@@ -5100,6 +5100,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             return {"status": "error", "message": str(e)}
 
     _SIM_CACHE_FLUSH_INTERVAL_S = 30
+    # Warm-load only bridges the seconds-long reconnect gap after a restart, so a
+    # persisted telemetry frame older than this is dropped rather than shown —
+    # stops a rename-orphaned "ghost" spoke frame from resurrecting on restart.
+    _WARM_LOAD_MAX_AGE_S = 1800   # 30 min
 
     def _sim_cache_tenant_of(self, spoke_pk: str) -> str:
         """Group simulations_cache (keyed by spoke primary key) into per-tenant
@@ -5123,11 +5127,30 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                            tenant_of=self._sim_cache_tenant_of, decrypt=_dec, encrypt=_enc)
             data = shard_load(self.state.data_dir, "simulations", "simulations_cache.json",
                               decrypt=_dec) or {}
-            self.simulations_cache = {str(k): v for k, v in data.items()
-                                      if isinstance(v, dict)}
-            if self.simulations_cache:
-                logger.info("simulations_cache: warm-loaded %d spoke payload(s) from shards",
-                            len(self.simulations_cache))
+            # Drop ANCIENT frames on warm-load. Warm-start only exists to bridge
+            # the few-seconds reconnect gap after a restart, so a frame older than
+            # _WARM_LOAD_MAX_AGE_S has no value — and worse, a spoke that was
+            # renamed (e.g. the -spoke/-agent id change) leaves a stale entry
+            # under its OLD id that the live spoke never overwrites; a restart
+            # would warm-load that GHOST and show it (old agent version / VM
+            # count) until the operator manually clears it. Dropping stale frames
+            # here makes a restart never resurrect a ghost — the live relay
+            # repopulates the real host within seconds.
+            _now = time.time()
+            loaded, _dropped = {}, 0
+            for k, v in data.items():
+                if not isinstance(v, dict):
+                    continue
+                _ft = v.get("fetched_at")
+                if isinstance(_ft, (int, float)) and (_now - _ft) > self._WARM_LOAD_MAX_AGE_S:
+                    _dropped += 1
+                    continue
+                loaded[str(k)] = v
+            self.simulations_cache = loaded
+            if self.simulations_cache or _dropped:
+                logger.info("simulations_cache: warm-loaded %d spoke payload(s) from shards"
+                            "%s", len(self.simulations_cache),
+                            f" ({_dropped} stale ghost frame(s) dropped)" if _dropped else "")
         except Exception as e:  # noqa: BLE001
             logger.warning("simulations_cache warm load failed: %s — starting empty", e)
 
