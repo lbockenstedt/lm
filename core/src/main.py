@@ -559,6 +559,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         _cs_bridge_log = logging.getLogger("CSBridge")
         _cs_bridge_log.setLevel(logging.INFO)
         _cs_bridge_log.addHandler(cs_bridge_handler)
+        # Route the hub-side Simulations ENGINE loggers (quota engine + central
+        # poller + sim routes) into the Simulations (cs) log view too, so their
+        # operational INFO lines surface under WebUI Logs → Simulations instead of
+        # only the general Hub log. Reuses the CSBridge handler/deque — these are
+        # all hub-side Simulations activity. (Verbose per-cycle diagnostics in
+        # these modules are logged at DEBUG so they don't flood either view.)
+        for _sim_logger_name in ("SimRoutes", "SimQuota", "CentralHubPoller"):
+            logging.getLogger(_sim_logger_name).addHandler(cs_bridge_handler)
 
         # Route uncaught SYNC exceptions through the "Hub" logger so they land in
         # self.logs → Error Log tab (collect_error_logs) + BugFixer, instead of

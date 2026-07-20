@@ -645,10 +645,10 @@ class CentralHubPoller:
             # DIAG: what the engine looks for vs what Central actually returned for
             # this site. A monitored id absent from BOTH lists = a site-drop or a
             # name diff; present = should fire.
-            logger.info("central-check diag [%s→%s]: monitored=%s alert_keys=%s insight_keys=%s",
-                        wireless_site, central_site,
-                        [str(c.get("id")) for c in monitored if isinstance(c, dict) and c.get("id")],
-                        sorted(alert_ci), sorted(insight_ci))
+            logger.debug("central-check diag [%s→%s]: monitored=%s alert_keys=%s insight_keys=%s",
+                         wireless_site, central_site,
+                         [str(c.get("id")) for c in monitored if isinstance(c, dict) and c.get("id")],
+                         sorted(alert_ci), sorted(insight_ci))
             # GLOBAL SIM CATALOG: record every alert/insight NAME observed on this
             # tenant/site into the hub-wide history shared by ALL tenants, so the
             # Sim-Quota "Alert / Insight ID" picker builds a library automatically

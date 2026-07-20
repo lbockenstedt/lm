@@ -1164,10 +1164,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             f"{w}→{(smap or {}).get(w)}"
             for stat, smap in blocks for w in (stat or {})
         })
-        logger.info("engine-firing diag [%s]: alert_id=%r site=%r hub_status=%s spokes=%d "
-                    "aliases=%s matched_status=%r → firing=%s; status_wsites=%s cids_at_site=%s",
-                    tenant_id, alert_id, site or "(global)", hub_present, len(spokes),
-                    sorted(aliases), matched_status, firing, status_wsites, sorted(seen_cids))
+        # DEBUG: fires once PER ALERT PER POLL — a per-cycle diagnostic, not an
+        # operational event. At INFO it floods the Hub log (and read like debug);
+        # keep it at DEBUG so it only surfaces with debug logging enabled.
+        logger.debug("engine-firing diag [%s]: alert_id=%r site=%r hub_status=%s spokes=%d "
+                     "aliases=%s matched_status=%r → firing=%s; status_wsites=%s cids_at_site=%s",
+                     tenant_id, alert_id, site or "(global)", hub_present, len(spokes),
+                     sorted(aliases), matched_status, firing, status_wsites, sorted(seen_cids))
         return firing
 
     async def _run_adaptive_controller() -> None:
