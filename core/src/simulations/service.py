@@ -245,6 +245,11 @@ class SimulationsService:
                     "hw_type": c.get("hw_type") or c.get("platform") or "",
                     "online": bool(c.get("online", meta["spoke_online"])),
                     "connected_ssid": c.get("connected_ssid") or "—",
+                    # Sim-network connectivity (relayed by the spoke) — surfaces
+                    # "never got an IP" / "gateway unreachable" for the dongle-
+                    # quarantine trigger (heartbeat rides a separate backend
+                    # network, so online≠has-sim-IP).
+                    "gateway_reachable": c.get("gateway_reachable"),
                     "simulation_id": c.get("simulation_id") or "",
                     "active_simulations": c.get("active_simulations") or [],
                     "last_seen": c.get("last_seen") or "—",
