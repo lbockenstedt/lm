@@ -6232,6 +6232,43 @@ async function csRenderVmServerVms() {
         });
     });
     csStartShedTicker();
+    // Reconcile optimistic click-driven in-flight badges against this fresh
+    // telemetry list BEFORE building rows or injecting placeholders (uses real
+    // VMs only): drop confirmed deletes, clear settled ops, time out stale keys.
+    csReconcileVmInflight(vms);
+    // Part 2 — auto-prov prediction: surface VMs the run is still provisioning
+    // that haven't appeared in telemetry yet as placeholder rows (deduped by vmid
+    // against the real list, so the real row replaces the placeholder later). Also
+    // tally how many more the run has queued beyond what we can show.
+    const presentVmids = new Set(vms.map(v => String(v.vmid)));
+    let moreQueued = 0;
+    scope.forEach(hh => {
+        const run = hh && hh.proxmox && hh.proxmox.prov_run;
+        if (!run || !Array.isArray(run.items)) return;
+        const hn = hh.hostname || hh.spoke_hostname || hh.spoke_id;
+        run.items.forEach(it => {
+            if (!it || it.vmid == null) return;
+            const stt = String(it.status || '').toLowerCase();
+            if (!(stt === 'provisioning' || stt === 'cloning' || stt === 'configuring' ||
+                  stt === 'queued' || stt === 'pending' || stt === 'pending_checkin')) return;
+            if (presentVmids.has(String(it.vmid))) return;   // real VM exists → dedupe
+            presentVmids.add(String(it.vmid));
+            const pv = {
+                vmid: it.vmid, name: it.vm_name || '', prov_status: 'provisioning', status: '',
+                _placeholder: true, _spoke: hh.spoke_id, _host: hn,
+                _hostlabel: hh.spoke_name || hn, _vidpid: it.vidpid || it.bus || '',
+            };
+            pv._key = csVmKey(pv);
+            vms.push(pv);
+        });
+        if (run.running) {
+            const known = (Number(run.completed) || 0) + (Number(run.failed) || 0) +
+                          (Array.isArray(run.items) ? run.items.length : 0);
+            const total = Number(run.total) || 0;
+            if (total > known) moreQueued += (total - known);
+        }
+    });
+    window._csVmActiveTab = 'Simulation Clients';   // full render always lands here
     const cats = ['Simulation Clients', 'Other', 'Containers', 'Templates'];
     const grouped = {};
     cats.forEach(c => grouped[c] = vms.filter(v => csVmCategory(v) === c));
@@ -6246,6 +6283,7 @@ async function csRenderVmServerVms() {
         <button onclick="csVmBulk('reboot_vm')" class="bg-slate-200 text-slate-700 px-2 py-1 rounded font-bold">Reboot</button>
         <button onclick="csVmBulk('reclone_vm')" class="bg-blue-100 text-blue-700 px-2 py-1 rounded font-bold" title="Wipe and re-clone the selected VMs from template (discards current disk state)">Reclone</button>
         <button onclick="csVmBulk('delete_vm')" class="bg-red-100 text-red-700 px-2 py-1 rounded font-bold" title="Permanently delete the selected VMs from Proxmox">Delete</button>
+        ${moreQueued > 0 ? `<span class="text-slate-400" title="Auto-provisioning has more VMs queued than are shown yet">· ${moreQueued} more queued</span>` : ''}
       </div>
       <div id="cs-vm-list">${csVmTable(rows)}</div>
       ${csVmStatusLegend()}
@@ -6382,7 +6420,79 @@ function csQtBadge(q) {
         + `<span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>🚫 QT ${csEscape(q.bus_path)} · ${csEscape(reason)} · clears in ${cnt}</span>`;
 }
 
+// ── Optimistic in-flight VM state (click-driven) ─────────────────────────────
+// Telemetry can MISS a fast transition (a VM deleted between two telemetry frames
+// never gets a "tearing_down" frame — it just goes present→gone). The operator's
+// click IS the signal: the moment an action is dispatched we mark the VM in-flight
+// so its row shows the operation immediately, then telemetry reconciles it on the
+// next refresh. Keyed by the composite _key (spoke|host|vmid — VMIDs collide
+// across hosts); falls back to unique_id/vmid. Overrides the steady + prov_status
+// badge since it fires EARLIER than the agent's own prov_status stamp.
+const _vmInflight = new Map();   // key -> {op, ts}
+const _CS_ACTION_OP = { delete_vm: 'deleting', stop_vm: 'stopping', start_vm: 'starting', reboot_vm: 'rebooting', reclone_vm: 'recloning', clone_lxc: 'cloning' };
+const _CS_INFLIGHT_META = {
+    deleting:  { label: 'deleting…',  cls: 'bg-red-100 text-red-700',     dot: 'border-red-500' },
+    stopping:  { label: 'stopping…',  cls: 'bg-amber-100 text-amber-700', dot: 'border-amber-500' },
+    starting:  { label: 'starting…',  cls: 'bg-green-100 text-green-700', dot: 'border-green-500' },
+    rebooting: { label: 'rebooting…', cls: 'bg-blue-100 text-blue-700',   dot: 'border-blue-500' },
+    recloning: { label: 'recloning…', cls: 'bg-indigo-100 text-indigo-700', dot: 'border-indigo-500' },
+    cloning:   { label: 'cloning…',   cls: 'bg-blue-100 text-blue-700',   dot: 'border-blue-500' },
+};
+function csVmInflightKey(v) { return String((v && (v._key || v.unique_id)) || (v && v.vmid) || ''); }
+function csVmInflightBadge(op) {
+    const m = _CS_INFLIGHT_META[op] || { label: op + '…', cls: 'bg-amber-100 text-amber-700', dot: 'border-amber-500' };
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${m.cls}" title="Operation in progress — waiting for telemetry to confirm"><span class="animate-spin w-2.5 h-2.5 rounded-full border-2 ${m.dot} border-t-transparent"></span>⏳ ${csEscape(m.label)}</span>`;
+}
+// Badge for an auto-prov placeholder row — a VM the run is provisioning that
+// hasn't materialised in the telemetry VM list yet. Dedupe-by-vmid means the real
+// row replaces it once it appears.
+function csVmPlaceholderBadge(v) {
+    const vp = (v && v._vidpid) ? ` <span class="text-slate-400 font-normal normal-case">${csEscape(v._vidpid)}</span>` : '';
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-sky-100 text-sky-700" title="Auto-provisioning in progress — this VM is being created"><span class="animate-spin w-2.5 h-2.5 rounded-full border-2 border-sky-500 border-t-transparent"></span>⏳ provisioning…</span>${vp}`;
+}
+// Reconcile the in-flight map against a fresh telemetry VM list: drop confirmed
+// deletes (VM gone), hand back to the agent's own badge once telemetry reflects
+// the op, and time out any entry older than 120s so a lost/failed op can't stick.
+// Runs BEFORE the rows are built on each render, using REAL telemetry VMs only
+// (call it before injecting auto-prov placeholders).
+function csReconcileVmInflight(freshVms) {
+    if (!_vmInflight.size) return;
+    const now = Date.now();
+    const byKey = new Map();
+    (freshVms || []).forEach(v => { if (v) byKey.set(csVmInflightKey(v), v); });
+    for (const [key, ent] of Array.from(_vmInflight.entries())) {
+        if (now - (ent && ent.ts || 0) > 120000) { _vmInflight.delete(key); continue; }
+        const v = byKey.get(key);
+        if (!v) { if (ent.op === 'deleting') _vmInflight.delete(key); continue; }   // gone → delete confirmed
+        const st = String(v.status || '').toLowerCase();
+        const ps = String(v.prov_status || '').toLowerCase();
+        switch (ent.op) {
+            case 'deleting':  if (ps === 'tearing_down') _vmInflight.delete(key); break;   // agent badge takes over
+            case 'stopping':  if (st === 'stopped') _vmInflight.delete(key); break;
+            case 'starting':  if (st === 'running') _vmInflight.delete(key); break;
+            case 'rebooting': if (st === 'running') _vmInflight.delete(key); break;
+            case 'recloning': if (ps === 'recloning') _vmInflight.delete(key); break;      // agent badge takes over
+            case 'cloning':   if (ps === 'provisioning' || ps === 'recloning' || st === 'running') _vmInflight.delete(key); break;
+        }
+    }
+}
+// Re-render just the current category tab's rows into #cs-vm-list so an optimistic
+// badge shows instantly (synchronous — no telemetry fetch). The next telemetry
+// pulse (csVmOpFastRefresh burst) rebuilds from fresh data and reconciles.
+function csVmRerenderInflight() {
+    try {
+        if (!window._csVmGrouped) return;
+        const cat = window._csVmActiveTab || 'Simulation Clients';
+        const list = csEl('cs-vm-list');
+        if (list) list.innerHTML = csVmTable(csVmRenderRows(window._csVmGrouped[cat] || []));
+    } catch (e) { console.warn('csVmRerenderInflight failed', e); }
+}
+
 function csVmStatusBadge(v) {
+    // Optimistic override — the operator's click fires before the agent stamps
+    // prov_status, so this wins over both the steady status and prov_status.
+    const _inf = _vmInflight.get(csVmInflightKey(v));
+    if (_inf) return csVmInflightBadge(_inf.op);
     const ps = String(v.prov_status || '').toLowerCase();
     if (ps === 'tearing_down') {
         return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-700"><span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>Deleting…</span>`;
@@ -6510,8 +6620,11 @@ function csAutoProvPanel(h) {
 function csVmRow(v) {
     const vid = csEscape(v.vmid);
     const key = csEscape(v._key != null ? v._key : csVmKey(v));
+    // Auto-prov placeholder — a VM the run is provisioning that hasn't appeared in
+    // telemetry yet. No real VM to act on, and no checkbox (bulk must skip it).
+    const isPlaceholder = v._placeholder === true;
     // Disable actions on a VM that's being torn down — it's about to vanish.
-    const busy = String(v.prov_status || '').toLowerCase() === 'tearing_down';
+    const busy = isPlaceholder || String(v.prov_status || '').toLowerCase() === 'tearing_down';
     // Route by composite key (spoke|host|vmid) — VMIDs can collide across hosts.
     const act = (label, action, cls) => busy
         ? `<button disabled title="VM is being deleted" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-300 cursor-not-allowed">${label}</button>`
@@ -6524,11 +6637,15 @@ function csVmRow(v) {
     const consoleBtn = (busy || isLxc || v.is_template)
         ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : (v.is_template ? 'Templates have no console' : 'VM is being deleted')}" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-300 cursor-not-allowed">🖥 Console</button>`
         : `<button onclick="csOpenVmConsole('${key}')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-100" title="Open a noVNC console to this VM">🖥 Console</button>`;
+    const selCell = isPlaceholder
+        ? `<span class="inline-block w-3.5"></span> ${vid}`
+        : `<input type="checkbox" class="cs-vm-sel" data-vmkey="${key}" data-vmid="${vid}" onchange="csVmSelUpdateHeader()"/> ${vid}`;
+    const statusCell = isPlaceholder ? csVmPlaceholderBadge(v) : csVmStatusBadge(v);
     return `<tr>
-      <td class="px-3 py-2 font-mono text-xs"><input type="checkbox" class="cs-vm-sel" data-vmkey="${key}" data-vmid="${vid}" onchange="csVmSelUpdateHeader()"/> ${vid}</td>
+      <td class="px-3 py-2 font-mono text-xs">${selCell}</td>
       <td class="px-3 py-2 text-sm">${csEscape(v.name || '—')}</td>
       <td class="px-3 py-2 text-slate-500">${csEscape(csVmOs(v))}</td>
-      <td class="px-3 py-2">${csVmStatusBadge(v)}</td>
+      <td class="px-3 py-2">${statusCell}</td>
       <td class="px-3 py-2 text-xs text-slate-500">${csEscape(v._hostlabel || v._host || '—')}</td>
       <td class="px-3 py-2"><div class="flex flex-wrap gap-1">
         ${consoleBtn}
@@ -6554,6 +6671,7 @@ function csVmRenderRows(list) {
 }
 
 window.csVmVmsTab = function (cat) {
+    window._csVmActiveTab = cat;   // so csVmRerenderInflight targets the right tab
     const rows = csVmRenderRows((window._csVmGrouped && window._csVmGrouped[cat]) || []);
     const list = csEl('cs-vm-list');
     if (list) list.innerHTML = csVmTable(rows);
@@ -6617,6 +6735,11 @@ window.csVmAction = async function (key, action) {
     const sid = encodeURIComponent(v._spoke || csVmSelectedSpoke);
     const target = v._host || csVmTarget();
     if (typeof showToast === 'function') showToast(`${csVmActionLabel(action)} VM ${vmid}…`, 'info');
+    // Optimistic in-flight: mark the VM the moment we dispatch (before awaiting)
+    // and re-render so its row shows the operation instantly. Telemetry reconciles
+    // on the next csRenderVmServerVms (csReconcileVmInflight).
+    const _op = _CS_ACTION_OP[action];
+    if (_op) { _vmInflight.set(key, { op: _op, ts: Date.now() }); csVmRerenderInflight(); }
     if (action === 'delete_vm') await csExpirePendingForTarget(target);
     try {
         await csFetch(`/${csTenant()}/spokes/${sid}/proxmox-command?tenant_id=${csTenant()}`,
@@ -6643,6 +6766,10 @@ window.csVmBulk = async function (action) {
         if (!confirm(`Delete ${items.length} VM(s) across ${hostList.length} host(s)?\n\n${bd}`)) return;
     }
     if (typeof showToast === 'function') showToast(`${csVmActionLabel(action)} ${items.length} VM(s) across ${hostList.length} host(s)…`, 'info');
+    // Optimistic in-flight: mark every selected VM the moment we dispatch (before
+    // awaiting) and re-render so their rows show the operation instantly.
+    const _op = _CS_ACTION_OP[action];
+    if (_op) { items.forEach(v => _vmInflight.set(v._key, { op: _op, ts: Date.now() })); csVmRerenderInflight(); }
     if (action === 'delete_vm') {
         for (const hh of new Set(items.map(v => v._host))) { await csExpirePendingForTarget(hh); }
     }

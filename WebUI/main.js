@@ -13938,9 +13938,59 @@ function pxmxOs(v) {
 }
 
 // Steady-state status pill for a pxmx VM (mirrors csVmStatusBadge's plain tail
+// ── Optimistic in-flight VM state (click-driven) ─────────────────────────────
+// Telemetry can MISS a fast transition (a VM destroyed between two frames goes
+// present→gone with no intermediate frame). The operator's click IS the signal:
+// the moment an action is dispatched we mark the VM in-flight so its row shows
+// the operation immediately, then telemetry reconciles it on the next refresh.
+// Keyed by unique_id (fallback vmid). This view has no prov_run (a Simulations
+// concept), so it's click-driven only — no auto-prov provisioning placeholders.
+const _pxmxVmInflight = new Map();   // key -> {op, ts}
+const _PXMX_ACTION_OP = { start: 'starting', stop: 'stopping', reboot: 'rebooting', restart: 'rebooting', destroy: 'deleting', delete: 'deleting' };
+const _PXMX_INFLIGHT_META = {
+    deleting:  { label: 'deleting…',  cls: 'bg-red-100 text-red-700' },
+    stopping:  { label: 'stopping…',  cls: 'bg-amber-100 text-amber-700' },
+    starting:  { label: 'starting…',  cls: 'bg-green-100 text-green-700' },
+    rebooting: { label: 'rebooting…', cls: 'bg-blue-100 text-blue-700' },
+    cloning:   { label: 'cloning…',   cls: 'bg-blue-100 text-blue-700' },
+};
+function pxmxVmKey(v) { return String((v && (v.unique_id || v.vmid)) != null ? (v.unique_id || v.vmid) : ''); }
+function pxmxInflightBadge(op) {
+    const m = _PXMX_INFLIGHT_META[op] || { label: op + '…', cls: 'bg-amber-100 text-amber-700' };
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${m.cls}" title="Operation in progress — waiting for telemetry to confirm"><span class="animate-spin inline-block w-2.5 h-2.5 rounded-full border-2 border-current border-t-transparent"></span>⏳ ${escapeHtml(m.label)}</span>`;
+}
+// Reconcile the in-flight map against a fresh telemetry VM list: drop confirmed
+// deletes (VM gone), clear ops whose target state telemetry now reflects, and
+// time out any entry older than 120s so a lost/failed op can't stick forever.
+// Runs BEFORE the rows are built on each load.
+function pxmxReconcileVmInflight(freshVms) {
+    if (!_pxmxVmInflight.size) return;
+    const now = Date.now();
+    const byKey = new Map();
+    (freshVms || []).forEach(v => { if (v) byKey.set(pxmxVmKey(v), v); });
+    for (const [key, ent] of Array.from(_pxmxVmInflight.entries())) {
+        if (now - (ent && ent.ts || 0) > 120000) { _pxmxVmInflight.delete(key); continue; }
+        const v = byKey.get(key);
+        if (!v) { if (ent.op === 'deleting') _pxmxVmInflight.delete(key); continue; }
+        const st = String(v.status || '').toLowerCase();
+        if (ent.op === 'stopping' && st === 'stopped') _pxmxVmInflight.delete(key);
+        else if ((ent.op === 'starting' || ent.op === 'rebooting') && st === 'running') _pxmxVmInflight.delete(key);
+    }
+}
+// Re-render just the VM list table (when mounted) so an optimistic badge shows
+// instantly, before the next telemetry refresh. No-op off the VM list view.
+function pxmxRerenderVmList() {
+    try {
+        const el = document.getElementById('pxmx-vm-list');
+        if (el) el.innerHTML = pxmxVmTableHtml(window._pxmxVms || []);
+    } catch (e) { console.warn('pxmxRerenderVmList failed', e); }
+}
+
 // branch — pxmx VMs don't carry prov_status/shed/reclone state like cs sim
 // clients do, so a simple running/stopped/other pill is the right shape here).
 function pxmxVmStatusBadge(v) {
+    const _inf = _pxmxVmInflight.get(pxmxVmKey(v));
+    if (_inf) return pxmxInflightBadge(_inf.op);
     const st = String(v.status || 'unknown').toLowerCase();
     const cls = st === 'running' ? 'bg-green-100 text-green-700'
               : st === 'stopped' ? 'bg-slate-100 text-slate-500'
@@ -14051,6 +14101,10 @@ window.pxmxBulkAction = async function (action) {
                      .map(vm => ({ unique_id: vm.unique_id, vmid: vm.vmid, node: vm.node, type: vm.type }));
     const missing = sel.length - items.length;
     if (statusEl) statusEl.textContent = `${action}… ${items.length} VM(s)`;
+    // Optimistic in-flight: mark every selected VM the moment we dispatch (before
+    // awaiting), then re-render so their rows show the operation immediately.
+    const _op = _PXMX_ACTION_OP[action];
+    if (_op) { items.forEach(it => _pxmxVmInflight.set(String((it.unique_id || it.vmid) != null ? (it.unique_id || it.vmid) : ''), { op: _op, ts: Date.now() })); pxmxRerenderVmList(); }
     let ok = 0, fail = missing;
     try {
         const r = await setupFetch('/api/pxmx/vm-action-bulk', {
@@ -14290,6 +14344,11 @@ async function pxmxVmAction(uniqueId, action) {
     const statusEl = document.getElementById('pxmx-vm-action-status');
     const setStat = (msg) => { if (statusEl) statusEl.textContent = msg; };
     setStat(`${action}…`);
+    // Optimistic in-flight: mark the VM the moment we dispatch (before awaiting),
+    // then re-render so its row shows the operation immediately. Telemetry
+    // reconciles it on the next load (pxmxReconcileVmInflight).
+    const _op = _PXMX_ACTION_OP[action];
+    if (_op) { _pxmxVmInflight.set(pxmxVmKey(vm), { op: _op, ts: Date.now() }); pxmxRerenderVmList(); }
     try {
         const r = await setupFetch('/api/pxmx/vm-action', {
             method: 'POST',
@@ -15467,6 +15526,9 @@ async function loadPxmxData(subMenu) {
             // openNodeVms / pxmxNodeDetailHtml).
             window._pxmxNodes = nodes;
             window._pxmxVms = vms;
+            // Reconcile optimistic in-flight badges against this fresh list before
+            // any rows are built (drop confirmed deletes, clear settled ops, time out).
+            pxmxReconcileVmInflight(vms);
             window._pxmxAgentCount = vmData.agent_count || '?';
             // Template-pool names from the hub: VMs whose pool is in this set are
             // shared templates any tenant may clone (clone-from-template). The
@@ -15547,8 +15609,8 @@ async function loadPxmxData(subMenu) {
                         <span class="text-xs text-slate-400 font-normal">(${vms.length} total)</span> ${helpIcon('pxmx', null, 'Hypervisor help')}</h3>
                     ${buildBtn}
                 </div>`
-                + (vms.length > 0 ? pxmxVmTableHtml(vms)
-                   : '<p class="p-4 text-slate-400 italic text-sm">No VMs found — waiting for agent telemetry.</p>');
+                + `<div id="pxmx-vm-list">${vms.length > 0 ? pxmxVmTableHtml(vms)
+                   : '<p class="p-4 text-slate-400 italic text-sm">No VMs found — waiting for agent telemetry.</p>'}</div>`;
 
         }
     } catch (err) {
