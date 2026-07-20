@@ -7108,6 +7108,192 @@ function csFreshnessPanel(h) {
     </div>`;
 }
 
+// ── VM Server → Details: human-readable telemetry helpers ────────────────────
+// The Details "Telemetry" grid renders h.proxmox fields. Scalars stay in compact
+// csKvTile boxes; nested objects (prov_run, delete_gate, gate_averages,
+// vmid_range, agent_telemetry, …) used to stringify to an unreadable raw-JSON
+// blob — these render them as readable key:value lines in a wider, column-
+// spanning tile. Every interpolated string passes through csEscape.
+
+// Compact age formatter (seconds → "12s"/"3m"/"2h"/"1d"). Null/NaN → '—'. The hub
+// copy also has _csAgeLabel; this local one keeps both sim-views.js copies in
+// sync and covers the cs-local copy, which lacks _csAgeLabel.
+function csAgeShort(secs) {
+    if (secs == null || isNaN(secs)) return '—';
+    secs = Math.max(0, Math.floor(Number(secs)));
+    if (secs < 60) return secs + 's';
+    if (secs < 3600) return Math.floor(secs / 60) + 'm';
+    if (secs < 86400) return Math.floor(secs / 3600) + 'h';
+    return Math.floor(secs / 86400) + 'd';
+}
+
+// Friendly scalar rendering shared by the grid + the object-line formatter.
+// Returns a RAW string (caller escapes). Booleans → Yes/No; epoch-ish keys →
+// local datetime (csLastSeen); percentage-ish keys → "N%"; seconds keys → "Ns";
+// phase_ms object → "vm_list 8548ms · node_stats 1182ms"; arrays → comma list;
+// other nested objects → "k=v · k=v". Never a raw JSON blob.
+function csFmtLeaf(k, v) {
+    if (v === null || v === undefined || v === '') return '—';
+    if (typeof v === 'boolean') return v ? 'Yes' : 'No';
+    const kl = String(k).toLowerCase();
+    if (typeof v === 'number' && v > 1e8 &&
+        (kl === 'gen_ts' || kl === 'ingested_at' || kl === 'last_seen' ||
+         kl === 'started_at' || kl === 'completed_at' ||
+         kl.endsWith('_ts') || kl.endsWith('_at'))) {
+        return csLastSeen(v);
+    }
+    if (typeof v === 'number' &&
+        (kl === 'cpu_1h_avg' || kl === 'mem_1h_avg' || kl === 'cpu_avg' ||
+         kl === 'mem_avg' || kl.endsWith('_pct') || kl.endsWith('_avg') ||
+         kl.endsWith('_threshold'))) {
+        return v + '%';
+    }
+    if (typeof v === 'number' && kl.endsWith('_s')) return v + 's';
+    if (Array.isArray(v)) {
+        return v.length ? v.map(x => (x !== null && typeof x === 'object') ? csFmtLeaf('', x) : String(x)).join(', ') : '(none)';
+    }
+    if (typeof v === 'object') {
+        if (kl === 'phase_ms') return Object.entries(v).map(([j, jv]) => `${j.replace(/_ms$/, '')} ${jv}ms`).join(' · ');
+        return Object.entries(v).map(([j, jv]) => `${j}=${csFmtLeaf(j, jv)}`).join(' · ');
+    }
+    return String(v);
+}
+
+// Render an object/array's fields as stacked "key  value" rows (readable, never
+// JSON). Used for the wide telemetry tiles + as the fallback for unknown objects.
+function csFmtObjRows(obj) {
+    if (Array.isArray(obj)) {
+        if (!obj.length) return '<div class="text-slate-400">(none)</div>';
+        return obj.map(it => `<div class="font-mono text-slate-700 break-all">${csEscape(csFmtLeaf('', it))}</div>`).join('');
+    }
+    const keys = Object.keys(obj || {});
+    if (!keys.length) return '<div class="text-slate-400">(empty)</div>';
+    return keys.map(k => `<div class="flex justify-between gap-3 py-0.5 border-b border-slate-100 last:border-0">
+        <span class="text-slate-400 whitespace-nowrap">${csEscape(k)}</span>
+        <span class="text-slate-700 font-mono text-right break-all">${csEscape(csFmtLeaf(k, obj[k]))}</span>
+      </div>`).join('');
+}
+
+// Friendly inner HTML for the well-known nested telemetry objects. Returns null
+// to fall back to the generic csFmtObjRows layout for anything unrecognized (so
+// data is never hidden by a special-case that doesn't fit the shape).
+function csFmtKnownObj(k, v) {
+    const o = v || {};
+    const esc = s => csEscape(String(s));
+    if (k === 'prov_run') {
+        const items = Array.isArray(o.items) ? o.items : [];
+        const head = o.running
+            ? `running ${esc(items.length)}${o.total != null ? '/' + esc(o.total) : ''} (completed ${esc(o.completed != null ? o.completed : 0)}, failed ${esc(o.failed != null ? o.failed : 0)})`
+            : (o.completed_at ? `idle · last run: completed ${esc(o.completed != null ? o.completed : 0)}, failed ${esc(o.failed != null ? o.failed : 0)}` : 'idle');
+        const list = items.map(it => `<div class="font-mono text-slate-700 break-all">vmid ${esc(it.vmid != null ? it.vmid : '?')} · ${esc(it.vidpid || it.bus || '—')} · ${esc(it.status || '—')}</div>`).join('');
+        return `<div class="text-slate-700 mb-1">${head}</div>${list}`;
+    }
+    if (k === 'delete_gate') {
+        if (!Object.keys(o).length) return null;
+        const pct = x => (x != null ? esc(x) + '%' : '—');
+        return `<div class="text-slate-700 mb-1"><b>${esc(o.reason || '—')}</b></div>
+            <div class="grid grid-cols-2 gap-x-3 gap-y-0.5 font-mono text-slate-700">
+              <div>CPU ${pct(o.cpu_avg)} / ${pct(o.cpu_threshold)}</div>
+              <div>Mem ${pct(o.mem_avg)} / ${pct(o.mem_threshold)}</div>
+              <div>cooldown ${esc(o.cooldown_remaining_s != null ? o.cooldown_remaining_s : 0)}s</div>
+              <div>tracked ${esc(o.tracked_usb_vms != null ? o.tracked_usb_vms : 0)}</div>
+              <div>eligible ${esc(o.eligible_candidates != null ? o.eligible_candidates : 0)}</div>
+              <div>exceeded ${o.threshold_exceeded ? 'yes' : 'no'}</div>
+            </div>`;
+    }
+    if (k === 'gate_averages') {
+        const f = x => (x != null ? esc(x) + '%' : '—');
+        return `<div class="font-mono text-slate-700">CPU 1h ${f(o.cpu_1h_avg)} · Mem 1h ${f(o.mem_1h_avg)}</div>`;
+    }
+    if (k === 'vmid_range') {
+        if (o.start == null && o.end == null) return null;
+        return `<div class="font-mono text-slate-700">${esc(o.start != null ? o.start : '—')}–${esc(o.end != null ? o.end : '—')}${o.batch_id ? ' · batch ' + esc(o.batch_id) : ''}</div>`;
+    }
+    return null;  // agent_telemetry + unknowns → generic csFmtObjRows
+}
+
+// One telemetry tile. Scalars → compact csKvTile with pretty formatting; objects/
+// arrays → a wider, column-spanning tile whose body is readable key:value lines
+// (friendly for well-known keys, generic rows otherwise) that scroll inside the
+// box instead of blowing out the row.
+function csTelemetryTile(k, v) {
+    if (k === 'pve_version') return csKvTile(k, csPveVersion(v));
+    if (v !== null && typeof v === 'object') {
+        const inner = csFmtKnownObj(k, v) || csFmtObjRows(v);
+        return `<div class="bg-slate-50 rounded-lg p-3 sm:col-span-2 lg:col-span-2">
+          <p class="text-[10px] text-slate-400 uppercase font-bold tracking-widest break-all">${csEscape(k)}</p>
+          <div class="text-xs text-slate-700 mt-1 space-y-0.5 max-h-48 overflow-auto">${inner}</div>
+        </div>`;
+    }
+    // Scalars: friendly rendering (booleans → Yes/No, epochs → datetime, %/s).
+    return csKvTile(k, csFmtLeaf(k, v));
+}
+
+// "Link & Approval" card — hub-live connection/approval state for THIS host, the
+// answer to "is the agent connected & approved?" without SSH. Spoke online, the
+// agent-link/approval state (filled async by csFillLinkApproval from
+// /api/pxmx/agents), a source/provenance line, and reconnect info from
+// h.freshness. The agent row paints a "checking…" placeholder replaced once the
+// raw fetch resolves.
+function csLinkApprovalCard(h) {
+    const f = (h && h.freshness) || {};
+    const spokeName = h.spoke_name || h.spoke_id || '—';
+    const spokeDot = h.spoke_online
+        ? '<span class="text-green-600 font-bold">● Online</span>'
+        : '<span class="text-slate-400 font-bold">○ Offline</span>';
+    // Source / provenance — Live / Stale / Warm-cache / Offline · via <spoke_id>.
+    const via = ` · via ${csEscape(String(h.spoke_id || '—'))}`;
+    let src;
+    if (h.host_online) src = `<span class="text-green-600 font-bold">Live</span>${via}`;
+    else if (h.host_stale) src = `<span class="text-amber-600 font-bold">Stale (${csEscape(csAgeShort(h.host_age_s))})</span>${via}`;
+    else if (h.cache_fresh) src = `<span class="text-sky-600 font-bold">Warm-cache (${csEscape(csAgeShort(h.cache_age_s))})</span>${via}`;
+    else src = `<span class="text-slate-400 font-bold">Offline</span>${via}`;
+    // Reconnect info (from h.freshness; null on older agents → '—').
+    const rc = (f.reconnect_count != null) ? csEscape(String(f.reconnect_count)) : '—';
+    let drop = '';
+    if (f.last_disconnect_reason) {
+        drop = ` · <span class="text-slate-500">last drop: ${csEscape(String(f.last_disconnect_reason))}${f.last_disconnect_age_s != null ? ' (' + csEscape(csAgeShort(f.last_disconnect_age_s)) + ' ago)' : ''}</span>`;
+    }
+    return `<div class="hpe-card rounded-lg p-4 shadow-sm mb-4">
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Link &amp; Approval</p>
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-sm text-slate-700">
+        <div><span class="text-slate-400">Spoke:</span> ${csEscape(String(spokeName))} ${spokeDot}</div>
+        <div id="cs-link-agent"><span class="text-slate-400">Agent link:</span> <span class="text-slate-400">checking…</span></div>
+        <div class="sm:col-span-2"><span class="text-slate-400">Source:</span> ${src}</div>
+        <div class="sm:col-span-2"><span class="text-slate-400">Reconnects:</span> ${rc}${drop}</div>
+      </div>
+    </div>`;
+}
+
+// Fill the "Agent link" cell in the Link & Approval card from /api/pxmx/agents.
+// That endpoint is NOT reachable via csFetch (csFetch prepends /sim/api), so it's
+// a raw same-origin fetch. Matches THIS host to an agent by hostname; the target
+// element may be gone if the page re-rendered, so every write is guarded.
+async function csFillLinkApproval(h) {
+    if (!document.getElementById('cs-link-agent')) return;
+    const hn = (h.proxmox?.node?.hostname || h.hostname || h.spoke_hostname || '').toLowerCase();
+    let html;
+    try {
+        const res = await fetch('/api/pxmx/agents', { credentials: 'same-origin' });
+        const d = await res.json();
+        const match = (list) => (Array.isArray(list) ? list : []).find(a => (a.hostname || '').toLowerCase() === hn);
+        const online = hn ? match(d.agents) : null;
+        const pending = hn ? match(d.pending_agents) : null;
+        const offline = hn ? match(d.offline_agents) : null;
+        const hb = (a) => (a && a.heartbeat_age_s != null) ? ` <span class="text-slate-400">(${csEscape(csAgeShort(a.heartbeat_age_s))} ago)</span>` : '';
+        if (online) html = `<span class="text-green-600 font-bold">● Connected</span>${hb(online)}`;
+        else if (pending) html = `<span class="text-amber-600 font-bold">⏳ Pending approval</span> <span class="text-slate-500">— approve in Setup → Spokes &amp; Agents</span>`;
+        else if (offline) html = `<span class="text-slate-400 font-bold">○ Offline</span>${hb(offline)}`;
+        else if (!hn) html = `<span class="text-slate-400">unknown (host reports no hostname)</span>`;
+        else html = `<span class="text-slate-400 font-bold">○ Not connected</span>`;
+    } catch (e) {
+        console.error('csFillLinkApproval: /api/pxmx/agents fetch failed', e);
+        html = `<span class="text-slate-400">unavailable</span>`;
+    }
+    const el = document.getElementById('cs-link-agent');
+    if (el) el.innerHTML = `<span class="text-slate-400">Agent link:</span> ` + html;
+}
+
 async function csRenderVmServerDetails() {
     csSetToolbar('');
     try { await csVmLoad(); } catch (e) { console.error('csRenderVmServerDetails: vm load failed', e); csSet(csErrorBox('Could not load details', e)); return; }
@@ -7124,15 +7310,12 @@ async function csRenderVmServerDetails() {
     // badly as a raw csKvTile and deserves a readable layout.
     const skip = ['vms','usb_state','present_usb','unknown_usb','node','usb_count','provision'];
     const entries = Object.entries(px).filter(([k]) => !skip.includes(k));
-    // Pretty-print a few well-known keys instead of their raw form: pve_version
-    // arrives as "pve-manager/9.2.3/abc123" (strip to 9.2.3 via csPveVersion) and
-    // last_seen as a fractional epoch (→ local datetime via csLastSeen).
-    const fmt = (k, v) => {
-        if (k === 'pve_version') return csKvTile(k, csPveVersion(v));
-        if (k === 'last_seen') return csKvTile(k, csLastSeen(v));
-        return csKvTile(k, v);
-    };
-    const tiles = entries.map(([k, v]) => fmt(k, v)).join('');
+    // Human-readable tiles: scalars pretty-printed (pve_version → 9.2.3,
+    // last_seen/ingested_at epoch → local datetime, bools → Yes/No, %/s units);
+    // nested objects (prov_run/delete_gate/gate_averages/vmid_range/
+    // agent_telemetry) render as readable key:value lines in a wider column-
+    // spanning tile instead of a raw JSON blob (csTelemetryTile).
+    const tiles = entries.map(([k, v]) => csTelemetryTile(k, v)).join('');
     const _delId = csVmHostId(h);
     csSet(`<div>${csVmHostBanner()}
       <div class="flex justify-end mb-3">
@@ -7147,6 +7330,7 @@ async function csRenderVmServerDetails() {
         ${csStat('CPU 1h', px.cpu_1h_avg || '—')}${csStat('Mem 1h', px.mem_1h_avg || '—')}
         ${csStat('Agent', px.agent_version || '—')}
       </div>
+      ${csLinkApprovalCard(h)}
       ${csFreshnessPanel(h)}
       <div class="flex items-center justify-between mb-2">
         <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Telemetry</p>
@@ -7157,6 +7341,10 @@ async function csRenderVmServerDetails() {
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">${csProvisionCard(px)}</div>
       <details class="mt-4 text-xs"><summary class="cursor-pointer text-slate-400">Raw payload</summary>${csJsonDump(h)}</details>
     </div>`);
+    // Progressive fill: the page is painted immediately above; fill the "Agent
+    // link" cell once /api/pxmx/agents resolves (raw fetch — not csFetch-able).
+    // Not awaited, so it never blocks the render.
+    csFillLinkApproval(h).catch(e => console.error('csRenderVmServerDetails: link/approval fill failed', e));
 }
 
 // Delete a VM Server host row + clear its cached/stored data. For a host the
