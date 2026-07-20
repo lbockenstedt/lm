@@ -487,6 +487,23 @@ class SimulationsStore:
             self._tenant(tenant_id)["knob_learn_state"] = dict(state) if isinstance(state, dict) else {}
             await self._asave()
 
+    # ── known-good operating points (per tenant, per ALERT) ───────────────────
+    # The captured stable snapshot the operator sees ("exactly what it took") and
+    # that a Reset-to-known-good restores to. Keyed per ALERT (alert_type:alert_id
+    # — no site, so it's shared across a tenant's sites): ``{count, clients,
+    # knobs, time_to_stable_s, achieved_at, buffer}`` (see
+    # sim_quota.known_good_from_state). Recorded when a learning-ON quota reaches
+    # phase==stable; a copy is proposed to the global pending queue for admin
+    # approval.
+    async def get_known_good(self, tenant_id: str) -> Dict[str, Any]:
+        v = self._data.get(tenant_id, {}).get("known_good")
+        return dict(v) if isinstance(v, dict) else {}
+
+    async def set_known_good(self, tenant_id: str, mapping: Dict[str, Any]) -> None:
+        with self._lock:
+            self._tenant(tenant_id)["known_good"] = dict(mapping) if isinstance(mapping, dict) else {}
+            await self._asave()
+
     # ── realtime alert rules (per-tenant; the AlertEngine matches on these) ─────
     async def get_alert_rules(self, tenant_id: str) -> List[Dict[str, Any]]:
         """[{id, name, source, recipients:[...], enabled}] — the tenant's realtime
@@ -925,6 +942,24 @@ class SimulationsStore:
     async def set_global_learned_values(self, mapping: Dict[str, Any]) -> None:
         with self._lock:
             self._global()["global_learned_values"] = (
+                dict(mapping) if isinstance(mapping, dict) else {})
+            await self._asave()
+
+    # ── GLOBAL learned-value APPROVAL QUEUE (pending → admin approves → global) ──
+    # When a learning tenant records a known-good, a copy is PROPOSED here keyed
+    # per ALERT: ``{count, floor, knobs, time_to_stable_s, source_tenant,
+    # proposed_at}``. A Global Admin reviews and approves → the entry is written
+    # into ``global_learned_values`` (above), from which every tenant seeds. Lives
+    # under ``__global__``. Auto-proposing here (not straight into
+    # global_learned_values) is the "admin must approve before it goes to every
+    # tenant" gate the operator asked for.
+    async def get_global_learned_pending(self) -> Dict[str, Any]:
+        v = self._global().get("global_learned_pending")
+        return dict(v) if isinstance(v, dict) else {}
+
+    async def set_global_learned_pending(self, mapping: Dict[str, Any]) -> None:
+        with self._lock:
+            self._global()["global_learned_pending"] = (
                 dict(mapping) if isinstance(mapping, dict) else {})
             await self._asave()
 

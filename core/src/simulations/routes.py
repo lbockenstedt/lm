@@ -1233,6 +1233,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         applied_op[ak] = gval
                 changed = False
                 live = set()
+                # Known-good capture: the learned simulation.conf knobs live in
+                # the knob-learner state (same _adaptive_key), and the per-alert
+                # known-good snapshot + the global pending-approval queue are read
+                # once per sweep and written back if they change.
+                knob_state = await store.get_knob_learn_state(tid)
+                known_good = await store.get_known_good(tid)
+                pending = await store.get_global_learned_pending()
+                kg_changed = False
+                pending_changed = False
                 for q in adaptive:
                     k = _adaptive_key(q); live.add(k)
                     firing = await _alert_firing(tid, q, alias_groups)
@@ -1241,12 +1250,41 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                             applied_op.get(_alert_key(q)))
                     if after != before:
                         state[k] = after; changed = True
+                    # Record the known-good when a learning-ON quota is stable —
+                    # count + the knobs it took + how long. Per ALERT (shared
+                    # across sites); the higher learned count wins. Only when the
+                    # snapshot actually changes, and only propose to the global
+                    # pending queue when it differs from the approved global value
+                    # (admin still has to approve before it seeds every tenant).
+                    if (q.get("learning") and after.get("phase") == "stable"
+                            and after.get("learned_op") is not None):
+                        _knobs = (knob_state.get(k) or {}).get("values") or {}
+                        kg = sim_quota.known_good_from_state(q, after, _knobs)
+                        if kg:
+                            ak = _alert_key(q)
+                            prev = known_good.get(ak) or {}
+                            if (int(kg["count"]) != int(prev.get("count", 0))
+                                    or (kg.get("knobs") or {}) != (prev.get("knobs") or {})):
+                                known_good[ak] = kg
+                                kg_changed = True
+                                _gap = (global_lv or {}).get(ak) or {}
+                                if int(_gap.get("op", -1)) != int(kg["count"]):
+                                    pending[ak] = {
+                                        "count": kg["count"], "floor": after.get("floor"),
+                                        "knobs": kg.get("knobs") or {},
+                                        "time_to_stable_s": kg.get("time_to_stable_s"),
+                                        "source_tenant": tid, "proposed_at": now}
+                                    pending_changed = True
                 for k in list(state.keys()):
                     if k not in live:
                         state.pop(k, None); changed = True
                 if changed:
                     await store.set_adaptive_state(tid, state)
                     await _push_sim_quotas(tid)
+                if kg_changed:
+                    await store.set_known_good(tid, known_good)
+                if pending_changed:
+                    await store.set_global_learned_pending(pending)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("adaptive controller (%s): %s", tid, exc)
 
@@ -3912,6 +3950,137 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         await store.set_global_learned_values(clean)
         pushed = await _push_sim_quotas_all_tenants()
         return {"status": "published", "values": clean, "pushed_to_spokes": pushed}
+
+    # ── Known-good operating points (per tenant): view + reset-to-known-good ───
+    @app.get("/sim/api/{tenant}/sim-quota/known-good")
+    async def get_known_good_ops(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """The recorded known-good operating point per alert for this tenant —
+        what the learner settled on ("exactly what it took"): count + the
+        simulation.conf knobs + time-to-stable + when. Read-only; drives the UI."""
+        return {"known_good": await store.get_known_good(tenant_id)}
+
+    @app.post("/sim/api/{tenant}/sim-quota/reset-to-known-good")
+    async def reset_to_known_good(tenant: str, request: Request,
+                                  tenant_id: str = Depends(get_tenant_id)):
+        """Restore this tenant's adaptive controllers to their recorded
+        known-good (count + learned knobs), then reshuffle. A learning-ON alert
+        HOLDS at the known-good count for 1h (all clients spin up + every sim
+        fires) then resumes learning from there; a learning-OFF alert jumps +
+        holds. Body: optional ``{alert_key}`` to scope to one alert, else all."""
+        _require_admin(request)
+        import time as _t
+        from .sim_quota import normalize_quota, _alert_key as _ak, seed_state_to_known_good
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        only_ak = (body or {}).get("alert_key")
+        now = _t.time()
+        kg_map = await store.get_known_good(tenant_id)
+        if not kg_map:
+            return {"status": "no_known_good",
+                    "message": "No known-good recorded yet — let an alert reach 'stable' first."}
+        csc = await store.get_central_sites_config(tenant_id) or {}
+        quotas = [normalize_quota(r) for r in (csc.get("sim_quotas") or [])]
+        state = await store.get_adaptive_state(tenant_id)
+        knob_state = await store.get_knob_learn_state(tenant_id)
+        restored = 0
+        for q in quotas:
+            if not (q.get("enabled") and _adaptive_is_on(q)):
+                continue
+            ak = _ak(q)
+            if only_ak and ak != only_ak:
+                continue
+            kg = kg_map.get(ak)
+            if not kg:
+                continue
+            # Restore the COUNT controller to the known-good (held if learning).
+            state[_adaptive_key(q)] = seed_state_to_known_good(kg, bool(q.get("learning")), now)
+            # Restore the learned simulation.conf KNOBS to what the snapshot took.
+            if kg.get("knobs"):
+                ent = dict(knob_state.get(_adaptive_key(q)) or {})
+                ent["values"] = dict(kg["knobs"])
+                knob_state[_adaptive_key(q)] = ent
+            restored += 1
+        if not restored:
+            return {"status": "no_match",
+                    "message": "No adaptive alert matched a recorded known-good."}
+        await store.set_adaptive_state(tenant_id, state)
+        await store.set_knob_learn_state(tenant_id, knob_state)
+        # Reshuffle the placement ledger so clients redistribute to the restored
+        # count, and push the restored quotas/knobs down to the spokes.
+        await _cs_forward_all(tenant_id, "CS_RESET_SIM_QUOTA", {}, timeout=30.0)
+        pushed = await _push_sim_quotas(tenant_id)
+        return {"status": "ok", "restored_alerts": restored,
+                "hold_seconds": 3600, "pushed_to_spokes": pushed}
+
+    # ── Global learned-value APPROVAL QUEUE (superadmin) ──────────────────────
+    @app.get("/sim/api/superadmin/global-learned-pending")
+    async def get_global_learned_pending(request: Request):
+        """Known-good operating points proposed by learning tenants, awaiting
+        admin approval before they seed every tenant. Each: ``{count, floor,
+        knobs, time_to_stable_s, source_tenant, proposed_at}`` keyed per alert."""
+        _require_admin(request)
+        return {"pending": await store.get_global_learned_pending(),
+                "published": await store.get_global_learned_values()}
+
+    @app.post("/sim/api/superadmin/global-learned-pending/approve")
+    async def approve_global_learned_pending(request: Request):
+        """Approve a proposed known-good → publish into global_learned_values
+        (seeds every tenant). Body: ``{alert_key}`` or ``{alert_keys:[...]}``."""
+        import time as _t
+        _require_admin(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        keys = list(body.get("alert_keys") or [])
+        if body.get("alert_key"):
+            keys.append(body["alert_key"])
+        keys = [str(k) for k in keys if k]
+        if not keys:
+            raise HTTPException(status_code=400, detail="alert_key(s) required")
+        pending = await store.get_global_learned_pending()
+        published = await store.get_global_learned_values()
+        now = _t.time()
+        approved = []
+        for ak in keys:
+            p = pending.get(ak)
+            if not isinstance(p, dict) or p.get("count") is None:
+                continue
+            published[ak] = {
+                "op": int(p["count"]),
+                "floor": int(p["floor"]) if p.get("floor") is not None else None,
+                "knobs": dict(p.get("knobs") or {}),
+                "time_to_stable_s": p.get("time_to_stable_s"),
+                "source_tenant": str(p.get("source_tenant") or ""),
+                "published_at": now,
+            }
+            pending.pop(ak, None)
+            approved.append(ak)
+        if not approved:
+            raise HTTPException(status_code=404, detail="no matching pending entries")
+        await store.set_global_learned_values(published)
+        await store.set_global_learned_pending(pending)
+        pushed = await _push_sim_quotas_all_tenants()
+        return {"status": "approved", "approved": approved, "pushed_to_spokes": pushed}
+
+    @app.post("/sim/api/superadmin/global-learned-pending/reject")
+    async def reject_global_learned_pending(request: Request):
+        """Discard a proposed known-good without publishing. Body: ``{alert_key}``."""
+        _require_admin(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        ak = str((body or {}).get("alert_key") or "")
+        if not ak:
+            raise HTTPException(status_code=400, detail="alert_key required")
+        pending = await store.get_global_learned_pending()
+        existed = pending.pop(ak, None) is not None
+        if existed:
+            await store.set_global_learned_pending(pending)
+        return {"status": "rejected" if existed else "not_found", "alert_key": ak}
 
     @app.get("/sim/api/{tenant}/central/available")
     async def get_central_available(tenant: str, tenant_id: str = Depends(get_tenant_id)):
