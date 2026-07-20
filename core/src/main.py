@@ -3236,12 +3236,25 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             cs_data["fetched_at"] = time.time()
         except Exception:  # noqa: BLE001 — never let stamping break ingest
             pass
+        # Content-identical frame? The spoke's conditional relay skips unchanged
+        # frames, but a ~60s heartbeat frame re-arrives with identical content
+        # (the spoke stamps ``_content_sig`` over the STATE, excluding timestamps /
+        # rolling CPU-mem). When it's identical we still store it (fresh
+        # fetched_at) but SKIP the two expensive side effects: the shaped-read
+        # memo invalidation (a recompute the next WebUI read would otherwise do
+        # for no reason) and the browser broadcast. Cuts hub work to ~zero for an
+        # idle fleet. Fail-safe: a missing sig (old spoke) → treated as changed.
+        _in_sig = cs_data.get("_content_sig")
+        _sig_store = self.__dict__.setdefault("_sim_cache_content_sig", {})
+        _identical = (_in_sig is not None and _sig_store.get(pk) == _in_sig)
+        _sig_store[pk] = _in_sig
         self.simulations_cache[pk] = cs_data
         self._sim_cache_dirty = True  # warm-load snapshot flushed by run_sim_cache_flush_loop
         # Invalidate the shaped-read memo (SimulationsService.get_clients_data /
-        # get_proxmox_data) for this spoke's tenant: a fresh telemetry frame is
-        # exactly when the shaped result changes.
-        self._bump_sim_cache_gen(spoke_id)
+        # get_proxmox_data) only when the CONTENT changed — a fresh, DIFFERENT
+        # telemetry frame is exactly when the shaped result changes.
+        if not _identical:
+            self._bump_sim_cache_gen(spoke_id)
         # Spoke-reported drain state (mid self-update). ``draining: true`` keeps
         # the hub from firing request/reply commands at a spoke that's about to
         # os._exit+relaunch (config pushes queue to the mailbox instead). A
@@ -3254,12 +3267,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 self.clear_draining(spoke_id)
         except Exception:  # noqa: BLE001 — drain bookkeeping must never break ingest
             pass
-        # Fan out to browsers subscribed on /sim/ws (tenant-scoped).
-        try:
-            await self.simulations_broadcaster.broadcast(
-                spoke_id, cs_data, self.state.get_spoke_tenant(spoke_id))
-        except Exception as exc:
-            logger.debug("simulations broadcast failed: %s", exc)
+        # Fan out to browsers subscribed on /sim/ws (tenant-scoped) — only when
+        # the content changed (an identical heartbeat frame has nothing new to
+        # render, so don't wake every subscribed browser for it).
+        if not _identical:
+            try:
+                await self.simulations_broadcaster.broadcast(
+                    spoke_id, cs_data, self.state.get_spoke_tenant(spoke_id))
+            except Exception as exc:
+                logger.debug("simulations broadcast failed: %s", exc)
         # USB-availability diagnostic: summarize which USB keys the cs spoke sent
         # and where they live, so a missing USB count in the tenant
         # Simulations/VM Server view can be localized to the spoke payload shape
