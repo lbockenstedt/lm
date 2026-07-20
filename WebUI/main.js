@@ -15174,6 +15174,19 @@ function pxmxShortVer(v) {
     return m ? m[1] : String(v);
 }
 
+// Cluster vs standalone badge beside a Proxmox node name (icon 101 Server Stack
+// when clustered, 121 Server when standalone). Clustered = a real cluster name
+// distinct from the node's own name (the agent sets cluster_name == hostname for
+// a standalone host, so cluster === node means "not clustered").
+function pxmxClusterBadge(n) {
+    const clustered = !!(n && n.cluster && String(n.cluster) !== String(n.node));
+    const title = clustered ? 'Clustered Proxmox' : 'Standalone Proxmox';
+    const d = clustered
+        ? 'M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008V8.25zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008V8.25z'
+        : 'M21.75 17.25v-.228a4.5 4.5 0 00-.12-1.03l-2.268-9.64a3.375 3.375 0 00-3.285-2.602H7.923a3.375 3.375 0 00-3.285 2.602l-2.268 9.64a4.5 4.5 0 00-.12 1.03v.228m19.5 0a3 3 0 01-3 3H5.25a3 3 0 01-3-3m19.5 0a3 3 0 00-3-3H5.25a3 3 0 00-3 3m16.5 0h.008v.008h-.008v-.008zm-3 0h.008v.008h-.008v-.008z';
+    return `<span title="${title}" class="inline-flex align-text-bottom text-slate-400 ml-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="${d}"></path></svg></span>`;
+}
+
 function renderPxmxNodes() {
     const wrap = document.getElementById('pxmx-nodes-wrap');
     if (!wrap) return;
@@ -15190,7 +15203,7 @@ function renderPxmxNodes() {
         const selCls     = key === sel ? 'bg-green-50 ring-1 ring-green-300' : 'hover:bg-slate-50';
         return `<tr data-node-key="${escAttr(key)}" onclick="openNodeVms('${escJs(key)}')" class="border-b border-slate-100 cursor-pointer ${selCls}">
             <td class="px-4 py-2 text-xs text-slate-500">${n.cluster || '—'}</td>
-            <td class="px-4 py-2 font-medium">${n.node}</td>
+            <td class="px-4 py-2 font-medium">${n.node}${pxmxClusterBadge(n)}</td>
             <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusCls}">${n.status}</span></td>
             <td class="px-4 py-2">${n.cpu_usage ?? '—'}%</td>
             <td class="px-4 py-2">${n.cpu_cores ?? '—'}</td>

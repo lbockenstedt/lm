@@ -5567,7 +5567,7 @@ async function csRenderVmServer() {
         const selCls = csVmHostId(h) === sel ? 'bg-green-50 ring-1 ring-green-300' : 'hover:bg-slate-50';
         return `<tr class="border-b border-slate-100 cursor-pointer ${selCls}" onclick="csVmSelectHost('${csEscape(csVmHostId(h))}','VMs')">
           <td class="px-4 py-2 text-center" onclick="event.stopPropagation()"><input type="checkbox" class="cs-host-sel" data-host="${csEscape((px.node && px.node.hostname) || csVmHostId(h))}" data-spoke="${csEscape(h.spoke_id || '')}" data-name="${csEscape(h.spoke_name || h.spoke_hostname || h.spoke_id || '')}"></td>
-          <td class="px-4 py-2"><span class="font-medium text-slate-700">${csEscape(h.spoke_name || h.spoke_hostname || h.spoke_id)}</span></td>
+          <td class="px-4 py-2"><span class="font-medium text-slate-700">${csEscape(h.spoke_name || h.spoke_hostname || h.spoke_id)}</span>${csClusterBadge(csHostClustered(h))}</td>
           <td class="px-4 py-2 text-center">${csHostStateBadge(h)}</td>
           <td class="px-4 py-2 text-center">${vmN}</td>
           <td class="px-4 py-2 text-center">${usbN}${qtPill}</td>
@@ -6002,6 +6002,30 @@ function csHostVms(h) {
     const nodes = new Set(all.filter(v => v && v.node).map(v => v.node));
     if (nodes.size <= 1) return all;
     return all.filter(v => v && v.node === nodeName);
+}
+
+// Is this host part of a MULTI-NODE Proxmox cluster? The agent reports
+// cluster_name (== the hostname when standalone) + a nodes list, and each VM
+// carries v.cluster / v.node. Clustered when: a nodes list has >1 entry, OR the
+// cluster name differs from this node's hostname, OR its VMs show cluster!=node.
+function csHostClustered(h) {
+    const px = (h && h.proxmox) || {};
+    const nodeName = (px.node && px.node.hostname) || (h && h.hostname) || '';
+    const nodes = px.nodes || (px.node && px.node.nodes);
+    if (Array.isArray(nodes) && nodes.length > 1) return true;
+    const cluster = px.cluster || px.cluster_name || (px.node && px.node.cluster) || '';
+    if (cluster && nodeName && String(cluster) !== String(nodeName)) return true;
+    return ((h && h.proxmox_vms) || []).some(v => v && v.cluster && v.node && String(v.cluster) !== String(v.node));
+}
+
+// Cluster vs standalone badge beside a Proxmox node name: clustered → icon 101
+// (Server Stack), standalone → icon 121 (Server).
+function csClusterBadge(clustered) {
+    const title = clustered ? 'Clustered Proxmox' : 'Standalone Proxmox';
+    const d = clustered
+        ? 'M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008V8.25zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008V8.25z'
+        : 'M21.75 17.25v-.228a4.5 4.5 0 00-.12-1.03l-2.268-9.64a3.375 3.375 0 00-3.285-2.602H7.923a3.375 3.375 0 00-3.285 2.602l-2.268 9.64a4.5 4.5 0 00-.12 1.03v.228m19.5 0a3 3 0 01-3 3H5.25a3 3 0 01-3-3m19.5 0a3 3 0 00-3-3H5.25a3 3 0 00-3 3m16.5 0h.008v.008h-.008v-.008zm-3 0h.008v.008h-.008v-.008z';
+    return `<span title="${title}" class="inline-flex align-text-bottom text-slate-400 ml-1"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="${d}"></path></svg></span>`;
 }
 
 function csSimVmCount(h) {
