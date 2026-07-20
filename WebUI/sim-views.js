@@ -6675,6 +6675,18 @@ function csVmShellReconnect() { csVmShellConnect((window.__csVmShellCtx || {}).a
 // type, bus_path, vmid, prov_status, missing_since} — NOT pre-split vid/pid and
 // NOT with active_vms/missing booleans. The source webui-hub frontend derives
 // those client-side; we mirror that here so the tables render correctly.
+// Curated VID:PID → product name (common USB Wi-Fi sim dongles) + VID → vendor
+// fallback, so the USB table shows a friendly name when live telemetry omits one.
+const _CS_USB_PRODUCTS = { '0bda:8812':'Realtek RTL8812AU (AC1200)','0bda:b812':'Realtek RTL88x2BU','0bda:c811':'Realtek RTL8811CU','0bda:8178':'Realtek RTL8192CU','0bda:818b':'Realtek RTL8192EU','0bda:f179':'Realtek RTL8188FTV','0e8d:7612':'MediaTek MT7612U','0e8d:7610':'MediaTek MT7610U','0e8d:7961':'MediaTek MT7921U','148f:5370':'Ralink RT5370','148f:3070':'Ralink RT3070','148f:7601':'MT7601U','0cf3:9271':'Atheros AR9271','2357:0120':'TP-Link TL-WN722N v2/v3','2357:010c':'TP-Link Archer T2U' };
+const _CS_USB_VENDORS = { '0bda':'Realtek','0e8d':'MediaTek','148f':'Ralink','0cf3':'Qualcomm Atheros','2357':'TP-Link','0846':'NETGEAR','7392':'Edimax','2001':'D-Link','050d':'Belkin','13b1':'Linksys','8087':'Intel','0781':'SanDisk','1a86':'QinHeng','05e3':'Genesys Logic','2109':'VIA Labs','046d':'Logitech' };
+function csUsbDeviceName(vidpid) {
+    if (!vidpid) return '';
+    const key = String(vidpid).toLowerCase();
+    if (_CS_USB_PRODUCTS[key]) return _CS_USB_PRODUCTS[key];
+    const vid = key.split(':')[0];
+    return _CS_USB_VENDORS[vid] ? `${_CS_USB_VENDORS[vid]} device` : '';
+}
+
 async function csRenderVmServerUsb() {
     csSetToolbar('');
     let hosts;
@@ -6776,7 +6788,7 @@ async function csRenderVmServerUsb() {
                 m.set(key, g);
             }
             g.items.push(u);
-            const nm = u.name || u.product || u.vidpid || '';
+            const nm = u.name || u.product || csUsbDeviceName(key) || u.vidpid || '';
             if (nm && (g.name === '' || g.name === '—')) g.name = nm;
             const ssc = sc(u);
             if (ssc && !g.scope) g.scope = ssc;

@@ -9960,6 +9960,53 @@ async function toggleSubnetFilter(module) {
     loadSubnetFilterToggles();
 }
 
+// Curated VID:PID → product name (common USB Wi-Fi adapter chipsets used as sim
+// dongles) with a VID → vendor fallback, so the USB management UI can show a
+// human-friendly name/type even when no live telemetry label is available.
+const _USB_PRODUCT_NAMES = {
+    '0bda:8812': 'Realtek RTL8812AU (AC1200)',
+    '0bda:b812': 'Realtek RTL88x2BU',
+    '0bda:c811': 'Realtek RTL8811CU',
+    '0bda:8178': 'Realtek RTL8192CU',
+    '0bda:818b': 'Realtek RTL8192EU',
+    '0bda:f179': 'Realtek RTL8188FTV',
+    '0e8d:7612': 'MediaTek MT7612U',
+    '0e8d:7610': 'MediaTek MT7610U',
+    '0e8d:7961': 'MediaTek MT7921U',
+    '148f:5370': 'Ralink RT5370',
+    '148f:3070': 'Ralink RT3070',
+    '148f:7601': 'MT7601U',
+    '0cf3:9271': 'Atheros AR9271',
+    '2357:0120': 'TP-Link TL-WN722N v2/v3',
+    '2357:010c': 'TP-Link Archer T2U',
+};
+const _USB_VENDOR_NAMES = {
+    '0bda': 'Realtek',
+    '0e8d': 'MediaTek',
+    '148f': 'Ralink',
+    '0cf3': 'Qualcomm Atheros',
+    '2357': 'TP-Link',
+    '0846': 'NETGEAR',
+    '7392': 'Edimax',
+    '2001': 'D-Link',
+    '050d': 'Belkin',
+    '13b1': 'Linksys',
+    '8087': 'Intel',
+    '0781': 'SanDisk',
+    '1a86': 'QinHeng',
+    '05e3': 'Genesys Logic',
+    '2109': 'VIA Labs',
+    '046d': 'Logitech',
+};
+function usbDeviceName(vidpid) {
+    if (!vidpid) return '';
+    const key = String(vidpid).toLowerCase();
+    if (_USB_PRODUCT_NAMES[key]) return _USB_PRODUCT_NAMES[key];
+    const vid = key.split(':')[0];
+    if (_USB_VENDOR_NAMES[vid]) return `${_USB_VENDOR_NAMES[vid]} device`;
+    return '';
+}
+
 function _usbChip(vp, label, onRemove, extra) {
     return `<span class="inline-flex items-center gap-1 bg-slate-100 rounded-full pl-2 pr-1 py-0.5 text-xs font-mono text-slate-700">${label || vp}${extra || ''}<button onclick="${onRemove}" class="text-slate-400 hover:text-red-500 font-bold">&times;</button></span>`;
 }
@@ -9980,7 +10027,7 @@ async function loadUsbOverview() {
     certWrap.innerHTML = (g.certified || []).length
         ? (g.certified || []).map(d => `<div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 border border-slate-200 rounded-md">
             <span class="font-mono text-xs text-slate-700 w-28">${escapeHtml(d.vidpid)}</span>
-            <span class="text-xs text-slate-600 flex-1 min-w-[8rem]">${escapeHtml(d.label || '—')}</span>
+            <span class="text-xs text-slate-600 flex-1 min-w-[8rem]">${escapeHtml(d.label && d.label !== d.vidpid ? d.label : (usbDeviceName(d.vidpid) || '—'))}</span>
             <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-green-100 text-green-700">Certified globally</span>
             <button onclick="removeGlobalUsbCert('${d.vidpid}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded text-xs font-bold">Un-approve</button>
           </div>`).join('')
@@ -9988,7 +10035,7 @@ async function loadUsbOverview() {
     ignWrap.innerHTML = (g.ignored || []).length
         ? (g.ignored || []).map(vp => `<div class="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 border border-slate-200 rounded-md">
             <span class="font-mono text-xs text-slate-700 w-28">${escapeHtml(vp)}</span>
-            <span class="text-xs text-slate-600 flex-1 min-w-[8rem]">—</span>
+            <span class="text-xs text-slate-600 flex-1 min-w-[8rem]">${escapeHtml(usbDeviceName(vp) || '—')}</span>
             <span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-200 text-slate-600">Ignored globally</span>
             <button onclick="removeGlobalUsbIgnore('${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-1 rounded text-xs font-bold">Un-ignore</button>
           </div>`).join('')
@@ -9998,15 +10045,23 @@ async function loadUsbOverview() {
     const tenants = data.tenants || [];
     if (!tenants.length) { list.innerHTML = '<p class="text-xs text-slate-400 italic">No tenants configured.</p>'; return; }
     list.innerHTML = tenants.map(t => {
-        const cert = (t.certified || []).map(d => _usbChip(d.vidpid, `${d.vidpid} <span class="text-slate-400">${d.type || ''}</span>`, `tenantUsbRemove('${t.id}','${d.vidpid}')`)).join('') || '<span class="text-xs text-slate-400 italic">none</span>';
-        const ign = (t.ignored || []).map(vp => _usbChip(vp, vp, `tenantUsbRemove('${t.id}','${vp}')`)).join('') || '<span class="text-xs text-slate-400 italic">none</span>';
+        const cert = (t.certified || []).map(d => `<div class="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 border border-slate-200 rounded-md">
+                <span class="font-mono text-xs text-slate-700">${escapeHtml(d.vidpid)}</span>
+                <span class="text-xs text-slate-500 flex-1 min-w-[6rem]">${escapeHtml(usbDeviceName(d.vidpid) || d.type || '—')}</span>
+                <button onclick="tenantUsbRemove('${t.id}','${d.vidpid}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-0.5 rounded text-[11px] font-bold">Un-approve</button>
+              </div>`).join('') || '<span class="text-xs text-slate-400 italic">none</span>';
+        const ign = (t.ignored || []).map(vp => `<div class="flex flex-wrap items-center gap-x-2 gap-y-1 px-2 py-1.5 border border-slate-200 rounded-md">
+                <span class="font-mono text-xs text-slate-700">${escapeHtml(vp)}</span>
+                <span class="text-xs text-slate-500 flex-1 min-w-[6rem]">${escapeHtml(usbDeviceName(vp) || '—')}</span>
+                <button onclick="tenantUsbRemove('${t.id}','${vp}')" class="bg-slate-200 text-slate-600 hover:bg-red-100 hover:text-red-600 px-2 py-0.5 rounded text-[11px] font-bold">Un-ignore</button>
+              </div>`).join('') || '<span class="text-xs text-slate-400 italic">none</span>';
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center justify-between mb-2">
                 <span class="text-sm font-bold text-slate-700">${t.name} <span class="text-xs font-mono text-slate-400">${t.id}</span></span>
             </div>
             <div class="grid grid-cols-2 gap-3 text-xs">
-                <div><p class="text-[10px] uppercase font-bold text-slate-400 mb-1">Certified (local)</p><div class="flex flex-wrap gap-1 min-h-[1.5rem]">${cert}</div></div>
-                <div><p class="text-[10px] uppercase font-bold text-slate-400 mb-1">Ignored (local)</p><div class="flex flex-wrap gap-1 min-h-[1.5rem]">${ign}</div></div>
+                <div><p class="text-[10px] uppercase font-bold text-slate-400 mb-1">Certified (local)</p><div class="flex flex-col gap-1 min-h-[1.5rem]">${cert}</div></div>
+                <div><p class="text-[10px] uppercase font-bold text-slate-400 mb-1">Ignored (local)</p><div class="flex flex-col gap-1 min-h-[1.5rem]">${ign}</div></div>
             </div>
             <div class="flex gap-1 mt-2">
                 <input id="tusbc-${t.id}" placeholder="1a2b:3c4d" class="w-28 font-mono text-xs ${'w-full bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500 text-slate-800'}" onkeydown="if(event.key==='Enter')tenantUsbAdd('${t.id}','certify')">
