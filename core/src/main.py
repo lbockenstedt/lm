@@ -347,6 +347,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # migration trigger fires → _primary_key returns spoke_id for every
         # spoke (legacy, zero behavior change).
         self.spoke_id_alias: Dict[str, str] = {}
+        # guid → recent reimage timestamps, for the clone-collision backstop
+        # (_note_reimage_collision): a burst of reimages on one guid = multiple
+        # cloned boxes presenting the same identity.
+        self._recent_reimages: Dict[str, list] = {}
 
         # Phase 2b (B2) agent-relay guid-primary: once a relayed agent is lazily
         # migrated to guid-primary, agent_id_alias maps the agent_id it REPORTS

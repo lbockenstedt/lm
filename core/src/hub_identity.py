@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Dict, Optional
 
 logger = logging.getLogger("Hub")
+
+# Clone-collision backstop: a single box being re-imaged is a rare, one-shot
+# event, but N clones sharing a golden .env each present a DIFFERENT install_uuid
+# under the SAME guid and "reimage" it in a tight burst. More than
+# _CLONE_REIMAGE_THRESHOLD reimages of one guid within _CLONE_REIMAGE_WINDOW_S is
+# treated as a clone collision (multiple live boxes on one identity) and alerted.
+_CLONE_REIMAGE_WINDOW_S = 120
+_CLONE_REIMAGE_THRESHOLD = 3
 
 
 class HubIdentityMixin:
@@ -35,6 +44,38 @@ class HubIdentityMixin:
             if iu:
                 idx[iu] = aid
         self.install_uuid_index = idx
+
+    def _note_reimage_collision(self, guid: str) -> None:
+        """Backstop alert for cloned boxes stepping on each other.
+
+        The client-side machine-binding (``_ensure_install_uuid``) normally makes a
+        clone mint its own identity, so hitting this means multiple boxes are still
+        presenting the SAME guid (e.g. clones that share a machine fingerprint too).
+        Each such clone 'reimages' the guid with its own install_uuid, so a burst of
+        reimages on one guid == a live collision. Raise ONE loud, deduplicated
+        warning + spoke event so the operator strips identity on the image rather
+        than chasing a flapping spoke."""
+        try:
+            hist = self._recent_reimages.setdefault(guid, [])
+            now = time.time()
+            hist.append(now)
+            cutoff = now - _CLONE_REIMAGE_WINDOW_S
+            hist[:] = [t for t in hist if t >= cutoff]
+            if len(hist) >= _CLONE_REIMAGE_THRESHOLD:
+                logger.warning(
+                    "[identity] CLONE COLLISION: guid %s reimaged %d× in %ds — "
+                    "multiple boxes are presenting the SAME identity (a cloned "
+                    ".env). They flap over one connection. Fix: strip identity on "
+                    "the golden image (prep_for_imaging.sh), or delete this spoke "
+                    "and let the boxes re-onboard as distinct ids.",
+                    guid, len(hist), _CLONE_REIMAGE_WINDOW_S)
+                self.record_spoke_event(
+                    guid, "clone_collision",
+                    f"{len(hist)} reimages in ≤{_CLONE_REIMAGE_WINDOW_S}s — "
+                    "multiple boxes sharing one identity")
+                hist.clear()  # dedupe until it re-accumulates
+        except Exception:
+            pass
 
     # Sentinel in system_state marking that the one-shot persisted-blob
     # guid migration has already run (see ``_migrate_persisted_blobs_to_guid``).
@@ -231,6 +272,7 @@ class HubIdentityMixin:
                 if prev_uuid and prev_uuid != install_uuid:
                     self.record_spoke_event(new_pk, "reimaged",
                                             f"install_uuid {prev_uuid[:8]}… → {install_uuid[:8]}…")
+                    self._note_reimage_collision(new_pk)
                     if self.install_uuid_index.get(prev_uuid) == new_pk:
                         del self.install_uuid_index[prev_uuid]
                 self.install_uuid_index[install_uuid] = new_pk

@@ -2018,25 +2018,68 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         except Exception:
             return ""
 
+    def _machine_fingerprint(self) -> str:
+        """A stable per-MACHINE id, used to detect a cloned .env (identity copied
+        onto a different physical box). ``/etc/machine-id`` first (regenerated per
+        clone by most provisioning / cloud-init), then the SMBIOS/DMI product UUID
+        as a fallback. Returns '' if neither is readable — binding is then skipped
+        (fail-open; we never re-mint on an unreadable fingerprint)."""
+        for path in ("/etc/machine-id", "/var/lib/dbus/machine-id",
+                     "/sys/class/dmi/id/product_uuid"):
+            try:
+                with open(path) as f:
+                    v = f.read().strip()
+                if v:
+                    return v
+            except Exception:
+                continue
+        return ""
+
     def _ensure_install_uuid(self) -> str:
         """Returns this spoke's stable install UUID, minting + persisting it on first start.
 
-        The UUID is created at FIRST START (not at install) so cloning the install
-        tree does NOT copy a UUID — a clone gets its own on its first start. A
-        prep-for-imaging run strips ``INSTALL_UUID`` from .env so a cloned image
-        mints a fresh one here too (intentionally breaking correlation → a clean
-        new identity rather than a rename of the original).
+        MACHINE-BOUND (defends against cloned spokes stepping on each other): the
+        UUID is pinned to this box's machine fingerprint via ``INSTALL_UUID_MACHINE``.
+        A VM clone copies the whole .env — INSTALL_UUID *and* the secret — so without
+        this the clone would present the ORIGIN's UUID, the hub would treat it as a
+        "reimage" of the origin, and the two boxes collapse onto one identity and
+        flap. Here, if a cloned .env lands on a DIFFERENT machine (stored fingerprint
+        != this box), we mint a FRESH UUID and drop the copied ``HUB_SECRET`` so the
+        clone re-onboards as its OWN identity instead of impersonating the origin.
+        This makes prep-for-imaging optional: a clone self-heals on first boot.
 
-        We trust only what lands on disk: if the write fails we return '' (no
-        UUID) rather than a volatile in-memory UUID, so a write failure never
-        causes a different identity on every boot. The hub treats an empty UUID
-        as "no correlation" and simply records the spoke by id as before.
+        A missing stored fingerprint on an existing UUID = a pre-binding install
+        (UUID predates this feature): we backfill the fingerprint and KEEP the UUID
+        (it is NOT a clone). We trust only what lands on disk: a failed write returns
+        '' so a write failure never yields a volatile identity across boots.
         """
+        cur_fp = self._machine_fingerprint()
         existing = self._read_env_value("INSTALL_UUID")
         if existing:
+            stored_fp = self._read_env_value("INSTALL_UUID_MACHINE")
+            if cur_fp and stored_fp and stored_fp != cur_fp:
+                logger.warning(
+                    "INSTALL_UUID %s… was minted on a different machine "
+                    "(fingerprint %s… != this box %s…) — cloned .env detected; "
+                    "minting a fresh identity + dropping the copied HUB_SECRET so "
+                    "this clone onboards as itself and cannot step on the origin.",
+                    existing[:8], stored_fp[:8], cur_fp[:8])
+                new_uuid = str(uuid.uuid4())
+                self._persist_secret_to_env("INSTALL_UUID", new_uuid)
+                self._persist_secret_to_env("INSTALL_UUID_MACHINE", cur_fp)
+                # Drop the origin's hub secret so the clone re-onboards (and is
+                # re-approved) as a distinct spoke rather than authenticating as
+                # the box it was cloned from.
+                self._persist_secret_to_env("HUB_SECRET", "")
+                return self._read_env_value("INSTALL_UUID")
+            if cur_fp and not stored_fp:
+                # Pre-binding install — adopt this machine as the binding, keep UUID.
+                self._persist_secret_to_env("INSTALL_UUID_MACHINE", cur_fp)
             return existing
         new_uuid = str(uuid.uuid4())
         self._persist_secret_to_env("INSTALL_UUID", new_uuid)
+        if cur_fp:
+            self._persist_secret_to_env("INSTALL_UUID_MACHINE", cur_fp)
         return self._read_env_value("INSTALL_UUID")
 
     def _persist_hub_secret(self, new_secret: str) -> None:
