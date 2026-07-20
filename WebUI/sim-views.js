@@ -5364,7 +5364,7 @@ function csVmHostBanner() {
              class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-slate-50 ${on ? 'bg-green-50' : ''}">
              <input type="checkbox" ${on ? 'checked' : ''} onchange="csVmHostToggle('${csEscape(id)}')"/>
              ${csOnlineDot(h.spoke_online)}<span class="flex-1">${csEscape(_hname(h))}</span>
-             <span class="text-slate-400">${(h.proxmox_vms || []).length} VM</span></label>`;
+             <span class="text-slate-400">${csHostVms(h).length} VM</span></label>`;
     }).join('');
     return `<div class="mb-4 relative" style="max-width:28rem">
       <div class="flex items-center gap-2">
@@ -5497,7 +5497,7 @@ async function csRenderVmServer() {
     // Count VMs the agents report as actively recloning (prov_status stamped
     // from reclone_vmids) — the reclone_state placeholder was always empty.
     const recloneRunning = hosts.reduce((n, h) =>
-        n + ((h.proxmox_vms || []).filter(v => String(v.prov_status || '').toLowerCase() === 'recloning').length), 0);
+        n + (csHostVms(h).filter(v => String(v.prov_status || '').toLowerCase() === 'recloning').length), 0);
     // Warm-start staleness notice (upper-right): hosts whose live connection is
     // down AND whose cached telemetry is >5 min old (cache_stale). Fresh cache
     // (<5 min) is served silently as current — no notice. See service._cache_fields.
@@ -5719,7 +5719,7 @@ function csAutoProvLivePanel() {
     // "starting up". Cross-reference each host's proxmox_vms running set.
     const flight = [];
     (csVmHosts || []).forEach(h => {
-        const runningVmids = new Set((h.proxmox_vms || [])
+        const runningVmids = new Set(csHostVms(h)
             .filter(v => String(v.status || '').toLowerCase() === 'running')
             .map(v => Number(v.vmid)));
         (h.usb_devices || []).forEach(u => {
@@ -5986,9 +5986,26 @@ function csVmCategory(v) {
 // excluding templates and LXC containers). The overview's VMs column and the
 // fleet table used h.vm_count, which includes templates + containers. Falls
 // back to vm_count only when the full VM list isn't present (best-effort).
+// VMs scoped to THIS host's own Proxmox node. A clustered agent reports the
+// WHOLE cluster's VMs in proxmox_vms (Proxmox's cluster API is cluster-wide), so
+// without scoping every node row shows every node's VMs (and inflates the count
+// to the cluster total). Each VM is stamped with v.node (its owning node); scope
+// to this host's node (px.node.hostname). Only filters when the list genuinely
+// spans MULTIPLE nodes (a clustered agent's cluster-wide report); standalone
+// hosts and unstamped VMs return the list unchanged. NOTE: a node with zero VMs
+// of its own correctly scopes to an EMPTY list here — that is the whole point
+// (the reported bug was empty cluster nodes showing every other node's VMs).
+function csHostVms(h) {
+    const all = (h && h.proxmox_vms) || [];
+    const nodeName = h && h.proxmox && h.proxmox.node && h.proxmox.node.hostname;
+    if (!nodeName) return all;
+    const nodes = new Set(all.filter(v => v && v.node).map(v => v.node));
+    if (nodes.size <= 1) return all;
+    return all.filter(v => v && v.node === nodeName);
+}
+
 function csSimVmCount(h) {
-    const list = h && h.proxmox_vms;
-    if (Array.isArray(list)) return list.filter(v => csVmCategory(v) === 'Simulation Clients').length;
+    if (Array.isArray(h && h.proxmox_vms)) return csHostVms(h).filter(v => csVmCategory(v) === 'Simulation Clients').length;
     return (h && h.vm_count) || 0;
 }
 
@@ -6018,7 +6035,7 @@ async function csRenderVmServerVms() {
         const usb = (hh.proxmox && hh.proxmox.usb_state) || hh.usb_state || [];
         const shed = {};
         usb.forEach(u => { if (u && u.shed_at && u.vmid != null) shed[String(u.vmid)] = u.shed_at; });
-        (hh.proxmox_vms || []).forEach(v => {
+        csHostVms(hh).forEach(v => {
             const vv = Object.assign({}, v);
             vv._spoke = hh.spoke_id;
             vv._host = hn;
@@ -6245,7 +6262,7 @@ function csAutoProvRunState(px, vms) {
 // Provisioning… X/Y / Deleting N), a progress bar, and a per-VM phase feed.
 function csAutoProvPanel(h) {
     const px = (h && h.proxmox) || {};
-    const vms = (h && h.proxmox_vms) || [];
+    const vms = csHostVms(h);
     const prov = px.provision || {};
     const autoOn = prov.auto_provision_on === true || String(prov.auto_provision_on || '').toLowerCase() === 'on';
     const run = csAutoProvRunState(px, vms);
