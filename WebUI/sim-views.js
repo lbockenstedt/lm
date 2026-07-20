@@ -6703,12 +6703,23 @@ async function csRenderVmServerUsb() {
         if (typeof _raw === 'string' && _raw.trim()) { try { _raw = JSON.parse(_raw); } catch (_) { _raw = _raw.split(/[,\s]+/); } }
         tenantIgnored = (Array.isArray(_raw) ? _raw : []).map(x => String(x || '').trim().toLowerCase()).filter(Boolean);
     } catch (_) { /* non-fatal — just omit the ignored section */ }
-    const h = csVmSelectedHost();
-    if (!h) { csSet(csEmpty('No host selected.')); return; }
-    const px = h.proxmox || {};
-    const present = px.present_usb || [];
-    const unknown = px.unknown_usb || [];
-    const usbState = px.usb_state || [];
+    const scopeHosts = csVmSelectedHosts();
+    if (!scopeHosts.length) { csSet(csEmpty('No host selected.')); return; }
+    const h = csVmSelectedHost();   // banner + single-host affordances
+    // Aggregate USB across ALL selected hosts — the Host dropdown is multi-select,
+    // and each host's proxmox block carries its OWN present_usb / unknown_usb /
+    // usb_state / quarantine. Previously only the FIRST selected host's px was
+    // read, so a multi-select still showed just one host. Tag each device with
+    // its host so a device's origin is preserved through grouping.
+    const present = [], unknown = [], usbState = [], quarantine = [];
+    scopeHosts.forEach(hh => {
+        const hpx = hh.proxmox || {};
+        const hn = hh.spoke_name || hh.spoke_hostname || hh.spoke_id || '';
+        (hpx.present_usb || []).forEach(u => present.push(Object.assign({ _host: hn }, u)));
+        (hpx.unknown_usb || []).forEach(u => unknown.push(Object.assign({ _host: hn }, u)));
+        (hpx.usb_state || []).forEach(e => usbState.push(e));
+        (hpx.quarantine || []).forEach(q => quarantine.push(q));
+    });
     // Index assigned-dongle state by bus_path (then vidpid) to derive active_vms
     // and missing status for each certified dongle.
     const stateByBus = {}, stateByVp = {};
@@ -6756,7 +6767,7 @@ async function csRenderVmServerUsb() {
       ${g ? `<span><b class="text-sm text-slate-700">${g}</b> global</span>` : ''}
       ${b ? `<span><b class="text-sm text-slate-700">${b}</b> global+local</span>` : ''}
       ${l ? `<span><b class="text-sm text-slate-700">${l}</b> local</span>` : ''}
-      <span><b class="text-sm text-slate-700">${total}</b> on this host</span>
+      <span><b class="text-sm text-slate-700">${total}</b> on ${scopeHosts.length === 1 ? 'this host' : scopeHosts.length + ' selected hosts'}</span>
       <span><b class="text-sm text-slate-700">${fleetTotal}</b> total on cs server</span>
       <span><b class="text-sm text-slate-700">${unknown.length}</b> uncertified</span>
     </div>`;
@@ -6764,7 +6775,7 @@ async function csRenderVmServerUsb() {
     // One red badge per bus: bus-id + reason + live countdown to the 1h
     // auto-recovery. Surfaced here (the dongle-management surface) so an admin
     // sees WHY a dongle is sidelined and that it self-clears.
-    const qt = (px.quarantine || []).filter(q => q && q.bus_path);
+    const qt = quarantine.filter(q => q && q.bus_path);
     const qtBox = qt.length ? `<div class="mb-4 border border-red-200 bg-red-50 rounded-lg p-3">
       <p class="text-[11px] font-bold text-red-700 uppercase tracking-wider mb-2">Quarantined dongles (${qt.length}) — sidelined by kernel USB errors</p>
       <div class="flex flex-wrap gap-2">${qt.map(csQtBadge).join('')}</div>
