@@ -7133,7 +7133,15 @@ async function csRenderVmServerDetails() {
         return csKvTile(k, v);
     };
     const tiles = entries.map(([k, v]) => fmt(k, v)).join('');
+    const _delId = csVmHostId(h);
     csSet(`<div>${csVmHostBanner()}
+      <div class="flex justify-end mb-3">
+        <button onclick="csDeleteHost('${csEscape(String(_delId).replace(/'/g, "\\'"))}')"
+          class="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-md text-xs font-bold"
+          title="Remove this host from the VM Server view and clear its cached/stored data. Use for a host that has been intentionally shut down. If the host comes back online it will re-appear.">
+          Delete host + clear cache
+        </button>
+      </div>
       <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
         ${csStat('Node', node.hostname || '—')}${csStat('USB', csUsbCount(h))}
         ${csStat('CPU 1h', px.cpu_1h_avg || '—')}${csStat('Mem 1h', px.mem_1h_avg || '—')}
@@ -7150,6 +7158,31 @@ async function csRenderVmServerDetails() {
       <details class="mt-4 text-xs"><summary class="cursor-pointer text-slate-400">Raw payload</summary>${csJsonDump(h)}</details>
     </div>`);
 }
+
+// Delete a VM Server host row + clear its cached/stored data. For a host the
+// operator has intentionally shut down that otherwise lingers as a STALE row.
+// Hits DELETE /sim/api/proxmox/host/{hostname}: the hub drops the host from its
+// simulations cache (immediate UI removal) and best-effort tells the owning cs
+// spoke to drop it from proxmox_states so it isn't re-relayed. If the host comes
+// back online it will re-appear on the next telemetry frame.
+window.csDeleteHost = async function (hostname) {
+    if (!hostname) return;
+    if (!confirm(`Delete host '${hostname}'?\n\nThis removes it from the VM Server view and clears its cached/stored data on the hub. Use this for a host you've intentionally shut down. If it comes back online it will re-appear.`))
+        return;
+    try {
+        const d = await csFetch(`/proxmox/host/${encodeURIComponent(hostname)}?tenant_id=${csTenant()}`,
+            { method: 'DELETE' });
+        if (typeof showToast === 'function') showToast((d && d.message) || 'Host removed', 'success');
+        // Clear selection so the now-deleted host isn't referenced, then reload
+        // the VM Server view (mirrors csVmHostAll's reload path).
+        csVmSelectedHostIds = [];
+        csVmSelectedHostId = '';
+        loadCSData('VM Server', currentSubChild || 'VMs', true);
+    } catch (e) {
+        console.error('csDeleteHost: delete failed', e);
+        if (typeof showToast === 'function') showToast('Delete failed: ' + (e.message || e), 'error');
+    }
+};
 
 // ── Clients / Central (per-spoke, from the aggregate reads) ────
 async function csRenderVmServerClients() {

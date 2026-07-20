@@ -2412,6 +2412,71 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             pass
         return result
 
+    @app.delete("/sim/api/proxmox/host/{hostname}")
+    async def cs_delete_proxmox_host(hostname: str, request: Request,
+                                     tenant_id: str = Depends(get_tenant_id)):
+        """Remove a Proxmox host row from the VM Server view + clear its cached
+        data. For an intentionally shut-down host that otherwise lingers as a STALE
+        row. Clears the hub's cached ``proxmox_hosts`` entry for this host across the
+        tenant's cs spokes (immediate UI removal) and best-effort tells the owning
+        spoke to drop it from ``proxmox_states`` so it isn't re-relayed. Works even
+        if the spoke is offline (cache clear still applies)."""
+        _require_admin(request)
+        hn = (hostname or "").strip()
+        if not hn:
+            raise HTTPException(status_code=400, detail="hostname required")
+        removed = 0
+        cleared_sids = []
+        cache = getattr(hub, "simulations_cache", None)
+        if isinstance(cache, dict):
+            for sid, cdata in list(cache.items()):
+                if not isinstance(cdata, dict):
+                    continue
+                try:
+                    if hub.state.get_spoke_tenant(sid) != tenant_id:
+                        continue
+                except Exception:
+                    pass
+                touched = False
+                ph = cdata.get("proxmox_hosts")
+                if isinstance(ph, list):
+                    new_ph = [h for h in ph
+                              if str((h or {}).get("hostname", "")).strip() != hn]
+                    if len(new_ph) != len(ph):
+                        cdata["proxmox_hosts"] = new_ph
+                        removed += len(ph) - len(new_ph)
+                        touched = True
+                # Prune the flat single-host mirrors that belong to this host too.
+                for k in ("proxmox_vms", "usb_devices"):
+                    lst = cdata.get(k)
+                    if isinstance(lst, list):
+                        pruned = [x for x in lst
+                                  if str((x or {}).get("_agent_hostname")
+                                         or (x or {}).get("node", "")).strip() != hn]
+                        if len(pruned) != len(lst):
+                            cdata[k] = pruned
+                            touched = True
+                if touched:
+                    cleared_sids.append(sid)
+                    try:
+                        hub._bump_sim_cache_gen(sid)
+                    except Exception:
+                        pass
+        # Best-effort: tell the connected cs spoke(s) to drop it from proxmox_states
+        # so it doesn't re-appear on the next relay. Spoke offline → skip silently.
+        forwarded = False
+        try:
+            sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
+            if sid:
+                await hub.request_response(sid, "CS_PURGE_HOST", {"hostname": hn}, timeout=8.0)
+                forwarded = True
+        except Exception:
+            pass
+        return {"status": "ok", "removed": removed, "spoke_notified": forwarded,
+                "message": (f"Removed host {hn}"
+                            + ("" if forwarded else " (spoke offline — cache cleared; "
+                               "it will reappear only if a spoke relays it again)"))}
+
     @app.delete("/sim/api/{tenant}/clients/overrides")
     async def cs_clear_all_client_overrides(tenant: str,
                                             tenant_id: str = Depends(get_tenant_id)):
