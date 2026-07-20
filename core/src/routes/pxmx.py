@@ -787,6 +787,71 @@ def register(app, hub, ctx):
         msg = ("Agent disconnected and removed." if relayed else "Agent removed (was not connected).")
         return {"status": "ok", "message": msg}
 
+    @app.delete("/api/pxmx/server")
+    async def delete_pxmx_server(request: Request):
+        """Remove a hypervisor SERVER (pxmx host) from the Hypervisors →
+        Overview / Virtual Machines view: purge its agent's hub state and clear
+        the cached VM list so its now-stale VMs + node stop showing. For a host
+        that's been intentionally shut down. Body: ``{agent_id?, node?, hostname?,
+        cluster?}`` — agent_id preferred (UI resolves it from the node's VMs);
+        else the agent whose hostname matches ``node`` is used. VM data is served
+        live from connected agents, so a server that's STILL online will
+        re-appear on the next poll — this is for removing dead/stale ones."""
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        agent_id = str((body or {}).get("agent_id") or "").strip()
+        node = str((body or {}).get("node") or (body or {}).get("hostname") or "").strip()
+        # Resolve the agent by hostname when the UI couldn't map the node → agent.
+        if not agent_id and node:
+            ss = hub.state.system_state
+            for pk, cfg in (ss.get("agent_config", {}) or {}).items():
+                if str((cfg or {}).get("hostname", "")).strip().lower() == node.lower():
+                    agent_id = pk
+                    break
+            if not agent_id:
+                for pk, info in (getattr(hub, "agent_info", {}) or {}).items():
+                    if str((info or {}).get("hostname", "")).strip().lower() == node.lower():
+                        agent_id = (info or {}).get("agent_id") or pk
+                        break
+        purged = None
+        if agent_id:
+            # Best-effort live disconnect through the owning spoke (mirrors
+            # delete_pxmx_agent), then purge ALL persisted + in-mem agent state.
+            try:
+                owning = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
+                    or hub.get_hypervisor_spoke()
+                if owning:
+                    try:
+                        await hub.request_response(owning, "SPOKE_RELAY", {
+                            "target_agent_id": hub._agent_relay_name(agent_id),
+                            "command": "REVOKE_AGENT"}, timeout=8.0)
+                    except Exception:  # noqa: BLE001 — agent may be dead already
+                        pass
+                _purge_agent_state(hub, agent_id)
+                purged = agent_id
+            except Exception as e:  # noqa: BLE001
+                logger.info("delete_pxmx_server: purge of '%s' failed: %s", agent_id, e)
+        # Clear the cached VM list (so the dead server's VMs vanish immediately;
+        # the next live poll repopulates from connected agents only) + the agents
+        # SWR cache (so it drops from the Agents tile too).
+        try:
+            hub.warm_cache.pop("pxmx_vms", None)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _AGENTS_CACHE["data"] = None
+            _AGENTS_CACHE["ts"] = 0.0
+        except Exception:  # noqa: BLE001
+            pass
+        return {"status": "ok", "purged_agent": purged,
+                "message": ("Server removed" + (f" (agent {purged})" if purged else "")
+                            + " — cached VMs cleared.")}
+
     @app.get("/api/pxmx/nodes")
     async def get_pxmx_nodes(request: Request):
         hub = app.state.hub

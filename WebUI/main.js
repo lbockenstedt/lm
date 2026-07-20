@@ -15342,7 +15342,7 @@ function renderPxmxNodes() {
     if (!wrap) return;
     const nodes = window._pxmxNodes || [];
     const sel = window._pxmxNodeSel;
-    const cols = ['Cluster', 'Node', 'Status', 'CPU %', 'Cores', 'RAM Used', 'RAM Total', 'Version'];
+    const cols = ['Cluster', 'Node', 'Status', 'CPU %', 'Cores', 'RAM Used', 'RAM Total', 'Version', ''];
     const escAttr = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
     const escJs   = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     const rows = nodes.map(n => {
@@ -15360,9 +15360,45 @@ function renderPxmxNodes() {
             <td class="px-4 py-2">${ramUsedGb} GB</td>
             <td class="px-4 py-2">${ramTotalGb} GB</td>
             <td class="px-4 py-2 text-xs text-slate-400">${pxmxShortVer(n.proxmox_version) || '—'}</td>
+            <td class="px-4 py-2 text-right" onclick="event.stopPropagation()">
+                <button onclick="deletePxmxServer('${escJs(n.node)}','${escJs(n.cluster || '')}')"
+                    class="text-xs text-red-600 hover:text-red-800 font-medium"
+                    title="Remove this server from the view and clear its cached VMs. For a host you've intentionally shut down; a still-online host re-appears on the next poll.">Delete</button>
+            </td>
         </tr>`;
     }).join('');
     wrap.innerHTML = tableWrap(tableHead(cols) + `<tbody>${rows}</tbody>`);
+}
+
+// Remove a hypervisor server (pxmx host) from the Overview / Virtual Machines
+// view: purge its agent's hub state + clear the cached VM list so a
+// shut-down host stops lingering. Resolves the node → agent_id from the cached
+// VMs (each carries agent_id); the backend falls back to a hostname match.
+async function deletePxmxServer(node, cluster) {
+    if (!node) return;
+    if (!await showConfirmToast(`Remove server '${node}'?\n\nPurges its agent and clears its cached VMs from the Hypervisors view. Use this for a host you've intentionally shut down — if it's still online it will re-appear on the next poll.`)) return;
+    let agent_id = '';
+    try {
+        const hit = (window._pxmxVms || []).find(v => (v.node || '') === node && v.agent_id);
+        if (hit) agent_id = hit.agent_id;
+    } catch (e) { /* fall back to hostname match server-side */ }
+    try {
+        const res = await fetch('/api/pxmx/server', {
+            method: 'DELETE', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ agent_id, node, cluster }),
+        });
+        const d = await res.json().catch(() => ({}));
+        if (res.ok) {
+            showToast(d.message || 'Server removed', 'success');
+            if (window._pxmxNodeSel === pxmxNodeKey(cluster, node)) window._pxmxNodeSel = null;
+            loadPxmxData('Overview');
+        } else {
+            showToast(d.detail || 'Delete failed', 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + (e.message || e), 'error');
+    }
 }
 
 // Clicking a node on the Nodes tab sets it as the VM filter and navigates to the
