@@ -6691,6 +6691,18 @@ async function csRenderVmServerUsb() {
     csSetToolbar('');
     let hosts;
     try { hosts = await csVmLoad(); } catch (e) { console.error('csRenderVmServerUsb: vm load failed', e); csSet(csErrorBox('Could not load USB', e)); return; }
+    // Tenant-level ignored vid:pids (from this tenant's hub_config). The live
+    // device tables below DROP ignored devices, so without listing them here a
+    // tenant admin would have no way to UN-ignore one (that action otherwise
+    // lives only on the superadmin Setup → Simulations USB page). Un-ignore is
+    // the tenant-scoped POST /{tenant}/usb-vidpids action=remove (csUsbVidpid).
+    let tenantIgnored = [];
+    try {
+        const _hc = await csFetch('/tenant/' + csTenant() + '/hub-config');
+        let _raw = ((_hc && _hc.hub_config) || {}).usb_ignored_vidpids;
+        if (typeof _raw === 'string' && _raw.trim()) { try { _raw = JSON.parse(_raw); } catch (_) { _raw = _raw.split(/[,\s]+/); } }
+        tenantIgnored = (Array.isArray(_raw) ? _raw : []).map(x => String(x || '').trim().toLowerCase()).filter(Boolean);
+    } catch (_) { /* non-fatal — just omit the ignored section */ }
     const h = csVmSelectedHost();
     if (!h) { csSet(csEmpty('No host selected.')); return; }
     const px = h.proxmox || {};
@@ -6821,6 +6833,19 @@ async function csRenderVmServerUsb() {
         <button onclick="csUsbVidpid('${csEscape(g.vid)}','${csEscape(g.pid)}','ignore')" class="bg-slate-200 text-slate-600 px-2 py-0.5 rounded text-[10px] font-bold">Ignore</button>
       </div></td>
     </tr>`; }).join('');
+    // Ignored (this tenant) — un-ignore restores the adapter to service. Uses the
+    // tenant-scoped remove action (no superadmin needed). Name via csUsbDeviceName.
+    const ignRows = tenantIgnored.map(vp => {
+        const _i = vp.indexOf(':');
+        const vid = _i > 0 ? vp.slice(0, _i) : vp;
+        const pid = _i > 0 ? vp.slice(_i + 1) : '';
+        const nm = (typeof csUsbDeviceName === 'function' ? csUsbDeviceName(vp) : '') || '';
+        return `<tr>
+      <td class="px-3 py-2 text-sm">${csEscape(nm || '—')}</td>
+      <td class="px-3 py-2 font-mono text-xs">${csEscape(vid)}:${csEscape(pid)}</td>
+      <td class="px-3 py-2"><button onclick="csUsbVidpid('${csEscape(vid)}','${csEscape(pid)}','remove')" class="bg-slate-200 text-slate-600 hover:bg-green-100 hover:text-green-700 px-2 py-0.5 rounded text-[10px] font-bold">Un-ignore</button></td>
+    </tr>`;
+    }).join('');
     // Diagnostic: when no dongles are present, show where the cs spoke put
     // USB data (admin-only sidecar from the hub) so a missing count can be
     // diagnosed without leaving the page.
@@ -6842,6 +6867,7 @@ async function csRenderVmServerUsb() {
       ${csTable(['Device', 'VID:PID', 'Type', 'Approved', 'Count', 'Active VMs', 'Status'], certRows)}
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-5 mb-2">Uncertified / Unknown (${unGroups.length} type${unGroups.length === 1 ? '' : 's'} · ${unknown.length} dongle${unknown.length === 1 ? '' : 's'}) — pick a type, then Certify</p>
       ${csTable(['Device', 'VID:PID', 'Count', 'Type & Actions'], unRows)}
+      ${tenantIgnored.length ? `<p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-5 mb-2">Ignored (this tenant) (${tenantIgnored.length}) — un-ignore to bring an adapter back into service</p>${csTable(['Device', 'VID:PID', 'Action'], ignRows)}` : ''}
     </div>`);
 }
 
