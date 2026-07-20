@@ -91,6 +91,22 @@ class SpokeRegistryMixin:
         # Also drop the persisted last-seen so a deleted spoke doesn't keep a
         # stale timestamp that would surface as a ghost "last seen" entry.
         self.state.clear_spoke_last_seen(pk)
+        # Purge the IDENTITY-correlation indices too. remove_module() clears the
+        # persisted module_metadata, but the in-memory spoke_id_alias (NOT
+        # persisted — rebuilt at runtime) and install_uuid_index still map this
+        # spoke's connect-name(s) and install_uuid(s) onto its guid. Without this,
+        # a clone-correlated spoke RESURRECTS on the very next reconnect:
+        # _reconcile_spoke_identity resolves the reconnecting box back to the
+        # deleted guid via the surviving alias/index and re-creates its metadata —
+        # so "Delete" never sticks for a cloned fleet (all clones keep collapsing
+        # into one guid no matter how many times it's deleted). Drop every alias/
+        # index entry that resolves to pk, plus pk's own guid-keyed entries.
+        for _name, _guid in list(getattr(self, "spoke_id_alias", {}).items()):
+            if _guid == pk or _name == pk:
+                self.spoke_id_alias.pop(_name, None)
+        for _iu, _guid in list(getattr(self, "install_uuid_index", {}).items()):
+            if _guid == pk or _iu == pk:
+                self.install_uuid_index.pop(_iu, None)
 
     def _mark_spoke_disconnected(self, spoke_id: str) -> None:
         """Record a clean-WS-close disconnect in ``spoke_telemetry``.
