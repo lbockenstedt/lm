@@ -28,7 +28,8 @@ from typing import Any, Dict
 logger = logging.getLogger("AlertEngine")
 
 SOURCES = ("dashboard_check", "vm_offline", "quota_unmet", "spoke_offline",
-           "cert_issue_failed", "cert_renew_failed", "cert_deploy_failed")
+           "cert_issue_failed", "cert_renew_failed", "cert_deploy_failed",
+           "bulk_dongle_failure", "single_bus_failing")
 _LABEL = {
     "dashboard_check": "Dashboard check",
     "vm_offline": "VM / hypervisor offline",
@@ -37,6 +38,8 @@ _LABEL = {
     "cert_issue_failed": "Certificate Request Failed",
     "cert_renew_failed": "Certificate Renewal Failed",
     "cert_deploy_failed": "Certificate Deploy Failed",
+    "bulk_dongle_failure": "Dongle quarantine — bulk client failure",
+    "single_bus_failing": "Dongle quarantine — single bus failing",
 }
 _POLL_S = 60
 _HYPERVISOR_TYPES = ("hypervisor", "simulation")
@@ -259,6 +262,44 @@ async def _eval_tenant(engine: "AlertEngine", service, tenant: str, needed: set)
                     await engine.evaluate(tenant, "cert_deploy_failed", item,
                                           bad, t.get("last_message") or "",
                                           severity="error" if bad else "ok")
+    # bulk_dongle_failure / single_bus_failing — from each CS spoke's relayed
+    # ``qt_state`` (populated by the spoke's dongle-quarantine detection sweep;
+    # see sim_quota_engine._quarantine_sweep). The spoke decides; the hub only
+    # alarms. ``bulk_dongle_failure`` = a host with >20% of its T2 clients never
+    # connecting (infrastructure — a switch/AP/downlink — not individual
+    # dongles, so the sweep suppresses the per-dongle shed there).
+    # ``single_bus_failing`` = a single USB bus accumulating quarantine strikes
+    # (a flaky port/dongle — the storm-guard counterpart to the bulk case).
+    if needed & {"bulk_dongle_failure", "single_bus_failing"}:
+        try:
+            raw_spokes = service._spokes_for_tenant(tenant)  # [(sid, raw_frame)]
+        except Exception:  # noqa: BLE001
+            raw_spokes = []
+        for sid, data in raw_spokes:
+            qt = data.get("qt_state") if isinstance(data, dict) else None
+            if not isinstance(qt, dict):
+                continue
+            spk = (data.get("spoke_name") if isinstance(data, dict) else None) or sid
+            if "bulk_dongle_failure" in needed:
+                bulk = qt.get("bulk_hosts") or []
+                bad = bool(bulk)
+                detail = ("hosts with >20% of T2 clients never connecting: "
+                          + ", ".join(map(str, bulk))) if bad else ""
+                await engine.evaluate(tenant, "bulk_dongle_failure", spk,
+                                      bad, detail,
+                                      severity="error" if bad else "ok")
+            if "single_bus_failing" in needed:
+                # A bus with ≥3 accumulated fails on one spoke = a single flaky
+                # bus (not a one-off). The sweep counts per-bus fails per tick;
+                # a persistent flapper crosses this across sweeps.
+                flaky = [b for b, n in (qt.get("per_bus_fails") or {}).items()
+                         if int(n or 0) >= 3]
+                bad = bool(flaky)
+                detail = ("buses with repeated quarantine fails: "
+                          + ", ".join(map(str, flaky))) if bad else ""
+                await engine.evaluate(tenant, "single_bus_failing", spk,
+                                      bad, detail,
+                                      severity="error" if bad else "ok")
 
 
 async def run_alert_loop(hub) -> None:
