@@ -439,6 +439,10 @@ class SimulationsService:
                 "vm_count":         at.get("vm_count"),
                 "node_count":       at.get("node_count"),
                 "agent_version":    at.get("agent_version"),
+                # Reconnect context (#3) — how flappy the agent's link is.
+                "reconnect_count":        at.get("reconnect_count"),
+                "last_disconnect_reason": at.get("last_disconnect_reason"),
+                "last_disconnect_age_s":  at.get("last_disconnect_age_s"),
             }
             out_hosts.append(h)
         return {"tenant_id": result.get("tenant_id", tenant_id), "hosts": out_hosts}
