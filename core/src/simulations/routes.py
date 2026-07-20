@@ -1471,6 +1471,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 out["ignored_hostnames"] = ih
         except Exception:  # noqa: BLE001
             pass
+        # Dongle-quarantine exclusion sims: a per-tenant csc ``qt_exclude_sims``
+        # overrides the platform-wide default; the spoke's SimQuotaEngine reads
+        # the resolved set from its central_sites_config (the engine defaults to
+        # the locked set when neither is set, so this is purely an admin override).
+        try:
+            t_qt = csc.get("qt_exclude_sims")
+            if isinstance(t_qt, list):
+                out["qt_exclude_sims"] = [str(s) for s in t_qt if str(s).strip()]
+            else:
+                g_qt = await store.get_qt_exclude_sims()
+                if g_qt:
+                    out["qt_exclude_sims"] = g_qt
+        except Exception:  # noqa: BLE001
+            pass
         return out
 
     async def _push_sim_quotas(tenant_id: str) -> int:
@@ -3658,6 +3672,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Global Simulation Sharing (stacking) + N/A hide maps live here now.
         catalog["sim_shareable"] = await _sim_shareable()
         catalog["sim_na"] = await _sim_na()
+        # Dongle-quarantine: the platform-wide exclusion-sim set (sims whose
+        # no-IP/no-SSID outcome is the point — don't QT a client running only
+        # these). A tenant csc ``qt_exclude_sims`` overrides per-tenant; this
+        # is the global default the Sim-Quota Defaults editor curates.
+        catalog["qt_exclude_sims"] = await store.get_qt_exclude_sims()
         return {"defaults": await store.get_sim_quota_defaults(),
                 "catalog": catalog}
 
@@ -3730,6 +3749,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if isinstance((body or {}).get("sim_na"), dict):
             await store.set_sim_na_global(
                 {str(k): bool(v) for k, v in body["sim_na"].items()})
+        # Dongle-quarantine exclusion sims (global default). Coerce to a list of
+        # known sim ids; unknown ids are dropped (an admin typo shouldn't widen
+        # the exclusion set silently). Empty list = exclude nothing (every sim
+        # that never connects is shed); omitted = leave the stored set as-is.
+        if isinstance((body or {}).get("qt_exclude_sims"), list):
+            known = set(SIM_META.keys())
+            cleaned_qt = [s for s in (body["qt_exclude_sims"] or [])
+                          if str(s).strip() in known]
+            await store.set_qt_exclude_sims(cleaned_qt)
         # Global sharing/N-A feed every tenant's catalog — clear the whole cache.
         _sim_quota_catalog_cache.clear()
         # A global-defaults / sharing change can shift every tenant's effective

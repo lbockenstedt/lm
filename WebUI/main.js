@@ -6383,6 +6383,14 @@ function _renderSetupSimulationsTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+                  <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Dongle Quarantine — Exclusion Sims</h3>
+                  <button onclick="saveQtExcludeSims()" class="${btnCls} text-xs px-3 py-1">Save</button>
+                </div>
+                <p class="text-xs text-slate-500 mb-3">Sims whose no-IP / no-SSID outcome is the <b>point</b> of the sim (e.g. <span class="font-mono">dhcp_fail</span>, <span class="font-mono">assoc_fail</span>). A T2 (USB-dongle) client running <b>only</b> these past the 1h grace window is <b>not</b> quarantined. A client running any non-excluded sim (or none) that never connects is shed: its bus is struck + the VM destroyed + re-cloned. Per-tenant override: a tenant's Config → Sim Quotas csc <span class="font-mono">qt_exclude_sims</span> overrides this default.</p>
+                <div id="qt-exclude-sims-rows" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            </div>
+            <div class="${card}">
+                <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
                   <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Simulation Sharing (Stacking)</h3>
                   <div class="flex items-center gap-3">
                     <label class="text-[11px] text-slate-500 flex items-center gap-1"><input type="checkbox" onchange="simSharingToggleHide(this)"> Hide N/A</label>
@@ -6712,8 +6720,10 @@ async function loadSimQuotaDefaults() {
         const cat = _simQuotaDefaultsCatalog;
         _simSharing = (cat.sim_shareable && typeof cat.sim_shareable === 'object') ? { ...cat.sim_shareable } : {};
         _simSharingNA = (cat.sim_na && typeof cat.sim_na === 'object') ? { ...cat.sim_na } : {};
+        _qtExcludeSims = Array.isArray(cat.qt_exclude_sims) ? cat.qt_exclude_sims.slice() : [];
         _renderSimQuotaDefaultsEditor();
         _renderSimSharing();
+        _renderQtExcludeSims();
     } catch (e) {
         rowsEl.innerHTML = '<p class="text-xs text-red-400 italic">Failed to load sim quota defaults</p>';
         console.error('loadSimQuotaDefaults failed', e);
@@ -6728,6 +6738,38 @@ async function loadSimQuotaDefaults() {
 let _simSharing = {};
 let _simSharingNA = {};
 let _simSharingHideNA = false;
+
+// ── Dongle-quarantine exclusion sims (GLOBAL, Setup → Simulations → Sim Quotas) ─
+// The platform-wide set of sim ids whose no-IP/no-SSID outcome is the POINT of
+// the sim (dhcp_fail, assoc_fail, …) — a T2 client running ONLY these past the
+// 1h grace window is NOT quarantined. Curated in the Sim-Quota Defaults editor;
+// saved via the same sim-quota-defaults PUT. The spoke's SimQuotaEngine reads
+// the resolved set (this default, overridable per-tenant in csc) from its
+// central_sites_config; when neither is set it falls back to the locked default.
+let _qtExcludeSims = [];
+
+function _qtExcludeSyncFromDom() {
+    _qtExcludeSims = Array.from(document.querySelectorAll('[data-qtexclude]:checked'))
+        .map(el => el.getAttribute('data-qtexclude'));
+}
+
+function _renderQtExcludeSims() {
+    const el = document.getElementById('qt-exclude-sims-rows');
+    if (!el) return;
+    const cat = _simQuotaDefaultsCatalog || { sims: [] };
+    // Every known sim is a candidate (an admin can exclude any sim whose
+    // no-connect is by design); sorted for stable display.
+    const sims = (cat.sims || []).map(s => s.sim_id)
+        .filter(Boolean).sort((a, b) => String(a).toLowerCase().localeCompare(String(b).toLowerCase()));
+    const esc = escapeHtml;
+    const sel = new Set(_qtExcludeSims);
+    el.innerHTML = sims.length
+        ? sims.map(f => `<label class="flex items-center gap-2 py-1 border-b border-slate-100 text-xs">
+            <input data-qtexclude="${esc(f)}" type="checkbox" ${sel.has(f) ? 'checked' : ''}>
+            <span class="font-mono text-slate-600">${esc(f)}</span>
+          </label>`).join('')
+        : '<p class="text-xs text-slate-400 italic">No simulations found.</p>';
+}
 
 function _simSharingSyncFromDom() {
     document.querySelectorAll('[data-simshare]').forEach(el => { _simSharing[el.getAttribute('data-simshare')] = !!el.checked; });
@@ -6762,13 +6804,31 @@ function _renderSimSharing() {
 window.simSharingOnNA = function () { _simSharingSyncFromDom(); _renderSimSharing(); };
 window.simSharingToggleHide = function (cb) { _simSharingSyncFromDom(); _simSharingHideNA = !!(cb && cb.checked); _renderSimSharing(); };
 
+window.saveQtExcludeSims = async function () {
+    _qtExcludeSyncFromDom();
+    try {
+        const r = await fetch(SIM_QUOTA_DEFAULTS_URL, {
+            method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            // Include current defaults + sharing so the shared PUT doesn't wipe them.
+            body: JSON.stringify({ defaults: _simQuotaDefaultsSyncFromDom(),
+                                   sim_shareable: _simSharing, sim_na: _simSharingNA,
+                                   qt_exclude_sims: _qtExcludeSims }),
+        });
+        if (!r.ok) throw new Error(`${r.status}`);
+        if (typeof showToast === 'function') showToast('Quarantine exclusion sims saved.', 'success');
+    } catch (e) {
+        if (typeof showToast === 'function') showToast((e && e.message) || 'Save failed', 'error');
+        console.error('saveQtExcludeSims failed', e);
+    }
+};
+
 window.saveSimSharing = async function () {
     _simSharingSyncFromDom();
     try {
         const r = await fetch(SIM_QUOTA_DEFAULTS_URL, {
             method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
             // Include current defaults so the shared PUT doesn't wipe them.
-            body: JSON.stringify({ defaults: _simQuotaDefaultsSyncFromDom(), sim_shareable: _simSharing, sim_na: _simSharingNA }),
+            body: JSON.stringify({ defaults: _simQuotaDefaultsSyncFromDom(), sim_shareable: _simSharing, sim_na: _simSharingNA, qt_exclude_sims: _qtExcludeSyncFromDom() }),
         });
         if (!r.ok) throw new Error(`${r.status}`);
         if (typeof showToast === 'function') showToast('Simulation sharing saved.', 'success');
@@ -6823,7 +6883,7 @@ async function saveSimQuotaDefaults() {
     try {
         const data = await apiJson(SIM_QUOTA_DEFAULTS_URL, {
             method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ defaults: rows }),
+            body: JSON.stringify({ defaults: rows, qt_exclude_sims: _qtExcludeSyncFromDom() }),
         });
         _simQuotaDefaults = (data.defaults || rows).map(_simQuotaDefaultFromServer);
         _renderSimQuotaDefaultsEditor();

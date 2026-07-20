@@ -852,6 +852,26 @@ class SimulationsStore:
                 dict(d) for d in (quotas or []) if isinstance(d, dict)]
             await self._asave()
 
+    # ── GLOBAL dongle-quarantine exclusion sims (Setup → Simulations → Defaults) ─
+    # Platform-wide list of sim ids whose no-IP/no-SSID outcome is the POINT of the
+    # sim (dhcp_fail, assoc_fail, …) and so must NOT trigger a dongle quarantine.
+    # A T2 client running ONLY these sims past the grace window is left alone; one
+    # running any non-excluded sim (or none) that never connects is shed. The spoke's
+    # SimQuotaEngine reads the resolved value from its central_sites_config (the hub
+    # pushes this global default down on every sim-quota push); a tenant csc
+    # ``qt_exclude_sims`` overrides it per-tenant. Default = the locked decision set.
+    async def get_qt_exclude_sims(self) -> List[str]:
+        v = self._global().get("qt_exclude_sims")
+        if not isinstance(v, list):
+            return []
+        return [str(s) for s in v if str(s).strip()]
+
+    async def set_qt_exclude_sims(self, sims: List[str]) -> None:
+        with self._lock:
+            self._global()["qt_exclude_sims"] = [
+                str(s).strip() for s in (sims or []) if str(s).strip()]
+            await self._asave()
+
     # ── GLOBAL learned sim-quota operating points (Setup → Global Learned Values) ──
     # Platform-wide (superadmin-curated) published learned values, keyed per ALERT
     # ``{alert_type}:{alert_id}`` (no site): ``{op, floor, source_tenant,
