@@ -315,13 +315,32 @@ function csOnlineBadge(online) {
         : `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-100 text-slate-500 text-[10px] font-bold uppercase tracking-wider"><span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span>Offline</span>`;
 }
 
-// Host state badge with warm-start awareness: Online when the spoke's websocket
-// is live; "Cached" (fresh, <5 min old) when disconnected but the last telemetry
-// frame is recent — so a just-restarted spoke's fleet renders as current instead
-// of alarming Offline; Offline once the cache is stale (>5 min, cache_stale).
+// Host state badge — driven by the host's OWN telemetry freshness (host_online /
+// host_stale / host_age_s, recomputed hub-side per request), not the parent
+// spoke's socket. A fresh agent frame means the whole agent→spoke→hub chain is
+// live, so:
+//   Online  — host_online (fresh frame within the stale window)
+//   Stale   — spoke up but this agent stopped reporting (shut down / hung); age shown
+//   Cached  — no fresh host frame but the spoke's cache is recent (warm-start)
+//   Offline — otherwise
+// Fixes both reported bugs: live hosts wrongly reading "Cached" (spoke_online
+// mis-keyed after a rename) and shut-down hosts stuck on "Online".
+function _csAgeLabel(secs) {
+    if (secs == null) return '';
+    if (secs < 60) return secs + 's';
+    if (secs < 3600) return Math.floor(secs / 60) + 'm';
+    return Math.floor(secs / 3600) + 'h';
+}
 function csHostStateBadge(h) {
-    if (h && h.spoke_online) return csOnlineBadge(true);
-    if (h && h.cache_fresh) {
+    if (!h) return csOnlineBadge(false);
+    if (h.host_online) return csOnlineBadge(true);
+    // Spoke is up but this host's agent frame has gone stale → surface it
+    // distinctly (amber) with the age so a dead/hung agent is obvious.
+    if (h.host_stale && h.spoke_online) {
+        const age = _csAgeLabel(h.host_age_s);
+        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold uppercase tracking-wider" title="Agent last reported ${age ? age + ' ago' : 'a while ago'} — spoke is up but this host stopped sending telemetry"><span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>Stale${age ? ' · ' + csEscape(age) : ''}</span>`;
+    }
+    if (h.cache_fresh) {
         const age = (h.cache_age_s != null) ? Math.floor(h.cache_age_s / 60) + 'm' : '';
         return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 text-[10px] font-bold uppercase tracking-wider" title="Live connection down — showing cached data ${age ? '(' + csEscape(String(age)) + ' old)' : ''}"><span class="w-1.5 h-1.5 rounded-full bg-sky-400"></span>Cached</span>`;
     }
@@ -5557,17 +5576,20 @@ async function csRenderVmServer() {
     try { hosts = await csVmLoad(); }
     catch (e) { console.error('csRenderVmServer: fleet load failed', e); csSet(csErrorBox('Could not load VM Server fleet', e)); return; }
     if (!hosts.length) { csSet(csEmpty('No VM servers reporting yet.')); return; }
-    const online = hosts.filter(h => h.spoke_online).length;
+    // Online = hosts whose OWN agent frame is fresh (host_online), not merely
+    // whose parent spoke's socket is up — so a shut-down agent drops out of the
+    // count. Falls back to spoke_online when host_online is absent (old cache).
+    const online = hosts.filter(h => (h.host_online != null ? h.host_online : h.spoke_online)).length;
     const vms = hosts.reduce((n, h) => n + csSimVmCount(h), 0);
     const usbs = hosts.reduce((n, h) => n + csUsbCount(h), 0);
     // Count VMs the agents report as actively recloning (prov_status stamped
     // from reclone_vmids) — the reclone_state placeholder was always empty.
     const recloneRunning = hosts.reduce((n, h) =>
         n + (csHostVms(h).filter(v => String(v.prov_status || '').toLowerCase() === 'recloning').length), 0);
-    // Warm-start staleness notice (upper-right): hosts whose live connection is
-    // down AND whose cached telemetry is >5 min old (cache_stale). Fresh cache
-    // (<5 min) is served silently as current — no notice. See service._cache_fields.
-    const staleHosts = hosts.filter(h => !h.spoke_online && h.cache_stale);
+    // Staleness notice (upper-right): hosts whose own agent frame has gone stale
+    // (host_stale) — a shut-down/hung agent OR a >5-min-old cache. host_stale is
+    // recomputed per request hub-side, so this advances even with no new frame.
+    const staleHosts = hosts.filter(h => h.host_stale || (!h.spoke_online && h.cache_stale));
     // Remember we're showing stale cache so the /sim/ws telemetry handler can
     // force a one-shot refresh the moment the spoke/agent reconnect.
     window._csVmHadStale = staleHosts.length > 0;
@@ -7039,6 +7061,53 @@ window.csCmdDelete = async function (btn) {
 };
 
 // ── Details (node header + headline stats + telemetry tile grid + raw dump) ─
+// Telemetry-freshness diagnostic panel for the per-server Details page. Renders
+// the per-HOP age chain (agent built the frame → cs spoke ingested → hub cached →
+// now) plus the agent's per-phase collect timings (the pvesh calls that stall on
+// a loaded host) and the effective tick cadence. This is the "where is the delay"
+// tool: a large agent-generated age with small phase times points at the spoke→hub
+// relay; a large get_vm_list/get_node_stats points at an agent pvesh stall.
+function csFreshnessPanel(h) {
+    const f = (h && h.freshness) || {};
+    const ph = f.phase_ms || {};
+    const ms = v => (v == null ? '—' : v + 'ms');
+    const secs = v => {
+        if (v == null) return '—';
+        if (v < 60) return v + 's';
+        if (v < 3600) return Math.floor(v / 60) + 'm ' + Math.round(v % 60) + 's';
+        return Math.floor(v / 3600) + 'h ' + Math.floor((v % 3600) / 60) + 'm';
+    };
+    const state = h.host_online
+        ? '<span class="text-green-600 font-bold">● LIVE</span>'
+        : (h.host_stale ? `<span class="text-amber-600 font-bold">● STALE (${csEscape(secs(h.host_age_s))})</span>`
+                        : '<span class="text-slate-500 font-bold">● —</span>');
+    const tile = (label, val, hint) => `<div class="rounded-md border border-slate-200 bg-white px-3 py-2">
+        <div class="text-[10px] uppercase tracking-wider text-slate-400">${csEscape(label)}</div>
+        <div class="text-sm font-mono font-bold text-slate-700">${csEscape(val)}</div>
+        ${hint ? `<div class="text-[10px] text-slate-400">${csEscape(hint)}</div>` : ''}</div>`;
+    return `<div class="hpe-card rounded-lg p-4 shadow-sm mb-4">
+      <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Telemetry Freshness</p>
+        <span class="text-xs text-slate-500">${state} · agent v${csEscape(String(f.agent_version || '—'))} · tick #${csEscape(String(f.iter != null ? f.iter : '—'))}</span>
+      </div>
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 mb-3">
+        ${tile('Agent generated', secs(f.agent_gen_age_s) + ' ago', 'frame built on agent')}
+        ${tile('Agent → Spoke', f.agent_to_spoke_s != null ? f.agent_to_spoke_s + 's' : '—', 'relay to cs spoke')}
+        ${tile('Spoke ingested', secs(f.spoke_ingest_age_s) + ' ago', 'cs spoke stored')}
+        ${tile('Hub cached', secs(f.hub_cache_age_s) + ' ago', 'hub received frame')}
+        ${tile('Tick cadence', f.interval_s != null ? f.interval_s + 's' : '—', 'agent loop interval')}
+      </div>
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Agent collect phase — last tick</p>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+        ${tile('metrics', ms(ph.metrics_ms))}
+        ${tile('get_vm_list', ms(ph.vm_list_ms))}
+        ${tile('get_node_stats', ms(ph.node_stats_ms))}
+        ${tile('compute_tiers', ms(ph.tiers_ms))}
+      </div>
+      <div class="text-[10px] text-slate-400 mt-2">VMs ${csEscape(String(f.vm_count != null ? f.vm_count : '—'))} · nodes ${csEscape(String(f.node_count != null ? f.node_count : '—'))}. Big <b>agent-generated age</b> with small phase times ⇒ spoke/hub relay lag; big <b>get_vm_list</b>/<b>get_node_stats</b> ⇒ agent pvesh stall on a busy host.</div>
+    </div>`;
+}
+
 async function csRenderVmServerDetails() {
     csSetToolbar('');
     try { await csVmLoad(); } catch (e) { console.error('csRenderVmServerDetails: vm load failed', e); csSet(csErrorBox('Could not load details', e)); return; }
@@ -7070,6 +7139,7 @@ async function csRenderVmServerDetails() {
         ${csStat('CPU 1h', px.cpu_1h_avg || '—')}${csStat('Mem 1h', px.mem_1h_avg || '—')}
         ${csStat('Agent', px.agent_version || '—')}
       </div>
+      ${csFreshnessPanel(h)}
       <div class="flex items-center justify-between mb-2">
         <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Telemetry</p>
         <span class="text-[10px] text-slate-400">${entries.length} field${entries.length === 1 ? '' : 's'}</span>

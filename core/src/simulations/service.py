@@ -19,6 +19,11 @@ _WARN = {"warning", "warn", "degraded", "unknown", "no_data", "pending"}
 # than this the UI shows a "cached data — check Spoke and Agent" notice. See
 # _cache_fields + WebUI csVmServer render.
 _CACHE_FRESH_S = 300
+# A pxmx host whose last telemetry frame is older than this is treated as stale
+# / offline on its VM Server row — matches the cs spoke's relay STALE_SECS so a
+# shut-down agent stops showing "online" (recomputed per REQUEST, not baked into
+# the memoized build, so a host with no new frame still ages out).
+_HOST_STALE_S = 180
 
 
 def _agent_cs_enabled(hub, hostname: str) -> bool:
@@ -383,8 +388,60 @@ class SimulationsService:
         else:
             result = self._build_proxmox_data(tenant_id)
             memo[("proxmox", tenant_id)] = (key, result)
-        return {"tenant_id": result.get("tenant_id", tenant_id),
-                "hosts": [dict(h) for h in (result.get("hosts") or [])]}
+        # Recompute per-hop AGES + online/stale HERE, per request — NOT in the
+        # memoized build. The memo only rebuilds when a new telemetry frame bumps
+        # the cache-gen, so a shut-down host (no new frame) would otherwise keep a
+        # frozen "just now" age and show ONLINE forever. Computing ages from the
+        # memoized raw timestamps on every request is what lets a dead host age
+        # out and a genuinely-stale cache read "cached". Also powers the detail
+        # page's telemetry-freshness panel (agent → spoke → hub → now chain).
+        now = time.time()
+        out_hosts = []
+        for h in (result.get("hosts") or []):
+            h = dict(h)
+            hls = h.get("host_last_seen")
+            if isinstance(hls, (int, float)) and hls:
+                h["host_age_s"] = max(0, int(now - hls))
+                h["host_stale"] = h["host_age_s"] > _HOST_STALE_S
+                # ONLINE iff this host's own agent frame is fresh. A recent frame
+                # can ONLY exist if the whole chain (agent → spoke → hub) is live,
+                # so this is more reliable than spoke_online — which mis-keys after
+                # a spoke rename (showed live hosts as "cached") and ignores a
+                # shut-down agent under a still-live spoke (showed dead hosts as
+                # "online"). Both reported symptoms.
+                h["host_online"] = not h["host_stale"]
+            else:
+                # No per-host timestamp (old warm-loaded frame) → fall back to the
+                # spoke-connection signal so nothing regresses during a cache roll.
+                h["host_age_s"] = None
+                h["host_stale"] = None
+                h["host_online"] = bool(h.get("spoke_online"))
+            # Recompute the cache freshness label from the hub receipt time each
+            # request (was frozen at build time → misleading "cached"/"fresh").
+            hf = h.get("hub_fetched_at")
+            if isinstance(hf, (int, float)) and hf:
+                cage = max(0, int(now - hf))
+                h["cache_age_s"] = cage
+                h["cache_fresh"] = cage < _CACHE_FRESH_S
+                h["cache_stale"] = cage >= _CACHE_FRESH_S
+            # Per-hop lag chain for the detail page (seconds, one-decimal).
+            at = h.get("agent_telemetry") or {}
+            gen = at.get("gen_ts")
+            h["freshness"] = {
+                "agent_gen_age_s":  round(now - gen, 1) if isinstance(gen, (int, float)) else None,
+                "agent_to_spoke_s": at.get("agent_to_spoke_lag_s"),
+                "spoke_ingest_age_s": round(now - hls, 1) if isinstance(hls, (int, float)) and hls else None,
+                "hub_cache_age_s":  h.get("cache_age_s"),
+                "relay_age_s":      h.get("relay_age_s"),
+                "interval_s":       at.get("interval_s"),
+                "phase_ms":         at.get("phase_ms") or {},
+                "iter":             at.get("iter"),
+                "vm_count":         at.get("vm_count"),
+                "node_count":       at.get("node_count"),
+                "agent_version":    at.get("agent_version"),
+            }
+            out_hosts.append(h)
+        return {"tenant_id": result.get("tenant_id", tenant_id), "hosts": out_hosts}
 
     def _build_proxmox_data(self, tenant_id: str) -> Dict[str, Any]:
         hosts: List[dict] = []
@@ -418,6 +475,17 @@ class SimulationsService:
                         "ws_reconnect_count": data.get("ws_reconnect_count"),
                         "ws_last_error": data.get("ws_last_error"),
                         "sim_conf_read_error": data.get("sim_conf_read_error"),
+                        # ── Telemetry-freshness RAW timestamps (per-hop age chain).
+                        # Only RAW epochs are memoized here; the AGES + online/stale
+                        # are recomputed per-request in get_proxmox_data so a
+                        # shut-down host (no new frame → no memo rebuild) still ages
+                        # out instead of being frozen "online". agent → spoke → hub:
+                        "host_last_seen":  hpx.get("last_seen"),
+                        "agent_telemetry": hpx.get("agent_telemetry") or {},
+                        "ingested_at":     hpx.get("ingested_at"),
+                        "relayed_at":      h.get("relayed_at"),
+                        "relay_age_s":     h.get("relay_age_s"),
+                        "hub_fetched_at":  data.get("fetched_at"),
                     })
                 continue
             # Legacy single-host shape (one Proxmox host per cs spoke).
@@ -450,6 +518,11 @@ class SimulationsService:
                 "ws_reconnect_count": data.get("ws_reconnect_count"),
                 "ws_last_error": data.get("ws_last_error"),
                 "sim_conf_read_error": data.get("sim_conf_read_error"),
+                # Freshness raw timestamps (see the multi-host branch above).
+                "host_last_seen":  px.get("last_seen"),
+                "agent_telemetry": px.get("agent_telemetry") or {},
+                "ingested_at":     px.get("ingested_at"),
+                "hub_fetched_at":  data.get("fetched_at"),
             })
         # Dedup by agent hostname: one physical pxmx host can be relayed/cached
         # by more than one cs spoke (redundant relay paths or overlapping
