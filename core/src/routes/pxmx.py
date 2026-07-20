@@ -836,6 +836,23 @@ def register(app, hub, ctx):
                 purged = agent_id
             except Exception as e:  # noqa: BLE001
                 logger.info("delete_pxmx_server: purge of '%s' failed: %s", agent_id, e)
+        # HIDE the node persistently — the Hypervisors nodes come from a LIVE
+        # GET_NODE_STATS, and a shut-down host is still reported (status=offline)
+        # by its cluster peers, so purging the agent + clearing the cache alone
+        # would let it re-appear on the next poll (the reported bug: "success
+        # toast but it doesn't delete"). get_pxmx_nodes/_with_tpl filter this set;
+        # a node that comes back ONLINE is auto-unhidden there.
+        hidden_added = False
+        if node:
+            try:
+                ss = hub.state.system_state
+                hidden = ss.setdefault("pxmx_hidden_nodes", [])
+                if node not in hidden:
+                    hidden.append(node)
+                    hub.state._mark_dirty()
+                    hidden_added = True
+            except Exception:  # noqa: BLE001
+                pass
         # Clear the cached VM list (so the dead server's VMs vanish immediately;
         # the next live poll repopulates from connected agents only) + the agents
         # SWR cache (so it drops from the Agents tile too).
@@ -848,9 +865,10 @@ def register(app, hub, ctx):
             _AGENTS_CACHE["ts"] = 0.0
         except Exception:  # noqa: BLE001
             pass
-        return {"status": "ok", "purged_agent": purged,
-                "message": ("Server removed" + (f" (agent {purged})" if purged else "")
-                            + " — cached VMs cleared.")}
+        return {"status": "ok", "purged_agent": purged, "hidden": hidden_added or bool(node),
+                "message": ("Server hidden from the Hypervisors view + cached VMs cleared"
+                            + (f"; agent {purged} purged" if purged else "")
+                            + ". It re-appears automatically only if the host comes back online.")}
 
     @app.get("/api/pxmx/nodes")
     async def get_pxmx_nodes(request: Request):
@@ -866,6 +884,26 @@ def register(app, hub, ctx):
         try:
             result = await hub.request_response(pxmx_spoke, "GET_NODE_STATS", {})
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            # Operator-hidden (deleted) servers: filter them out of the live feed
+            # so a shut-down host that cluster peers still report as offline stays
+            # gone. AUTO-UNHIDE any hidden node that reports back ONLINE (the host
+            # returned) so a live node is never permanently hidden.
+            if isinstance(data, dict) and isinstance(data.get("nodes"), list):
+                ss = hub.state.system_state
+                hidden = list(ss.get("pxmx_hidden_nodes", []) or [])
+                if hidden:
+                    hset = set(hidden)
+                    back = {str(n.get("node") or "") for n in data["nodes"]
+                            if isinstance(n, dict) and str(n.get("status") or "").lower() == "online"
+                            and str(n.get("node") or "") in hset}
+                    if back:
+                        remaining = [h for h in hidden if h not in back]
+                        ss["pxmx_hidden_nodes"] = remaining
+                        hub.state._mark_dirty()
+                        hset -= back
+                    data = dict(data)
+                    data["nodes"] = [n for n in data["nodes"]
+                                     if not (isinstance(n, dict) and str(n.get("node") or "") in hset)]
             return data
         except Exception as e:
             logger.exception("get_pxmx_nodes failed")
@@ -900,12 +938,20 @@ def register(app, hub, ctx):
         # live, warm, and cached reads alike.
         protected_set = hub.simulations_store.get_all_protected_vms()
 
+        _hidden_nodes = set(hub.state.system_state.get("pxmx_hidden_nodes", []) or [])
+
         def _with_tpl(data):
             if isinstance(data, dict):
                 data = dict(data)
                 data["template_pools"] = template_pools
                 vms = data.get("vms")
                 if isinstance(vms, list):
+                    # Drop VMs on operator-hidden (deleted) servers so a removed
+                    # host's stale VMs don't re-appear from the live/cluster feed.
+                    if _hidden_nodes:
+                        vms = [v for v in vms if not (isinstance(v, dict)
+                               and str(v.get("node") or "") in _hidden_nodes)]
+                        data["vms"] = vms
                     for v in vms:
                         if isinstance(v, dict):
                             v["protected"] = v.get("unique_id") in protected_set
