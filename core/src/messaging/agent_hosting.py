@@ -33,10 +33,11 @@ import websockets
 from typing import Any, Dict, List, Optional
 
 try:
-    from .control_plane import BaseControlPlane
+    from .control_plane import BaseControlPlane, _ws_keepalive_env
     from ..security.signer import MessageSigner, split_frame
 except ImportError:  # imported off a stale path (bare modules on sys.path)
     from messaging.control_plane import BaseControlPlane  # type: ignore
+    from messaging.control_plane import _ws_keepalive_env  # type: ignore
     from security.signer import MessageSigner, split_frame  # type: ignore
 
 logger = logging.getLogger("AgentHostingControlPlane")
@@ -278,6 +279,15 @@ class AgentHostingControlPlane(BaseControlPlane):
             scheme = "ws"
         for attempt in range(10):
             try:
+                # Websocket keepalive on the /ws/agent server: use the same
+                # 30s/90s (env-overridable) the hub<->spoke leg uses, NOT the
+                # websockets library default 20s/20s. A long synchronous agent
+                # command (qm clone, RUN_COMMAND) can block the agent's event
+                # loop past 20s; the default ping_timeout would then tear down
+                # the agent WS and kill every in-flight VNC console session
+                # sharing that loop — the ~15s VNC stall.
+                serve_kwargs["ping_interval"] = _ws_keepalive_env("LM_WS_PING_INTERVAL_S", 30.0)
+                serve_kwargs["ping_timeout"] = _ws_keepalive_env("LM_WS_PING_TIMEOUT_S", 90.0)
                 async with websockets.serve(
                     self._agent_handler, host, port, **serve_kwargs,
                 ):
