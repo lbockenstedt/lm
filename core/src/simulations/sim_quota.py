@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import configparser
 import logging
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("SimQuota")
 
@@ -364,6 +364,8 @@ def _derived_mode(phase: str) -> str:
         return "stable"
     if phase == "at_max":
         return "at_max"
+    if phase == "held":
+        return "held"  # parked at a known-good after a Reset-to-known-good
     return "learning"
 
 
@@ -408,6 +410,15 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
     phase = st.get("phase") or "up_find"
     learned_op = st.get("learned_op")
     last = float(st.get("last_change") or 0)
+    # Learning-lifecycle metadata for the "known-good operating point" record:
+    # when this learning run began (for time-to-stable), when it last went stable,
+    # and an optional HOLD deadline set by a Reset-to-known-good (hold the target
+    # untouched until then — e.g. the 1h post-reset window so all clients spin up
+    # and every sim fires before we resume ratcheting).
+    learning_started_at = float(st.get("learning_started_at") or 0)
+    stable_since = float(st.get("stable_since") or 0)
+    time_to_stable_s = st.get("time_to_stable_s")
+    hold_until = float(st.get("hold_until") or 0)
 
     if target is None:  # cold start — seed from the known-good op if any
         seed = applied_op if applied_op else mn
@@ -415,19 +426,54 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
         floor = None
         learned_op = None
         phase = "up_find"
+        learning_started_at = now  # start the time-to-stable clock
+        stable_since = 0.0
+        time_to_stable_s = None
         # Start the settle clock now so even the FIRST change waits a full
         # 30-min window (give Central time to confirm firing at the start level).
         last = now
     target = max(mn, min(mx, int(target)))
+    if not learning_started_at:
+        learning_started_at = now  # backfill for pre-metadata states
 
     def _stable_at(fl: int) -> None:
-        """Enter `stable`: record learned_op and park target at floor+buffer."""
-        nonlocal floor, learned_op, target, phase, last
+        """Enter `stable`: record learned_op + the time-to-stable, and park target
+        at floor+buffer. A stable transition is when the known-good is captured."""
+        nonlocal floor, learned_op, target, phase, last, stable_since, time_to_stable_s
         floor = fl
         learned_op = max(mn, ceil_to_int(float(fl) * (1 + buffer)))
         target = min(mx, learned_op)
         phase = "stable"
         last = now
+        # Only stamp time-to-stable on the FIRST entry into stable this run (not
+        # on later re-probes that briefly leave + re-enter stable during drift).
+        if not stable_since:
+            stable_since = now
+            time_to_stable_s = int(max(0.0, now - learning_started_at))
+
+    def _ret() -> Dict[str, Any]:
+        return {"target": max(mn, min(mx, int(target))), "floor": floor,
+                "phase": phase, "learned_op": learned_op, "learning": learning,
+                "mode": _derived_mode(phase), "last_change": last,
+                "learning_started_at": learning_started_at,
+                "stable_since": stable_since or None,
+                "time_to_stable_s": time_to_stable_s,
+                "hold_until": hold_until or None}
+
+    # HOLD: a Reset-to-known-good parks the target at the recorded count and sets
+    # hold_until. While holding we make NO changes (let the fleet converge). When
+    # the hold expires we fall through to normal logic — the lab then resumes
+    # learning from the known-good; a consumer just keeps holding (up-only).
+    if hold_until and now < hold_until:
+        phase = "held"
+        return _ret()
+    if hold_until and now >= hold_until:
+        hold_until = 0.0
+        # Resuming after the hold: treat the parked count as the current stable
+        # baseline so the lab re-probes DOWN from it (drift tracking), not from min.
+        if phase == "held":
+            phase = "stable"
+            last = now
 
     if (now - last) >= settle:
         if firing is None:
@@ -501,9 +547,63 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
                     target = min(mx, target + step)
                     phase = "up_find"; last = now
 
-    return {"target": max(mn, min(mx, int(target))), "floor": floor,
-            "phase": phase, "learned_op": learned_op, "learning": learning,
-            "mode": _derived_mode(phase), "last_change": last}
+    return _ret()
+
+
+def known_good_from_state(q: Dict[str, Any], st: Dict[str, Any],
+                          knobs: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Build a "known-good operating point" record from a STABLE controller state
+    — the thing the operator sees ("exactly what it took") and that a
+    Reset-to-known-good restores to. Returns None unless the state is stable with
+    a learned_op. ``knobs`` = the simulation.conf intensity values the knob-floor
+    learner settled on for this alert's sims (what was modified to make it work).
+
+    Shape: ``{alert, alert_type, alert_id, site, count, clients, knobs,
+    time_to_stable_s, achieved_at, buffer}``."""
+    try:
+        if (st or {}).get("phase") != "stable":
+            return None
+        op = (st or {}).get("learned_op")
+        if op is None:
+            return None
+        return {
+            "alert":        _alert_key(q),
+            "alert_type":   q.get("alert_type"),
+            "alert_id":     q.get("alert_id"),
+            "site":         q.get("site", ""),
+            "count":        int(op),          # learned client count
+            "clients":      int(op),
+            "knobs":        dict(knobs or {}),  # simulation.conf values it took
+            "time_to_stable_s": st.get("time_to_stable_s"),
+            "achieved_at":  st.get("stable_since"),
+            "buffer":       float(q.get("buffer") if q.get("buffer") is not None else 0.20),
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def seed_state_to_known_good(kg: Dict[str, Any], learning: bool, now: float,
+                             hold_s: int = 3600) -> Dict[str, Any]:
+    """Return a controller state parked at a known-good operating point, for a
+    Reset-to-known-good. ``learning`` ON → HOLD at the known-good count for
+    ``hold_s`` (default 1h: let every client come up + every sim fire) then the
+    lab resumes learning from there. ``learning`` OFF → jump to the count and
+    hold (consumer; up-only stable). The count is stamped as ``learned_op`` so a
+    resumed lab re-probes DOWN from it rather than from min."""
+    count = int(kg.get("count") or kg.get("learned_op") or 1)
+    return {
+        "target":       count,
+        "floor":        count,
+        "learned_op":   count,
+        "phase":        "held" if learning else "stable",
+        "learning":     bool(learning),
+        "mode":         "held" if learning else "stable",
+        "last_change":  now,
+        "learning_started_at": now,
+        "stable_since": now if not learning else 0.0,
+        "time_to_stable_s": kg.get("time_to_stable_s"),
+        "hold_until":   (now + int(hold_s)) if learning else None,
+    }
 
 
 def apply_adaptive_targets(quotas: List[Dict[str, Any]],
