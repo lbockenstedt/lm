@@ -17718,6 +17718,7 @@ async function loadLEData(subMenu) {
                     <div class="flex flex-col items-end gap-1.5">
                         ${retryBtn ? `<div>${retryBtn}</div>` : ''}
                         <div class="flex flex-row items-center justify-end gap-1.5">
+                            <button onclick="leToggleBugfixer('${dEsc}', ${c.bugfixer ? 'false' : 'true'})" class="${c.bugfixer ? 'bg-purple-600/15 text-purple-700 border-purple-500' : 'bg-slate-500/10 text-slate-500 border-slate-300'} border px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="${c.bugfixer ? 'This cert IS the BugFixer identity — the mTLS gate for hub log reads + fleet update commands. Click to un-tag.' : 'Tag this cert as the BugFixer identity so bugfixer (presenting it over mTLS) can read hub logs + run fleet updates. Also deploy it to the bugfixer target via Manage.'}">${c.bugfixer ? '★ BugFixer' : 'Tag BugFixer'}</button>
                             <button onclick="showLeTargetsModal('${dEsc}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Manage distribution targets">Manage</button>
                             <button onclick="leRenewCert('${dEsc}')" class="bg-slate-700/10 hover:bg-slate-700/20 text-slate-700 border border-slate-700 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Renew this cert">Renew</button>
                             <button onclick="leRevokeCert('${dEsc}')" class="bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Revoke + remove from managed list">Revoke</button>
@@ -19023,6 +19024,24 @@ async function deleteDnsCredential(name) {
         showToast('DNS credential deleted', 'success');
         await dnsCredReloadList();
     } catch (e) { showToast('Delete failed: ' + e.message, 'error'); }
+}
+
+// Tag / un-tag a managed cert as the BugFixer identity (H1). Only a connection
+// presenting a tagged cert over mTLS may use the reverse HUB_REQUEST channel
+// (read every tenant's hub logs + run fleet TRIGGER_* update commands). This just
+// records which domain's cert is the BugFixer identity; deploy the cert itself to
+// the bugfixer target via Manage. POST /api/le/certs/{domain}/bugfixer.
+async function leToggleBugfixer(domain, enable) {
+    try {
+        const { ok, detail } = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/bugfixer`, {
+            method: 'POST', body: JSON.stringify({ enabled: enable })
+        });
+        if (!ok) { showToast('BugFixer tag failed: ' + (detail || ''), 'error'); return; }
+        showToast(enable
+            ? `Tagged ${domain} as the BugFixer cert — now deploy it to the bugfixer target (Manage) so it presents over mTLS`
+            : `Removed the BugFixer tag from ${domain}`, 'success');
+        await loadLEData();
+    } catch (e) { showToast('BugFixer tag failed: ' + (e.message || e), 'error'); }
 }
 
 async function leRenewCert(domain) {
