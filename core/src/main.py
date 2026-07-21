@@ -6890,12 +6890,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         """asyncio loop exception handler — logs unhandled task exceptions via
         the Hub logger (→ self.logs → Error Log + BugFixer) then defers to the
         default handler. See logging-observability-contract.md req 4."""
+        from messaging.log_relay import format_asyncio_context
         exc = context.get("exception")
         msg = context.get("message") or "unhandled asyncio exception"
+        detail = format_asyncio_context(context)
         if exc is not None:
-            logger.error("Uncaught asyncio exception: %s", msg, exc_info=exc)
+            logger.error("Uncaught asyncio exception: %s%s", msg, detail, exc_info=exc)
         else:
-            logger.error("asyncio error: %s", msg)
+            logger.error("asyncio error: %s%s", msg, detail)
         loop.default_exception_handler(context)
 
     async def start(self):
@@ -6905,7 +6907,17 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # Route unhandled asyncio-task exceptions through the Hub logger → its
         # error log (sync excepthook installed in __init__). See req 4.
         try:
-            asyncio.get_running_loop().set_exception_handler(self._asyncio_exception_relay)
+            _loop = asyncio.get_running_loop()
+            _loop.set_exception_handler(self._asyncio_exception_relay)
+            # Opt-in deep diagnosis: asyncio debug mode captures a source_traceback
+            # for every task, so a "Task was destroyed but it is pending!" names the
+            # CREATION site (the relay handler surfaces it). OFF by default — it
+            # wraps every callback + emits slow-callback warnings, real overhead on
+            # a busy hub — so gate it behind LM_ASYNCIO_DEBUG for a targeted hunt.
+            if str(os.getenv("LM_ASYNCIO_DEBUG", "")).strip().lower() in ("1", "true", "yes", "on"):
+                _loop.set_debug(True)
+                logger.warning("asyncio debug mode ON (LM_ASYNCIO_DEBUG) — task "
+                               "creation tracebacks captured; expect slow-callback overhead")
         except Exception:  # noqa: BLE001
             pass
         version = "unknown"

@@ -19,6 +19,34 @@ import logging
 logger = logging.getLogger("BaseControlPlane")
 
 
+def format_asyncio_context(context) -> str:
+    """Extract WHICH task/future/handle an asyncio loop exception concerns, so a
+    bare ``Task was destroyed but it is pending!`` names the offending coroutine
+    and its source location instead of being anonymous. Returns a ``; ``-prefixed
+    suffix to append to the log message (empty string when nothing useful is
+    present). ``source_traceback`` — where the task was CREATED, the single best
+    clue for a "destroyed but pending" leak — is included when present (asyncio
+    populates it only under debug mode; enable with LM_ASYNCIO_DEBUG=1)."""
+    parts = []
+    for key in ("task", "future", "handle", "protocol", "transport"):
+        obj = context.get(key)
+        if obj is None:
+            continue
+        try:
+            parts.append(f"{key}={obj!r}")
+        except Exception:  # noqa: BLE001 — a repr must never break logging
+            parts.append(f"{key}=<unreprable {type(obj).__name__}>")
+    detail = ("; " + ", ".join(parts)) if parts else ""
+    src_tb = context.get("source_traceback")
+    if src_tb:
+        try:
+            import traceback as _tb
+            detail += "\n  task created at:\n" + "".join(_tb.format_list(src_tb)).rstrip()
+        except Exception:  # noqa: BLE001
+            pass
+    return detail
+
+
 class LogRelayMixin:
     """SPOKE_LOG relay + uncaught-exception relay mixed into BaseControlPlane."""
 
@@ -137,8 +165,9 @@ class LogRelayMixin:
         local reporting."""
         exc = context.get("exception")
         msg = context.get("message") or "unhandled asyncio exception"
+        detail = format_asyncio_context(context)
         if exc is not None:
-            logger.error("Uncaught asyncio exception: %s", msg, exc_info=exc)
+            logger.error("Uncaught asyncio exception: %s%s", msg, detail, exc_info=exc)
         else:
-            logger.error("asyncio error: %s", msg)
+            logger.error("asyncio error: %s%s", msg, detail)
         loop.default_exception_handler(context)
