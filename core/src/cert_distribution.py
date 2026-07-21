@@ -46,7 +46,7 @@ logger = logging.getLogger("le.distribution")
 # other nw families (aos_switch/ex_switch/gateway) return a clear ERROR from
 # the spoke (external-key / SSH-SFTP plumbing not yet built). Both are fast
 # REST targets → 120s install tier (no pvenode wait).
-CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", "statuspage", "ipam", "simulation", "nac", "nw", "netbox-server", "ldap-server"}
+CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", "statuspage", "ipam", "simulation", "nac", "nw", "netbox-server", "ldap-server", "bugfixer"}
 
 
 async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
