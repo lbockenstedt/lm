@@ -209,7 +209,12 @@ class MistClient:
                 elif isinstance(payload, dict):
                     result = payload.get("sites") or payload.get("result") or payload.get("items") or []
         except Exception as exc:  # noqa: BLE001
+            # Cache ONLY on success: a fetch failure must not latch an empty
+            # list for the full TTL (that would make every site vanish for
+            # ~TTL). Return the last good value if we have one, else empty
+            # WITHOUT caching so the next cycle re-fetches.
             logger.warning("Mist sites fetch failed [%s]: %s", self._config_hash, exc)
+            return cached[1] if cached else result
         _sites_cache[self._config_hash] = (time.time(), result)
         return result
 

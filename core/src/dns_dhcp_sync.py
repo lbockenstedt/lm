@@ -253,6 +253,11 @@ class DnsDhcpSyncMixin:
             return
 
         results = await asyncio.gather(*pushes, return_exceptions=True)
+        # Latch each side's hash ONLY when that side's push actually SUCCEEDED.
+        # A failed/unapplied push (e.g. spoke transiently offline) must leave the
+        # old hash in place so the change is retried next cycle rather than
+        # latched-as-synced forever.
+        new_hashes = dict(getattr(self, "_last_sync_hashes", None) or {})
         ri = 0
         if dns_spoke and dns_changed:
             r = results[ri]; ri += 1
@@ -262,9 +267,11 @@ class DnsDhcpSyncMixin:
             else:
                 self._record_status("dns", status="ok", records_synced=len(records),
                                     spoke_result=unwrap_spoke(r))
+                new_hashes["dns"] = dns_hash
         else:
             self._record_status("dns", status="ok", records_synced=len(records),
                                 skipped_unchanged=True)
+            new_hashes["dns"] = dns_hash
         if dhcp_spoke and dhcp_changed:
             r = results[ri]
             if isinstance(r, Exception):
@@ -274,11 +281,13 @@ class DnsDhcpSyncMixin:
                 self._record_status("dhcp", status="ok", subnets_synced=len(subnets),
                                     reservations_synced=len(reservations),
                                     spoke_result=unwrap_spoke(r))
+                new_hashes["dhcp"] = dhcp_hash
         else:
             self._record_status("dhcp", status="ok", subnets_synced=len(subnets),
                                 reservations_synced=len(reservations),
                                 skipped_unchanged=True)
-        self._last_sync_hashes = {"dns": dns_hash, "dhcp": dhcp_hash}
+            new_hashes["dhcp"] = dhcp_hash
+        self._last_sync_hashes = new_hashes
 
     async def run_dns_dhcp_sync_loop(self):
         """Background loop: reconcile Unbound + Kea to NetBox every ``interval`` s.

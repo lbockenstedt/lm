@@ -81,7 +81,6 @@ class SpokeRegistryMixin:
         rate_limiters / re-pushes simulations_cache, so eviction on delete is safe.
         """
         pk = self._primary_key(spoke_id)
-        self._bump_sim_cache_gen(spoke_id)  # shaped-read memo invalidation (tenant set changed)
         self.simulations_cache.pop(pk, None)
         self.spoke_telemetry.pop(pk, None)
         self.rate_limiters.pop(pk, None)

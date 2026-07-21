@@ -1702,6 +1702,34 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             self._vm_live_state.pop(str(tenant_id), None)
         return out
 
+    def vm_live_drop_reappeared(self, tenant_id, present_ts) -> None:
+        """Drop ``deleted`` overlay entries whose vmid has REAPPEARED in a fresh
+        telemetry frame captured AFTER the deletion was stamped.
+
+        A reused/re-cloned vmid that the spoke reports again is authoritative: the
+        deleted-overlay must not keep pruning (hiding) it for the remainder of
+        ``_VM_DELETED_TTL``. ``present_ts`` maps vmid_str → the newest frame
+        timestamp that still carries that vmid; a stale pre-delete cached frame
+        (timestamp older than the deletion stamp) does NOT clear the overlay, so
+        the bridge-prune of a genuinely-deleted vmid is preserved."""
+        if not tenant_id or not present_ts:
+            return
+        t = self._vm_live_state.get(str(tenant_id))
+        if not t:
+            return
+        for vmid, frame_ts in present_ts.items():
+            key = self._vmid_key(vmid)
+            entry = t.get(key)
+            if not entry or (entry or {}).get("state") != "deleted":
+                continue
+            try:
+                if float(frame_ts or 0) > float(entry.get("ts", 0) or 0):
+                    t.pop(key, None)
+            except (TypeError, ValueError):
+                continue
+        if not t:
+            self._vm_live_state.pop(str(tenant_id), None)
+
     async def _relay_cs_event(self, spoke_id: str, agent_id: str,
                               cs_type: str, data: Dict[str, Any]) -> None:
         """Forward a relayed CS_* agent event to the tenant's cs spoke (best-effort).
@@ -3227,20 +3255,6 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self.record_spoke_event(spoke_id, "psk_self_provision", f"tenant={tenant_hint}")
         return True
 
-    def _bump_sim_cache_gen(self, spoke_id: str) -> None:
-        """Bump the per-tenant simulations-cache generation counter for the tenant
-        this spoke is bound to. SimulationsService keys its shaped-read memo
-        (get_clients_data / get_proxmox_data) on (tenant_id, generation), so a
-        bump here is what makes the next read rebuild after a CS_TELEMETRY frame
-        (or a spoke eviction) changes the tenant's cached data. Lazy dict so no
-        __init__ change is needed; never raises."""
-        try:
-            tenant = self.state.get_spoke_tenant(spoke_id) or ""
-            gen = self.__dict__.setdefault("_sim_cache_gen", {})
-            gen[tenant] = gen.get(tenant, 0) + 1
-        except Exception:  # noqa: BLE001 — memo bookkeeping must never break ingest
-            pass
-
     async def _handle_cs_telemetry(self, spoke_id: str, cs_data) -> None:
         """Ingest a CS_TELEMETRY frame from a combined cs / unified pxmx spoke.
 
@@ -3275,7 +3289,6 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # the hub just no longer gates on it.)
         self.simulations_cache[pk] = cs_data
         self._sim_cache_dirty = True  # warm-load snapshot flushed by run_sim_cache_flush_loop
-        self._bump_sim_cache_gen(spoke_id)
         # Spoke-reported drain state (mid self-update). ``draining: true`` keeps
         # the hub from firing request/reply commands at a spoke that's about to
         # os._exit+relaunch (config pushes queue to the mailbox instead). A

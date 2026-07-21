@@ -553,6 +553,28 @@ class SimulationsService:
         # VM rows and PRUNE vmids whose delete just completed, so the table
         # reflects a mutation the instant its message arrives instead of waiting
         # for the next ~10-30s telemetry frame. Best-effort — never break render.
+        #
+        # First reconcile REAPPEARANCES: a vmid that shows up again in a telemetry
+        # frame captured AFTER its delete was stamped is a reused/re-cloned vmid,
+        # so clear its stale "deleted" overlay — otherwise a legitimately
+        # re-created vmid stays hidden for the rest of _VM_DELETED_TTL (180s).
+        present_ts: Dict[str, float] = {}
+        for h in hosts:
+            fa = h.get("hub_fetched_at")
+            if not fa:
+                continue
+            for vm in (h.get("proxmox_vms") or []):
+                if not isinstance(vm, dict):
+                    continue
+                vid = str(vm.get("vmid"))
+                try:
+                    present_ts[vid] = max(present_ts.get(vid, 0.0), float(fa))
+                except (TypeError, ValueError):
+                    continue
+        try:
+            self.hub.vm_live_drop_reappeared(tenant_id, present_ts)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             overlay = self.hub.vm_live_states(tenant_id)
         except Exception:  # noqa: BLE001

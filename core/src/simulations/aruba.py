@@ -850,7 +850,12 @@ class ArubaClient:
                 data = await self._get(http, "/network-monitoring/v1alpha1/sites-health")
                 result = data.get("items") or []
         except Exception as exc:
+            # Cache ONLY on success: a failed fetch must not latch an empty
+            # list for the full TTL (that would make every site vanish).
+            # Serve the last good value if we have one, else empty WITHOUT
+            # caching so the next cycle re-fetches.
             logger.warning("new_central sites-health cache fetch [%s]: %s", self._config_hash, exc)
+            return cached[1] if cached else result
         _sites_health_cache[self._config_hash] = (time.time(), result)
         return result
 
@@ -872,7 +877,11 @@ class ArubaClient:
                         break
                     params["next"] = nxt
         except Exception as exc:
+            # Cache ONLY on success: don't latch an empty/partial list for the
+            # full TTL on failure. Serve the last good value if available, else
+            # empty WITHOUT caching so the next cycle re-fetches.
             logger.warning("new_central devices cache fetch [%s]: %s", self._config_hash, exc)
+            return cached[1] if cached else []
         _devices_cache[self._config_hash] = (time.time(), result)
         return result
 
@@ -894,7 +903,11 @@ class ArubaClient:
                         break
                     params["next"] = nxt
         except Exception as exc:
+            # Cache ONLY on success: don't latch an empty/partial list for the
+            # full TTL on failure. Serve the last good value if available, else
+            # empty WITHOUT caching so the next cycle re-fetches.
             logger.warning("new_central clients cache fetch [%s]: %s", self._config_hash, exc)
+            return cached[1] if cached else []
         if result:
             logger.info("new_central client fields sample [%s]: %s", self._config_hash, list(result[0].keys()))
         _nc_clients_cache[self._config_hash] = (time.time(), result)
