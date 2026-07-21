@@ -9,6 +9,14 @@ from cert_distribution import build_available_targets
 def register(app, hub, ctx):
     """Register net_services routes on the Hub app."""
     _filter_session = ctx._filter_session
+    # Explicit-tenant filter (scopes even admins by the selected tenant; delegates
+    # to _filter_session when no tenant is passed). Used by DNS/DHCP so the pages
+    # honor the global tenant picker like nw/ipam/firewall already do.
+    _filter_tenant = ctx._filter_tenant
+    # Resolves the tenant-picker selection to a tenant_id WITH an access check
+    # (admin → any; multi-tenant user → owned only; None if not allowed). Used by
+    # the bespoke le cert filter to scope by an explicitly-selected tenant.
+    _effective_tenant = ctx._effective_tenant
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
 
@@ -65,7 +73,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/dns/records")
-    async def dns_list_records(request: Request):
+    async def dns_list_records(request: Request, tenant: str = None):
         """List DNS records from the Unbound spoke, subnet-filtered per the
         caller's tenant when the ``dns`` subnet-filter module is enabled.
 
@@ -77,7 +85,7 @@ def register(app, hub, ctx):
         all records."""
         logger.debug("relay GET /api/dns/records")
         data = await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_LIST", log_name="dns_list_records")
-        return await _filter_session(request, data, "dns", ["value", "ip"])
+        return await _filter_tenant(request, data, "dns", ["value", "ip"], tenant)
 
     @app.post("/api/dns/record")
     async def dns_add_record(request: Request):
@@ -292,24 +300,34 @@ def register(app, hub, ctx):
                 continue
         return hosts, any_source
 
-    async def _filter_le_certs(request, data):
+    async def _filter_le_certs(request, data, tenant=None):
         """Tenant subnet-filter the cert list. Certs have no IP column, so a cert is
         attributed to a tenant by resolving its SANs through the internal DNS A/AAAA
         records: a non-admin sees a cert only if one of its SANs maps to a hostname
         whose DNS IP is in the tenant's prefixes. A wildcard SAN (``*.d``) matches any
         A-record host under that domain. TWO DNS sources are consulted: the DNS
         module (Unbound spoke) AND every connected firewall's Unbound host-overrides
-        (OPNsense). Admins / ``le`` toggle off / no prefixes → unchanged. If BOTH DNS
-        sources are unreachable → fail OPEN (don't hide certs on an outage). The cache
-        stores the UNFILTERED list; this runs per request."""
-        if not isinstance(data, dict):
+        (OPNsense). If BOTH DNS sources are unreachable → fail OPEN (don't hide certs
+        on an outage). The cache stores the UNFILTERED list; this runs per request.
+
+        Tenant scoping: an EXPLICIT tenant (the picker) scopes by THAT tenant's
+        prefixes even for admins (matches nw/ipam/firewall); with none selected, an
+        admin sees all and a session-tenant user is scoped by their own prefixes."""
+        if not isinstance(data, dict) or not access.filter_enabled(hub, "le"):
             return data
         sess = _session_user(request)
-        if not sess or _is_admin(sess) or not access.filter_enabled(hub, "le"):
-            return data
-        prefixes = await access.resolve_prefixes(hub, sess)
-        if not prefixes:
-            return data
+        tid = _effective_tenant(request, tenant) if tenant else None
+        if tenant and tid:
+            # Explicit tenant selected → scope by its prefixes (admins included).
+            prefixes = await access.resolve_prefixes_for_tenant(hub, tid)
+            if not prefixes:
+                return {**data, "certs": []}   # fail CLOSED for an explicit tenant
+        else:
+            if not sess or _is_admin(sess):
+                return data
+            prefixes = await access.resolve_prefixes(hub, sess)
+            if not prefixes:
+                return data
         import ipaddress
         nets = []
         for p in prefixes:
@@ -366,7 +384,7 @@ def register(app, hub, ctx):
         return {**data, "certs": tagged}
 
     @app.get("/api/le/certs")
-    async def le_list_certs(request: Request):
+    async def le_list_certs(request: Request, tenant: str = None):
         """List managed certificates from the le spoke.
 
         Warm-cached (``le_cache``): serves last-known certs (marked ``stale``)
@@ -384,18 +402,18 @@ def register(app, hub, ctx):
             if cached is not None:
                 out = dict(cached) if isinstance(cached, dict) else {"certs": cached}
                 out["stale"] = True
-                return await _filter_le_certs(request, _tag_bugfixer(out))
+                return await _filter_le_certs(request, _tag_bugfixer(out), tenant)
             raise HTTPException(status_code=503, detail="Certificate spoke not connected")
         try:
             data = await _relay_spoke(le_sid, "LE_LIST_CERTS", log_name="le_list_certs")
             await hub.le_cache_set("certs", data)
-            return await _filter_le_certs(request, _tag_bugfixer(data))
+            return await _filter_le_certs(request, _tag_bugfixer(data), tenant)
         except HTTPException:
             cached = hub.le_cache_get("certs")
             if cached is not None:
                 out = dict(cached) if isinstance(cached, dict) else {"certs": cached}
                 out["stale"] = True
-                return await _filter_le_certs(request, _tag_bugfixer(out))
+                return await _filter_le_certs(request, _tag_bugfixer(out), tenant)
             raise
 
     @app.get("/api/le/eligible-domains")
@@ -807,7 +825,7 @@ def register(app, hub, ctx):
         return get_spoke_or_503(hub, "dhcp", "DHCP")
 
     @app.get("/api/dhcp/subnets")
-    async def dhcp_list_subnets(request: Request):
+    async def dhcp_list_subnets(request: Request, tenant: str = None):
         """List DHCP subnets configured on the Kea spoke, subnet-filtered per
         the caller's tenant when the ``dhcp`` subnet-filter module is enabled
         (mirrors /api/dhcp/leases). The subnet's ``subnet`` field is a CIDR; the
@@ -816,14 +834,14 @@ def register(app, hub, ctx):
         Unfiltered when the subnet-filter toggle is off (shared single-view Kea)."""
         logger.debug("relay GET /api/dhcp/subnets")
         data = await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_SUBNETS", log_name="dhcp_list_subnets")
-        return await _filter_session(request, data, "dhcp", ["subnet"])
+        return await _filter_tenant(request, data, "dhcp", ["subnet"], tenant)
 
     @app.get("/api/dhcp/leases")
-    async def dhcp_list_leases(request: Request, subnet: str = None):
+    async def dhcp_list_leases(request: Request, subnet: str = None, tenant: str = None):
         """List DHCP leases (optionally per-subnet); subnet-filtered before return."""
         logger.debug("relay %s %s subnet=%s", request.method, request.url.path, subnet)
         data = await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_LEASES", {"subnet": subnet}, log_name="dhcp_list_leases")
-        return await _filter_session(request, data, "dhcp", ["ip", "address"])
+        return await _filter_tenant(request, data, "dhcp", ["ip", "address"], tenant)
 
     @app.post("/api/dhcp/reservation")
     async def dhcp_add_reservation(request: Request):
@@ -832,7 +850,7 @@ def register(app, hub, ctx):
         return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_ADD_RES", body, log_name="dhcp_add_reservation")
 
     @app.get("/api/dhcp/reservations")
-    async def dhcp_list_reservations(request: Request):
+    async def dhcp_list_reservations(request: Request, tenant: str = None):
         """List DHCP reservations from the Kea spoke, subnet-filtered per the
         caller's tenant when the ``dhcp`` subnet-filter module is enabled
         (mirrors /api/dhcp/leases). A reservation's ``ip`` is matched against
@@ -841,7 +859,7 @@ def register(app, hub, ctx):
         Admins always see all. Unfiltered when the toggle is off."""
         logger.debug("relay GET /api/dhcp/reservations")
         data = await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_RES", log_name="dhcp_list_reservations")
-        return await _filter_session(request, data, "dhcp", ["ip"])
+        return await _filter_tenant(request, data, "dhcp", ["ip"], tenant)
 
     @app.put("/api/dhcp/reservation")
     async def dhcp_update_reservation(request: Request):

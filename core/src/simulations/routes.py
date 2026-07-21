@@ -2389,12 +2389,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return is_admin_fn(sess) or (rep.get("tenant") == _user_tenant(sess))
 
     @app.get("/api/reports/list")
-    async def list_reports(request: Request):
+    async def list_reports(request: Request, tenant: str = None):
         sess = session_user_fn(request)
         reports = email_report.get_reports(hub)
         if not is_admin_fn(sess):
             tid = _user_tenant(sess)
             reports = [r for r in reports if r.get("tenant") == tid]
+        elif tenant and tenant != "default":
+            # Admin + a specific tenant on the picker → scope the view to it (the
+            # non-admin filter above stays the security floor; this is view scope).
+            reports = [r for r in reports if r.get("tenant") == tenant]
         return {"reports": reports}
 
     @app.get("/api/reports/tenants")

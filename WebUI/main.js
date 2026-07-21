@@ -2875,7 +2875,7 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
         pxmxRows = _pxmxAgentsCache.rows;
     } else {
         try {
-            const agentRes = await fetch('/api/pxmx/agents', { credentials: 'same-origin' });
+            const agentRes = await fetch('/api/pxmx/agents?tenant=' + encodeURIComponent(currentTenant), { credentials: 'same-origin' });
             if (agentRes.ok) {
                 const agentData = await agentRes.json();
                 pxmxRows = [
@@ -3424,7 +3424,7 @@ async function loadReportsData() {
     el.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
     let reports = [];
     try {
-        reports = ((await apiJson('/api/reports/list')) || {}).reports || [];
+        reports = ((await apiJson('/api/reports/list?tenant=' + encodeURIComponent(currentTenant))) || {}).reports || [];
     } catch (e) { el.innerHTML = `<div class="hpe-card rounded-lg p-5 text-red-600">Could not load reports: ${escapeHtml(e.message || String(e))}</div>`; return; }
     window._reportsCache = reports;
     const freqLabel = s => { s = s || {}; const f = s.freq || 'weekly'; const when = f === 'weekly' ? ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][s.dow || 0] : (f === 'monthly' ? ('day ' + (s.dom || 1)) : ''); return `${f}${when ? ' ' + when : ''} @ ${String(s.hour != null ? s.hour : 7).padStart(2, '0')}:00`; };
@@ -10986,7 +10986,7 @@ async function loadSpokesAndAgents() {
     // single failure degrades the same as before (best-effort).
     const [spokesRes, agentsRes, diagRes] = await Promise.allSettled([
         (async () => setupFetch('/setup/pending_spokes'))(),
-        (async () => fetch('/api/pxmx/agents', { credentials: 'same-origin' }))(),
+        (async () => fetch('/api/pxmx/agents?tenant=' + encodeURIComponent(currentTenant), { credentials: 'same-origin' }))(),
         (async () => setupFetch('/setup/diagnostics'))(),
     ]);
 
@@ -11200,7 +11200,7 @@ async function approveAgent(agentId) {
     // forever) or blocked approval outright when no pxmx spoke was connected.
     let spokeId = null;
     try {
-        const res = await fetch('/api/pxmx/agents', { credentials: 'same-origin' });
+        const res = await fetch('/api/pxmx/agents?tenant=' + encodeURIComponent(currentTenant), { credentials: 'same-origin' });
         const data = res.ok ? await res.json() : {};
         const all = [...(data.agents || []), ...(data.pending_agents || [])];
         const found = all.find(a => a.agent_id === agentId);
@@ -15766,7 +15766,7 @@ async function loadPxmxData(subMenu) {
         if (subMenu === 'Overview' || subMenu === 'Virtual Machines') {
             const [vmR, nodesR] = await Promise.all([
                 fetch(`/api/pxmx/vms?tenant=${encodeURIComponent(currentTenant)}`),
-                fetch('/api/pxmx/nodes'),
+                fetch('/api/pxmx/nodes?tenant=' + encodeURIComponent(currentTenant)),
             ]);
             const vmData    = vmR.ok    ? await vmR.json()    : {};
             const nodesData = nodesR.ok ? await nodesR.json() : {};
@@ -17022,7 +17022,7 @@ async function loadDNSData(subMenu) {
         }
 
         // ── Records (default) ─────────────────────────────────────────────
-        const { ok, data: d, detail } = await _spokeFetch('/api/dns/records');
+        const { ok, data: d, detail } = await _spokeFetch('/api/dns/records?tenant=' + encodeURIComponent(currentTenant));
         if (!ok) {
             container.innerHTML = `${_spokeErrorBanner(detail, 'DNS spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Verify the Unbound configuration in Setup → DNS.</p>`;
             if (addBtn) addBtn.classList.add('hidden');
@@ -17126,7 +17126,7 @@ async function loadLEData(subMenu) {
     } catch (e) { /* status is decorative; the certs call surfaces the real error */ }
 
     try {
-        const { ok, data: d, detail } = await _spokeFetch('/api/le/certs');
+        const { ok, data: d, detail } = await _spokeFetch('/api/le/certs?tenant=' + encodeURIComponent(currentTenant));
         if (!ok) {
             container.innerHTML = `${_spokeErrorBanner(detail, 'Certificate (le) spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Install the le spoke (install_all.sh, or its install_le.sh) and approve it in Setup → Spokes &amp; Agents.</p>`;
             return;
@@ -18768,7 +18768,7 @@ async function loadDHCPData(subMenu) {
         }
 
         if (subMenu === 'Subnets') {
-            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/subnets');
+            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/subnets?tenant=' + encodeURIComponent(currentTenant));
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); return; }
             const subnets = d.subnets || [];
             const cols = ['ID', 'Subnet', 'Pools'];
@@ -18785,7 +18785,7 @@ async function loadDHCPData(subMenu) {
                 : tw(th(cols) + `<tbody>${rows}</tbody>`);
 
         } else if (subMenu === 'Leases') {
-            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/leases');
+            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/leases?tenant=' + encodeURIComponent(currentTenant));
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); return; }
             const leases = d.leases || [];
             const cols = ['IP Address', 'MAC', 'Hostname', 'State', 'Valid Until'];
@@ -18801,7 +18801,7 @@ async function loadDHCPData(subMenu) {
                 : tw(th(cols) + `<tbody>${rows}</tbody>`);
 
         } else if (subMenu === 'Reservations') {
-            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservations');
+            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservations?tenant=' + encodeURIComponent(currentTenant));
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); if (addBtn) addBtn.classList.add('hidden'); return; }
             const res = d.reservations || [];
             window._dhcpReservations = res;
@@ -18833,7 +18833,7 @@ async function _loadDhcpSubnetOptions(selId) {
     if (!sel) return;
     sel.innerHTML = '<option value="">Loading…</option>';
     try {
-        const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/subnets');
+        const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/subnets?tenant=' + encodeURIComponent(currentTenant));
         const subnets = ok ? (d.subnets || []) : [];
         sel.innerHTML = subnets.length
             ? subnets.map(s => `<option value="${escapeHtml(String(s.id))}">${escapeHtml(String(s.id))} — ${escapeHtml(s.subnet)}</option>`).join('')

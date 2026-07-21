@@ -520,7 +520,7 @@ def register(app, hub, ctx):
         return {"cmd": cmd, "spoke_url": spoke_url, "spoke_ip": host}
 
     @app.get("/api/pxmx/agents")
-    async def get_pxmx_agents():
+    async def get_pxmx_agents(request: Request, tenant: str = None):
         """Agents tile data source. Aggregates GET_AGENTS across EVERY
         agent-hosting spoke (hypervisor=pxmx, simulation=cs — both subclass
         AgentHostingControlPlane), not just pxmx: a Proxmox host agent can now
@@ -567,6 +567,19 @@ def register(app, hub, ctx):
         live_ids |= {a.get("agent_id") for a in live.get("pending_agents", []) if a.get("agent_id")}
         out = dict(live)
         out["offline_agents"] = _offline_relay_agents(hub, live_ids)
+        # Tenant scope (picker): an explicit tenant shows ONLY agents whose owning
+        # spoke is bound to it (module_metadata tenant_id — same source
+        # get_hypervisor_spoke_for_tenant uses). Admin with none selected ("All")
+        # or a tenantless resolve → unchanged (full roster). The SWR cache stays the
+        # full roster; we filter this per-request copy.
+        tid = _resolve_tenant(request, tenant)
+        if tid and tid != "default":
+            md = hub.state.system_state.get("module_metadata", {}) or {}
+            def _agent_tid(a):
+                return (md.get(a.get("spoke_id"), {}) or {}).get("tenant_id")
+            for _k in ("agents", "pending_agents", "offline_agents"):
+                if isinstance(out.get(_k), list):
+                    out[_k] = [a for a in out[_k] if _agent_tid(a) == tid]
         return out
 
     @app.post("/api/pxmx/agents/{agent_id}/revoke")
@@ -871,14 +884,22 @@ def register(app, hub, ctx):
                             + ". It re-appears automatically only if the host comes back online.")}
 
     @app.get("/api/pxmx/nodes")
-    async def get_pxmx_nodes(request: Request):
+    async def get_pxmx_nodes(request: Request, tenant: str = None):
         hub = app.state.hub
-        # Whole-cluster hypervisor node stats are infrastructure-wide (every
-        # node, all tenants' capacity) — Global-Admin-only. Was reachable by any
-        # authenticated user with no tenant filter.
-        if not _is_admin(_session_user(request)):
-            raise HTTPException(status_code=403, detail="Admin access required")
-        pxmx_spoke = hub.get_hypervisor_spoke()
+        sess = _session_user(request)
+        # Node stats are per-SPOKE (the whole cluster behind the hypervisor spoke).
+        # Scope by the tenant picker: an explicit/own tenant → ONLY that tenant's
+        # BOUND hypervisor spoke (its own host's nodes), so the Overview honors the
+        # picker like the VM list already does; an admin with no tenant selected
+        # ("All") → the global spoke (every node). A non-admin with no bound spoke
+        # sees nothing (fail-closed) rather than the old flat 403.
+        tid = _resolve_tenant(request, tenant)
+        if tid and tid != "default":
+            pxmx_spoke = hub.get_hypervisor_spoke_for_tenant(tid)
+        elif _is_admin(sess):
+            pxmx_spoke = hub.get_hypervisor_spoke()
+        else:
+            raise HTTPException(status_code=403, detail="Select a tenant to view its hypervisor nodes")
         if not pxmx_spoke:
             return {"nodes": [], "spoke_connected": False}
         try:
