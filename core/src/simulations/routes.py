@@ -2496,10 +2496,6 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                             touched = True
                 if touched:
                     cleared_sids.append(sid)
-                    try:
-                        hub._bump_sim_cache_gen(sid)
-                    except Exception:
-                        pass
         # Best-effort: tell the connected cs spoke(s) to drop it from proxmox_states
         # so it doesn't re-appear on the next relay. Spoke offline → skip silently.
         forwarded = False
@@ -3676,6 +3672,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         results = await _cs_forward_all(tenant_id, "CS_GET_SIM_QUOTA_STATE", {}, timeout=15.0)
         merged_ledger: dict = {}
         monitored: list = []
+        # Live per-check firing status merged across the tenant's cs spokes —
+        # {site: {check_id: {status, message}}}. Each spoke polls its own site
+        # slice, so a per-site union is correct (a site's status comes from the
+        # spoke that owns it). Forwarded to the Engine State view so it can show
+        # whether each alert/insight is firing using the SAME indicator the
+        # dashboard Checks table uses (csStatusBadge), with no extra API query.
+        check_status: dict = {}
         pool = {"online": 0, "by_site": {}, "tenant_pool": 0}   # cheap tenant-wide sum
         # The spoke's ACTUAL effective_sim_quotas (what its engine is running
         # against) — the hub pushes count to the spoke, but until it lands the
@@ -3700,11 +3703,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 pool["by_site"][_s] = pool["by_site"].get(_s, 0) + int(_n or 0)
             if not monitored:
                 monitored = data.get("monitored_checks") or []
+            for wsite, cmap in (data.get("check_status") or {}).items():
+                if not isinstance(cmap, dict):
+                    continue
+                check_status.setdefault(wsite, {}).update(cmap)
         for m in merged_ledger.values():  # dedupe (a hostname is unique per tenant)
             m["clients"] = list(dict.fromkeys(m["clients"]))
         if not results:
             return {"status": "SUCCESS", "effective": [], "ledger": {},
-                    "monitored_checks": [], "warning": "Client-Sim spoke not connected."}
+                    "monitored_checks": [], "check_status": {},
+                    "warning": "Client-Sim spoke not connected."}
         # Tenant-wide placement warnings: compare the merged fill to the tenant's
         # configured hold-N per cell (not each spoke's split share).
         placement_warnings: list = []
@@ -3734,7 +3742,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                   "spoke_counts": spoke_counts,
                   "stale_push": stale_push,
                   "ledger": merged_ledger, "monitored_checks": monitored,
-                  "placement_warnings": placement_warnings, "pool": pool}
+                  "placement_warnings": placement_warnings, "pool": pool,
+                  "check_status": check_status}
         try:
             result["adaptive_state"] = await store.get_adaptive_state(tenant_id)
         except Exception:  # noqa: BLE001

@@ -3751,6 +3751,23 @@ async function csRenderSimQuotaState() {
             const hit = mc.find(c => c && String(c.id) === i && (c.type || 'alert') === t);
             return hit && hit.name ? hit.name : '';
         };
+        // Live per-check firing status from the spoke's Central poller, reused
+        // from the sim-quota-state payload (NO extra API query). This is the
+        // SAME {site: {check_id: {status, message}}} the dashboard Checks table
+        // renders — so the indicator here is identical to the dashboard check:
+        // csStatusBadge(status). INVERTED semantics: status "ok" == the expected
+        // error IS present == the alert/insight IS firing (green); "error" ==
+        // the sim stopped producing it (red). Empty when Central isn't
+        // configured / no poll has run, or for presence / untethered rows.
+        const checkStatus = (st.check_status && typeof st.check_status === 'object') ? st.check_status : {};
+        const firingOf = (q) => {
+            if (!q.alert_id) return '';  // presence / untethered — no alert to fire
+            const siteMap = checkStatus[q.site || ''] || {};
+            const info = siteMap[q.alert_id];
+            if (info == null) return '';
+            const s = (typeof info === 'object' ? info.status : info) || '';
+            return s ? csStatusBadge(s) : '';
+        };
         const chips = (hosts) => (hosts || []).map(h =>
             `<span class="inline-block bg-slate-100 text-slate-700 rounded px-1.5 py-0.5 mr-1 mb-1 font-mono text-[11px]">${csEscape(h)}</span>`).join('');
         // Compact "Known-good" line for a quota row that has a recorded stable
@@ -3822,6 +3839,7 @@ async function csRenderSimQuotaState() {
             return `<tr class="border-t border-slate-100">
               <td class="px-2 pt-1.5 pb-0.5 text-xs capitalize">${csEscape(typeCell)}</td>
               <td class="px-2 pt-1.5 pb-0.5 text-xs">${idCell}</td>
+              <td class="px-2 pt-1.5 pb-0.5 text-xs text-center">${firingOf(q) || '<span class="text-slate-300">—</span>'}</td>
               <td class="px-2 pt-1.5 pb-0.5 text-xs">${simCell}</td>
               <td class="px-2 pt-1.5 pb-0.5 text-xs">${csEscape(q.site || '<all>')}</td>
               <td class="px-2 pt-1.5 pb-0.5 text-xs text-center">${fill}</td>
@@ -3829,7 +3847,7 @@ async function csRenderSimQuotaState() {
               <td class="px-2 pt-1.5 pb-0.5 text-xs text-center">${q.rehome ? '✓' : '—'}</td>
             </tr>
             <tr>
-              <td class="px-2 pt-0 pb-2 text-xs align-top" colspan="7">
+              <td class="px-2 pt-0 pb-2 text-xs align-top" colspan="8">
                 <span class="text-[10px] text-slate-400 uppercase tracking-wider mr-1.5">Clients</span>${chips(clients) || '<span class="text-slate-400 italic">none</span>'}
                 ${kgLine(q)}
               </td>
@@ -3945,6 +3963,7 @@ async function csRenderSimQuotaState() {
             ${eff.length ? `<table class="w-full text-left">
               <thead><tr class="text-[11px] text-slate-400 uppercase tracking-wider">
                 <th class="px-2 py-1">Type</th><th class="px-2 py-1">Alert / Insight ID</th>
+                <th class="px-2 py-1 text-center">Firing</th>
                 <th class="px-2 py-1">Sim</th><th class="px-2 py-1">SSID</th>
                 <th class="px-2 py-1 text-center">Assigned</th><th class="px-2 py-1 text-center">Multi</th>
                 <th class="px-2 py-1 text-center">Re-home</th>
