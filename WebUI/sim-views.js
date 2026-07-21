@@ -1730,6 +1730,16 @@ function csSimBtnClass(on, isOverride) {
 
 function csClientSimBar(c, host) {
     const cfg = c.effective_config || c.config || {};
+    // "Running now" = the sim the client is ACTUALLY executing this cycle
+    // (active_simulations, from its heartbeat). In hub/engine-driven mode the
+    // ambient + quota-assigned sims are runtime-only (the weighted roll / engine
+    // pick is NEVER written back to the pushed config), so the config-based
+    // "enabled" state below shows them OFF — which is why every client read
+    // "no active simulations". Surface a distinct pulsing-dot + emerald ring for
+    // what's live, WITHOUT touching the deliberate enabled=resolved-config button
+    // semantics (a cleared override still drops off on the next frame).
+    const running = new Set((Array.isArray(c.active_simulations) ? c.active_simulations : [])
+        .map(s => String(s).toLowerCase()));
     // Model A: a button is "on" iff the client's RESOLVED config has the flag on.
     // Per-user overrides (user-overrides.conf [username]) and the 2h demo are
     // already folded into that resolved config by the spoke, so this single
@@ -1741,9 +1751,11 @@ function csClientSimBar(c, host) {
     const btns = CS_CONTROL_FLAGS.map(f => {
         const on = isOn(f);
         const ovFlag = false;
-        return `<button data-cs-sim-host="${csEscape(host)}" data-cs-sim-flag="${csEscape(f)}" data-cs-sim-on="${on ? '1' : '0'}" data-cs-sim-ov="${ovFlag ? '1' : '0'}"
-          onclick="csSimToggle(this)" title="${ovFlag ? 'Override' : 'SID'}: ${csEscape(f)} ${on ? 'on' : 'off'} on ${csEscape(host)} — click to ${on ? 'disable' : 'enable'}"
-          class="${csSimBtnClass(on, ovFlag)} w-full text-center">${csEscape(f)}</button>`;
+        const run = running.has(String(f).toLowerCase());
+        const runDot = run ? '<span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse mr-1 align-middle" title="running now"></span>' : '';
+        return `<button data-cs-sim-host="${csEscape(host)}" data-cs-sim-flag="${csEscape(f)}" data-cs-sim-on="${on ? '1' : '0'}" data-cs-sim-ov="${ovFlag ? '1' : '0'}" data-cs-sim-running="${run ? '1' : '0'}"
+          onclick="csSimToggle(this)" title="${ovFlag ? 'Override' : 'SID'}: ${csEscape(f)} ${on ? 'on' : 'off'} on ${csEscape(host)}${run ? ' · RUNNING now' : ''} — click to ${on ? 'disable' : 'enable'}"
+          class="${csSimBtnClass(on, ovFlag)}${run ? ' ring-2 ring-emerald-400' : ''} w-full text-center">${runDot}${csEscape(f)}</button>`;
     }).join('');
     // Uniform-size sim knobs laid out in a 2-ROW grid (columns = half the flag
     // count, rounded up) so every button is the same width and the set stays
