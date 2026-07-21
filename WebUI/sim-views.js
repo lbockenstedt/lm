@@ -7237,7 +7237,7 @@ async function csRenderVmServerUsb() {
                 m.set(key, g);
             }
             g.items.push(u);
-            const nm = u.name || u.product || csUsbDeviceName(key) || u.vidpid || '';
+            const nm = u.description || u.name || u.product || csUsbDeviceName(key) || u.vidpid || '';
             if (nm && (g.name === '' || g.name === '—')) g.name = nm;
             const ssc = sc(u);
             if (ssc && !g.scope) g.scope = ssc;
