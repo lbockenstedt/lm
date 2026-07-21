@@ -6216,8 +6216,17 @@ async function csRenderVmServerVms() {
     // spoke/host so actions route correctly (VMIDs can collide across hosts).
     // Join the per-host missing-dongle shed deadline (usb_state[].shed_at).
     const vms = [];
+    // Per-host frame-generation age (seconds since the agent BUILT the frame,
+    // computed hub-side per request). The reconcile compares this against each
+    // in-flight action's timestamp so a STALE (pre-action) frame can't revert an
+    // optimistic badge — the "deleted VMs snap back to running" bug during a slow
+    // mass-delete, where telemetry froze on the pre-delete snapshot for minutes.
+    window._csHostFrameAge = {};
     scope.forEach(hh => {
         const hn = hh.hostname || hh.spoke_hostname || hh.spoke_id;
+        const f = hh.freshness || {};
+        const age = (f.agent_gen_age_s != null) ? f.agent_gen_age_s : hh.host_age_s;
+        window._csHostFrameAge[hn] = (age != null && isFinite(age)) ? Number(age) : null;
         const usb = (hh.proxmox && hh.proxmox.usb_state) || hh.usb_state || [];
         const shed = {};
         usb.forEach(u => { if (u && u.shed_at && u.vmid != null) shed[String(u.vmid)] = u.shed_at; });
@@ -6428,8 +6437,13 @@ function csQtBadge(q) {
 // next refresh. Keyed by the composite _key (spoke|host|vmid — VMIDs collide
 // across hosts); falls back to unique_id/vmid. Overrides the steady + prov_status
 // badge since it fires EARLIER than the agent's own prov_status stamp.
-const _vmInflight = new Map();   // key -> {op, ts}
+const _vmInflight = new Map();   // key -> {op, ts, host}
 const _CS_ACTION_OP = { delete_vm: 'deleting', stop_vm: 'stopping', start_vm: 'starting', reboot_vm: 'rebooting', reclone_vm: 'recloning', clone_lxc: 'cloning' };
+// Normal timeout once a FRESH (post-action) frame has had a chance to confirm.
+const _CS_INFLIGHT_TIMEOUT_MS = 120000;
+// Absolute give-up ceiling, applied even while telemetry is stale, so a badge
+// can never stick forever if fresh frames never resume (e.g. agent went away).
+const _CS_INFLIGHT_HARD_MS = 900000;   // 15 min
 const _CS_INFLIGHT_META = {
     deleting:  { label: 'deleting…',  cls: 'bg-red-100 text-red-700',     dot: 'border-red-500' },
     stopping:  { label: 'stopping…',  cls: 'bg-amber-100 text-amber-700', dot: 'border-amber-500' },
@@ -6460,10 +6474,23 @@ function csReconcileVmInflight(freshVms) {
     const now = Date.now();
     const byKey = new Map();
     (freshVms || []).forEach(v => { if (v) byKey.set(csVmInflightKey(v), v); });
+    const frameAge = window._csHostFrameAge || {};
     for (const [key, ent] of Array.from(_vmInflight.entries())) {
-        if (now - (ent && ent.ts || 0) > 120000) { _vmInflight.delete(key); continue; }
+        // Absolute give-up — even if telemetry never resumes, never stick forever.
+        if (now - (ent && ent.ts || 0) > _CS_INFLIGHT_HARD_MS) { _vmInflight.delete(key); continue; }
+        // Is THIS host's current frame NEWER than the action? A frame the agent
+        // built BEFORE the click can neither confirm nor deny it. While telemetry
+        // is stale we HOLD the in-flight badge instead of reverting to a pre-action
+        // "running" snapshot (a slow mass-delete froze telemetry for ~7 min; the
+        // old flat 120s timeout then reverted deleted VMs back to running).
+        const _host = ent && ent.host;
+        const _ageS = _host ? frameAge[_host] : null;
+        const _frameEpoch = (_ageS != null && isFinite(_ageS)) ? (now - _ageS * 1000) : now;
+        if (_frameEpoch < ((ent && ent.ts) || 0)) continue;   // stale/pre-action frame → hold
+        // Fresh frame exists → normal settle timeout + telemetry reconcile apply.
+        if (now - (ent && ent.ts || 0) > _CS_INFLIGHT_TIMEOUT_MS) { _vmInflight.delete(key); continue; }
         const v = byKey.get(key);
-        if (!v) { if (ent.op === 'deleting') _vmInflight.delete(key); continue; }   // gone → delete confirmed
+        if (!v) { if (ent.op === 'deleting') _vmInflight.delete(key); continue; }   // gone (from a fresh frame) → delete confirmed
         const st = String(v.status || '').toLowerCase();
         const ps = String(v.prov_status || '').toLowerCase();
         switch (ent.op) {
@@ -6739,7 +6766,7 @@ window.csVmAction = async function (key, action) {
     // and re-render so its row shows the operation instantly. Telemetry reconciles
     // on the next csRenderVmServerVms (csReconcileVmInflight).
     const _op = _CS_ACTION_OP[action];
-    if (_op) { _vmInflight.set(key, { op: _op, ts: Date.now() }); csVmRerenderInflight(); }
+    if (_op) { _vmInflight.set(key, { op: _op, ts: Date.now(), host: v._host }); csVmRerenderInflight(); }
     if (action === 'delete_vm') await csExpirePendingForTarget(target);
     try {
         await csFetch(`/${csTenant()}/spokes/${sid}/proxmox-command?tenant_id=${csTenant()}`,
@@ -6769,7 +6796,7 @@ window.csVmBulk = async function (action) {
     // Optimistic in-flight: mark every selected VM the moment we dispatch (before
     // awaiting) and re-render so their rows show the operation instantly.
     const _op = _CS_ACTION_OP[action];
-    if (_op) { items.forEach(v => _vmInflight.set(v._key, { op: _op, ts: Date.now() })); csVmRerenderInflight(); }
+    if (_op) { items.forEach(v => _vmInflight.set(v._key, { op: _op, ts: Date.now(), host: v._host })); csVmRerenderInflight(); }
     if (action === 'delete_vm') {
         for (const hh of new Set(items.map(v => v._host))) { await csExpirePendingForTarget(hh); }
     }
