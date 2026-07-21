@@ -6656,16 +6656,10 @@ function csAutoProvPanel(h) {
         pill = `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 text-xs font-bold"><span class="w-2 h-2 rounded-full bg-slate-400"></span>Auto-Provisioning: Idle</span>`;
     }
 
-    // "Clear USB Quarantine" — releases dongles the agent has sidelined (dmesg
-    // quarantine + destroy-fail bus exclusions from repeated spin-up/down) so they
-    // can be provisioned again. Sends the clear_usb_quarantine cs command to THIS
-    // host; no SSH needed.
-    const _apHost = h.hostname || h.spoke_hostname || h.spoke_id || '';
-    const _clearUsbBtn = `<button onclick="csClearUsbQuarantine('${csEscape(String(h.spoke_id || ''))}','${csEscape(String(_apHost))}')" title="Clear USB dongle quarantine + destroy-fail bus exclusions on this host so sidelined dongles can be provisioned again" class="text-[11px] font-bold px-2.5 py-1 rounded-md border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 whitespace-nowrap">Clear USB Quarantine</button>`;
     // Idle + nothing deleting → compact pill + last-pass reason only.
     if (!active && !deleting.length) {
         const reason = prov.reason ? `<span class="text-xs text-slate-400 truncate">${csEscape(prov.reason)}</span>` : '';
-        return `<div class="hpe-card rounded-lg p-5 mb-3 flex items-center justify-between gap-3">${pill}<div class="flex items-center gap-3 min-w-0">${reason}${_clearUsbBtn}</div></div>`;
+        return `<div class="hpe-card rounded-lg p-5 mb-3 flex items-center justify-between gap-3">${pill}${reason}</div>`;
     }
 
     const pct = run.total > 0 ? Math.round((Math.min(run.completed, run.total) / run.total) * 100) : 0;
@@ -7176,8 +7170,18 @@ async function csRenderVmServerUsb() {
     // Start the live countdown ticker so the QT badges' "clears in" timer ticks
     // between telemetry pulses (idempotent — one interval for the whole page).
     csStartShedTicker();
+    // "Clear USB Quarantine" — releases dongles the agent has sidelined (dmesg
+    // quarantine AND destroy-fail bus exclusions from repeated spin-up/down) so
+    // they can be provisioned again. Lives on the USB page (the dongle-management
+    // surface); sends clear_usb_quarantine to the selected host, no SSH.
+    const _usbHost = (h && (h.hostname || h.spoke_hostname || h.spoke_id)) || '';
+    const _clearUsbBtn = `<button onclick="csClearUsbQuarantine('${csEscape(String((h && h.spoke_id) || ''))}','${csEscape(String(_usbHost))}')" title="Clear this host's USB dongle quarantine + destroy-fail bus exclusions (repeated spin-up/down trips the latter) so sidelined dongles can be provisioned again" class="text-[11px] font-bold px-3 py-1.5 rounded-md border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 whitespace-nowrap">Clear USB Quarantine</button>`;
     csSet(`<div>${csVmHostBanner()}
       ${dbgBox}
+      <div class="flex items-center justify-between gap-3 mb-4">
+        <p class="text-[11px] text-slate-400 min-w-0">Release dongles the agent has sidelined — dmesg quarantine <em>and</em> destroy-fail bus exclusions — so they can be provisioned again.</p>
+        ${_clearUsbBtn}
+      </div>
       ${summary}
       ${qtBox}
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Certified USB (${certGroups.length} type${certGroups.length === 1 ? '' : 's'} · ${present.length} dongle${present.length === 1 ? '' : 's'})</p>
