@@ -309,6 +309,37 @@ def register(app, hub, ctx):
             logger.exception("netbox_get_sites failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/api/netbox/seed-catalog")
+    async def netbox_seed_catalog(request: Request):
+        """Seed NetBox with the bundled Aruba/HPE/Juniper device-type catalog
+        (manufacturers + device types + interface/console/power templates).
+        ADMIN-ONLY: creates many objects. Idempotent — re-runs upsert device
+        types and add missing templates, never erroring on an existing type
+        (safe to re-run after editing the catalog). Bypasses _netbox_write
+        (not a tenant-scoped CRUD object; no body / no tenant clamp)."""
+        sess = _session_user(request)
+        if not (sess and _is_admin(sess)):
+            raise HTTPException(status_code=403, detail="Admin only")
+        hub = app.state.hub
+        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
+        logger.info("netbox seed-catalog by %s",
+                    (sess.get("user", {}) or {}).get("username"))
+        try:
+            # Long-running: 45+ device types × interface/console/power templates.
+            result = await hub.request_response(spoke_id, "NETBOX_SEED_CATALOG",
+                                                {}, timeout=300.0)
+            # New/changed device types alter the device form-options picklist.
+            try:
+                _refresh_module_all_tenants(hub, "netbox_devices")
+            except Exception:  # noqa: BLE001
+                pass
+            return _unwrap_netbox(result)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox_seed_catalog failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/api/netbox/racks")
     async def netbox_get_racks(request: Request, site: str = None, tenant: str = None):
         """List NetBox racks, optionally scoped by site; non-admins get the

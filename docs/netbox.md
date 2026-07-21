@@ -89,6 +89,15 @@ Plus `GET_VERSION`, `UPDATE_CONFIG`, `SPOKE_UPDATE`.
 - **Allocate a prefix or IP.** IPAM → Prefixes/IPs → allocate; you can search for available space within a parent block or claim a specific prefix/IP directly.
 - **Force a staleness sweep or check why something is offline.** The staleness sweep normally runs on the hub's own schedule; if you need to check sooner, look at a device/VM's `last_seen` value — anything older than the configured stale-days threshold will show (or shortly become) offline.
 
+## Seed device catalog
+
+Populating NetBox by hand is tedious: every switch model needs a manufacturer, a device type, and a set of interface/console/power-port templates before you can instantiate devices and get their 24/48 ports + SFP+ uplinks. **Setup → Module Management → "Seed catalog"** (Global-Admin only) loads a bundled **Aruba / HPE / Juniper** device-type catalog — manufacturers, device types, and interface/console/power templates — into NetBox in one action. It runs on the spoke (`NETBOX_SEED_CATALOG` → `NetboxEngine.seed_catalog()`, thread-offloaded) reusing the spoke's existing `NETBOX_URL`/`NETBOX_API_TOKEN`, then refreshes the device picklists.
+
+- **Scope:** device **types + templates only**. No device instances, sites, racks, prefixes, or IPs are created — you still place devices via the IPAM UI as normal. Instantiating a device from a seeded type auto-creates its interfaces.
+- **Idempotent (safe to re-run):** manufacturers and device types are get-or-created by slug; an existing device type has its scalar fields (`u_height`, `is_full_depth`, `comments`) upserted and `.save()`d rather than erroring. Templates are **add-missing** — existing templates (including any you added by hand) are never deleted or re-typed. So the intended "edit the catalog, re-run" workflow works for *adding* models/ports; a rename or port-type *change* on an existing name is a delete-that-device-type + re-seed (re-create), not an automatic migration (avoids clobbering hand-added ports / breaking instantiated devices).
+- **Access:** Global-Admin only — the WebUI card is hidden for non-admins (`isAdmin()`), and `POST /api/netbox/seed-catalog` returns **403** for non-admin sessions. Defense in depth.
+- **Catalog location / extending it:** the catalog is `netbox/src/seed_catalog.json` (compact schema: per model, a `ports` spec expanded into named templates, plus `mgmt`/`console`/`power`). To add or amend a model, edit that JSON on the spoke repo, redeploy the spoke (WebUI Update), and click Seed catalog again. The toast reports manufacturers created, device types created/updated, templates added, and any per-model errors (one bad model doesn't abort the rest).
+
 ## Troubleshooting / common questions
 
 - **A sync fails with 400 / "field does not exist for this object type."** The custom fields this sync needs were never provisioned on this NetBox (a stale deploy, or an externally-managed NetBox that was connected without provisioning). Fix: Setup → IPAM → edit the instance → **Apply schema changes**, or rerun `install.sh` on the module side. This is safe and idempotent.

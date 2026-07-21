@@ -6186,6 +6186,13 @@ function _renderSetupModuleMgmtTile(content) {
                     </div>
                 </div>
             </div>
+            ${isAdmin() ? `<div class="${card}">
+                <div class="flex items-center justify-between mb-1">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">NetBox → Seed Device Catalog</h3>
+                    <button onclick="seedNetboxCatalog(this)" class="${btnSecCls} text-xs">Seed catalog</button>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">Loads the bundled Aruba/HPE/Juniper device-type catalog into NetBox — manufacturers, device types, and their interface (24/48-port + SFP+/QSFP28 uplinks), console, and power templates — so you don't hand-build each model. Idempotent: re-running after editing the catalog upserts types and adds any new templates without error (existing templates are never deleted or re-typed). Global-Admin only. After seeding, instantiate a device from a type and its interfaces are auto-created.</p>
+            </div>` : ''}
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">TrueNAS Appliances ${helpIcon('lm-hub', null, 'Hub help')}</h3>
@@ -6276,6 +6283,18 @@ async function saveNwNetboxImport(btn) {
         else showToast('Failed to save: ' + (await r.json().catch(() => ({}))).detail, 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Save'; } }
+}
+
+async function seedNetboxCatalog(btn) {
+    if (!await showConfirmToast('Seed NetBox with the bundled Aruba/HPE/Juniper device-type catalog (manufacturers + device types + interface/console/power templates)? Existing types are upserted; missing templates are added; nothing is deleted.')) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Seeding…'; }
+    try {
+        const r = await apiJson('/api/netbox/seed-catalog', { method: 'POST' });
+        const errs = r.errors && r.errors.length;
+        const msg = `Seeded: ${r.manufacturers_created} manufacturers, ${r.device_types_created} new device types (${r.device_types_updated} updated), +${r.templates_added} templates` + (errs ? ` · ${r.errors.length} errors` : '');
+        showToast(msg, errs ? 'info' : 'success');
+    } catch (e) { showToast('Seed failed: ' + e.message, 'error'); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Seed catalog'; } }
 }
 
 async function runNwNetboxImport(btn) {
