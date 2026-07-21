@@ -361,7 +361,10 @@ def register(app, hub, ctx):
         ``global_config['bugfixer_cert_identities']``. The HUB_REQUEST channel
         is gated to a connection presenting one of these over mTLS."""
         gc = hub.state.system_state.get("global_config", {}) or {}
-        return {str(n) for n in (gc.get("bugfixer_cert_identities") or [])}
+        # Lower-cased: le_set_bugfixer stores lowercase, and DNS names are
+        # case-insensitive — so match case-insensitively (a cert whose domain
+        # carries any uppercase would otherwise never show as tagged).
+        return {str(n).strip().lower() for n in (gc.get("bugfixer_cert_identities") or [])}
 
     def _tag_bugfixer(data):
         """Tag each cert with ``bugfixer: bool`` (its domain / any SAN is in the
@@ -376,9 +379,9 @@ def register(app, hub, ctx):
             if not isinstance(c, dict):
                 tagged.append(c)
                 continue
-            names = {str(c.get("domain") or "")}
+            names = {str(c.get("domain") or "").strip().lower()}
             for san in (c.get("domains") or []):
-                names.add(str(san or ""))
+                names.add(str(san or "").strip().lower())
             is_bf = any(n and n in pinned for n in names)
             tagged.append({**c, "bugfixer": is_bf})
         return {**data, "certs": tagged}
