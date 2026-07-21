@@ -17607,12 +17607,18 @@ async function loadLEData(subMenu) {
             const idEsc = escJsAttr(String(t.identifier || ''));
             const ifk = `${domain}|${t.module_type}|${t.identifier || ''}`;
             const since = inflightMap[ifk];
+            // Purple ★ prefix for the bugfixer target so it's visually distinct
+            // from fleet/spoke targets — this is the target the BugFixer agent
+            // presents the cert to over mTLS. (The cert's BugFixer-identity tag
+            // itself is set via the checkbox inside Manage.)
+            const isBf = String(t.module_type || '').toLowerCase() === 'bugfixer';
+            const bfStar = isBf ? `<span class="text-purple-600 font-bold mr-0.5" title="BugFixer target — bugfixer presents this cert over mTLS">★</span>` : '';
             if (since) {
                 // Yellow while we wait for deployment confirmation. The elapsed
                 // span is updated every 1s by updateLeInflightTimers. Not
                 // clickable — a deploy is already running for this target.
                 return `<span class="px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-800 border border-amber-300" data-inflight-since="${since}" title="Deployment in progress…">
-                    <span class="inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse mr-1 align-middle"></span>${t.module_type}${t.identifier ? '/' + t.identifier : ''} <span class="le-inflight-elapsed" data-elapsed-since="${since}">0s</span>
+                    <span class="inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse mr-1 align-middle"></span>${bfStar}${t.module_type}${t.identifier ? '/' + t.identifier : ''} <span class="le-inflight-elapsed" data-elapsed-since="${since}">0s</span>
                 </span>`;
             }
             const ok = t.last_status === 'SUCCESS';
@@ -17627,7 +17633,7 @@ async function loadLEData(subMenu) {
             const statusTxt = t.last_status || 'not pushed yet';
             const msgPart = t.last_message ? ` — ${t.last_message}` : '';
             const tip = `${label}: ${statusTxt}${msgPart} (last push: ${when}). Click to deploy now.`;
-            const btn = `<button onclick="leDeployTarget('${dEsc}','${mtEsc}','${idEsc}')" class="px-1.5 py-0.5 rounded text-xs font-medium ${cls} cursor-pointer hover:brightness-95 active:scale-95 transition" title="${escJsAttr(tip)}">${mark} ${label}</button>`;
+            const btn = `<button onclick="leDeployTarget('${dEsc}','${mtEsc}','${idEsc}')" class="px-1.5 py-0.5 rounded text-xs font-medium ${cls} cursor-pointer hover:brightness-95 active:scale-95 transition" title="${escJsAttr(tip)}">${mark} ${bfStar}${label}</button>`;
             // Fleet spokes (nw): the spoke-level badge above is the success
             // signal (spoke holds the cert). The per-device detail lives in a
             // collapsed, lazy-loaded section BELOW the targets (leFleetDetail) —
@@ -17718,8 +17724,7 @@ async function loadLEData(subMenu) {
                     <div class="flex flex-col items-end gap-1.5">
                         ${retryBtn ? `<div>${retryBtn}</div>` : ''}
                         <div class="flex flex-row items-center justify-end gap-1.5">
-                            <button onclick="leToggleBugfixer(this, '${dEsc}', ${c.bugfixer ? 'false' : 'true'})" class="${c.bugfixer ? 'bg-purple-600/15 text-purple-700 border-purple-500' : 'bg-slate-500/10 text-slate-500 border-slate-300'} border px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="${c.bugfixer ? 'This cert IS the BugFixer identity — the mTLS gate for hub log reads + fleet update commands. Click to un-tag.' : 'Tag this cert as the BugFixer identity so bugfixer (presenting it over mTLS) can read hub logs + run fleet updates. Also deploy it to the bugfixer target via Manage.'}">${c.bugfixer ? '★ BugFixer' : 'Tag BugFixer'}</button>
-                            <button onclick="showLeTargetsModal('${dEsc}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Manage distribution targets">Manage</button>
+                            <button onclick="showLeTargetsModal('${dEsc}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Manage distribution targets + BugFixer identity tag">Manage</button>
                             <button onclick="leRenewCert('${dEsc}')" class="bg-slate-700/10 hover:bg-slate-700/20 text-slate-700 border border-slate-700 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Renew this cert">Renew</button>
                             <button onclick="leRevokeCert('${dEsc}')" class="bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Revoke + remove from managed list">Revoke</button>
                         </div>
@@ -17779,11 +17784,12 @@ async function loadLEData(subMenu) {
         // all so the operator can un-tag the extras. Surfaced as a persistent
         // banner ABOVE the table so you don't have to scan every row's "★
         // BugFixer" button to find it. c.bugfixer is reconciled from the hub's
-        // authoritative pinned list in loadLEData/leToggleBugfixer.
+        // authoritative pinned list in loadLEData / leToggleBugfixerChk (the
+        // checkbox inside the Manage modal).
         const bfCerts = (certs || []).filter(c => c.bugfixer);
         const bfBanner = (() => {
             if (!bfCerts.length) {
-                return `<div class="mx-4 mt-3 mb-1 px-3 py-2 rounded-md border text-xs bg-slate-50 border-slate-200 text-slate-600 flex items-center gap-2"><span class="text-purple-500 font-bold">★</span><span><b>BugFixer identity:</b> no cert tagged. Tag a managed cert (<span class="font-mono">Tag BugFixer</span> on its row) so bugfixer can present it over mTLS to read hub logs + run fleet updates, then deploy it to the bugfixer target via <b>Manage</b>.</span></div>`;
+                return `<div class="mx-4 mt-3 mb-1 px-3 py-2 rounded-md border text-xs bg-slate-50 border-slate-200 text-slate-600 flex items-center gap-2"><span class="text-purple-500 font-bold">★</span><span><b>BugFixer identity:</b> no cert tagged. Open a cert's <b>Manage</b> → check <b>★ BugFixer identity</b> so bugfixer can present it over mTLS to read hub logs + run fleet updates, then add a <span class="font-mono">bugfixer</span> target (★) in the same modal so the cert is deployed to the bugfixer agent.</span></div>`;
             }
             const names = bfCerts.map(c => `<span class="font-mono font-bold text-purple-700">${escapeHtml(c.domain || '(unnamed)')}</span>`).join(', ');
             const extra = bfCerts.length > 1 ? ` <span class="text-amber-600">— ${bfCerts.length} tagged; un-tag extras so only one is pinned.</span>` : '';
@@ -18097,6 +18103,7 @@ async function showLeTargetsModal(domain) {
     }
     const cert = (window._leCerts || []).find(c => c.domain === domain) || {};
     const tgts = cert.targets || [];
+    const isBfCert = !!cert.bugfixer;
     const esc = s => String(s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
     const row = (t, i) => {
         const ok = t.last_status === 'SUCCESS';
@@ -18113,6 +18120,10 @@ async function showLeTargetsModal(domain) {
     const modal = openModal('le-targets-modal', `
         <h3 class="text-lg font-bold mb-1">Distribution targets — <span class="font-mono">${esc(domain)}</span></h3>
         <p class="text-xs text-slate-500 mb-4">Each target is a spoke (by module type) the hub pushes this cert to; that spoke installs it on its device. Only installed modules with at least one device are listed.</p>
+        <label class="flex items-start gap-2 mb-4 p-3 rounded-md border ${isBfCert ? 'bg-purple-50 border-purple-200' : 'bg-slate-50 border-slate-200'} cursor-pointer" title="Tag this cert as the BugFixer mTLS identity — the gate for hub log reads + fleet update commands. Then add a bugfixer target below so the cert is deployed to the bugfixer agent.">
+            <input type="checkbox" id="le-bugfixer-chk" ${isBfCert ? 'checked' : ''} onchange="leToggleBugfixerChk(this, '${esc(domain)}')" class="mt-0.5 accent-purple-600" />
+            <span class="text-xs text-slate-700"><span class="font-bold text-purple-700">★ BugFixer identity</span> — tag this cert as the one bugfixer presents over mTLS to read hub logs + run fleet updates. <span class="text-slate-500">Also add a <span class="font-mono">bugfixer</span> target below (★) so the cert is deployed to the bugfixer agent.</span></span>
+        </label>
         <div class="overflow-x-auto mb-3"><table class="w-full text-sm">
             <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>
                 <th class="px-3 py-2 text-left font-medium">Target</th>
@@ -19046,20 +19057,23 @@ async function deleteDnsCredential(name) {
     } catch (e) { showToast('Delete failed: ' + e.message, 'error'); }
 }
 
-// Tag / un-tag a managed cert as the BugFixer identity (H1). Only a connection
-// presenting a tagged cert over mTLS may use the reverse HUB_REQUEST channel
-// (read every tenant's hub logs + run fleet TRIGGER_* update commands). This just
-// records which domain's cert is the BugFixer identity; deploy the cert itself to
-// the bugfixer target via Manage. POST /api/le/certs/{domain}/bugfixer.
-async function leToggleBugfixer(btn, domain, enable) {
-    if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+// Tag / un-tag a managed cert as the BugFixer identity (H1), driven by the
+// checkbox inside the Manage modal. Only a connection presenting a tagged cert
+// over mTLS may use the reverse HUB_REQUEST channel (read every tenant's hub
+// logs + run fleet TRIGGER_* update commands). This just records which domain's
+// cert is the BugFixer identity; deploy the cert itself to a bugfixer target
+// (also in Manage) so the agent presents it. POST /api/le/certs/{domain}/bugfixer.
+async function leToggleBugfixerChk(cb, domain) {
+    const enable = cb ? cb.checked : true;
+    if (cb) { cb.disabled = true; }
     try {
         const { ok, data, detail } = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/bugfixer`, {
-            method: 'POST', body: JSON.stringify({ enabled: enable })
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: enable })
         });
         if (!ok) {
             showToast('BugFixer tag failed: ' + (detail || 'request rejected'), 'error');
-            if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+            if (cb) { cb.checked = !enable; cb.disabled = false; }
             return;
         }
         // Re-tag the cached certs from the hub's authoritative pinned list (the
@@ -19073,13 +19087,14 @@ async function leToggleBugfixer(btn, domain, enable) {
             }
         }
         showToast(enable
-            ? `Tagged ${domain} as the BugFixer cert — now deploy it to the bugfixer target (Manage) so it presents over mTLS`
+            ? `Tagged ${domain} as the BugFixer cert — add a bugfixer target (★) below so it presents over mTLS`
             : `Removed the BugFixer tag from ${domain}`, 'success');
-        window._leLoading = false;   // clear any stuck guard so the re-render actually runs
-        await loadLEData();
+        window._leLoading = false;   // clear any stuck guard so the re-render runs
+        await loadLEData();          // refresh the top banner + row target stars
+        if (cb) cb.disabled = false;
     } catch (e) {
         showToast('BugFixer tag failed: ' + (e.message || e), 'error');
-        if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+        if (cb) { cb.checked = !enable; cb.disabled = false; }
     }
 }
 
