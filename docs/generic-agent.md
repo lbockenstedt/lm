@@ -33,11 +33,11 @@ role's live status.
 
 ## Install flags
 
-- `agent/install_agent.sh`: `--hub` (optional; omit/`auto` → auto-discover), `--id` (default `agent-<hostname>`), `--secret`, `--hub-secret`, `--role <one>` / `--roles <csv>` (merged + de-duplicated; roles: `dns|dhcp|network|netbox|opnsense|ldap|simulation|cppm|proxmox|le|console`), `--loopback` (co-located with hub), `--clone` (stage + enable but leave stopped), `--tls-verify` (+ optional `--tls-ca-cert`). Roles persist in `.env` `LOADED_ROLES`. See [install-flags.md](install-flags.md) for the full canonical flag list.
+- `agent/install_agent.sh`: `--hub` (optional; omit/`auto` → auto-discover), `--id` (default `agent-<hostname>`), `--secret`, `--hub-secret`, `--role <one>` / `--roles <csv>` (merged + de-duplicated; roles: `dns|dhcp|network|netbox|opnsense|ldap|simulation|cppm|proxmox|le|console|truenas`), `--loopback` (co-located with hub), `--clone` (stage + enable but leave stopped), `--tls-verify` (+ optional `--tls-ca-cert`). Roles persist in `.env` `LOADED_ROLES`. See [install-flags.md](install-flags.md) for the full canonical flag list.
 
 ## Key commands / handlers
 
-- **Agent-spoke `_ROLE_MAP`** (12 hosted roles — rel_path, class, module_type, repo):
+- **Agent-spoke `_ROLE_MAP`** (13 hosted roles — rel_path, class, module_type, repo):
   - `dns` → `dns/src/dns_spoke.py::DNSSpoke` (`dns`, in-repo)
   - `dhcp` → `dhcp/src/dhcp_spoke.py::DHCPSpoke` (`dhcp`, in-repo)
   - `console` → `console/src/console_spoke.py::ConsoleSpoke` (`console`, in-repo)
@@ -50,6 +50,7 @@ role's live status.
   - `cppm` → `cppm/src/spoke.py::CPPMSpoke` (`nac`, `lbockenstedt/cppm.git`)
   - `proxmox` → `pxmx/src/proxmox_spoke.py::ProxmoxSpoke` (`hypervisor`, `lbockenstedt/pxmx.git`)
   - `le` → `le/src/le_spoke.py::LESpoke` (`certificates`, `lbockenstedt/le.git`)
+  - `truenas` → `truenas/src/truenas_spoke.py::TruenasSpoke` (`storage`, `lbockenstedt/truenas.git`) — manages/reports on TrueNAS appliances over the official WebSocket JSON-RPC client (`truenas_api_client`); pools, datasets, shares (SMB/NFS), disks, alerts, services, capacity + gated writes (create/delete datasets, create shares, snapshots, scrubs). Mirrors `nw` (fleet-poll spoke + cache twin) and `le` (per-tenant API-key store).
   - `_DEPLOY_ROLES` (2 — run their own installer as a background subprocess, module_type `agent`, not hosted sub-spokes): `bugfixer` (curl|bash `lbockenstedt/bugfixer` `install.sh`), `netbox-server` (curl|bash `lbockenstedt/netbox` `install.sh --infra-only` — deploys the NetBox *application*; the separate `netbox` IPAM role sub-spoke talks to it).
   - `_RoleAdapter` wraps non-BaseSpoke roles (e.g. cppm). `LOAD_ROLE`/`UNLOAD_ROLE`/`UPDATE_CONFIG` handling; `_load_role_class`/`_sync_load_role`/`_install_role` (git clone + venv pip install).
 
@@ -60,7 +61,7 @@ role's live status.
 ## Notable behaviors & gotchas
 
 - **Boot `--role` does NOT run `_install_role`** — `install_agent.sh` stages a boot `--role`/`--roles` but only pre-installs system packages; the role class loads on first `LOAD_ROLE` from the hub (staged roles auto-load at startup).
-- **8 sibling repos auto-clone on `LOAD_ROLE`** — `dns`/`dhcp`/`console` ship in-repo (staged from the `/opt/lm` clone); the other 8 roles (`network`, `netbox`, `opnsense`, `ldap`, `simulation`, `cppm`, `proxmox`, `le`) clone from their own GitHub repos. Covers every canonical hub module type except `agent`.
+- **9 sibling repos auto-clone on `LOAD_ROLE`** — `dns`/`dhcp`/`console` ship in-repo (staged from the `/opt/lm` clone); the other 9 roles (`network`, `netbox`, `opnsense`, `ldap`, `simulation`, `cppm`, `proxmox`, `le`, `truenas`) clone from their own GitHub repos. Covers every canonical hub module type except `agent`.
 
 ## How it works
 
@@ -70,7 +71,7 @@ role's live status.
   `agent/src/control_plane.py::RoleConnection`) under the sub-spoke id `{agent}-{role}`
   (e.g. `agent-svr-02-dns`) carrying the role's real `module_type` (`dns`, `dhcp`, `nw`,
   `ipam`, `firewall`, `directory`, `simulation`, `nac`, `hypervisor`, `certificates`,
-  `console`). The hub routes commands to that role purely by `module_type`/spoke id,
+  `console`, `storage`). The hub routes commands to that role purely by `module_type`/spoke id,
   exactly as it would to any dedicated spoke.
 - **Parent-auto-approve.** A `RoleConnection` sends `parent_spoke_id` (the base agent's
   id) in its auth frame instead of an install UUID. Because the base agent is already
@@ -81,8 +82,8 @@ role's live status.
   DHCP, NetBox, etc.) — they are the same box, split by connection.
 - **`LOAD_ROLE` / `UNLOAD_ROLE`.** On `LOAD_ROLE {role: "dns"}` the agent (1) clones the
   sibling repo if the role isn't in-repo yet (`dns`/`dhcp`/`console` ship inside the `lm`
-  clone; `network`, `netbox`, `opnsense`, `ldap`, `simulation`, `cppm`, `proxmox`, `le`
-  are separate GitHub repos cloned into `/opt/lm/<dir>`), (2) installs any system
+  clone; `network`, `netbox`, `opnsense`, `ldap`, `simulation`, `cppm`, `proxmox`, `le`,
+  `truenas` are separate GitHub repos cloned into `/opt/lm/<dir>`), (2) installs any system
   packages the role needs (e.g. `unbound` for dns, `kea-dhcp4-server` for dhcp,
   `certbot` for le) and pip-installs the role's `requirements.txt` into the agent's
   shared venv, (3) instantiates the real spoke class and — for a role whose class isn't

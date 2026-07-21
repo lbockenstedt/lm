@@ -70,6 +70,7 @@ _ROLE_MAP = {
     "le":         ("le/src/le_spoke.py",            "LESpoke",   "certificates", "https://github.com/lbockenstedt/le.git"),
     "console":    ("console/src/console_spoke.py",  "ConsoleSpoke", "console",   None),
     "statuspage": ("statuspage/src/statuspage_spoke.py", "StatusPageSpoke", "statuspage", None),
+    "truenas":    ("truenas/src/truenas_spoke.py",  "TruenasSpoke", "storage",   "https://github.com/lbockenstedt/truenas.git"),
 }
 
 # Logger-name prefixes each role emits under. Used by the multi-role agent's
@@ -109,6 +110,7 @@ _ROLE_LOG_PREFIXES: Dict[str, tuple] = {
     "le":         ("LE", "le."),
     "console":    ("Console",),
     "statuspage": ("StatusPageSpoke",),
+    "truenas":    ("Truenas",),
 }
 
 # Deploy roles: instead of morphing the agent into a service, these run an

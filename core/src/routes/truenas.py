@@ -508,3 +508,93 @@ def register(app, hub, ctx):
         pushed = await _truenas_push_fleet(hub, spoke_id) if spoke_id else False
         return {"status": "ok", "message": f"TrueNAS appliance {appliance_id} deleted.",
                 "pushed": pushed}
+
+    # ── TrueNAS → NetBox inventory-discovery sync ─────────────────────────────
+    # Mirrors routes/setup.py's nw-discovery-sync routes. Config lives in
+    # global_config["truenas_discovery_sync"] (enabled/source/mode/interval/
+    # daily_time/concurrency/defaults); the background loop runs in
+    # TruenasDiscoverySyncMixin.run_truenas_discovery_sync_loop.
+
+    @app.get("/setup/truenas-discovery-sync")
+    async def get_truenas_discovery_sync(request: Request):
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        cfg = hub.state.system_state.get("global_config", {}).get("truenas_discovery_sync", {}) or {}
+        return {"config": cfg,
+                "sources": [{"name": n, "label": se.get("label", n),
+                              "module_type": se.get("module_type", ""),
+                              "connected": bool(hub.get_all_spokes_by_type(se.get("module_type", "")))}
+                             for n, se in hub.TRUENAS_DISCOVERY_SOURCES.items()],
+                "netbox_connected": bool(hub.get_spoke_by_type("ipam"))}
+
+    @app.post("/setup/truenas-discovery-sync")
+    async def set_truenas_discovery_sync(request: Request):
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        cfg = (data or {}).get("config", {}) if isinstance(data, dict) else {}
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        # Sentinel-merge: keep defaults if the caller omitted them.
+        old = gc.get("truenas_discovery_sync", {}) or {}
+        merged = {**old, **cfg}
+        gc["truenas_discovery_sync"] = merged
+        hub.state.system_state["global_config"] = gc
+        hub.state._mark_dirty()
+        return {"status": "ok", "config": merged}
+
+    @app.post("/setup/truenas-discovery-sync/run")
+    async def run_truenas_discovery_sync(request: Request):
+        """On-demand TrueNAS → NetBox inventory sync ('Sync now'). Body
+        optional: ``{"tenant_id": "<id>"}`` to sync one tenant; absent → all."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        target = (data or {}).get("tenant_id") if isinstance(data, dict) else None
+        if target:
+            results = [await hub.sync_tenant_truenas_devices(target)]
+        else:
+            agg = await hub.run_truenas_discovery_sync_all()
+            results = list((agg.get("per_tenant") or {}).values())
+        pushed = sum(int(r.get("pushed", 0)) for r in results)
+        errors = sum(int(r.get("errors", 0)) for r in results)
+        skipped = sum(int(r.get("skipped", 0)) for r in results)
+        deleted = sum(int(r.get("deleted", 0)) for r in results)
+        return {"results": results,
+                "summary": {"pushed": pushed, "errors": errors, "skipped": skipped,
+                            "deleted": deleted, "tenants": len(results)}}
+
+    @app.get("/setup/truenas-discovery-sync/status")
+    async def truenas_discovery_sync_status(request: Request):
+        """Per-tenant last truenas-discovery-sync status."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        statuses = hub.simulations_store.get_all_truenas_discovery_sync_status()
+        tenants = []
+        for tid, st in statuses.items():
+            tenants.append({
+                "tenant_id": tid,
+                "tenant_name": st.get("tenant_name") or tid,
+                "status": st.get("status"),
+                "pushed": st.get("pushed", 0),
+                "errors": st.get("errors", 0),
+                "skipped": st.get("skipped", 0),
+                "deleted": st.get("deleted", 0),
+                "message": st.get("message", ""),
+                "discovered_total": st.get("discovered_total", 0),
+                "last_sync_ts": st.get("last_sync_ts"),
+            })
+        return {"tenants": tenants}

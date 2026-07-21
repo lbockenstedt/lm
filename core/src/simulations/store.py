@@ -761,6 +761,33 @@ class SimulationsStore:
                 out[tid] = dict(st)
         return out
 
+    # ── TrueNAS → NetBox inventory-discovery sync last-run status ─────────────
+    # Per-tenant result of the most recent truenas-discovery sync cycle
+    # (background loop or on-demand "Sync now"). Persisted so the UI still shows
+    # the last run after a hub restart. Shape: {status, pushed, errors, skipped,
+    # deleted, discovered_total, message, last_sync_ts, tenant_name}.
+    async def get_truenas_discovery_sync_status(self, tenant_id: str) -> Dict[str, Any]:
+        """Return the tenant's last truenas-discovery-sync status (empty if never run)."""
+        return dict(self._data.get(tenant_id, {}).get("truenas_discovery_sync", {}))
+
+    async def set_truenas_discovery_sync_status(self, tenant_id: str,
+                                                status: Dict[str, Any]) -> None:
+        """Replace the tenant's truenas-discovery-sync status and persist."""
+        with self._lock:
+            self._tenant(tenant_id)["truenas_discovery_sync"] = status or {}
+            await self._asave()
+
+    def get_all_truenas_discovery_sync_status(self) -> Dict[str, Dict[str, Any]]:
+        """Return {tenant_id: status} for every tenant with a recorded truenas-discovery sync."""
+        out: Dict[str, Dict[str, Any]] = {}
+        for tid, t in self._data.items():
+            if tid == self._GLOBAL_KEY:
+                continue
+            st = t.get("truenas_discovery_sync")
+            if st:
+                out[tid] = dict(st)
+        return out
+
     # ── Realtime NAC → IPAM reverse sync last-run status (Setup → Sync) ───────
     # Per-tenant result of the most recent realtime ClearPass Access Tracker →
     # NetBox pull (background loop or on-demand "Sync now"). Persisted so the UI

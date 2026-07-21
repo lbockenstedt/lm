@@ -392,6 +392,7 @@ const MODULE_CLASSES = {
     'Network': ['nw'],
     'Simulations': ['cs'],
     'Certificates': ['le'],
+    'Storage': ['truenas'],
     'Console': ['console']
 };
 
@@ -470,6 +471,7 @@ const AGENT_ROLES = {
     'proxmox':    { name: 'Hypervisor (Proxmox / pxmx)', desc: 'Proxmox spoke bridging the hub to per-host pxmx agents (VM lifecycle, VNC console, USB auto-provisioning).', deploy: false },
     'le':         { name: 'Certificate Management (Let\'s Encrypt)', desc: 'Issues/renews prod Let\'s Encrypt certs via certbot (HTTP-01 / DNS-01) and serves them to the hub for distribution to target spokes (e.g. OPNsense). Installs certbot + DNS-01 plugins.', deploy: false },
     'console':    { name: 'Console Server', desc: 'Serial console access to attached hardware (USB adapters + on-board UART). Auto-detects baud, auto-identifies devices, and relays an xterm.js terminal through the hub.', deploy: false },
+    'truenas':    { name: 'Storage (TrueNAS)', desc: 'Polls and manages TrueNAS appliances over the official WebSocket JSON-RPC client — pools, datasets, shares (SMB/NFS), disks, alerts, services, capacity; gated management actions (create/delete datasets, create shares, take snapshots, run scrubs). Reports health + capacity and syncs into NetBox.', deploy: false },
     'statuspage': { name: 'Simulation Status Page', desc: 'Public, read-only status page for one tenant — cloud-provider style (overall banner, per-component status, 90-day uptime history) plus a Clients view whose demo dropdown lets visitors trigger a live 2h simulation. Bind it to a tenant; the hub pushes that tenant\'s redacted dashboard down. Serves its own HTTPS page (cert via the le role).', deploy: false },
     'bugfixer':   { name: 'BugFixer', desc: 'Autonomous GitHub issue bot. Installs as a systemd service on this host and connects to the Hub as its own agent.', deploy: true },
 };
@@ -486,6 +488,7 @@ const PRODUCT_MAP = {
     'nw': 'nw',
     'le': 'le',
     'console': 'console',
+    'truenas': 'truenas',
 };
 
 // module_type -> nav product. A spoke's REGISTERED module_type is the
@@ -510,6 +513,7 @@ const MODULE_TYPE_PRODUCT = {
     certificates: 'le',
     console: 'console',
     directory: 'ldap',
+    storage: 'truenas',
 };
 
 // spoke_id prefix -> product, used ONLY as a fallback when a spoke's module_type
@@ -524,7 +528,7 @@ const MODULE_TYPE_PRODUCT = {
 const _ID_PREFIX_PRODUCT = {
     pxmx: 'pxmx', opn: 'opnsense', opnsense: 'opnsense', pfsense: 'opnsense',
     cppm: 'cppm', ise: 'cppm', cs: 'cs', netbox: 'netbox', phpipam: 'netbox',
-    dns: 'dns', dhcp: 'dhcp', nw: 'nw', le: 'le',
+    dns: 'dns', dhcp: 'dhcp', nw: 'nw', le: 'le', truenas: 'truenas',
 };
 function _productFromIdPrefix(sid) {
     for (const [prefix, product] of Object.entries(_ID_PREFIX_PRODUCT)) {
@@ -1270,6 +1274,7 @@ const VIEW_SUBMENUS = {
     dns: ['Records', 'Statistics', 'Forwarders'],
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations'],
     nw: ['Devices', 'IP Addresses', 'VLANs', 'MAC Table', 'ARP', 'Interfaces'],
+    truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
 };
 
 // Two-tier horizontal nav: child tabs that appear in #top-nav-secondary under
@@ -1331,13 +1336,14 @@ const LOG_MODULE_PRODUCT = {
     'logs-cppm':   'cppm',
     'logs-cs':     'cs',
     'logs-le':     'le',
+    'logs-truenas': 'truenas',
 };
 function logsSubmenu() {
     const products = window.activeProducts || new Set();
     const hasAgents = !!window.hasAgents;
     // Preserve the canonical order: hub first, then installed module tabs in
     // their fixed sequence, agents, then the hub-native filtered views last.
-    const order = ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-le', 'logs-agents', 'logs-recovery', 'logs-errors'];
+    const order = ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-le', 'logs-truenas', 'logs-agents', 'logs-recovery', 'logs-errors'];
     return order.filter(m => {
         if (m === 'logs-hub' || m === 'logs-recovery' || m === 'logs-errors') return true;
         if (m === 'logs-agents') return hasAgents;
@@ -3046,6 +3052,7 @@ const VIEW_LOADERS = {
     nw:       loadNwData,
     le:       loadLEData,
     console:  loadConsoleData,
+    truenas:  loadTruenasData,
     cs:       (subMenu) => loadCSData(subMenu, currentSubChild),
     setup:    _renderSetupSection,
     settings: _renderSettingsSection,
@@ -3214,6 +3221,13 @@ function _viewTemplate(viewId) {
             return `<div class="space-y-4">
   <div id="nw-table-container" class="${card}">
     <div class="py-12 text-center text-slate-400 italic">Loading network devices…</div>
+  </div>
+</div>`;
+
+        case 'truenas':
+            return `<div class="space-y-4">
+  <div id="truenas-table-container" class="${card}">
+    <div class="py-12 text-center text-slate-400 italic">Loading storage…</div>
   </div>
 </div>`;
 
@@ -6171,10 +6185,38 @@ function _renderSetupModuleMgmtTile(content) {
                         <button onclick="saveNwNetboxImport(this)" class="${btnCls}">Save</button>
                     </div>
                 </div>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">TrueNAS Appliances ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <button onclick="showAddTruenasApplianceModal()" class="${btnCls}">+ Add Appliance</button>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">TrueNAS storage appliances polled over the official WebSocket JSON-RPC client. Each appliance is bound to a tenant + owning storage spoke; the spoke polls on its cycle (pools, datasets, shares, disks, alerts, services, capacity) and warms the hub cache. Use a per-appliance API key (created in TrueNAS → Settings → API Keys); self-signed boxes set Verify SSL off.</p>
+                <div id="truenas-appliances-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            </div>
+            <div class="${card}">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">TrueNAS — Auto-Poll Default</h3>
+                <p class="text-xs text-slate-400 mb-3">Module-level poll cadence applied to every TrueNAS appliance that inherits it. An appliance's own Auto-Poll Interval always overrides this. The storage spoke polls on this cycle to warm the hub cache.</p>
+                <div class="flex items-center gap-3">
+                    <select id="truenas-module-poll-default" class="bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        <option value="">Built-in default (15 minutes)</option>
+                        <option value="0">Off (no auto-poll)</option>
+                        <option value="60">Every 1 minute</option>
+                        <option value="300">Every 5 minutes</option>
+                        <option value="900">Every 15 minutes</option>
+                        <option value="1800">Every 30 minutes</option>
+                        <option value="3600">Every hour</option>
+                        <option value="21600">Every 6 hours</option>
+                        <option value="86400">Every day</option>
+                    </select>
+                    <button onclick="saveTruenasPollConfig(this)" class="${btnCls} ml-auto">Save</button>
+                </div>
             </div>`;
     loadAllDevices();
     loadNwPollConfig();
     loadNwNetboxImport();
+    loadTruenasAppliances();
+    loadTruenasPollConfig();
 }
 
 // NetBox → NW import config (Setup → Module Management). NetBox = fleet SoT.
@@ -13831,6 +13873,216 @@ async function loadNwData(subMenu) {
     }
 }
 
+// Storage (TrueNAS) — Appliances → fleet list (/api/truenas/appliances);
+// Pools / Datasets / Shares / Disks / Alerts / Capacity → per-appliance fetch
+// merged across the fleet (/api/truenas/{id}/{pools|datasets|shares|disks|alerts|
+// capacity}), each row tagged with its source appliance (_applianceId /
+// appliance). ?tenant= scopes the server-side fleet filter to the selected
+// tenant. Spoke-down serves the hub cache twin (no 503) — the route falls back
+// to truenas_data.json when no spoke is connected.
+async function loadTruenasData(subMenu) {
+    const container = document.getElementById('truenas-table-container');
+    if (!container) return;
+    subMenu = subMenu || currentSubView;
+    container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching ${subMenu} data…</div>`;
+
+    // Suppress the per-view "+ Add" action strip; appliances are managed on
+    // Setup → TrueNAS Appliances.
+    const actions = document.getElementById('top-nav-actions');
+    if (actions) actions.innerHTML = '';
+
+    const tenantQs = currentTenant ? `?tenant=${encodeURIComponent(currentTenant)}` : '';
+
+    const _endpointFor = sm => {
+        if (sm === 'Pools') return 'pools';
+        if (sm === 'Datasets') return 'datasets';
+        if (sm === 'Shares') return 'shares';
+        if (sm === 'Disks') return 'disks';
+        if (sm === 'Alerts') return 'alerts';
+        if (sm === 'Capacity') return 'capacity';
+        return null;
+    };
+
+    // Normalize a fleet response (raw array or envelope) into a row list.
+    const _fleetRows = data => {
+        if (Array.isArray(data)) return data;
+        if (data && typeof data === 'object') {
+            if (Array.isArray(data.data)) return data.data;
+            if (data.appliances && Array.isArray(data.appliances.data)) return data.appliances.data;
+        }
+        return [];
+    };
+    // Normalize a per-appliance endpoint response into the payload list/dict.
+    const _extract = data => {
+        if (Array.isArray(data)) return data;
+        if (data && typeof data === 'object') {
+            if (Array.isArray(data.data)) return data.data;
+            if (data.data && typeof data.data === 'object') return data.data;
+            if (data.payload && Array.isArray(data.payload.data)) return data.payload.data;
+        }
+        return [];
+    };
+
+    try {
+        // ---- Appliance fleet list ----
+        if (subMenu === 'Appliances') {
+            let r;
+            try {
+                r = await fetch(`/api/truenas/appliances${tenantQs}`);
+            } catch (e) {
+                container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Storage spoke not connected. Approve one in Setup → Spokes & Agents, or add appliances in Setup → TrueNAS Appliances.</div>`;
+                return;
+            }
+            if (!r.ok) {
+                container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Storage spoke not connected (HTTP ${r.status}).</div>`;
+                return;
+            }
+            const data = await r.json();
+            const items = _fleetRows(data);
+            if (!items.length) {
+                container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No TrueNAS appliances configured. Add one in Setup → TrueNAS Appliances.</div>`;
+                return;
+            }
+            const headers = ['NAME', 'HOST', 'TYPE', 'VERSION', 'STATUS', ''].map(h => `<th class="px-4 py-3">${h}</th>`).join('');
+            const rows = items.map(it => {
+                const info = (it.info && typeof it.info === 'object') ? it.info : {};
+                const reachable = it.reachable;
+                const rcell = reachable === true || reachable === 'up'
+                    ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">online</span>'
+                    : reachable === false || reachable === 'down'
+                        ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">offline</span>'
+                        : `<span class="text-slate-400 text-xs">—</span>`;
+                const poll = isAdmin()
+                    ? `<button onclick="pollTruenasAppliance('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3">Poll Now</button>`
+                    : '';
+                return `<tr class="hover:bg-slate-50 transition-colors">
+                    <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}</td>
+                    <td class="px-4 py-3 text-slate-600 font-mono text-xs">${escapeHtml(it.host || '—')}</td>
+                    <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(info.product_name || info.product || it.object_type || 'TrueNAS')}</td>
+                    <td class="px-4 py-3 text-slate-600 font-mono text-xs">${escapeHtml(info.version || '—')}</td>
+                    <td class="px-4 py-3">${rcell}</td>
+                    <td class="px-4 py-3 text-right">${poll}</td>
+                </tr>`;
+            }).join('');
+            container.innerHTML = `
+                <div class="space-y-4">
+                    <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
+                        <table class="w-full text-left text-sm">
+                            <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}</tr></thead>
+                            <tbody class="divide-y divide-slate-200">${rows}</tbody>
+                        </table>
+                    </div>
+                </div>`;
+            return;
+        }
+
+        // ---- Per-appliance sub-resource, merged across the fleet ----
+        const endpoint = _endpointFor(subMenu);
+        if (!endpoint) return;
+
+        let fleet = [];
+        try {
+            const dr = await fetch(`/api/truenas/appliances`);
+            if (dr.ok) fleet = _fleetRows(await dr.json());
+        } catch (e) { /* spoke down handled below */ }
+        if (!fleet.length) {
+            container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Storage spoke not connected or no appliances configured.</div>`;
+            return;
+        }
+
+        const results = await Promise.allSettled(fleet.map(a =>
+            fetch(`/api/truenas/${a.id}/${endpoint}${tenantQs}`)
+                .then(r => r.ok ? r.json() : Promise.reject(new Error(`${r.status} ${r.statusText}`)))
+                .then(data => ({ app: a, data }))
+        ));
+        let items = [];
+        const errors = [];
+        results.forEach(res => {
+            if (res.status === 'fulfilled') {
+                const payload = _extract(res.value.data);
+                // shares is a {smb, nfs, iscsi} map; flatten with kind tag.
+                if (subMenu === 'Shares' && payload && typeof payload === 'object' && !Array.isArray(payload)) {
+                    ['smb', 'nfs', 'iscsi'].forEach(kind => {
+                        (Array.isArray(payload[kind]) ? payload[kind] : []).forEach(s => {
+                            items.push({ ...s, _applianceId: res.value.app.id, appliance: res.value.app.name || res.value.app.id, kind: kind.toUpperCase() });
+                        });
+                    });
+                } else if (Array.isArray(payload)) {
+                    items = items.concat(payload.map(it => ({
+                        ...it, _applianceId: res.value.app.id, appliance: res.value.app.name || res.value.app.id
+                    })));
+                }
+            } else {
+                errors.push(String((res.reason && res.reason.message) || res.reason));
+            }
+        });
+
+        if (!items.length) {
+            const errNote = errors.length ? `<div class="text-xs text-amber-600 mt-2">${errors.length} appliance(s) unreachable.</div>` : '';
+            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No ${subMenu} found.${errNote}</div>`;
+            return;
+        }
+
+        let keys;
+        if (subMenu === 'Pools') keys = ['appliance', 'name', 'status', 'healthy', 'size', 'allocated', 'free', 'path'];
+        else if (subMenu === 'Datasets') keys = ['appliance', 'name', 'type', 'pool', 'used', 'available', 'mountpoint'];
+        else if (subMenu === 'Shares') keys = ['appliance', 'kind', 'name', 'path', 'comment', 'enabled'];
+        else if (subMenu === 'Disks') keys = ['appliance', 'name', 'serial', 'size', 'model', 'transport', 'smart'];
+        else if (subMenu === 'Alerts') keys = ['appliance', 'level', 'category', 'message', 'state'];
+        else if (subMenu === 'Capacity') keys = ['appliance', 'pool', 'used', 'avail', 'pct_used'];
+        else keys = ['appliance', ...Object.keys(items[0] || {}).filter(k => k !== 'id' && k !== 'appliance' && !k.startsWith('_'))];
+
+        const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace(/_/g, ' ')}</th>`).join('');
+        const rows = items.map(item => {
+            const cells = keys.map(k => {
+                const val = item[k] !== undefined && item[k] !== null && item[k] !== '' ? String(item[k]) : '-';
+                if (k === 'appliance') return `<td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(val)}</td>`;
+                if (k === 'status') {
+                    const color = val === 'ONLINE' || val === 'up' ? 'text-green-600' : (val === 'DEGRADED' || val === 'FAULTED' ? 'text-red-600' : 'text-slate-500');
+                    return `<td class="px-4 py-3 font-mono text-xs ${color}">${escapeHtml(val)}</td>`;
+                }
+                if (k === 'healthy') {
+                    const color = val === 'true' || val === 'True' ? 'text-green-600' : 'text-red-600';
+                    return `<td class="px-4 py-3 font-mono text-xs ${color}">${escapeHtml(val)}</td>`;
+                }
+                if (k === 'level') {
+                    const color = val === 'CRITICAL' || val === 'ALERT' ? 'text-red-600' : (val === 'WARNING' || val === 'NOTICE' ? 'text-amber-600' : 'text-slate-500');
+                    return `<td class="px-4 py-3 font-mono text-xs ${color}">${escapeHtml(val)}</td>`;
+                }
+                return `<td class="px-4 py-3 text-slate-600 font-mono text-xs max-w-[260px] truncate" title="${escapeHtml(val)}">${escapeHtml(val)}</td>`;
+            }).join('');
+            return `<tr class="hover:bg-slate-50 transition-colors">${cells}</tr>`;
+        }).join('');
+
+        const errBanner = errors.length ? `<div class="text-xs text-amber-600">${errors.length} of ${fleet.length} appliance(s) unreachable.</div>` : '';
+        container.innerHTML = `
+            <div class="space-y-4">
+                ${errBanner}
+                <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
+                    <table class="w-full text-left text-sm">
+                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}</tr></thead>
+                        <tbody class="divide-y divide-slate-200">${rows}</tbody>
+                    </table>
+                </div>
+            </div>`;
+    } catch (err) {
+        console.error(`[Storage] Error in loadTruenasData:`, err);
+        container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading ${subMenu}: ${err.message}</div>`;
+    }
+}
+
+// Admin: trigger an immediate poll of one appliance (POST /api/truenas/{id}/poll).
+async function pollTruenasAppliance(applianceId, name, btn) {
+    if (btn) { btn.disabled = true; const orig = btn.textContent; btn.textContent = 'Polling…'; try { await pollTruenasApplianceRun(applianceId); btn.textContent = 'Done'; setTimeout(() => { btn.disabled = false; btn.textContent = orig; }, 1200); } catch (e) { btn.textContent = 'Failed'; btn.disabled = false; } }
+}
+async function pollTruenasApplianceRun(applianceId) {
+    const r = await fetch(`/api/truenas/${encodeURIComponent(applianceId)}/poll`, { method: 'POST', credentials: 'same-origin' });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    // Refresh the current sub-view to reflect the fresh poll.
+    if (currentView === 'truenas') loadTruenasData(currentSubView);
+}
+window.pollTruenasAppliance = pollTruenasAppliance;
+
 // Admin: apply a CLI/REST config snippet to a device (POST /api/nw/{id}/config).
 function showNwConfigModal(deviceId, deviceName) {
     const modal = document.createElement('div');
@@ -20139,6 +20391,211 @@ async function saveNwDevice() {
 function closeNwDeviceModal() {
     const modal = document.getElementById('nw-device-modal');
     if (modal) modal.remove();
+}
+
+// ─── TrueNAS Appliances: list + add/edit modal + poll config ───────────────
+// Backing routes: /setup/truenas-appliances (GET/POST), /setup/truenas-appliances/
+// {id} (PUT/DELETE), /setup/truenas-poll-config (GET/POST). Mirrors the Network
+// Devices setup pattern. Fields: name, host, api_key (sentinel-merged — leave
+// blank to keep the stored key), verify_ssl, auth_mechanism, poll_interval,
+// spoke_id (storage spokes), tenant_id. Creds persist in global_config only.
+let _truenasAppliancesCache = [];
+async function loadTruenasAppliances() {
+    try {
+        const data = await apiJson('/setup/truenas-appliances');
+        _truenasAppliancesCache = Array.isArray(data.truenas_appliances) ? data.truenas_appliances : [];
+        return _truenasAppliancesCache;
+    } catch (e) {
+        _truenasAppliancesCache = [];
+        return [];
+    }
+}
+async function loadTruenasAppliancesList() {
+    const listEl = document.getElementById('truenas-appliances-list');
+    if (!listEl) return;
+    try {
+        const apps = await loadTruenasAppliances();
+        if (!apps.length) {
+            listEl.innerHTML = '<p class="text-xs text-slate-400 italic">No TrueNAS appliances configured.</p>';
+            return;
+        }
+        listEl.innerHTML = apps.map(a => {
+            const sub = [
+                a.host || '',
+                a.api_key_set ? 'key set' : 'no key',
+                a.verify_ssl === false ? 'verify SSL off' : 'verify SSL on',
+            ].filter(Boolean).join(' · ');
+            return `<div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
+                <div><span class="text-sm font-medium text-slate-700">${escapeHtml(a.name || a.id)}</span><span class="ml-2 text-xs text-slate-400">${escapeHtml(sub)}</span></div>
+                <div class="flex gap-2">
+                    <button onclick="editTruenasAppliance('${escapeHtml(a.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
+                    <button onclick="deleteTruenasAppliance('${escapeHtml(a.id)}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
+                </div>
+            </div>`;
+        }).join('');
+    } catch (e) {
+        listEl.innerHTML = `<p class="text-xs text-red-500">Error loading appliances: ${e.message}</p>`;
+    }
+}
+async function deleteTruenasAppliance(id) {
+    if (!await showConfirmToast(`Delete TrueNAS appliance ${id}?`)) return;
+    try {
+        await apiJson(`/setup/truenas-appliances/${id}`, { method: 'DELETE' });
+        loadTruenasAppliancesList();
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+function showAddTruenasApplianceModal() {
+    const modal = document.createElement('div');
+    modal.id = 'truenas-appliance-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    modal.innerHTML = `
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 sticky top-0">
+                <h3 class="text-lg font-bold text-[#263040]" id="truenas-modal-title">Add TrueNAS Appliance</h3>
+                <button onclick="closeTruenasApplianceModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+            </div>
+            <div class="p-6 space-y-4">
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Name</label><input type="text" id="truenas-name" placeholder="e.g. nas-01" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Host / IP</label><input type="text" id="truenas-host" placeholder="10.0.0.50" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">API Key</label><input type="password" id="truenas-api-key" placeholder="Create in TrueNAS → Settings → API Keys" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><p class="text-[11px] text-slate-400">Leave blank on edit to keep the stored key (sentinel-merge). The spoke forces <code>wss://</code>; keys auto-revoke over plain <code>ws://</code>.</p></div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Verify SSL</label><select id="truenas-verify-ssl" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="true">On (trusted CA)</option><option value="false" selected>Off (self-signed)</option></select></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Auth Mechanism</label><select id="truenas-auth-mech" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="auto" selected>Auto (SCRAM→PLAIN)</option><option value="PLAIN">PLAIN (Core / 24.x)</option><option value="SCRAM">SCRAM-SHA-512 (26+)</option></select></div>
+                </div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Storage Spoke</label><select id="truenas-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Auto-Poll Interval</label>
+                    <select id="truenas-poll-interval" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        <option value="inherit" selected>Inherit module default</option>
+                        <option value="0">Off (manual Poll Now only)</option>
+                        <option value="60">Every 1 minute</option>
+                        <option value="300">Every 5 minutes</option>
+                        <option value="900">Every 15 minutes</option>
+                        <option value="1800">Every 30 minutes</option>
+                        <option value="3600">Every hour</option>
+                        <option value="21600">Every 6 hours</option>
+                        <option value="86400">Every day</option>
+                    </select>
+                </div>
+            </div>
+            <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
+                <button onclick="closeTruenasApplianceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
+                <button onclick="saveTruenasAppliance()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save Appliance</button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+
+    loadApprovedSpokes().then(spokes => {
+        const selector = document.getElementById('truenas-spoke');
+        if (selector) {
+            const tnSpokes = spokes.filter(s =>
+                s.module_type === 'storage' || /^truenas/.test(s.spoke_id));
+            selector.innerHTML = tnSpokes.length > 0
+                ? '<option value="">— select spoke —</option>' + tnSpokes.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(_spokeName(s))}</option>`).join('')
+                : '<option value="">No storage spokes found</option>';
+        }
+    });
+}
+async function editTruenasAppliance(id) {
+    const apps = _truenasAppliancesCache.length ? _truenasAppliancesCache : await loadTruenasAppliances();
+    const a = apps.find(x => x.id === id);
+    if (!a) return;
+    showAddTruenasApplianceModal();
+    document.getElementById('truenas-modal-title').textContent = 'Edit TrueNAS Appliance';
+    document.getElementById('truenas-name').value = a.name || '';
+    document.getElementById('truenas-host').value = a.host || '';
+    // api_key left blank → route sentinel-merges the stored key.
+    document.getElementById('truenas-api-key').value = '';
+    document.getElementById('truenas-verify-ssl').value = (a.verify_ssl === false) ? 'false' : 'true';
+    document.getElementById('truenas-auth-mech').value = a.auth_mechanism || 'auto';
+    document.getElementById('truenas-poll-interval').value =
+        (a.poll_interval === undefined || a.poll_interval === null || a.poll_interval === '')
+            ? 'inherit' : String(a.poll_interval);
+    setTimeout(() => {
+        const selector = document.getElementById('truenas-spoke');
+        if (selector) selector.value = a.spoke_id || '';
+    }, 100);
+    document.getElementById('truenas-appliance-modal').dataset.applianceId = id;
+}
+async function saveTruenasAppliance() {
+    const modal = document.getElementById('truenas-appliance-modal');
+    const id = modal.dataset.applianceId;
+    const verifyRaw = document.getElementById('truenas-verify-ssl').value;
+    const config = {
+        name: document.getElementById('truenas-name').value.trim(),
+        host: document.getElementById('truenas-host').value.trim(),
+        verify_ssl: verifyRaw === 'true',
+        auth_mechanism: document.getElementById('truenas-auth-mech').value,
+        spoke_id: document.getElementById('truenas-spoke').value,
+        poll_interval: (() => {
+            const pv = document.getElementById('truenas-poll-interval').value;
+            return (pv === 'inherit' || pv === '') ? null : (parseInt(pv, 10) || 0);
+        })(),
+    };
+    const key = document.getElementById('truenas-api-key').value;
+    if (key) config.api_key = key;   // absent → route keeps the stored key
+    if (!config.name || !config.host) {
+        showToast('Name and host are required.', 'error');
+        return;
+    }
+    try {
+        const method = id ? 'PUT' : 'POST';
+        const url = id ? `/setup/truenas-appliances/${id}` : '/setup/truenas-appliances';
+        const payload = id ? { config } : { appliance: config };
+        const response = await setupFetch(url, {
+            method,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (response.ok) {
+            showToast(`TrueNAS appliance ${id ? 'updated' : 'added'} successfully!`, 'success');
+            closeTruenasApplianceModal();
+            loadTruenasAppliancesList();
+        } else {
+            const err = await response.json().catch(() => ({}));
+            showToast('Failed to save appliance: ' + (err.detail || response.status), 'error');
+        }
+    } catch (err) {
+        showToast('Error saving appliance: ' + err.message, 'error');
+    }
+}
+function closeTruenasApplianceModal() {
+    const modal = document.getElementById('truenas-appliance-modal');
+    if (modal) modal.remove();
+}
+async function loadTruenasPollConfig() {
+    const sel = document.getElementById('truenas-module-poll-default');
+    if (!sel) return;
+    try {
+        const r = await setupFetch('/setup/truenas-poll-config');
+        if (!r.ok) return;
+        const d = await r.json();
+        sel.value = (d.default_poll_interval === null || d.default_poll_interval === undefined)
+            ? '' : String(d.default_poll_interval);
+    } catch (e) { /* leave built-in default selected */ }
+}
+async function saveTruenasPollConfig(btn) {
+    const sel = document.getElementById('truenas-module-poll-default');
+    if (!sel) return;
+    const raw = sel.value;
+    const body = { default_poll_interval: raw === '' ? null : (parseInt(raw, 10) || 0) };
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const r = await setupFetch('/setup/truenas-poll-config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) showToast(`Module poll default saved${d.pushed ? ` (pushed to ${d.pushed} spoke${d.pushed === 1 ? '' : 's'})` : ''}.`, 'success');
+        else showToast('Failed to save: ' + (d.detail || r.status), 'error');
+    } catch (e) {
+        showToast('Error saving: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save'; }
+    }
 }
 
 // ─── Multi-instance Setup tabs (NAC / IPAM / LDAP / DNS / DHCP) ───────────────

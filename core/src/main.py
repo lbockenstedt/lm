@@ -75,6 +75,7 @@ from endpoint_sync import EndpointSyncMixin
 from vm_sync import VmSyncMixin
 from fw_discovery_sync import FwDiscoverySyncMixin
 from nw_discovery_sync import NwDiscoverySyncMixin
+from truenas_discovery_sync import TruenasDiscoverySyncMixin
 from nw_cache import NwCacheMixin
 from truenas_cache import TruenasCacheMixin
 from le_cache import LeCacheMixin
@@ -272,7 +273,7 @@ def _mdns_hub_properties(version_str: str, agent_port: int,
     return props
 
 
-class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
+class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -7064,6 +7065,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # on-demand "Sync now" via /setup/nw-netbox-import/run. See
         # run_nw_netbox_import_loop (NwDiscoverySyncMixin).
         nw_netbox_import_task = asyncio.create_task(self.run_nw_netbox_import_loop())
+        # TrueNAS → NetBox inventory-discovery sync: per schedule (or on-demand
+        # "Sync now") pull the TrueNAS appliance fleet from every connected
+        # storage spoke, map each appliance to a NetBox dcim.device record
+        # (tenant-tagged by the appliance's own tenant_id), and push per-tenant
+        # to the netbox spoke via NETBOX_SYNC_DEVICES (source="TrueNAS" so the
+        # sink tags records truenas-owned). Minimal counterpart to the nw
+        # ARP-topology sync — appliances, not neighbors. See
+        # run_truenas_discovery_sync_loop (TruenasDiscoverySyncMixin).
+        truenas_discovery_sync_task = asyncio.create_task(self.run_truenas_discovery_sync_loop())
         # Realtime NAC → IPAM reverse sync: every ~1 min pull ClearPass Access
         # Tracker sessions (last 2 min) from the CPPM spoke, attribute by prefix,
         # and add to NetBox the MACs not already present (only-add-missing —

@@ -330,7 +330,8 @@ stage_role() {
         proxmox)    ROLE_REPO="https://github.com/lbockenstedt/pxmx.git";      ROLE_CLONE_DIR="pxmx";     ROLE_REQ="$INSTALL_DIR/pxmx/requirements.txt" ;;
         le)         ROLE_REPO="https://github.com/lbockenstedt/le.git";        ROLE_CLONE_DIR="le";       ROLE_REQ="$INSTALL_DIR/le/requirements.txt"
                     ROLE_APT="certbot python3-certbot-dns-cloudflare python3-certbot-dns-route53 openssl" ;;
-        *) echo "❌ Unknown role '$role'"; echo "Valid: dns dhcp network netbox opnsense ldap simulation cppm proxmox le console statuspage"; exit 1 ;;
+        truenas)    ROLE_REPO="https://github.com/lbockenstedt/truenas.git";    ROLE_CLONE_DIR="truenas";  ROLE_REQ="$INSTALL_DIR/truenas/requirements.txt" ;;   # sibling repo; requirements.txt pins truenas-api-client (official WS JSON-RPC client) + websockets
+        *) echo "❌ Unknown role '$role'"; echo "Valid: dns dhcp network netbox opnsense ldap simulation cppm proxmox le console statuspage truenas"; exit 1 ;;
     esac
 
     if [[ -n "$ROLE_REPO" ]]; then
