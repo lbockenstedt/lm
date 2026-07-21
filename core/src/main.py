@@ -4867,16 +4867,22 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         having to comb each spoke's logs by hand.
         """
         import re
-        # Match the LEVEL keyword, not the bare word "error" anywhere — the
-        # latter false-positives on uvicorn's ``uvicorn.error`` logger name
-        # (which carries INFO lifecycle lines like "connection open"), landing
-        # benign INFO lines in the error log. The negative lookbehind ``(?<!\.)``
-        # excludes dotted-logger-name matches (``uvicorn.error``, ``cs.error``,
-        # …) while still matching `` - ERROR - `` / ``[ERROR]`` / ``ERROR:`` /
-        # ``[sync-error]`` (hyphen is not a dot) and the ``Traceback`` /
-        # ``Exception`` continuation lines.
-        pat = re.compile(r"(?<!\.)(\berror\b|\bexception\b|\btraceback\b|\bcritical\b)",
-                         re.IGNORECASE)
+        # Match an actual ERROR/CRITICAL *level*, not the word "error" in prose.
+        # Our log format is ``… - LEVEL - msg`` and LEVEL is always UPPERCASE
+        # (``%(levelname)s``), so keying ERROR/CRITICAL case-SENSITIVELY excludes
+        # lowercase prose: the benign INFO summary
+        # ``provisioning_repos: 10 ok, 0 error, 0 skipped`` (a COUNT of zero
+        # errors) no longer lands in the Error Log, and the ``uvicorn.error``
+        # logger name (lowercase, carrying INFO lifecycle lines) drops out for
+        # free. The old ``\berror\b`` + IGNORECASE matched that bare lowercase
+        # word despite the comment claiming otherwise. The ``[sync-error]`` family
+        # of tags is lowercase by convention → matched explicitly; Traceback/
+        # Exception (case-insensitive) catch Python failures whose header line
+        # carries no level token.
+        pat = re.compile(
+            r"(?<!\.)\b(?:ERROR|CRITICAL)\b"        # uppercase level (not prose "error")
+            r"|\[[a-z][a-z-]*-error\]"              # [sync-error] and kin
+            r"|(?i:\btraceback\b|\bexception\b)")    # Python failure indicators
         errs = []
         for log in self.logs:
             if pat.search(log):
