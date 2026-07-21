@@ -234,6 +234,18 @@ class SpokeAlertMixin:
     def _spoke_alert_clear(self, sid: str) -> None:
         self._spoke_alerts.pop(sid, None)
 
+    def _spoke_label(self, sid: str) -> str:
+        """Human-readable spoke label for the out-of-contact log lines: the
+        display name (or name/hostname) with a short id hint for correlation, so
+        the alert reads ``cs-svr-05 (a25e89a6)`` instead of the bare UUID. Falls
+        back to the raw id when no name is registered."""
+        try:
+            md = (self.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
+        except Exception:  # noqa: BLE001 — a label must never break the alert loop
+            md = {}
+        name = (md.get("display_name") or md.get("name") or md.get("hostname") or "").strip()
+        return f"{name} ({str(sid)[:8]})" if name and name != sid else str(sid)
+
     def _schedule_alert_email(self, sid: str, tier: str, detail: str,
                               since_ts: Optional[float], duration: float) -> None:
         """No-op: spoke/agent out-of-contact emails are now OPT-IN via the tenant's
@@ -314,7 +326,7 @@ class SpokeAlertMixin:
                     self.record_spoke_event(sid, "spoke_back_in_contact",
                                             f"reconnected after {prev_dur}s")
                     logger.info("[spoke-alert] %s back in contact (was out %ds)",
-                                sid, prev_dur)
+                                self._spoke_label(sid), prev_dur)
                 elif tier == _TIER_WARN:
                     # none → warning (first alert).
                     detail = f"out of contact {int(duration)}s (warn {warn_s}s)"
@@ -324,7 +336,7 @@ class SpokeAlertMixin:
                     # avoids noise; the forgiving warning is for the dashboard).
                     logger.warning("[spoke-alert] %s out of contact %ds "
                                    "(warn threshold %ds exceeded)",
-                                   sid, int(duration), warn_s)
+                                   self._spoke_label(sid), int(duration), warn_s)
                     self._schedule_alert_email(sid, "warning", detail,
                                                since_ts, duration)
                 else:  # tier == _TIER_ERROR (escalation from warning)
@@ -339,7 +351,7 @@ class SpokeAlertMixin:
                     # bugfixer so a 30-min outage is actionable, not just visual.
                     logger.error("[spoke-alert] %s out of contact %ds "
                                  "(error threshold %ds exceeded)",
-                                 sid, int(duration), error_s)
+                                 self._spoke_label(sid), int(duration), error_s)
                     self._schedule_alert_email(sid, "error", detail,
                                                prev_since, duration)
 
