@@ -436,6 +436,28 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         back to the singular get_client_sim_spoke on an older hub build without
         it. Pushes CONCURRENTLY so a slow/queued spoke doesn't serialise the
         fan-out (3 spokes = one ~5s round-trip, not three)."""
+        # Never let a hub-config push carry a TENANT-ONLY vid:pid list. The
+        # global USB/PCI approvals live in a SEPARATE store (not in the tenant's
+        # hub_config), so a raw hub-config Save/reset/patch would push the
+        # tenant-only usb_vidpids and OVERWRITE the effective (global+tenant) list
+        # the spoke already stored — silently evicting a globally-certified dongle
+        # from the spoke → agent, so it never provisions ("global dongle not
+        # grabbed" bug). Whenever any of these lists is present in the payload,
+        # replace it with the EFFECTIVE merged list (same union the global-approval
+        # and reconnect pushes already use). Idempotent for _push_usb_to_tenant
+        # (which already sent effective). Payloads without these keys are untouched.
+        if isinstance(payload, dict) and any(
+                k in payload for k in ("usb_vidpids", "usb_ignored_vidpids",
+                                       "t1_pci_vidpids", "t3_pci_vidpids")):
+            payload = dict(payload)
+            if "usb_vidpids" in payload:
+                payload["usb_vidpids"] = json.dumps(await _effective_usb_vidpids(tenant_id))
+            if "usb_ignored_vidpids" in payload:
+                payload["usb_ignored_vidpids"] = json.dumps(await _effective_usb_ignored(tenant_id))
+            if "t1_pci_vidpids" in payload:
+                payload["t1_pci_vidpids"] = json.dumps(await _effective_t1_pci(tenant_id))
+            if "t3_pci_vidpids" in payload:
+                payload["t3_pci_vidpids"] = json.dumps(await _effective_t3_pci(tenant_id))
         # Prefer the plural helper (reaches every bound cs spoke); fall back to
         # the singular one on an older hub build without it.
         spoke_ids: list = []
