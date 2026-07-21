@@ -375,6 +375,32 @@ function csStatusBadge(status) {
     return `<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${cls}">${csEscape(s)}</span>`;
 }
 
+function csAlertBadge(status) {
+    // Engine State "Alert" column: a compact OK / FAILED badge for whether the
+    // quota's alert is currently firing. INVERTED semantics (a sim quota
+    // monitors an EXPECTED failure): status "ok" == the expected error IS
+    // present == the alert IS firing → green OK; "error"/"fail" == the sim
+    // stopped producing it → red FAILED. Same color classes as csStatusBadge
+    // but collapses the label to OK / FAILED (WARN for degraded, N/A for no
+    // data) so the column reads as a binary firing indicator instead of the
+    // raw check-status string. Use csStatusBadge elsewhere where the literal
+    // status word is the point (Checks/Status tables).
+    const s = String(status || 'unknown').toLowerCase();
+    const green = 'bg-green-100 text-green-700';
+    const red = 'bg-red-100 text-red-700';
+    const amber = 'bg-amber-100 text-amber-700';
+    const slate = 'bg-slate-100 text-slate-500';
+    let cls = slate, label = 'N/A';
+    if (['pass', 'ok', 'functional'].includes(s)) {
+        cls = green; label = 'OK';
+    } else if (['fail', 'failed', 'error', 'critical', 'down'].includes(s)) {
+        cls = red; label = 'FAILED';
+    } else if (['warning', 'degraded'].includes(s)) {
+        cls = amber; label = 'WARN';
+    }
+    return `<span class="px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider ${cls}" title="Alert firing status — OK = the expected failure is present (firing), FAILED = the sim stopped producing it">${label}</span>`;
+}
+
 function csTable(headers, rowsHtml, opts = {}) {
     // opts.headerHtml: optional array (same length as headers) of raw HTML to
     // use for a given column's <th> instead of the escaped header text — used
@@ -3755,9 +3781,9 @@ async function csRenderSimQuotaState() {
         // from the sim-quota-state payload (NO extra API query). This is the
         // SAME {site: {check_id: {status, message}}} the dashboard Checks table
         // renders — so the indicator here is identical to the dashboard check:
-        // csStatusBadge(status). INVERTED semantics: status "ok" == the expected
-        // error IS present == the alert/insight IS firing (green); "error" ==
-        // the sim stopped producing it (red). Empty when Central isn't
+        // csAlertBadge(status). INVERTED semantics: status "ok" == the expected
+        // error IS present == the alert/insight IS firing (green OK); "error"
+        // == the sim stopped producing it (red FAILED). Empty when Central isn't
         // configured / no poll has run, or for presence / untethered rows.
         const checkStatus = (st.check_status && typeof st.check_status === 'object') ? st.check_status : {};
         const firingOf = (q) => {
@@ -3766,7 +3792,7 @@ async function csRenderSimQuotaState() {
             const info = siteMap[q.alert_id];
             if (info == null) return '';
             const s = (typeof info === 'object' ? info.status : info) || '';
-            return s ? csStatusBadge(s) : '';
+            return s ? csAlertBadge(s) : '';
         };
         const chips = (hosts) => (hosts || []).map(h =>
             `<span class="inline-block bg-slate-100 text-slate-700 rounded px-1.5 py-0.5 mr-1 mb-1 font-mono text-[11px]">${csEscape(h)}</span>`).join('');
@@ -3967,7 +3993,7 @@ async function csRenderSimQuotaState() {
             ${eff.length ? `<table class="w-full text-left">
               <thead><tr class="text-[11px] text-slate-400 uppercase tracking-wider">
                 <th class="px-2 py-1">Type</th><th class="px-2 py-1">Alert / Insight ID</th>
-                <th class="px-2 py-1 text-center">Firing</th>
+                <th class="px-2 py-1 text-center">Alert</th>
                 <th class="px-2 py-1">Sim</th><th class="px-2 py-1">SSID</th>
                 <th class="px-2 py-1 text-center">Assigned</th><th class="px-2 py-1 text-center">Multi</th>
                 <th class="px-2 py-1 text-center">Re-home</th>
