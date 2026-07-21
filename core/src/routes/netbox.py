@@ -1,4 +1,6 @@
 """NetBox (IPAM) config + sites/racks/devices/prefixes/IPs routes."""
+import os
+import secrets
 from api import (
     HTTPException, Request, _cache_entry, _fetch_module, _hub_msg,
     _refresh_module_all_tenants, _unwrap_netbox,
@@ -339,6 +341,187 @@ def register(app, hub, ctx):
         except Exception as e:
             logger.exception("netbox_seed_catalog failed")
             raise HTTPException(status_code=500, detail=str(e))
+
+    # ─── Excel rack-layout import (admin-only, two-step URL relay) ────────────
+    #
+    # Mirrors the template-refresh relay: the hub saves the uploaded .xlsx to a
+    # scratch dir, mints a one-time download token, and hands the spoke a
+    # download_url + token. The spoke HTTP-GETs the file for BOTH steps (detect
+    # → user maps columns → commit), so the workbook isn't inlined over the WS
+    # (16 MiB frame cap). The scratch file + token live until the commit
+    # completes (or the hub restarts). Bypasses _netbox_write — the importer
+    # resolves tenant itself from the body's tenant_slug (admin-gated).
+
+    _RACK_IMPORT_DIR = os.environ.get("LM_RACK_IMPORT_DIR", "/var/lib/lm/imports")
+    _RACK_IMPORT_MAX = 64 * 1024 * 1024  # 64 MB xlsx cap
+
+    def _rack_imports():
+        """In-memory upload_id → {path, token, filename, ts}. Lost on hub
+        restart (imports are short-lived; the user re-uploads)."""
+        if not getattr(hub, "rack_imports", None):
+            hub.rack_imports = {}
+        return hub.rack_imports
+
+    def _rack_import_download_url(request, upload_id):
+        base = (os.environ.get("LM_HUB_PUBLIC_URL") or str(request.base_url)).rstrip("/")
+        return f"{base}/api/netbox/racks/import-xlsx/{upload_id}"
+
+    @app.post("/api/netbox/racks/import-xlsx")
+    async def netbox_rack_import_xlsx(request: Request):
+        """Step 1: accept an .xlsx upload, save it to scratch, relay
+        NETBOX_IMPORT_RACK_DETECT to the spoke (it fetches the file via the
+        token-gated download_url, parses with openpyxl, returns detected rack
+        sheets + guessed column maps). Also fetches device form-options
+        (sites/device_types/roles/tenants) so the WebUI can render the mapping
+        UI + defaults in one round trip. ADMIN-ONLY."""
+        import uuid as _uuid, secrets as _secrets, time as _time
+        from pathlib import Path
+        sess = _session_user(request)
+        if not (sess and _is_admin(sess)):
+            raise HTTPException(status_code=403, detail="Admin only")
+        hub = app.state.hub
+        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
+        ctype = (request.headers.get("content-type") or "").lower()
+        data = b""
+        filename = ""
+        try:
+            if "multipart/form-data" in ctype:
+                form = await request.form()
+                up = form.get("file")
+                if up is None:
+                    raise HTTPException(status_code=400, detail="no 'file' field in the upload")
+                filename = getattr(up, "filename", "") or "rack.xlsx"
+                data = await up.read()
+            else:
+                data = await request.body()
+                filename = "rack.xlsx"
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"could not read upload: {e}")
+        if not data:
+            raise HTTPException(status_code=400, detail="empty upload")
+        if len(data) > _RACK_IMPORT_MAX:
+            raise HTTPException(status_code=413, detail="upload exceeds 64 MB limit")
+        if not filename.lower().endswith(".xlsx"):
+            raise HTTPException(status_code=400, detail="file must be .xlsx")
+
+        upload_id = _uuid.uuid4().hex
+        token = _secrets.token_urlsafe(32)
+        try:
+            Path(_RACK_IMPORT_DIR).mkdir(parents=True, exist_ok=True)
+            path = os.path.join(_RACK_IMPORT_DIR, f"{upload_id}.xlsx")
+            with open(path, "wb") as f:
+                f.write(data)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("netbox rack import: failed to save upload")
+            raise HTTPException(status_code=500, detail=f"could not save upload: {e}")
+        _rack_imports()[upload_id] = {"path": path, "token": token,
+                                      "filename": filename, "ts": _time.time()}
+        logger.info("netbox rack import-xlsx by %s (upload_id=%s, %d bytes)",
+                    (sess.get("user", {}) or {}).get("username"), upload_id, len(data))
+        try:
+            download_url = _rack_import_download_url(request, upload_id)
+            detect = await hub.request_response(spoke_id, "NETBOX_IMPORT_RACK_DETECT",
+                                                {"download_url": download_url, "token": token},
+                                                timeout=180.0)
+            detect = _unwrap_netbox(detect)
+            if detect.get("status") != "SUCCESS":
+                # parse failed on the spoke (e.g. openpyxl missing) → clean up.
+                _rack_imports().pop(upload_id, None)
+                try: os.remove(path)
+                except OSError: pass
+                raise HTTPException(status_code=502, detail=detect.get("message") or "detect failed")
+            # form-options for the mapping UI + defaults (parallel picklist read).
+            try:
+                fo = await hub.request_response(spoke_id, "NETBOX_GET_DEVICE_FORM_OPTIONS",
+                                                {}, timeout=20.0)
+                fo = _unwrap_netbox(fo)
+                form_options = fo if fo.get("status") == "SUCCESS" else {}
+            except Exception:  # noqa: BLE001
+                form_options = {}
+            return {"upload_id": upload_id, "racks": detect.get("racks", []),
+                    "form_options": form_options}
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox rack import-xlsx relay failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/netbox/racks/import-commit")
+    async def netbox_rack_import_commit(request: Request):
+        """Step 2: apply the user's column maps + selections. Body::
+        ``{upload_id, sheets:[{sheet, rack_name, site_slug, u_height,
+        tenant_slug, shape, column_map, default_role_slug, default_status}],
+        dry_run}``. Relays NETBOX_IMPORT_RACK_COMMIT (the spoke re-GETs the file,
+        re-parses the selected sheets with full device rows, then creates/updates
+        racks + devices + mgmt iface/IP). Deletes the scratch file after.
+        ADMIN-ONLY. Bypasses _netbox_write (importer resolves tenant itself)."""
+        sess = _session_user(request)
+        if not (sess and _is_admin(sess)):
+            raise HTTPException(status_code=403, detail="Admin only")
+        hub = app.state.hub
+        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="invalid JSON body")
+        upload_id = str(body.get("upload_id") or "")
+        rec = _rack_imports().get(upload_id)
+        if not rec or not os.path.isfile(rec["path"]):
+            raise HTTPException(status_code=404, detail="upload not found (expired or already committed)")
+        sheets = body.get("sheets") or []
+        if not sheets:
+            raise HTTPException(status_code=400, detail="no sheets selected")
+        dry_run = bool(body.get("dry_run"))
+        logger.info("netbox rack import-commit by %s (upload_id=%s, %d sheets, dry_run=%s)",
+                    (sess.get("user", {}) or {}).get("username"), upload_id, len(sheets), dry_run)
+        try:
+            download_url = _rack_import_download_url(request, upload_id)
+            result = await hub.request_response(spoke_id, "NETBOX_IMPORT_RACK_COMMIT",
+                                                {"download_url": download_url,
+                                                 "token": rec["token"],
+                                                 "sheets": sheets, "dry_run": dry_run},
+                                                timeout=600.0)
+            result = _unwrap_netbox(result)
+            # Clean up the scratch file + token regardless of outcome.
+            _rack_imports().pop(upload_id, None)
+            try: os.remove(rec["path"])
+            except OSError: pass
+            # Invalidate rack + device picklist caches (creates/updates both).
+            if not dry_run:
+                try:
+                    _refresh_module_all_tenants(hub, "netbox_racks")
+                    _refresh_module_all_tenants(hub, "netbox_devices")
+                except Exception:  # noqa: BLE001
+                    pass
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("netbox rack import-commit relay failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/netbox/racks/import-xlsx/{upload_id}")
+    async def netbox_rack_import_download(upload_id: str, request: Request):
+        """Token-gated file download for the spoke (middleware-exempt: the spoke
+        authenticates with the one-time bearer token, not a user session).
+        Mirrors the template-refresh download endpoint."""
+        from fastapi.responses import FileResponse
+        rec = _rack_imports().get(upload_id)
+        if not rec:
+            raise HTTPException(status_code=404, detail="upload not found")
+        auth = request.headers.get("authorization") or ""
+        token = ""
+        if auth.lower().startswith("bearer "):
+            token = auth[7:].strip()
+        token = token or request.query_params.get("token") or ""
+        if not token or not secrets.compare_digest(token, rec["token"]):
+            raise HTTPException(status_code=403, detail="invalid download token")
+        if not os.path.isfile(rec["path"]):
+            raise HTTPException(status_code=404, detail="upload file missing on disk")
+        return FileResponse(rec["path"], media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            filename=rec.get("filename") or "rack.xlsx")
 
     @app.get("/api/netbox/racks")
     async def netbox_get_racks(request: Request, site: str = None, tenant: str = None):

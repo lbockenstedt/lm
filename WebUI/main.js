@@ -196,6 +196,10 @@ const ROUTES = {
     showNetboxAllocatePrefixModal:{ modal: true, via: 'submitNetboxAllocatePrefix' },
     showFindSubnetModal:    { modal: true, via: 'submitFindSubnetAssign' },
     showNetboxAllocateIPModal:{ modal: true, via: 'submitNetboxAllocateIP' },
+    // Excel rack-layout importer (admin-only): upload+detect → map columns → commit.
+    rackImportXlsx:         { m: 'POST', p: '/api/netbox/racks/import-xlsx',       api: 'netbox_rack_import_xlsx' },
+    rackImportCommit:       { m: 'POST', p: '/api/netbox/racks/import-commit',     api: 'netbox_rack_import_commit' },
+    showRackImportModal:    { modal: true, via: 'commitRackImport' },
 
     // ── DNS / DHCP ──
     loadDNSData:            { m: 'GET',  p: '/api/dns/records',           api: 'dns_list_records' },
@@ -6296,6 +6300,207 @@ async function seedNetboxCatalog(btn) {
     } catch (e) { showToast('Seed failed: ' + e.message, 'error'); }
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Seed catalog'; } }
 }
+
+// ── Excel rack-layout importer (admin-only) ──────────────────────────────────
+// Two-step URL-relay flow: upload .xlsx → hub saves to scratch + spoke detects
+// rack sheets + guesses column maps → user edits maps + picks racks → commit
+// (spoke re-GETs the file, re-parses, creates racks + devices + mgmt iface/IP).
+// Mirrors seedNetboxCatalog/runNwNetboxImport (toast + btn-state) and
+// uploadSelfBackup (FormData via apiJson). Tenant = currentTenant stamped on
+// every rack + device; 'default' = global.
+const RACK_IMPORT_FIELDS = ['name','device_type','serial','asset_tag','position','face','mgmt_ip','mac','role','status','description','ignore'];
+
+async function showRackImportModal() {
+    if (!isAdmin()) { showToast('Admin only', 'error'); return; }
+    openModal('nb-rack-import-modal', `
+        <div class="flex justify-between items-center mb-3">
+            <h3 class="text-lg font-bold">Import rack layout from Excel</h3>
+            <button onclick="document.getElementById('nb-rack-import-modal').remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+        </div>
+        <div class="space-y-3">
+            <div class="flex items-center gap-3">
+                <input id="nb-rack-file" type="file" accept=".xlsx" class="hidden" onchange="uploadRackImportXlsx(this)">
+                <button onclick="document.getElementById('nb-rack-file').click()" class="bg-indigo-50 hover:bg-indigo-100 text-indigo-600 border border-indigo-300 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm">Choose .xlsx…</button>
+                <span id="nb-rack-file-name" class="text-xs text-slate-500"></span>
+            </div>
+            <div id="nb-rack-import-status" class="text-xs text-slate-500"></div>
+            <div id="nb-rack-import-results"></div>
+        </div>
+    `, { card: 'w-full max-w-5xl p-6 space-y-4 max-h-[90vh] overflow-y-auto', backdropClose: true });
+    window._rackImport = { upload_id: null, racks: [], form_options: {} };
+}
+window.showRackImportModal = showRackImportModal;
+
+async function uploadRackImportXlsx(input) {
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    if (!/\.xlsx$/i.test(file.name)) { showToast('Pick a .xlsx workbook.', 'error'); input.value = ''; return; }
+    document.getElementById('nb-rack-file-name').textContent = file.name;
+    const status = document.getElementById('nb-rack-import-status');
+    const results = document.getElementById('nb-rack-import-results');
+    status.textContent = 'Detecting rack sheets…';
+    results.innerHTML = '';
+    try {
+        const fd = new FormData();
+        fd.append('file', file, file.name);
+        // apiJson + FormData mirrors uploadSelfBackup — the multipart
+        // Content-Type/boundary is set by the browser for a FormData body.
+        const d = await apiJson('/api/netbox/racks/import-xlsx', { method: 'POST', body: fd });
+        window._rackImport = { upload_id: d.upload_id, racks: d.racks || [], form_options: d.form_options || {} };
+        status.textContent = `Detected ${d.racks.length} rack sheet(s). Review the mapping, pick racks, then Import.`;
+        renderRackImportResults();
+    } catch (e) {
+        status.innerHTML = `<span class="text-red-600">Upload/detect failed: ${escapeHtml(e.message || e)}</span>`;
+    } finally { input.value = ''; }
+}
+window.uploadRackImportXlsx = uploadRackImportXlsx;
+
+function renderRackImportResults() {
+    const { racks, form_options } = window._rackImport;
+    const fo = form_options || {};
+    const sites = fo.sites || [];
+    const roles = fo.device_roles || [];
+    const siteOpts = '<option value="">— pick site —</option>' +
+        sites.map(s => `<option value="${escapeHtml(s.slug)}">${escapeHtml(s.name)}</option>`).join('');
+    const roleOpts = '<option value="">(no default role)</option>' +
+        roles.map(r => `<option value="${escapeHtml(r.slug)}">${escapeHtml(r.name)}</option>`).join('');
+    const tenantLabel = (currentTenant && currentTenant !== 'default') ? currentTenant : '(global)';
+
+    let html = `<div class="rounded-lg border border-slate-200 p-3 bg-slate-50">
+        <div class="text-xs font-semibold text-slate-600 mb-2">Defaults for all selected racks</div>
+        <div class="grid grid-cols-3 gap-2">
+            <label class="text-xs">Default Site
+                <select id="nb-ri-def-site" class="w-full border rounded px-2 py-1 text-xs mt-0.5">${siteOpts}</select>
+            </label>
+            <label class="text-xs">Default Role
+                <select id="nb-ri-def-role" class="w-full border rounded px-2 py-1 text-xs mt-0.5">${roleOpts}</select>
+            </label>
+            <label class="text-xs">Tenant (current)
+                <input class="w-full border rounded px-2 py-1 text-xs mt-0.5 bg-slate-100" value="${escapeHtml(tenantLabel)}" disabled>
+            </label>
+        </div>
+    </div>`;
+
+    racks.forEach((rk, i) => {
+        const isSummary = rk.shape === 'summary';
+        const siteOvOpts = '<option value="">(use default)</option>' +
+            sites.map(s => `<option value="${escapeHtml(s.slug)}">${escapeHtml(s.name)}</option>`).join('');
+        html += `<details class="rounded-lg border border-slate-200"${i === 0 ? ' open' : ''}>
+            <summary class="px-3 py-2 text-sm font-medium flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" data-ri-include="${i}"${i === 0 ? ' checked' : ''} class="ri-include" onclick="event.stopPropagation()">
+                <span>${escapeHtml(rk.rack_name)}</span>
+                <span class="text-xs text-slate-400">${escapeHtml(rk.shape)} · ${rk.u_height}U · ${rk.device_count} slots</span>
+            </summary>
+            <div class="px-3 pb-3 space-y-2">
+                <div class="grid grid-cols-3 gap-2">
+                    <label class="text-xs">Rack name
+                        <input data-ri-name="${i}" class="w-full border rounded px-2 py-1 text-xs mt-0.5" value="${escapeHtml(rk.rack_name)}">
+                    </label>
+                    <label class="text-xs">Site override
+                        <select data-ri-site="${i}" class="w-full border rounded px-2 py-1 text-xs mt-0.5">${siteOvOpts}</select>
+                    </label>
+                    <label class="text-xs">U-height
+                        <input data-ri-u="${i}" type="number" class="w-full border rounded px-2 py-1 text-xs mt-0.5" value="${rk.u_height}">
+                    </label>
+                </div>
+                ${isSummary
+                    ? '<p class="text-xs text-slate-400">Summary sheet: Front/Rear text cells become front/rear-face devices (named by their text). No column mapping needed.</p>'
+                    : renderColumnMap(rk, i)}
+            </div>
+        </details>`;
+    });
+
+    html += `<div class="flex items-center justify-between pt-3 border-t">
+        <label class="text-xs flex items-center gap-1"><input id="nb-ri-dryrun" type="checkbox"> Dry run (validate only, write nothing)</label>
+        <div class="flex gap-2">
+            <button onclick="document.getElementById('nb-rack-import-modal').remove()" class="px-3 py-1.5 text-xs border border-slate-300 rounded hover:bg-slate-50">Cancel</button>
+            <button onclick="commitRackImport(this)" class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded text-xs font-bold transition-all shadow-sm">Import</button>
+        </div>
+    </div>`;
+    document.getElementById('nb-rack-import-results').innerHTML = html;
+}
+window.renderRackImportResults = renderRackImportResults;
+
+function renderColumnMap(rk, i) {
+    const cols = rk.columns || [];
+    const cm = rk.column_map || {};
+    const rows = cols.map((c, ci) => {
+        const sel = cm[c] || 'ignore';
+        const opts = RACK_IMPORT_FIELDS.map(f => `<option value="${f}"${f === sel ? ' selected' : ''}>${f}</option>`).join('');
+        const sample = (rk.preview_rows && rk.preview_rows[0] && rk.preview_rows[0][ci] != null)
+            ? String(rk.preview_rows[0][ci]).slice(0, 40) : '';
+        return `<tr>
+            <td class="px-2 py-1 text-xs font-mono">${escapeHtml(c)}</td>
+            <td class="px-2 py-1 text-xs text-slate-400">${escapeHtml(sample)}</td>
+            <td class="px-2 py-1"><select data-ri-map="${i}" data-ri-col="${escapeHtml(c)}" class="border rounded px-1 py-0.5 text-xs">${opts}</select></td>
+        </tr>`;
+    }).join('');
+    return `<div class="text-xs text-slate-600 mt-1">Column mapping (source column → NetBox field):</div>
+        <table class="w-full text-xs border rounded"><thead><tr class="bg-slate-100">
+            <th class="px-2 py-1 text-left">Column</th>
+            <th class="px-2 py-1 text-left">Sample</th>
+            <th class="px-2 py-1 text-left">→ Field</th>
+        </tr></thead><tbody>${rows}</tbody></table>`;
+}
+window.renderColumnMap = renderColumnMap;
+
+function collectRackImport() {
+    const { racks } = window._rackImport || {};
+    if (!racks) return [];
+    const defSite = document.getElementById('nb-ri-def-site')?.value || '';
+    const defRole = document.getElementById('nb-ri-def-role')?.value || '';
+    const tenant = (currentTenant && currentTenant !== 'default') ? currentTenant : '';
+    const sheets = [];
+    racks.forEach((rk, i) => {
+        const inc = document.querySelector(`[data-ri-include="${i}"]`);
+        if (!inc || !inc.checked) return;
+        const name = document.querySelector(`[data-ri-name="${i}"]`)?.value || rk.rack_name;
+        const siteOv = document.querySelector(`[data-ri-site="${i}"]`)?.value || '';
+        const u = parseInt(document.querySelector(`[data-ri-u="${i}"]`)?.value, 10) || rk.u_height;
+        const column_map = {};
+        document.querySelectorAll(`select[data-ri-map="${i}"]`).forEach(sel => {
+            const f = sel.value;
+            if (f && f !== 'ignore') column_map[sel.dataset.riCol] = f;
+        });
+        sheets.push({
+            sheet: rk.sheet, rack_name: name, shape: rk.shape,
+            site_slug: siteOv || defSite, u_height: u, tenant_slug: tenant,
+            column_map, default_role_slug: defRole, default_status: 'active',
+        });
+    });
+    return sheets;
+}
+window.collectRackImport = collectRackImport;
+
+async function commitRackImport(btn) {
+    const sheets = collectRackImport();
+    if (!sheets.length) { showToast('Select at least one rack to import.', 'error'); return; }
+    const upload_id = window._rackImport?.upload_id;
+    if (!upload_id) { showToast('No upload — choose a file first.', 'error'); return; }
+    const dryRun = !!document.getElementById('nb-ri-dryrun')?.checked;
+    if (!await showConfirmToast(`${dryRun ? 'Dry-run' : 'Import'} ${sheets.length} rack sheet(s)?${dryRun ? ' — nothing will be written.' : ''}`)) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
+    try {
+        const r = await apiJson('/api/netbox/racks/import-commit', {
+            method: 'POST', body: JSON.stringify({ upload_id, sheets, dry_run: dryRun }),
+        });
+        const errs = (r.errors && r.errors.length) || 0;
+        const msg = `${r.dry_run ? 'Dry run: ' : ''}+${r.racks_created} racks (${r.racks_updated} upd), +${r.devices_created} devices (${r.devices_updated} upd), ${r.ips_assigned} IPs`
+            + (r.skipped_devices ? ` · ${r.skipped_devices} skipped` : '')
+            + (errs ? ` · ${errs} errors` : '');
+        showToast(msg, errs ? 'info' : 'success');
+        const status = document.getElementById('nb-rack-import-status');
+        if (errs && status) {
+            status.innerHTML = `<details class="text-xs text-red-600"><summary>${errs} error(s) — unresolved device types? Seed the catalog first.</summary>${r.errors.slice(0, 25).map(e => `<div class="font-mono">${escapeHtml((e.rack || e.sheet || '') + ': ' + (e.name ? e.name + ' — ' : '') + (e.message || ''))}</div>`).join('')}</details>`;
+        }
+        if (!dryRun && !errs) {
+            document.getElementById('nb-rack-import-modal')?.remove();
+            loadNetboxData('Racks');
+        }
+    } catch (e) { showToast('Import failed: ' + (e.message || e), 'error'); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Import'; } }
+}
+window.commitRackImport = commitRackImport;
 
 async function runNwNetboxImport(btn) {
     if (btn) { btn.disabled = true; btn.textContent = 'Importing…'; }
@@ -15942,9 +16147,15 @@ async function loadNetboxData(subMenu) {
             const findBtn = subMenu === 'Prefixes'
                 ? `<button onclick="showFindSubnetModal()" class="bg-white border border-[#01A982] text-[#01A982] hover:bg-[#01A982] hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2">New Subnet</button>`
                 : '';
-            actions.innerHTML = canEdit()
-                ? `${findBtn}<button onclick="showNetboxAddModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add</button>`
+            // Admin-only Excel rack-layout importer (Setup → Module Management
+            // gating is mirrored here: only admins see the button; the hub
+            // routes are admin-gated too — defense in depth).
+            const importBtn = (subMenu === 'Racks' && isAdmin())
+                ? `<button onclick="showRackImportModal()" class="bg-white border border-indigo-500 text-indigo-600 hover:bg-indigo-500 hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2">Import .xlsx</button>`
                 : '';
+            actions.innerHTML = canEdit()
+                ? `${importBtn}${findBtn}<button onclick="showNetboxAddModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add</button>`
+                : importBtn;
         } else if (subMenu === 'Overview' && isAdmin()) {
             // Admin-only maintenance: recover data orphaned by a NetBox tenant rename.
             actions.innerHTML = `<button onclick="showNetboxMigrateTenantModal()" class="bg-white border border-amber-500 text-amber-600 hover:bg-amber-500 hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm" title="Reassign all of one tenant's NetBox objects to another, then delete the source">Migrate Data to new Tenant</button>`;

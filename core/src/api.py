@@ -1156,6 +1156,14 @@ def create_app(hub):
                 or path.endswith("/download") or path.endswith("/refresh-progress")):
             return await call_next(request)
 
+        # Spoke-facing Excel rack-import download — the netbox spoke has no
+        # browser session, so the GET is gated by a per-upload bearer token
+        # INSIDE the route (routes/netbox.py), not by a session. Only the GET
+        # (the {upload_id} download) is exempt; the POST upload + commit are
+        # session-gated admin routes.
+        if path.startswith("/api/netbox/racks/import-xlsx/") and request.method == "GET":
+            return await call_next(request)
+
         sess = _session_user(request)
         if not sess:
             # A present-but-invalid lm_session cookie is a forged/tampered
