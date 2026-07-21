@@ -40,6 +40,7 @@ A leaf: stdlib only. Audience: transport developers.
 
 import os
 import ssl
+import tempfile
 
 
 # Runtime override set by the hub from global_config.mtls_enabled (the WebUI knob),
@@ -158,10 +159,71 @@ def apply_server_client_auth(ctx: ssl.SSLContext):
         return ctx
     try:
         ctx.load_verify_locations(cafile=ca)
+        # Also trust the system store (LE/ISRG roots) so an LE-issued, SAN-pinned
+        # identity (the BugFixer cert deployed from the LE module) verifies without
+        # having to live in the private mTLS CA — mirrors the client leg, which
+        # already trusts system+CA via create_default_context. See
+        # server_client_ca_file() for the rationale (widening trust is safe: the
+        # handshake is not the gate).
+        try:
+            ctx.load_default_certs(ssl.Purpose.CLIENT_AUTH)
+        except Exception:  # noqa: BLE001
+            pass
         ctx.verify_mode = server_verify_mode()
     except Exception:  # noqa: BLE001 - don't brick the listener
         pass
     return ctx
+
+
+_combined_ca_path = None
+
+
+def server_client_ca_file():
+    """CA bundle path for VERIFYING presented client certs on a server leg
+    (the hub's :443 listener). It is ``LM_MTLS_CA`` (the private mTLS wildcard
+    chain that authenticates ordinary spokes) concatenated with the system trust
+    store, so an LE-issued, SAN-pinned identity — the BugFixer cert deployed from
+    the LE module — also verifies without having to live in the private mTLS CA.
+
+    Why widening trust here is safe: under the permissive model the TLS handshake
+    is NOT the gate (see server_verify_mode). CERT_OPTIONAL only decides whether a
+    presented cert is *readable*; actual authority is app-layer — ordinary spokes
+    by session key, and the reverse HUB_REQUEST channel by BugFixer SAN pinning
+    (``_hub_request_authorized``). A peer presenting any publicly-trusted cert
+    therefore passes TLS but gains nothing unless it is explicitly pinned. This
+    also restores the symmetry the client leg already has (create_default_context
+    trusts system+CA). Returns the raw ``LM_MTLS_CA`` path if the combine fails,
+    so a bad system-store read can never brick the listener."""
+    global _combined_ca_path
+    ca, _, _ = _paths()
+    if not ca or not os.path.exists(ca):
+        return ca or ""
+    if _combined_ca_path and os.path.exists(_combined_ca_path):
+        return _combined_ca_path
+    try:
+        parts = []
+        with open(ca, "r") as f:
+            parts.append(f.read())
+        dvp = ssl.get_default_verify_paths()
+        sys_ca = dvp.cafile or dvp.openssl_cafile
+        if sys_ca and os.path.exists(sys_ca):
+            with open(sys_ca, "r") as f:
+                parts.append(f.read())
+        else:
+            try:
+                import certifi
+                with open(certifi.where(), "r") as f:
+                    parts.append(f.read())
+            except Exception:  # noqa: BLE001
+                pass
+        combined = "\n".join(p.strip() for p in parts if p.strip()) + "\n"
+        out = os.path.join(tempfile.gettempdir(), "lm_mtls_client_ca_combined.pem")
+        with open(out, "w") as f:
+            f.write(combined)
+        _combined_ca_path = out
+        return out
+    except Exception:  # noqa: BLE001 - fall back to the private CA only
+        return ca
 
 
 def status() -> dict:

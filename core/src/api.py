@@ -1922,7 +1922,9 @@ def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
     try:
         from security import mtls as _mtls
         if _mtls.mtls_enabled():
-            _ca = _mtls._paths()[0]
+            # Combined CA = private mTLS CA + system store, so an LE-issued,
+            # SAN-pinned BugFixer cert verifies too (see server_client_ca_file).
+            _ca = _mtls.server_client_ca_file()
             if _ca and os.path.exists(_ca):
                 cfg_kwargs["ssl_ca_certs"] = _ca
                 cfg_kwargs["ssl_cert_reqs"] = _mtls.server_verify_mode()
@@ -1987,7 +1989,8 @@ def run_api_server(hub, port=443):
         try:
             from security import mtls as _mtls
             if _mtls.mtls_enabled():
-                _ca = _mtls._paths()[0]
+                # Combined CA (private mTLS CA + system store) — see build_server().
+                _ca = _mtls.server_client_ca_file()
                 if _ca and os.path.exists(_ca):
                     _mtls_kw = {"ssl_ca_certs": _ca,
                                 "ssl_cert_reqs": _mtls.server_verify_mode()}
