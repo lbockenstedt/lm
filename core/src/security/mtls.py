@@ -38,9 +38,12 @@ precedence over env for the material paths — see set_runtime_materials):
 A leaf: stdlib only. Audience: transport developers.
 """
 
+import logging
 import os
 import ssl
 import tempfile
+
+logger = logging.getLogger(__name__)
 
 
 # Runtime override set by the hub from global_config.mtls_enabled (the WebUI knob),
@@ -204,25 +207,46 @@ def server_client_ca_file():
         parts = []
         with open(ca, "r") as f:
             parts.append(f.read())
-        dvp = ssl.get_default_verify_paths()
-        sys_ca = dvp.cafile or dvp.openssl_cafile
-        if sys_ca and os.path.exists(sys_ca):
+        # Locate the system ROOT bundle (holds ISRG/LE roots). Try certifi first —
+        # it ships a complete PEM bundle and is almost always installed (requests/
+        # httpx depend on it) — then OpenSSL's configured paths, then the common
+        # distro locations. ssl.get_default_verify_paths().cafile is frequently
+        # None on Debian (it uses a capath dir, not a single file), which is why a
+        # single-source lookup silently produced a root-less bundle and every
+        # LE-issued client cert got rejected.
+        sys_ca = ""
+        try:
+            import certifi
+            if os.path.exists(certifi.where()):
+                sys_ca = certifi.where()
+        except Exception:  # noqa: BLE001
+            pass
+        if not sys_ca:
+            dvp = ssl.get_default_verify_paths()
+            for cand in (dvp.cafile, dvp.openssl_cafile,
+                         "/etc/ssl/certs/ca-certificates.crt",   # Debian/Ubuntu
+                         "/etc/pki/tls/certs/ca-bundle.crt",     # RHEL/CentOS
+                         "/etc/ssl/cert.pem"):                   # Alpine/BSD
+                if cand and os.path.exists(cand):
+                    sys_ca = cand
+                    break
+        if sys_ca:
             with open(sys_ca, "r") as f:
                 parts.append(f.read())
-        else:
-            try:
-                import certifi
-                with open(certifi.where(), "r") as f:
-                    parts.append(f.read())
-            except Exception:  # noqa: BLE001
-                pass
         combined = "\n".join(p.strip() for p in parts if p.strip()) + "\n"
         out = os.path.join(tempfile.gettempdir(), "lm_mtls_client_ca_combined.pem")
         with open(out, "w") as f:
             f.write(combined)
         _combined_ca_path = out
+        n_certs = combined.count("-----BEGIN CERTIFICATE-----")
+        logger.info("[mtls] client-verify CA = LM_MTLS_CA + system store (%s): "
+                    "%d trusted cert(s) at %s", sys_ca or "system store NOT FOUND",
+                    n_certs, out)
         return out
-    except Exception:  # noqa: BLE001 - fall back to the private CA only
+    except Exception as e:  # noqa: BLE001 - fall back to the private CA only
+        logger.warning("[mtls] combined client-verify CA build failed (%s) — "
+                       "falling back to LM_MTLS_CA only; LE-issued client certs "
+                       "(e.g. BugFixer) will be REJECTED", e)
         return ca
 
 
