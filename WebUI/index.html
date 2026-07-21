@@ -581,17 +581,80 @@
         } catch (e) {}
         banner(msg);
       }
+
+      // Dismissible, re-usable runtime-error banner. Unlike the fatal `banner`
+      // (one-shot, page-load failures only), this surfaces recoverable runtime
+      // errors — e.g. a ReferenceError thrown while rendering a view — so an
+      // operator on a remote system with no devtools console still sees what
+      // broke and where. Same red look as the fatal banner per UX preference,
+      // but with Reload + a dismiss ×, and it updates in place for new errors
+      // (dedup'd on identical text so a spammy handler doesn't churn).
+      var rbEl = null, rbShown = null;
+      function runtimeBanner(msg, where) {
+        var text = String(msg || '(no message)').slice(0, 300);
+        if (where) text += '  (' + where + ')';
+        if (rbShown === text && rbEl && rbEl.style.display !== 'none') return;
+        rbShown = text;
+        if (rbEl) {
+          var s = rbEl.querySelector('.lm-rb-msg');
+          if (s) s.textContent = text;
+          rbEl.style.display = 'flex';
+        } else {
+          rbEl = document.createElement('div');
+          rbEl.setAttribute('role', 'alert');
+          rbEl.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483646;'
+            + 'background:#7f1d1d;color:#fff;font:13px/1.4 system-ui,sans-serif;'
+            + 'padding:8px 14px;box-shadow:0 2px 8px rgba(0,0,0,.4);'
+            + 'display:flex;align-items:center;gap:10px';
+          rbEl.innerHTML = '<strong>⚠ Runtime error</strong>'
+            + '<span class="lm-rb-msg" style="flex:1;opacity:.95;word-break:break-word"></span>'
+            + '<button class="lm-rb-reload" style="padding:2px 10px;border:1px solid #fff;'
+            + 'border-radius:4px;background:transparent;color:#fff;cursor:pointer">Reload</button>'
+            + '<button class="lm-rb-dismiss" title="Dismiss" style="padding:2px 8px;'
+            + 'border:1px solid rgba(255,255,255,.6);border-radius:4px;background:transparent;'
+            + 'color:#fff;cursor:pointer">×</button>';
+          (document.body || document.documentElement).appendChild(rbEl);
+          rbEl.querySelector('.lm-rb-reload').onclick = function () { location.reload(); };
+          rbEl.querySelector('.lm-rb-dismiss').onclick = function () {
+            rbEl.style.display = 'none'; rbShown = null;
+          };
+          rbEl.querySelector('.lm-rb-msg').textContent = text;
+        }
+      }
+      // Network/transport failures are surfaced inline by the app (spoke-down
+      // 503s, "NetBox spoke not connected", etc.) — don't also flash a scary
+      // red banner for them on a flaky link.
+      function isNetworkNoise(msg) {
+        return /\b(failed to fetch|networkerror when attempting to fetch resource|load failed|err_network)\b/i.test(String(msg || ''));
+      }
+
       window.addEventListener('error', function (e) {
         // Script parse/exec failures surface here with no column/line on the
         // event's filename → treat a core-asset error as fatal; ignore benign
         // resource 404s for non-core assets.
         var f = (e && e.filename) || '';
-        if (/main\.js|sim-views\.js|update_handler\.js|help\.js/.test(f)) onFatal(e.message);
+        var coreAsset = /main\.js|sim-views\.js|update_handler\.js|help\.js/.test(f);
+        // If the app already initialized (the sentinel global exists), a
+        // core-asset error is a RUNTIME error (e.g. a ReferenceError thrown in
+        // a click handler) — reloading won't fix it and only loses the user's
+        // place, so surface it dismissibly. Only route to onFatal (reload-once
+        // cache-bust) when main.js never initialized — a stale/partial deploy.
+        if (coreAsset && typeof window.updateStatus !== 'function') { onFatal(e.message); return; }
+        // Otherwise surface as a dismissible runtime banner (non-fatal). Skip
+        // cross-origin script errors (no message, can't act on) and network
+        // noise (shown inline by the app already).
+        var msg = e && e.message;
+        if (!msg || isNetworkNoise(msg)) return;
+        var where = f ? f.split('/').pop() + ':' + (e.lineno || 0) : '';
+        runtimeBanner(msg, where);
       }, true);
       window.addEventListener('unhandledrejection', function (e) {
         // Don't reload on a rejected promise (usually a failed fetch, not fatal);
-        // just surface it non-destructively.
-        banner((e && e.reason && e.reason.message) || 'A background request failed.');
+        // just surface it non-destructively. Prefer the Error's message.
+        var r = e && e.reason;
+        var msg = (r && (r.message || r.stack)) || String(r || 'A background request failed.');
+        if (isNetworkNoise(msg)) return;
+        runtimeBanner(msg, '');
       });
       // If the app never initialized (core script failed to parse/run), the
       // sentinel global won't exist — flag it after load settles.
