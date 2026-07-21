@@ -228,6 +228,18 @@ class RepoSyncMixin:
             logger.info("[sync-error] update-health: %d warning(s) unchanged since last cycle",
                         len(cur_warnings))
         self._prev_update_warnings = cur_warnings
+        # Benign self-healing notices (e.g. a stale process pending the restart
+        # window) — INFO only, NO [sync-error] tag, so they stay observable in the
+        # hub log WITHOUT landing in the Error Log / BugFixer feed. Deduped across
+        # cycles like warnings (the stale state persists from pull → 2am restart,
+        # so log it once per state change, not every 15-min cycle).
+        cur_notices = set(update_health.get("notices", []))
+        prev_notices = getattr(self, "_prev_update_notices", set())
+        for n in sorted(cur_notices - prev_notices):
+            logger.info("update-health: %s", n)
+        for n in sorted(prev_notices - cur_notices):
+            logger.info("update-health: CLEARED — %s", n)
+        self._prev_update_notices = cur_notices
 
         ok_count = sum(1 for r in repo_results if r.get("status") == "ok")
         err_count = sum(1 for r in repo_results if r.get("status") == "error")

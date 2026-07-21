@@ -638,6 +638,11 @@ class UpdatePipelineMixin:
         unreachable, legacy leaf) - logged at WARNING."""
         warnings: List[str] = []
         errors: List[str] = []
+        # ``notices`` = benign, self-healing states that are EXPECTED and must not
+        # read as failures: chiefly a stale process pending the restart window. The
+        # caller logs these at plain INFO (no ``[sync-error]`` tag), so they don't
+        # land in the Error Log / BugFixer feed. They do NOT affect ``ok``.
+        notices: List[str] = []
         checks: Dict[str, Any] = {}
         try:
             hub_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
@@ -726,9 +731,16 @@ class UpdatePipelineMixin:
             checks["running_version"] = run_v
             checks["disk_version"] = disk_v
             if run_v and disk_v and run_v not in ("unknown",) and run_v != disk_v:
-                errors.append(
+                # INFO, not an error: code pulled but not yet restarted is the
+                # EXPECTED steady state between an auto-update and the gated 2am
+                # restart window — the watchdog self-heals it (1h hard backstop
+                # below). A genuinely broken restart path trips the SEPARATE
+                # machinery errors (missing helper / bad unit / no Restart=), which
+                # stay loud. So the stale state itself is a notice, not a failure.
+                notices.append(
                     f"process is STALE: running v{run_v} but on-disk is v{disk_v} — "
-                    f"code updated without a restart (systemctl restart lm.service).")
+                    f"code updated without a restart; the watchdog will restart it "
+                    f"in the maintenance window.")
                 # The in-process self-restart (lm-update-restart) can silently
                 # fail to fire from the daemon, leaving a stale process serving
                 # old code. Drop a sentinel for the ROOT lm-watchdog, which does a
@@ -839,7 +851,7 @@ class UpdatePipelineMixin:
         except Exception as e:  # noqa: BLE001 — health check must never raise
             warnings.append(f"update health check error: {e}")
         return {"ok": not warnings and not errors, "checks": checks,
-                "warnings": warnings, "errors": errors}
+                "warnings": warnings, "errors": errors, "notices": notices}
 
     async def _repair_update_perms(self) -> bool:
         """Best-effort self-heal for update-path permission drift (root-owned
