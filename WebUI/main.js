@@ -6387,7 +6387,12 @@ function _elevFaceTable(units, faceLabel) {
     </div>`;
 }
 
-async function showRackElevationModal(rackId, rackName) {
+async function showRackElevationModal(rackId) {
+    // Name comes from the cached racks list (window._nbRacks) — NOT embedded in
+    // the onclick attribute, where a JSON.stringify'd double-quoted name would
+    // close the HTML attribute early and break the click handler.
+    const rk = (window._nbRacks || []).find(r => String(r.id) === String(rackId)) || {};
+    const rackName = rk.name || '';
     openModal('nb-rack-elev-modal', `
         <div class="flex justify-between items-center mb-3">
             <h3 class="text-lg font-bold">Rack elevation — ${escapeHtml(rackName || '')}</h3>
@@ -16352,7 +16357,7 @@ async function loadNetboxData(subMenu) {
                 <td class="px-4 py-2 text-xs font-mono">${rk.facility_id || '—'}</td>
                 <td class="px-4 py-2 text-center">${rk.u_height}</td>
                 <td class="px-4 py-2 whitespace-nowrap">
-                    <button onclick="showRackElevationModal(${rk.id}, ${JSON.stringify(rk.name)})" title="View elevation" class="p-1 text-slate-400 hover:text-[#01A982] transition-colors">${viewIcon}</button>
+                    <button onclick="showRackElevationModal(${rk.id})" title="View elevation" class="p-1 text-slate-400 hover:text-[#01A982] transition-colors">${viewIcon}</button>
                     <button onclick="editNetboxRack(${rk.id})" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
                     <button onclick="deleteNetboxRack(${rk.id})" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
                 </td>
