@@ -553,6 +553,21 @@ def register(app, hub, ctx):
                                    id_field="rack_id", obj_id=rack_id,
                                    verify_key="netbox_racks", tenant_mode=None)
 
+    @app.get("/api/netbox/racks/{rack_id}/elevation")
+    async def netbox_get_rack_elevation(rack_id: int, request: Request):
+        """Front+rear rack elevation render model for the WebUI "View" button
+        (mirrors NetBox's rack-elevation view). Read-only, but non-admins are
+        ownership-gated against their tenant's racks cache (same cross-tenant
+        guard as the PUT/DELETE routes) so a user can't enumerate another
+        tenant's rack layout by guessing the sequential rack_id; admins bypass.
+        Relays ``NETBOX_GET_RACK_ELEVATION`` to the ipam spoke."""
+        await _verify_owns(request, "netbox_racks", rack_id, id_field="id")
+        hub = app.state.hub
+        spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
+        result = await hub.request_response(
+            spoke_id, "NETBOX_GET_RACK_ELEVATION", {"rack_id": rack_id}, timeout=30.0)
+        return _unwrap_netbox(result)
+
     @app.get("/api/netbox/devices")
     async def netbox_get_devices(request: Request, site: str = None, rack: str = None, tenant: str = None):
         """List NetBox devices, optionally scoped by site/rack; non-admins get the

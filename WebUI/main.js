@@ -200,6 +200,9 @@ const ROUTES = {
     rackImportXlsx:         { m: 'POST', p: '/api/netbox/racks/import-xlsx',       api: 'netbox_rack_import_xlsx' },
     rackImportCommit:       { m: 'POST', p: '/api/netbox/racks/import-commit',     api: 'netbox_rack_import_commit' },
     showRackImportModal:    { modal: true, via: 'commitRackImport' },
+    // Rack elevation view (front+rear like NetBox): GET render model.
+    rackElevation:          { m: 'GET',  p: '/api/netbox/racks/{rack_id}/elevation', api: 'netbox_get_rack_elevation' },
+    showRackElevationModal: { modal: true, via: 'showRackElevationModal' },
 
     // ── DNS / DHCP ──
     loadDNSData:            { m: 'GET',  p: '/api/dns/records',           api: 'dns_list_records' },
@@ -6330,6 +6333,102 @@ async function showRackImportModal() {
     window._rackImport = { upload_id: null, racks: [], form_options: {} };
 }
 window.showRackImportModal = showRackImportModal;
+
+// ── Rack elevation view (front+rear, like NetBox) ───────────────────────────
+// Renders the render-model from NETBOX_GET_RACK_ELEVATION: two side-by-side
+// U-grids (top→bottom, highest U first) with consecutive same-device units
+// merged via rowspan (multi-U devices), cells tinted with the device role
+// color, plus a 0U/side tray underneath. Read-only; non-admins are ownership-
+// gated at the route.
+function _elevTextOn(hex) {
+    const h = (hex || '').replace('#', '');
+    if (h.length !== 6) return '#1e293b';
+    const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+    const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    return lum > 0.6 ? '#1e293b' : '#ffffff';
+}
+
+function _elevFaceTable(units, faceLabel) {
+    // units: [{unit, device|null}] top→bottom. Merge consecutive same-device-id
+    // units into one rowspan cell (multi-U device); empty units stay blank.
+    const rows = [];
+    let i = 0;
+    while (i < units.length) {
+        const u = units[i];
+        const dev = u && u.device;
+        let span = 1;
+        if (dev && dev.id != null) {
+            while (i + span < units.length && units[i + span].device && units[i + span].device.id === dev.id) span++;
+        }
+        const label = `<td class="px-2 py-1 text-[10px] text-slate-400 font-mono w-8 text-right align-middle border-b border-slate-100">${u && u.unit != null ? u.unit : ''}</td>`;
+        let cell;
+        if (dev) {
+            const color = dev.role_color || '9e9e9e';
+            const fg = _elevTextOn(color);
+            cell = `<td rowspan="${span}" class="px-2 py-1 text-[11px] align-top border-b border-white/20" style="background:#${color};color:${fg}">
+                <div class="font-semibold truncate leading-tight">${escapeHtml(dev.name || '')}</div>
+                <div class="opacity-85 truncate leading-tight">${escapeHtml(dev.model || '')}${dev.role ? ' · ' + escapeHtml(dev.role) : ''}</div>
+                ${dev.primary_ip ? `<div class="font-mono opacity-85 truncate leading-tight">${escapeHtml(dev.primary_ip)}</div>` : ''}
+            </td>`;
+        } else {
+            cell = `<td rowspan="${span}" class="border-b border-slate-100 bg-slate-50/40"></td>`;
+        }
+        rows.push(`<tr>${label}${cell}</tr>`);
+        i += span;
+    }
+    if (!rows.length) {
+        return `<div class="flex-1 min-w-0">
+            <div class="text-xs font-bold text-slate-400 uppercase mb-1">${faceLabel}</div>
+            <p class="text-xs text-slate-400 italic">empty</p></div>`;
+    }
+    return `<div class="flex-1 min-w-0">
+        <div class="text-xs font-bold text-slate-500 uppercase mb-1">${faceLabel}</div>
+        <table class="w-full border-collapse">${rows.join('')}</table>
+    </div>`;
+}
+
+async function showRackElevationModal(rackId, rackName) {
+    openModal('nb-rack-elev-modal', `
+        <div class="flex justify-between items-center mb-3">
+            <h3 class="text-lg font-bold">Rack elevation — ${escapeHtml(rackName || '')}</h3>
+            <button onclick="document.getElementById('nb-rack-elev-modal').remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+        </div>
+        <div id="nb-rack-elev-body" class="text-xs text-slate-500">Loading…</div>
+    `, { card: 'w-full max-w-3xl p-6 space-y-4 max-h-[90vh] overflow-y-auto', backdropClose: true });
+    try {
+        const d = await apiJson(`/api/netbox/racks/${rackId}/elevation`);
+        const body = document.getElementById('nb-rack-elev-body');
+        if (!d || d.status === 'ERROR') {
+            body.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${escapeHtml((d && d.message) || 'NetBox spoke not connected')}</p>`;
+            return;
+        }
+        const r = d.rack || {};
+        const meta = `<div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600 mb-3">
+            <span><span class="text-slate-400">Site:</span> ${escapeHtml(r.site || '—')}</span>
+            <span><span class="text-slate-400">Tenant:</span> ${escapeHtml(r.tenant || '—')}</span>
+            <span><span class="text-slate-400">Height:</span> ${r.u_height || 0}U</span>
+        </div>`;
+        const front = (d.faces && d.faces.front) || [];
+        const rear  = (d.faces && d.faces.rear)  || [];
+        const grid = `<div class="flex gap-4 items-start">${_elevFaceTable(front, 'Front')}${_elevFaceTable(rear, 'Rear')}</div>`;
+        const zero = d.zero_u || [];
+        const zeroHtml = zero.length ? `<div class="mt-4">
+            <div class="text-xs font-bold text-slate-500 uppercase mb-1">0U / side</div>
+            <div class="flex flex-wrap gap-2">${zero.map(z => {
+                const c = z.role_color || '9e9e9e';
+                return `<div class="px-2 py-1 rounded text-[11px]" style="background:#${c};color:${_elevTextOn(c)}">
+                    <span class="font-semibold">${escapeHtml(z.name || '')}</span>
+                    <span class="opacity-85"> · ${escapeHtml(z.role || '')}</span>
+                </div>`;
+            }).join('')}</div>
+        </div>` : '';
+        body.innerHTML = meta + grid + zeroHtml;
+    } catch (e) {
+        const body = document.getElementById('nb-rack-elev-body');
+        if (body) body.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${escapeHtml(e.message || '')}</p>`;
+    }
+}
+window.showRackElevationModal = showRackElevationModal;
 
 async function uploadRackImportXlsx(input) {
     const file = input && input.files && input.files[0];
@@ -16168,6 +16267,7 @@ async function loadNetboxData(subMenu) {
     const escAttr = s => String(s == null ? '' : s).replace(/"/g, '&quot;');
     const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
+    const viewIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>`;
 
     try {
         if (subMenu === 'Overview') {
@@ -16252,6 +16352,7 @@ async function loadNetboxData(subMenu) {
                 <td class="px-4 py-2 text-xs font-mono">${rk.facility_id || '—'}</td>
                 <td class="px-4 py-2 text-center">${rk.u_height}</td>
                 <td class="px-4 py-2 whitespace-nowrap">
+                    <button onclick="showRackElevationModal(${rk.id}, ${JSON.stringify(rk.name)})" title="View elevation" class="p-1 text-slate-400 hover:text-[#01A982] transition-colors">${viewIcon}</button>
                     <button onclick="editNetboxRack(${rk.id})" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
                     <button onclick="deleteNetboxRack(${rk.id})" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
                 </td>

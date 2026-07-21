@@ -118,6 +118,12 @@ Recreating a lab's racks + devices by hand is infeasible, and a rigid fixed-sche
 
 **Access:** Global-Admin only — the WebUI button is hidden for non-admins (`isAdmin()`), and both POST routes return **403** for non-admin sessions. Defense in depth. The spoke's token-gated `GET /api/netbox/racks/import-xlsx/{upload_id}` download is session-exempt (the spoke has no browser session) — gated by the one-time bearer token inside the route, like the template-refresh download. **Tenant:** the current tenant (header picker) is stamped on every rack + device; `default` = global. **Dep:** `openpyxl` on the spoke (`netbox/requirements.txt`); a missing dep degrades to a clear ERROR, not a spoke crash.
 
+## Rack elevation view
+
+A NetBox-style front/back rack elevation, opened from the **eye button** on each rack row (IPAM → Racks). `GET /api/netbox/racks/{rack_id}/elevation` relays `NETBOX_GET_RACK_ELEVATION` to the ipam spoke, which calls NetBox's `/api/dcim/racks/{id}/elevation/?face=front|rear` (one entry per RU, top→bottom, multi-U devices occupying consecutive units) plus the rack's device list for 0U / side devices (position null/0). The render model is `{rack:{name,u_height,site,tenant}, faces:{front,rear:[{unit,device}]}, zero_u:[…]}` — each device summary carries the role `color` so the WebUI tints the slot like NetBox; consecutive same-device units are merged into one rowspan cell; 0U/side devices render in a tray below the two grids.
+
+**Access:** read-only, but non-admins are ownership-gated against their tenant's racks cache (`_verify_owns`, same cross-tenant guard as the rack PUT/DELETE routes) so a user can't enumerate another tenant's rack layout by guessing the sequential `rack_id`; admins bypass.
+
 ## Troubleshooting / common questions
 
 - **A sync fails with 400 / "field does not exist for this object type."** The custom fields this sync needs were never provisioned on this NetBox (a stale deploy, or an externally-managed NetBox that was connected without provisioning). Fix: Setup → IPAM → edit the instance → **Apply schema changes**, or rerun `install.sh` on the module side. This is safe and idempotent.
