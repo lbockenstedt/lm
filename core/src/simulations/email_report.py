@@ -64,6 +64,15 @@ def _num(v: Any) -> str:
     return _esc(v) if v is not None else "—"
 
 
+def _pct(v: Any) -> str:
+    """Success-% cell: colored green/amber/red by band, '—' when no graded samples."""
+    if v is None:
+        return '<span style="color:#9ca3af">—</span>'
+    col = "#10b981" if v >= 99 else ("#b8860b" if v >= 95 else "#ef4444")
+    n = int(v) if float(v).is_integer() else v
+    return f'<span style="color:{col};font-weight:bold">{n}%</span>'
+
+
 def _html_to_text(html: str) -> str:
     """Crude plain-text fallback for the multipart email (clients render the
     HTML; this is the text/plain alternative)."""
@@ -100,16 +109,28 @@ async def build_report(hub, service: SimulationsService, tenant_id: str,
 
     # 30-day health (centralized hub poller + relayed distributed spokes)
     health: Dict[str, Dict[str, Any]] = {}
+    success: Dict[str, Dict[str, Any]] = {}
     hh = getattr(getattr(hub, "central_hub_poller", None), "_health", None)
     if hh is not None:
         try:
             health = dict(hh.summary(tenant_id) or {})
         except Exception:  # noqa: BLE001
             health = {}
+        try:
+            success = dict(hh.success_stats(tenant_id) or {})
+        except Exception:  # noqa: BLE001
+            success = {}
     for _sid, sd in service._spokes_for_tenant(tenant_id):
         sp = ((sd or {}).get("central") or {}).get("health") or {}
         for site, cm in sp.items():
             health.setdefault(site, {}).update(cm)
+    # Success-% per check over 24h·7d·4w. Centralized = hourly-accurate; distributed
+    # checks (daily-only) fall back to their daily buckets so every row gets a score.
+    from .central_hub_poller import success_from_daily
+    for site, cm in health.items():
+        for cid, dlist in (cm or {}).items():
+            if success.get(site, {}).get(cid) is None:
+                success.setdefault(site, {})[cid] = success_from_daily(dlist)
 
     checks.sort(key=lambda r: (_RANK.get(r["status"], 3), r["site"], r["check"]))
     n_fail = sum(1 for c in checks if c["status"] == "error")
@@ -146,16 +167,18 @@ async def build_report(hub, service: SimulationsService, tenant_id: str,
         rows = []
         for c in checks:
             daily = ((health.get(c["site"]) or {}).get(c["check"])) or []
+            sx = ((success.get(c["site"]) or {}).get(c["check"])) or {}
             rows.append(f'<tr><td {td}><span style="font-family:monospace;font-size:11px;color:#374151">{_esc(c["site"])}</span></td>'
                         f'<td {td}>{_esc(c["check"])}</td><td {td}>{_pill(c["status"])}</td>'
+                        f'<td {tdn}>{_pct(sx.get("h24"))}</td><td {tdn}>{_pct(sx.get("d7"))}</td><td {tdn}>{_pct(sx.get("w4"))}</td>'
                         f'<td {td}>{_strip(daily)}</td></tr>')
         parts.append(f'''
   <div style="padding:18px 22px 8px">
    <div style="{P};font-size:13px;font-weight:bold;color:#1f2937;margin-bottom:8px">Dashboard Checks
-     <span style="font-weight:normal;color:#6b7280;font-size:11px">· {len(checks)} monitored · worst first</span></div>
+     <span style="font-weight:normal;color:#6b7280;font-size:11px">· {len(checks)} monitored · worst first · % = polls OK</span></div>
    <table role="presentation" width="100%" style="border-collapse:collapse">
-     <tr><th {th}>Site</th><th {th}>Check</th><th {th}>Status</th><th {th}>30-day trend</th></tr>
-     {"".join(rows) or f'<tr><td {td} colspan="4">No checks reported.</td></tr>'}
+     <tr><th {th}>Site</th><th {th}>Check</th><th {th}>Status</th><th {th} style="text-align:right">24h</th><th {th} style="text-align:right">7d</th><th {th} style="text-align:right">4w</th><th {th}>30-day trend</th></tr>
+     {"".join(rows) or f'<tr><td {td} colspan="7">No checks reported.</td></tr>'}
    </table>
    <div style="{P};font-size:10px;color:#6b7280;padding:8px 0 4px">
      <span style="color:#10b981">■</span> firing (healthy) &nbsp; <span style="color:#f59e0b">■</span> degraded &nbsp;

@@ -296,6 +296,31 @@ class ClientCountTracker:
 
 _HEALTH_IDX = {"ok": 0, "warning": 1, "error": 2}  # else (no_data/pending/unknown) -> 3
 
+# Success-% reporting windows: (payload key, seconds). 4 weeks = 28d, inside the
+# 30-day retention. Ordered widest-last so the UI can render them left→right.
+_SUCCESS_WINDOWS = (("h24", 24 * 3600), ("d7", 7 * 86400), ("w4", 28 * 86400))
+
+
+def success_from_daily(daily: list) -> Dict[str, Any]:
+    """Fallback success-% from a DAILY bucket list ([{d,o,w,e,n}], newest last) —
+    used for distributed-mode checks that relay only daily summaries (no hourly).
+    Same denominator rule as CheckHealthHistory.success_stats: ok/(ok+warning+error),
+    grey excluded. h24 = today's bucket only (best available at daily resolution)."""
+    now = time.time()
+    today = int(now // 86400 * 86400)
+    spans = {"h24": today, "d7": now - 7 * 86400, "w4": now - 28 * 86400}
+    out: Dict[str, Any] = {}
+    for label, floor in spans.items():
+        ok = graded = 0
+        for d in (daily or []):
+            if int(d.get("d", 0)) < floor:
+                continue
+            o, w, e = int(d.get("o", 0)), int(d.get("w", 0)), int(d.get("e", 0))
+            ok += o
+            graded += o + w + e
+        out[label] = round(100.0 * ok / graded, 1) if graded else None
+    return out
+
 
 class CheckHealthHistory:
     """Rolling 30-day status history for every dashboard check, in HOURLY buckets.
@@ -398,6 +423,36 @@ class CheckHealthHistory:
         buckets = self._h.get(self._key(tenant, site, check_id), {})
         return [{"h": b, "o": v[0], "w": v[1], "e": v[2], "n": v[3]}
                 for b, v in sorted(buckets.items())]
+
+    def success_stats(self, tenant: str) -> Dict[str, Any]:
+        """{site: {check_id: {"h24", "d7", "w4"}}} — the % of GRADED samples that
+        were OK (green) over the last 24 hours, 7 days, and 4 weeks. "Graded" =
+        ok+warning+error; grey/no_data (idx 3) is excluded from the denominator so
+        a check that simply wasn't reporting doesn't drag the score down. Each value
+        is a 0–100 float rounded to 1 dp, or None when the window has no graded
+        samples. Hourly-accurate (24h really means the last 24 one-hour buckets)."""
+        now = time.time()
+        prefix = f"{tenant}{_CC_KEYSEP}"
+        out: Dict[str, Any] = {}
+        for key, buckets in self._h.items():
+            if not key.startswith(prefix):
+                continue
+            parts = key.split(_CC_KEYSEP, 2)
+            if len(parts) != 3:
+                continue
+            _, site, check_id = parts
+            stats: Dict[str, Any] = {}
+            for label, span in _SUCCESS_WINDOWS:
+                floor = now - span
+                ok = graded = 0
+                for b, cell in buckets.items():
+                    if b < floor:
+                        continue
+                    ok += cell[0]
+                    graded += cell[0] + cell[1] + cell[2]
+                stats[label] = round(100.0 * ok / graded, 1) if graded else None
+            out.setdefault(site, {})[check_id] = stats
+        return out
 
 
 _CPW_WINDOW = 3600  # seconds — the rolling 1-hour PASS/FAIL verdict window

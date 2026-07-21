@@ -1855,13 +1855,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 except Exception:  # noqa: BLE001 — no spoke / offline → empty
                     pass
             return {"hourly": hourly}
+        from .central_hub_poller import success_from_daily
         daily = dict(health.summary(tenant_id)) if health else {}
+        success = dict(health.success_stats(tenant_id)) if health else {}
         # Merge relayed spoke health (distributed-mode tenants).
         for _sid, data in service._spokes_for_tenant(tenant_id):
             sp = ((data or {}).get("central") or {}).get("health") or {}
             for site_name, checks in sp.items():
                 daily.setdefault(site_name, {}).update(checks)
-        return {"daily": daily}
+        # Success-% per check (ok / graded over 24h·7d·4w). Hub-poller history is
+        # hourly-accurate; distributed checks (only in `daily`) fall back to their
+        # daily buckets so every rendered check gets a score.
+        for site_name, checks in daily.items():
+            for cid, dlist in (checks or {}).items():
+                if success.get(site_name, {}).get(cid) is None:
+                    success.setdefault(site_name, {})[cid] = success_from_daily(dlist)
+        return {"daily": daily, "success": success}
 
     @app.get("/sim/api/aggregate/central-status")
     async def get_central_status(tenant_id: str = Depends(get_tenant_id)):

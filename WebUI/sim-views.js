@@ -854,9 +854,13 @@ async function csRenderSimulations() {
     const data = await csSimLoadCentral();
     const spokes = csSimSpokes(data);
     if (!spokes) return;
-    // 30-day per-check health history (for the strip under each check row).
-    try { window._csHealthDaily = ((await csFetch(`/aggregate/central-health?tenant_id=${csTenant()}`)) || {}).daily || {}; }
-    catch (e) { console.error('central-health fetch failed', e); window._csHealthDaily = {}; }
+    // 30-day per-check health history (for the strip under each check row) +
+    // per-check success-% (polls OK) over 24h/7d/4w.
+    try {
+        const _ch = (await csFetch(`/aggregate/central-health?tenant_id=${csTenant()}`)) || {};
+        window._csHealthDaily = _ch.daily || {};
+        window._csHealthSuccess = _ch.success || {};
+    } catch (e) { console.error('central-health fetch failed', e); window._csHealthDaily = {}; window._csHealthSuccess = {}; }
     window._csHealthHourly = window._csHealthHourly || {};
     // Collect the universe of check ids + per-bucket counts.
     const checkIds = new Set();
@@ -905,19 +909,32 @@ window.csSimChecksFilter = function () {
     const rh = rows.map(r => {
       const daily = ((window._csHealthDaily || {})[r.site] || {})[r.check];
       const bar = csHealthBar(daily, r.site, r.check);
+      const sx = ((window._csHealthSuccess || {})[r.site] || {})[r.check] || {};
       return `<tr>
       <td class="px-3 pt-2 pb-1 font-mono text-xs text-slate-600">${csEscape(r.site)}</td>
       <td class="px-3 pt-2 pb-1 font-mono text-xs">${csEscape(r.check)}</td>
       <td class="px-3 pt-2 pb-1">${csStatusBadge(r.status)}</td>
+      <td class="px-3 pt-2 pb-1 text-right">${csPct(sx.h24)}</td>
+      <td class="px-3 pt-2 pb-1 text-right">${csPct(sx.d7)}</td>
+      <td class="px-3 pt-2 pb-1 text-right">${csPct(sx.w4)}</td>
       <td class="px-3 pt-2 pb-1 text-xs text-slate-400">${csEscape((r.detail && (r.detail.message || r.detail.last_error)) || '—')}</td>
-    </tr>${bar ? `<tr><td colspan="4" class="px-3 pb-2 pt-0">${bar}</td></tr>` : ''}`;
+    </tr>${bar ? `<tr><td colspan="7" class="px-3 pb-2 pt-0">${bar}</td></tr>` : ''}`;
     }).join('');
-    body.innerHTML = csTable(['Site', 'Check', 'Status', 'Detail'], rh);
+    body.innerHTML = csTable(['Site', 'Check', 'Status', '24h', '7d', '4w', 'Detail'], rh);
 };
 
 // Keystroke-debounced entry point for the free-text filter input (the bucket
 // <select> stays on the immediate onchange= above). See csDebounce.
 window.csSimChecksFilterKey = csDebounce(window.csSimChecksFilter, 200);
+
+// Success-% cell for the checks table — % of polls OK over a window. Colored by
+// band (≥99 green, ≥95 amber, else red); em-dash when no graded samples.
+function csPct(v) {
+    if (v === null || v === undefined) return '<span class="text-slate-300">—</span>';
+    const col = v >= 99 ? 'text-emerald-600' : (v >= 95 ? 'text-amber-600' : 'text-red-500');
+    const n = Number.isInteger(v) ? v : v;
+    return `<span class="${col} font-semibold text-xs" title="${v}% of polls OK">${n}%</span>`;
+}
 
 // ── Per-check 30-day health strip (green/yellow/red) ─────────────────────────
 // Full-width, thin daily bar rendered on its own row under each check. One
