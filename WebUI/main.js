@@ -16455,15 +16455,48 @@ function editNetboxRack(id) {
     showNetboxRackModal(item);
 }
 
-function showNetboxRackModal(editItem) {
+async function showNetboxRackModal(editItem) {
     const editing = !!editItem;
     const val = v => (v == null ? '' : String(v).replace(/"/g, '&quot;'));
+    const esc = escapeHtml;
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
+
+    // Pull the real NetBox sites so the user picks from a dropdown instead of
+    // typing a free-text slug. /api/netbox/sites → { sites: [{id,name,slug}] }.
+    // add_rack takes a site SLUG, so option values are slugs. On edit the site
+    // is immutable (update_rack doesn't take it) → disabled select, preselected
+    // by matching the rack's stored site NAME (get_racks returns the name, not
+    // the slug). Falls back to a free-text slug input if the sites list is
+    // empty / fetch fails, so the form still works offline.
+    let sites = [];
+    try {
+        const r = await fetch('/api/netbox/sites');
+        if (r.ok) { const d = await r.json(); sites = d.sites || []; }
+    } catch (e) { console.error('showNetboxRackModal: sites fetch failed — falling back to free-text', e); }
+
+    const curSiteName = val(editItem?.site);
+    let siteField;
+    if (sites.length) {
+        const matched = sites.find(s => s.name === curSiteName);
+        const opts = sites.map(s => {
+            const sel = (matched ? s.slug === matched.slug : s.name === curSiteName) ? 'selected' : '';
+            return `<option value="${esc(s.slug)}" ${sel}>${esc(s.name)} <${esc(s.slug)}></option>`;
+        }).join('');
+        // When editing a rack whose site isn't in the current list, show the
+        // stored name as a disabled-looking placeholder so the field isn't blank.
+        const placeholder = (editing && !matched)
+            ? `<option value="" selected>${esc(curSiteName) || '—'}</option>`
+            : `<option value="">Select site…</option>`;
+        siteField = `<select id="nb-r-site" class="${inputCls}" ${editing ? 'disabled' : ''}>${placeholder}${opts}</select>`;
+    } else {
+        siteField = `<input id="nb-r-site" value="${curSiteName}" class="${inputCls}" placeholder="lab-a" ${editing ? 'readonly' : ''}>`;
+    }
+
     const modal = openModal('nb-rack-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} Rack</h3>
         <div class="space-y-3">
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Rack Name</label><input id="nb-r-name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="Rack-01"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Site Slug</label><input id="nb-r-site" value="${val(editItem?.site)}" class="${inputCls}" placeholder="lab-a" ${editing ? 'readonly' : ''}></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Site</label>${siteField}</div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Height (U)</label><input id="nb-r-uheight" type="number" min="1" value="${val(editItem?.u_height) || 42}" class="${inputCls}" placeholder="42"></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Facility ID (optional)</label><input id="nb-r-facility" value="${val(editItem?.facility_id)}" class="${inputCls}" placeholder="A1"></div>
         </div>
