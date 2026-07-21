@@ -7176,6 +7176,15 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         _knob_loop = getattr(self, "_knob_learner_loop", None)
         if _knob_loop is not None:
             asyncio.create_task(_knob_loop())
+        # Sim-quota reconcile-push backstop: every 15m, re-push a tenant's
+        # effective sim quotas when its cs spoke's effective set has drifted
+        # from the hub's (missing or count-mismatched). The 45s adaptive
+        # controller also runs a reconcile pass each tick; this loop is the
+        # decoupled safety net for a stable-but-stale spoke that missed a push
+        # while continuously online. Registered by register_simulations_routes.
+        _reconcile_loop = getattr(self, "_reconcile_push_loop", None)
+        if _reconcile_loop is not None:
+            asyncio.create_task(_reconcile_loop())
         # Hub-as-sole-GitHub-client: ONE central puller that syncs each
         # github-managed tenant's simulation.conf / user-overrides.conf from its
         # repo and pushes changes down to that tenant's spokes (replaces the

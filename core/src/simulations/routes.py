@@ -1042,6 +1042,29 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             global_lv = {}
         return sim_quota.apply_adaptive_targets(quotas, state, global_lv)
 
+    async def _spoke_effective_counts(tenant_id: str) -> dict:
+        """Per-quota effective count as the cs spoke's engine is ACTUALLY running
+        it (vs the hub's pushed target) — ``{dedup_key: count}``. Gathered by
+        forwarding ``CS_GET_SIM_QUOTA_STATE`` to every cs spoke and reducing each
+        reply's ``effective`` list. Empty when no spokes reply (spoke down or no
+        cs spoke bound). The first spoke's count wins per key (the effective set
+        is pushed tenant-wide, so every spoke reports the same count for a key);
+        mirrors the reduction in ``get_sim_quota_state``."""
+        counts: dict = {}
+        try:
+            results = await _cs_forward_all(tenant_id, "CS_GET_SIM_QUOTA_STATE",
+                                            {}, timeout=10.0)
+        except Exception:  # noqa: BLE001
+            return counts
+        for _sid, data in results:
+            if not isinstance(data, dict):
+                continue
+            for q in (data.get("effective") or []):
+                if isinstance(q, dict):
+                    counts.setdefault(sim_quota.quota_dedup_key(q),
+                                      int(q.get("count") or 0))
+        return counts
+
     def _ceil(x: float) -> int:
         return sim_quota.ceil_to_int(x)
 
@@ -1197,6 +1220,54 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                      sorted(aliases), matched_status, firing, status_wsites, sorted(seen_cids))
         return firing
 
+    async def _reconcile_push_tenant(tenant_id: str) -> bool:
+        """Re-push the tenant's effective sim quotas when the cs spoke's
+        effective set is missing or count-mismatched vs the hub's. Returns True
+        when a re-push was sent.
+
+        This is the self-heal for a spoke that missed a push while continuously
+        online: the adaptive controller only re-pushes on state change, so a
+        spoke whose adaptive state is stable AND that missed an earlier push
+        (briefly disconnected with a mailbox delivery that didn't land, or the
+        push fired before it connected) stays stale forever — the engine keeps
+        topping up to the stale set and the row reads 0/target with no
+        eligibility explanation. Also covers non-adaptive fixed-count quotas
+        (WPA/Max-Assoc) that the adaptive controller skips entirely. The
+        diagnostic behind the decision is ``_compute_stale_push`` (shipped with
+        the Quota State view); this is the actuator that actually re-feeds the
+        spoke. Called every 45s from the adaptive controller loop (A) AND every
+        15m from a dedicated backstop loop (B)."""
+        try:
+            eff = await _effective_sim_quotas(tenant_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("reconcile-push [%s] effective read failed: %s",
+                         tenant_id, exc)
+            return False
+        if not eff:
+            return False  # tenant has no quotas — no forward, no push
+        try:
+            spoke_counts = await _spoke_effective_counts(tenant_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("reconcile-push [%s] spoke counts read failed: %s",
+                         tenant_id, exc)
+            return False
+        stale = _compute_stale_push(eff, spoke_counts)
+        if not stale:
+            return False
+        logger.info(
+            "reconcile-push [%s]: %d stale quota(s) — re-pushing: %s",
+            tenant_id, len(stale),
+            ", ".join(
+                f"{s['key']} spoke={s['spoke_count']} hub={s['hub_count']}"
+                f"{'(missing)' if s['missing'] else ''}" for s in stale))
+        try:
+            await _push_sim_quotas(tenant_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("reconcile-push [%s] re-push failed: %s",
+                           tenant_id, exc)
+            return False
+        return True
+
     async def _run_adaptive_controller() -> None:
         """One controller pass over every tenant's adaptive quotas — advance the
         target and re-push when it moves. Small (per-quota state).
@@ -1216,6 +1287,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         for tid in _all_tenant_ids():
             try:
                 csc = await store.get_central_sites_config(tid) or {}
+                # (A) Reconcile-pass each 45s tick: re-push effective quotas when
+                # the spoke's effective set is missing/mismatched vs the hub's,
+                # regardless of adaptive state. The adaptive push below only fires
+                # on state change, so a stable-but-stale spoke (missed a push while
+                # online) would never self-heal. Runs for EVERY tenant — including
+                # non-adaptive fixed-count quotas (WPA/Max-Assoc) the `if not
+                # adaptive: continue` below would otherwise skip. When this tick
+                # ALSO moves adaptive state, both pushes fire: this one carries
+                # the pre-step effective set, the `if changed:` push carries the
+                # post-step target — the second wins, which is correct.
+                await _reconcile_push_tenant(tid)
                 # Resolve the tenant's site-alias groups ONCE for the whole sweep
                 # (was re-read + rebuilt inside _alert_firing per quota).
                 alias_groups = _alias_groups_from_csc(csc)
@@ -1327,6 +1409,36 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # isn't guaranteed at route-registration time).
     try:
         hub._adaptive_controller_loop = _adaptive_controller_loop
+    except Exception:  # noqa: BLE001
+        pass
+
+    async def _reconcile_push_loop() -> None:
+        """Periodic backstop (B): re-push effective sim quotas for any tenant
+        whose spoke-side effective set has drifted from the hub's. Decoupled
+        from the adaptive controller so it still self-heals a stable-but-stale
+        spoke even when the 45s controller's per-tenant try/except skips a
+        tenant or the controller loop itself is stalled. 15-min cadence — the
+        45s controller also runs a reconcile pass each tick (A); this is the
+        safety net, not the primary path. Started from main.py."""
+        while True:
+            try:
+                for tid in _all_tenant_ids():
+                    await _reconcile_push_tenant(tid)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — a sweep must not kill the loop
+                logger.warning("reconcile-push loop: %s", exc)
+            await asyncio.sleep(900)
+
+    try:
+        hub._reconcile_push_loop = _reconcile_push_loop
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Expose the per-tenant actuator alongside the loop — gives the Hub a
+    # callable seam (and a unit-test hook) without reaching into the closure.
+    try:
+        hub._reconcile_push_tenant = _reconcile_push_tenant
     except Exception:  # noqa: BLE001
         pass
 
