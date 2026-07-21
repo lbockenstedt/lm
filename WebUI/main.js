@@ -17773,10 +17773,30 @@ async function loadLEData(subMenu) {
                 : `${soon.length} cert(s) expiring within 30d — the le renewal loop should renew these; verify with ⚡ Distribute now.`;
             return `<div class="mx-4 mt-3 mb-1 px-3 py-2 rounded-md border text-xs ${cls}">${msg}</div>`;
         })();
+        // BugFixer identity indicator — which managed cert is pinned as the
+        // BugFixer mTLS identity (the gate for hub log reads + fleet update
+        // commands). Only one cert should be tagged; if several are, list them
+        // all so the operator can un-tag the extras. Surfaced as a persistent
+        // banner ABOVE the table so you don't have to scan every row's "★
+        // BugFixer" button to find it. c.bugfixer is reconciled from the hub's
+        // authoritative pinned list in loadLEData/leToggleBugfixer.
+        const bfCerts = (certs || []).filter(c => c.bugfixer);
+        const bfBanner = (() => {
+            if (!bfCerts.length) {
+                return `<div class="mx-4 mt-3 mb-1 px-3 py-2 rounded-md border text-xs bg-slate-50 border-slate-200 text-slate-600 flex items-center gap-2"><span class="text-purple-500 font-bold">★</span><span><b>BugFixer identity:</b> no cert tagged. Tag a managed cert (<span class="font-mono">Tag BugFixer</span> on its row) so bugfixer can present it over mTLS to read hub logs + run fleet updates, then deploy it to the bugfixer target via <b>Manage</b>.</span></div>`;
+            }
+            const names = bfCerts.map(c => `<span class="font-mono font-bold text-purple-700">${escapeHtml(c.domain || '(unnamed)')}</span>`).join(', ');
+            const extra = bfCerts.length > 1 ? ` <span class="text-amber-600">— ${bfCerts.length} tagged; un-tag extras so only one is pinned.</span>` : '';
+            const deployed = bfCerts.some(c => (c.targets || []).some(t => (t.module_type || '').toLowerCase() === 'bugfixer'));
+            const depNote = deployed
+                ? ` <span class="text-green-600">— deployed to a bugfixer target ✓</span>`
+                : ` <span class="text-amber-600">— not yet deployed to a bugfixer target (Manage → add a bugfixer target)</span>`;
+            return `<div class="mx-4 mt-3 mb-1 px-3 py-2 rounded-md border text-xs bg-purple-50 border-purple-200 text-purple-800 flex items-center gap-2"><span class="text-purple-600 font-bold">★</span><span><b>BugFixer identity:</b> ${names}${depNote}${extra}</span></div>`;
+        })();
         const note = body.message ? `<p class="px-4 pb-3 text-xs text-slate-400 italic">${body.message}</p>` : '';
         container.innerHTML = (certs.length === 0 && !attemptRows)
             ? `${note}<p class="p-4 text-slate-400 italic text-sm">No managed certificates yet. Click <b class="text-slate-600 not-italic">＋ Issue certificate</b> above to configure an ACME account (email + challenge type) and issue your first cert.</p>`
-            : expBanner + note + tw(th(cols) + `<tbody>${attemptRows}${rows}</tbody>`) + _leLegend();
+            : bfBanner + expBanner + note + tw(th(cols) + `<tbody>${attemptRows}${rows}</tbody>`) + _leLegend();
     } catch (err) {
         container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
     } finally {
