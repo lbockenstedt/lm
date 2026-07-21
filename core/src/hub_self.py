@@ -165,7 +165,23 @@ class HubSelfControlPlane(AgentHostingControlPlane):
         # first-connect refused → backoff cycle on every hub start).
         await asyncio.sleep(0.5)
         self._agent_client_task = asyncio.create_task(self._run_in_process_agent())
-        await asyncio.Event().wait()   # serve forever (until cancelled)
+        try:
+            await asyncio.Event().wait()   # serve forever (until cancelled)
+        finally:
+            # Cancel the two child tasks so they don't log "Task was destroyed
+            # but it is pending!" when the hub shuts down and main.py cancels
+            # this run() task. Both are fire-and-forget loops; cancel + await.
+            for _t in (getattr(self, "_agent_server_task", None),
+                       getattr(self, "_agent_client_task", None)):
+                if _t is not None and not _t.done():
+                    _t.cancel()
+            for _t in (getattr(self, "_agent_server_task", None),
+                       getattr(self, "_agent_client_task", None)):
+                if _t is not None and not _t.done():
+                    try:
+                        await _t
+                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                        pass
 
     # ── In-process dumb agent ───────────────────────────────────────────────
 

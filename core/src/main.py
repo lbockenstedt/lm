@@ -7202,11 +7202,16 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # agent is down. ``LM_HUB_SELF_AGENT=0`` disables the feature entirely.
         # See ``core/src/hub_self.py`` + ``docs/hub-direct-ops.md``.
         self._hub_self = None
+        self._hub_self_task = None
         if os.environ.get("LM_HUB_SELF_AGENT", "1").strip() not in ("0", "false", "False"):
             try:
                 from hub_self import HubSelfControlPlane
                 self._hub_self = HubSelfControlPlane("hub-self")
-                asyncio.create_task(self._hub_self.run())
+                # Store the task so the shutdown finally below can cancel it —
+                # run() blocks on asyncio.Event().wait() (serve forever), and
+                # an uncancelled pending task logs "Task was destroyed but it
+                # is pending!" when the loop closes on hub restart.
+                self._hub_self_task = asyncio.create_task(self._hub_self.run())
                 logger.info("hub-self loopback agent-host started")
             except Exception as e:  # noqa: BLE001 — never fatal to the hub
                 logger.warning("hub-self agent-host disabled (non-fatal): %s", e)
@@ -7252,6 +7257,21 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             except Exception as exc:  # noqa: BLE001
                 logger.debug("Hub API server shutdown: %s", exc)
             self._stop_mdns_broadcast()
+            # Cancel the background tasks created in start() so the loop
+            # doesn't close with them pending (the "Task was destroyed but it
+            # is pending!" warning on hub restart — hub_self.run() blocks on
+            # an asyncio.Event forever, cert_dist is a long poll loop).
+            for _t in (self._hub_self_task, cert_dist_task):
+                if _t is None or _t.done():
+                    continue
+                _t.cancel()
+            for _t in (self._hub_self_task, cert_dist_task):
+                if _t is None or _t.done():
+                    continue
+                try:
+                    await _t
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                    pass
 
 
     async def run_hub_heartbeat_loop(self):
