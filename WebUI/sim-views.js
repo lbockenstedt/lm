@@ -3825,6 +3825,35 @@ async function csRenderSimQuotaState() {
         };
         const chips = (hosts) => (hosts || []).map(h =>
             `<span class="inline-block bg-slate-100 text-slate-700 rounded px-1.5 py-0.5 mr-1 mb-1 font-mono text-[11px]">${csEscape(h)}</span>`).join('');
+        // Per-quota candidate diagnostics (engine _quota_diag, keyed by _quota_key)
+        // so an underfilled row explains WHY: how many pool clients are free-and-
+        // eligible vs blocked, and by what. Keyed the same as keyOf(q).
+        const diagByKey = {};
+        (Array.isArray(st.diagnostics) ? st.diagnostics : []).forEach(d => {
+            if (d && d.key) diagByKey[d.key] = d;
+        });
+        const REASON_LBL = {
+            packed_other_quota: 'already serving another quota',
+            exclusive_bucket_default: 'running an exclusive bucket-default sim',
+            exclusive_monopolized: 'monopolized by an exclusive sim',
+            human_pin: 'human-pinned',
+            off_site_pinned: 'pinned to another site (server not tenant-pool)',
+            site_claimed_this_sweep: 'claimed by another site this sweep',
+            ssid_claimed_other_cell: 'claimed by another SSID cell',
+        };
+        const diagLine = (q, k) => {
+            const d = diagByKey[k];
+            if (!d) return '';
+            const target = q.count != null ? q.count : 0;
+            const blocked = (d.blocked && typeof d.blocked === 'object') ? d.blocked : {};
+            const bparts = Object.keys(blocked).sort((a, b) => blocked[b] - blocked[a])
+                .map(r => `${blocked[r]} ${REASON_LBL[r] || r}`);
+            if (d.assigned >= target && !bparts.length) return '';
+            const bits = [`<b>${d.eligible_free || 0}</b> free-eligible`];
+            if (bparts.length) bits.push(`blocked: ${csEscape(bparts.join(', '))}`);
+            if (d.not_harvestable) bits.push(`${d.not_harvestable} offline`);
+            return `<div class="mt-1 text-[11px] text-amber-700/90">🔎 why: ${bits.join(' · ')}</div>`;
+        };
         // Compact "Known-good" line for a quota row that has a recorded stable
         // operating point (matched by alert_key = "{alert_type}:{alert_id}"), plus
         // a per-row "Reset to known-good" button. Empty string when the row has no
@@ -3904,7 +3933,7 @@ async function csRenderSimQuotaState() {
             <tr>
               <td class="px-2 pt-0 pb-2 text-xs align-top" colspan="8">
                 <span class="text-[10px] text-slate-400 uppercase tracking-wider mr-1.5">Clients</span>${chips(clients) || '<span class="text-slate-400 italic">none</span>'}
-                ${kgLine(q)}
+                ${kgLine(q)}${diagLine(q, k)}
               </td>
             </tr>`;
         }).join('');
