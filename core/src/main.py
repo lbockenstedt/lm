@@ -2548,7 +2548,60 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             logger.debug("push_cs_hub_config: hub_config read for %s failed: %s",
                          spoke_id, exc)
             return
-        if not isinstance(hc, dict) or not hc.get("hub_config_enabled"):
+        hc = hc if isinstance(hc, dict) else {}
+        if not hc.get("hub_config_enabled"):
+            # Hub-owned sim config is OFF for this tenant — but GLOBAL USB dongle
+            # approvals are PLATFORM-WIDE and must still reach the spoke on
+            # reconnect (a globally-certified vid:pid the tenant never set). The
+            # full hub_config push below carries these when hub_config IS enabled;
+            # when it's disabled we deliver just the effective certified/ignored
+            # lists on their own, mirroring the approval-time _push_usb_to_tenant.
+            # Without this a spoke whose tenant hasn't enabled hub_config never
+            # picks up a global dongle cert after a restart, so its pxmx agent
+            # won't provision that dongle ("no eligible dongles" for a dongle the
+            # admin approved globally).
+            try:
+                from simulations.routes import (_normalize_usb_vidpids,
+                                                _normalize_usb_ignored)
+            except Exception:  # noqa: BLE001 — lazy import; routes pulls FastAPI
+                return
+            thc = dict(hc.get("hub_config") or {})
+            try:
+                g_cert = await self.simulations_store.get_global_usb_vidpids()
+            except Exception:  # noqa: BLE001
+                g_cert = []
+            try:
+                g_ign = await self.simulations_store.get_global_usb_ignored_vidpids()
+            except Exception:  # noqa: BLE001
+                g_ign = []
+            seen: set = set()
+            cert: list = []
+            for d in (_normalize_usb_vidpids(g_cert)
+                      + _normalize_usb_vidpids(thc.get("usb_vidpids"))):
+                vp = d.get("vidpid", "") if isinstance(d, dict) else ""
+                if vp and vp not in seen:
+                    seen.add(vp)
+                    cert.append(d)
+            ign = sorted(set(_normalize_usb_ignored(g_ign))
+                        | set(_normalize_usb_ignored(thc.get("usb_ignored_vidpids"))))
+            if not cert and not ign:
+                return
+            usb_only = {"usb_vidpids": json.dumps(cert),
+                        "usb_ignored_vidpids": json.dumps(ign)}
+            try:
+                outcome = await self._drain_aware_config_push(
+                    spoke_id, "CS_CONFIG_UPDATE", usb_only, timeout=30.0)
+                if outcome.get("queued"):
+                    logger.info("CS effective-USB re-push to %s %s (tenant %s, "
+                                "hub_config off)", spoke_id,
+                                "draining — queued" if outcome.get("draining")
+                                else "queued (spoke unreachable)", tenant_id)
+                else:
+                    logger.info("Re-pushed effective USB approvals to %s (tenant "
+                                "%s, hub_config off)", spoke_id, tenant_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("CS effective-USB re-push to %s failed: %s",
+                               spoke_id, exc)
             return
         cfg = dict(hc.get("hub_config") or {})
         # Effective USB lists (global + tenant, deduped) — the cs speak
