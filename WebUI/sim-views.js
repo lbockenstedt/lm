@@ -6556,6 +6556,25 @@ function csQtBadge(q) {
         + `<span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>🚫 QT ${csEscape(q.bus_path)} · ${csEscape(reason)} · clears in ${cnt}</span>`;
 }
 
+// Badge for a dongle the agent is actively RECOVERING (usb_state[].recovery) —
+// climbing the ladder before it would quarantine. Surfaces bus + VM + current
+// stage/attempts + the reason so an operator sees WHY a VM is recloning and
+// WHICH dongle is at fault (guest_blind = attached but guest can't see it;
+// detached = passthrough keeps dropping).
+function csRecoveryBadge(e) {
+    if (!e || !e.recovery) return '';
+    const r = e.recovery;
+    const stage = String(r.stage || r.state || '');
+    const ladder = r.state === 'guest_blind'
+        ? 'usb_reset → reattach → reboot → reclone → quarantine'
+        : 'reclone → quarantine';
+    const title = `${String(r.reason || 'recovering')}. Ladder: ${ladder}.`;
+    const vm = (e.vmid != null && e.vmid !== '') ? ` · VM ${csEscape(String(e.vmid))}` : '';
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800" title="${csEscape(title)}">`
+        + `<span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>🔧 ${csEscape(e.bus_path || '')} · ${csEscape(e.name || e.vidpid || '')}${vm}`
+        + ` · <span class="uppercase">${csEscape(stage)}</span> ${Number(r.attempts || 0)}/${Number(r.max || 0)}</span>`;
+}
+
 // ── Optimistic in-flight VM state (click-driven) ─────────────────────────────
 // Telemetry can MISS a fast transition (a VM deleted between two telemetry frames
 // never gets a "tearing_down" frame — it just goes present→gone). The operator's
@@ -7165,6 +7184,17 @@ async function csRenderVmServerUsb() {
       <div class="flex flex-wrap gap-2">${qt.map(csQtBadge).join('')}</div>
       <p class="text-[10px] text-red-600/80 mt-2">Each auto-recovers after 1h and gets retried; re-quarantines if the kernel errors persist. A failed clone never quarantines a dongle.</p>
     </div>` : '';
+    // Recovering dongles: an assigned dongle the agent is actively trying to
+    // restore (usb_state[].recovery, set while it climbs the recovery ladder)
+    // BEFORE it would quarantine — this is the "why is this VM recloning + which
+    // dongle is bad" surface. guest_blind = attached host-side but the guest
+    // can't see it; detached = passthrough keeps dropping (reclone strikes).
+    const recovering = usbState.filter(e => e && e.recovery);
+    const recBox = recovering.length ? `<div class="mb-4 border border-amber-200 bg-amber-50 rounded-lg p-3">
+      <p class="text-[11px] font-bold text-amber-700 uppercase tracking-wider mb-2">Recovering dongles (${recovering.length}) — trying to restore before quarantine</p>
+      <div class="flex flex-wrap gap-2">${recovering.map(csRecoveryBadge).join('')}</div>
+      <p class="text-[10px] text-amber-600/80 mt-2">A dongle whose guest can't see it, or whose passthrough keeps dropping, climbs a recovery ladder (USB reset → reattach → reboot → reclone → quarantine). This shows WHY a VM is recloning and WHICH dongle is at fault; if every stage fails it lands in Quarantine above.</p>
+    </div>` : '';
     // Type options for the per-row dropdown. A certified dongle that hasn't
     // been classified yet shows a "—" placeholder (selected) so the operator
     // must pick wired/wireless to assign it; picking it re-certifies (the
@@ -7269,6 +7299,7 @@ async function csRenderVmServerUsb() {
         <div class="flex items-center gap-2">${_clearQtBtn}${_clearExclBtn}</div>
       </div>
       ${summary}
+      ${recBox}
       ${qtBox}
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Certified USB (${certGroups.length} type${certGroups.length === 1 ? '' : 's'} · ${present.length} dongle${present.length === 1 ? '' : 's'})</p>
       ${csTable(['Device', 'VID:PID', 'Type', 'Approved', 'Count', 'Active VMs', 'Status'], certRows)}
