@@ -1073,7 +1073,7 @@ function csProvisionCard(px) {
     const reason = prov.reason ? csEscape(String(prov.reason)) : '—';
     const loopOn = !!prov.loop_running;
     const csOn = !!prov.cs_enabled;
-    const autoOn = !!prov.auto_provision_on;
+    const autoOn = _autoProvEffective(prov.auto_provision_on) === true;
     const vidpids = (cfg.dongle_vidpids != null) ? csEscape(String(cfg.dongle_vidpids)) : '—';
     const img1 = cfg.image1_template_id ? 'yes' : (cfg.image1_template_id === false ? 'no' : '—');
     const img2 = cfg.image2_template_id ? 'yes' : (cfg.image2_template_id === false ? 'no' : '—');
@@ -5451,6 +5451,30 @@ let csVmHosts = [];
 // csRefreshAutoProvStatus from usb-provisioning-status). Drives the ENABLE
 // button label/state on the Auto-Provisioning tile.
 let csAutoProvOn = false;
+// Optimistic auto-prov toggle. The per-host "auto-provision on" chip is
+// TELEMETRY-driven (the agent's actually-applied state), so it lags a toggle by
+// a relay cycle — the operator sees VMs spin up before the chip flips, or a
+// stale on/off right after flipping. On toggle we record the DESIRED state and
+// show it on the telemetry chips until a telemetry frame CONFIRMS it (agent's
+// auto_provision_on matches) or a 90s hard timeout. The hub-config ENABLE button
+// is already instant (the toggle persists synchronously), so it isn't overridden.
+let _autoProvInflight = null;            // { enabled: bool, ts: ms } | null
+const _AUTOPROV_INFLIGHT_MS = 90000;
+function _autoProvReported(v) {          // agent telemetry → tri-state true/false/null
+    if (v === true) return true;
+    if (v === false) return false;
+    const s = String(v == null ? '' : v).toLowerCase();
+    if (s === 'on' || s === 'true') return true;
+    if (s === 'off' || s === 'false') return false;
+    return null;                         // unknown / missing (no data this frame)
+}
+function _autoProvEffective(rawReported) {
+    const reported = _autoProvReported(rawReported);
+    if (!_autoProvInflight) return reported;
+    if (Date.now() - _autoProvInflight.ts > _AUTOPROV_INFLIGHT_MS) { _autoProvInflight = null; return reported; }
+    if (reported === _autoProvInflight.enabled) { _autoProvInflight = null; return reported; }  // telemetry confirmed
+    return _autoProvInflight.enabled;    // still pending → show the DESIRED state
+}
 let csVmSelectedSpoke = '';       // spoke_id of the FIRST in-scope host (single-host children)
 let csVmSelectedHostId = '';      // FIRST in-scope host id (single-host children)
 // Multi-host selection for VMS + Command Queue. Empty array = ALL hosts. The
@@ -5635,7 +5659,7 @@ function csProvThrottleBadge(px) {
         else detail = r || 'throttled';
         return pill('bg-red-100 text-red-700', `⏸ ${detail}`, 'Auto-provisioning throttled: ' + detail);
     }
-    if (prov.auto_provision_on === false)
+    if (_autoProvEffective(prov.auto_provision_on) === false)
         return pill('bg-slate-200 text-slate-500', 'Off', 'Auto-provisioning disabled');
     if (prov.cs_enabled === false)
         return pill('bg-slate-200 text-slate-500', 'No sim', 'Client-simulation mode not enabled on this agent');
@@ -6103,12 +6127,17 @@ window.csToggleAutoProvision = async function (enabled) {
     // Default to the opposite of the current state, which the function's closure
     // CAN read.
     if (enabled === undefined) enabled = !csAutoProvOn;
+    // Optimistic: reflect the DESIRED state on the telemetry-driven chips right
+    // away (they otherwise lag a relay cycle behind), held until a telemetry frame
+    // confirms it (_autoProvEffective) or times out.
+    _autoProvInflight = { enabled: !!enabled, ts: Date.now() };
+    csAutoProvOn = !!enabled;
     try {
         const r = await csFetch(`/${csTenant()}/toggle-auto-provision?tenant_id=${csTenant()}`, {
             method: 'POST', body: JSON.stringify({ enabled }) });
         csPushToast(r, enabled ? 'Auto-provisioning enabled' : 'Auto-provisioning disabled');
         csRefreshAutoProvStatus();
-    } catch (e) { console.error('csToggleAutoProvision: toggle failed', e); if (typeof showToast === 'function') showToast('Toggle failed: ' + (e.message || e), 'error'); }
+    } catch (e) { _autoProvInflight = null; console.error('csToggleAutoProvision: toggle failed', e); if (typeof showToast === 'function') showToast('Toggle failed: ' + (e.message || e), 'error'); }
 };
 
 window.csUpdateAll = async function () {
@@ -6587,7 +6616,7 @@ function csAutoProvPanel(h) {
     const px = (h && h.proxmox) || {};
     const vms = csHostVms(h);
     const prov = px.provision || {};
-    const autoOn = prov.auto_provision_on === true || String(prov.auto_provision_on || '').toLowerCase() === 'on';
+    const autoOn = _autoProvEffective(prov.auto_provision_on) === true;
     const run = csAutoProvRunState(px, vms);
     const deleting = vms.filter(v => String(v.prov_status || '').toLowerCase() === 'tearing_down');
     const active = run.running && run.total > 0;
@@ -7469,8 +7498,11 @@ function csLinkApprovalCard(h) {
     const spokeDot = h.spoke_online
         ? '<span class="text-green-600 font-bold">● Online</span>'
         : '<span class="text-slate-400 font-bold">○ Offline</span>';
-    // Source / provenance — Live / Stale / Warm-cache / Offline · via <spoke_id>.
-    const via = ` · via ${csEscape(String(h.spoke_id || '—'))}`;
+    // Source / provenance — Live / Stale / Warm-cache / Offline · via <spoke name>.
+    // Show the readable spoke NAME (not the bare UUID); keep a short id hint for
+    // correlation when a display name exists.
+    const _sid = String(h.spoke_id || '');
+    const via = ` · via ${csEscape(spokeName)}${(spokeName !== _sid && _sid) ? ' (' + csEscape(_sid.slice(0, 8)) + ')' : ''}`;
     let src;
     if (h.host_online) src = `<span class="text-green-600 font-bold">Live</span>${via}`;
     else if (h.host_stale) src = `<span class="text-amber-600 font-bold">Stale (${csEscape(csAgeShort(h.host_age_s))})</span>${via}`;
