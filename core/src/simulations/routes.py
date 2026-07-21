@@ -527,6 +527,51 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # instead of a big spoke holding all of an alert's traffic. The +1
         # remainder rotates per-quota (by a stable checksum of its key) so it's not
         # always the same spoke carrying the extra across many alerts.
+        # Per-site apportionment: a site-scoped quota is split ONLY across the
+        # spokes that actually hold clients for that site (each spoke's
+        # CS_TELEMETRY ``pool_by_site``), not every bound cs spoke. A bound
+        # spoke whose clients are all elsewhere no longer reserves a share it
+        # can never fill — the old even/total-pool split under-filled the
+        # tenant total whenever the tenant had a bound spoke that didn't serve
+        # the site (the MIA target divided across a DAL-only spoke too). Alert-
+        # tied quotas stay EVEN among the site-eligible spokes (fault tolerance:
+        # lose one, the others still carry the alert); presence/untethered
+        # quotas stay PROPORTIONAL to the per-site pool. Falls back to the
+        # legacy even/total-pool split when no telemetry places the site on any
+        # spoke (cold cache / just-connected spoke) — never worse than today.
+        try:
+            _csc = await store.get_central_sites_config(tenant_id) or {}
+            _alias_groups = _alias_groups_from_csc(_csc)
+        except Exception:  # noqa: BLE001
+            _alias_groups = []
+
+        def _site_aliases(site) -> Optional[set]:
+            """The quota's site resolved to its co-referring alias set (cell →
+            wsite → central_site, transitively) so a "MIA" quota matches a
+            spoke reporting "MIA-PSK" clients. None for an empty/global site →
+            the quota is eligible on every spoke."""
+            site = str(site or "").strip()
+            if not site:
+                return None
+            aliases = {site.lower()}
+            try:
+                changed = True
+                while changed:
+                    changed = False
+                    for g in _alias_groups:
+                        if (aliases & g) and not (g <= aliases):
+                            aliases |= g
+                            changed = True
+            except Exception:  # noqa: BLE001
+                pass
+            return aliases
+
+        def _spoke_pool_by_site(sid: str) -> dict:
+            try:
+                return (getattr(hub, "simulations_cache", {}).get(sid) or {}).get("pool_by_site") or {}
+            except Exception:  # noqa: BLE001
+                return {}
+
         _k = len(spoke_ids)
         _idx_of = {sid: i for i, sid in enumerate(spoke_ids)}
 
@@ -539,9 +584,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if sum(_weights) <= 0:
             _weights = [1] * _k
 
-        def _apportion(total, idx: int, even: bool = False, rotate: int = 0) -> int:
+        def _site_weights(aliases) -> list:
+            """Per-spoke weight for a site-scoped quota: the count of that
+            spoke's pool clients whose physical site is in the alias set. None
+            aliases (global quota) → the spoke's whole online pool (_weights)."""
+            if aliases is None:
+                return list(_weights)
+            ws = []
+            for sid in spoke_ids:
+                bs = _spoke_pool_by_site(sid)
+                n = sum(int(v) for s, v in bs.items()
+                        if str(s).strip().lower() in aliases)
+                ws.append(n)
+            return ws
+
+        def _apportion_w(total, idx: int, weights, rotate: int = 0) -> int:
             total = int(total or 0)
-            weights = [1] * _k if even else _weights
             tw = sum(weights) or 1
             raw = [total * w / tw for w in weights]
             shares = [int(x) for x in raw]
@@ -565,20 +623,37 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 return payload
             idx = _idx_of.get(sid, 0)
             p = dict(payload)
-            if isinstance(p.get("effective_sim_quotas"), list):
-                # Alert-tied quotas spread evenly (fault tolerance); presence and
-                # untethered sim quotas stay proportional to pool size.
-                p["effective_sim_quotas"] = [
-                    {**q, "count": _apportion(q.get("count") or 0, idx,
-                                              even=bool(q.get("alert_id")),
-                                              rotate=_quota_rotate(q))}
-                    for q in p["effective_sim_quotas"]]
-            if isinstance(p.get("ssid_placement"), dict):
-                p["ssid_placement"] = {
-                    site: ({**pc, "targets": {c: _apportion(n or 0, idx)
-                                             for c, n in (pc.get("targets") or {}).items()}}
-                           if isinstance(pc, dict) else pc)
-                    for site, pc in p["ssid_placement"].items()}
+            if isinstance(payload.get("effective_sim_quotas"), list):
+                out = []
+                for q in payload["effective_sim_quotas"]:
+                    site_w = _site_weights(_site_aliases(q.get("site")))
+                    if q.get("alert_id"):
+                        # Alert-tied: EVEN among site-eligible spokes (1 each),
+                        # so losing one doesn't drop the alert. Fall back to
+                        # even-across-all when no telemetry places the site.
+                        w = [1 if x > 0 else 0 for x in site_w]
+                        if sum(w) == 0:
+                            w = [1] * _k
+                    else:
+                        # Presence / untethered: proportional to the per-site
+                        # pool. Fall back to total-pool when no site telemetry.
+                        w = site_w
+                        if sum(w) <= 0:
+                            w = _weights
+                    out.append({**q, "count": _apportion_w(q.get("count") or 0, idx,
+                                                           w, _quota_rotate(q))})
+                p["effective_sim_quotas"] = out
+            if isinstance(payload.get("ssid_placement"), dict):
+                out_place = {}
+                for site, pc in payload["ssid_placement"].items():
+                    if not isinstance(pc, dict):
+                        out_place[site] = pc
+                        continue
+                    site_w = _site_weights(_site_aliases(site))
+                    w = site_w if sum(site_w) > 0 else _weights
+                    out_place[site] = {**pc, "targets": {
+                        c: _apportion_w(n or 0, idx, w) for c, n in (pc.get("targets") or {}).items()}}
+                p["ssid_placement"] = out_place
             return p
 
         async def _one(sid: str):
@@ -1684,6 +1759,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             *[_push_sim_quotas(tid) for tid in _all_tenant_ids()]
         )
         return sum(counts)
+
+    # Expose the per-tenant push as a callable seam on the Hub (on-demand
+    # re-push + a unit-test hook for the per-site apportionment in _push_config).
+    try:
+        hub._push_sim_quotas = _push_sim_quotas
+    except Exception:  # noqa: BLE001
+        pass
 
     # ── aggregate reads (literal "aggregate" first segment) ────────────────
     @app.get("/sim/api/aggregate/dashboard")
