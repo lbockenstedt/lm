@@ -6595,6 +6595,7 @@ function csAutoProvRunState(px, vms) {
             total: Number.isFinite(+run.total) ? +run.total : items.length,
             completed: Number.isFinite(+run.completed) ? +run.completed : items.filter(i => i.status === 'done').length,
             failed: Number.isFinite(+run.failed) ? +run.failed : items.filter(i => i.status === 'failed').length,
+            cancelled: Number.isFinite(+run.cancelled) ? +run.cancelled : items.filter(i => i.status === 'cancelled').length,
             startedAt: run.started_at || null,
             items,
         };
@@ -6628,6 +6629,7 @@ function csAutoProvPanel(h) {
     } else if (active) {
         const bits = [`Provisioning… ${Math.min(run.completed, run.total)}/${run.total}`];
         if (run.failed) bits.push(`${run.failed} failed`);
+        if (run.cancelled) bits.push(`${run.cancelled} cancelled`);
         pill = `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-sky-50 text-sky-700 text-xs font-bold"><span class="animate-spin w-3 h-3 rounded-full border-2 border-sky-500 border-t-transparent"></span>${bits.join(' · ')}</span>`;
     } else if (!autoOn) {
         pill = `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 text-slate-500 text-xs font-bold"><span class="w-2 h-2 rounded-full bg-slate-400"></span>Auto-Provisioning: Off</span>`;
