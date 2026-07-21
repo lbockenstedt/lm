@@ -69,6 +69,7 @@ Consolidated reference for every environment variable read across the LM system.
 | `LM_PXMX_STATE_DIR` | Update state | `/var/lib/pxmx/update-state` | spoke + agent |
 | `LM_SD_NOTIFY_INTERVAL_S` | systemd notify | 20 | agent |
 | `USB_PROVISION_INTERVAL_S` | Provision loop tick | 60 | agent |
+| `POST_PROV_REBOOT_DELAY_S` | Post-clone settle reboot delay — seconds after a clone completes before the provision loop reboots the VM (so it restarts after settling + pulling engine config + running `update.sh`) | 900 | agent |
 | `NOTIFY_SOCKET` | systemd notify socket | — | agent |
 | `SPOKE_URL`, `AGENT_ID`, `AGENT_SECRET` | Agent identity | — | agent `.env` |
 

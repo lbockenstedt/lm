@@ -6324,13 +6324,19 @@ async function csRenderVmServerVms() {
         window._csHostFrameAge[hn] = (age != null && isFinite(age)) ? Number(age) : null;
         const usb = (hh.proxmox && hh.proxmox.usb_state) || hh.usb_state || [];
         const shed = {};
-        usb.forEach(u => { if (u && u.shed_at && u.vmid != null) shed[String(u.vmid)] = u.shed_at; });
+        const reboot = {};
+        usb.forEach(u => {
+            if (!u || u.vmid == null) return;
+            if (u.shed_at) shed[String(u.vmid)] = u.shed_at;
+            if (u.reboot_at) reboot[String(u.vmid)] = u.reboot_at;
+        });
         csHostVms(hh).forEach(v => {
             const vv = Object.assign({}, v);
             vv._spoke = hh.spoke_id;
             vv._host = hn;
             vv._hostlabel = hh.spoke_name || hn;
             vv._shed_at = shed[String(v.vmid)] || null;
+            vv._reboot_at = reboot[String(v.vmid)] || null;
             vv._key = csVmKey(vv);
             vms.push(vv);
         });
@@ -6435,6 +6441,7 @@ function csVmStatusLegend() {
         ['bg-sky-500', 'Provisioning / Configuring', 'auto-provision: cloning then configuring a new sim VM'],
         ['bg-amber-500', 'Shedding', 'countdown to teardown — its USB dongle is missing'],
         ['bg-red-500', 'Deleting', 'being torn down (destroy in progress)'],
+        ['bg-blue-500', 'Reboots in', 'post-clone settle reboot countdown — restarts after settle + engine config + update.sh'],
     ];
     return `<div class="mt-3 px-1">
       <p class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Status legend</p>
@@ -6486,6 +6493,13 @@ function csStartShedTicker() {
             const secs = at - now;
             el.textContent = secs <= 0 ? 'now' : csFmtDuration(secs);
         });
+        // Post-clone settle-reboot countdown (data-reboot-at = cloned_at + 15m,
+        // stamped by the agent's set_assignment). Live, not stepwise.
+        document.querySelectorAll('.cs-reboot-countdown').forEach(el => {
+            const at = Number(el.getAttribute('data-reboot-at'));
+            const secs = at - now;
+            el.textContent = secs <= 0 ? 'now' : csFmtDuration(secs);
+        });
     }, 1000);
 }
 
@@ -6497,6 +6511,24 @@ function csShedBadge(v) {
     return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-700" title="Dongle removed — VM will be shed when the missing-dongle timer expires">`
         + `<span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>🗑️ Sheds in `
         + `<span class="cs-shed-countdown" data-shed-at="${Number(v._shed_at)}">${csFmtDuration(secs)}</span></span>`;
+}
+
+// Badge for a freshly-cloned VM counting down to its +15-min post-clone settle
+// reboot. Rendered ALONGSIDE the steady status (the box keeps running until
+// reboot_at), not in place of it — see csVmStatusBadge's steady branch. The
+// agent stamps post_prov_reboot[vmid].reboot_at in set_assignment (the choke
+// point both first-clone and reclone hit); _run_post_prov_reboot_queue fires
+// a graceful QGA reboot when due. Two reboots are intentional: the immediate
+// post-clone reboot only applies hostname + first-boot bits (the box doesn't
+// stay up long enough to pull engine config); this later one restarts it
+// AFTER it has settled, pulled engine config, and run update.sh.
+function csRebootBadge(v) {
+    if (!v || !v._reboot_at) return '';
+    const secs = Number(v._reboot_at) - Date.now() / 1000;
+    if (secs <= 0) return '';
+    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-blue-100 text-blue-700" title="Post-clone settle reboot — the VM will gracefully restart once it has settled, pulled engine config, and run update.sh (the immediate post-clone reboot only set the hostname/first-boot bits; this one finalizes after the settle window)">`
+        + `<span class="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse"></span>🔄 Reboots in `
+        + `<span class="cs-reboot-countdown" data-reboot-at="${Number(v._reboot_at)}">${csFmtDuration(secs)}</span></span>`;
 }
 
 // Number of quarantined dongles on a host (px.quarantine list, dmesg-only).
@@ -6631,7 +6663,12 @@ function csVmStatusBadge(v) {
         const label = (String(v.status || '').toLowerCase() === 'running') ? 'Configuring' : 'Provisioning';
         return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-sky-100 text-sky-700"><span class="w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse"></span>${label}</span>`;
     }
-    return csStatusBadge(v.status || 'unknown');
+    // Steady status — append the post-clone settle-reboot countdown ALONGSIDE
+    // it (the box keeps running until reboot_at, so the reboot badge is a
+    // secondary indicator, not a replacement for the running/stopped pill).
+    const steady = csStatusBadge(v.status || 'unknown');
+    const rb = csRebootBadge(v);
+    return rb ? steady + ' ' + rb : steady;
 }
 
 function csAutoProvPhaseMeta(status) {
