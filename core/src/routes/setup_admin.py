@@ -920,4 +920,17 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=404, detail="Bug report not found")
         return rep
 
+    @app.delete("/setup/bug-reports/{rid}")
+    async def delete_bug_report(rid: str):
+        """Delete a stored bug report (admin-only, like the rest of /setup/).
+        Removes the in-memory index entry + the on-disk artifacts
+        (console/HTML/screenshot) under data_dir/bugs/<id>/. The public GitHub
+        issue bugfixer may already have filed is NOT touched — only the hub's
+        local copy of the captured artifacts."""
+        hub = app.state.hub
+        ok = await asyncio.to_thread(hub._delete_bug_report, rid)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Bug report not found")
+        return {"status": "ok", "id": rid}
+
     # ── LDAP relay (/api/ldap/*) ──────────────────────────────────────────────

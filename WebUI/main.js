@@ -170,6 +170,7 @@ const ROUTES = {
     saveToastConfig:        { m: 'POST', p: '/setup/toast-config',        api: 'update_toast_config' },
     loadBugReports:         { m: 'GET',  p: '/setup/bug-reports',         api: 'list_bug_reports' },
     showBugReport:          { m: 'GET',  p: '/setup/bug-reports/{rid}',   api: 'get_bug_report' },
+    deleteBugReport:        { m: 'DELETE', p: '/setup/bug-reports/{rid}', api: 'delete_bug_report' },
     submitBugReport:        { m: 'POST', p: '/api/bug-report',            api: 'file_bug_report' },
 
     // ── OPNsense management ──
@@ -4245,6 +4246,7 @@ async function loadBugReports() {
                 <span class="flex-1 truncate text-slate-700">${escapeHtml(r.summary || '(no summary)')}</span>
                 <span class="shrink-0 text-[10px] text-slate-400 font-mono">${escapeHtml(r.id)}</span>
                 <span class="shrink-0 w-16 text-center text-xs font-medium">${status}</span>
+                <button onclick="event.stopPropagation(); deleteBugReport('${escapeHtml(r.id)}')" title="Delete report" class="shrink-0 p-1 text-slate-300 hover:text-red-500 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
             </div>`;
         }).join('');
     } catch (err) {
@@ -4327,6 +4329,22 @@ window._clientDebugStop = async function (host, tenantRaw) {
     } catch (e) { showToast(`Stop failed: ${e.message}`, 'error'); }
 };
 
+async function deleteBugReport(rid) {
+    if (!rid) return;
+    if (!await showConfirmToast(`Delete bug report ${rid}? This removes the stored console / HTML / screenshot artifacts on the hub. The public GitHub issue (if bugfixer already filed one) is NOT touched.`)) return;
+    try {
+        await apiJson(`/setup/bug-reports/${encodeURIComponent(rid)}`, { method: 'DELETE' });
+        showToast('Bug report deleted', 'success');
+        // Close the detail modal if open, then refresh the list if it's mounted.
+        const ov = document.getElementById('bug-detail-overlay');
+        if (ov) ov.remove();
+        if (document.getElementById('system-logs-container')) loadBugReports();
+    } catch (e) {
+        showToast(`Delete failed: ${e.message}`, 'error');
+    }
+}
+window.deleteBugReport = deleteBugReport;
+
 async function showBugReport(rid) {
     const overlay = document.createElement('div');
     overlay.id = 'bug-detail-overlay';
@@ -4335,7 +4353,10 @@ async function showBugReport(rid) {
         <div class="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
             <div class="px-5 py-3 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-sm font-bold text-slate-700">Bug Report <span class="font-mono text-slate-400">${escapeHtml(rid)}</span></h3>
-                <button onclick="document.getElementById('bug-detail-overlay').remove()" class="text-slate-400 hover:text-slate-600 text-xl">✕</button>
+                <div class="flex items-center gap-3">
+                    <button onclick="deleteBugReport('${escapeHtml(rid)}')" title="Delete report" class="text-xs font-bold text-red-500 hover:text-red-700 border border-red-200 hover:border-red-300 px-3 py-1 rounded transition-colors">Delete</button>
+                    <button onclick="document.getElementById('bug-detail-overlay').remove()" class="text-slate-400 hover:text-slate-600 text-xl">✕</button>
+                </div>
             </div>
             <div id="bug-detail-body" class="p-5 overflow-y-auto text-xs space-y-4">
                 <div class="py-12 text-center text-slate-400 animate-pulse">Loading...</div>

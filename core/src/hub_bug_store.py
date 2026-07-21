@@ -169,3 +169,30 @@ class HubBugStoreMixin:
         except Exception as e:
             logger.warning(f"[bug-report] could not persist filed flag for {rid}: {e}")
         return True
+
+    def _delete_bug_report(self, rid: str) -> bool:
+        """Remove a bug report from the in-memory index and delete its on-disk
+        artifacts (``<data_dir>/bugs/<id>/`` — report.json, console.log,
+        dom.html, screenshot). Returns True if anything was removed (index
+        hit OR a stale dir existed), False if the id was unknown. Best-effort
+        on the rmtree: a missing/locked dir still counts as removed-from-
+        index so the WebUI list refresh shows it gone. The public GitHub
+        issue (if bugfixer already filed one) is NOT touched — only the hub's
+        local copy of the captured artifacts."""
+        if not rid:
+            return False
+        existed = rid in self.bug_reports
+        self.bug_reports.pop(rid, None)
+        d = os.path.join(self.bug_dir, rid)
+        removed_dir = False
+        if os.path.isdir(d):
+            try:
+                import shutil
+                shutil.rmtree(d)
+                removed_dir = True
+            except Exception as e:
+                logger.warning(f"[bug-report] could not remove artifact dir {d}: {e}")
+        if existed or removed_dir:
+            logger.info(f"[bug-report] deleted id={rid} index_size={len(self.bug_reports)}")
+            return True
+        return False
