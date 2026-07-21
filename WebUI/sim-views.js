@@ -6637,10 +6637,16 @@ function csAutoProvPanel(h) {
         pill = `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 text-xs font-bold"><span class="w-2 h-2 rounded-full bg-slate-400"></span>Auto-Provisioning: Idle</span>`;
     }
 
+    // "Clear USB Quarantine" — releases dongles the agent has sidelined (dmesg
+    // quarantine + destroy-fail bus exclusions from repeated spin-up/down) so they
+    // can be provisioned again. Sends the clear_usb_quarantine cs command to THIS
+    // host; no SSH needed.
+    const _apHost = h.hostname || h.spoke_hostname || h.spoke_id || '';
+    const _clearUsbBtn = `<button onclick="csClearUsbQuarantine('${csEscape(String(h.spoke_id || ''))}','${csEscape(String(_apHost))}')" title="Clear USB dongle quarantine + destroy-fail bus exclusions on this host so sidelined dongles can be provisioned again" class="text-[11px] font-bold px-2.5 py-1 rounded-md border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 whitespace-nowrap">Clear USB Quarantine</button>`;
     // Idle + nothing deleting → compact pill + last-pass reason only.
     if (!active && !deleting.length) {
         const reason = prov.reason ? `<span class="text-xs text-slate-400 truncate">${csEscape(prov.reason)}</span>` : '';
-        return `<div class="hpe-card rounded-lg p-5 mb-3 flex items-center justify-between gap-3">${pill}${reason}</div>`;
+        return `<div class="hpe-card rounded-lg p-5 mb-3 flex items-center justify-between gap-3">${pill}<div class="flex items-center gap-3 min-w-0">${reason}${_clearUsbBtn}</div></div>`;
     }
 
     const pct = run.total > 0 ? Math.round((Math.min(run.completed, run.total) / run.total) * 100) : 0;
@@ -7307,6 +7313,19 @@ window.csClearCommands = async function () {
         await csFetch(`/${csTenant()}/proxmx/commands?tenant_id=${csTenant()}`, { method: 'DELETE' });
         csRenderVmServerQueue(true);
     } catch (e) { console.error('csClearCommands: clear failed', e); if (typeof showToast === 'function') showToast('Clear failed: ' + (e.message || e), 'error'); }
+};
+
+// Release dongles the agent has sidelined (dmesg quarantine + destroy-fail bus
+// exclusions) so they can be provisioned again. Sends clear_usb_quarantine to the
+// target host via the same command path as the maintenance ops.
+window.csClearUsbQuarantine = async function (spokeId, host) {
+    if (!confirm(`Release dongles on ${host || 'this host'}?\n\nClears the USB dongle quarantine and the destroy-fail bus exclusions (what repeated spin-up/down trips) so sidelined dongles are picked up on the next provision pass. Safe to run anytime.`)) return;
+    try {
+        const r = await csFetch(`/${csTenant()}/proxmx/command?tenant_id=${csTenant()}`, {
+            method: 'POST', body: JSON.stringify({ action: 'clear_usb_quarantine', target: host || 'proxmox', type: 'clear_usb_quarantine', args: {} }) });
+        if (typeof csPushToast === 'function') csPushToast(r, 'USB quarantine cleared — dongles will be picked up on the next provision pass');
+        else if (typeof showToast === 'function') showToast('USB quarantine cleared', 'success');
+    } catch (e) { console.error('csClearUsbQuarantine failed', e); if (typeof showToast === 'function') showToast('Clear USB quarantine failed: ' + (e.message || e), 'error'); }
 };
 
 window.csCmdDelete = async function (btn) {
