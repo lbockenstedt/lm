@@ -993,21 +993,9 @@ function fileBug() {
     setTimeout(() => document.getElementById('bug-description')?.focus(), 50);
 }
 
-async function submitBugReport() {
-    const explanation = (document.getElementById('bug-description')?.value || '').trim();
-    if (!explanation) {
-        showToast('Please describe what’s wrong before submitting', 'error');
-        return;
-    }
-    const severity = document.getElementById('bug-severity')?.value || 'medium';
-    const btn = document.getElementById('bug-submit-btn');
-    const statusEl = document.getElementById('bug-submit-status');
-    const setBusy = (msg) => {
-        if (btn) { btn.disabled = true; btn.classList.add('opacity-60', 'cursor-wait'); btn.textContent = 'Submitting…'; }
-        if (statusEl) { statusEl.textContent = msg; statusEl.classList.remove('hidden'); }
-    };
-    setBusy('Capturing console, HTML, and screenshot…');
-
+// Shared capture for manual + auto bug filing: console buffer + truncated DOM
+// + a best-effort html2canvas screenshot. Never blocks submission on failure.
+async function _captureBugContext() {
     // Console buffer (installed at top of main.js).
     const consoleLogs = (window.__lmBugBuffer || [])
         .map(e => `[${e.ts}] ${e.level.toUpperCase()}: ${e.msg}`)
@@ -1035,32 +1023,48 @@ async function submitBugReport() {
         console.warn('File-a-Bug: screenshot capture failed', e);
         screenshot = null;
     }
+    return { consoleLogs, html, screenshot };
+}
 
-    const payload = {
-        explanation,
-        severity,
-        console_logs: consoleLogs,
-        html,
-        screenshot,
-        context: {
-            currentView,
-            currentSubView,
-            currentTenant,
-            url: location.href,
-            userAgent: navigator.userAgent,
-            timestamp: Date.now(),
-            hubVersion: window.__lmHubVersion || 'unknown',
-            webuiVersion: window.__lmWebuiVersion || 'unknown',
-            username: currentUser?.username || null,
-        },
+function _bugContextMeta() {
+    return {
+        currentView,
+        currentSubView,
+        currentTenant,
+        url: location.href,
+        userAgent: navigator.userAgent,
+        timestamp: Date.now(),
+        hubVersion: window.__lmHubVersion || 'unknown',
+        webuiVersion: window.__lmWebuiVersion || 'unknown',
+        username: currentUser?.username || null,
     };
+}
 
-    setBusy('Submitting to hub…');
+// Core submit shared by the manual File-a-Bug modal and the auto-file path
+// (the runtime-error banner). ``onStatus`` receives human-readable progress.
+async function _submitBugReport(explanation, severity, onStatus) {
+    if (typeof onStatus === 'function') onStatus('Capturing console, HTML, and screenshot…');
+    const { consoleLogs, html, screenshot } = await _captureBugContext();
+    const payload = { explanation, severity, console_logs: consoleLogs, html, screenshot, context: _bugContextMeta() };
+    if (typeof onStatus === 'function') onStatus('Submitting to hub…');
+    return await apiJson('/api/bug-report', { method: 'POST', body: JSON.stringify(payload) });
+}
+
+async function submitBugReport() {
+    const explanation = (document.getElementById('bug-description')?.value || '').trim();
+    if (!explanation) {
+        showToast('Please describe what’s wrong before submitting', 'error');
+        return;
+    }
+    const severity = document.getElementById('bug-severity')?.value || 'medium';
+    const btn = document.getElementById('bug-submit-btn');
+    const statusEl = document.getElementById('bug-submit-status');
+    const setBusy = (msg) => {
+        if (btn) { btn.disabled = true; btn.classList.add('opacity-60', 'cursor-wait'); btn.textContent = 'Submitting…'; }
+        if (statusEl) { statusEl.textContent = msg; statusEl.classList.remove('hidden'); }
+    };
     try {
-        const data = await apiJson('/api/bug-report', {
-            method: 'POST',
-            body: JSON.stringify(payload),
-        });
+        const data = await _submitBugReport(explanation, severity, setBusy);
         showToast(`Bug report submitted (id ${data.id || ''}) — bugfixer will file an issue`, 'success');
         document.getElementById('file-bug-modal')?.remove();
     } catch (err) {
@@ -1070,6 +1074,38 @@ async function submitBugReport() {
         if (btn) { btn.disabled = false; btn.classList.remove('opacity-60', 'cursor-wait'); btn.textContent = 'Retry'; }
     }
 }
+
+// Auto-file a bug when the runtime-error banner fires (called from the
+// index.html error boundary). Dedup'd per unique message per session so a
+// spammy handler doesn't open a GitHub issue on every throw. ``onStatus``
+// updates the banner's "Filing Bug with BugFixer" status line.
+const _autoFiledBugs = new Set();
+async function fileBugAuto(message, where, onStatus) {
+    const sig = String(message || '').slice(0, 200);
+    if (_autoFiledBugs.has(sig)) {
+        if (typeof onStatus === 'function') onStatus('Already filed for this error');
+        return;
+    }
+    _autoFiledBugs.add(sig);
+    if (typeof onStatus === 'function') onStatus('Filing Bug with BugFixer…');
+    const whereStr = where ? ` (${where})` : '';
+    const viewCtx = [currentView, currentSubView].filter(Boolean).join(' / ');
+    const tenantCtx = currentTenant ? ` · tenant=${currentTenant}` : '';
+    const explanation = `[Auto-filed from a runtime browser error — the user did not type this.]\n\n`
+        + `Error: ${message}${whereStr}\n`
+        + `View: ${viewCtx || '(unknown)'}${tenantCtx}\n`
+        + `URL: ${location.href}\n`
+        + `User agent: ${navigator.userAgent}\n`;
+    const wrap = typeof onStatus === 'function' ? (s) => onStatus('Filing Bug with BugFixer — ' + s) : null;
+    try {
+        const data = await _submitBugReport(explanation, 'high', wrap);
+        if (typeof onStatus === 'function') onStatus(`Bug filed (id ${data.id || ''}) — bugfixer will triage`);
+    } catch (err) {
+        console.error('Auto bug-file failed', err);
+        if (typeof onStatus === 'function') onStatus('Bug filing failed: ' + (err && err.message || ''));
+    }
+}
+window.fileBugAuto = fileBugAuto;
 
 function userAllowedTenants() {
     return currentUser?.tenants || [];

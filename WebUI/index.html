@@ -590,6 +590,11 @@
       // but with Reload + a dismiss ×, and it updates in place for new errors
       // (dedup'd on identical text so a spammy handler doesn't churn).
       var rbEl = null, rbShown = null;
+      function rbStatus(s) {
+        if (!rbEl) return;
+        var st = rbEl.querySelector('.lm-rb-status');
+        if (st) { st.textContent = s || ''; st.style.display = s ? 'inline' : 'none'; }
+      }
       function runtimeBanner(msg, where) {
         var text = String(msg || '(no message)').slice(0, 300);
         if (where) text += '  (' + where + ')';
@@ -605,9 +610,10 @@
           rbEl.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483646;'
             + 'background:#7f1d1d;color:#fff;font:13px/1.4 system-ui,sans-serif;'
             + 'padding:8px 14px;box-shadow:0 2px 8px rgba(0,0,0,.4);'
-            + 'display:flex;align-items:center;gap:10px';
+            + 'display:flex;align-items:center;gap:10px;flex-wrap:wrap';
           rbEl.innerHTML = '<strong>⚠ Runtime error</strong>'
-            + '<span class="lm-rb-msg" style="flex:1;opacity:.95;word-break:break-word"></span>'
+            + '<span class="lm-rb-msg" style="flex:1;opacity:.95;word-break:break-word;min-width:200px"></span>'
+            + '<span class="lm-rb-status" style="opacity:.85;font-size:12px;display:none"></span>'
             + '<button class="lm-rb-reload" style="padding:2px 10px;border:1px solid #fff;'
             + 'border-radius:4px;background:transparent;color:#fff;cursor:pointer">Reload</button>'
             + '<button class="lm-rb-dismiss" title="Dismiss" style="padding:2px 8px;'
@@ -619,6 +625,16 @@
             rbEl.style.display = 'none'; rbShown = null;
           };
           rbEl.querySelector('.lm-rb-msg').textContent = text;
+        }
+        // Auto-file a bug with BugFixer (dedup'd inside fileBugAuto so a spammy
+        // handler doesn't open a GitHub issue on every throw). The boundary stays
+        // tiny + dependency-free: capture + POST live in main.js; we just trigger
+        // it and relay status text into the banner's status span.
+        if (typeof window.fileBugAuto === 'function') {
+          rbStatus('Filing Bug with BugFixer…');
+          try { window.fileBugAuto(msg, where, rbStatus); } catch (_) { rbStatus(''); }
+        } else {
+          rbStatus('BugFixer unavailable');
         }
       }
       // Network/transport failures are surfaced inline by the app (spoke-down
