@@ -6108,7 +6108,7 @@ function _renderSetupDhcpTile(content) {
 // table with a per-row type badge + Edit/Delete. See DEVICE_TYPES below for the
 // declarative per-type schema (endpoint, fields, spoke filter, payload key).
 function _renderSetupModuleMgmtTile(content) {
-    const { card, btnCls } = _SETUP_CLS;
+    const { card, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
