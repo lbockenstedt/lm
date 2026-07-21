@@ -76,6 +76,7 @@ from vm_sync import VmSyncMixin
 from fw_discovery_sync import FwDiscoverySyncMixin
 from nw_discovery_sync import NwDiscoverySyncMixin
 from nw_cache import NwCacheMixin
+from truenas_cache import TruenasCacheMixin
 from le_cache import LeCacheMixin
 from warm_cache import WarmCacheMixin
 from dns_dhcp_sync import DnsDhcpSyncMixin
@@ -225,6 +226,7 @@ _PUSH_CONFIG_MODULE_KEY = {
     "simulation": "cs",
     "nw":         "nw",
     "certificates": "le",
+    "storage":    "truenas",
 }
 
 # spoke_id substring → push_config branch tag. NOTE: the prefix-fallback loop
@@ -236,7 +238,7 @@ _PUSH_CONFIG_MODULE_KEY = {
 _PUSH_CONFIG_PREFIX_MAP = {
     'pxmx': 'pxmx', 'opn': 'opn', 'cs': 'cs',
     'cppm': 'cppm', 'netbox': 'netbox', 'ldap': 'ldap', 'nw': 'nw',
-    'le': 'le',
+    'le': 'le', 'truenas': 'truenas',
 }
 
 # _UPDATE_SOURCE_MODULE_KEY / _UPDATE_SOURCE_PREFIX_MAP moved to
@@ -270,7 +272,7 @@ def _mdns_hub_properties(version_str: str, agent_port: int,
     return props
 
 
-class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, NwCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
+class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -798,6 +800,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # of 503-ing until the nw spoke reconnects. See nw_cache.NwCacheMixin.
         self.nw_cache_init()
         self.nw_cache_load()
+        # TrueNAS (storage) cache twin — same atomic-persist + warm-start shape
+        # as nw_cache (serves last-known data when the truenas spoke is offline).
+        self.truenas_cache_init()
+        self.truenas_cache_load()
         # Certificates warm cache — same pattern as nw_cache so the Certificates
         # page renders last-known certs instantly (stale) instead of blocking on
         # a live LE_LIST_CERTS round-trip or 503-ing until the le spoke reconnects.
@@ -2139,6 +2145,21 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                           "shared_tenant_id": _access.shared_tenant_id() or "",
                           "default_poll_interval":
                               self.state.get_global_config().get("nw_poll_default_interval")}
+            elif module_key == 'truenas':
+                # TrueNAS (storage) fleet: one storage spoke manages many
+                # appliances. Push the appliances bound to this spoke; fall back
+                # to unbound appliances (single-product deployments). Mirrors
+                # the nw branch.
+                import access as _access
+                import copy as _copy
+                appliances = self.state.get_global_config().get("truenas_appliances", []) or []
+                mine = [a for a in appliances if isinstance(a, dict) and a.get("spoke_id") == spoke_id]
+                if not mine:
+                    mine = [a for a in appliances if isinstance(a, dict) and not a.get("spoke_id")]
+                config = {"appliances": [_copy.deepcopy(a) for a in mine],
+                          "shared_tenant_id": _access.shared_tenant_id() or "",
+                          "default_poll_interval":
+                              self.state.get_global_config().get("truenas_poll_default_interval")}
             elif module_key == 'ldap':
                 # Directory (LDAP) spoke: the bound instance's LDAP_* connection
                 # settings PLUS this node's multi-instance mirror identity
@@ -4659,6 +4680,21 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     if _nw_did and isinstance(_nw_pdata, dict):
                         # Warm cache + per-device NetBox inventory sync.
                         asyncio.create_task(self.apply_nw_auto_poll(_nw_did, _nw_pdata))
+                    continue
+
+                # --- TrueNAS autonomous per-appliance poll result (spoke-driven)
+                # A truenas spoke polled an appliance on its configured
+                # poll_interval and pushed the fused result. Fold it into the
+                # per-appliance truenas cache so every Storage sub-view
+                # (info/pools/datasets/disks/shares/alerts/services/capacity)
+                # serves instantly without a live WS JSON-RPC round-trip. The
+                # payload's ``data`` is the flattened poll. Fire-and-forget.
+                if payload.get("type") == "TRUENAS_POLL_RESULT":
+                    _td = payload.get("data", {}) or {}
+                    _tn_aid = _td.get("appliance_id")
+                    _tn_pdata = _td.get("data") if isinstance(_td.get("data"), dict) else _td
+                    if _tn_aid and isinstance(_tn_pdata, dict):
+                        asyncio.create_task(self.truenas_cache_set_poll(_tn_aid, _tn_pdata))
                     continue
 
                 # --- LE cert renewed (event-driven distribution) ---

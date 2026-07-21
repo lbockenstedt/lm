@@ -26,6 +26,7 @@ _MODULE_TYPE_PREFIX = {
     "agent":      "agent",
     "nw":         "nw",
     "certificates": "le",
+    "storage":    "truenas",
 }
 
 
@@ -346,6 +347,34 @@ class SpokeRegistryMixin:
         from access import shared_tenant_id
         sid = shared_tenant_id()
         return self.get_nw_spoke_for_tenant(sid) if sid else self.get_spoke_by_type("nw")
+
+    def get_truenas_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
+        """Tenant-aware TrueNAS (storage) spoke — mirrors
+        ``get_nw_spoke_for_tenant``. With a real ``tenant_id``, return ONLY a
+        connected, approved storage spoke BOUND to that tenant — NEVER one
+        bound to a different tenant (that would leak another tenant's
+        appliances into this tenant's live surface / offline cache). No
+        unassigned fallback. With ``tenant_id`` None / ``"default"`` (admin
+        unscoped), fall back to ``get_spoke_by_type("storage")`` so the admin's
+        Storage page still shows the global fleet."""
+        if not tenant_id or tenant_id == "default":
+            return self.get_spoke_by_type("storage")
+        cands = [sid for sid in (self.get_all_spokes_by_type("storage") or [])
+                 if sid in self.active_connections
+                 and self.approved_modules.get(sid, False)]
+        if not cands:
+            return None
+        md = self.state.system_state.get("module_metadata", {})
+        bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
+        return bound[0] if bound else None
+
+    def get_truenas_spoke_for_shared(self) -> Optional[str]:
+        """The storage spoke that owns the SHARED-tenant TrueNAS appliances.
+        Mirrors ``get_nw_spoke_for_shared``."""
+        from access import shared_tenant_id
+        sid = shared_tenant_id()
+        return (self.get_truenas_spoke_for_tenant(sid)
+                if sid else self.get_spoke_by_type("storage"))
 
     def get_all_spokes_by_type(self, module_type: str):
         """Return all connected spoke IDs that advertised the given module_type."""
