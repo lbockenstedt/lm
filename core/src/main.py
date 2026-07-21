@@ -157,7 +157,8 @@ from log_redaction import (_redact, _REDACT_COMMANDS, _REDACT_FIELDS,
                            _LOGSAFE_COMMANDS, _FULLY_REDACT_COMMANDS,
                            _FULLY_REDACT_SUBSTRINGS, _SECRET_SUBSTRINGS,
                            _is_secret_field, _scrub_secret_fields,
-                           _project_nw_devices, TokenBucket, _fit_log_payload)
+                           _project_nw_devices, TokenBucket, _fit_log_payload,
+                           _request_subject)
 
 # H4 sentinel: ``_decrypt_inbound_payload`` returns this (instead of a secret)
 # to signal "drop this frame" — an encrypted payload that won't AEAD-decrypt
@@ -1294,7 +1295,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     settled = True
                     return result
 
-            logger.error(f"Request Timeout: [{command_type}] {msg_id} from {self._spoke_label(spoke_id)} after {timeout}s")
+            # Subject (the hostname/appliance/device the request operates on)
+            # instead of the opaque msg_id UUID — the recurring "UUID instead
+            # of a name" complaint. Falls back to a short req=<first8> hint for
+            # correlation with the DEBUG request/response lines (full msg_id
+            # stays there) when no subject is derivable from the payload.
+            _subject = _request_subject(command_type, data) or f"req={msg_id[:8]}"
+            logger.error(f"Request Timeout: [{command_type}] {_subject} from {self._spoke_label(spoke_id)} after {timeout}s")
             return {"status": "ERROR", "message": "Timed out waiting for spoke response"}
         finally:
             # Drop the waiter so a late ack can't leak a response_cache entry.

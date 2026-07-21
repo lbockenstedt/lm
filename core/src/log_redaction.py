@@ -186,6 +186,38 @@ def _project_nw_devices(devices):
     return [d for d in devices if isinstance(d, dict)]
 
 
+# Ordered subject-field allowlist for the Request Timeout log line. Replaces
+# the opaque per-request ``msg_id`` UUID with the *subject* the request
+# operates on — the sim-client hostname a CS_POLL_AGENT_INBOX poll timed out
+# on, the appliance a TRUENAS_GET_POOLS fetch timed out on, the device a
+# NW_GET_ARP pull timed out on — so the operator reads a NAME, not a random
+# correlation id (the recurring "UUID instead of a name" complaint). The full
+# ``msg_id`` stays in the DEBUG request/response lines for exact correlation;
+# the ERROR line keeps a short ``req=<first8>`` hint when no subject is
+# derivable. Fields are ordered most-identifying/least-sensitive first; bare
+# ``id`` is deliberately excluded (usually a UUID — the very thing being
+# replaced) in favor of named fields. None of these are secret-bearing (the
+# secret fields are already in ``_REDACT_FIELDS`` / ``_SECRET_SUBSTRINGS`` and
+# are never picked here).
+_REQUEST_SUBJECT_FIELDS = ("hostname", "name", "appliance_id", "device_id",
+                            "vmid", "spoke_id", "tenant_id", "mac", "ip")
+
+
+def _request_subject(command_type: str, data: Any) -> str:
+    """A short human-meaningful label for the subject of a request, for the
+    Request Timeout ERROR log (replaces the opaque ``msg_id`` UUID). Returns
+    ``"<field>=<value>"`` for the first matching allowlist field in ``data``,
+    or ``""`` when no subject is derivable (the caller falls back to a short
+    ``msg_id`` prefix). Never raises."""
+    if not isinstance(data, dict):
+        return ""
+    for k in _REQUEST_SUBJECT_FIELDS:
+        v = data.get(k)
+        if v not in (None, "", []):
+            return f"{k}={v}"
+    return ""
+
+
 class TokenBucket:
     """Simple thread-safe-ish token bucket for per-connection rate limiting.
 
