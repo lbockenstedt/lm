@@ -17965,6 +17965,9 @@ async function saveLeRetryInterval(v) {
 }
 
 async function leDistributeNow() {
+    // Immediate feedback — distribution fans out to every target and can take a
+    // while; the "Distribute complete" toast below fires when it finishes.
+    showToast('Certificates are being distributed to all targets…', 'info');
     try {
         const { ok, data, detail } = await _spokeFetch('/api/le/distribute', { method: 'POST' });
         if (!ok) { showToast('Distribute failed: ' + (detail || ''), 'error'); await loadLEData(); return; }
