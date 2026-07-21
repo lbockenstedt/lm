@@ -224,6 +224,16 @@ def register(app, hub, ctx):
           - IP / prefix: contains '.' or ':' (IPv4/IPv6/CIDR)
           - MAC: matches hex pairs separated by : or -
           - Name / hostname / username: everything else
+
+        Tenant scoping: the payload carries the active tenant's scope keys —
+        ``tenant`` (NetBox slug; used by netbox + cppm and as the LDAP OU slug),
+        ``proxmox_tag`` (pxmx/kvm tag_filter), ``prefixes`` (CIDRs for DHCP
+        filtering), and ``is_admin``. Each spoke enforces scoping: if its scope
+        key is present it filters to that tenant (shared/global objects are
+        included); if the key is absent the spoke returns unscoped results ONLY
+        for admins, and empty for non-admins — never leak another tenant's data.
+        The hypervisor leg is routed to the tenant-bound spoke so a non-admin
+        never reaches another tenant's hypervisor at all.
         """
         import re, asyncio as _asyncio
         hub = app.state.hub
@@ -246,7 +256,28 @@ def register(app, hub, ctx):
 
         resolved = _resolve_tenant(request, tenant)
         scoping = get_tenant_scoping(hub, resolved)
-        payload = {"q": q_search, "tenant": scoping["netbox_tenant_slug"] or resolved}
+        sess = _session_user(request)
+        is_admin = bool(sess and _is_admin(sess))
+        # NetBox tenant slug drives netbox + cppm scoping and is the LDAP OU
+        # slug. For a non-default tenant with no bound NetBox slug, fall back to
+        # the tenant id so LDAP OU derivation (ou=<slug>,<base>) still works.
+        nb_slug = scoping.get("netbox_tenant_slug") or (resolved if resolved and resolved != "default" else "")
+        proxmox_tag = scoping.get("proxmox_tag") or ""
+        # Tenant prefixes (CIDRs) for DHCP lease filtering. Admin unscoped is
+        # allowed; a non-admin with no prefixes gets no DHCP results (safe).
+        prefixes = []
+        if nb_slug:
+            try:
+                prefixes = await _resolve_prefixes_for_tenant(hub, resolved) or []
+            except Exception as e:
+                logger.warning(f"search: prefix fetch for '{resolved}' failed: {e}")
+        payload = {
+            "q": q_search,
+            "tenant": nb_slug,           # netbox + cppm + ldap OU slug
+            "proxmox_tag": proxmox_tag,  # pxmx/kvm tag_filter
+            "prefixes": prefixes,        # opnsense DHCP filter
+            "is_admin": is_admin,
+        }
 
         async def _call(spoke, cmd):
             if not spoke:
@@ -258,31 +289,35 @@ def register(app, hub, ctx):
             except Exception as e:
                 return [{"source": cmd, "type": "error", "name": str(e)}]
 
-        async def _empty():
-            # Placeholder for a leg a non-admin may not run (directory SEARCH_USERS
-            # is admin-only — see can_search_directory) so the gather shape stays
-            # uniform without fanning the directory spoke.
-            return []
-
         spoke_ipam       = hub.get_spoke_by_type("ipam")
-        spoke_hypervisor = hub.get_hypervisor_spoke()
+        # Tenant-bound hypervisor: a non-admin only reaches a hypervisor bound
+        # to its tenant (None → no VM results, no leak). The admin's
+        # unscoped/default view falls back to any hypervisor.
+        if resolved and resolved != "default":
+            spoke_hypervisor = hub.get_hypervisor_spoke_for_tenant(resolved)
+        else:
+            spoke_hypervisor = hub.get_hypervisor_spoke()
         spoke_nac        = hub.get_spoke_by_type("nac")
-        spoke_directory  = hub.get_spoke_by_type("directory")
+        # Tenant-bound directory: a non-admin only reaches the LDAP spoke bound
+        # to its tenant (None → no user results). The spoke additionally scopes
+        # by the tenant's OU base DN (see ldap_spoke SEARCH_USERS), so even a
+        # shared directory spoke returns only the tenant's own OU.
+        if resolved and resolved != "default":
+            spoke_directory = hub.get_directory_spoke_for_tenant(resolved) or hub.get_spoke_by_type("directory")
+        else:
+            spoke_directory = hub.get_spoke_by_type("directory")
         spoke_firewall   = hub.get_spoke_by_type("firewall")
 
-        # SECURITY: the directory (LDAP) SEARCH_USERS leg bypasses the
-        # ``/api/ldap/*`` admin gate — a non-admin could enumerate directory
-        # users via the global search. The IPAM/NAC/Hypervisor/Firewall legs
-        # are tenant-scoped via the payload tenant slug above, but directory
-        # users are not tenant-scoped, so fan SEARCH_USERS only for admins.
-        sess = _session_user(request)
-        can_search_directory = bool(sess and _is_admin(sess))
-
+        # Directory (LDAP) search is now tenant-OU scoped spoke-side, so it is
+        # safe to fan for non-admins (they only see their own tenant's OU). The
+        # spoke returns empty for a non-admin with no tenant slug. This used to
+        # be admin-only because directory users weren't tenant-scoped; the OU
+        # scoping closes that leak.
         tasks = [
             _call(spoke_ipam,       "NETBOX_SEARCH"),
             _call(spoke_hypervisor, "SEARCH_VMS"),
             _call(spoke_nac,        "SEARCH_SESSIONS"),
-            _call(spoke_directory,  "SEARCH_USERS") if can_search_directory else _empty(),
+            _call(spoke_directory,  "SEARCH_USERS"),
             _call(spoke_firewall,   "SEARCH_DHCP"),
         ]
         all_results = await _asyncio.gather(*tasks)
@@ -299,8 +334,7 @@ def register(app, hub, ctx):
                 "ipam":       spoke_ipam is not None,
                 "hypervisor": spoke_hypervisor is not None,
                 "nac":        spoke_nac is not None,
-                # directory leg is admin-only; reflect whether it actually ran.
-                "directory":  bool(spoke_directory is not None and can_search_directory),
+                "directory":  spoke_directory is not None,
                 "firewall":   spoke_firewall is not None,
             },
         }

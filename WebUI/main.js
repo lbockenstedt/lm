@@ -22200,7 +22200,13 @@ function handleSearch(value) {
 
     _searchTimer = setTimeout(async () => {
         try {
-            const r = await fetch(`/api/search?q=${encodeURIComponent(value.trim())}`);
+            // Scope the search to the picked tenant when one is selected (an
+            // admin browsing tenant "acme" sees acme + shared results; "default"
+            // → unscoped/all). The hub enforces scoping spoke-side; this just
+            // tells it which tenant to scope to.
+            const tnt = (currentTenant && currentTenant !== 'default')
+                ? `&tenant=${encodeURIComponent(currentTenant)}` : '';
+            const r = await fetch(`/api/search?q=${encodeURIComponent(value.trim())}${tnt}`);
             const d = r.ok ? await r.json() : null;
             if (!d) { dropdown.innerHTML = '<p class="text-xs text-red-400 px-2 py-1">Search failed</p>'; return; }
 
@@ -22212,27 +22218,37 @@ function handleSearch(value) {
             const sourceIcon = {
                 netbox:    '📦',
                 pxmx:      '🖥️',
+                kvm:       '🖥️',
                 cppm:      '🔐',
                 ldap:      '👤',
                 opnsense:  '🔥',
             };
             const typeLabel = {
-                device:     'Device',
-                ip:         'IP Address',
-                prefix:     'Prefix',
-                vm:         'VM',
-                lxc:        'Container',
-                session:    'NAC Session',
-                endpoint:   'Endpoint',
-                user:       'User',
-                computer:   'Computer',
-                dhcp_lease: 'DHCP Lease',
+                device:      'Device',
+                ip:          'IP Address',
+                prefix:      'Prefix',
+                vm:          'VM',
+                lxc:         'Container',
+                session:     'NAC Session',
+                endpoint:    'Endpoint',
+                user:        'User',
+                group:       'Group',
+                computer:    'Computer',
+                dhcp_lease:  'DHCP Lease',
+                dhcp_static: 'DHCP Reservation',
+                rack:        'Rack',
+                vlan:        'VLAN',
+                site:        'Site',
             };
 
             const rows = d.results.slice(0, 12).map(item => {
                 const icon  = sourceIcon[item.source] || '•';
                 const label = typeLabel[item.type]    || item.type;
-                const sub   = [item.ip, item.mac, item.cluster, item.dn].filter(Boolean).join(' · ');
+                const subParts = [item.ip, item.mac, item.cluster, item.dn];
+                if (item.vid != null) subParts.push(`VLAN ${item.vid}`);
+                if (item.site) subParts.push(item.site);
+                if (item.rack) subParts.push(item.rack);
+                const sub = subParts.filter(Boolean).join(' · ');
                 return `<div class="flex items-start gap-2 px-2 py-1.5 rounded-lg hover:bg-slate-50 cursor-pointer"
                              onclick="openSearchResult(${JSON.stringify(item).replace(/"/g, '&quot;')})">
                     <span class="text-base leading-none mt-0.5">${icon}</span>
