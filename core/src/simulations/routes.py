@@ -53,6 +53,30 @@ from .helpers import (  # noqa: F401
 )
 
 
+def _compute_stale_push(eff_quotas: list, spoke_counts: dict) -> list:
+    """Flag effective quotas whose spoke-side count lags the hub's applied count.
+
+    ``spoke_counts`` maps ``quota_dedup_key`` → the count the spoke's engine is
+    actually running with (from the spoke's own effective set). A quota that
+    **matches** (sc == hc) is current. A quota the spoke has at a **different**
+    count is a stale push. A quota **missing** from the spoke (sc is None — the
+    push never landed) is the starkest case: the engine never tries to fill it,
+    so it reads 0/target with no eligibility explanation — flag it as
+    spoke_count 0 + ``missing=True`` instead of silently skipping it (the old
+    ``sc is not None`` guard hid exactly this case). A quota with hub count 0
+    that's also absent/0 on the spoke is not flagged (nothing to push)."""
+    out: list = []
+    for q in eff_quotas or []:
+        k = sim_quota.quota_dedup_key(q)
+        sc = spoke_counts.get(k)
+        hc = int(q.get("count") or 0)
+        sc_num = 0 if sc is None else sc
+        if sc_num != hc and (sc_num > 0 or hc > 0):
+            out.append({"key": k, "spoke_count": sc_num,
+                        "hub_count": hc, "missing": sc is None})
+    return out
+
+
 def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                   is_admin_fn, check_tenant_access_fn=None, sessions=None,
                                   has_cs_access_fn=None, is_tenant_admin_fn=None):
@@ -3730,13 +3754,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Flag adaptive quotas whose spoke count (engine's real target) lags the
         # hub count (controller's applied target) — a push that hasn't landed yet,
         # which presents as "underfilled" but is really a stale count on the spoke.
-        stale_push: list = []
-        for q in eff_quotas:
-            k = sim_quota.quota_dedup_key(q)
-            sc = spoke_counts.get(k)
-            hc = int(q.get("count") or 0)
-            if sc is not None and sc != hc:
-                stale_push.append({"key": k, "spoke_count": sc, "hub_count": hc})
+        stale_push = _compute_stale_push(eff_quotas, spoke_counts)
         result = {"status": "SUCCESS",
                   "effective": eff_quotas,
                   "spoke_counts": spoke_counts,
