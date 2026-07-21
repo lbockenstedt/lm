@@ -317,7 +317,8 @@ async def distribute_all_certs(rr: Callable, get_by_type: Callable,
         if is_mtls:
             mtls_summary = await distribute_mtls_materials_to_all_spokes(
                 rr, push, get_primary_spokes, le_spoke_id, domain, cur_hash,
-                push_state, install_on_hub=install_on_hub)
+                push_state, install_on_hub=install_on_hub,
+                claimed_ids=_claimed_ids, claimed_group_types=_claimed_group_types)
             aggregate.extend(mtls_summary)
     return aggregate
 
@@ -342,6 +343,8 @@ async def distribute_mtls_materials_to_all_spokes(
         material_hash: Optional[str],
         push_state: Dict[str, str],
         install_on_hub: Optional[Callable] = None,
+        claimed_ids: Optional[Set[str]] = None,
+        claimed_group_types: Optional[Set[str]] = None,
         ) -> List[Dict[str, Any]]:
     """Fan the LE wildcard's mTLS materials (the chain as the CA bundle + the
     wildcard as the client cert/key) to EVERY connected PRIMARY spoke (all
@@ -379,6 +382,32 @@ async def distribute_mtls_materials_to_all_spokes(
         return summary
 
     primary = list(get_primary_spokes() or [])
+
+    # Exclude spokes that already hold their OWN unique (non-wildcard) LE cert — a
+    # dedicated cert claims that node's identity, so the wildcard's mTLS CLIENT
+    # cert must NEVER overwrite it. Without this a device with a specific cert
+    # (e.g. bugfixer, SAN-pinned to bugfixer.<domain>) would be handed the wildcard
+    # client cert by this fan-out and present *.<domain> instead — breaking its
+    # pinned identity (HUB_REQUEST would deny it). Mirrors the exclusion in
+    # distribute_wildcard_to_all_spokes; ledger-derived + recomputed each run, so
+    # deploying/removing a unique cert auto-toggles the skip. The caller passes the
+    # claim-set; a direct caller that omits it gets a one-shot LE_LIST_CERTS lookup.
+    if claimed_ids is None or claimed_group_types is None:
+        try:
+            _res = _unwrap(await rr(le_spoke_id, "LE_LIST_CERTS", {}, timeout=15.0))
+            _ld = (_res.get("data") if isinstance(_res, dict) and isinstance(_res.get("data"), dict)
+                   else _res) or {}
+            claimed_ids, claimed_group_types = _build_claimed_targets(_ld.get("certs") or [])
+        except Exception:  # noqa: BLE001 - never block the fan-out on a claim-set lookup
+            claimed_ids, claimed_group_types = set(), set()
+    _excluded = [(sid, mt) for (sid, mt) in primary
+                 if sid in claimed_ids or mt in claimed_group_types]
+    if _excluded:
+        logger.info("[mtls] %s: skipping %d spoke(s) with their own unique cert: %s",
+                    domain, len(_excluded), ", ".join(sid for (sid, _mt) in _excluded))
+        primary = [(sid, mt) for (sid, mt) in primary
+                   if sid not in claimed_ids and mt not in claimed_group_types]
+
     include_hub = install_on_hub is not None
     if not primary and not include_hub:
         logger.info("[mtls] %s: no connected primary spokes — nothing to fan out",
