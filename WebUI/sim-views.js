@@ -4067,6 +4067,90 @@ async function csRenderSimQuotaState() {
     }
 }
 
+// ── Engine Diagnostic: WHY quotas fill / under-fill (Config → Engine Diagnostic) ─
+// Read-only deep view of the SimQuotaEngine's LAST-sweep candidate analysis: the
+// harvestable pool (online / tenant-pool / per-site) plus, per quota, how many
+// pool clients are free-and-eligible vs blocked and by what reason. Answers
+// "0/N underfilled — why?" without log-diving. Data from the sim-quota-state
+// payload (pool + diagnostics). Mirrored in both sim-views.js copies.
+window.CS_ENGINE_DIAG_REASONS = {
+    packed_other_quota: 'already serving another quota',
+    exclusive_bucket_default: 'running an exclusive bucket-default sim',
+    exclusive_monopolized: 'monopolized by an exclusive sim',
+    human_pin: 'human-pinned',
+    off_site_pinned: 'pinned to another site (server not tenant-pool)',
+    site_claimed_this_sweep: 'claimed by another site this sweep',
+    ssid_claimed_other_cell: 'claimed by another SSID cell',
+};
+async function csRenderEngineDiag() {
+    csSetToolbar('');
+    try {
+        const st = await csFetch(`/${csTenant()}/sim-quota-state?tenant_id=${csTenant()}`) || {};
+        if (st.warning) {
+            csSet(`<div class="hpe-card p-5 shadow-sm"><p class="text-xs text-slate-500">${csEscape(st.warning)}</p></div>`);
+            return;
+        }
+        const pool = (st.pool && typeof st.pool === 'object') ? st.pool : {};
+        const diag = Array.isArray(st.diagnostics) ? st.diagnostics : [];
+        const LBL = window.CS_ENGINE_DIAG_REASONS;
+        const bySite = (pool.by_site && typeof pool.by_site === 'object') ? pool.by_site : {};
+        const siteChips = Object.keys(bySite).sort().map(s =>
+            `<span class="inline-block bg-slate-100 text-slate-700 rounded px-2 py-0.5 mr-1 text-[11px]">${csEscape(s)}: <b>${bySite[s]}</b></span>`).join('')
+            || '<span class="text-slate-400 text-[11px]">none site-pinned</span>';
+        const rows = diag.slice()
+            .sort((a, b) => ((a.assigned || 0) - (a.target || 0)) - ((b.assigned || 0) - (b.target || 0)))
+            .map(d => {
+                const blocked = (d.blocked && typeof d.blocked === 'object') ? d.blocked : {};
+                const bparts = Object.keys(blocked).sort((a, b) => blocked[b] - blocked[a]).map(r =>
+                    `<span class="inline-block bg-amber-50 text-amber-700 border border-amber-200 rounded px-1.5 py-0.5 mr-1 mb-1 text-[11px]">${blocked[r]} × ${csEscape(LBL[r] || r)}</span>`).join('');
+                const label = !d.sim_id
+                    ? '<span class="italic text-slate-500">Clients Associated (presence)</span>'
+                    : `<span class="font-mono text-slate-700">${csEscape(d.sim_id)}</span>`;
+                const under = (d.assigned || 0) < (d.target || 0);
+                const fill = `<span class="${under ? 'text-amber-600' : 'text-[#01A982]'} font-semibold">${d.assigned || 0}/${d.target || 0}</span>`;
+                const free = d.eligible_free || 0;
+                const freeCell = (under && free > 0)
+                    ? `<span class="text-red-600 font-bold" title="Underfilled but ${free} eligible client(s) available — a real placement bug">${free} ⚠</span>`
+                    : `<span class="${free > 0 ? 'text-slate-700' : 'text-slate-400'}">${free}</span>`;
+                const kind = d.multi ? '<span class="text-slate-500">multi</span>' : '<span class="text-purple-700 font-semibold">exclusive</span>';
+                return `<tr class="border-t border-slate-100 align-top">
+                  <td class="px-2 py-1.5 text-xs">${label}</td>
+                  <td class="px-2 py-1.5 text-xs">${csEscape(d.site || '<all>')}</td>
+                  <td class="px-2 py-1.5 text-xs">${kind}</td>
+                  <td class="px-2 py-1.5 text-xs text-center">${fill}</td>
+                  <td class="px-2 py-1.5 text-xs text-center">${freeCell}</td>
+                  <td class="px-2 py-1.5 text-xs text-center text-slate-400">${d.not_harvestable || 0}</td>
+                  <td class="px-2 py-1.5 text-xs">${bparts || '<span class="text-slate-300">—</span>'}</td>
+                </tr>`;
+            }).join('');
+        csSet(`<div class="space-y-4">
+          <div class="hpe-card rounded-lg p-5 shadow-sm">
+            <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Engine Diagnostic ${helpIcon('cs', null, 'Simulations help')}</h3>
+              <button onclick="csRenderEngineDiag()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-sm font-bold shadow-sm">↻ Refresh</button>
+            </div>
+            <p class="text-xs text-slate-500 mb-3">Why each quota fills or under-fills, from the engine's LAST 60s sweep. <b>Free-eligible</b> = pool clients this quota could still take (non-zero on an underfilled quota = a real placement bug, flagged red); <b>Blocked</b> = clients excluded this quota, by reason. Refresh after a sweep.</p>
+            <div class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+              <span><b class="text-sm text-slate-700">${pool.online || 0}</b> harvestable</span>
+              <span><b class="text-sm text-slate-700">${pool.tenant_pool || 0}</b> tenant-pool (re-homable anywhere)</span>
+              <span class="text-slate-400">site-pinned:</span> ${siteChips}
+            </div>
+            ${diag.length ? `<div class="overflow-x-auto"><table class="w-full text-left">
+              <thead><tr class="text-[11px] text-slate-400 uppercase tracking-wider">
+                <th class="px-2 py-1">Sim / Quota</th><th class="px-2 py-1">Site</th><th class="px-2 py-1">Kind</th>
+                <th class="px-2 py-1 text-center">Assigned</th><th class="px-2 py-1 text-center">Free-eligible</th>
+                <th class="px-2 py-1 text-center">Offline</th><th class="px-2 py-1">Blocked (why)</th>
+              </tr></thead>
+              <tbody>${rows}</tbody>
+            </table></div>` : '<p class="text-xs text-slate-400 italic">No diagnostics yet — the engine records these on each 60s sweep. If Central/quotas aren\'t configured there\'s nothing to fill.</p>'}
+          </div>
+        </div>`);
+    } catch (e) {
+        console.error('csRenderEngineDiag: load failed', e);
+        csSet(csErrorBox('Could not load Engine Diagnostic', e));
+    }
+}
+
 // ── Sites: assign each connected pxmx server (agent host) to a site ───────────
 // The SimQuotaEngine resolves a client's site via its hosting server's entry
 // here (after a per-client wsite override, before the bucket-default wsite), so
@@ -5533,6 +5617,7 @@ async function csRenderSetupNotifications() {
 window.CS_CHILD_RENDERERS['Config::Engine']        = csRenderConfigSimQuotas;
 window.CS_CHILD_RENDERERS['Config::Sites']         = csRenderPxmxSiteMap;
 window.CS_CHILD_RENDERERS['Config::Engine State']  = csRenderSimQuotaState;
+window.CS_CHILD_RENDERERS['Config::Engine Diagnostic'] = csRenderEngineDiag;
 window.CS_CHILD_RENDERERS['Config::Config Editor']    = csRenderConfigSimulation;
 
 // ── Register Setup children ────────────────────────────────────────────────
