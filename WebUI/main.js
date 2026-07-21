@@ -16535,6 +16535,9 @@ async function submitNetboxRack() {
         site: get('nb-r-site'),
         u_height: parseInt(get('nb-r-uheight')) || 42,
         facility_id: get('nb-r-facility') || undefined,
+        // Stamp the current tenant so a rack created from a tenant view lands in
+        // that tenant (mirrors submitNetboxAllocatePrefix). 'default' = global.
+        tenant: (currentTenant && currentTenant !== 'default') ? currentTenant : undefined,
     };
     if (!payload.name || (!editing && !payload.site)) {
         showToast('Name and Site are required', 'error');
