@@ -495,6 +495,44 @@ def register(app, hub, ctx):
             asyncio.create_task(hub._le_refresh_certs_cache(le_sid))
         return payload
 
+    @app.get("/api/mtls/client-certs")
+    async def mtls_client_certs(request: Request):
+        """The Hub-Local-CA mTLS client certs the hub has issued to spokes
+        (system_state.mtls_client_certs) — so the LE module can list/manage them
+        alongside LE certs. Admin-only."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        reg = (hub.state.system_state.get("mtls_client_certs") or {})
+        active = set((hub.active_connections or {}).keys())
+        certs = []
+        for pk, e in reg.items():
+            certs.append({**e, "pk": pk, "connected": pk in active})
+        certs.sort(key=lambda c: (not c.get("connected"), c.get("spoke_id", "")))
+        return {"certs": certs}
+
+    @app.post("/api/mtls/reprovision")
+    async def mtls_reprovision(request: Request):
+        """Force-(re)issue Hub-Local-CA mTLS client certs. Body {spoke_id} for one,
+        else every connected spoke. Admin-only. Used to roll certs out immediately
+        instead of waiting for the next reconnect."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        body = await request.json() if request.headers.get("content-length") else {}
+        one = (body or {}).get("spoke_id") if isinstance(body, dict) else None
+        targets = [one] if one else list((hub.active_connections or {}).keys())
+        results = []
+        for sid in targets:
+            try:
+                r = await hub._provision_spoke_mtls_cert(sid, force=True)
+                results.append({"spoke_id": sid, **(r or {})})
+            except Exception as e:  # noqa: BLE001
+                results.append({"spoke_id": sid, "status": "error", "message": str(e)})
+        return {"provisioned": results, "count": len(results)}
+
     @app.get("/api/le/acme-info")
     async def le_acme_info(request: Request):
         """certbot version + ACME profile support + the CA's advertised profiles,

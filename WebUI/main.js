@@ -412,7 +412,7 @@ for (const _cls of Object.keys(MODULE_CLASSES)) {
     for (const _p of MODULE_CLASSES[_cls]) PRODUCT_LABEL[_p] = _cls;
 }
 const VIEW_LABEL = {
-    dashboard: 'Dashboard', setup: 'Setup', settings: 'System', logs: 'Logs', ldap: 'Directory', bugs: 'Bug Report', templates: 'Template Repo',
+    dashboard: 'Dashboard', setup: 'Setup', settings: 'System', logs: 'Logs', ldap: 'Directory', bugs: 'Bug Report', features: 'Feature Request', templates: 'Template Repo',
 };
 function updateHeaderModule() {
     const sep = document.getElementById('header-module-sep');
@@ -960,15 +960,21 @@ function fileBug() {
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-lg font-bold text-[#263040]">🐞 File a Bug</h3>
+                <h3 class="text-lg font-bold text-[#263040]">🐞 Bug / Feature Request</h3>
                 <button onclick="this.closest('#file-bug-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
                     <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
                 </button>
             </div>
             <div class="p-6 space-y-4">
                 <div class="space-y-2">
-                    <label class="text-xs text-slate-500 uppercase font-bold">What's wrong? <span class="text-red-500">*</span></label>
-                    <textarea id="bug-description" rows="4" placeholder="Describe what you were doing and what went wrong — e.g. 'Clicked Save on the firewall rule form and the page went blank.'" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></textarea>
+                    <label class="text-xs text-slate-500 uppercase font-bold">Describe the bug or request <span class="text-red-500">*</span></label>
+                    <textarea id="bug-description" rows="4" placeholder="Describe what went wrong, or what you'd like added — e.g. 'Clicked Save on the firewall rule form and the page went blank.' or 'Add a CSV export button to the device list.'" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></textarea>
+                </div>
+                <div class="flex items-center gap-2">
+                    <input type="checkbox" id="bug-is-feature" class="rounded border-slate-300 text-[#01A982] focus:ring-[#01A982]">
+                    <label for="bug-is-feature" class="text-xs text-slate-600 select-none cursor-pointer">
+                        This is a <b>feature request</b>, not a bug (something I'd like added or changed)
+                    </label>
                 </div>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Severity (optional)</label>
@@ -980,8 +986,9 @@ function fileBug() {
                 </div>
                 <p class="text-[11px] text-slate-400 leading-relaxed">
                     Your browser console log, the current page HTML, and a screenshot will be captured and sent to the hub.
-                    BugFixer will open a GitHub issue and attempt a fix. The public issue contains only your explanation and
-                    context — the console/HTML/screenshot stay on the hub and are used only as fix context.
+                    BugFixer opens a GitHub issue from your explanation + context. For a <b>bug</b> it will also attempt a fix;
+                    a <b>feature request</b> is filed as an enhancement for triage (no auto-fix). The console/HTML/screenshot
+                    stay on the hub and are used only as fix context.
                 </p>
                 <div id="bug-submit-status" class="text-xs text-slate-500 hidden"></div>
                 <div class="pt-2 flex justify-end gap-3">
@@ -1043,10 +1050,12 @@ function _bugContextMeta() {
 
 // Core submit shared by the manual File-a-Bug modal and the auto-file path
 // (the runtime-error banner). ``onStatus`` receives human-readable progress.
-async function _submitBugReport(explanation, severity, onStatus) {
+// ``type`` is "bug" (default) or "feature" — from the modal's feature checkbox.
+// bugfixer files a feature request as an ``enhancement`` issue (no auto-fix).
+async function _submitBugReport(explanation, severity, onStatus, type = 'bug') {
     if (typeof onStatus === 'function') onStatus('Capturing console, HTML, and screenshot…');
     const { consoleLogs, html, screenshot } = await _captureBugContext();
-    const payload = { explanation, severity, console_logs: consoleLogs, html, screenshot, context: _bugContextMeta() };
+    const payload = { explanation, severity, type, console_logs: consoleLogs, html, screenshot, context: _bugContextMeta() };
     if (typeof onStatus === 'function') onStatus('Submitting to hub…');
     return await apiJson('/api/bug-report', { method: 'POST', body: JSON.stringify(payload) });
 }
@@ -1054,10 +1063,12 @@ async function _submitBugReport(explanation, severity, onStatus) {
 async function submitBugReport() {
     const explanation = (document.getElementById('bug-description')?.value || '').trim();
     if (!explanation) {
-        showToast('Please describe what’s wrong before submitting', 'error');
+        showToast('Please describe the bug or request before submitting', 'error');
         return;
     }
     const severity = document.getElementById('bug-severity')?.value || 'medium';
+    const isFeature = !!document.getElementById('bug-is-feature')?.checked;
+    const rtype = isFeature ? 'feature' : 'bug';
     const btn = document.getElementById('bug-submit-btn');
     const statusEl = document.getElementById('bug-submit-status');
     const setBusy = (msg) => {
@@ -1065,13 +1076,14 @@ async function submitBugReport() {
         if (statusEl) { statusEl.textContent = msg; statusEl.classList.remove('hidden'); }
     };
     try {
-        const data = await _submitBugReport(explanation, severity, setBusy);
-        showToast(`Bug report submitted (id ${data.id || ''}) — bugfixer will file an issue`, 'success');
+        const data = await _submitBugReport(explanation, severity, setBusy, rtype);
+        const label = isFeature ? 'Feature request' : 'Bug report';
+        showToast(`${label} submitted (id ${data.id || ''}) — bugfixer will file an issue`, 'success');
         document.getElementById('file-bug-modal')?.remove();
     } catch (err) {
         console.error('File-a-Bug: submit failed', err);
         if (statusEl) { statusEl.textContent = 'Failed to submit: ' + err.message; statusEl.classList.remove('hidden'); }
-        showToast('Failed to submit bug report: ' + err.message, 'error');
+        showToast('Failed to submit: ' + err.message, 'error');
         if (btn) { btn.disabled = false; btn.classList.remove('opacity-60', 'cursor-wait'); btn.textContent = 'Retry'; }
     }
 }
@@ -1099,7 +1111,7 @@ async function fileBugAuto(message, where, onStatus) {
         + `User agent: ${navigator.userAgent}\n`;
     const wrap = typeof onStatus === 'function' ? (s) => onStatus('Filing Bug with BugFixer — ' + s) : null;
     try {
-        const data = await _submitBugReport(explanation, 'high', wrap);
+        const data = await _submitBugReport(explanation, 'high', wrap, 'bug');
         if (typeof onStatus === 'function') onStatus(`Bug filed (id ${data.id || ''}) — bugfixer will triage`);
     } catch (err) {
         console.error('Auto bug-file failed', err);
@@ -1307,7 +1319,7 @@ async function refreshModuleCache(moduleKey) {
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
     settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons'],
-    logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs'],
+    logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs', 'logs-features'],
     setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines', 'Settings'],
@@ -1358,6 +1370,7 @@ const SUBMENU_LABELS = {
     'logs-errors': 'Error',
     'logs-recovery': 'Recovery',
     'logs-bugs': 'Bug Report',
+    'logs-features': 'Feature Request',
     'logs-opn': 'Firewall',
     'logs-pxmx': 'Hypervisor',
     'logs-cppm': 'Security/NAC',
@@ -2770,6 +2783,14 @@ function _rebuildMainNav(allSpokes, connections) {
             <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M4.5 8.5l2-1.5m13 1.5l-2-1.5M4.5 15.5l2 1.5m13-1.5l-2 1.5M12 4a4 4 0 014 4v4a4 4 0 01-8 0V8a4 4 0 014-4z"></path></svg></div>
             <span>Bug Report</span>
         </div>`;
+    // Feature Request — admin-only sibling of Bug Report. Same store, filtered
+    // to type=feature (loadBugReports('feature')); filed by bugfixer as an
+    // ``enhancement`` issue (no auto-fix). See memory file-a-bug-feature.
+    const _featureRequestNavHtml = () => `
+        <div onclick="setView('features')" id="nav-features" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-xs font-medium">
+            <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z"></path></svg></div>
+            <span>Feature Request</span>
+        </div>`;
     const _templateRepoNavHtml = () => `
         <div onclick="setView('templates')" id="nav-templates" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-xs font-medium">
             <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg></div>
@@ -2817,6 +2838,7 @@ function _rebuildMainNav(allSpokes, connections) {
         ${isAdmin() ? _securityNavHtml() : ''}
         ${isAdmin() ? _templateRepoNavHtml() : ''}
         ${isAdmin() ? _bugReportNavHtml() : ''}
+        ${isAdmin() ? _featureRequestNavHtml() : ''}
         ${(!isAdmin() && isTenantAdmin()) ? _myDevicesNavHtml() : ''}
     `;
 
@@ -3010,7 +3032,7 @@ function renderSpokeIndicators() {
 }
 
 async function setView(viewId) {
-    if ((viewId === 'setup' || viewId === 'settings' || viewId === 'logs' || viewId === 'bugs') && !isAdmin()) {
+    if ((viewId === 'setup' || viewId === 'settings' || viewId === 'logs' || viewId === 'bugs' || viewId === 'features') && !isAdmin()) {
         return;  // silently block — nav items are hidden, this guards deep-links
     }
     // My Devices is the tenant-admin device surface — reachable only by a
@@ -3344,6 +3366,7 @@ function _viewTemplate(viewId) {
 </div>`;
 
         case 'bugs':
+        case 'features':
             return `<div class="space-y-6">
   <div id="logs-content"></div>
 </div>`;
@@ -3936,6 +3959,9 @@ function initView(viewId, subView) {
         case 'bugs':
             _renderLogsSection('logs-bugs');
             break;
+        case 'features':
+            _renderLogsSection('logs-features');
+            break;
         case 'templates':
             renderTemplateRepo();
             break;
@@ -4067,15 +4093,20 @@ function _renderLogsSection(subMenu) {
     // The Recovery tab is a filtered view of the hub log (the [recovery]
     // watchdog lines already stream through Hub Logs unfiltered); load it with
     // the dedicated loader instead of the generic /setup/logs/<module> one.
-    // Bug Reports is its own table view of the hub's bug-report store.
+    // Bug Reports / Feature Requests are table views of the hub's bug-report
+    // store (loadBugReports filters by type: 'bug' | 'feature').
     const isRecovery = subMenu === 'logs-recovery';
     const isBugs = subMenu === 'logs-bugs';
-    const refreshCall = isRecovery ? "loadRecoveryLogs()" : isBugs ? "loadBugReports()" : `loadModuleLogs('${module}')`;
+    const isFeatures = subMenu === 'logs-features';
+    const bugType = isBugs ? 'bug' : isFeatures ? 'feature' : null;
+    const refreshCall = isRecovery ? "loadRecoveryLogs()"
+        : bugType ? `loadBugReports('${bugType}')` : `loadModuleLogs('${module}')`;
     // Clear Logs is destructive + fleet-wide (hub deque + every relayed
     // agent/spoke deque + on-disk /var/log/lm/*.log on the hub AND, via a
     // CLEAR_LOGS broadcast, every connected spoke's own disk). Hidden on the
-    // Bug Reports tab — that's a separate store, not a log source.
-    const clearBtn = isBugs ? '' :
+    // Bug Reports / Feature Requests tabs — those are a separate store, not
+    // a log source.
+    const clearBtn = (isBugs || isFeatures) ? '' :
         `<button onclick="clearLogs(()=>${refreshCall})" class="text-xs text-red-500 hover:text-red-700 font-medium">Clear</button>`;
     content.innerHTML = `
         <div class="${card}">
@@ -4096,8 +4127,8 @@ function _renderLogsSection(subMenu) {
     if (isRecovery) {
         loadRecoveryLogs();
         if (typeof isAdmin === 'function' && isAdmin()) _initStateResetCard();
-    } else if (isBugs) {
-        loadBugReports();
+    } else if (bugType) {
+        loadBugReports(bugType);
     } else {
         loadModuleLogs(module);
     }
@@ -4221,19 +4252,25 @@ async function loadRecoveryLogs() {
     }
 }
 
-// Bug Reports: the WebUI "File a Bug" footer button writes each report to the
-// hub's bug store; bugfixer later files a GitHub issue and flips `filed` to
-// true with the issue_url. This lists them (newest first) with status, and a
-// click opens a detail modal with the captured console/HTML/screenshot.
-async function loadBugReports() {
+// Bug Reports / Feature Requests: the WebUI "Bug/Feature Request" footer
+// button writes each report to the hub's bug store (with a `type` of "bug" or
+// "feature"); bugfixer later files a GitHub issue (Bug → auto-fix labels;
+// feature → enhancement, no auto-fix) and flips `filed` to true with the
+// issue_url. ``typeFilter`` ('bug' | 'feature') restricts the list to one kind
+// so the Bug Report and Feature Request nav items each show only their own.
+async function loadBugReports(typeFilter) {
     const container = document.getElementById('system-logs-container');
     if (!container) return;
-    container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching bug reports...</div>`;
+    const kindLabel = typeFilter === 'feature' ? 'feature request' : 'bug report';
+    container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching ${kindLabel}s...</div>`;
     try {
         const data = await apiJson('/setup/bug-reports');
-        const reports = data.reports || [];
+        let reports = data.reports || [];
+        // Legacy reports (pre-type-field) default to "bug"; only filter when a
+        // typeFilter is given (the two nav views). No filter = show everything.
+        if (typeFilter) reports = reports.filter(r => (r.type || 'bug') === typeFilter);
         if (reports.length === 0) {
-            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No bug reports yet. Use the 🐞 File a Bug button in the footer to capture the console, page HTML, and a screenshot.</div>`;
+            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No ${kindLabel}s yet. Use the 🐞 Bug/Feature Request button in the footer to capture the console, page HTML, and a screenshot${typeFilter === 'feature' ? ' (check the feature-request box)' : ''}.</div>`;
             return;
         }
         container.className = 'h-[32rem] overflow-y-auto bg-white border border-slate-200 rounded-md text-slate-700';
@@ -4243,11 +4280,16 @@ async function loadBugReports() {
             const sevColor = sev === 'high' ? 'bg-red-100 text-red-700'
                 : sev === 'low' ? 'bg-slate-100 text-slate-500'
                 : 'bg-amber-100 text-amber-700';
+            const isFeat = (r.type || 'bug') === 'feature';
+            const typeBadge = isFeat
+                ? `<span class="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-purple-100 text-purple-700" title="Feature request">💡 Feature</span>`
+                : `<span class="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-blue-100 text-blue-700" title="Bug">🐛 Bug</span>`;
             const status = r.filed
                 ? `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline">Filed ↗</a>`
                 : `<span class="text-amber-600">Pending</span>`;
             return `<div onclick="showBugReport('${escapeHtml(r.id)}')" class="px-4 py-2 border-b border-slate-100 hover:bg-slate-50 cursor-pointer flex items-center gap-3">
                 <span class="text-slate-400 w-44 shrink-0">${escapeHtml(ts)}</span>
+                ${typeBadge}
                 <span class="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold uppercase ${sevColor}">${escapeHtml(sev)}</span>
                 <span class="flex-1 truncate text-slate-700">${escapeHtml(r.summary || '(no summary)')}</span>
                 <span class="shrink-0 text-[10px] text-slate-400 font-mono">${escapeHtml(r.id)}</span>
@@ -4256,7 +4298,7 @@ async function loadBugReports() {
             </div>`;
         }).join('');
     } catch (err) {
-        container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading bug reports: ${err.message}</div>`;
+        container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading ${kindLabel}s: ${err.message}</div>`;
     }
 }
 
@@ -4358,7 +4400,7 @@ async function showBugReport(rid) {
     overlay.innerHTML = `
         <div class="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-hidden flex flex-col">
             <div class="px-5 py-3 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-                <h3 class="text-sm font-bold text-slate-700">Bug Report <span class="font-mono text-slate-400">${escapeHtml(rid)}</span></h3>
+                <h3 id="bug-detail-title" class="text-sm font-bold text-slate-700">Bug Report <span class="font-mono text-slate-400">${escapeHtml(rid)}</span></h3>
                 <div class="flex items-center gap-3">
                     <button onclick="deleteBugReport('${escapeHtml(rid)}')" title="Delete report" class="text-xs font-bold text-red-500 hover:text-red-700 border border-red-200 hover:border-red-300 px-3 py-1 rounded transition-colors">Delete</button>
                     <button onclick="document.getElementById('bug-detail-overlay').remove()" class="text-slate-400 hover:text-slate-600 text-xl">✕</button>
@@ -4378,7 +4420,10 @@ async function showBugReport(rid) {
         try { report = JSON.parse(r.report_json || '{}'); } catch { report = {}; }
         const consoleText = r.console || '(no console captured)';
         const domText = (r.dom || '').slice(0, 4000) || '(no HTML captured)';
+        const isFeat = (r.type || (report.type || 'bug')) === 'feature';
         const sev = r.severity || 'medium';
+        const titleEl = overlay.querySelector('#bug-detail-title');
+        if (titleEl) titleEl.innerHTML = `${isFeat ? '💡 Feature Request' : '🐛 Bug Report'} <span class="font-mono text-slate-400">${escapeHtml(rid)}</span>`;
         const status = r.filed
             ? `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline break-all">${escapeHtml(r.issue_url || 'Filed')}</a>`
             : `<span class="text-amber-600">Pending — bugfixer has not filed this yet</span>`;
@@ -4395,6 +4440,7 @@ async function showBugReport(rid) {
                 <div class="text-sm text-slate-700 whitespace-pre-wrap">${escapeHtml(report.explanation || r.summary || '(none)')}</div>
             </div>
             <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+                <div><span class="text-slate-400">Type:</span> <span class="font-medium">${isFeat ? '💡 Feature Request' : '🐛 Bug'}</span></div>
                 <div><span class="text-slate-400">Severity:</span> <span class="font-medium">${escapeHtml(sev)}</span></div>
                 <div><span class="text-slate-400">View:</span> <span class="font-medium">${escapeHtml(ctx.currentView || '—')}</span></div>
                 <div><span class="text-slate-400">URL:</span> <span class="font-medium break-all">${escapeHtml(ctx.url || '—')}</span></div>
@@ -8550,6 +8596,7 @@ const LM_NAV_ICONS = [
     { id: 11, name: 'Console',      key: 'console',    svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z"></path></svg>' },
     { id: 12, name: 'Template Repo',key: 'templates',  svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"></path></svg>' },
     { id: 13, name: 'Bug Report',   key: 'bugs',       svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M4.5 8.5l2-1.5m13 1.5l-2-1.5M4.5 15.5l2 1.5m13-1.5l-2 1.5M12 4a4 4 0 014 4v4a4 4 0 01-8 0V8a4 4 0 014-4z"></path></svg>' },
+    { id: 18, name: 'Feature Request', key: 'features', svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456z"></path></svg>' },
     { id: 14, name: 'My Devices',   key: 'mydevices',  svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01"></path></svg>' },
     { id: 15, name: 'Setup',        key: 'setup',      svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26"></path></svg>' },
     { id: 16, name: 'System',       key: 'settings',   svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>' },
@@ -17559,9 +17606,8 @@ function _leLegend() {
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
           ${lbl('Cert')}
-          <span class="flex items-center gap-1.5">${pill('bg-purple-100 text-purple-700', '★ BugFixer')} pinned mTLS identity (hub logs + fleet updates)</span>
-          <span class="flex items-center gap-1.5">${pill('bg-blue-100 text-blue-700', '🔐 clientAuth')} has the clientAuth EKU — usable as an mTLS client cert</span>
-          <span class="flex items-center gap-1.5">${pill('bg-amber-100 text-amber-700', 'shortlived')} non-default ACME profile (e.g. short-lived ~7d)</span>
+          <span class="flex items-center gap-1.5">${pill('bg-purple-100 text-purple-700', '★ BugFixer')} pinned mTLS identity (hub mints its clientAuth cert from the Local CA)</span>
+          <span class="flex items-center gap-1.5">${pill('bg-amber-100 text-amber-700', 'shortlived')} non-default ACME profile (short-lived ~7d). mTLS client certs come from the 🔒 hub Local CA, not here.</span>
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
           ${lbl('Expiry')}
@@ -17764,9 +17810,9 @@ async function loadLEData(subMenu) {
             // page). ★ BugFixer = pinned mTLS identity; 🔐 clientAuth = has the
             // clientAuth EKU (mTLS-client-capable); a profile chip = non-default
             // ACME profile (e.g. a short-lived cert).
-            const bfBadge = c.bugfixer ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-700 align-middle" title="Tagged as the BugFixer mTLS identity (Manage → ★ BugFixer)">★ BugFixer</span>` : '';
-            const caBadge = c.client_auth ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700 align-middle" title="Issued with the clientAuth EKU — usable as an mTLS client cert (Manage → clientAuth)">🔐 clientAuth</span>` : '';
-            const profBadge = (c.profile && String(c.profile).toLowerCase() !== 'classic') ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700 align-middle" title="ACME profile: ${escapeHtml(String(c.profile))} (validity/EKU set by the CA profile)">${escapeHtml(String(c.profile))}</span>` : '';
+            const bfBadge = c.bugfixer ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-700 align-middle" title="Pinned as the BugFixer mTLS identity (Manage → ★ BugFixer)">★ BugFixer</span>` : '';
+            const caBadge = '';
+            const profBadge = (c.profile && String(c.profile).toLowerCase() !== 'classic') ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700 align-middle" title="ACME profile: ${escapeHtml(String(c.profile))} (lifetime set by the CA profile)">${escapeHtml(String(c.profile))}</span>` : '';
             // 2-row group per cert: row 1 = the data (domain, email, challenge,
             // staging, expiry+renew-window) WITH the Manage/Renew/Revoke actions
             // stacked vertically in a pinned-right Actions cell on that same row
@@ -18189,11 +18235,7 @@ async function showLeTargetsModal(domain) {
         <p class="text-xs text-slate-500 mb-4">Each target is a spoke (by module type) the hub pushes this cert to; that spoke installs it on its device. Only installed modules with at least one device are listed.</p>
         <label class="flex items-start gap-2 mb-4 p-3 rounded-md border ${isBfCert ? 'bg-purple-50 border-purple-200' : 'bg-slate-50 border-slate-200'} cursor-pointer" title="Tag this cert as the BugFixer mTLS identity — the gate for hub log reads + fleet update commands. Then add a bugfixer target below so the cert is deployed to the bugfixer agent.">
             <input type="checkbox" id="le-bugfixer-chk" ${isBfCert ? 'checked' : ''} onchange="leToggleBugfixerChk(this, '${esc(domain)}')" class="mt-0.5 accent-purple-600" />
-            <span class="text-xs text-slate-700"><span class="font-bold text-purple-700">★ BugFixer identity</span> — tag this cert as the one bugfixer presents over mTLS to read hub logs + run fleet updates. <span class="text-slate-500">Also add a <span class="font-mono">bugfixer</span> target below (★) so the cert is deployed to the bugfixer agent. Checking this auto-enables clientAuth below.</span></span>
-        </label>
-        <label class="flex items-start gap-2 mb-4 p-3 rounded-md border ${isCA ? 'bg-blue-50 border-blue-200' : 'bg-slate-50 border-slate-200'} cursor-pointer" title="Re-issue this cert with the clientAuth EKU (ACME 'classic' profile) so it can be presented as an mTLS CLIENT cert. Required for the BugFixer identity and the mTLS wildcard; ordinary server certs don't need it. Re-issues the cert.">
-            <input type="checkbox" id="le-clientauth-chk" ${isCA ? 'checked' : ''} onchange="leToggleClientAuthChk(this, '${esc(domain)}')" class="mt-0.5 accent-blue-600" />
-            <span class="text-xs text-slate-700"><span class="font-bold text-blue-700">clientAuth EKU</span> — re-issue this cert so it can be used as an mTLS <b>client</b> cert (BugFixer, mTLS wildcard). <span class="text-slate-500">Ordinary server certs don't need this. Toggling re-issues the cert.</span></span>
+            <span class="text-xs text-slate-700"><span class="font-bold text-purple-700">★ BugFixer identity</span> — pin this cert's name as the BugFixer mTLS identity (hub logs + fleet updates). <span class="text-slate-500">The hub mints bugfixer's clientAuth mTLS cert from its Local CA for this SAN automatically; also add a <span class="font-mono">bugfixer</span> target below (★) to deploy this cert as bugfixer's WebUI/server cert.</span></span>
         </label>
         <div class="overflow-x-auto mb-3"><table class="w-full text-sm">
             <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>
@@ -18706,11 +18748,7 @@ async function showLeIssueModal() {
                     <input id="le-issue-staging" type="checkbox" class="rounded border-slate-300" />
                     Use Let's Encrypt <b>staging</b> (untrusted — for testing)
                 </label>
-                <label class="flex items-center gap-2 text-sm text-slate-700" title="Request the ACME 'classic' profile so the cert carries the clientAuth EKU in ADDITION to serverAuth. Required only for certs presented as an mTLS CLIENT cert (e.g. the BugFixer cert or the mTLS wildcard). Leave off for ordinary server certs.">
-                    <input id="le-issue-clientauth" type="checkbox" class="rounded border-slate-300" />
-                    Include <b>clientAuth</b> (for mTLS client certs)
-                </label>
-                <label class="flex items-center gap-1 text-sm text-slate-700" title="Let's Encrypt sets the certificate LIFETIME via a named ACME profile, not an arbitrary duration. Standard is ~90 days; short-lived is ~7 days (serverAuth only — can't be an mTLS client cert). See the profiles the CA advertises in the 🔒 mTLS status panel.">
+                <label class="flex items-center gap-1 text-sm text-slate-700" title="Let's Encrypt sets the certificate LIFETIME via a named ACME profile, not an arbitrary duration. Standard is ~90 days; short-lived is ~7 days. mTLS CLIENT certs are NOT issued here — the hub mints those from its Local CA (see the 🔒 mTLS status panel).">
                     Lifetime
                     <select id="le-issue-profile" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
                         <option value="">Standard (~90 days)</option>
@@ -18817,7 +18855,6 @@ async function leIssueCert() {
         : (chSel === 'dns' ? (document.getElementById('le-issue-dns-creds')?.value || '') : '');
     const staging = !!document.getElementById('le-issue-staging')?.checked;
     const keyType = document.getElementById('le-issue-keytype')?.value || 'rsa';
-    const clientAuth = !!document.getElementById('le-issue-clientauth')?.checked;
     const profile = document.getElementById('le-issue-profile')?.value || '';
 
     if (!domain) { showToast('Domain is required', 'error'); return; }
@@ -18833,8 +18870,8 @@ async function leIssueCert() {
         }
     }
 
-    const body = { domain, email, challenge, staging, key_type: keyType, client_auth: clientAuth };
-    if (profile) body.profile = profile;   // ACME profile (e.g. shortlived) — overrides clientAuth's classic
+    const body = { domain, email, challenge, staging, key_type: keyType };
+    if (profile) body.profile = profile;   // ACME profile (e.g. shortlived — lifetime only)
     // Per-cert renewal window (days before expiry the loop triggers). Send only
     // a positive int; blank/invalid → omitted → spoke stores None → uses the
     // 7-day default. The le spoke validates + normalizes (bad → None).
@@ -19174,16 +19211,11 @@ async function leToggleBugfixerChk(cb, domain) {
         showToast(enable
             ? `Tagged ${domain} as the BugFixer cert — add a bugfixer target (★) below so it presents over mTLS`
             : `Removed the BugFixer tag from ${domain}`, 'success');
-        // A BugFixer cert MUST carry the clientAuth EKU to be usable as an mTLS
-        // client cert — auto-enable it (re-issue) when tagging BugFixer, unless it
-        // already has it. Reflect it in the modal's clientAuth checkbox.
+        // The hub mints bugfixer's clientAuth mTLS cert from its Local CA for the
+        // pinned SAN on the next connect (public CAs can't issue clientAuth) — kick
+        // a re-provision now so it takes effect immediately.
         if (enable) {
-            const c = (window._leCerts || []).find(x => x.domain === domain);
-            if (c && !c.client_auth) {
-                const caCb = document.getElementById('le-clientauth-chk');
-                if (caCb) caCb.checked = true;
-                await leToggleClientAuthChk(caCb, domain, { skipConfirm: true, noReload: true });
-            }
+            try { await _spokeFetch('/api/mtls/reprovision', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ spoke_id: 'bugfixer' }) }); } catch (e) { /* best-effort */ }
         }
         window._leLoading = false;   // clear any stuck guard so the re-render runs
         await loadLEData();          // refresh the top banner + row target stars
@@ -19192,6 +19224,23 @@ async function leToggleBugfixerChk(cb, domain) {
         showToast('BugFixer tag failed: ' + (e.message || e), 'error');
         if (cb) { cb.checked = !enable; cb.disabled = false; }
     }
+}
+
+// Issue/renew Hub-Local-CA mTLS client certs. spokeId '' = every connected spoke.
+// The hub mints a clientAuth cert (public CAs can't) + delivers it; the spoke
+// restarts to present it, then shows mTLS ✓ here.
+async function mtlsProvision(spokeId) {
+    showToast(spokeId ? `Issuing mTLS cert for ${spokeId}…` : 'Issuing mTLS certs for all connected spokes…', 'info');
+    try {
+        const { ok, data, detail } = await _spokeFetch('/api/mtls/reprovision', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(spokeId ? { spoke_id: spokeId } : {})
+        });
+        if (!ok) { showToast('Provision failed: ' + (detail || ''), 'error'); return; }
+        const n = (data && data.count) || 0;
+        showToast(`Issued/renewed ${n} mTLS cert(s) — spokes reconnect to present them`, 'success');
+        setTimeout(() => { if (document.getElementById('mtls-debug-modal')) showMtlsDebug(); }, 1500);
+    } catch (e) { showToast('Provision failed: ' + (e.message || e), 'error'); }
 }
 
 // mTLS debug screen: which connected spokes/agents are ACTUALLY presenting a
@@ -19217,7 +19266,8 @@ async function showMtlsDebug() {
             <td class="px-3 py-1.5 font-bold ${c.mtls_active ? 'text-[#01A982]' : 'text-slate-400'}">${c.mtls_active ? 'mTLS ✓' : 'cert-less'}</td>
             <td class="px-3 py-1.5 text-xs">${c.sans && c.sans.length ? esc(c.sans.join(', ')) : '—'}${c.is_bugfixer_pinned ? ' <span class="text-purple-700 font-bold">★ BugFixer</span>' : ''}</td>
             <td class="px-3 py-1.5 text-xs text-slate-500">${esc(c.not_after || '')}</td>
-        </tr>`).join('') : `<tr><td colspan="5" class="px-3 py-3 text-slate-400 italic">No connected spokes.</td></tr>`;
+            <td class="px-3 py-1.5"><button onclick="mtlsProvision('${esc(c.spoke_id)}')" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2 py-0.5 rounded font-bold" title="Issue/renew this spoke's Hub-Local-CA mTLS client cert now">issue</button></td>
+        </tr>`).join('') : `<tr><td colspan="6" class="px-3 py-3 text-slate-400 italic">No connected spokes.</td></tr>`;
     const lmca = (d.lm_mtls_ca_certs || []).map(c => `<div>${esc(c.subject)} <span class="text-slate-400">← ${esc(c.issuer)}</span></div>`).join('') || '<div class="text-slate-400">— none —</div>';
     const pin = (d.pinned_cert_checks || []).map(p => `<div>${esc(p.domain)}: <span class="font-bold ${p.ok ? 'text-[#01A982]' : 'text-red-600'}">${p.ok ? 'accepted' : 'REJECTED'}</span> <span class="text-slate-400">${esc(p.detail || '')}</span></div>`).join('') || '<div class="text-slate-400">no cert tagged BugFixer</div>';
     const dupes = (d.duplicate_subjects || []);
@@ -19227,10 +19277,14 @@ async function showMtlsDebug() {
                 <h3 class="text-lg font-bold text-[#263040]">🔒 mTLS status</h3>
                 <span class="text-xs px-2 py-1 rounded-full ${d.mtls_enabled ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-600'}">${d.mtls_enabled ? 'mTLS ENABLED' : 'mTLS off'}</span>
             </div>
-            <div class="text-sm text-slate-600">${cs.connected ?? 0} connected · <b class="text-[#01A982]">${cs.mtls_active ?? 0}</b> presenting a verified client cert · <b class="text-slate-500">${cs.cert_less ?? 0}</b> cert-less (permissive fallback)</div>
+            <div class="flex items-center justify-between gap-2">
+              <div class="text-sm text-slate-600">${cs.connected ?? 0} connected · <b class="text-[#01A982]">${cs.mtls_active ?? 0}</b> presenting a verified client cert · <b class="text-slate-500">${cs.cert_less ?? 0}</b> cert-less</div>
+              <button onclick="mtlsProvision('')" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md font-bold whitespace-nowrap" title="Issue/renew a Hub-Local-CA mTLS client cert for EVERY connected spoke now">⟳ Provision all connected</button>
+            </div>
+            <div class="text-xs text-slate-500">The hub mints each spoke's clientAuth mTLS client cert from its <b>Local CA</b> (public CAs no longer issue clientAuth) — done automatically on connect; use these buttons to (re)issue on demand.</div>
             <div class="overflow-x-auto border border-slate-200 rounded-lg">
                 <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
-                    <th class="px-3 py-2 text-left">Spoke</th><th class="px-3 py-2 text-left">Type</th><th class="px-3 py-2 text-left">mTLS</th><th class="px-3 py-2 text-left">Cert SANs</th><th class="px-3 py-2 text-left">Expires</th>
+                    <th class="px-3 py-2 text-left">Spoke</th><th class="px-3 py-2 text-left">Type</th><th class="px-3 py-2 text-left">mTLS</th><th class="px-3 py-2 text-left">Cert SANs</th><th class="px-3 py-2 text-left">Expires</th><th class="px-3 py-2 text-left"></th>
                 </tr></thead><tbody>${rows}</tbody></table>
             </div>
             <div class="text-xs text-slate-500">Note: the hub is permissive (CERT_OPTIONAL) — a "cert-less" spoke still works (session-key auth). Only BugFixer's HUB_REQUEST channel <i>requires</i> a verified, pinned client cert.</div>
