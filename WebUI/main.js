@@ -19331,12 +19331,14 @@ async function showMtlsDebug() {
         <tr class="border-b border-slate-100">
             <td class="px-3 py-1.5 font-medium" title="${esc(c.spoke_id)}">${esc(c.label || c.spoke_id)}</td>
             <td class="px-3 py-1.5">${esc(c.module_type || '—')}</td>
-            <td class="px-3 py-1.5 font-bold ${c.mtls_active ? 'text-[#01A982]' : 'text-slate-400'}">${c.mtls_active ? 'mTLS ✓' : 'cert-less'}</td>
+            <td class="px-3 py-1.5 font-bold ${c.local ? 'text-slate-400' : (c.mtls_active ? 'text-[#01A982]' : 'text-amber-600')}" title="${c.local ? 'Co-located spoke — connects over plaintext loopback (ws://127.0.0.1). No TLS leg, so mTLS does not apply. mTLS is remote-only (wss).' : (c.mtls_active ? 'Presenting a verified Hub-CA client cert' : 'Remote spoke connected without presenting a client cert — issue one')}">${c.local ? 'local · N/A' : (c.mtls_active ? 'mTLS ✓' : 'cert-less')}</td>
             <td class="px-3 py-1.5 text-xs">${c.sans && c.sans.length ? esc(c.sans.join(', ')) : '—'}${c.is_bugfixer_pinned ? ' <span class="text-purple-700 font-bold">★ BugFixer</span>' : ''}</td>
             <td class="px-3 py-1.5 text-xs text-slate-500">${esc(c.not_after || '')}</td>
             <td class="px-3 py-1.5 whitespace-nowrap">
-                <button onclick="mtlsProvision('${esc(c.spoke_id)}')" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2 py-0.5 rounded font-bold" title="Issue/renew this spoke's Hub-Local-CA mTLS client cert now">issue</button>
-                ${c.mtls_active ? `<button onclick="mtlsRevoke('${esc(c.spoke_id)}','${esc(c.label || c.spoke_id)}')" class="text-xs bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-2 py-0.5 rounded font-bold ml-1" title="Revoke this spoke's mTLS client cert (it reconnects cert-less)">revoke</button>` : ''}
+                ${c.local
+                  ? `<span class="text-xs text-slate-400 italic" title="mTLS is remote-only (wss). A co-located spoke on loopback has no TLS leg to present a client cert.">loopback — mTLS N/A</span>`
+                  : `<button onclick="mtlsProvision('${esc(c.spoke_id)}')" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2 py-0.5 rounded font-bold" title="Issue/renew this spoke's Hub-Local-CA mTLS client cert now">issue</button>
+                ${c.mtls_active ? `<button onclick="mtlsRevoke('${esc(c.spoke_id)}','${esc(c.label || c.spoke_id)}')" class="text-xs bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-2 py-0.5 rounded font-bold ml-1" title="Revoke this spoke's mTLS client cert (it reconnects cert-less)">revoke</button>` : ''}`}
             </td>
         </tr>`).join('') : `<tr><td colspan="6" class="px-3 py-3 text-slate-400 italic">No connected spokes.</td></tr>`;
     const lmca = (d.lm_mtls_ca_certs || []).map(c => `<div>${esc(c.subject)} <span class="text-slate-400">← ${esc(c.issuer)}</span></div>`).join('') || '<div class="text-slate-400">— none —</div>';

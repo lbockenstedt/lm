@@ -889,23 +889,30 @@ def register(app, hub, ctx):
                     not_after = raw.get("notAfter", "") or ""
             except Exception:  # noqa: BLE001
                 pass
+            # Co-located spokes connect over plaintext loopback (ws://127.0.0.1):
+            # no TLS leg, so mTLS is not applicable (never a failure — just N/A).
+            local = hub._is_loopback_spoke(pk)
             clients.append({
                 "spoke_id": pk,
                 "label": _label(pk),
                 "module_type": (hub.spoke_module_types or {}).get(pk, ""),
                 "mtls_active": bool(ident),        # presented a VERIFIED client cert
+                "local": local,                    # loopback ws — mTLS N/A (remote-only)
                 "sans": sans,
                 "subject": subj,
                 "issuer": issuer,
                 "not_after": not_after,
                 "is_bugfixer_pinned": bool(ident) and any(s.lower() in pinned_lc for s in sans),
             })
-        clients.sort(key=lambda c: (not c["mtls_active"], c.get("label") or c["spoke_id"]))
+        # Sort: active first, then remote-eligible (cert-less), then loopback N/A last.
+        clients.sort(key=lambda c: (not c["mtls_active"], c.get("local", False),
+                                    c.get("label") or c["spoke_id"]))
         diag["clients"] = clients
         diag["clients_summary"] = {
             "connected": len(clients),
             "mtls_active": sum(1 for c in clients if c["mtls_active"]),
-            "cert_less": sum(1 for c in clients if not c["mtls_active"]),
+            "cert_less": sum(1 for c in clients if not c["mtls_active"] and not c.get("local")),
+            "local": sum(1 for c in clients if c.get("local")),
         }
         # Pinned BugFixer identity — reflect the LIVE connection: is a connected
         # spoke presenting a VERIFIED cert whose SAN matches the pin? (The LE cert is

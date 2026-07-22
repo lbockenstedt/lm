@@ -768,7 +768,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 ctx = ssl._create_unverified_context()
                 logger.debug("wss: using unverified context (self-signed hub cert; "
                              "set LM_HUB_TLS_VERIFY=1 to verify)")
-                return ctx
+                return self._present_client_cert(ctx)
             # Verify ON: prefer a pinned CA, else the system store.
             if self._tls_ca_cert:
                 if not os.path.isfile(self._tls_ca_cert):
@@ -780,14 +780,54 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 ctx = ssl.create_default_context(cafile=self._tls_ca_cert)
                 logger.info("wss: verifying hub cert against pinned CA %s",
                             self._tls_ca_cert)
-                return ctx
+                return self._present_client_cert(ctx)
             ctx = ssl.create_default_context()  # system trust store (public CA)
             logger.info("wss: verifying hub cert against system trust store "
                         "(LM_HUB_TLS_VERIFY=1, no LM_HUB_CA_CERT)")
-            return ctx
+            return self._present_client_cert(ctx)
         except Exception as e:
             logger.error("Could not build wss SSL context: %s — connecting without TLS", e)
             return None
+
+    def _present_client_cert(self, ctx):
+        """Load this spoke's hub-issued mTLS CLIENT cert into the wss context so
+        the spoke actually PRESENTS a verified client identity on the handshake.
+
+        THE fleet-mTLS bug this fixes: _client_ssl_ctx built a context that only
+        verified the *server* (hub) cert and never called load_cert_chain, so a
+        remote spoke connected over TLS but sent NO client cert — the hub saw it
+        cert-less and mTLS was silently inactive for every module except bugfixer
+        (which has its own connect code that presents the cert). Files are written
+        by _handle_set_mtls_client_cert (SPOKE_SET_MTLS_CLIENT_CERT) into the mTLS
+        material dir; env (LM_MTLS_CLIENT_CERT/KEY) is the fallback after a
+        restart. Best-effort: a missing/broken cert never breaks the transport
+        (permissive model — the hub falls back to cert-less)."""
+        if ctx is None:
+            return ctx
+        try:
+            cc = ck = ""
+            try:
+                cert_dir = self._mtls_material_dir()
+                _cc = os.path.join(cert_dir, "mtls-client.crt")
+                _ck = os.path.join(cert_dir, "mtls-client.key")
+                if os.path.isfile(_cc) and os.path.isfile(_ck):
+                    cc, ck = _cc, _ck
+            except Exception:  # noqa: BLE001
+                pass
+            if not (cc and ck):
+                _cc = os.getenv("LM_MTLS_CLIENT_CERT", "").strip()
+                _ck = os.getenv("LM_MTLS_CLIENT_KEY", "").strip()
+                if _cc and _ck and os.path.isfile(_cc) and os.path.isfile(_ck):
+                    cc, ck = _cc, _ck
+            if cc and ck:
+                ctx.load_cert_chain(cc, ck)
+                logger.info("wss: presenting hub-CA mTLS client cert to the hub (%s)", cc)
+            else:
+                logger.debug("wss: no mTLS client cert installed yet — connecting cert-less")
+        except Exception as e:  # noqa: BLE001 - never break the transport on cert load
+            logger.warning("wss: could not present mTLS client cert (%s) — "
+                           "connecting cert-less", e)
+        return ctx
 
     @staticmethod
     def _normalize_hub_url(url):

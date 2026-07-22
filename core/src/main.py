@@ -5059,6 +5059,21 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             deduped.append(line)
         return {"logs": deduped}
 
+    def _is_loopback_spoke(self, spoke_id: str) -> bool:
+        """True if this spoke connected over the plaintext loopback listener
+        (co-located on the hub box → ws://127.0.0.1, NOT wss://). Such a
+        connection has NO TLS leg, so the spoke can NEVER present an mTLS client
+        cert — mTLS is remote-only. This is why only remote modules (e.g.
+        bugfixer over wss://) can go mtls_active; issuing a cert to a co-located
+        spoke just writes files it can't present. remote_ip is captured at
+        connect into spoke_telemetry. Unknown IP → NOT treated as loopback (don't
+        suppress issuance on missing telemetry)."""
+        pk = self._primary_key(spoke_id)
+        tel = ((self.spoke_telemetry or {}).get(pk)
+               or (self.spoke_telemetry or {}).get(spoke_id) or {})
+        ip = str(tel.get("remote_ip") or "").strip().lower()
+        return ip in ("127.0.0.1", "::1", "localhost")
+
     async def _provision_spoke_mtls_cert(self, spoke_id: str, force: bool = False) -> Dict[str, Any]:
         """Fleet mTLS: issue + deliver a Hub-Local-CA clientAuth client cert to a
         spoke so it presents a VERIFIED mTLS identity (public CAs no longer issue
@@ -5075,6 +5090,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             except Exception:  # noqa: BLE001
                 return {"status": "error", "message": "mtls_ca unavailable"}
         pk = self._primary_key(spoke_id)
+        # Co-located spokes connect over plaintext loopback (ws://127.0.0.1) — no
+        # TLS leg, so a client cert can never be presented. Skip: issuing one just
+        # writes files the spoke can't use and shows a misleading "issued but never
+        # active". mTLS is remote-only (wss); this is why only bugfixer works.
+        if self._is_loopback_spoke(spoke_id):
+            return {"status": "skipped", "reason": "loopback",
+                    "message": "co-located spoke connects over loopback (ws://127.0.0.1) — "
+                               "mTLS is remote-only (wss); no client cert can be presented"}
         # A (re)issue clears any revocation — this IS the "un-revoke".
         try:
             (self.state.system_state.get("mtls_revoked", {}) or {}).pop(pk, None)
