@@ -5207,6 +5207,37 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 reg = self.state.system_state.get("mtls_client_certs", {}) or {}
                 now = time.time()
                 active = set((self.active_connections or {}).keys())
+                # CA rollover: the Hub Local CA (10y) must never silently lapse — if
+                # it does, EVERY client cert stops verifying at once. Well before
+                # expiry (90d), mint a fresh CA, keep the old one trusted so its
+                # already-issued leaves keep working through the overlap, hot-reload
+                # the listener trust, and force-reissue connected spokes onto the new
+                # CA. Naturally one-shot: after rollover the CA is 10y out again.
+                try:
+                    from security import mtls_ca as _mtls_ca
+                    from security import mtls as _mtls_mod
+                    ca_exp = _mtls_ca.ca_not_after_ts()
+                    if ca_exp and (ca_exp - now) <= 90 * 86400:
+                        logger.warning("[mtls] Hub Local CA within 90d of expiry — "
+                                       "rolling it over (old CA stays trusted for its "
+                                       "issued leaves).")
+                        _mtls_ca.rollover_ca()
+                        try:
+                            _mtls_mod.reload_client_ca()  # live listener trusts new+retired CA
+                        except Exception as ex:  # noqa: BLE001
+                            logger.warning(f"[mtls] CA rollover trust reload failed: {ex}")
+                        # Reissue every connected spoke from the new CA now, so nobody
+                        # waits on the 7d leaf window with a soon-dead CA.
+                        for pk2, e2 in list(reg.items()):
+                            if pk2 not in active:
+                                continue
+                            sid2 = e2.get("spoke_id") or pk2
+                            try:
+                                await self._provision_spoke_mtls_cert(sid2, force=True)
+                            except Exception as ex:  # noqa: BLE001
+                                logger.warning(f"[mtls] CA-rollover reissue for {sid2} failed: {ex}")
+                except Exception as ex:  # noqa: BLE001
+                    logger.warning(f"[mtls] CA expiry check failed: {ex}")
                 for pk, e in list(reg.items()):
                     if pk not in active:
                         continue

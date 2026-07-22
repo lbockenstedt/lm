@@ -279,6 +279,14 @@ def server_client_ca_file():
                     parts.append(cap)
             except Exception:  # noqa: BLE001
                 pass
+            # Retired CA certs (from a CA rollover) — still trusted so client certs
+            # the previous CA issued verify through the overlap until they expire.
+            try:
+                retired = _mtls_ca.retired_ca_pems()
+                if retired and retired.strip():
+                    parts.append(retired)
+            except Exception:  # noqa: BLE001
+                pass
         # Legacy LM_MTLS_CA (LE wildcard chain) — still trusted if present.
         if ca and os.path.exists(ca):
             with open(ca, "r") as f:

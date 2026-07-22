@@ -26,6 +26,12 @@ _CA_DIR = os.getenv(
 )
 CA_CERT_PATH = os.getenv("LM_MTLS_CLIENT_CA_CERT", os.path.join(_CA_DIR, "mtls-client-ca.pem"))
 CA_KEY_PATH = os.getenv("LM_MTLS_CLIENT_CA_KEY", os.path.join(_CA_DIR, "mtls-client-ca.key"))
+# Retired CA certs (no keys — we never sign with them again) accumulate here on
+# rollover so client certs the OLD CA issued keep verifying during the overlap
+# (a leaf lives ≤397d, so an old CA stays useful until its last leaf expires).
+# mtls.server_client_ca_file() folds these into the hub's client-verify bundle.
+RETIRED_CA_PATH = os.getenv("LM_MTLS_CLIENT_CA_RETIRED",
+                            os.path.join(_CA_DIR, "mtls-client-ca-retired.pem"))
 _CA_CN = os.getenv("LM_MTLS_CLIENT_CA_CN", "LM Hub mTLS Client CA")
 
 
@@ -48,11 +54,9 @@ def ca_cert_pem() -> str:
         return ""
 
 
-def ensure_ca():
-    """Create the self-signed mTLS client CA if it doesn't exist. Idempotent.
-    Returns the CA cert PEM (or '' on failure)."""
-    if ca_exists():
-        return ca_cert_pem()
+def _write_new_ca():
+    """Generate a fresh self-signed CA and write it to CA_CERT_PATH/CA_KEY_PATH
+    (overwriting). Shared by ensure_ca (first create) and rollover_ca (renewal)."""
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
@@ -89,6 +93,60 @@ def ensure_ca():
     except OSError:
         pass
     return ca_cert_pem()
+
+
+def ensure_ca():
+    """Create the self-signed mTLS client CA if it doesn't exist. Idempotent.
+    Returns the CA cert PEM (or '' on failure). Renewal near expiry is handled
+    separately by rollover_ca (called from the hub's mTLS renewal loop) so a
+    plain ensure_ca on the hot path never regenerates the CA under a live fleet."""
+    if ca_exists():
+        return ca_cert_pem()
+    return _write_new_ca()
+
+
+def ca_not_after_ts() -> float:
+    """Epoch seconds of the current CA cert's expiry (0.0 if no CA / parse error).
+    Drives the renewal loop's 'CA about to expire?' check."""
+    try:
+        from cryptography import x509
+        with open(CA_CERT_PATH, "rb") as f:
+            cert = x509.load_pem_x509_certificate(f.read())
+        try:
+            return cert.not_valid_after_utc.timestamp()
+        except Exception:  # noqa: BLE001 - older cryptography
+            return cert.not_valid_after.replace(tzinfo=datetime.timezone.utc).timestamp()
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def retired_ca_pems() -> str:
+    """Concatenated PEM of all RETIRED CA certs (empty string if none). Folded into
+    the hub's client-verify bundle so client certs an old CA issued keep verifying
+    through the rollover overlap."""
+    try:
+        with open(RETIRED_CA_PATH, "r") as f:
+            return f.read()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def rollover_ca() -> str:
+    """Renew the CA: append the CURRENT CA cert to the retired store (so its
+    already-issued leaf certs keep verifying until they expire), then mint a fresh
+    CA in its place. Returns the NEW CA cert PEM ('' on failure). The caller must
+    then reload the hub's client-verify trust (mtls.reload_client_ca) and re-issue
+    connected spokes so they get leaves signed by the new CA. Idempotent per
+    expiry: after this the CA is 10y out, so the near-expiry trigger won't refire."""
+    old_pem = ca_cert_pem()
+    if old_pem.strip():
+        try:
+            os.makedirs(_CA_DIR, exist_ok=True)
+            with open(RETIRED_CA_PATH, "a") as f:
+                f.write(("" if old_pem.endswith("\n") else "\n").join([old_pem, ""]))
+        except Exception:  # noqa: BLE001 - if we can't retire it, still roll (old leaves lose trust)
+            pass
+    return _write_new_ca()
 
 
 def issue_client_cert(common_name: str, sans=None, days: int = 397):
