@@ -6268,23 +6268,13 @@ async function csRefreshAutoProvStatus() {
         }
         if (!st) return;
         const csCount = Number(s.cs_enabled_agent_count || 0);
-        // Primary (freshest host) provision diagnostic — WHY the last pass
-        // provisioned nothing (or did), plus the loop liveness heartbeat and the
-        // config snapshot so a missing certification/template is visible at a
-        // glance instead of grepping the pxmx agent log.
-        const sp = (s.spokes || [])[0] || {};
-        const prov = (sp && sp.provision) || {};
-        const reason = prov.reason ? csEscape(String(prov.reason)) : '—';
-        const loopOn = !!prov.loop_running;
-        let html = `<div><b>Status:</b> ${on ? 'enabled' : 'disabled'} · ${csEscape(s.usb_auto_provision || 'off')}</div>`;
-        html += `<div><b>CS-enabled agents:</b> ${csCount}</div>`;
+        let html = '';
         // Most common cause of "I enabled Auto-Provisioning but nothing happens":
         // the per-agent Client Simulation flag was never set, so the provision
         // loop never spawns. Surface it explicitly.
         if (on && csCount === 0) {
             html += `<div class="text-amber-600 font-semibold">⚠ Auto-Provisioning is on but no hypervisor agent has Client Simulation mode enabled — enable it on the Hypervisors page (host → "Enable Client Simulation mode on this host").</div>`;
         }
-        html += `<div><b>Last pass:</b> ${reason}${loopOn ? '' : ' <span class="text-amber-600">(provision loop not running — check the pxmx agent log)</span>'}</div>`;
         st.innerHTML = html;
         // csAutoProvOn is now fresh → re-render the live in-flight panel.
         csAutoProvLivePanel();
