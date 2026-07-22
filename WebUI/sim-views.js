@@ -5620,6 +5620,16 @@ window.CS_CHILD_RENDERERS['Config::Engine State']  = csRenderSimQuotaState;
 window.CS_CHILD_RENDERERS['Config::Engine Diagnostic'] = csRenderEngineDiag;
 window.CS_CHILD_RENDERERS['Config::Config Editor']    = csRenderConfigSimulation;
 
+// Expose the child renderers that their OWN inline onclick handlers (Refresh
+// buttons etc.) call by bare name. This file is wrapped, so a bare `function`
+// is private and only reachable via CS_CHILD_RENDERERS — without these aliases
+// clicking Refresh throws "Can't find variable: csRenderEngineDiag".
+window.csRenderEngineDiag       = csRenderEngineDiag;
+window.csRenderConfigSimulation = csRenderConfigSimulation;
+window.csRenderSimQuotaState    = csRenderSimQuotaState;
+window.csRenderSpokeManagement  = csRenderSpokeManagement;
+window.csVmShellReconnect       = csVmShellReconnect;
+
 // ── Register Setup children ────────────────────────────────────────────────
 window.CS_CHILD_RENDERERS['Setup::General']        = csRenderSetup;
 // Backward-compat alias: a client with stale localStorage may still request
