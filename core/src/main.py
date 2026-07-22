@@ -5110,7 +5110,24 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         now = time.time()
         # Renew 7 days before expiry (skip while the current cert has >7d left).
         if not force and entry and (entry.get("not_after_ts") or 0) - now > 7 * 86400:
-            return {"status": "current", "not_after": entry.get("not_after")}
+            # Self-heal: the registry says a current cert exists, but if the spoke
+            # is connected and NOT presenting a verified client cert, the cert file
+            # is missing/stale on the spoke (e.g. the mtls-hub-client.* file-name
+            # split left pre-split spokes with only the old mtls-client.* — the new
+            # _present_client_cert looks for the dedicated file and presents
+            # nothing). Re-push so the spoke gets a presentable cert + restarts to
+            # present it. Guarded by a 10-min min re-issue interval so a genuinely
+            # broken spoke can't restart-loop, and only when we can actually see
+            # the live ws (don't force on unknown state).
+            _ws = (self.active_connections or {}).get(pk)
+            if _ws is not None and not getattr(_ws, "peer_cert_identity", None):
+                if (now - float(entry.get("issued_at") or 0)) >= 600:
+                    logger.info(f"[mtls] {spoke_id} connected cert-less despite a "
+                                f"current registry cert — re-pushing (cert file "
+                                f"missing/stale on the spoke)")
+                    force = True
+            if not force:
+                return {"status": "current", "not_after": entry.get("not_after")}
         # SANs: bugfixer includes the pinned identities so _hub_request_authorized
         # matches its presented cert; other spokes just need a verified identity.
         sans = [spoke_id]
