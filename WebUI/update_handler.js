@@ -34,15 +34,21 @@ async function triggerUpdate(evt) {
             const target = data.target_version || window.__lmTargetVersion || '';
             let msg;
             if (data.status === 'success') {
-                // Restart path — the watchdog performs the restart (queued, ~a
-                // moment), so say so and show the version we're moving to.
-                const verBit = (target && target !== running)
-                    ? ` — ${running ? running + ' → ' : ''}${target}`
-                    : (running ? ` (version ${running})` : '');
-                msg = `Update queued${verBit}. The hub will restart shortly.`;
+                // The hub WILL restart — but say WHY. Two distinct cases:
+                //  • new code was pulled (target advanced past running), or
+                //  • stale reload: code was already downloaded (by an earlier
+                //    auto-pull that deferred its restart to the window) and this
+                //    click applies it — no NEW download, but a real restart.
+                if (target && target !== running) {
+                    msg = `New version downloaded (${running ? running + ' → ' : ''}${target}) — restarting to apply.`;
+                } else {
+                    msg = `Applying a pending update${running ? ` (version ${running})` : ''} — restarting to load it. `
+                        + `(Already downloaded earlier; nothing new to fetch.)`;
+                }
             } else {
-                // Spoke-only / already-current — keep the server's own message.
-                msg = data.message || (running ? `Already up to date (version ${running}).` : 'No update needed.');
+                // Truly current — no restart happens.
+                msg = data.message
+                    || (running ? `Already up to date (version ${running}) — no restart.` : 'No update needed — no restart.');
             }
             showToast(msg, data.status === 'success' ? 'success' : 'info');
         }

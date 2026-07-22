@@ -442,14 +442,19 @@ class SelfUpdateMixin:
             head_before = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
             backup_dir = self._snapshot_for_update(head_before, cwd)
 
-            # 5. Fetch + pull; on rebase conflict reset hard to origin
-            subprocess.run(["git", "fetch", "origin"], cwd=cwd, check=True, timeout=120)
+            # 5. Fetch + pull; on rebase conflict reset hard to origin.
+            # capture_output so a failure's stderr (e.g. git's "Could not resolve
+            # host") reaches the CalledProcessError handler and the log — otherwise
+            # a DNS outage just logged an opaque "exit code 128".
+            subprocess.run(["git", "fetch", "origin"], cwd=cwd, check=True, timeout=120,
+                           capture_output=True, text=True)
             pull = self._run_git(["pull", "--rebase", "--autostash", "origin"], cwd=cwd)
             if pull.returncode != 0:
                 logger.warning(f"git pull --rebase failed (rc={pull.returncode}); resetting hard to origin")
                 branch = self._run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd).stdout.strip() or "main"
                 subprocess.run(["git", "rebase", "--abort"], cwd=cwd, check=False, timeout=60)
-                subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=cwd, check=True, timeout=60)
+                subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=cwd, check=True,
+                               timeout=60, capture_output=True, text=True)
 
             head_after = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
 
@@ -495,10 +500,18 @@ class SelfUpdateMixin:
                 logger.debug("update: already up to date; no restart needed.")
                 return {"status": "SUCCESS", "message": "Already up to date; no restart needed"}
         except subprocess.CalledProcessError as e:
-            logger.error(f"update failed (git command exit code {e.returncode}): {e}")
             stderr = e.stderr.decode('utf-8', errors='replace') if isinstance(e.stderr, bytes) else (e.stderr or '')
             stdout = e.stdout.decode('utf-8', errors='replace') if isinstance(e.stdout, bytes) else (e.stdout or '')
             detail = (stderr or stdout or str(e)).strip()
+            _dl = detail.lower()
+            if any(k in _dl for k in ("could not resolve host", "temporary failure in name resolution",
+                                      "name or service not known", "could not resolve hostname")):
+                logger.error(
+                    "update failed: DNS — git could not RESOLVE the remote host. This is a "
+                    "name-resolution problem on this box, NOT a git/repo error. Check "
+                    "/etc/resolv.conf + that the DNS server is reachable. git said: %s", detail)
+            else:
+                logger.error("update failed (git command exit code %s): %s", e.returncode, detail or e)
             return {"status": "ERROR", "message": f"git operation failed: {detail}"}
         except Exception as e:
             logger.error(f"update failed: {e}")

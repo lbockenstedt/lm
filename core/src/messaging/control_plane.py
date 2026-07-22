@@ -703,7 +703,18 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             except Exception as e:
                 _lasted = time.time() - _sess_start
                 _delay = 5 if _lasted >= 60 else min(_delay * 2, 60)
-                logger.error("Unexpected connection error after %.0fs (%s). Reconnecting in %ds...", _lasted, e, _delay)
+                if self._is_dns_error(e):
+                    _host = self._hub_host()
+                    logger.error(
+                        "Could not RESOLVE the hub domain '%s' — DNS failure (%s). "
+                        "The spoke can't find the hub's IP; this is a name-resolution "
+                        "problem, NOT the hub being down. Check the spoke's resolver "
+                        "(/etc/resolv.conf), that the DNS server is reachable, and that "
+                        "'%s' resolves (`dig %s`). Reconnecting in %ds...",
+                        _host, e, _host, _host, _delay)
+                else:
+                    logger.error("Unexpected connection error after %.0fs (%s). Reconnecting in %ds...",
+                                 _lasted, e, _delay)
             # If the hub URL is the auto-discovery sentinel, re-resolve on each
             # reconnect so a hub that comes up after this spoke (or moves) is
             # found without a restart.
@@ -883,6 +894,31 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                         idle, intvl, cnt, uto_ms)
         except Exception as e:  # noqa: BLE001 — keepalive tuning must never break the transport
             logger.debug("TCP keepalive setup skipped: %s", e)
+
+    @staticmethod
+    def _is_dns_error(e) -> bool:
+        """True if an exception is a DNS name-resolution failure — so the connect
+        log can say 'could not resolve the hub domain' plainly instead of a cryptic
+        errno (the operator spent real time detective-ing exactly this). Covers
+        socket.gaierror plus the wrapped OSError text websockets/asyncio surface."""
+        if isinstance(e, socket.gaierror):
+            return True
+        s = str(e).lower()
+        return any(k in s for k in (
+            "name or service not known", "temporary failure in name resolution",
+            "nodename nor servname", "getaddrinfo failed", "no address associated",
+            "name does not resolve", "could not resolve host"))
+
+    def _hub_host(self) -> str:
+        """Bare hostname of the pinned hub URL (scheme/port/path stripped), for
+        DNS diagnostics."""
+        try:
+            u = str(self.hub_url or "").split("://", 1)[-1].split("/", 1)[0].rsplit("@", 1)[-1]
+            if u.startswith("["):            # IPv6 literal
+                return u.split("]", 1)[0].lstrip("[")
+            return u.split(":", 1)[0]        # strip :port
+        except Exception:  # noqa: BLE001
+            return str(self.hub_url or "")
 
     @staticmethod
     def _normalize_hub_url(url):
