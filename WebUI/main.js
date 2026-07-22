@@ -3445,7 +3445,6 @@ function _viewTemplate(viewId) {
       <button onclick="leRenewAll()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">↻ Renew all</button>
       <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">⚡ Distribute now</button>
       <button onclick="showMtlsDebug()" class="bg-slate-600/10 hover:bg-slate-600/20 text-slate-700 border border-slate-400 px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap" title="Debug: which connected spokes/agents are ACTUALLY presenting a verified mTLS client cert vs. connected cert-less, plus the hub's trust bundle + pinned BugFixer cert check">🔒 mTLS status</button>
-      <button onclick="showHubHealth()" class="bg-slate-600/10 hover:bg-slate-600/20 text-slate-700 border border-slate-400 px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap" title="Hub event-loop health + per-spoke transport (RTT / write-buffer) — diagnoses fleet-wide WS backpressure (1011 keepalive drops): saturated hub loop vs network path (hub is in Azure)">📈 Hub health</button>
       <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200 whitespace-nowrap" title="Manage this tenant's DNS-01 credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-01 issuance">🔑 DNS Credentials</button>
     </div>
     <div class="flex items-center gap-4 flex-wrap">
@@ -4595,6 +4594,13 @@ function _renderSettingsSection(subMenu) {
                 </div>
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-3">
+                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hub Health &amp; Connectivity ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <button onclick="loadHubHealthCard()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Event-loop lag + per-spoke transport (RTT / write-buffer) — diagnoses fleet-wide WS backpressure (1011 drops): saturated hub loop vs network path (hub is in Azure)">↻ Refresh</button>
+                    </div>
+                    <div id="hub-health-body"><p class="text-slate-400 italic text-xs">Loading…</p></div>
+                </div>
+                <div class="${card} p-6">
+                    <div class="flex justify-between items-center mb-3">
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Message Backlog &amp; Rate Limiting ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                         <div class="flex items-center gap-2">
                             <button onclick="resetRateLimitDrops()" id="reset-drops-btn" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Zero the rate-limit drop counters">Reset Drops</button>
@@ -4728,6 +4734,7 @@ function _renderSettingsSection(subMenu) {
                 </div>
             </div>`;
         updateStatus();
+        loadHubHealthCard();
         loadBackpressureConfig();
         loadUpdateGateConfig();
         loadActiveSessions();
@@ -19317,10 +19324,23 @@ async function mtlsProvision(spokeId) {
 // hub's client-verify trust bundle + the pinned BugFixer cert verify. Fetches
 // /api/mtls/trust-diag (admin) and renders a modal. Answers "is mTLS really on
 // fleet-wide, and who's using it" — since CERT_OPTIONAL lets a spoke work either way.
-async function showHubHealth() {
-    let d;
-    try { d = await apiJson('/api/hub/health'); }
-    catch (e) { showToast('Hub health failed: ' + e.message, 'error'); return; }
+// Hub Health & Connectivity — inline card on System → Hub Status. Renders the
+// hub event-loop overload + per-spoke transport signals so an operator can tell
+// a saturated hub loop from a network/transport problem (the hub is in Azure).
+async function loadHubHealthCard() {
+    const body = document.getElementById('hub-health-body');
+    if (!body) return;
+    try {
+        const d = await apiJson('/api/hub/health');
+        body.innerHTML = _hubHealthHtml(d);
+    } catch (e) {
+        body.innerHTML = `<p class="text-red-500 text-xs">Hub health failed: ${escapeHtml(e.message)}</p>`;
+    }
+}
+window.loadHubHealthCard = loadHubHealthCard;
+
+function _hubHealthHtml(d) {
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
     const _fmtBytes = (n) => n == null ? '—' : n >= 1048576 ? (n/1048576).toFixed(1)+' MB'
         : n >= 1024 ? (n/1024).toFixed(1)+' KB' : n + ' B';
     const th = d.thresholds || {};
@@ -19347,9 +19367,8 @@ async function showHubHealth() {
         <td class="px-3 py-1.5 text-center text-slate-700">${c.mps}</td>
       </tr>`).join('') || `<tr><td colspan="5" class="px-3 py-3 text-slate-400 italic">No connected spokes.</td></tr>`;
     const talkers = (d.top_talkers||[]).slice(0,6).map(t => `${esc(t.spoke)} (${t.mps}/s)`).join(', ') || '—';
-    openModal('hub-health-modal', `<div class="p-6 space-y-4">
-      <div class="flex items-center justify-between">
-        <h3 class="text-lg font-bold text-[#263040]">📈 Hub Health</h3>
+    return `<div class="space-y-4">
+      <div class="flex items-center justify-end">
         <span class="text-xs px-2 py-1 rounded-full ${vClass}">${verdict}</span>
       </div>
       <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
@@ -19368,13 +19387,9 @@ async function showHubHealth() {
           <th class="px-3 py-1 text-center">RTT</th><th class="px-3 py-1 text-center">Write buffer</th><th class="px-3 py-1 text-center">msg/s</th>
         </tr></thead><tbody>${rows}</tbody></table>
       </div>
-      <div class="flex justify-between items-center gap-3">
-        <div class="text-[11px] text-slate-500">RTT = WS keepalive round-trip (network latency to the spoke). Write buffer = hub→spoke outbound backlog (growing = that spoke/network isn't draining). <b>High loop lag + low RTT/buffers = hub loop; high RTT or growing buffers = network transport.</b></div>
-        <button onclick="showHubHealth()" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md font-bold whitespace-nowrap">↻ Refresh</button>
-      </div>
-    </div>`);
+      <div class="text-[11px] text-slate-500">RTT = WS keepalive round-trip (network latency to the spoke). Write buffer = hub→spoke outbound backlog (growing = that spoke/network isn't draining). <b>High loop lag + low RTT/buffers = hub loop; high RTT or growing buffers = network transport.</b></div>
+    </div>`;
 }
-window.showHubHealth = showHubHealth;
 
 async function showMtlsDebug() {
     const esc = (s) => escapeHtml(String(s == null ? '' : s));
