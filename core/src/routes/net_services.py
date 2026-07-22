@@ -859,31 +859,8 @@ def register(app, hub, ctx):
         except Exception as e:  # noqa: BLE001
             return {"error": f"mtls module unavailable: {e}"}
         diag = _mtls.trust_diagnostics()
-        # Test-verify each pinned BugFixer cert's live chain against the hub trust.
         gc = hub.state.system_state.get("global_config", {}) or {}
         pinned = [str(n).strip() for n in (gc.get("bugfixer_cert_identities") or []) if str(n).strip()]
-        le_sid = hub.get_spoke_by_type("certificates")
-        checks = []
-        for domain in pinned:
-            entry = {"domain": domain}
-            if not le_sid:
-                entry.update({"ok": False, "detail": "certificate spoke not connected"})
-                checks.append(entry)
-                continue
-            try:
-                mat = await _relay_spoke(le_sid, "LE_GET_CERT", {"domain": domain},
-                                        log_name="mtls_trust_diag")
-                inner = mat.get("data") if isinstance(mat, dict) and isinstance(mat.get("data"), dict) else mat
-                fullchain = (inner or {}).get("fullchain") or ""
-                if not fullchain:
-                    entry.update({"ok": False, "detail": "le returned no fullchain for this domain"})
-                else:
-                    ok, detail = _mtls.verify_chain(fullchain)
-                    entry.update({"ok": ok, "detail": detail})
-            except Exception as e:  # noqa: BLE001
-                entry.update({"ok": False, "detail": f"lookup/verify failed: {e}"})
-            checks.append(entry)
-        diag["pinned_cert_checks"] = checks
         # Per-connection mTLS status: which connected spokes/agents ACTUALLY
         # presented a verified client cert vs. connected cert-less (permissive
         # fallback). Answers "who is really using mTLS" — the whole point being that
@@ -930,6 +907,25 @@ def register(app, hub, ctx):
             "mtls_active": sum(1 for c in clients if c["mtls_active"]),
             "cert_less": sum(1 for c in clients if not c["mtls_active"]),
         }
+        # Pinned BugFixer identity — reflect the LIVE connection: is a connected
+        # spoke presenting a VERIFIED cert whose SAN matches the pin? (The LE cert is
+        # no longer the mTLS cert — bugfixer presents the hub-CA clientAuth cert, so
+        # verifying the LE cert here always failed and was misleading.)
+        checks = []
+        for name in pinned:
+            nl = name.lower()
+            live = next((c for c in clients if c["mtls_active"]
+                         and any(str(s).lower() == nl for s in (c.get("sans") or []))), None)
+            if live:
+                checks.append({"domain": name, "ok": True,
+                               "detail": f"presented + verified live by "
+                                         f"{live.get('label') or live.get('spoke_id')}"
+                                         f" (issuer: {live.get('issuer', '')})"})
+            else:
+                checks.append({"domain": name, "ok": False,
+                               "detail": "no connected spoke is presenting a verified cert "
+                                         "with this SAN — issue/re-provide its mTLS cert"})
+        diag["pinned_cert_checks"] = checks
         gc2 = hub.state.system_state.get("global_config", {}) or {}
         diag["auto_provision"] = bool(gc2.get("mtls_ca_auto_provision", True))
         return diag
