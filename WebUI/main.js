@@ -17516,6 +17516,12 @@ function _leLegend() {
           <span class="flex items-center gap-1.5">${pill('bg-slate-100 text-slate-500 border border-slate-200', 'target +')} available — click to add</span>
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+          ${lbl('Cert')}
+          <span class="flex items-center gap-1.5">${pill('bg-purple-100 text-purple-700', '★ BugFixer')} pinned mTLS identity (hub logs + fleet updates)</span>
+          <span class="flex items-center gap-1.5">${pill('bg-blue-100 text-blue-700', '🔐 clientAuth')} has the clientAuth EKU — usable as an mTLS client cert</span>
+          <span class="flex items-center gap-1.5">${pill('bg-amber-100 text-amber-700', 'shortlived')} non-default ACME profile (e.g. short-lived ~7d)</span>
+        </div>
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
           ${lbl('Expiry')}
           <span class="flex items-center gap-1.5">${pill('bg-green-100 text-green-700', '&gt; 30d')} healthy</span>
           <span class="flex items-center gap-1.5">${pill('bg-amber-100 text-amber-700', '&lt; 30d')} renew due</span>
@@ -17709,6 +17715,13 @@ async function loadLEData(subMenu) {
             const retryBtn = isFailed
                 ? `<button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue (re-uses the stored params)">Retry</button>`
                 : '';
+            // Inline badges beside the domain (see the legend at the bottom of the
+            // page). ★ BugFixer = pinned mTLS identity; 🔐 clientAuth = has the
+            // clientAuth EKU (mTLS-client-capable); a profile chip = non-default
+            // ACME profile (e.g. a short-lived cert).
+            const bfBadge = c.bugfixer ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-700 align-middle" title="Tagged as the BugFixer mTLS identity (Manage → ★ BugFixer)">★ BugFixer</span>` : '';
+            const caBadge = c.client_auth ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700 align-middle" title="Issued with the clientAuth EKU — usable as an mTLS client cert (Manage → clientAuth)">🔐 clientAuth</span>` : '';
+            const profBadge = (c.profile && String(c.profile).toLowerCase() !== 'classic') ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700 align-middle" title="ACME profile: ${escapeHtml(String(c.profile))} (validity/EKU set by the CA profile)">${escapeHtml(String(c.profile))}</span>` : '';
             // 2-row group per cert: row 1 = the data (domain, email, challenge,
             // staging, expiry+renew-window) WITH the Manage/Renew/Revoke actions
             // stacked vertically in a pinned-right Actions cell on that same row
@@ -17717,7 +17730,7 @@ async function loadLEData(subMenu) {
             // Targets moved out of the data row so each badge has room to be a
             // click-to-deploy button (mirrors the CS spoke-clients click-to-act).
             return `<tr class="border-b border-slate-100 hover:bg-slate-50">
-                <td class="px-4 py-2 font-mono font-medium">${issueDot(c.domain)}${c.domain || '—'}</td>
+                <td class="px-4 py-2 font-mono font-medium">${issueDot(c.domain)}${c.domain || '—'}${bfBadge}${caBadge}${profBadge}</td>
                 <td class="px-4 py-2 text-xs">${c.email || '—'}</td>
                 <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">${c.challenge || '—'}</span></td>
                 <td class="px-4 py-2 text-center text-xs">${c.staging ? 'yes' : 'no'}</td>
@@ -17729,7 +17742,6 @@ async function loadLEData(subMenu) {
                     <div class="flex flex-col items-end gap-1.5">
                         ${retryBtn ? `<div>${retryBtn}</div>` : ''}
                         <div class="flex flex-row items-center justify-end gap-1.5">
-                            ${c.client_auth ? `<span class="text-[10px] text-blue-700 font-bold" title="Issued with the clientAuth EKU — usable as an mTLS client cert">clientAuth</span>` : ''}
                             <button onclick="showLeTargetsModal('${dEsc}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Manage distribution targets, BugFixer identity + clientAuth">Manage</button>
                             <button onclick="leRenewCert('${dEsc}')" class="bg-slate-700/10 hover:bg-slate-700/20 text-slate-700 border border-slate-700 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Renew this cert">Renew</button>
                             <button onclick="leRevokeCert('${dEsc}')" class="bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Revoke + remove from managed list">Revoke</button>
@@ -18653,6 +18665,13 @@ async function showLeIssueModal() {
                     <input id="le-issue-clientauth" type="checkbox" class="rounded border-slate-300" />
                     Include <b>clientAuth</b> (for mTLS client certs)
                 </label>
+                <label class="flex items-center gap-1 text-sm text-slate-700" title="Let's Encrypt sets the certificate LIFETIME via a named ACME profile, not an arbitrary duration. Standard is ~90 days; short-lived is ~7 days (serverAuth only — can't be an mTLS client cert). See the profiles the CA advertises in the 🔒 mTLS status panel.">
+                    Lifetime
+                    <select id="le-issue-profile" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        <option value="">Standard (~90 days)</option>
+                        <option value="shortlived">Short-lived (~7 days)</option>
+                    </select>
+                </label>
                 <label class="flex items-center gap-1 text-sm text-slate-700" title="How many days before expiry the renewal loop triggers for THIS cert. Default 7. A larger window renews earlier (more retry slack before it actually expires); a smaller one renews later.">
                     Renew before expiry
                     <input id="le-issue-renew-window" type="number" min="1" value="7" class="w-16 bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500" />
@@ -18754,6 +18773,7 @@ async function leIssueCert() {
     const staging = !!document.getElementById('le-issue-staging')?.checked;
     const keyType = document.getElementById('le-issue-keytype')?.value || 'rsa';
     const clientAuth = !!document.getElementById('le-issue-clientauth')?.checked;
+    const profile = document.getElementById('le-issue-profile')?.value || '';
 
     if (!domain) { showToast('Domain is required', 'error'); return; }
     if (!email) { showToast('ACME account email is required', 'error'); return; }
@@ -18769,6 +18789,7 @@ async function leIssueCert() {
     }
 
     const body = { domain, email, challenge, staging, key_type: keyType, client_auth: clientAuth };
+    if (profile) body.profile = profile;   // ACME profile (e.g. shortlived) — overrides clientAuth's classic
     // Per-cert renewal window (days before expiry the loop triggers). Send only
     // a positive int; blank/invalid → omitted → spoke stores None → uses the
     // 7-day default. The le spoke validates + normalizes (bad → None).
@@ -19248,17 +19269,20 @@ async function leToggleClientAuthChk(cb, domain, opts) {
     }
 }
 
+// Per-cert "Renew now" — FORCES a re-issue (--force-renewal) so it works even when
+// the cert isn't near expiry (a plain `certbot renew` no-ops until ~30d out).
 async function leRenewCert(domain) {
-    if (!confirm(`Renew ${domain} now? This runs "certbot renew" on the le spoke and re-pushes new material to its targets.`)) return;
+    if (!confirm(`Renew ${domain} now?\n\nForces a fresh re-issue on the le spoke (regardless of expiry) and re-pushes the new material to its targets.`)) return;
+    showToast(`Renewing ${domain}…`, 'info');
     try {
         const { ok, data, detail } = await _spokeFetch('/api/le/renew', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ domain }),
+            body: JSON.stringify({ domain, force: true }),
         });
         if (!ok) { showToast('Renew failed: ' + (detail || ''), 'error'); return; }
         const inner = (data && data.data) ? data.data : (data || {});
         const r = (inner.renewed || [])[0] || {};
-        if (r.renewed) showToast(`Renewed ${domain}.` + (r.error ? '' : ''), 'error');
+        if (r.renewed) showToast(`Renewed ${domain} — re-pushed to targets.`, 'success');
         else showToast(`Renewal did not complete for ${domain}: ${r.error || inner.message || 'unknown error'}`, 'error');
         await loadLEData();
     } catch (e) { showToast('Renew failed: ' + e.message, 'error'); }
