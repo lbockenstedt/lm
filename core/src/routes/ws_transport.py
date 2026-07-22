@@ -33,8 +33,13 @@ def register(app, hub, ctx):
         try:
             raw_peer_cert = (websocket.scope.get("extensions") or {}).get("x_peer_cert")
             adapter.peer_cert_identity = peer_cert_identity_from_getpeercert(raw_peer_cert)
+            # Keep the parsed getpeercert() dict (subject/issuer/notAfter/SANs) for
+            # the mTLS-clients debug view — so an operator can see WHICH connections
+            # actually presented a verified client cert vs. connected cert-less.
+            adapter.peer_cert_raw = raw_peer_cert if isinstance(raw_peer_cert, dict) else None
         except Exception:  # noqa: BLE001 - never drop a connection on a read hiccup
             adapter.peer_cert_identity = None
+            adapter.peer_cert_raw = None
         await hub.handle_connection(adapter)
 
     @app.websocket("/ws/agent")

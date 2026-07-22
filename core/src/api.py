@@ -165,6 +165,9 @@ class StarletteWSAdapter:
         # treats ``None`` as "no cert → deny HUB_REQUEST" (fail-closed). Defaults
         # to ``None`` so adapters created outside the route (test fakes) are safe.
         self.peer_cert_identity = None
+        # Parsed getpeercert() dict for the mTLS-clients debug view (set by the
+        # /ws/spoke route); None when no verified client cert was presented.
+        self.peer_cert_raw = None
 
     @property
     def remote_address(self):

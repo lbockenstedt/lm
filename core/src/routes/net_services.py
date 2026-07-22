@@ -812,6 +812,44 @@ def register(app, hub, ctx):
                 entry.update({"ok": False, "detail": f"lookup/verify failed: {e}"})
             checks.append(entry)
         diag["pinned_cert_checks"] = checks
+        # Per-connection mTLS status: which connected spokes/agents ACTUALLY
+        # presented a verified client cert vs. connected cert-less (permissive
+        # fallback). Answers "who is really using mTLS" — the whole point being that
+        # under CERT_OPTIONAL a spoke works either way, so mTLS can be silently
+        # inactive fleet-wide without anyone noticing.
+        pinned_lc = {str(n).strip().lower() for n in pinned}
+        clients = []
+        for pk, ws in list((hub.active_connections or {}).items()):
+            ident = getattr(ws, "peer_cert_identity", None)
+            raw = getattr(ws, "peer_cert_raw", None) or {}
+            sans = list(ident) if ident else []
+            subj = ""
+            issuer = ""
+            not_after = ""
+            try:
+                if isinstance(raw, dict):
+                    subj = ", ".join("=".join(x) for rdn in raw.get("subject", ()) for x in rdn)
+                    issuer = ", ".join("=".join(x) for rdn in raw.get("issuer", ()) for x in rdn)
+                    not_after = raw.get("notAfter", "") or ""
+            except Exception:  # noqa: BLE001
+                pass
+            clients.append({
+                "spoke_id": pk,
+                "module_type": (hub.spoke_module_types or {}).get(pk, ""),
+                "mtls_active": bool(ident),        # presented a VERIFIED client cert
+                "sans": sans,
+                "subject": subj,
+                "issuer": issuer,
+                "not_after": not_after,
+                "is_bugfixer_pinned": bool(ident) and any(s.lower() in pinned_lc for s in sans),
+            })
+        clients.sort(key=lambda c: (not c["mtls_active"], c["spoke_id"]))
+        diag["clients"] = clients
+        diag["clients_summary"] = {
+            "connected": len(clients),
+            "mtls_active": sum(1 for c in clients if c["mtls_active"]),
+            "cert_less": sum(1 for c in clients if not c["mtls_active"]),
+        }
         return diag
 
     @app.get("/api/le/certs/{domain}/devices")

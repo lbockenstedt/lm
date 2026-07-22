@@ -3420,6 +3420,7 @@ function _viewTemplate(viewId) {
     <button onclick="showLeIssueModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all">＋ Issue certificate</button>
     <button onclick="leRenewAll()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all">↻ Renew all</button>
     <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all">⚡ Distribute now</button>
+    <button onclick="showMtlsDebug()" class="bg-slate-600/10 hover:bg-slate-600/20 text-slate-700 border border-slate-400 px-3 py-1 rounded-md text-xs font-medium transition-all" title="Debug: which connected spokes/agents are ACTUALLY presenting a verified mTLS client cert vs. connected cert-less, plus the hub's trust bundle + pinned BugFixer cert check">🔒 mTLS status</button>
     <label class="flex items-center gap-1 text-xs text-amber-700 cursor-pointer select-none" title="When ON, a wildcard cert (*.domain) is pushed to EVERY connected cert-capable spoke + the hub on each distribution, not just its explicit targets. OFF by default while cert distribution is being tested — flip on once explicit-target distribution is confirmed working.">
       <input type="checkbox" id="le-wildcard-all-spokes" class="w-4 h-4 rounded" onchange="saveLeWildcardAllSpokes(this.checked)">
       Fan wildcard → all spokes
@@ -19105,6 +19106,54 @@ async function leToggleBugfixerChk(cb, domain) {
         showToast('BugFixer tag failed: ' + (e.message || e), 'error');
         if (cb) { cb.checked = !enable; cb.disabled = false; }
     }
+}
+
+// mTLS debug screen: which connected spokes/agents are ACTUALLY presenting a
+// verified mTLS client cert vs. connected cert-less (permissive fallback), plus the
+// hub's client-verify trust bundle + the pinned BugFixer cert verify. Fetches
+// /api/mtls/trust-diag (admin) and renders a modal. Answers "is mTLS really on
+// fleet-wide, and who's using it" — since CERT_OPTIONAL lets a spoke work either way.
+async function showMtlsDebug() {
+    const esc = (s) => escapeHtml(String(s == null ? '' : s));
+    openModal('mtls-debug-modal', `<div class="p-6"><div class="text-slate-500 italic text-sm">Loading mTLS status…</div></div>`, { card: 'max-w-4xl w-full max-h-[90vh] overflow-y-auto', backdropClose: true });
+    let d;
+    try {
+        const r = await _spokeFetch('/api/mtls/trust-diag');
+        if (!r.ok) { document.querySelector('#mtls-debug-modal .p-6')?.replaceChildren(); showToast('mTLS status failed: ' + (r.detail || 'admin required'), 'error'); document.getElementById('mtls-debug-modal')?.remove(); return; }
+        d = (r.data && r.data.mtls_enabled !== undefined) ? r.data : (r.data || {});
+    } catch (e) { showToast('mTLS status failed: ' + (e.message || e), 'error'); document.getElementById('mtls-debug-modal')?.remove(); return; }
+    const cs = d.clients_summary || {};
+    const clients = d.clients || [];
+    const rows = clients.length ? clients.map(c => `
+        <tr class="border-b border-slate-100">
+            <td class="px-3 py-1.5 font-mono">${esc(c.spoke_id)}</td>
+            <td class="px-3 py-1.5">${esc(c.module_type || '—')}</td>
+            <td class="px-3 py-1.5 font-bold ${c.mtls_active ? 'text-[#01A982]' : 'text-slate-400'}">${c.mtls_active ? 'mTLS ✓' : 'cert-less'}</td>
+            <td class="px-3 py-1.5 text-xs">${c.sans && c.sans.length ? esc(c.sans.join(', ')) : '—'}${c.is_bugfixer_pinned ? ' <span class="text-purple-700 font-bold">★ BugFixer</span>' : ''}</td>
+            <td class="px-3 py-1.5 text-xs text-slate-500">${esc(c.not_after || '')}</td>
+        </tr>`).join('') : `<tr><td colspan="5" class="px-3 py-3 text-slate-400 italic">No connected spokes.</td></tr>`;
+    const lmca = (d.lm_mtls_ca_certs || []).map(c => `<div>${esc(c.subject)} <span class="text-slate-400">← ${esc(c.issuer)}</span></div>`).join('') || '<div class="text-slate-400">— none —</div>';
+    const pin = (d.pinned_cert_checks || []).map(p => `<div>${esc(p.domain)}: <span class="font-bold ${p.ok ? 'text-[#01A982]' : 'text-red-600'}">${p.ok ? 'accepted' : 'REJECTED'}</span> <span class="text-slate-400">${esc(p.detail || '')}</span></div>`).join('') || '<div class="text-slate-400">no cert tagged BugFixer</div>';
+    const dupes = (d.duplicate_subjects || []);
+    openModal('mtls-debug-modal', `
+        <div class="p-6 space-y-4">
+            <div class="flex items-center justify-between">
+                <h3 class="text-lg font-bold text-[#263040]">🔒 mTLS status</h3>
+                <span class="text-xs px-2 py-1 rounded-full ${d.mtls_enabled ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-600'}">${d.mtls_enabled ? 'mTLS ENABLED' : 'mTLS off'}</span>
+            </div>
+            <div class="text-sm text-slate-600">${cs.connected ?? 0} connected · <b class="text-[#01A982]">${cs.mtls_active ?? 0}</b> presenting a verified client cert · <b class="text-slate-500">${cs.cert_less ?? 0}</b> cert-less (permissive fallback)</div>
+            <div class="overflow-x-auto border border-slate-200 rounded-lg">
+                <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
+                    <th class="px-3 py-2 text-left">Spoke</th><th class="px-3 py-2 text-left">Type</th><th class="px-3 py-2 text-left">mTLS</th><th class="px-3 py-2 text-left">Cert SANs</th><th class="px-3 py-2 text-left">Expires</th>
+                </tr></thead><tbody>${rows}</tbody></table>
+            </div>
+            <div class="text-xs text-slate-500">Note: the hub is permissive (CERT_OPTIONAL) — a "cert-less" spoke still works (session-key auth). Only BugFixer's HUB_REQUEST channel <i>requires</i> a verified, pinned client cert.</div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                <div><div class="font-semibold text-slate-600 mb-1">Hub client-verify CA (LM_MTLS_CA)</div><div class="font-mono text-slate-700 space-y-0.5">${lmca}</div><div class="text-slate-400 mt-1">combined bundle: ${d.combined_ca_count ?? '?'} trusted cert(s)${dupes.length ? ` · <span class="text-amber-600">dup subjects: ${esc(dupes.join(', '))}</span>` : ''}</div></div>
+                <div><div class="font-semibold text-slate-600 mb-1">Pinned BugFixer cert verify</div><div class="font-mono text-slate-700 space-y-0.5">${pin}</div></div>
+            </div>
+            <div class="flex justify-end"><button onclick="document.getElementById('mtls-debug-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button></div>
+        </div>`, { card: 'max-w-4xl w-full max-h-[90vh] overflow-y-auto', backdropClose: true });
 }
 
 // Toggle the clientAuth EKU on a managed cert. Re-issues via the le spoke with the
