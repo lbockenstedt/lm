@@ -262,6 +262,14 @@ def register(app, hub, ctx):
         # slug. For a non-default tenant with no bound NetBox slug, fall back to
         # the tenant id so LDAP OU derivation (ou=<slug>,<base>) still works.
         nb_slug = scoping.get("netbox_tenant_slug") or (resolved if resolved and resolved != "default" else "")
+        # Admins are trusted to search the whole directory / NetBox. When the
+        # UI sends no explicit tenant (admin on "default"/global), stay
+        # unscoped — otherwise _resolve_tenant's session-tenant fallback would
+        # OU-scope the admin to their home tenant and hide users outside that
+        # OU (the "search returns nothing" regression). An admin who explicitly
+        # picks a tenant still gets that tenant's scope.
+        if is_admin and not tenant:
+            nb_slug = ""
         proxmox_tag = scoping.get("proxmox_tag") or ""
         # Tenant prefixes (CIDRs) for DHCP lease filtering. Admin unscoped is
         # allowed; a non-admin with no prefixes gets no DHCP results (safe).
@@ -285,6 +293,13 @@ def register(app, hub, ctx):
             try:
                 r = await hub.request_response(spoke, cmd, payload)
                 d = _unwrap_spoke(r)
+                # Surface spoke ERROR envelopes (bind failure, missing OU, bad
+                # slug) as an error row instead of collapsing them to [] —
+                # otherwise a broken directory leg is indistinguishable from "no
+                # matches" and the failure is invisible to the operator.
+                if isinstance(d, dict) and d.get("status") == "ERROR":
+                    return [{"source": cmd, "type": "error",
+                             "name": d.get("message") or d.get("error") or "spoke error"}]
                 return d.get("results", []) if isinstance(d, dict) else []
             except Exception as e:
                 return [{"source": cmd, "type": "error", "name": str(e)}]
