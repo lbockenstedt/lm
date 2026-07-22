@@ -203,6 +203,35 @@ def register(app, hub, ctx):
             answer = answer or ("The assistant reached the tool-iteration limit "
                                 "without a final answer.")
 
+        def _degenerate(a):
+            # Some local models (e.g. glm via ollama) emit a broken/empty function
+            # call — the literal token "tool_calls" leaks through as content instead
+            # of a real tool call or a text answer. Treat those as "no answer".
+            s = (a or "").strip().lower().strip("`*[]{}\"' ")
+            return (not s) or s.startswith("tool_call")
+
+        if _degenerate(answer):
+            # Fall back to ONE plain-text turn with tools DISABLED so the user still
+            # gets a doc-grounded answer instead of the raw "tool_calls" token.
+            logger.info("help_ask: degenerate tool-loop answer (%r) — retrying tool-free",
+                        answer[:40])
+            try:
+                res = await hub.request_response(
+                    agent, "HELP_ASK",
+                    {"messages": [{"role": "user", "content": question}], "tools": None,
+                     "system": system + "\n\nAnswer directly in plain text using the "
+                                        "documentation above. Do NOT call tools."},
+                    timeout=90.0)
+                data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
+                if isinstance(data, dict) and data.get("status") == "SUCCESS":
+                    answer = (data.get("assistant") or {}).get("content") or answer
+            except Exception as e:  # noqa: BLE001
+                logger.warning("help_ask tool-free fallback failed: %s", e)
+            if _degenerate(answer):
+                answer = ("I couldn't get a usable answer from the current LLM provider "
+                          "(it didn't return a proper response). Try again, or switch the "
+                          "BugFixer provider in Settings.")
+
         citations = [n for n in picked if f"[doc:{n}]" in answer] or picked[:2]
         return {"answer": answer, "citations": citations,
                 "used_docs": picked, "used_tools": sorted(set(used_tools))}
