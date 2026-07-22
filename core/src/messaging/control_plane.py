@@ -1841,7 +1841,43 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             # it as the client cert ONLY — the server/WebUI cert is untouched.
             return await self._handle_set_mtls_client_cert(data)
 
+        if cmd_type == "SPOKE_CLEAR_MTLS_CLIENT_CERT":
+            return await self._handle_clear_mtls_client_cert(data)
+
         return None
+
+    async def _handle_clear_mtls_client_cert(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Revocation: delete this spoke's mTLS CLIENT cert/key + clear the runtime
+        materials so the next reconnect presents NOTHING (cert-less), and restart to
+        drop the current connection. Server/WebUI cert untouched."""
+        if getattr(self, "parent_spoke_id", ""):
+            return {"status": "SUCCESS", "message": "skipped — role sub-spoke"}
+        cert_dir = self._mtls_material_dir()
+        removed = False
+        for p in (os.path.join(cert_dir, "mtls-client.crt"),
+                  os.path.join(cert_dir, "mtls-client.key")):
+            try:
+                if os.path.exists(p):
+                    os.remove(p)
+                    removed = True
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            self._persist_secret_to_env("LM_MTLS_CLIENT_CERT", "")
+            self._persist_secret_to_env("LM_MTLS_CLIENT_KEY", "")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from security import mtls as _mtls
+            _mtls.set_runtime_materials(client_cert="", client_key="")
+        except Exception:  # noqa: BLE001
+            pass
+        logger.info("SPOKE_CLEAR_MTLS_CLIENT_CERT: cleared mTLS client cert for %s "
+                    "(revoked) — restarting cert-less", self.spoke_id)
+        if removed:
+            self._draining = True
+            asyncio.create_task(self._deferred_restart_exit())
+        return {"status": "SUCCESS", "message": "mTLS client cert cleared (revoked)"}
 
     async def _handle_set_mtls_client_cert(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Apply ``SPOKE_SET_MTLS_CLIENT_CERT``: write the hub-issued clientAuth cert

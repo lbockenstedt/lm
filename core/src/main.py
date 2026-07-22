@@ -4319,8 +4319,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 # Fleet mTLS: deliver a Hub-Local-CA clientAuth client cert so the
                 # spoke can present a VERIFIED mTLS identity (public CAs no longer
                 # issue clientAuth). Idempotent — skips when a current cert exists.
+                # Gated by the mtls_ca_auto_provision toggle (default ON); a revoked
+                # spoke (mtls_revoked set) is skipped until manually re-issued.
                 try:
-                    await self._provision_spoke_mtls_cert(spoke_id)
+                    _gc = self.state.system_state.get("global_config", {}) or {}
+                    _revoked = self.state.system_state.get("mtls_revoked", {}) or {}
+                    if (_gc.get("mtls_ca_auto_provision", True)
+                            and self._primary_key(spoke_id) not in _revoked):
+                        await self._provision_spoke_mtls_cert(spoke_id)
                 except Exception as e:  # noqa: BLE001 - never block connect on this
                     logger.warning(f"[mtls] provision client cert for {spoke_id} failed: {e}")
 
@@ -5069,12 +5075,18 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             except Exception:  # noqa: BLE001
                 return {"status": "error", "message": "mtls_ca unavailable"}
         pk = self._primary_key(spoke_id)
+        # A (re)issue clears any revocation — this IS the "un-revoke".
+        try:
+            (self.state.system_state.get("mtls_revoked", {}) or {}).pop(pk, None)
+        except Exception:  # noqa: BLE001
+            pass
         module_type = ((self.spoke_module_types or {}).get(pk)
                        or (self.spoke_module_types or {}).get(spoke_id) or "")
         reg = self.state.system_state.setdefault("mtls_client_certs", {})
         entry = reg.get(pk)
         now = time.time()
-        if not force and entry and (entry.get("not_after_ts") or 0) - now > 30 * 86400:
+        # Renew 7 days before expiry (skip while the current cert has >7d left).
+        if not force and entry and (entry.get("not_after_ts") or 0) - now > 7 * 86400:
             return {"status": "current", "not_after": entry.get("not_after")}
         # SANs: bugfixer includes the pinned identities so _hub_request_authorized
         # matches its presented cert; other spokes just need a verified identity.
@@ -5129,6 +5141,63 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         logger.info(f"[mtls] provisioned Hub-CA client cert for {spoke_id} "
                     f"(san={sans}, exp={na_iso})")
         return {"status": "SUCCESS", "san": sans, "not_after": na_iso}
+
+    async def _revoke_spoke_mtls_cert(self, spoke_id: str) -> Dict[str, Any]:
+        """Revoke a spoke's Hub-CA mTLS client cert: tell it to delete + stop
+        presenting it (reconnect cert-less), drop it from the registry, and mark it
+        revoked so auto-provision won't re-mint until an explicit (re)issue."""
+        pk = self._primary_key(spoke_id)
+        try:
+            msg = Message(
+                header=MessageHeader(message_id=str(uuid.uuid4()), timestamp=time.time(),
+                                     sender_id="hub", destination_id=spoke_id),
+                payload=MessagePayload(type="SPOKE_CLEAR_MTLS_CLIENT_CERT", data={}))
+            await self.send_to_spoke(msg)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[mtls] clear cert on {spoke_id} failed: {e}")
+        prev = (self.state.system_state.setdefault("mtls_client_certs", {})).pop(pk, None)
+        self.state.system_state.setdefault("mtls_revoked", {})[pk] = {
+            "spoke_id": spoke_id, "revoked_at": time.time(),
+            "serial": (prev or {}).get("serial", "")}
+        try:
+            await self.state.save_state_now()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.record_spoke_event(spoke_id, "mtls_cert_revoked", "")
+        except Exception:  # noqa: BLE001
+            pass
+        logger.info(f"[mtls] revoked Hub-CA client cert for {spoke_id}")
+        return {"status": "SUCCESS", "spoke_id": spoke_id}
+
+    async def run_mtls_renewal_loop(self):
+        """Renew Hub-CA mTLS client certs 7 days before expiry. Every hour, re-issue
+        (force) any CONNECTED spoke whose registry cert is within 7 days of expiry —
+        spokes stay connected for months, so on-connect renewal alone would let a
+        cert expire. Best-effort; never raises out of the loop."""
+        while True:
+            try:
+                await asyncio.sleep(3600)
+                if not (self.state.system_state.get("global_config", {}) or {}).get(
+                        "mtls_ca_auto_provision", True):
+                    continue
+                reg = self.state.system_state.get("mtls_client_certs", {}) or {}
+                now = time.time()
+                active = set((self.active_connections or {}).keys())
+                for pk, e in list(reg.items()):
+                    if pk not in active:
+                        continue
+                    if (e.get("not_after_ts") or 0) - now <= 7 * 86400:
+                        sid = e.get("spoke_id") or pk
+                        logger.info(f"[mtls] renewing client cert for {sid} (<7d to expiry)")
+                        try:
+                            await self._provision_spoke_mtls_cert(sid, force=True)
+                        except Exception as ex:  # noqa: BLE001
+                            logger.warning(f"[mtls] renew for {sid} failed: {ex}")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[mtls] renewal loop error: {e}")
 
     def _hub_request_authorized(self, spoke_id: str,
                                 peer_cert_identity=None) -> bool:
@@ -7175,6 +7244,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         coalesce_drain_task = asyncio.create_task(self.run_coalesce_drain_loop())
         opnsense_poll_task = asyncio.create_task(self.run_opnsense_polling_loop())
         rotation_task = asyncio.create_task(self.run_key_rotation_loop())
+        mtls_renewal_task = asyncio.create_task(self.run_mtls_renewal_loop())
         threat_sweep_task = asyncio.create_task(self.run_threat_sweep_loop())
         alert_engine_task = asyncio.create_task(run_alert_loop(self))
         tenant_sync_task = asyncio.create_task(self.run_tenant_sync_loop())

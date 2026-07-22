@@ -533,6 +533,22 @@ def register(app, hub, ctx):
                 results.append({"spoke_id": sid, "status": "error", "message": str(e)})
         return {"provisioned": results, "count": len(results)}
 
+    @app.post("/api/mtls/revoke")
+    async def mtls_revoke(request: Request):
+        """Revoke a spoke's Hub-CA mTLS client cert: it's cleared on the spoke
+        (reconnects cert-less), removed from the registry, and marked revoked so
+        auto-provision won't re-mint until an explicit (re)issue. Body {spoke_id}.
+        Admin-only."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        body = await request.json()
+        sid = (body or {}).get("spoke_id") if isinstance(body, dict) else None
+        if not sid:
+            raise HTTPException(status_code=400, detail="spoke_id required")
+        return await hub._revoke_spoke_mtls_cert(sid)
+
     @app.get("/api/le/acme-info")
     async def le_acme_info(request: Request):
         """certbot version + ACME profile support + the CA's advertised profiles,
@@ -874,6 +890,13 @@ def register(app, hub, ctx):
         # under CERT_OPTIONAL a spoke works either way, so mTLS can be silently
         # inactive fleet-wide without anyone noticing.
         pinned_lc = {str(n).strip().lower() for n in pinned}
+        _md = hub.state.system_state.get("module_metadata", {}) or {}
+
+        def _label(_pk):
+            m = _md.get(_pk, {}) or {}
+            nm = (m.get("display_name") or m.get("name") or m.get("hostname") or "").strip()
+            return nm or _pk
+
         clients = []
         for pk, ws in list((hub.active_connections or {}).items()):
             ident = getattr(ws, "peer_cert_identity", None)
@@ -891,6 +914,7 @@ def register(app, hub, ctx):
                 pass
             clients.append({
                 "spoke_id": pk,
+                "label": _label(pk),
                 "module_type": (hub.spoke_module_types or {}).get(pk, ""),
                 "mtls_active": bool(ident),        # presented a VERIFIED client cert
                 "sans": sans,
@@ -899,14 +923,33 @@ def register(app, hub, ctx):
                 "not_after": not_after,
                 "is_bugfixer_pinned": bool(ident) and any(s.lower() in pinned_lc for s in sans),
             })
-        clients.sort(key=lambda c: (not c["mtls_active"], c["spoke_id"]))
+        clients.sort(key=lambda c: (not c["mtls_active"], c.get("label") or c["spoke_id"]))
         diag["clients"] = clients
         diag["clients_summary"] = {
             "connected": len(clients),
             "mtls_active": sum(1 for c in clients if c["mtls_active"]),
             "cert_less": sum(1 for c in clients if not c["mtls_active"]),
         }
+        gc2 = hub.state.system_state.get("global_config", {}) or {}
+        diag["auto_provision"] = bool(gc2.get("mtls_ca_auto_provision", True))
         return diag
+
+    @app.post("/api/mtls/auto-provision")
+    async def mtls_set_auto_provision(request: Request):
+        """Toggle whether the hub auto-mints + delivers a Hub-CA mTLS client cert to
+        each spoke on connect. Default ON. Admin-only."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        body = await request.json()
+        enabled = bool(body.get("enabled")) if isinstance(body, dict) else False
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        gc["mtls_ca_auto_provision"] = enabled
+        hub.state.system_state["global_config"] = gc
+        await hub.state.save_state_now()
+        logger.info("[mtls] auto-provision set to %s", enabled)
+        return {"status": "ok", "auto_provision": enabled}
 
     @app.get("/api/le/certs/{domain}/devices")
     async def le_target_devices(domain: str, module_type: str = "", identifier: str = ""):
