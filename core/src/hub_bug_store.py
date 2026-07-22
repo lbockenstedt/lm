@@ -166,6 +166,12 @@ class HubBugStoreMixin:
     def _mark_bug_filed(self, rid: str, issue_url: str) -> bool:
         return self._update_bug_status(rid, filed=True, issue_url=issue_url, status="filed")
 
+    def _approve_bug_report(self, rid: str) -> bool:
+        """Admin approved a feature request → mark it 'approved' so GET_BUG_REPORTS
+        exposes it and bugfixer may file the GitHub issue and work it. No-op-safe on
+        bugs (they never need approval)."""
+        return self._update_bug_status(rid, status="approved")
+
     def _mark_bug_fixed(self, rid: str, issue_url: str = "") -> bool:
         """bugfixer closed the GitHub issue for this report → mark it 'fixed' so the
         LM bug-reports UI shows Fixed + the issue link."""

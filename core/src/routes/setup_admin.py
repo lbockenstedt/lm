@@ -934,4 +934,15 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=404, detail="Bug report not found")
         return {"status": "ok", "id": rid}
 
+    @app.post("/setup/bug-reports/{rid}/approve")
+    async def approve_bug_report(rid: str):
+        """Admin approves a feature request (admin-only, like the rest of /setup/).
+        Marks it 'approved' so GET_BUG_REPORTS exposes it to bugfixer, which then
+        files the GitHub issue and works the feature. Bugs never need this gate."""
+        hub = app.state.hub
+        ok = await asyncio.to_thread(hub._approve_bug_report, rid)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Bug report not found")
+        return {"status": "ok", "id": rid, "state": "approved"}
+
     # ── LDAP relay (/api/ldap/*) ──────────────────────────────────────────────

@@ -5320,10 +5320,20 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # scan_bugs filters on; these handlers carry the payload.
             if req_type == "GET_BUG_REPORTS":
                 reports = self._list_bug_reports()
+                # Feature requests are gated on admin approval: don't expose an
+                # unapproved feature to bugfixer (it would file + work it). Bugs
+                # pass through; a feature that's already approved/filed/fixed does
+                # too (so bugfixer can proceed / mark it fixed).
+                def _agent_visible(r):
+                    if (r.get("type") or "bug") != "feature":
+                        return True
+                    st = (r.get("status") or "").lower()
+                    return st in ("approved", "filed", "fixed") or bool(r.get("filed"))
+                reports = [r for r in reports if _agent_visible(r)]
                 unfiled = sum(1 for r in reports if not r.get("filed"))
                 logger.info(
                     f"[bug-report] GET_BUG_REPORTS from {spoke_id}: "
-                    f"{len(reports)} total, {unfiled} unfiled"
+                    f"{len(reports)} visible, {unfiled} unfiled (features gated on approval)"
                 )
                 return {"reports": reports}
 

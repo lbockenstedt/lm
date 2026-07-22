@@ -4261,6 +4261,9 @@ async function loadRecoveryLogs() {
 async function loadBugReports(typeFilter) {
     const container = document.getElementById('system-logs-container');
     if (!container) return;
+    // Remember the active view so an inline action (approve/delete) can refresh
+    // the SAME filtered list instead of resetting to the mixed view.
+    container.dataset.bugFilter = typeFilter || '';
     const kindLabel = typeFilter === 'feature' ? 'feature request' : 'bug report';
     container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching ${kindLabel}s...</div>`;
     try {
@@ -4284,16 +4287,29 @@ async function loadBugReports(typeFilter) {
             const typeBadge = isFeat
                 ? `<span class="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-purple-100 text-purple-700" title="Feature request">💡 Feature</span>`
                 : `<span class="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-blue-100 text-blue-700" title="Bug">🐛 Bug</span>`;
-            const status = r.filed
-                ? `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline">Filed ↗</a>`
-                : `<span class="text-amber-600">Pending</span>`;
+            // Feature requests are gated: an admin must Approve before bugfixer
+            // may file the GitHub issue and work it. Bugs skip the gate.
+            const _st = (r.status || (r.filed ? 'filed' : '')).toLowerCase();
+            let status;
+            if (_st === 'fixed') {
+                status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-green-600 font-semibold hover:underline" title="Fixed on GitHub">✓ Fixed ↗</a>`;
+            } else if (r.filed) {
+                status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline">Filed ↗</a>`;
+            } else if (isFeat && _st !== 'approved') {
+                // Awaiting admin approval — offer the Approve action inline.
+                status = `<button onclick="event.stopPropagation(); approveBugReport('${escapeHtml(r.id)}')" class="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700" title="Approve this feature so BugFixer can file &amp; work it">Approve</button>`;
+            } else if (isFeat && _st === 'approved') {
+                status = `<span class="text-emerald-600 font-medium" title="Approved — BugFixer will file &amp; work it">Approved</span>`;
+            } else {
+                status = `<span class="text-amber-600">Pending</span>`;
+            }
             return `<div onclick="showBugReport('${escapeHtml(r.id)}')" class="px-4 py-2 border-b border-slate-100 hover:bg-slate-50 cursor-pointer flex items-center gap-3">
                 <span class="text-slate-400 w-44 shrink-0">${escapeHtml(ts)}</span>
                 ${typeBadge}
                 <span class="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold uppercase ${sevColor}">${escapeHtml(sev)}</span>
                 <span class="flex-1 truncate text-slate-700">${escapeHtml(r.summary || '(no summary)')}</span>
                 <span class="shrink-0 text-[10px] text-slate-400 font-mono">${escapeHtml(r.id)}</span>
-                <span class="shrink-0 w-16 text-center text-xs font-medium">${status}</span>
+                <span class="shrink-0 w-20 text-center text-xs font-medium">${status}</span>
                 <button onclick="event.stopPropagation(); deleteBugReport('${escapeHtml(r.id)}')" title="Delete report" class="shrink-0 p-1 text-slate-300 hover:text-red-500 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
             </div>`;
         }).join('');
@@ -4386,12 +4402,28 @@ async function deleteBugReport(rid) {
         // Close the detail modal if open, then refresh the list if it's mounted.
         const ov = document.getElementById('bug-detail-overlay');
         if (ov) ov.remove();
-        if (document.getElementById('system-logs-container')) loadBugReports();
+        const _c = document.getElementById('system-logs-container');
+        if (_c) loadBugReports(_c.dataset.bugFilter || undefined);
     } catch (e) {
         showToast(`Delete failed: ${e.message}`, 'error');
     }
 }
 window.deleteBugReport = deleteBugReport;
+
+async function approveBugReport(rid) {
+    // Admin approves a feature request → bugfixer may then file the GitHub issue
+    // and work it (unapproved features are hidden from bugfixer). Bugs skip this.
+    if (!rid) return;
+    try {
+        await apiJson(`/setup/bug-reports/${encodeURIComponent(rid)}/approve`, { method: 'POST' });
+        showToast('Feature approved — BugFixer will file &amp; work it', 'success');
+        const c = document.getElementById('system-logs-container');
+        if (c) loadBugReports(c.dataset.bugFilter || undefined);
+    } catch (e) {
+        showToast(`Approve failed: ${e.message}`, 'error');
+    }
+}
+window.approveBugReport = approveBugReport;
 
 async function showBugReport(rid) {
     const overlay = document.createElement('div');
@@ -4424,9 +4456,19 @@ async function showBugReport(rid) {
         const sev = r.severity || 'medium';
         const titleEl = overlay.querySelector('#bug-detail-title');
         if (titleEl) titleEl.innerHTML = `${isFeat ? '💡 Feature Request' : '🐛 Bug Report'} <span class="font-mono text-slate-400">${escapeHtml(rid)}</span>`;
-        const status = r.filed
-            ? `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline break-all">${escapeHtml(r.issue_url || 'Filed')}</a>`
-            : `<span class="text-amber-600">Pending — bugfixer has not filed this yet</span>`;
+        const _dst = (r.status || (r.filed ? 'filed' : '')).toLowerCase();
+        let status;
+        if (_dst === 'fixed') {
+            status = `<span class="text-green-600 font-semibold">✓ Fixed</span> — <a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline break-all">${escapeHtml(r.issue_url || 'GitHub issue')}</a>`;
+        } else if (r.filed) {
+            status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline break-all">${escapeHtml(r.issue_url || 'Filed')}</a>`;
+        } else if (isFeat && _dst !== 'approved') {
+            status = `<span class="text-amber-600">Awaiting approval</span> <button onclick="approveBugReport('${escapeHtml(rid)}')" class="ml-2 px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700">Approve</button>`;
+        } else if (isFeat && _dst === 'approved') {
+            status = `<span class="text-emerald-600 font-medium">Approved — BugFixer will file &amp; work it</span>`;
+        } else {
+            status = `<span class="text-amber-600">Pending — bugfixer has not filed this yet</span>`;
+        }
         const shot = r.screenshot_b64
             ? `<img src="${escapeHtml(r.screenshot_b64)}" class="mt-2 max-w-full rounded border border-slate-200" alt="screenshot">`
             : `<span class="text-slate-400 italic">No screenshot captured</span>`;
