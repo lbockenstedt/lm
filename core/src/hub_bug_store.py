@@ -37,11 +37,17 @@ class HubBugStoreMixin:
             return ""
         explanation = str(payload.get("explanation") or "")
         severity = str(payload.get("severity") or "medium")
+        # "bug" (default, incl. all legacy reports) or "feature" — set by the
+        # WebUI "Bug/Feature Request" footer modal's checkbox. bugfixer files a
+        # feature request as a GitHub ``enhancement`` issue (no auto-fix).
+        rtype = str(payload.get("type") or "bug").strip().lower() or "bug"
+        if rtype not in ("bug", "feature"):
+            rtype = "bug"
         context = payload.get("context") or {}
         # Persist the structured metadata + the captured text artifacts.
         report_json = {
             "id": rid, "explanation": explanation, "severity": severity,
-            "context": context, "filed": False, "issue_url": "",
+            "type": rtype, "context": context, "filed": False, "issue_url": "",
             "ts": time.time(),
         }
         try:
@@ -68,7 +74,7 @@ class HubBugStoreMixin:
         # artifacts are read from disk on demand by _get_bug_report.
         self.bug_reports[rid] = {
             "id": rid, "summary": explanation[:120], "severity": severity,
-            "ts": report_json["ts"], "filed": False, "issue_url": "",
+            "type": rtype, "ts": report_json["ts"], "filed": False, "issue_url": "",
             "context": context, "has_screenshot": "screenshot_file" in report_json,
         }
         while len(self.bug_reports) > self.bug_report_limit:
@@ -76,7 +82,7 @@ class HubBugStoreMixin:
             self.bug_reports.pop(oldest, None)
         # Authoritative "report is on disk and ready for bugfixer" trace line.
         logger.info(
-            f"[bug-report] stored id={rid} severity={severity} "
+            f"[bug-report] stored id={rid} type={rtype} severity={severity} "
             f"console={len(str(payload.get('console_logs') or ''))} "
             f"html={len(str(payload.get('html') or ''))} "
             f"screenshot={report_json.get('screenshot_file') or 'none'} "
@@ -94,7 +100,7 @@ class HubBugStoreMixin:
             return {}
         out = {
             "id": rid, "summary": meta.get("summary", ""), "severity": meta.get("severity", ""),
-            "ts": meta.get("ts", 0), "filed": meta.get("filed", False),
+            "type": meta.get("type", "bug"), "ts": meta.get("ts", 0), "filed": meta.get("filed", False),
             "issue_url": meta.get("issue_url", ""), "context": meta.get("context", {}),
         }
         for name in ("report.json", "console.log", "dom.html"):
@@ -141,7 +147,8 @@ class HubBugStoreMixin:
             for _ts, r in entries[: self.bug_report_limit]:
                 self.bug_reports[r["id"]] = {
                     "id": r["id"], "summary": str(r.get("explanation", ""))[:120],
-                    "severity": r.get("severity", "medium"), "ts": r.get("ts", 0),
+                    "severity": r.get("severity", "medium"), "type": r.get("type", "bug"),
+                    "ts": r.get("ts", 0),
                     "filed": bool(r.get("filed")), "issue_url": r.get("issue_url", ""),
                     "context": r.get("context") or {},
                     "has_screenshot": bool(r.get("screenshot_file")),

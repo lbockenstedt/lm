@@ -886,12 +886,13 @@ def register(app, hub, ctx):
                 logger.error("bug-report: _store_bug_report returned no id (data keys=%s)", list(data.keys()))
                 raise HTTPException(status_code=500, detail="Failed to store bug report")
             sev = str(data.get("severity") or "medium")
+            rtype = str(data.get("type") or "bug").strip().lower() or "bug"
             ctx = data.get("context") or {}
             view = ctx.get("currentView") if isinstance(ctx, dict) else ""
             # Short marker — flows through HubLogHandler -> self.logs ->
             # /var/log/lm/hub.log -> GET_LOGS -> bugfixer scan_bugs. No base64.
             logger.info(
-                f"[bug-report] id={rid} severity={sev} view={view} "
+                f"[bug-report] id={rid} type={rtype} severity={sev} view={view} "
                 f"summary={explanation[:80]!r}"
             )
             return {"status": "ok", "id": rid}
