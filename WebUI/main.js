@@ -3437,6 +3437,7 @@ function _viewTemplate(viewId) {
       </label>
     </div>
   </div>
+  <div id="le-acme-info" class="text-xs"></div>
   <div id="le-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;
 
@@ -17496,6 +17497,47 @@ async function loadDNSData(subMenu) {
 // Static legend under the Certificates table — what the target status badges,
 // the Add chips, and the expiry colors mean. Same look as the Spokes/Clients
 // legends.
+// certbot / ACME-profile diagnostic panel on the Certificates page. Surfaces the
+// le spoke's certbot version + whether it supports ACME profiles (--preferred-profile,
+// certbot >=4.0) + the CA's advertised profiles — the answer to "I requested
+// clientAuth / short-lived but the cert didn't change". Fetches /api/le/acme-info.
+async function loadLeAcmeInfo() {
+    const el = document.getElementById('le-acme-info');
+    if (!el) return;
+    const esc = (s) => escapeHtml(String(s == null ? '' : s));
+    try {
+        const r = await _spokeFetch('/api/le/acme-info');
+        const a = (r.ok && r.data) ? r.data : {};
+        if (a.available === false) {
+            el.innerHTML = `<div class="px-3 py-2 rounded-md bg-slate-50 border border-slate-200 text-slate-500">certbot / ACME info unavailable: ${esc(a.reason || a.error || 'le spoke not connected')}</div>`;
+            return;
+        }
+        const profs = a.profiles || {};
+        const names = Object.keys(profs);
+        const supp = a.supports_profiles;
+        const reqProfile = a.clientauth_profile || 'classic';
+        const reqMissing = names.length && !names.includes(reqProfile);
+        const profChips = names.length
+            ? names.map(n => `<span class="inline-block px-1.5 py-0.5 rounded ${/classic/i.test(n) ? 'bg-[#01A982]/15 text-[#01A982]' : 'bg-slate-100 text-slate-600'} font-mono mr-1" title="${esc(profs[n] || '')}">${esc(n)}</span>`).join('')
+            : `<span class="text-amber-600">CA advertises no profiles (this ACME server may not support profile selection)</span>`;
+        const warn = (supp === false)
+            ? `<div class="mt-1 text-red-600 font-bold">⚠ certbot too old (need ≥ 4.0) — the le spoke's certbot auto-upgrade hasn't landed; clientAuth/short-lived profiles will be ignored until it does.</div>`
+            : (reqMissing ? `<div class="mt-1 text-red-600 font-bold">⚠ clientAuth profile "${esc(reqProfile)}" is NOT in the CA's list — set LM_LE_CLIENTAUTH_PROFILE to one of the names above.</div>` : '');
+        el.innerHTML = `<div class="px-3 py-2 rounded-md bg-slate-50 border border-slate-200 text-slate-600">
+            <span class="font-bold uppercase tracking-wider text-slate-400 mr-2">certbot / ACME</span>
+            <span>certbot <span class="font-mono">${esc(a.certbot_version || '?')}</span></span>
+            <span class="mx-2 text-slate-300">|</span>
+            <span>profiles: <b class="${supp ? 'text-[#01A982]' : 'text-red-600'}">${supp === null ? 'unknown' : (supp ? 'supported' : 'NOT supported')}</b></span>
+            <span class="mx-2 text-slate-300">|</span>
+            <span>clientAuth via <span class="font-mono">${esc(reqProfile)}</span></span>
+            <div class="mt-1">CA profiles: ${profChips}</div>
+            ${warn}
+        </div>`;
+    } catch (e) {
+        el.innerHTML = `<div class="px-3 py-2 rounded-md bg-slate-50 border border-slate-200 text-slate-500">certbot / ACME info error: ${esc(e.message || e)}</div>`;
+    }
+}
+
 function _leLegend() {
     const pill = (cls, t) => `<span class="${cls} px-1.5 py-0.5 rounded text-xs font-medium">${t}</span>`;
     const lbl = t => `<span class="font-bold uppercase tracking-wider text-slate-400 mr-1">${t}</span>`;
@@ -17546,6 +17588,9 @@ async function loadLEData(subMenu) {
     loadLeWildcardAllSpokes();
     // Hub-level failed-distribution retry interval (hours; default 1).
     loadLeRetryInterval();
+    // certbot / ACME-profile diagnostic (why a clientAuth/short-lived re-issue may
+    // not apply): certbot version + the CA's advertised profiles.
+    loadLeAcmeInfo();
 
     const th = tableHead, tw = tableWrap;  // shared table helpers
     // The le spoke returns nested {status, data:{...}}; unwrap to the inner data
