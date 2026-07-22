@@ -17725,8 +17725,8 @@ async function loadLEData(subMenu) {
                     <div class="flex flex-col items-end gap-1.5">
                         ${retryBtn ? `<div>${retryBtn}</div>` : ''}
                         <div class="flex flex-row items-center justify-end gap-1.5">
-                            <button onclick="leToggleClientAuth(this, '${dEsc}', ${c.client_auth ? 'false' : 'true'})" class="${c.client_auth ? 'bg-blue-600/15 text-blue-700 border-blue-500' : 'bg-slate-500/10 text-slate-500 border-slate-300'} border px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="${c.client_auth ? 'Issued WITH the clientAuth EKU — usable as an mTLS client cert. Click to re-issue server-only.' : 'Re-issue this cert WITH the clientAuth EKU (ACME classic profile) so it can be an mTLS CLIENT cert (BugFixer / mTLS wildcard). Only needed for mTLS client certs.'}">${c.client_auth ? '✓ clientAuth' : '+ clientAuth'}</button>
-                            <button onclick="showLeTargetsModal('${dEsc}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Manage distribution targets + BugFixer identity tag">Manage</button>
+                            ${c.client_auth ? `<span class="text-[10px] text-blue-700 font-bold" title="Issued with the clientAuth EKU — usable as an mTLS client cert">clientAuth</span>` : ''}
+                            <button onclick="showLeTargetsModal('${dEsc}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Manage distribution targets, BugFixer identity + clientAuth">Manage</button>
                             <button onclick="leRenewCert('${dEsc}')" class="bg-slate-700/10 hover:bg-slate-700/20 text-slate-700 border border-slate-700 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Renew this cert">Renew</button>
                             <button onclick="leRevokeCert('${dEsc}')" class="bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Revoke + remove from managed list">Revoke</button>
                         </div>
@@ -18109,6 +18109,7 @@ async function showLeTargetsModal(domain) {
     const cert = (window._leCerts || []).find(c => c.domain === domain) || {};
     const tgts = cert.targets || [];
     const isBfCert = !!cert.bugfixer;
+    const isCA = !!cert.client_auth;
     const esc = s => String(s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
     const row = (t, i) => {
         const ok = t.last_status === 'SUCCESS';
@@ -18127,7 +18128,11 @@ async function showLeTargetsModal(domain) {
         <p class="text-xs text-slate-500 mb-4">Each target is a spoke (by module type) the hub pushes this cert to; that spoke installs it on its device. Only installed modules with at least one device are listed.</p>
         <label class="flex items-start gap-2 mb-4 p-3 rounded-md border ${isBfCert ? 'bg-purple-50 border-purple-200' : 'bg-slate-50 border-slate-200'} cursor-pointer" title="Tag this cert as the BugFixer mTLS identity — the gate for hub log reads + fleet update commands. Then add a bugfixer target below so the cert is deployed to the bugfixer agent.">
             <input type="checkbox" id="le-bugfixer-chk" ${isBfCert ? 'checked' : ''} onchange="leToggleBugfixerChk(this, '${esc(domain)}')" class="mt-0.5 accent-purple-600" />
-            <span class="text-xs text-slate-700"><span class="font-bold text-purple-700">★ BugFixer identity</span> — tag this cert as the one bugfixer presents over mTLS to read hub logs + run fleet updates. <span class="text-slate-500">Also add a <span class="font-mono">bugfixer</span> target below (★) so the cert is deployed to the bugfixer agent.</span></span>
+            <span class="text-xs text-slate-700"><span class="font-bold text-purple-700">★ BugFixer identity</span> — tag this cert as the one bugfixer presents over mTLS to read hub logs + run fleet updates. <span class="text-slate-500">Also add a <span class="font-mono">bugfixer</span> target below (★) so the cert is deployed to the bugfixer agent. Checking this auto-enables clientAuth below.</span></span>
+        </label>
+        <label class="flex items-start gap-2 mb-4 p-3 rounded-md border ${isCA ? 'bg-blue-50 border-blue-200' : 'bg-slate-50 border-slate-200'} cursor-pointer" title="Re-issue this cert with the clientAuth EKU (ACME 'classic' profile) so it can be presented as an mTLS CLIENT cert. Required for the BugFixer identity and the mTLS wildcard; ordinary server certs don't need it. Re-issues the cert.">
+            <input type="checkbox" id="le-clientauth-chk" ${isCA ? 'checked' : ''} onchange="leToggleClientAuthChk(this, '${esc(domain)}')" class="mt-0.5 accent-blue-600" />
+            <span class="text-xs text-slate-700"><span class="font-bold text-blue-700">clientAuth EKU</span> — re-issue this cert so it can be used as an mTLS <b>client</b> cert (BugFixer, mTLS wildcard). <span class="text-slate-500">Ordinary server certs don't need this. Toggling re-issues the cert.</span></span>
         </label>
         <div class="overflow-x-auto mb-3"><table class="w-full text-sm">
             <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>
@@ -19099,6 +19104,17 @@ async function leToggleBugfixerChk(cb, domain) {
         showToast(enable
             ? `Tagged ${domain} as the BugFixer cert — add a bugfixer target (★) below so it presents over mTLS`
             : `Removed the BugFixer tag from ${domain}`, 'success');
+        // A BugFixer cert MUST carry the clientAuth EKU to be usable as an mTLS
+        // client cert — auto-enable it (re-issue) when tagging BugFixer, unless it
+        // already has it. Reflect it in the modal's clientAuth checkbox.
+        if (enable) {
+            const c = (window._leCerts || []).find(x => x.domain === domain);
+            if (c && !c.client_auth) {
+                const caCb = document.getElementById('le-clientauth-chk');
+                if (caCb) caCb.checked = true;
+                await leToggleClientAuthChk(caCb, domain, { skipConfirm: true, noReload: true });
+            }
+        }
         window._leLoading = false;   // clear any stuck guard so the re-render runs
         await loadLEData();          // refresh the top banner + row target stars
         if (cb) cb.disabled = false;
@@ -19156,32 +19172,47 @@ async function showMtlsDebug() {
         </div>`, { card: 'max-w-4xl w-full max-h-[90vh] overflow-y-auto', backdropClose: true });
 }
 
-// Toggle the clientAuth EKU on a managed cert. Re-issues via the le spoke with the
-// ACME "classic" profile (serverAuth + clientAuth) so the cert can be presented as
-// an mTLS CLIENT cert (BugFixer / the mTLS wildcard). Server-only certs don't need
-// it. POST /api/le/certs/{domain}/clientauth {enabled}; re-distributes on success.
-async function leToggleClientAuth(btn, domain, enable) {
-    if (!confirm(enable
+// clientAuth checkbox (inside the Manage modal). Re-issues the cert via the le
+// spoke with the ACME "classic" profile (serverAuth + clientAuth) so it can be
+// presented as an mTLS CLIENT cert (BugFixer / the mTLS wildcard). Server-only
+// certs don't need it. POST /api/le/certs/{domain}/clientauth {enabled} →
+// LE_SET_CLIENTAUTH; re-distributes on success. opts.skipConfirm is used when
+// leToggleBugfixerChk auto-enables it (a BugFixer cert MUST have clientAuth).
+async function leToggleClientAuthChk(cb, domain, opts) {
+    opts = opts || {};
+    const enable = cb ? cb.checked : true;
+    if (!opts.skipConfirm && !confirm(enable
         ? `Re-issue ${domain} WITH the clientAuth EKU now?\n\ncertbot re-issues it (ACME "classic" profile) and re-distributes to its targets. Needed only for mTLS client certs.`
-        : `Re-issue ${domain} as a server-only cert (drop clientAuth)?`)) return;
-    if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+        : `Re-issue ${domain} as a server-only cert (drop clientAuth)?`)) {
+        if (cb) cb.checked = !enable;   // revert on cancel
+        return false;
+    }
+    if (cb) cb.disabled = true;
     showToast(enable ? `Re-issuing ${domain} with clientAuth…` : `Re-issuing ${domain} without clientAuth…`, 'info');
     try {
         const { ok, detail } = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/clientauth`, {
-            method: 'POST', body: JSON.stringify({ enabled: enable })
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: enable })
         });
         if (!ok) {
             showToast('clientAuth change failed: ' + (detail || ''), 'error');
-            if (btn) { btn.disabled = false; btn.style.opacity = ''; }
-            return;
+            if (cb) { cb.checked = !enable; cb.disabled = false; }
+            return false;
+        }
+        if (Array.isArray(window._leCerts)) {
+            const c = window._leCerts.find(x => x.domain === domain);
+            if (c) c.client_auth = enable;
         }
         showToast(enable
-            ? `${domain} re-issued with clientAuth — now deploy it (Manage) so the mTLS client picks it up`
+            ? `${domain} re-issued with clientAuth — deploy it (a target below) so the mTLS client picks it up`
             : `${domain} re-issued server-only`, 'success');
-        await loadLEData();
+        if (!opts.noReload) { window._leLoading = false; await loadLEData(); }
+        if (cb) cb.disabled = false;
+        return true;
     } catch (e) {
         showToast('clientAuth change failed: ' + (e.message || e), 'error');
-        if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+        if (cb) { cb.checked = !enable; cb.disabled = false; }
+        return false;
     }
 }
 
