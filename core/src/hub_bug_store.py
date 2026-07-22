@@ -102,6 +102,9 @@ class HubBugStoreMixin:
             "id": rid, "summary": meta.get("summary", ""), "severity": meta.get("severity", ""),
             "type": meta.get("type", "bug"), "ts": meta.get("ts", 0), "filed": meta.get("filed", False),
             "issue_url": meta.get("issue_url", ""), "context": meta.get("context", {}),
+            # status: "" (new) → "filed" (issue opened) → "fixed" (bugfixer closed it).
+            "status": meta.get("status", ("filed" if meta.get("filed") else "")),
+            "fixed_at": meta.get("fixed_at", 0),
         }
         for name in ("report.json", "console.log", "dom.html"):
             p = os.path.join(d, name)
@@ -150,6 +153,8 @@ class HubBugStoreMixin:
                     "severity": r.get("severity", "medium"), "type": r.get("type", "bug"),
                     "ts": r.get("ts", 0),
                     "filed": bool(r.get("filed")), "issue_url": r.get("issue_url", ""),
+                    "status": r.get("status", ("filed" if r.get("filed") else "")),
+                    "fixed_at": r.get("fixed_at", 0),
                     "context": r.get("context") or {},
                     "has_screenshot": bool(r.get("screenshot_file")),
                 }
@@ -159,22 +164,42 @@ class HubBugStoreMixin:
             logger.debug("bug_reports warm load skipped: %s", e)
 
     def _mark_bug_filed(self, rid: str, issue_url: str) -> bool:
+        return self._update_bug_status(rid, filed=True, issue_url=issue_url, status="filed")
+
+    def _mark_bug_fixed(self, rid: str, issue_url: str = "") -> bool:
+        """bugfixer closed the GitHub issue for this report → mark it 'fixed' so the
+        LM bug-reports UI shows Fixed + the issue link."""
+        import time as _t
+        return self._update_bug_status(rid, status="fixed", issue_url=issue_url or None,
+                                        fixed_at=_t.time())
+
+    def _update_bug_status(self, rid: str, *, filed=None, status=None,
+                           issue_url=None, fixed_at=None) -> bool:
+        """Update a report's filed/status/issue_url/fixed_at in the in-memory index
+        AND persist to report.json so it survives a hub restart. Only sets the fields
+        passed (issue_url=None leaves the existing one)."""
         meta = self.bug_reports.get(rid)
         if not meta:
             return False
-        meta["filed"] = True
-        meta["issue_url"] = issue_url or ""
-        # Persist to report.json too so the filed flag survives a hub restart.
+        if filed is not None:
+            meta["filed"] = bool(filed)
+        if status is not None:
+            meta["status"] = status
+        if issue_url:
+            meta["issue_url"] = issue_url
+        if fixed_at is not None:
+            meta["fixed_at"] = fixed_at
         p = os.path.join(self.bug_dir, rid, "report.json")
         try:
             with open(p, "r") as f:
                 rpt = json.load(f)
-            rpt["filed"] = True
-            rpt["issue_url"] = issue_url or ""
+            for k in ("filed", "status", "issue_url", "fixed_at"):
+                if k in meta:
+                    rpt[k] = meta[k]
             with open(p, "w") as f:
                 json.dump(rpt, f, indent=2)
-        except Exception as e:
-            logger.warning(f"[bug-report] could not persist filed flag for {rid}: {e}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[bug-report] could not persist status for {rid}: {e}")
         return True
 
     def _delete_bug_report(self, rid: str) -> bool:

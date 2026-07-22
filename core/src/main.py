@@ -5346,6 +5346,18 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 )
                 return {"status": "ok" if ok else "not_found"}
 
+            if req_type == "MARK_BUG_FIXED":
+                # bugfixer closed the GitHub issue for this report → the LM UI shows
+                # "Fixed" + the issue link.
+                rid = req.get("id", "")
+                issue_url = req.get("issue_url", "")
+                ok = await asyncio.to_thread(self._mark_bug_fixed, rid, issue_url)
+                logger.info(
+                    f"[bug-report] MARK_BUG_FIXED id={rid} url={issue_url} "
+                    f"from {spoke_id}: {'ok' if ok else 'not_found'}"
+                )
+                return {"status": "ok" if ok else "not_found"}
+
             # NetBox IPAM spoke (API-only, no cert helper) owns the cert-install
             # KNOWLEDGE and relays the actual install to the netbox-server agent
             # (the NetBox web host, which has nginx + the root sudoers helper).
