@@ -7536,7 +7536,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         while True:
             try:
                 uptime = int(time.time() - start)
-                logger.debug(
+                # INFO, not DEBUG: at the default INFO level a DEBUG line is
+                # filtered before it reaches HubLogHandler → never buffered into
+                # self.logs → never returned by GET_LOGS → BugFixer never observes
+                # the hub's own heartbeat and its triage warm-up gate stays stuck
+                # "waiting for hub's own heartbeat" forever. Matches the spoke-side
+                # BaseControlPlane._health_heartbeat_task, which logs at INFO.
+                logger.info(
                     "[heartbeat] ok module=hub spoke_id=hub hub=ok uptime_s=%s spokes=%d",
                     uptime, len(self.active_connections),
                 )
