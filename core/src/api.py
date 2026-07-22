@@ -1956,7 +1956,23 @@ def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
             cfg_kwargs["ws"] = _peer_cert_ws._PeerCertProtocol
     except Exception:  # noqa: BLE001 - never brick the boot on a peer-cert-ws hiccup
         pass
-    return uvicorn.Server(uvicorn.Config(app, **cfg_kwargs))
+    server = uvicorn.Server(uvicorn.Config(app, **cfg_kwargs))
+    # Register the listener's client-verify SSLContext so mTLS trust can be
+    # hot-reloaded in place when certs/chains change — no hub restart needed for a
+    # renewal or a newly-deployed device cert (see mtls.reload_client_ca). Force the
+    # config to build its SSLContext now (serve() would otherwise defer it), then
+    # hand the context to mtls. Best-effort; a hiccup just means trust changes wait
+    # for the next restart (today's behavior).
+    try:
+        from security import mtls as _mtls
+        if _mtls.mtls_enabled():
+            if not server.config.loaded:
+                server.config.load()
+            if getattr(server.config, "ssl", None) is not None:
+                _mtls.register_server_ctx(server.config.ssl)
+    except Exception:  # noqa: BLE001 - never brick the boot on a context-register hiccup
+        pass
+    return server
 
 
 def run_api_server(hub, port=443):

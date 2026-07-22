@@ -74,12 +74,60 @@ def set_runtime_materials(ca=None, client_cert=None, client_key=None) -> None:
     left None keeps its current value, so a caller can set just the CA bundle
     (the hub — it has no client leg) without clobbering client paths. Pass an
     empty string to explicitly clear a path back to the env fallback."""
+    ca_changed = ca is not None and _runtime_materials.get("ca") != (ca or None)
     if ca is not None:
         _runtime_materials["ca"] = ca or None
     if client_cert is not None:
         _runtime_materials["client_cert"] = client_cert or None
     if client_key is not None:
         _runtime_materials["client_key"] = client_key or None
+    # When the client-verify CA changes (cert renewal, a new device's chain), hot-
+    # reload the LIVE listener's SSL trust so it takes effect WITHOUT a hub restart.
+    if ca_changed:
+        try:
+            reload_client_ca()
+        except Exception:  # noqa: BLE001 - never let a reload hiccup break distribution
+            pass
+
+
+# Reference to the running server's client-verify SSLContext, registered by
+# build_server(). Lets reload_client_ca() refresh the LIVE listener's trust in
+# place when materials change — so a cert/trust update never needs a hub restart.
+_server_ctx = None
+
+
+def register_server_ctx(ctx) -> None:
+    """build_server() hands us the listener's SSLContext so we can hot-reload its
+    client-verify trust later (see reload_client_ca)."""
+    global _server_ctx
+    _server_ctx = ctx
+
+
+def reload_client_ca() -> bool:
+    """Rebuild the combined client-verify CA and reload it into the LIVE listener
+    SSLContext, so a changed trust chain (renewal, a newly-deployed device cert)
+    is honored on the NEXT handshake without restarting the hub. Adds the current
+    anchors to the running context (OpenSSL de-dups); existing connections are
+    unaffected. Returns True if the live context was refreshed. NOTE: this ADDS
+    trust — a fully-rotated CA leaves the old anchors trusted until the next
+    restart, which is safe (old certs simply stay valid)."""
+    global _combined_ca_path
+    ctx = _server_ctx
+    if ctx is None:
+        return False
+    _combined_ca_path = None  # force a fresh rebuild from current materials
+    combined = server_client_ca_file()
+    if not combined or not os.path.exists(combined):
+        return False
+    try:
+        ctx.load_verify_locations(cafile=combined)
+        logger.info("[mtls] live listener client-verify trust reloaded from %s "
+                    "(no hub restart needed)", combined)
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[mtls] live trust reload failed (%s) — a hub restart will "
+                       "still pick up the new trust", e)
+        return False
 
 
 def mtls_enabled() -> bool:
