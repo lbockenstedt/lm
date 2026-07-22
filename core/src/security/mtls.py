@@ -320,7 +320,10 @@ def verify_chain(fullchain_pem: str):
         fd, leaf_path = tempfile.mkstemp(suffix=".pem")
         with os.fdopen(fd, "w") as f:
             f.write(blocks[0])
-        args = ["openssl", "verify", "-CAfile", combined]
+        # -purpose sslclient: match what the TLS server actually enforces on a
+        # CLIENT cert (the clientAuth EKU). Plain `openssl verify` skips this, so a
+        # serverAuth-only cert would falsely pass here yet be rejected on the wire.
+        args = ["openssl", "verify", "-purpose", "sslclient", "-CAfile", combined]
         if len(blocks) > 1:
             fd2, inter_path = tempfile.mkstemp(suffix=".pem")
             with os.fdopen(fd2, "w") as f:
