@@ -19194,7 +19194,7 @@ async function showMtlsDebug() {
                 el.innerHTML =
                     `<div class="font-semibold text-slate-600 mb-1">certbot / ACME profiles (le spoke)</div>` +
                     `<div>certbot: <span class="font-mono">${esc(a.certbot_version || '?')}</span> · --preferred-profile support: <b class="${supp ? 'text-[#01A982]' : 'text-red-600'}">${supp === null ? 'unknown' : (supp ? 'yes' : 'NO — certbot too old (need ≥4.0)')}</b></div>` +
-                    `<div class="mt-1">clientAuth profile requested: <span class="font-mono">${esc(a.clientauth_profile || 'classic')}</span> ${names.length && !names.some(n => n === (a.clientauth_profile || 'classic')) ? '<span class="text-red-600 font-bold">← not in the CA\\'s list! set LM_LE_CLIENTAUTH_PROFILE to a name below</span>' : ''}</div>` +
+                    `<div class="mt-1">clientAuth profile requested: <span class="font-mono">${esc(a.clientauth_profile || 'classic')}</span> ${names.length && !names.some(n => n === (a.clientauth_profile || 'classic')) ? '<span class="text-red-600 font-bold">← not in the CA profile list! set LM_LE_CLIENTAUTH_PROFILE to a name below</span>' : ''}</div>` +
                     `<div class="mt-1">CA (${esc(a.acme_directory || '')}) profiles:</div><div class="mt-0.5 pl-2 border-l-2 border-slate-200">${profList}</div>`;
             }
         }
