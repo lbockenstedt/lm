@@ -19272,7 +19272,6 @@ async function leToggleClientAuthChk(cb, domain, opts) {
 // Per-cert "Renew now" — FORCES a re-issue (--force-renewal) so it works even when
 // the cert isn't near expiry (a plain `certbot renew` no-ops until ~30d out).
 async function leRenewCert(domain) {
-    if (!confirm(`Renew ${domain} now?\n\nForces a fresh re-issue on the le spoke (regardless of expiry) and re-pushes the new material to its targets.`)) return;
     showToast(`Renewing ${domain}…`, 'info');
     try {
         const { ok, data, detail } = await _spokeFetch('/api/le/renew', {
