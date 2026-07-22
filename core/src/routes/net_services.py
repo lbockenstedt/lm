@@ -1,5 +1,6 @@
 """DNS/LE/DHCP spoke-relay routes and shared spoke helpers."""
 import asyncio
+import time
 from api import (
     HTTPException, Request, _spoke_payload_or_raise, access, get_spoke_or_503,
     logger,
@@ -953,6 +954,93 @@ def register(app, hub, ctx):
         await hub.state.save_state_now()
         logger.info("[mtls] auto-provision set to %s", enabled)
         return {"status": "ok", "auto_provision": enabled}
+
+    @app.get("/api/hub/health")
+    async def hub_health(request: Request):
+        """Hub event-loop / overload health for the WebUI diagnostics card. The
+        loop-lag + protect + per-spoke msg-rate signals here are what diagnose
+        fleet-wide WS backpressure (spokes dropping with 1011 keepalive timeout
+        because a saturated hub loop can't drain their sockets). Admin-only."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        import psutil as _ps
+        lag_hist = list(getattr(hub, "_loop_lag_hist", []) or [])
+        gc = (hub.state.get_global_config() or {})
+        pcfg = (gc.get("protect", {}) or {})
+        try:
+            memp = _ps.virtual_memory().percent
+        except Exception:  # noqa: BLE001
+            memp = 0.0
+        # Top talkers — the spokes offering the most frames/s (a provisioning storm
+        # relaying a flood of agent logs is the usual hub-loop saturator).
+        smps = getattr(hub, "spoke_mps", {}) or {}
+        top = sorted(smps.items(), key=lambda kv: kv[1] or 0, reverse=True)[:8]
+        def _label(sid):
+            try:
+                return hub._spoke_label(sid)
+            except Exception:  # noqa: BLE001
+                return sid
+        now = time.time()
+        recent_to = len({k: v for k, v in (getattr(hub, "_recent_request_timeouts", {}) or {}).items()
+                         if v > now})
+        # Per-connection TRANSPORT health — to rule network path (the hub is in
+        # Azure) in or out. rtt_ms is the websockets keepalive ping RTT (network
+        # latency to that spoke); write_buffer_bytes is the hub→spoke outbound
+        # backlog (a growing buffer = that spoke/network isn't draining = transport
+        # backpressure, NOT a hub-loop problem). High loop_lag + LOW rtt/buffers =
+        # hub loop; high rtt or growing buffers = network/spoke transport.
+        tel_all = getattr(hub, "spoke_telemetry", {}) or {}
+        conns = []
+        for pk, ws in list((getattr(hub, "active_connections", {}) or {}).items()):
+            lat = getattr(ws, "latency", None)   # seconds (websockets keepalive RTT)
+            wbuf = None
+            try:
+                tr = getattr(ws, "transport", None)
+                if tr is not None and hasattr(tr, "get_write_buffer_size"):
+                    wbuf = int(tr.get_write_buffer_size())
+            except Exception:  # noqa: BLE001
+                wbuf = None
+            raddr = ""
+            try:
+                ra = getattr(ws, "remote_address", None)
+                raddr = ra[0] if ra else ""
+            except Exception:  # noqa: BLE001
+                pass
+            tel = tel_all.get(pk, {}) or {}
+            conns.append({
+                "spoke": _label(pk),
+                "remote_ip": raddr or tel.get("remote_ip", ""),
+                "rtt_ms": (round(lat * 1000, 1) if isinstance(lat, (int, float)) and lat else None),
+                "write_buffer_bytes": wbuf,
+                "mps": round((smps.get(pk) or 0), 1),
+            })
+        conns.sort(key=lambda c: ((c["write_buffer_bytes"] or 0), (c["rtt_ms"] or 0)), reverse=True)
+        return {
+            "loop_lag_s": round(getattr(hub, "_loop_lag", 0.0), 3),
+            "loop_lag_max_s": round(max(lag_hist) if lag_hist else 0.0, 3),
+            "loop_lag_avg_s": round(sum(lag_hist) / len(lag_hist), 3) if lag_hist else 0.0,
+            "loop_lag_hist": [round(x, 3) for x in lag_hist],
+            "cpu_pct": round(getattr(hub, "_proc_cpu", 0.0), 1),
+            "mem_pct": round(memp, 1),
+            "mps": round(getattr(hub, "mps", 0.0), 1),
+            "throughput_mbps": round(getattr(hub, "throughput_mbps", 0.0), 3),
+            "protect_mode": bool(getattr(hub, "_protect_mode", False)),
+            "protect_reason": getattr(hub, "_protect_reason", "") or "",
+            "protect_since": (round(now - getattr(hub, "_protect_entered_ts", 0), 0)
+                              if getattr(hub, "_protect_mode", False) else 0),
+            "request_timeouts_recent": recent_to,
+            "request_timeouts_total": int(getattr(hub, "_request_timeouts_total", 0)),
+            "connected_spokes": len(getattr(hub, "active_connections", {}) or {}),
+            "top_talkers": [{"spoke": _label(sid), "mps": round(m or 0, 1)} for sid, m in top],
+            "connections": conns,
+            "thresholds": {
+                "loop_lag_high_s": float(pcfg.get("loop_lag_high_s", 0.75)),
+                "cpu_high_pct": float(pcfg.get("cpu_high_pct", 90)),
+                "mem_high_pct": float(pcfg.get("mem_high_pct", 90)),
+            },
+        }
 
     @app.get("/api/le/certs/{domain}/devices")
     async def le_target_devices(domain: str, module_type: str = "", identifier: str = ""):

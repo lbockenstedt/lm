@@ -3445,6 +3445,7 @@ function _viewTemplate(viewId) {
       <button onclick="leRenewAll()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">↻ Renew all</button>
       <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">⚡ Distribute now</button>
       <button onclick="showMtlsDebug()" class="bg-slate-600/10 hover:bg-slate-600/20 text-slate-700 border border-slate-400 px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap" title="Debug: which connected spokes/agents are ACTUALLY presenting a verified mTLS client cert vs. connected cert-less, plus the hub's trust bundle + pinned BugFixer cert check">🔒 mTLS status</button>
+      <button onclick="showHubHealth()" class="bg-slate-600/10 hover:bg-slate-600/20 text-slate-700 border border-slate-400 px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap" title="Hub event-loop health + per-spoke transport (RTT / write-buffer) — diagnoses fleet-wide WS backpressure (1011 keepalive drops): saturated hub loop vs network path (hub is in Azure)">📈 Hub health</button>
       <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200 whitespace-nowrap" title="Manage this tenant's DNS-01 credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-01 issuance">🔑 DNS Credentials</button>
     </div>
     <div class="flex items-center gap-4 flex-wrap">
@@ -19316,6 +19317,65 @@ async function mtlsProvision(spokeId) {
 // hub's client-verify trust bundle + the pinned BugFixer cert verify. Fetches
 // /api/mtls/trust-diag (admin) and renders a modal. Answers "is mTLS really on
 // fleet-wide, and who's using it" — since CERT_OPTIONAL lets a spoke work either way.
+async function showHubHealth() {
+    let d;
+    try { d = await apiJson('/api/hub/health'); }
+    catch (e) { showToast('Hub health failed: ' + e.message, 'error'); return; }
+    const _fmtBytes = (n) => n == null ? '—' : n >= 1048576 ? (n/1048576).toFixed(1)+' MB'
+        : n >= 1024 ? (n/1024).toFixed(1)+' KB' : n + ' B';
+    const th = d.thresholds || {};
+    const lagHi = th.loop_lag_high_s || 0.75;
+    const lag = d.loop_lag_s || 0, lagMax = d.loop_lag_max_s || 0;
+    const lagColor = lag >= lagHi ? 'text-red-600' : lag >= lagHi/2 ? 'text-amber-600' : 'text-[#01A982]';
+    const cpuColor = (d.cpu_pct||0) >= (th.cpu_high_pct||90) ? 'text-red-600' : 'text-slate-800';
+    const memColor = (d.mem_pct||0) >= (th.mem_high_pct||90) ? 'text-red-600' : 'text-slate-800';
+    const conns = d.connections || [];
+    const anyHiRtt = conns.some(c => (c.rtt_ms||0) > 150);
+    const anyBuf = conns.some(c => (c.write_buffer_bytes||0) > 65536);
+    let verdict, vClass, hint;
+    if (d.protect_mode) { verdict = `⚠ PROTECT — ${esc(d.protect_reason)} (${d.protect_since}s)`; vClass = 'bg-red-100 text-red-700'; }
+    else if (lag >= lagHi) { verdict = 'Hub loop saturated'; vClass = 'bg-red-100 text-red-700'; }
+    else { verdict = 'Hub loop healthy'; vClass = 'bg-green-100 text-green-700'; }
+    if (lag >= lagHi) hint = '🔴 High loop lag with low RTT/buffers → the HUB LOOP is the bottleneck (fix hub-side — likely agent-log/telemetry flood from a provisioning storm).';
+    else if (anyHiRtt || anyBuf) hint = '🌐 Loop is healthy but some spokes show high RTT or a growing write buffer → NETWORK / transport path (the hub is in Azure) to those spokes.';
+    else hint = '🟢 Loop healthy and transport clean — no backpressure right now. (Catch it live during a stall for the clearest signal.)';
+    const rows = conns.map(c => `<tr class="border-b border-slate-100">
+        <td class="px-3 py-1.5">${esc(c.spoke)}</td>
+        <td class="px-3 py-1.5 font-mono text-xs">${esc(c.remote_ip||'—')}</td>
+        <td class="px-3 py-1.5 text-center ${(c.rtt_ms||0)>150?'text-red-600 font-bold':'text-slate-700'}">${c.rtt_ms!=null?c.rtt_ms+' ms':'—'}</td>
+        <td class="px-3 py-1.5 text-center ${(c.write_buffer_bytes||0)>65536?'text-red-600 font-bold':'text-slate-700'}">${_fmtBytes(c.write_buffer_bytes)}</td>
+        <td class="px-3 py-1.5 text-center text-slate-700">${c.mps}</td>
+      </tr>`).join('') || `<tr><td colspan="5" class="px-3 py-3 text-slate-400 italic">No connected spokes.</td></tr>`;
+    const talkers = (d.top_talkers||[]).slice(0,6).map(t => `${esc(t.spoke)} (${t.mps}/s)`).join(', ') || '—';
+    openModal('hub-health-modal', `<div class="p-6 space-y-4">
+      <div class="flex items-center justify-between">
+        <h3 class="text-lg font-bold text-[#263040]">📈 Hub Health</h3>
+        <span class="text-xs px-2 py-1 rounded-full ${vClass}">${verdict}</span>
+      </div>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+        <div><div class="text-slate-500 text-xs">Loop lag (now / 60s max)</div><div class="font-bold ${lagColor}">${lag.toFixed(2)}s / ${lagMax.toFixed(2)}s</div></div>
+        <div><div class="text-slate-500 text-xs">Hub CPU (%/core)</div><div class="font-bold ${cpuColor}">${d.cpu_pct}%</div></div>
+        <div><div class="text-slate-500 text-xs">Memory</div><div class="font-bold ${memColor}">${d.mem_pct}%</div></div>
+        <div><div class="text-slate-500 text-xs">Msgs/s · Throughput</div><div class="font-bold text-slate-800">${d.mps} · ${d.throughput_mbps} MB/s</div></div>
+        <div><div class="text-slate-500 text-xs">Connected spokes</div><div class="font-bold text-slate-800">${d.connected_spokes}</div></div>
+        <div><div class="text-slate-500 text-xs">Req timeouts (recent / total)</div><div class="font-bold ${d.request_timeouts_recent?'text-amber-600':'text-slate-800'}">${d.request_timeouts_recent} / ${d.request_timeouts_total}</div></div>
+        <div class="col-span-2"><div class="text-slate-500 text-xs">Top talkers (frames/s)</div><div class="text-slate-700 text-xs">${talkers}</div></div>
+      </div>
+      <div class="text-xs text-slate-700 bg-slate-50 border border-slate-200 rounded p-2">${hint}</div>
+      <div class="overflow-x-auto border border-slate-200 rounded-lg">
+        <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
+          <th class="px-3 py-1 text-left">Spoke</th><th class="px-3 py-1 text-left">Remote IP</th>
+          <th class="px-3 py-1 text-center">RTT</th><th class="px-3 py-1 text-center">Write buffer</th><th class="px-3 py-1 text-center">msg/s</th>
+        </tr></thead><tbody>${rows}</tbody></table>
+      </div>
+      <div class="flex justify-between items-center gap-3">
+        <div class="text-[11px] text-slate-500">RTT = WS keepalive round-trip (network latency to the spoke). Write buffer = hub→spoke outbound backlog (growing = that spoke/network isn't draining). <b>High loop lag + low RTT/buffers = hub loop; high RTT or growing buffers = network transport.</b></div>
+        <button onclick="showHubHealth()" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md font-bold whitespace-nowrap">↻ Refresh</button>
+      </div>
+    </div>`);
+}
+window.showHubHealth = showHubHealth;
+
 async function showMtlsDebug() {
     const esc = (s) => escapeHtml(String(s == null ? '' : s));
     openModal('mtls-debug-modal', `<div class="p-6"><div class="text-slate-500 italic text-sm">Loading mTLS status…</div></div>`, { card: 'max-w-4xl w-full max-h-[90vh] overflow-y-auto', backdropClose: true });

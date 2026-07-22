@@ -653,6 +653,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # can't tell a late request/response reply from a genuinely stray ack.
         # { msg_id: expire_ts }
         self._recent_request_timeouts: Dict[str, float] = {}
+        # Live event-loop lag (seconds over the 1s tick), sampled by run_mps_loop.
+        # Surfaced in the WebUI hub-health card so an operator can SEE when the hub
+        # loop is saturated (the cause of fleet-wide WS backpressure / 1011 drops)
+        # instead of grepping logs. Total request-timeout events since boot too.
+        self._loop_lag: float = 0.0
+        self._loop_lag_hist: "deque" = deque(maxlen=60)   # ~60s of samples
+        self._request_timeouts_total: int = 0
         # Aligned with DRAIN_WINDOW_S (a spoke mid self-update can take up to
         # ~180s to git-pull, os._exit, relaunch, then flush its late FAILED
         # replies). A request that times out EARLY in that window gets its late
@@ -1302,6 +1309,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # stays there) when no subject is derivable from the payload.
             _subject = _request_subject(command_type, data) or f"req={msg_id[:8]}"
             logger.error(f"Request Timeout: [{command_type}] {_subject} from {self._spoke_label(spoke_id)} after {timeout}s")
+            try:
+                self._request_timeouts_total += 1
+            except Exception:  # noqa: BLE001
+                pass
             return {"status": "ERROR", "message": "Timed out waiting for spoke response"}
         finally:
             # Drop the waiter so a late ack can't leak a response_cache entry.
@@ -5879,6 +5890,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             _now = time.time()
             _loop_lag = max(0.0, (_now - _last_tick) - 1.0)
             _last_tick = _now
+            self._loop_lag = _loop_lag
+            self._loop_lag_hist.append(_loop_lag)
             try:
                 # ── Overload self-protection: memory OR loop-lag, w/ hysteresis ──
                 # Enter above the high mark, leave below the low mark (no flap).
