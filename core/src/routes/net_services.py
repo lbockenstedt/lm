@@ -494,6 +494,31 @@ def register(app, hub, ctx):
             asyncio.create_task(hub._le_refresh_certs_cache(le_sid))
         return payload
 
+    @app.post("/api/le/certs/{domain}/clientauth")
+    async def le_set_clientauth(domain: str, request: Request):
+        """Toggle the clientAuth EKU on a managed cert and re-issue now. The ACME
+        'classic'-style profile carries serverAuth+clientAuth; the default profile
+        is server-only. Needed for mTLS CLIENT certs (BugFixer, the mTLS wildcard) —
+        certs that don't need it stay server-only. Re-distributes the freshly-issued
+        material to the cert's targets, like /api/le/issue."""
+        body = await request.json()
+        enabled = bool(body.get("enabled", body.get("client_auth", False))) if isinstance(body, dict) else False
+        data = {"domain": domain, "client_auth": enabled, "tenant_id": _le_tenant(request)}
+        hub, le_sid, payload = await _le_request("LE_SET_CLIENTAUTH", data,
+                                                  timeout=_LE_CERTBOT_TIMEOUT)
+        inner = _le_inner(payload)
+        d = inner.get("domain") or domain
+        targets = inner.get("targets") or []
+        if d and le_sid:
+            try:
+                inner["distribution"] = await hub._distribute_one_cert(
+                    le_sid, d, targets, material_hash=inner.get("material_hash"))
+            except Exception as e:
+                logger.warning("cert distribution after clientauth toggle failed: %s", e)
+                inner["distribution"] = [{"status": "ERROR", "message": str(e)}]
+            asyncio.create_task(hub._le_refresh_certs_cache(le_sid))
+        return payload
+
     @app.post("/api/le/renew")
     async def le_renew_cert(request: Request):
         """Renew one (body.domain) or all managed certs via the le spoke, then

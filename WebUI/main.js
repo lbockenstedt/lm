@@ -17724,6 +17724,7 @@ async function loadLEData(subMenu) {
                     <div class="flex flex-col items-end gap-1.5">
                         ${retryBtn ? `<div>${retryBtn}</div>` : ''}
                         <div class="flex flex-row items-center justify-end gap-1.5">
+                            <button onclick="leToggleClientAuth(this, '${dEsc}', ${c.client_auth ? 'false' : 'true'})" class="${c.client_auth ? 'bg-blue-600/15 text-blue-700 border-blue-500' : 'bg-slate-500/10 text-slate-500 border-slate-300'} border px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="${c.client_auth ? 'Issued WITH the clientAuth EKU — usable as an mTLS client cert. Click to re-issue server-only.' : 'Re-issue this cert WITH the clientAuth EKU (ACME classic profile) so it can be an mTLS CLIENT cert (BugFixer / mTLS wildcard). Only needed for mTLS client certs.'}">${c.client_auth ? '✓ clientAuth' : '+ clientAuth'}</button>
                             <button onclick="showLeTargetsModal('${dEsc}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Manage distribution targets + BugFixer identity tag">Manage</button>
                             <button onclick="leRenewCert('${dEsc}')" class="bg-slate-700/10 hover:bg-slate-700/20 text-slate-700 border border-slate-700 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Renew this cert">Renew</button>
                             <button onclick="leRevokeCert('${dEsc}')" class="bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Revoke + remove from managed list">Revoke</button>
@@ -18633,10 +18634,14 @@ async function showLeIssueModal() {
                      per provider — sample shown as a grey placeholder). -->
                 <textarea id="le-issue-dns-creds" rows="5" placeholder="" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500 placeholder:text-slate-400 placeholder:font-mono placeholder:text-xs"></textarea>
             </div>
-            <div class="flex items-center gap-4">
+            <div class="flex items-center gap-4 flex-wrap">
                 <label class="flex items-center gap-2 text-sm text-slate-700">
                     <input id="le-issue-staging" type="checkbox" class="rounded border-slate-300" />
                     Use Let's Encrypt <b>staging</b> (untrusted — for testing)
+                </label>
+                <label class="flex items-center gap-2 text-sm text-slate-700" title="Request the ACME 'classic' profile so the cert carries the clientAuth EKU in ADDITION to serverAuth. Required only for certs presented as an mTLS CLIENT cert (e.g. the BugFixer cert or the mTLS wildcard). Leave off for ordinary server certs.">
+                    <input id="le-issue-clientauth" type="checkbox" class="rounded border-slate-300" />
+                    Include <b>clientAuth</b> (for mTLS client certs)
                 </label>
                 <label class="flex items-center gap-1 text-sm text-slate-700" title="How many days before expiry the renewal loop triggers for THIS cert. Default 7. A larger window renews earlier (more retry slack before it actually expires); a smaller one renews later.">
                     Renew before expiry
@@ -18738,6 +18743,7 @@ async function leIssueCert() {
         : (chSel === 'dns' ? (document.getElementById('le-issue-dns-creds')?.value || '') : '');
     const staging = !!document.getElementById('le-issue-staging')?.checked;
     const keyType = document.getElementById('le-issue-keytype')?.value || 'rsa';
+    const clientAuth = !!document.getElementById('le-issue-clientauth')?.checked;
 
     if (!domain) { showToast('Domain is required', 'error'); return; }
     if (!email) { showToast('ACME account email is required', 'error'); return; }
@@ -18752,7 +18758,7 @@ async function leIssueCert() {
         }
     }
 
-    const body = { domain, email, challenge, staging, key_type: keyType };
+    const body = { domain, email, challenge, staging, key_type: keyType, client_auth: clientAuth };
     // Per-cert renewal window (days before expiry the loop triggers). Send only
     // a positive int; blank/invalid → omitted → spoke stores None → uses the
     // 7-day default. The le spoke validates + normalizes (bad → None).
@@ -19098,6 +19104,35 @@ async function leToggleBugfixerChk(cb, domain) {
     } catch (e) {
         showToast('BugFixer tag failed: ' + (e.message || e), 'error');
         if (cb) { cb.checked = !enable; cb.disabled = false; }
+    }
+}
+
+// Toggle the clientAuth EKU on a managed cert. Re-issues via the le spoke with the
+// ACME "classic" profile (serverAuth + clientAuth) so the cert can be presented as
+// an mTLS CLIENT cert (BugFixer / the mTLS wildcard). Server-only certs don't need
+// it. POST /api/le/certs/{domain}/clientauth {enabled}; re-distributes on success.
+async function leToggleClientAuth(btn, domain, enable) {
+    if (!confirm(enable
+        ? `Re-issue ${domain} WITH the clientAuth EKU now?\n\ncertbot re-issues it (ACME "classic" profile) and re-distributes to its targets. Needed only for mTLS client certs.`
+        : `Re-issue ${domain} as a server-only cert (drop clientAuth)?`)) return;
+    if (btn) { btn.disabled = true; btn.style.opacity = '0.6'; }
+    showToast(enable ? `Re-issuing ${domain} with clientAuth…` : `Re-issuing ${domain} without clientAuth…`, 'info');
+    try {
+        const { ok, detail } = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/clientauth`, {
+            method: 'POST', body: JSON.stringify({ enabled: enable })
+        });
+        if (!ok) {
+            showToast('clientAuth change failed: ' + (detail || ''), 'error');
+            if (btn) { btn.disabled = false; btn.style.opacity = ''; }
+            return;
+        }
+        showToast(enable
+            ? `${domain} re-issued with clientAuth — now deploy it (Manage) so the mTLS client picks it up`
+            : `${domain} re-issued server-only`, 'success');
+        await loadLEData();
+    } catch (e) {
+        showToast('clientAuth change failed: ' + (e.message || e), 'error');
+        if (btn) { btn.disabled = false; btn.style.opacity = ''; }
     }
 }
 
