@@ -250,6 +250,96 @@ def server_client_ca_file():
         return ca
 
 
+def _parse_pem_certs(path):
+    """Subject/issuer/self_signed for every cert in a PEM file (leaf→root),
+    for the trust-diagnostic UI. Empty on any read/parse error."""
+    certs = []
+    if not path or not os.path.exists(path):
+        return certs
+    try:
+        from cryptography import x509
+        with open(path, "rb") as f:
+            raw = f.read()
+        end = b"-----END CERTIFICATE-----"
+        for seg in raw.split(end):
+            if b"-----BEGIN CERTIFICATE-----" not in seg:
+                continue
+            try:
+                c = x509.load_pem_x509_certificate(seg + end)
+                s = c.subject.rfc4514_string()
+                i = c.issuer.rfc4514_string()
+                certs.append({"subject": s, "issuer": i, "self_signed": s == i})
+            except Exception:  # noqa: BLE001
+                continue
+    except Exception:  # noqa: BLE001
+        pass
+    return certs
+
+
+def trust_diagnostics() -> dict:
+    """What the hub's mTLS client-verify path actually trusts — so an operator can
+    see, from the WebUI, whether a private-CA chain (e.g. YR2/Root YR) is present
+    in LM_MTLS_CA and whether the combined bundle also pulled the public system
+    store (which can COLLIDE with a private root of the same name, e.g. two
+    'ISRG Root X1'). LM_MTLS_CA certs are listed in full; the combined bundle is
+    summarized by count (it may hold 100+ system roots)."""
+    ca, _, _ = _paths()
+    combined = server_client_ca_file() if (ca and os.path.exists(ca)) else ""
+    lm_ca_certs = _parse_pem_certs(ca)
+    combined_certs = _parse_pem_certs(combined) if combined else []
+    # Flag same-subject collisions (the real vs private ISRG Root X1 hazard).
+    subj_counts = {}
+    for c in combined_certs:
+        subj_counts[c["subject"]] = subj_counts.get(c["subject"], 0) + 1
+    collisions = sorted(s for s, n in subj_counts.items() if n > 1)
+    return {
+        "mtls_enabled": mtls_enabled(),
+        "lm_mtls_ca_path": ca or "",
+        "lm_mtls_ca_certs": lm_ca_certs,           # the private chain, in full
+        "combined_ca_path": combined,
+        "combined_ca_count": len(combined_certs),  # LM_MTLS_CA + system store
+        "duplicate_subjects": collisions,          # same-name root hazard
+    }
+
+
+def verify_chain(fullchain_pem: str):
+    """Verify a leaf+intermediates PEM against the hub's combined client-verify CA
+    — the EXACT trust the mTLS listener uses — via ``openssl verify``. Returns
+    ``(ok: bool, detail: str)`` so the UI can show whether the hub would accept a
+    given cert (e.g. the pinned BugFixer cert) and, if not, openssl's reason."""
+    combined = server_client_ca_file()
+    if not combined or not os.path.exists(combined):
+        return False, "no client-verify CA configured (mTLS off or LM_MTLS_CA unset)"
+    import subprocess
+    end = "-----END CERTIFICATE-----"
+    blocks = [b + end + "\n" for b in fullchain_pem.split(end) if "BEGIN CERTIFICATE" in b]
+    if not blocks:
+        return False, "no certificate in input"
+    leaf_path = inter_path = None
+    try:
+        fd, leaf_path = tempfile.mkstemp(suffix=".pem")
+        with os.fdopen(fd, "w") as f:
+            f.write(blocks[0])
+        args = ["openssl", "verify", "-CAfile", combined]
+        if len(blocks) > 1:
+            fd2, inter_path = tempfile.mkstemp(suffix=".pem")
+            with os.fdopen(fd2, "w") as f:
+                f.write("".join(blocks[1:]))
+            args += ["-untrusted", inter_path]
+        args.append(leaf_path)
+        r = subprocess.run(args, capture_output=True, text=True, timeout=10)
+        return r.returncode == 0, (r.stdout + r.stderr).strip()[:400]
+    except Exception as e:  # noqa: BLE001
+        return False, f"verify error: {e}"
+    finally:
+        for p in (leaf_path, inter_path):
+            try:
+                if p:
+                    os.unlink(p)
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def status() -> dict:
     """Introspection for the readiness check / UI: is mTLS on, and are the
     materials present so it *would* work? The ``*_path`` fields expose the

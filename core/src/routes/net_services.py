@@ -745,6 +745,50 @@ def register(app, hub, ctx):
         return {"status": "ok", "domain": domain, "bugfixer": enabled,
                 "pinned": pinned}
 
+    @app.get("/api/mtls/trust-diag")
+    async def mtls_trust_diag(request: Request):
+        """H1 debug: what the hub's mTLS client-verify path trusts, and whether it
+        would ACCEPT each pinned BugFixer cert. Surfaces (a) the LM_MTLS_CA chain in
+        full, (b) the combined-bundle cert count + any same-subject collisions (the
+        real-vs-private 'ISRG Root X1' hazard), and (c) an openssl verify of every
+        pinned cert's live chain (pulled from the le spoke) against that bundle — so
+        an operator sees from the WebUI exactly why a cert is rejected. Admin-only."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        try:
+            from security import mtls as _mtls
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"mtls module unavailable: {e}"}
+        diag = _mtls.trust_diagnostics()
+        # Test-verify each pinned BugFixer cert's live chain against the hub trust.
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        pinned = [str(n).strip() for n in (gc.get("bugfixer_cert_identities") or []) if str(n).strip()]
+        le_sid = hub.get_spoke_by_type("certificates")
+        checks = []
+        for domain in pinned:
+            entry = {"domain": domain}
+            if not le_sid:
+                entry.update({"ok": False, "detail": "certificate spoke not connected"})
+                checks.append(entry)
+                continue
+            try:
+                mat = await _relay_spoke(le_sid, "LE_GET_CERT", {"domain": domain},
+                                        log_name="mtls_trust_diag")
+                inner = mat.get("data") if isinstance(mat, dict) and isinstance(mat.get("data"), dict) else mat
+                fullchain = (inner or {}).get("fullchain") or ""
+                if not fullchain:
+                    entry.update({"ok": False, "detail": "le returned no fullchain for this domain"})
+                else:
+                    ok, detail = _mtls.verify_chain(fullchain)
+                    entry.update({"ok": ok, "detail": detail})
+            except Exception as e:  # noqa: BLE001
+                entry.update({"ok": False, "detail": f"lookup/verify failed: {e}"})
+            checks.append(entry)
+        diag["pinned_cert_checks"] = checks
+        return diag
+
     @app.get("/api/le/certs/{domain}/devices")
     async def le_target_devices(domain: str, module_type: str = "", identifier: str = ""):
         """Drill-down device list for a fleet spoke target. For nw it pulls the
