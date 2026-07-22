@@ -157,25 +157,35 @@ def _paths():
 def client_context(is_wss: bool):
     """SSL context for a client leg (spoke→hub, agent→spoke).
 
-    Default (mTLS off): today's behavior — unverified-but-encrypted for wss,
-    None for ws. mTLS on: verify the server against the CA and present the
-    client cert (mutual auth), falling back safely if a path is missing so a
-    misconfig can't hard-break the transport before activation is complete."""
+    Default (mTLS off): unverified-but-encrypted for wss (None for ws) — BUT still
+    present our hub-issued client cert if we have one, so fleet mTLS works via
+    hub-minted certs without flipping LM_MTLS_ENABLED on every spoke (the hub decides
+    whether to require it — CERT_OPTIONAL). mTLS on: also verify the server against
+    the CA (mutual auth), falling back safely if a path is missing so a misconfig
+    can't hard-break the transport before activation is complete."""
     if not is_wss:
         return None
-    if not mtls_enabled():
-        return ssl._create_unverified_context()
     ca, cert, key = _paths()
+    have_client = bool(cert and key and os.path.exists(cert) and os.path.exists(key))
+
+    def _present(ctx):
+        if have_client:
+            try:
+                ctx.load_cert_chain(cert, key)   # present our client cert
+            except Exception:  # noqa: BLE001
+                pass
+        return ctx
+
+    if not mtls_enabled():
+        return _present(ssl._create_unverified_context())
     try:
         ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH,
                                          cafile=ca or None)
         ctx.check_hostname = bool(ca)  # only meaningful with a CA to verify against
         ctx.verify_mode = ssl.CERT_REQUIRED if ca else ssl.CERT_NONE
-        if cert and key:
-            ctx.load_cert_chain(cert, key)   # present our client cert (mutual)
-        return ctx
+        return _present(ctx)
     except Exception:  # noqa: BLE001 - never brick the transport on a bad path
-        return ssl._create_unverified_context()
+        return _present(ssl._create_unverified_context())
 
 
 def server_verify_mode():

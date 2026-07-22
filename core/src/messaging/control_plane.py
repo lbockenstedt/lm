@@ -1835,7 +1835,55 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             # to cert-renewal cadence (~60–90 days), not hourly.
             return await self._handle_set_mtls_materials(data)
 
+        if cmd_type == "SPOKE_SET_MTLS_CLIENT_CERT":
+            # Hub-Local-CA clientAuth cert minted for THIS spoke's mTLS CLIENT
+            # identity to the hub (public CAs no longer issue clientAuth). Install
+            # it as the client cert ONLY — the server/WebUI cert is untouched.
+            return await self._handle_set_mtls_client_cert(data)
+
         return None
+
+    async def _handle_set_mtls_client_cert(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply ``SPOKE_SET_MTLS_CLIENT_CERT``: write the hub-issued clientAuth cert
+        + key as this spoke's mTLS CLIENT identity (LM_MTLS_CLIENT_CERT/KEY), register
+        runtime materials so the next hub reconnect presents it, and restart on change
+        so the client leg re-presents immediately. Leaves LM_MTLS_CA + the server cert
+        alone (the WebUI cert stays LE-issued)."""
+        if getattr(self, "parent_spoke_id", ""):
+            return {"status": "SUCCESS",
+                    "message": "skipped — role sub-spoke; parent carries the mTLS client cert"}
+        cert = (data.get("cert") or "").strip()
+        key = (data.get("key") or "").strip()
+        if not cert or not key:
+            return {"status": "ERROR", "message": "missing cert/key"}
+        cert_dir = self._mtls_material_dir()
+        cc_path = os.path.join(cert_dir, "mtls-client.crt")
+        ck_path = os.path.join(cert_dir, "mtls-client.key")
+        changed = False
+        try:
+            changed |= self._mtls_write_if_changed(
+                cc_path, cert if cert.endswith("\n") else cert + "\n", 0o644)
+            changed |= self._mtls_write_if_changed(
+                ck_path, key if key.endswith("\n") else key + "\n", 0o600)
+            self._persist_secret_to_env("LM_MTLS_CLIENT_CERT", cc_path)
+            self._persist_secret_to_env("LM_MTLS_CLIENT_KEY", ck_path)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("SPOKE_SET_MTLS_CLIENT_CERT: write to %s failed: %s", cert_dir, e)
+            return {"status": "ERROR", "message": f"write failed: {e}"}
+        try:
+            from security import mtls as _mtls
+            _mtls.set_runtime_materials(client_cert=cc_path, client_key=ck_path)
+        except Exception:  # noqa: BLE001
+            pass
+        if changed:
+            logger.info("SPOKE_SET_MTLS_CLIENT_CERT: installed hub-CA mTLS client cert "
+                        "for %s — restarting to present it", self.spoke_id)
+            self._draining = True
+            asyncio.create_task(self._deferred_restart_exit())
+            return {"status": "SUCCESS",
+                    "message": "hub-CA mTLS client cert installed; restarting to present it"}
+        logger.info("SPOKE_SET_MTLS_CLIENT_CERT: mTLS client cert up to date for %s", self.spoke_id)
+        return {"status": "SUCCESS", "message": "hub-CA mTLS client cert up to date (no change)"}
 
     async def _handle_set_mtls_materials(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Apply ``SPOKE_SET_MTLS_MATERIALS``: write CA + client cert/key to the

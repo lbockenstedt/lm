@@ -4316,6 +4316,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     await self.send_to_spoke(key_msg, signing_secret=None)
                 await self.push_config_to_spoke(spoke_id)
 
+                # Fleet mTLS: deliver a Hub-Local-CA clientAuth client cert so the
+                # spoke can present a VERIFIED mTLS identity (public CAs no longer
+                # issue clientAuth). Idempotent — skips when a current cert exists.
+                try:
+                    await self._provision_spoke_mtls_cert(spoke_id)
+                except Exception as e:  # noqa: BLE001 - never block connect on this
+                    logger.warning(f"[mtls] provision client cert for {spoke_id} failed: {e}")
+
                 # Request version AFTER the session key is established so the spoke
                 # can sign its response and the hub can verify it.
                 try:
@@ -5044,6 +5052,83 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             seen.add(key)
             deduped.append(line)
         return {"logs": deduped}
+
+    async def _provision_spoke_mtls_cert(self, spoke_id: str, force: bool = False) -> Dict[str, Any]:
+        """Fleet mTLS: issue + deliver a Hub-Local-CA clientAuth client cert to a
+        spoke so it presents a VERIFIED mTLS identity (public CAs no longer issue
+        clientAuth). Idempotent — skips when the registry holds a current (>30d to
+        expiry) cert unless ``force``. BugFixer's cert SANs include the pinned
+        ``bugfixer_cert_identities`` so the HUB_REQUEST gate matches; other spokes
+        get SAN=spoke_id. The hub keeps only cert METADATA (the spoke holds the
+        private key) — re-issue to re-provision."""
+        try:
+            from security import mtls_ca
+        except Exception:  # noqa: BLE001
+            try:
+                import mtls_ca  # type: ignore
+            except Exception:  # noqa: BLE001
+                return {"status": "error", "message": "mtls_ca unavailable"}
+        pk = self._primary_key(spoke_id)
+        module_type = ((self.spoke_module_types or {}).get(pk)
+                       or (self.spoke_module_types or {}).get(spoke_id) or "")
+        reg = self.state.system_state.setdefault("mtls_client_certs", {})
+        entry = reg.get(pk)
+        now = time.time()
+        if not force and entry and (entry.get("not_after_ts") or 0) - now > 30 * 86400:
+            return {"status": "current", "not_after": entry.get("not_after")}
+        # SANs: bugfixer includes the pinned identities so _hub_request_authorized
+        # matches its presented cert; other spokes just need a verified identity.
+        sans = [spoke_id]
+        gc = self.state.get_global_config() or {}
+        pinned = [str(n).strip() for n in (gc.get("bugfixer_cert_identities") or []) if str(n).strip()]
+        is_bf = module_type == "bugfixer" or spoke_id == "bugfixer" or pk == "bugfixer"
+        if is_bf and pinned:
+            sans = list(dict.fromkeys(pinned + [spoke_id]))
+        cn = sans[0]
+        try:
+            fullchain, key = mtls_ca.issue_client_cert(cn, sans=sans, days=397)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[mtls] issue client cert for {spoke_id} failed: {e}")
+            return {"status": "error", "message": str(e)}
+        try:
+            msg = Message(
+                header=MessageHeader(message_id=str(uuid.uuid4()), timestamp=time.time(),
+                                     sender_id="hub", destination_id=spoke_id),
+                payload=MessagePayload(type="SPOKE_SET_MTLS_CLIENT_CERT",
+                                       data={"cert": fullchain, "key": key, "sans": sans}))
+            await self.send_to_spoke(msg)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[mtls] deliver client cert to {spoke_id} failed: {e}")
+            return {"status": "error", "message": str(e)}
+        # Record metadata only (never the private key).
+        na_iso, na_ts, serial = "", 0.0, ""
+        try:
+            from cryptography import x509
+            end = "-----END CERTIFICATE-----"
+            leaf = x509.load_pem_x509_certificate((fullchain.split(end)[0] + end).encode())
+            try:
+                na = leaf.not_valid_after_utc
+            except Exception:  # noqa: BLE001
+                na = leaf.not_valid_after
+            na_iso, na_ts, serial = na.isoformat(), na.timestamp(), format(leaf.serial_number, "x")
+        except Exception:  # noqa: BLE001
+            pass
+        reg[pk] = {"spoke_id": spoke_id, "module_type": module_type, "san": sans, "cn": cn,
+                   "issued_at": now, "not_after": na_iso, "not_after_ts": na_ts,
+                   "serial": serial, "source": "hub-ca", "bugfixer": bool(is_bf)}
+        self.state.system_state["mtls_client_certs"] = reg
+        try:
+            await self.state.save_state_now()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.record_spoke_event(spoke_id, "mtls_cert_provisioned",
+                                    f"san={','.join(sans)} exp={na_iso}")
+        except Exception:  # noqa: BLE001
+            pass
+        logger.info(f"[mtls] provisioned Hub-CA client cert for {spoke_id} "
+                    f"(san={sans}, exp={na_iso})")
+        return {"status": "SUCCESS", "san": sans, "not_after": na_iso}
 
     def _hub_request_authorized(self, spoke_id: str,
                                 peer_cert_identity=None) -> bool:
