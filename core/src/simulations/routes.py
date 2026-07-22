@@ -3939,6 +3939,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # the engine's real target vs. the controller's and flag a stale push
         # (the root cause of "4/15" that looks like an eligibility problem).
         spoke_counts: dict = {}
+        # Per-quota "why (under)filled" diagnostics, summed across the tenant's cs
+        # spokes (each fills its split share) — the same shape the spoke's
+        # quota_diagnostics() returns. WITHOUT this the hub WebUI's Engine
+        # Diagnostic is always empty (the spoke records it; the hub UI reads the
+        # hub), so an underfilled quota gave no reason. blocked-reason counts sum;
+        # target/assigned/eligible_free/not_harvestable sum; labels take first.
+        merged_diag: dict = {}
         for _sid, data in results:
             if not isinstance(data, dict):
                 continue
@@ -3946,6 +3953,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 m = merged_ledger.setdefault(
                     k, {"sim_id": e.get("sim_id"), "site": e.get("site"), "clients": []})
                 m["clients"].extend(e.get("clients") or [])
+            for d in (data.get("diagnostics") or []):
+                if not isinstance(d, dict) or not d.get("key"):
+                    continue
+                md = merged_diag.get(d["key"])
+                if md is None:
+                    md = {"key": d["key"], "sim_id": d.get("sim_id"), "site": d.get("site"),
+                          "claim": d.get("claim"), "multi": d.get("multi"),
+                          "target": 0, "producing": 0, "assigned": 0,
+                          "eligible_free": 0, "not_harvestable": 0, "blocked": {}}
+                    merged_diag[d["key"]] = md
+                for f in ("target", "producing", "assigned", "eligible_free", "not_harvestable"):
+                    md[f] += int(d.get(f) or 0)
+                for r, n in (d.get("blocked") or {}).items():
+                    md["blocked"][r] = md["blocked"].get(r, 0) + int(n or 0)
             for q in (data.get("effective") or []):
                 if isinstance(q, dict):
                     spoke_counts.setdefault(sim_quota.quota_dedup_key(q), int(q.get("count") or 0))
@@ -3990,6 +4011,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                   "stale_push": stale_push,
                   "ledger": merged_ledger, "monitored_checks": monitored,
                   "placement_warnings": placement_warnings, "pool": pool,
+                  "diagnostics": list(merged_diag.values()),
                   "check_status": check_status}
         try:
             result["adaptive_state"] = await store.get_adaptive_state(tenant_id)
