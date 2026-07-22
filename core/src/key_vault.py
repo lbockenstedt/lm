@@ -202,6 +202,25 @@ def build_min_backup(hub) -> bytes:
         except Exception:  # noqa: BLE001
             return ""
 
+    def _read_file(p):
+        try:
+            with open(p, "r") as f:
+                return f.read()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    # Hub Local mTLS CA (mints the fleet's clientAuth client certs). DR-critical:
+    # without it a rebuilt hub can't verify ANY spoke's mTLS cert until every spoke
+    # is re-provisioned, and BugFixer's HUB_REQUEST channel stays dead. Escrow the
+    # cert + key so a restore re-establishes the same CA.
+    _mtls_ca_cert = _mtls_ca_key = ""
+    try:
+        from security import mtls_ca as _mca
+        _mtls_ca_cert = _read_file(_mca.CA_CERT_PATH)
+        _mtls_ca_key = _read(_mca.CA_KEY_PATH) or _read_file(_mca.CA_KEY_PATH)
+    except Exception:  # noqa: BLE001
+        pass
+
     bundle = {
         "kind": "lm-min-backup", "version": 1,
         "created": _dt.datetime.now(_dt.timezone.utc).isoformat(),
@@ -215,6 +234,8 @@ def build_min_backup(hub) -> bytes:
         "tenants": (ss.get("tenant_state", {}) or {}).get("tenants", {}),
         "oidc_cert_pem": _read(getattr(oidc_cfg, "cert_path", "")),
         "oidc_key_pem": _read(getattr(oidc_cfg, "key_path", "")),
+        "mtls_ca_cert_pem": _mtls_ca_cert,
+        "mtls_ca_key_pem": _mtls_ca_key,
         "fernet_key": _os.environ.get("LM_FERNET_KEY", ""),
     }
     return _json.dumps(bundle).encode()
@@ -314,6 +335,24 @@ def apply_min_backup(hub, bundle: dict) -> Dict[str, Any]:
                 wrote.append(path)
             except Exception as e:  # noqa: BLE001
                 logger.warning("Key Vault restore: could not write %s: %s", path, e)
+    # Restore the Hub Local mTLS CA so the rebuilt hub keeps issuing/verifying the
+    # fleet's clientAuth certs without re-provisioning every spoke.
+    try:
+        from security import mtls_ca as _mca
+        for pem_key, path, mode in (("mtls_ca_cert_pem", _mca.CA_CERT_PATH, 0o644),
+                                    ("mtls_ca_key_pem", _mca.CA_KEY_PATH, 0o600)):
+            pem = bundle.get(pem_key)
+            if pem and path:
+                _os.makedirs(_os.path.dirname(path), exist_ok=True)
+                with open(path, "w") as f:
+                    f.write(pem)
+                try:
+                    _os.chmod(path, mode)
+                except OSError:
+                    pass
+                wrote.append(path)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Key Vault restore: could not write mTLS CA: %s", e)
     hub.state.save_state()
     logger.info("Key Vault: restored min backup (users=%d, wrote %d cert files)",
                 len(bundle.get("users", {}) or {}), len(wrote))
