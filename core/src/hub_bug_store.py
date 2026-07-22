@@ -166,6 +166,16 @@ class HubBugStoreMixin:
     def _mark_bug_filed(self, rid: str, issue_url: str) -> bool:
         return self._update_bug_status(rid, filed=True, issue_url=issue_url, status="filed")
 
+    @staticmethod
+    def _bug_feature_gated(r: dict) -> bool:
+        """True if this report is a feature request that an admin has NOT yet
+        approved — bugfixer must not file/work it. Bugs are never gated; a feature
+        that's already approved/filed/fixed is not gated."""
+        if (r.get("type") or "bug") != "feature":
+            return False
+        st = str(r.get("status") or "").lower()
+        return not (st in ("approved", "filed", "fixed") or bool(r.get("filed")))
+
     def _approve_bug_report(self, rid: str) -> bool:
         """Admin approved a feature request → mark it 'approved' so GET_BUG_REPORTS
         exposes it and bugfixer may file the GitHub issue and work it. No-op-safe on

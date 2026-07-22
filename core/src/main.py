@@ -5320,26 +5320,33 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             # scan_bugs filters on; these handlers carry the payload.
             if req_type == "GET_BUG_REPORTS":
                 reports = self._list_bug_reports()
-                # Feature requests are gated on admin approval: don't expose an
-                # unapproved feature to bugfixer (it would file + work it). Bugs
-                # pass through; a feature that's already approved/filed/fixed does
-                # too (so bugfixer can proceed / mark it fixed).
-                def _agent_visible(r):
-                    if (r.get("type") or "bug") != "feature":
-                        return True
-                    st = (r.get("status") or "").lower()
-                    return st in ("approved", "filed", "fixed") or bool(r.get("filed"))
-                reports = [r for r in reports if _agent_visible(r)]
+                # Feature requests are gated on admin approval: bugfixer must not
+                # file/work an unapproved feature. We still SEND them (annotated
+                # gated_pending_approval=True) so bugfixer can count "awaiting
+                # approval" for its diagnostics — but scan_bugs skips filing them,
+                # and GET_BUG_REPORT (below) denies the full fetch. Bugs, and any
+                # feature already approved/filed/fixed, are not gated.
+                for r in reports:
+                    r["gated_pending_approval"] = self._bug_feature_gated(r)
+                gated = sum(1 for r in reports if r.get("gated_pending_approval"))
                 unfiled = sum(1 for r in reports if not r.get("filed"))
                 logger.info(
                     f"[bug-report] GET_BUG_REPORTS from {spoke_id}: "
-                    f"{len(reports)} visible, {unfiled} unfiled (features gated on approval)"
+                    f"{len(reports)} total, {unfiled} unfiled, {gated} feature(s) awaiting approval"
                 )
                 return {"reports": reports}
 
             if req_type == "GET_BUG_REPORT":
                 rid = req.get("id", "")
                 rep = await asyncio.to_thread(self._get_bug_report, rid)
+                # Defense in depth: never hand a full unapproved-feature report to
+                # bugfixer (it would file + work it). The admin approves first.
+                if rep and self._bug_feature_gated(rep):
+                    logger.info(
+                        f"[bug-report] GET_BUG_REPORT id={rid} from {spoke_id}: "
+                        f"GATED (feature awaiting admin approval)"
+                    )
+                    return {"gated_pending_approval": True, "id": rid}
                 logger.info(
                     f"[bug-report] GET_BUG_REPORT id={rid} from {spoke_id}: "
                     f"{'hit' if rep else 'miss'}"
