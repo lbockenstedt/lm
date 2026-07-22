@@ -1,0 +1,170 @@
+#!/bin/bash
+# lmctl — one standard operator CLI for any Lab Manager host (hub / cs spoke /
+# pxmx agent). Auto-detects the role from the installed systemd unit + dirs so
+# the SAME commands work everywhere. Canonical source: lm/scripts/lmctl —
+# install_cs.sh / install_all.sh / install_agent.sh drop it into /usr/local/bin.
+#
+#   lmctl update        pull latest code (component + shared /opt/lm core) + restart
+#   lmctl debug         dump a full debug bundle to the terminal (aka get-debug-data)
+#   lmctl logs [-f] [N] tail the module log (follow with -f; N lines, default 200)
+#   lmctl status        quick health: role, version, active?, hub link, last stall
+#   lmctl restart       reset-failed + restart the service (clears start-limit park)
+#   lmctl recover       drop a stale mTLS client cert + reset-failed + restart
+#   lmctl harden        apply StartLimitIntervalSec=0 so churn can't park the unit
+#   lmctl stall         show the latest event-loop-stall thread-stack dumps
+#   lmctl version       print the git commit of each checkout + VERSION file
+#   lmctl help
+set -uo pipefail
+
+# ── role detection ───────────────────────────────────────────────────────────
+UNIT="" ; ROLE="" ; declare -a REPOS=() ; LOG=""
+_have_unit() { systemctl list-unit-files "$1" >/dev/null 2>&1 || systemctl cat "$1" >/dev/null 2>&1; }
+if _have_unit lm-cs.service; then
+    ROLE="cs-spoke" ; UNIT="lm-cs.service" ; LOG="/var/log/lm/lm-cs.log"
+    REPOS=(/opt/lm /opt/lm/cs)
+elif _have_unit lm-pxmx-agent.service; then
+    ROLE="pxmx-agent" ; UNIT="lm-pxmx-agent.service" ; LOG="/var/log/lm/pxmx-agent.log"
+    # agent install dir varies; resolve from the unit's WorkingDirectory
+    _wd="$(systemctl show -p WorkingDirectory --value lm-pxmx-agent.service 2>/dev/null)"
+    REPOS=(${_wd:-/opt/lm-pxmx-agent})
+elif _have_unit lm.service; then
+    ROLE="hub" ; UNIT="lm.service" ; LOG="/var/log/lm/lm.log"
+    REPOS=(/opt/lm)
+elif _have_unit lm-spoke.service; then
+    ROLE="spoke" ; UNIT="lm-spoke.service" ; LOG="/var/log/lm/lm-spoke.log"
+    REPOS=(/opt/lm)
+fi
+[ -f "$LOG" ] || LOG="$(ls -1t /var/log/lm/*.log 2>/dev/null | head -1)"
+
+_need_role() { [ -n "$UNIT" ] || { echo "lmctl: no Lab Manager service found on this host." >&2; exit 1; }; }
+_g() { git -c safe.directory='*' -C "$1" "${@:2}"; }   # git in a repo, ownership-safe
+
+# ── subcommands ──────────────────────────────────────────────────────────────
+cmd_update() {
+    _need_role
+    echo "▶ Updating $ROLE ($UNIT) — repos: ${REPOS[*]}"
+    for d in "${REPOS[@]}"; do
+        [ -d "$d/.git" ] || { echo "  skip $d (not a git checkout)"; continue; }
+        local before after
+        before="$(_g "$d" rev-parse --short HEAD 2>/dev/null)"
+        _g "$d" fetch --all --quiet 2>/dev/null
+        if _g "$d" reset --hard '@{u}' >/dev/null 2>&1; then :; else
+            _g "$d" reset --hard "origin/$(_g "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)" >/dev/null 2>&1
+        fi
+        after="$(_g "$d" rev-parse --short HEAD 2>/dev/null)"
+        if [ "$before" = "$after" ]; then echo "  $d: already at $after"; else echo "  $d: $before → $after"; fi
+    done
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl reset-failed "$UNIT" 2>/dev/null || true
+    systemctl restart "$UNIT" && echo "✓ $UNIT restarted"
+}
+
+cmd_restart() {
+    _need_role
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl reset-failed "$UNIT" 2>/dev/null || true
+    systemctl restart "$UNIT" && echo "✓ $UNIT restarted (reset-failed cleared any start-limit park)"
+}
+
+cmd_harden() {
+    _need_role
+    local d="/etc/systemd/system/${UNIT}.d"
+    mkdir -p "$d"
+    printf '[Unit]\nStartLimitIntervalSec=0\n' > "$d/startlimit.conf"
+    systemctl daemon-reload
+    echo "✓ StartLimitIntervalSec=0 applied to $UNIT (restart churn can no longer park it dead)."
+    echo "  Run 'lmctl restart' to bring it up if it is currently parked."
+}
+
+cmd_recover() {
+    _need_role
+    echo "▶ Recovery for $ROLE:"
+    cmd_harden
+    # Clear a stale/clobbered mTLS CLIENT cert so the spoke connects cert-less and
+    # the hub re-issues cleanly (the cert-collision failure mode). Never touches
+    # the WebUI/server cert or the dedicated hub-client cert.
+    for f in $(ls /opt/lm/*/certs/mtls-client.crt /opt/lm/*/certs/mtls-client.key 2>/dev/null); do
+        echo "  removing stale agent-leg cert $f"; rm -f "$f"
+    done
+    systemctl reset-failed "$UNIT" 2>/dev/null || true
+    systemctl restart "$UNIT" && echo "✓ recovered + restarted $UNIT"
+}
+
+cmd_logs() {
+    [ -n "$LOG" ] || { echo "lmctl: no log file found under /var/log/lm/." >&2; exit 1; }
+    local follow="" n=200
+    for a in "$@"; do case "$a" in -f) follow="-f";; [0-9]*) n="$a";; esac; done
+    echo "== $LOG (last $n lines${follow:+, following}) =="
+    tail ${follow} -n "$n" "$LOG"
+}
+
+cmd_stall() {
+    [ -n "$LOG" ] || exit 1
+    echo "== recent event-loop-stall stack dumps ($LOG) =="
+    grep -n "Event loop stalled" "$LOG" | tail -5
+    echo "-- latest captured thread stacks --"
+    grep -A40 "loop-stall: thread stacks" "$LOG" 2>/dev/null | tail -80 \
+        || echo "(none yet — the dumper fires on the next stall; needs the current core build)"
+}
+
+cmd_version() {
+    _need_role
+    for d in "${REPOS[@]}"; do
+        [ -d "$d/.git" ] && printf "  %-14s %s (%s)\n" "$(basename "$d")" \
+            "$(_g "$d" rev-parse --short HEAD 2>/dev/null)" "$(_g "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    done
+    for v in "${REPOS[@]}"; do [ -f "$v/VERSION" ] && echo "  VERSION($(basename "$v")): $(cat "$v/VERSION")"; done
+    return 0
+}
+
+cmd_status() {
+    _need_role
+    echo "role:     $ROLE   unit: $UNIT"
+    echo "active:   $(systemctl is-active "$UNIT" 2>/dev/null)   failed: $(systemctl is-failed "$UNIT" 2>/dev/null)   restarts: $(systemctl show -p NRestarts --value "$UNIT" 2>/dev/null)"
+    cmd_version
+    if [ -n "$LOG" ]; then
+        echo "hub link: $(grep -E "Connected to Lab Manager Hub|Connection lost|Hub identity verified" "$LOG" 2>/dev/null | tail -1 | sed 's/^[0-9-]* //')"
+        echo "stalls:   $(grep -c "Event loop stalled" "$LOG" 2>/dev/null) total; last: $(grep "Event loop stalled" "$LOG" 2>/dev/null | tail -1 | grep -oE '^[0-9: -]+')"
+    fi
+}
+
+cmd_debug() {
+    _need_role
+    echo "===================== lm debug bundle ====================="
+    echo "date:  $(date -Is)    host: $(hostname)    role: $ROLE"
+    echo "----- versions -----";            cmd_version
+    echo "----- systemd -----"
+    systemctl status "$UNIT" --no-pager -l 2>/dev/null | head -15
+    echo "failed units: $(systemctl --failed --no-legend 2>/dev/null | awk '{print $1}' | tr '\n' ' ')"
+    echo "----- resources -----"
+    uptime; echo; free -h 2>/dev/null | head -2; echo; df -h / /opt/lm 2>/dev/null | sort -u
+    echo "----- mTLS certs -----"
+    for c in /opt/lm/*/certs/mtls-hub-client.crt /opt/lm/*/certs/cert.pem /etc/*/hub-client-cert.pem; do
+        [ -f "$c" ] || continue
+        echo "· $c"
+        openssl x509 -in "$c" -noout -subject -issuer -enddate -ext extendedKeyUsage 2>/dev/null \
+            | sed 's/^/    /' || echo "    (openssl parse failed)"
+    done
+    echo "----- hub link (recent) -----"
+    [ -n "$LOG" ] && grep -E "Connected to Lab Manager|Connection lost|Hub identity|keepalive ping timeout|Event loop stalled|reconcile: swept" "$LOG" 2>/dev/null | tail -20
+    echo "----- latest loop-stall stack -----"
+    [ -n "$LOG" ] && { grep -A40 "loop-stall: thread stacks" "$LOG" 2>/dev/null | tail -50 || echo "(none captured yet)"; }
+    echo "----- last 60 log lines -----"
+    [ -n "$LOG" ] && tail -n 60 "$LOG"
+    echo "=================== end debug bundle ======================"
+}
+
+case "${1:-help}" in
+    update)                       cmd_update ;;
+    debug|get-debug-data|dbg)     cmd_debug ;;
+    logs|log|tail)                shift; cmd_logs "$@" ;;
+    status|st)                    cmd_status ;;
+    restart)                      cmd_restart ;;
+    recover)                      cmd_recover ;;
+    harden)                       cmd_harden ;;
+    stall|stalls)                 cmd_stall ;;
+    version|ver)                  echo "role: $ROLE"; cmd_version ;;
+    help|-h|--help)
+        sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) echo "lmctl: unknown command '$1' (try 'lmctl help')" >&2; exit 1 ;;
+esac

@@ -1346,16 +1346,23 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 fut = asyncio.run_coroutine_threadsafe(websocket.send(frame), loop)
                 fut.result(timeout=self.HEARTBEAT_SEND_DEADLINE_S)
             except concurrent.futures.TimeoutError:
-                # The event loop didn't process the send within the deadline →
-                # it's blocked on sync I/O somewhere. The send stays pending and
-                # completes (or fails) when the loop unblocks; the hub's 90s WS
-                # keepalive is the backstop. Surface the stall so it's diagnosable
-                # instead of a silent last_seen gap.
+                # The send coroutine didn't complete within the deadline. TWO
+                # distinct causes, distinguished by the stack dump below:
+                #   (a) the event loop is blocked on a sync call (loop thread deep
+                #       in app code), or
+                #   (b) the loop is IDLE in selectors.select and the send is stuck
+                #       on OUTBOUND backpressure — the hub isn't draining this
+                #       spoke's socket, so send() awaits writability. (Confirmed in
+                #       the field: loop in select() → this is a hub/network-side
+                #       problem, NOT a spoke sync block.)
+                # Either way the hub's 90s WS keepalive is the backstop.
                 logger.warning(
-                    "Event loop stalled — heartbeat send did not complete in %.0fs "
-                    "(a sync-I/O call is likely blocking the loop). The WS keepalive "
-                    "may drop this connection; the send will complete when the loop "
-                    "unblocks.", self.HEARTBEAT_SEND_DEADLINE_S)
+                    "Heartbeat send did not complete in %.0fs — WS send stuck. Loop "
+                    "blocked on a sync call, OR (loop idle in select) OUTBOUND "
+                    "backpressure: the hub isn't draining this spoke's stream. The "
+                    "thread-stack dump below tells which — a loop thread in "
+                    "selectors.select = backpressure (hub/network side).",
+                    self.HEARTBEAT_SEND_DEADLINE_S)
                 # This heartbeat thread is NOT blocked, so it can capture WHERE the
                 # event-loop thread is stuck — the definitive way to name the sync
                 # call that's blocking (guessing from periodic-task audits is
