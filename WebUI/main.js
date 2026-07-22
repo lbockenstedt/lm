@@ -19168,8 +19168,36 @@ async function showMtlsDebug() {
                 <div><div class="font-semibold text-slate-600 mb-1">Hub client-verify CA (LM_MTLS_CA)</div><div class="font-mono text-slate-700 space-y-0.5">${lmca}</div><div class="text-slate-400 mt-1">combined bundle: ${d.combined_ca_count ?? '?'} trusted cert(s)${dupes.length ? ` · <span class="text-amber-600">dup subjects: ${esc(dupes.join(', '))}</span>` : ''}</div></div>
                 <div><div class="font-semibold text-slate-600 mb-1">Pinned BugFixer cert verify</div><div class="font-mono text-slate-700 space-y-0.5">${pin}</div></div>
             </div>
+            <div id="mtls-acme-info" class="border-t border-slate-200 pt-3 text-xs text-slate-500">Loading certbot / ACME profile info…</div>
             <div class="flex justify-end"><button onclick="document.getElementById('mtls-debug-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button></div>
         </div>`, { card: 'max-w-4xl w-full max-h-[90vh] overflow-y-auto', backdropClose: true });
+    // certbot / ACME profile info (le spoke) — diagnoses "requested clientAuth but
+    // got serverAuth-only": needs certbot >= 4.0 for --preferred-profile, and the
+    // clientAuth-capable profile must exist + be named correctly.
+    try {
+        const ar = await _spokeFetch('/api/le/acme-info');
+        const a = (ar.ok && ar.data) ? ar.data : {};
+        const el = document.getElementById('mtls-acme-info');
+        if (el) {
+            if (a.available === false) { el.innerHTML = `<span class="text-amber-600">ACME info unavailable: ${esc(a.reason || a.error || '')}</span>`; }
+            else {
+                const profs = a.profiles || {};
+                const names = Object.keys(profs);
+                const profList = names.length
+                    ? names.map(n => `<span class="font-mono ${/classic/i.test(n) ? 'text-[#01A982] font-bold' : 'text-slate-700'}">${esc(n)}</span> <span class="text-slate-400">${esc((profs[n] || '').slice(0, 60))}</span>`).join('<br>')
+                    : '<span class="text-amber-600">CA advertises no profiles (this ACME server may not support profile selection)</span>';
+                const supp = a.supports_profiles;
+                el.innerHTML =
+                    `<div class="font-semibold text-slate-600 mb-1">certbot / ACME profiles (le spoke)</div>` +
+                    `<div>certbot: <span class="font-mono">${esc(a.certbot_version || '?')}</span> · --preferred-profile support: <b class="${supp ? 'text-[#01A982]' : 'text-red-600'}">${supp === null ? 'unknown' : (supp ? 'yes' : 'NO — certbot too old (need ≥4.0)')}</b></div>` +
+                    `<div class="mt-1">clientAuth profile requested: <span class="font-mono">${esc(a.clientauth_profile || 'classic')}</span> ${names.length && !names.some(n => n === (a.clientauth_profile || 'classic')) ? '<span class="text-red-600 font-bold">← not in the CA\\'s list! set LM_LE_CLIENTAUTH_PROFILE to a name below</span>' : ''}</div>` +
+                    `<div class="mt-1">CA (${esc(a.acme_directory || '')}) profiles:</div><div class="mt-0.5 pl-2 border-l-2 border-slate-200">${profList}</div>`;
+            }
+        }
+    } catch (e) {
+        const el = document.getElementById('mtls-acme-info');
+        if (el) el.textContent = 'ACME info error: ' + (e.message || e);
+    }
 }
 
 // clientAuth checkbox (inside the Manage modal). Re-issues the cert via the le

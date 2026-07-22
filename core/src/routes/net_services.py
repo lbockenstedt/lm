@@ -494,6 +494,23 @@ def register(app, hub, ctx):
             asyncio.create_task(hub._le_refresh_certs_cache(le_sid))
         return payload
 
+    @app.get("/api/le/acme-info")
+    async def le_acme_info(request: Request):
+        """certbot version + ACME profile support + the CA's advertised profiles,
+        relayed from the le spoke. Diagnoses 'requested clientAuth but got
+        serverAuth-only' — shows whether certbot is new enough (>=4.0 for
+        --preferred-profile) and the clientAuth-capable profile's real name."""
+        hub = app.state.hub
+        le_sid = hub.get_spoke_by_type("certificates")
+        if not le_sid:
+            return {"available": False, "reason": "certificate spoke not connected"}
+        try:
+            payload = await _relay_spoke(le_sid, "LE_ACME_INFO", log_name="le_acme_info")
+            inner = payload.get("data") if isinstance(payload, dict) and isinstance(payload.get("data"), dict) else payload
+            return {"available": True, **(inner or {})}
+        except Exception as e:  # noqa: BLE001
+            return {"available": False, "error": str(e)}
+
     @app.post("/api/le/certs/{domain}/clientauth")
     async def le_set_clientauth(domain: str, request: Request):
         """Toggle the clientAuth EKU on a managed cert and re-issue now. The ACME
