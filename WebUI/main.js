@@ -19226,6 +19226,32 @@ async function leToggleBugfixerChk(cb, domain) {
     }
 }
 
+// Revoke a spoke's Hub-CA mTLS client cert — it reconnects cert-less.
+async function mtlsRevoke(spokeId, label) {
+    if (!confirm(`Revoke ${label || spokeId}'s mTLS client cert?\n\nThe spoke reconnects cert-less and (if BugFixer) loses hub-log/update access until you re-issue. Auto-provision won't re-mint until you click issue.`)) return;
+    try {
+        const { ok, detail } = await _spokeFetch('/api/mtls/revoke', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spoke_id: spokeId })
+        });
+        if (!ok) { showToast('Revoke failed: ' + (detail || ''), 'error'); return; }
+        showToast(`Revoked ${label || spokeId}'s mTLS cert`, 'success');
+        setTimeout(() => { if (document.getElementById('mtls-debug-modal')) showMtlsDebug(); }, 1500);
+    } catch (e) { showToast('Revoke failed: ' + (e.message || e), 'error'); }
+}
+
+// Toggle hub auto-provisioning of mTLS certs on spoke connect.
+async function mtlsSetAutoProvision(enabled) {
+    try {
+        const { ok, detail } = await _spokeFetch('/api/mtls/auto-provision', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled })
+        });
+        if (!ok) { showToast('Auto-provision toggle failed: ' + (detail || ''), 'error'); return; }
+        showToast(enabled ? 'Auto-provision ON — spokes get a cert on connect' : 'Auto-provision OFF — manage mTLS certs manually', 'success');
+    } catch (e) { showToast('Auto-provision toggle failed: ' + (e.message || e), 'error'); }
+}
+
 // Issue/renew Hub-Local-CA mTLS client certs. spokeId '' = every connected spoke.
 // The hub mints a clientAuth cert (public CAs can't) + delivers it; the spoke
 // restarts to present it, then shows mTLS ✓ here.
@@ -19261,12 +19287,15 @@ async function showMtlsDebug() {
     const clients = d.clients || [];
     const rows = clients.length ? clients.map(c => `
         <tr class="border-b border-slate-100">
-            <td class="px-3 py-1.5 font-mono">${esc(c.spoke_id)}</td>
+            <td class="px-3 py-1.5 font-medium" title="${esc(c.spoke_id)}">${esc(c.label || c.spoke_id)}</td>
             <td class="px-3 py-1.5">${esc(c.module_type || '—')}</td>
             <td class="px-3 py-1.5 font-bold ${c.mtls_active ? 'text-[#01A982]' : 'text-slate-400'}">${c.mtls_active ? 'mTLS ✓' : 'cert-less'}</td>
             <td class="px-3 py-1.5 text-xs">${c.sans && c.sans.length ? esc(c.sans.join(', ')) : '—'}${c.is_bugfixer_pinned ? ' <span class="text-purple-700 font-bold">★ BugFixer</span>' : ''}</td>
             <td class="px-3 py-1.5 text-xs text-slate-500">${esc(c.not_after || '')}</td>
-            <td class="px-3 py-1.5"><button onclick="mtlsProvision('${esc(c.spoke_id)}')" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2 py-0.5 rounded font-bold" title="Issue/renew this spoke's Hub-Local-CA mTLS client cert now">issue</button></td>
+            <td class="px-3 py-1.5 whitespace-nowrap">
+                <button onclick="mtlsProvision('${esc(c.spoke_id)}')" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2 py-0.5 rounded font-bold" title="Issue/renew this spoke's Hub-Local-CA mTLS client cert now">issue</button>
+                ${c.mtls_active ? `<button onclick="mtlsRevoke('${esc(c.spoke_id)}','${esc(c.label || c.spoke_id)}')" class="text-xs bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-2 py-0.5 rounded font-bold ml-1" title="Revoke this spoke's mTLS client cert (it reconnects cert-less)">revoke</button>` : ''}
+            </td>
         </tr>`).join('') : `<tr><td colspan="6" class="px-3 py-3 text-slate-400 italic">No connected spokes.</td></tr>`;
     const lmca = (d.lm_mtls_ca_certs || []).map(c => `<div>${esc(c.subject)} <span class="text-slate-400">← ${esc(c.issuer)}</span></div>`).join('') || '<div class="text-slate-400">— none —</div>';
     const pin = (d.pinned_cert_checks || []).map(p => `<div>${esc(p.domain)}: <span class="font-bold ${p.ok ? 'text-[#01A982]' : 'text-red-600'}">${p.ok ? 'accepted' : 'REJECTED'}</span> <span class="text-slate-400">${esc(p.detail || '')}</span></div>`).join('') || '<div class="text-slate-400">no cert tagged BugFixer</div>';
@@ -19277,9 +19306,15 @@ async function showMtlsDebug() {
                 <h3 class="text-lg font-bold text-[#263040]">🔒 mTLS status</h3>
                 <span class="text-xs px-2 py-1 rounded-full ${d.mtls_enabled ? 'bg-green-100 text-green-700' : 'bg-slate-200 text-slate-600'}">${d.mtls_enabled ? 'mTLS ENABLED' : 'mTLS off'}</span>
             </div>
-            <div class="flex items-center justify-between gap-2">
+            <div class="flex items-center justify-between gap-2 flex-wrap">
               <div class="text-sm text-slate-600">${cs.connected ?? 0} connected · <b class="text-[#01A982]">${cs.mtls_active ?? 0}</b> presenting a verified client cert · <b class="text-slate-500">${cs.cert_less ?? 0}</b> cert-less</div>
-              <button onclick="mtlsProvision('')" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md font-bold whitespace-nowrap" title="Issue/renew a Hub-Local-CA mTLS client cert for EVERY connected spoke now">⟳ Provision all connected</button>
+              <div class="flex items-center gap-3">
+                <label class="flex items-center gap-1.5 text-xs text-slate-600 cursor-pointer select-none" title="When ON, the hub auto-mints + delivers a Hub-Local-CA mTLS client cert to every spoke on connect (and renews 7 days before expiry). Turn OFF to manage certs manually.">
+                  <input type="checkbox" id="mtls-autoprov-chk" ${d.auto_provision ? 'checked' : ''} onchange="mtlsSetAutoProvision(this.checked)" class="w-4 h-4 rounded">
+                  Auto-provision
+                </label>
+                <button onclick="mtlsProvision('')" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md font-bold whitespace-nowrap" title="Issue/renew a Hub-Local-CA mTLS client cert for EVERY connected spoke now">⟳ Provision all connected</button>
+              </div>
             </div>
             <div class="text-xs text-slate-500">The hub mints each spoke's clientAuth mTLS client cert from its <b>Local CA</b> (public CAs no longer issue clientAuth) — done automatically on connect; use these buttons to (re)issue on demand.</div>
             <div class="overflow-x-auto border border-slate-200 rounded-lg">
