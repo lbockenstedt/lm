@@ -3416,22 +3416,26 @@ function _viewTemplate(viewId) {
         case 'le':
             return `<div class="space-y-6">
   <div id="le-status-bar" class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500"></div>
-  <div class="flex items-center gap-2">
-    <button onclick="showLeIssueModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all">＋ Issue certificate</button>
-    <button onclick="leRenewAll()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all">↻ Renew all</button>
-    <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all">⚡ Distribute now</button>
-    <button onclick="showMtlsDebug()" class="bg-slate-600/10 hover:bg-slate-600/20 text-slate-700 border border-slate-400 px-3 py-1 rounded-md text-xs font-medium transition-all" title="Debug: which connected spokes/agents are ACTUALLY presenting a verified mTLS client cert vs. connected cert-less, plus the hub's trust bundle + pinned BugFixer cert check">🔒 mTLS status</button>
-    <label class="flex items-center gap-1 text-xs text-amber-700 cursor-pointer select-none" title="When ON, a wildcard cert (*.domain) is pushed to EVERY connected cert-capable spoke + the hub on each distribution, not just its explicit targets. OFF by default while cert distribution is being tested — flip on once explicit-target distribution is confirmed working.">
-      <input type="checkbox" id="le-wildcard-all-spokes" class="w-4 h-4 rounded" onchange="saveLeWildcardAllSpokes(this.checked)">
-      Fan wildcard → all spokes
-    </label>
-    <button onclick="showLeWildcardCoverage()" class="text-xs text-slate-500 hover:text-slate-700 underline decoration-dotted" title="See which spokes would (eligible) and would not (ineligible + why) receive a wildcard cert via fan-out">Coverage</button>
-    <label class="flex items-center gap-1 text-xs text-slate-600 select-none" title="How soon the hub retries a FAILED cert distribution to a target. The hub sweeps on this cadence and re-pushes any target whose last push errored (successful targets are skipped). Default 1 hour. Lower = faster retry but more hub→spoke chatter.">
-      Retry failed every
-      <input type="number" id="le-distribution-retry-hours" min="1" step="1" value="1" class="w-14 px-1 py-0.5 rounded border border-slate-300 text-xs" onchange="saveLeRetryInterval(this.value)">
-      hrs
-    </label>
-    <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200" title="Manage this tenant's DNS-01 credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-01 issuance">🔑 DNS Credentials</button>
+  <div class="space-y-2">
+    <div class="flex items-center gap-2 flex-nowrap">
+      <button onclick="showLeIssueModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">＋ Issue certificate</button>
+      <button onclick="leRenewAll()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">↻ Renew all</button>
+      <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">⚡ Distribute now</button>
+      <button onclick="showMtlsDebug()" class="bg-slate-600/10 hover:bg-slate-600/20 text-slate-700 border border-slate-400 px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap" title="Debug: which connected spokes/agents are ACTUALLY presenting a verified mTLS client cert vs. connected cert-less, plus the hub's trust bundle + pinned BugFixer cert check">🔒 mTLS status</button>
+      <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200 whitespace-nowrap" title="Manage this tenant's DNS-01 credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-01 issuance">🔑 DNS Credentials</button>
+    </div>
+    <div class="flex items-center gap-4 flex-wrap">
+      <label class="flex items-center gap-1 text-xs text-amber-700 cursor-pointer select-none" title="When ON, a wildcard cert (*.domain) is pushed to EVERY connected cert-capable spoke + the hub on each distribution, not just its explicit targets. OFF by default while cert distribution is being tested — flip on once explicit-target distribution is confirmed working.">
+        <input type="checkbox" id="le-wildcard-all-spokes" class="w-4 h-4 rounded" onchange="saveLeWildcardAllSpokes(this.checked)">
+        Fan wildcard → all spokes
+      </label>
+      <button onclick="showLeWildcardCoverage()" class="text-xs text-slate-500 hover:text-slate-700 underline decoration-dotted" title="See which spokes would (eligible) and would not (ineligible + why) receive a wildcard cert via fan-out">Coverage</button>
+      <label class="flex items-center gap-1 text-xs text-slate-600 select-none" title="How soon the hub retries a FAILED cert distribution to a target. The hub sweeps on this cadence and re-pushes any target whose last push errored (successful targets are skipped). Default 1 hour. Lower = faster retry but more hub→spoke chatter.">
+        Retry failed every
+        <input type="number" id="le-distribution-retry-hours" min="1" step="1" value="1" class="w-14 px-1 py-0.5 rounded border border-slate-300 text-xs" onchange="saveLeRetryInterval(this.value)">
+        hrs
+      </label>
+    </div>
   </div>
   <div id="le-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;
@@ -17791,7 +17795,7 @@ async function loadLEData(subMenu) {
         const bfCerts = (certs || []).filter(c => c.bugfixer);
         const bfBanner = (() => {
             if (!bfCerts.length) {
-                return `<div class="mx-4 mt-3 mb-1 px-3 py-2 rounded-md border text-xs bg-slate-50 border-slate-200 text-slate-600 flex items-center gap-2"><span class="text-purple-500 font-bold">★</span><span><b>BugFixer identity:</b> no cert tagged. Open a cert's <b>Manage</b> → check <b>★ BugFixer identity</b> so bugfixer can present it over mTLS to read hub logs + run fleet updates, then add a <span class="font-mono">bugfixer</span> target (★) in the same modal so the cert is deployed to the bugfixer agent.</span></div>`;
+                return '';  // no cert tagged → no banner (guidance lives in Manage)
             }
             const names = bfCerts.map(c => `<span class="font-mono font-bold text-purple-700">${escapeHtml(c.domain || '(unnamed)')}</span>`).join(', ');
             const extra = bfCerts.length > 1 ? ` <span class="text-amber-600">— ${bfCerts.length} tagged; un-tag extras so only one is pinned.</span>` : '';
