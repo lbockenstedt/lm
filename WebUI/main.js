@@ -18217,7 +18217,7 @@ async function showLeTargetsModal(domain) {
             <button onclick="addLeTarget('${esc(domain)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Add target</button>
             <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Distribute now</button>
             <button onclick="document.getElementById('le-targets-modal').remove()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
-        </div>`, { card: 'max-w-2xl w-full p-6' });
+        </div>`, { card: 'max-w-2xl w-full p-6 max-h-[90vh] overflow-y-auto' });
     leTgtMtChange('le-tgt-mt', 'le-tgt-id');  // seed the device list for the first module
 }
 
