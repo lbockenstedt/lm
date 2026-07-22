@@ -835,6 +835,55 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                            "connecting cert-less", e)
         return ctx
 
+    def _apply_tcp_keepalive(self, websocket):
+        """Enable TCP keepalive + a user-timeout on the live spoke→hub socket.
+
+        WHY: the app-level WS ping (30s/90s) only detects a dead peer after 90s,
+        and — critically — it does NOT bound a STUCK SEND. When a spoke's path to a
+        cloud hub silently drops (MTU blackhole / packet loss / a stateful hop that
+        blackholes the flow), outbound bytes sit UN-ACKed and the loop hangs in
+        send() while the kernel retransmits for up to ~15 min by default. That is
+        the observed flap: loop idle in select(), heartbeat 'send did not complete',
+        1011.
+
+        - SO_KEEPALIVE (+ Linux idle/intvl/cnt) keeps the flow's NAT/router
+          connection-tracking entry alive between WS pings and detects a dead IDLE
+          link in ~idle+intvl*cnt seconds.
+        - TCP_USER_TIMEOUT (Linux) is the important one: it caps how long the kernel
+          waits for an ACK of TRANSMITTED data before failing the connection — so a
+          stuck send errors out in ~this many seconds and the spoke reconnects fast,
+          instead of hanging on the 90s WS keepalive (or minutes of retransmits).
+        All best-effort + env-overridable; never fatal to the transport."""
+        try:
+            tr = getattr(websocket, "transport", None)
+            sock = tr.get_extra_info("socket") if tr is not None else None
+            if sock is None:
+                return
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            idle = int(_ws_keepalive_env("LM_WS_TCP_KEEPIDLE_S", 30.0))
+            intvl = int(_ws_keepalive_env("LM_WS_TCP_KEEPINTVL_S", 10.0))
+            try:
+                cnt = max(1, int(os.environ.get("LM_WS_TCP_KEEPCNT", "3")))
+            except Exception:  # noqa: BLE001
+                cnt = 3
+            try:
+                uto_ms = max(5000, int(os.environ.get("LM_WS_TCP_USER_TIMEOUT_MS", "60000")))
+            except Exception:  # noqa: BLE001
+                uto_ms = 60000
+            if hasattr(socket, "TCP_KEEPIDLE"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, idle)
+            if hasattr(socket, "TCP_KEEPINTVL"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, intvl)
+            if hasattr(socket, "TCP_KEEPCNT"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, cnt)
+            if hasattr(socket, "TCP_USER_TIMEOUT"):
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, uto_ms)
+            logger.info("spoke→hub TCP keepalive on (idle=%ss intvl=%ss cnt=%s "
+                        "user_timeout=%sms) — bounds a stuck send / dead path",
+                        idle, intvl, cnt, uto_ms)
+        except Exception as e:  # noqa: BLE001 — keepalive tuning must never break the transport
+            logger.debug("TCP keepalive setup skipped: %s", e)
+
     @staticmethod
     def _normalize_hub_url(url):
         """Normalize a pinned hub URL for the unified-443 hub (best-effort).
@@ -998,6 +1047,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             ping_timeout=_ws_keepalive_env("LM_WS_PING_TIMEOUT_S", 90.0),
         ) as websocket:
             self._hub_ws = websocket
+            self._apply_tcp_keepalive(websocket)   # keep the flow alive + bound a stuck send
             self._last_hub_contact = time.time()  # TCP+TLS+WS up = hub reachable
             # Capture the running loop so the updater thread can schedule a final
             # synchronous log flush (run_coroutine_threadsafe) before os._exit(0).
