@@ -1356,6 +1356,21 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                     "(a sync-I/O call is likely blocking the loop). The WS keepalive "
                     "may drop this connection; the send will complete when the loop "
                     "unblocks.", self.HEARTBEAT_SEND_DEADLINE_S)
+                # This heartbeat thread is NOT blocked, so it can capture WHERE the
+                # event-loop thread is stuck — the definitive way to name the sync
+                # call that's blocking (guessing from periodic-task audits is
+                # unreliable). Rate-limited so a persistent stall can't flood the
+                # log. Stacks go to stderr → the module log (StandardError=append).
+                _now = time.time()
+                if _now - getattr(self, "_last_stall_dump", 0.0) > 60.0:
+                    self._last_stall_dump = _now
+                    try:
+                        import faulthandler as _fh, sys as _sys
+                        print("=== lm loop-stall: thread stacks (heartbeat watchdog) ===",
+                              file=_sys.stderr, flush=True)
+                        _fh.dump_traceback(all_threads=True)
+                    except Exception:  # noqa: BLE001 — diagnostics must never kill the thread
+                        pass
             except (websockets.exceptions.ConnectionClosed, OSError, ConnectionError) as e:
                 logger.debug("Heartbeat send failed; letting main loop reconnect: %s", e)
                 return
