@@ -797,33 +797,39 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         verified the *server* (hub) cert and never called load_cert_chain, so a
         remote spoke connected over TLS but sent NO client cert — the hub saw it
         cert-less and mTLS was silently inactive for every module except bugfixer
-        (which has its own connect code that presents the cert). Files are written
-        by _handle_set_mtls_client_cert (SPOKE_SET_MTLS_CLIENT_CERT) into the mTLS
-        material dir; env (LM_MTLS_CLIENT_CERT/KEY) is the fallback after a
-        restart. Best-effort: a missing/broken cert never breaks the transport
-        (permissive model — the hub falls back to cert-less)."""
+        (which has its own connect code that presents the cert).
+
+        CRITICAL: present ONLY the DEDICATED hub-leg cert (mtls-hub-client.*, env
+        LM_MTLS_HUB_CLIENT_CERT/KEY) written by _handle_set_mtls_client_cert — NOT
+        the shared mtls-client.* / LM_MTLS_CLIENT_CERT that SPOKE_SET_MTLS_MATERIALS
+        writes for the /ws/agent leg. Presenting the agent-leg cert to the hub is
+        exactly what a cert-distribution push used to do — the hub rejected it and
+        the spoke fell off the fleet. If the dedicated cert is absent we present
+        NOTHING (cert-less still connects under the permissive model, and the hub
+        re-issues the hub-CA cert on the next connect). Best-effort: a missing/broken
+        cert never breaks the transport."""
         if ctx is None:
             return ctx
         try:
             cc = ck = ""
             try:
                 cert_dir = self._mtls_material_dir()
-                _cc = os.path.join(cert_dir, "mtls-client.crt")
-                _ck = os.path.join(cert_dir, "mtls-client.key")
+                _cc = os.path.join(cert_dir, "mtls-hub-client.crt")
+                _ck = os.path.join(cert_dir, "mtls-hub-client.key")
                 if os.path.isfile(_cc) and os.path.isfile(_ck):
                     cc, ck = _cc, _ck
             except Exception:  # noqa: BLE001
                 pass
             if not (cc and ck):
-                _cc = os.getenv("LM_MTLS_CLIENT_CERT", "").strip()
-                _ck = os.getenv("LM_MTLS_CLIENT_KEY", "").strip()
+                _cc = os.getenv("LM_MTLS_HUB_CLIENT_CERT", "").strip()
+                _ck = os.getenv("LM_MTLS_HUB_CLIENT_KEY", "").strip()
                 if _cc and _ck and os.path.isfile(_cc) and os.path.isfile(_ck):
                     cc, ck = _cc, _ck
             if cc and ck:
                 ctx.load_cert_chain(cc, ck)
                 logger.info("wss: presenting hub-CA mTLS client cert to the hub (%s)", cc)
             else:
-                logger.debug("wss: no mTLS client cert installed yet — connecting cert-less")
+                logger.debug("wss: no hub-leg mTLS client cert installed yet — connecting cert-less")
         except Exception as e:  # noqa: BLE001 - never break the transport on cert load
             logger.warning("wss: could not present mTLS client cert (%s) — "
                            "connecting cert-less", e)
@@ -1894,7 +1900,12 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             return {"status": "SUCCESS", "message": "skipped — role sub-spoke"}
         cert_dir = self._mtls_material_dir()
         removed = False
-        for p in (os.path.join(cert_dir, "mtls-client.crt"),
+        # The spoke→hub client identity now lives in mtls-hub-client.* (see
+        # _handle_set_mtls_client_cert); clear those. The legacy mtls-client.* names
+        # are cleared too for spokes that predate the split.
+        for p in (os.path.join(cert_dir, "mtls-hub-client.crt"),
+                  os.path.join(cert_dir, "mtls-hub-client.key"),
+                  os.path.join(cert_dir, "mtls-client.crt"),
                   os.path.join(cert_dir, "mtls-client.key")):
             try:
                 if os.path.exists(p):
@@ -1903,6 +1914,8 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             except Exception:  # noqa: BLE001
                 pass
         try:
+            self._persist_secret_to_env("LM_MTLS_HUB_CLIENT_CERT", "")
+            self._persist_secret_to_env("LM_MTLS_HUB_CLIENT_KEY", "")
             self._persist_secret_to_env("LM_MTLS_CLIENT_CERT", "")
             self._persist_secret_to_env("LM_MTLS_CLIENT_KEY", "")
         except Exception:  # noqa: BLE001
@@ -1921,10 +1934,18 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
 
     async def _handle_set_mtls_client_cert(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Apply ``SPOKE_SET_MTLS_CLIENT_CERT``: write the hub-issued clientAuth cert
-        + key as this spoke's mTLS CLIENT identity (LM_MTLS_CLIENT_CERT/KEY), register
-        runtime materials so the next hub reconnect presents it, and restart on change
-        so the client leg re-presents immediately. Leaves LM_MTLS_CA + the server cert
-        alone (the WebUI cert stays LE-issued)."""
+        + key as this spoke's spoke→hub mTLS CLIENT identity and restart on change so
+        the client leg re-presents immediately.
+
+        DEDICATED files (``mtls-hub-client.crt``/``.key``, env
+        ``LM_MTLS_HUB_CLIENT_CERT``/``KEY``) — NOT the shared ``mtls-client.crt`` that
+        ``SPOKE_SET_MTLS_MATERIALS`` (the /ws/agent-leg materials) writes. They used to
+        collide on the same file: a cert-distribution push (INSTALL_CERT →
+        SET_MTLS_MATERIALS) would clobber the hub-CA clientAuth cert with the
+        agent-leg cert, the spoke would then present THAT to the hub, the hub rejected
+        it, and the spoke fell off the fleet (connected but invisible). Keeping the
+        hub-leg identity in its own file makes the two independent. Leaves LM_MTLS_CA
+        + the server cert alone (the WebUI cert stays LE-issued)."""
         if getattr(self, "parent_spoke_id", ""):
             return {"status": "SUCCESS",
                     "message": "skipped — role sub-spoke; parent carries the mTLS client cert"}
@@ -1933,24 +1954,19 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         if not cert or not key:
             return {"status": "ERROR", "message": "missing cert/key"}
         cert_dir = self._mtls_material_dir()
-        cc_path = os.path.join(cert_dir, "mtls-client.crt")
-        ck_path = os.path.join(cert_dir, "mtls-client.key")
+        cc_path = os.path.join(cert_dir, "mtls-hub-client.crt")
+        ck_path = os.path.join(cert_dir, "mtls-hub-client.key")
         changed = False
         try:
             changed |= self._mtls_write_if_changed(
                 cc_path, cert if cert.endswith("\n") else cert + "\n", 0o644)
             changed |= self._mtls_write_if_changed(
                 ck_path, key if key.endswith("\n") else key + "\n", 0o600)
-            self._persist_secret_to_env("LM_MTLS_CLIENT_CERT", cc_path)
-            self._persist_secret_to_env("LM_MTLS_CLIENT_KEY", ck_path)
+            self._persist_secret_to_env("LM_MTLS_HUB_CLIENT_CERT", cc_path)
+            self._persist_secret_to_env("LM_MTLS_HUB_CLIENT_KEY", ck_path)
         except Exception as e:  # noqa: BLE001
             logger.warning("SPOKE_SET_MTLS_CLIENT_CERT: write to %s failed: %s", cert_dir, e)
             return {"status": "ERROR", "message": f"write failed: {e}"}
-        try:
-            from security import mtls as _mtls
-            _mtls.set_runtime_materials(client_cert=cc_path, client_key=ck_path)
-        except Exception:  # noqa: BLE001
-            pass
         if changed:
             logger.info("SPOKE_SET_MTLS_CLIENT_CERT: installed hub-CA mTLS client cert "
                         "for %s — restarting to present it", self.spoke_id)
