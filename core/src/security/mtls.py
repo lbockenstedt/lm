@@ -246,15 +246,33 @@ def server_client_ca_file():
     trusts system+CA). Returns the raw ``LM_MTLS_CA`` path if the combine fails,
     so a bad system-store read can never brick the listener."""
     global _combined_ca_path
-    ca, _, _ = _paths()
-    if not ca or not os.path.exists(ca):
-        return ca or ""
     if _combined_ca_path and os.path.exists(_combined_ca_path):
         return _combined_ca_path
+    ca, _, _ = _paths()
     try:
         parts = []
-        with open(ca, "r") as f:
-            parts.append(f.read())
+        # Hub Local mTLS CA — the internal CA that mints the clientAuth client certs
+        # every spoke (incl. BugFixer) presents for mTLS (public CAs no longer issue
+        # clientAuth). ALWAYS trusted so hub-issued certs verify, even when LM_MTLS_CA
+        # (the legacy LE wildcard chain) is unset. Generated on first use.
+        try:
+            import mtls_ca as _mtls_ca
+        except Exception:  # noqa: BLE001
+            try:
+                from security import mtls_ca as _mtls_ca  # noqa: F401
+            except Exception:  # noqa: BLE001
+                _mtls_ca = None
+        if _mtls_ca is not None:
+            try:
+                cap = _mtls_ca.ensure_ca()
+                if cap and cap.strip():
+                    parts.append(cap)
+            except Exception:  # noqa: BLE001
+                pass
+        # Legacy LM_MTLS_CA (LE wildcard chain) — still trusted if present.
+        if ca and os.path.exists(ca):
+            with open(ca, "r") as f:
+                parts.append(f.read())
         # Locate the system ROOT bundle (holds ISRG/LE roots). Try certifi first —
         # it ships a complete PEM bundle and is almost always installed (requests/
         # httpx depend on it) — then OpenSSL's configured paths, then the common
@@ -281,6 +299,8 @@ def server_client_ca_file():
         if sys_ca:
             with open(sys_ca, "r") as f:
                 parts.append(f.read())
+        if not [p for p in parts if p.strip()]:
+            return ca or ""   # nothing to trust — leave the listener as-is
         combined = "\n".join(p.strip() for p in parts if p.strip()) + "\n"
         out = os.path.join(tempfile.gettempdir(), "lm_mtls_client_ca_combined.pem")
         with open(out, "w") as f:
