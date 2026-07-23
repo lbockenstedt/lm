@@ -35,9 +35,14 @@ ALERT_TYPES = ("alert", "insight")
 # pre-Mist row is Aruba. The prefix is a Setup/picker/catalog concern only; the
 # spoke's bare ``alert_type_counts``, the dashboard Checks view, and reports all
 # stay on the bare id (the prefix is stripped before any comparison there).
-SOURCE_PREFIXES = {"central": "Central", "mist": "Mist"}
-# Reverse lookup is case-insensitive on the stored source name.
-_PREFIX_TO_SOURCE = {"central": "central", "mist": "mist"}
+SOURCE_PREFIXES = {"central": "Central", "mist": "Mist",
+                   "central_on_prem": "Central On-Prem"}
+# Reverse lookup: map the lowercased DISPLAY prefix (as it appears in a stored
+# id, e.g. "Central On-Prem:DNS Fail") back to the canonical source key. Built
+# from SOURCE_PREFIXES so the two maps can never drift — note the display form
+# ("central on-prem") differs from the source key ("central_on_prem"), so a
+# hand-maintained dict would silently miss the on-prem prefix.
+_PREFIX_TO_SOURCE = {label.lower(): src for src, label in SOURCE_PREFIXES.items()}
 
 
 def parse_alert_source(alert_id: str) -> Tuple[str, str]:

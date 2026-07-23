@@ -461,6 +461,35 @@ class SimulationsStore:
             self._tenant(tenant_id)["mist_sites_config"] = cfg or {}
             await self._asave()
 
+    # ── Central On-Prem API config (a SECOND, independent Aruba Central instance
+    # pointing at an on-prem appliance — same ArubaClient/API as cloud Central,
+    # just a separate config slot so the two never overwrite each other). Mirrors
+    # central_config; the poller (CentralHubPoller instance="central_on_prem")
+    # reads this slot and writes hub.central_on_prem_hub_status.
+    async def get_central_on_prem_config(self, tenant_id: str) -> Dict[str, Any]:
+        """Return the tenant's Central On-Prem API config (mode + cluster creds)."""
+        return self._data.get(tenant_id, {}).get("central_on_prem_config", {})
+
+    async def set_central_on_prem_config(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
+        """Replace the tenant's Central On-Prem API config and persist."""
+        with self._lock:
+            self._tenant(tenant_id)["central_on_prem_config"] = cfg or {}
+            await self._asave()
+
+    # ── Central On-Prem sites config (Setup → Central On-Prem API / Central
+    # On-Prem). Mirrors central_sites_config: site_mappings + monitored_checks +
+    # hardware_checks + sim_quotas + site_min_clients — fully independent from
+    # the cloud Central sites config so the two instances don't share mappings.
+    async def get_central_on_prem_sites_config(self, tenant_id: str) -> Dict[str, Any]:
+        """Return the tenant's Central On-Prem sites config."""
+        return self._data.get(tenant_id, {}).get("central_on_prem_sites_config", {})
+
+    async def set_central_on_prem_sites_config(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
+        """Replace the tenant's Central On-Prem sites config and persist."""
+        with self._lock:
+            self._tenant(tenant_id)["central_on_prem_sites_config"] = cfg or {}
+            await self._asave()
+
     # ── adaptive harvest controller state (design doc §9) ────────────────────
     # Per-tenant {quota_key: {target, floor, mode, last_change}} — the running
     # state of the min/max ramp-decay-learn controller. Small (tens of quotas).
@@ -890,6 +919,15 @@ class SimulationsStore:
         unknown → centralized, so a hub with a Mist config shows its checks with
         zero spokes assigned."""
         return str((modes or {}).get("mist_api") or "").strip().lower() != "distributed"
+
+    @staticmethod
+    def central_on_prem_api_is_centralized(modes: Optional[Dict[str, Any]]) -> bool:
+        """Whether the tenant's Central On-Prem API is processed centrally (the
+        HUB polls the on-prem Aruba Central appliance itself — no spoke required).
+        DEFAULTS to centralized, mirroring ``central_api_is_centralized``: only an
+        explicit ``central_on_prem_api == "distributed"`` opts out (a spoke holds
+        the creds and does the polling). Unset / blank / unknown → centralized."""
+        return str((modes or {}).get("central_on_prem_api") or "").strip().lower() != "distributed"
 
     async def set_processing_mode(self, tenant_id: str, feature: str, value: str) -> None:
         with self._lock:

@@ -641,6 +641,30 @@ class SimulationsService:
         centralized mist_api mode. Mirror of _hub_central."""
         return (getattr(self.hub, "mist_hub_status", {}) or {}).get(tenant_id)
 
+    # ── Central On-Prem — a SECOND, independent Aruba Central instance (same
+    # ArubaClient/API as cloud Central, separate config + status slot so the two
+    # never step on each other). Mirror of _hub_central; produced by the
+    # CentralHubPoller instance="central_on_prem" (Phase 2). The getattr default
+    # keeps this safe before the hub's central_on_prem_hub_status dict is wired.
+    def _hub_central_on_prem(self, tenant_id: str) -> Any:
+        """Hub-side ``central_on_prem_status`` for a centralized-mode tenant, or
+        None when not centralized / not yet polled. Mirror of _hub_central."""
+        return (getattr(self.hub, "central_on_prem_hub_status", {}) or {}).get(tenant_id)
+
+    def _hub_block_for_source(self, source: str, tenant_id: str) -> Any:
+        """Dispatch a sim-quota source to its hub-side status block. Central →
+        _hub_central, Mist → _hub_mist, Central On-Prem → _hub_central_on_prem.
+        Unknown/legacy source defaults to cloud Central (bare ids are Central).
+        Used by the SimQuotaEngine firing-eval so each source's quota reads ONLY
+        its own source's telemetry — a Central On-Prem quota never fires on
+        cloud Central's status (and vice versa)."""
+        src = str(source or "central").strip().lower()
+        if src == "mist":
+            return self._hub_mist(tenant_id)
+        if src == "central_on_prem":
+            return self._hub_central_on_prem(tenant_id)
+        return self._hub_central(tenant_id)
+
     def _mist_site_rows(self, mist: dict) -> List[dict]:
         """Per-wsite ok/fail/unknown check tally + wireless client count from a
         ``mist_status`` block. Mirror of _central_site_rows — Mist's status block
