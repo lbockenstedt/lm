@@ -210,6 +210,17 @@ const SIM_ROUTES = {
     csLoadMistAvailable:         { m: 'GET',    p: '/{tenant}/mist/available',                   api: 'get_mist_available' },
     csSaveMistSites:             { m: 'POST',   p: '/{tenant}/mist-sites-config',                api: 'set_mist_sites' },
     csTestMist:                  { m: 'POST',   p: '/{tenant}/test-mist',                        api: 'test_mist' },
+    // ── Central On-Prem (Setup → Central On-Prem API tab + tab data) — MIRROR of Central ──
+    csSimLoadCentralOnPrem:      { m: 'GET',    p: '/aggregate/central-on-prem',                  api: 'get_central_on_prem' },
+    csRenderCentralOnPrem:       { m: 'GET',    p: '/aggregate/central-on-prem-status',           api: 'get_central_on_prem_status' },
+    csRenderCentralOnPremAlerts: { m: 'GET',    p: '/aggregate/central-on-prem',                  api: 'get_central_on_prem' },
+    csRenderCentralOnPremClients:{ m: 'GET',   p: '/aggregate/central-on-prem',                  api: 'get_central_on_prem' },
+    csSaveCentralOnPremConn:    { m: 'POST',   p: '/aggregate/central-on-prem',                  api: 'save_central_on_prem' },
+    csRenderSetupCentralOnPremApi: { m: 'GET',  p: '/aggregate/central-on-prem-status',          api: 'get_central_on_prem_status',
+                                   m2: 'GET', p2: '/{tenant}/central-on-prem-sites-config',     api2: 'get_central_on_prem_sites' },
+    csLoadCentralOnPremAvailable:{ m: 'GET',    p: '/{tenant}/central-on-prem/available',        api: 'get_central_on_prem_available' },
+    csSaveCentralOnPremSites:   { m: 'POST',   p: '/{tenant}/central-on-prem-sites-config',     api: 'set_central_on_prem_sites' },
+    csTestCentralOnPrem:        { m: 'POST',   p: '/{tenant}/test-central-on-prem',              api: 'test_central_on_prem' },
 
     // ── Hub-config (Setup → Hub Config card) ──
     csHubConfigCard:             { m: 'GET',    p: '/tenant/{tenant}/hub-config',                api: 'get_hub_config' },
@@ -733,6 +744,7 @@ async function loadCSData(subMenu, child, force) {
                 case 'Dashboard': await csRenderSimulations(force); break;
                 case 'Clients':     await csRenderClients(force); break;
                 case 'Central':     await csRenderCentral(force); break;
+                case 'Central On-Prem': await csRenderCentralOnPrem(force); break;
                 case 'Mist':        await csRenderMist(force); break;
                 case 'Config':      await csRenderConfigSimulation(force); break;
                 case 'Setup':       await csRenderSetup(force); break;
@@ -2701,7 +2713,472 @@ window.csToggleMonitorHardware = async function (id, name, deviceType, site, mon
 // fault is ABSENT (the sim stopped producing it) — red does NOT mean Central is
 // down. Uses only data already forwarded: /aggregate/central-browse (raw) +
 // /sim-quota-state (derived check_status + monitored_checks). No new endpoint.
-// Copy text to the clipboard (async API with a legacy execCommand fallback for
+
+/* ===========================================================================
+ * 3b. Central On-Prem — sites / alerts / clients + save form  (MIRROR of Central;
+ *    same Aruba Central API, separate config slot).
+ *    GET /sim/api/aggregate/central-on-prem-status?tenant_id={T}
+ *    POST /sim/api/aggregate/central-on-prem  {mode, hub_central_on_prem_config}
+ * ========================================================================= */
+
+// The Central Sites/Alerts/Clients tabs now pull the FULL Central inventory via
+// /aggregate/central-on-prem-browse (hub forwards CS_CENTRAL_BROWSE → spoke browse_all),
+// independent of site_mappings. Shared fetch with a short in-memory cache so
+// switching tabs doesn't re-hit Central each time.
+let _csCentralOnPremBrowseCache = null, _csCentralOnPremBrowseAt = 0, _csCentralOnPremBrowseTenant = null;
+async function csCentralOnPremBrowse() {
+    const t = csTenant();
+    if (_csCentralOnPremBrowseCache && _csCentralOnPremBrowseTenant === t && (Date.now() - _csCentralOnPremBrowseAt) < 60000) {
+        return _csCentralOnPremBrowseCache;
+    }
+    let data = {};
+    try { data = await csFetch(`/aggregate/central-on-prem-browse?tenant_id=${t}`) || {}; }
+    catch (e) { console.error('csCentralOnPremBrowse: /aggregate/central-on-prem-browse failed', e); data = { warning: String(e && e.message || e) }; }
+    _csCentralOnPremBrowseCache = data; _csCentralOnPremBrowseAt = Date.now(); _csCentralOnPremBrowseTenant = t;
+    return data;
+}
+function _csCentralOnPremWarn(data) {
+    return data && data.warning ? `<div class="text-xs text-amber-600 mb-3">${csEscape(data.warning)}</div>` : '';
+}
+
+// ── Central shared table: clickable column sort + Monitored on/off filter ────
+// The five Central tabs (Sites/Alerts/Insights/Clients/Hardware) each render a
+// table with a per-row Monitor toggle. This wrapper gives them click-to-sort on
+// any column header (▲/▼ marks the active column; click toggles asc/desc) and a
+// quick All / On / Off filter above the table for the Monitored flag (when
+// opts.monitorOf is supplied). Sort + filter state is kept per table-id across
+// re-renders, so toggling a Monitor button (which re-fetches + re-renders the
+// tab) preserves the user's sort/filter. Re-sorting/re-filtering is LOCAL — it
+// rebuilds only the table slot from the cached rows in _csCentralOnPremTbl[id], never
+// re-hitting Central.
+const _csCentralOnPremTbl = {};   // id -> {columns, rows, opts, sort:{col,dir}|null, filter:'all'|'mon'|'unmon'}
+
+function csCentralOnPremTable(id, columns, rows, opts = {}) {
+    // columns: [{label, render(row)->html, sort(row)->comparable, width?}]
+    // opts.monitorOf: (row)->bool  — enables the Monitored All/On/Off filter
+    // opts.caption:   small grey caption rendered under the filter row
+    const st = _csCentralOnPremTbl[id] || (_csCentralOnPremTbl[id] = { sort: null, filter: 'all' });
+    st.columns = columns; st.rows = rows; st.opts = opts;
+    return `<div id="cs-central-on-prem-table-${csEscape(id)}">${_csCentralOnPremTableBuild(id)}</div>`;
+}
+
+function _csCentralOnPremTableBuild(id) {
+    const st = _csCentralOnPremTbl[id]; if (!st) return '';
+    const { columns, rows, opts, sort, filter } = st;
+    const monOf = opts.monitorOf || null;
+    let view = rows;
+    if (monOf && filter !== 'all') view = rows.filter(r => filter === 'mon' ? !!monOf(r) : !monOf(r));
+    if (sort && columns[sort.col] && typeof columns[sort.col].sort === 'function') {
+        const ci = sort.col, dir = sort.dir, acc = columns[ci].sort;
+        view = view.slice().sort((a, b) => {
+            const av = acc(a), bv = acc(b);
+            let cmp;
+            if (typeof av === 'number' && typeof bv === 'number') cmp = av - bv;
+            else {
+                const as = String(av == null ? '' : av).toLowerCase();
+                const bs = String(bv == null ? '' : bv).toLowerCase();
+                cmp = as < bs ? -1 : as > bs ? 1 : 0;
+            }
+            return dir === 'desc' ? -cmp : cmp;
+        });
+    }
+    const ths = columns.map((c, i) => {
+        const active = sort && sort.col === i;
+        const arrow = active ? (sort.dir === 'desc' ? ' ▼' : ' ▲') : '';
+        const w = c.width ? ` style="width:${csEscape(String(c.width))}"` : '';
+        return `<th${w} class="px-3 py-2 text-left font-semibold cursor-pointer select-none hover:text-slate-700" onclick="csCentralOnPremSort('${csEscape(id)}', ${i})" title="Sort by ${csEscape(c.label)}">${csEscape(c.label)}${active ? `<span class="text-slate-400">${arrow}</span>` : ''}</th>`;
+    }).join('');
+    const body = view.length
+        ? view.map(r => `<tr>${columns.map(c => `<td class="px-3 py-2">${c.render(r)}</td>`).join('')}</tr>`).join('')
+        : `<tr><td class="px-3 py-8 text-center text-slate-400 italic" colspan="${columns.length}">No data.</td></tr>`;
+    let bar = '';
+    if (monOf) {
+        const nMon = rows.filter(r => monOf(r)).length;
+        const mk = (val, label) => `<button onclick="csCentralOnPremFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-[#263040]/10 text-[#263040] border-[#263040]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
+        bar = `<div class="flex items-center gap-2 mb-3">
+            <span class="text-xs text-slate-500 font-semibold uppercase tracking-wider">Monitored:</span>
+            ${mk('all', `All (${rows.length})`)}${mk('mon', `On (${nMon})`)}${mk('unmon', `Off (${rows.length - nMon})`)}
+        </div>`;
+    }
+    const caption = opts.caption ? `<div class="text-xs text-slate-400 mb-2">${csEscape(opts.caption)}</div>` : '';
+    return `${bar}${caption}<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 uppercase text-xs tracking-wider">${ths}</thead><tbody class="divide-y divide-slate-100">${body}</tbody></table></div>`;
+}
+
+// Click handlers — local re-render from the cached rows (NO Central refetch).
+window.csCentralOnPremSort = function (id, col) {
+    const st = _csCentralOnPremTbl[id]; if (!st) return;
+    if (st.sort && st.sort.col === col) st.sort.dir = st.sort.dir === 'asc' ? 'desc' : 'asc';
+    else st.sort = { col, dir: 'asc' };
+    const wrap = document.getElementById(`cs-central-on-prem-table-${id}`);
+    if (wrap) wrap.innerHTML = _csCentralOnPremTableBuild(id);
+};
+window.csCentralOnPremFilter = function (id, val) {
+    const st = _csCentralOnPremTbl[id]; if (!st) return;
+    st.filter = val;
+    const wrap = document.getElementById(`cs-central-on-prem-table-${id}`);
+    if (wrap) wrap.innerHTML = _csCentralOnPremTableBuild(id);
+};
+
+async function csRenderCentralOnPrem() {
+    csSetToolbar('');
+    // Browse (full site inventory) + the monitoring config, so each row shows a
+    // Monitor toggle reflecting whether the site is already enrolled.
+    const [data, sitesCfg] = await Promise.all([
+        csCentralOnPremBrowse(),
+        csFetch(`/${csTenant()}/central-on-prem-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+    ]);
+    const sites = (data && data.sites) || [];
+    const warn = _csCentralOnPremWarn(data);
+    if (!sites.length) { csSet(`${warn}${csEmpty('No Central On-Prem sites returned.', 'Verify the Central On-Prem API token/mode in Setup → Central On-Prem API and that the account has sites.')}`); return; }
+    const sm = (sitesCfg && sitesCfg.site_mappings && typeof sitesCfg.site_mappings === 'object') ? sitesCfg.site_mappings : {};
+    const monitored = new Set(Object.values(sm).map(v => String(v)));  // Central-site names enrolled
+    const minBySite = (sitesCfg && sitesCfg.site_min_clients && typeof sitesCfg.site_min_clients === 'object') ? sitesCfg.site_min_clients : {};  // per-site min-client floor
+    // Per-site alert/insight counts from the browse data. Insights tagged
+    // "All Sites" (global) count toward every site.
+    const alertsBySite = {}, insightsBySite = {}; let globalInsights = 0;
+    ((data && data.alerts) || []).forEach(a => { const s = a.site || '—'; alertsBySite[s] = (alertsBySite[s] || 0) + 1; });
+    ((data && data.insights) || []).forEach(i => { const s = i.site || '—'; if (s === 'All Sites') globalInsights++; else insightsBySite[s] = (insightsBySite[s] || 0) + 1; });
+    const rows = sites.map(st => {
+        const name = st.name || '';
+        const isMon = monitored.has(String(name));
+        const nAlerts = alertsBySite[name] || 0;
+        const nInsights = (insightsBySite[name] || 0) + globalInsights;
+        const _minLbl = minBySite[name] ? ` · min ${csEscape(String(minBySite[name]))}` : '';
+        const btn = isMon
+            ? `<button onclick="csMonitorCentralOnPremSiteModal(${csEscape(JSON.stringify(name))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Monitored${_minLbl}</button>`
+            : `<button onclick="csMonitorCentralOnPremSiteModal(${csEscape(JSON.stringify(name))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this site's client count (set a min-client floor)">Monitor</button>`;
+        return { name, health: st.health_score, clients: st.wireless_clients != null ? st.wireless_clients : 0,
+                 alerts: nAlerts, insights: nInsights, monitored: isMon, btn: name ? btn : '' };
+    });
+    const siteCols = [
+        { label: 'Site',     render: r => `<span class="font-medium text-slate-700">${csEscape(r.name || '—')}</span>`, sort: r => r.name || '' },
+        { label: 'Health',   render: r => r.health != null && r.health !== '' ? csEscape(r.health) : '—', sort: r => (r.health == null || r.health === '' ? -1 : Number(r.health) || 0) },
+        { label: 'Clients',  render: r => `<span class="font-bold text-slate-700">${csEscape(r.clients)}</span>`, sort: r => r.clients },
+        { label: 'Alerts',   render: r => `<span class="${r.alerts ? 'text-amber-600 font-bold' : 'text-slate-400'}">${r.alerts}</span>`, sort: r => r.alerts },
+        { label: 'Insights', render: r => `<span class="${r.insights ? 'text-slate-600' : 'text-slate-400'}">${r.insights}</span>`, sort: r => r.insights },
+        { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
+    ];
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralOnPremTable('central-on-prem-sites', siteCols, rows, { monitorOf: r => r.monitored, caption: `${sites.length} site(s) — Monitor a site to track its client count for change on the dashboard` })}</div></div>`);
+}
+
+// Open the Monitor dialog for a Central site. Enrolls/stops client-count
+// monitoring AND sets an optional per-site minimum-client floor: if the live
+// count drops below the floor the poller raises a "Minimum Client Threshold"
+// error check on the dashboard, IN ADDITION to the existing % drop check.
+// ``rerender`` is 'clients' when opened from the Clients view so the save
+// re-renders the right pane.
+window.csMonitorCentralOnPremSiteModal = async function (siteName, rerender) {
+    const existing = document.getElementById('cs-monitor-central-on-prem-site-modal');
+    if (existing) { existing.remove(); return; }
+    let cfg = {};
+    try { cfg = await csFetch(`/${csTenant()}/central-on-prem-sites-config?tenant_id=${csTenant()}`) || {}; } catch (e) { /* tolerate, defaults below */ }
+    const sm = (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {};
+    const isMon = Object.values(sm).some(v => String(v) === String(siteName));
+    const minBySite = (cfg.site_min_clients && typeof cfg.site_min_clients === 'object') ? cfg.site_min_clients : {};
+    const curMin = minBySite[siteName] || '';
+    const rr = rerender === 'clients' ? 'clients' : 'sites';
+    const esc = csEscape;  // shared escaper (escapes &<>"')
+
+    const modal = document.createElement('div');
+    modal.id = 'cs-monitor-central-on-prem-site-modal';
+    modal.dataset.rerender = rr;
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm p-4';
+    modal.innerHTML = `
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                <h3 class="text-lg font-bold text-[#263040]">${isMon ? 'Monitored' : 'Monitor'} — ${esc(siteName)}</h3>
+                <button onclick="this.closest('#cs-monitor-central-on-prem-site-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div class="p-6 space-y-4">
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Minimum clients <span class="font-normal normal-case text-slate-400">(optional floor)</span></label>
+                    <input id="cs-monitor-min" type="number" min="0" step="1" value="${esc(curMin)}" placeholder="blank = no floor (drop-based only)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    <p class="text-[11px] text-slate-400 leading-relaxed">If this site's live client count drops below this number, an error is raised on the dashboard — in addition to the existing % drop check. Leave blank to monitor for change only.</p>
+                </div>
+                <div id="cs-monitor-status" class="text-xs text-slate-500 hidden"></div>
+                <div class="pt-2 flex justify-between gap-3">
+                    ${isMon ? `<button onclick="csSaveMonitorCentralOnPremSite(${csEscape(JSON.stringify(siteName))}, false, null)" class="px-4 py-2 text-sm font-medium text-rose-600 hover:text-rose-800 border border-rose-200 rounded-md">Stop monitoring</button>` : `<span></span>`}
+                    <div class="flex gap-3">
+                        <button onclick="this.closest('#cs-monitor-central-on-prem-site-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
+                        <button id="cs-monitor-save" class="bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300 px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">${isMon ? 'Save' : 'Start monitoring'}</button>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+    const inp = document.getElementById('cs-monitor-min');
+    if (inp) { inp.focus(); inp.select(); }
+    const saveBtn = document.getElementById('cs-monitor-save');
+    if (saveBtn) saveBtn.addEventListener('click', () => {
+        const raw = ((inp || {}).value || '').trim();
+        const n = raw === '' ? 0 : parseInt(raw, 10);
+        if (raw !== '' && (!Number.isFinite(n) || n < 0)) {
+            if (typeof showToast === 'function') showToast('Minimum clients must be a non-negative integer', 'error');
+            return;
+        }
+        csSaveMonitorCentralOnPremSite(siteName, true, n);
+    });
+};
+
+// Worker for the monitor dialog: writes site_mappings (+ site_min_clients) into
+// central_sites_config, preserving the monitored alert/insight + hardware
+// checks. ``minClients``: null = leave the floor untouched (Stop), 0 = clear it,
+// >0 = set it. Reads data-rerender on the modal to re-render the opening pane.
+window.csSaveMonitorCentralOnPremSite = async function (siteName, monitor, minClients) {
+    const modal = document.getElementById('cs-monitor-central-on-prem-site-modal');
+    const statusEl = modal ? modal.querySelector('#cs-monitor-status') : null;
+    const saveBtn = modal ? modal.querySelector('#cs-monitor-save') : null;
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.classList.add('opacity-50', 'cursor-not-allowed'); }
+    if (statusEl) { statusEl.textContent = 'Saving…'; statusEl.classList.remove('hidden'); }
+    try {
+        const cfg = await csFetch(`/${csTenant()}/central-on-prem-sites-config?tenant_id=${csTenant()}`) || {};
+        const sm = (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? { ...cfg.site_mappings } : {};
+        const minBySite = (cfg.site_min_clients && typeof cfg.site_min_clients === 'object') ? { ...cfg.site_min_clients } : {};
+        if (monitor) {
+            sm[siteName] = siteName;
+            if (minClients === null) { /* keep existing floor */ }
+            else if (minClients > 0) { minBySite[siteName] = minClients; }
+            else { delete minBySite[siteName]; }
+        } else {
+            Object.keys(sm).forEach(k => { if (String(sm[k]) === String(siteName) || k === siteName) delete sm[k]; });
+            delete minBySite[siteName];
+        }
+        const body = {
+            site_mappings: sm,
+            site_min_clients: minBySite,
+            monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
+            hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
+        };
+        const r = await csFetch(`/${csTenant()}/central-on-prem-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
+        if (typeof csPushToast === 'function') csPushToast(r, monitor ? `Monitoring ${siteName}` : `Stopped monitoring ${siteName}`);
+        else if (typeof showToast === 'function') showToast(monitor ? `Monitoring ${siteName}` : `Stopped monitoring ${siteName}`, 'success');
+        if (modal) modal.remove();
+        ((modal && modal.dataset.rerender) === 'clients' ? csRenderCentralOnPremClients : csRenderCentralOnPrem)();
+    } catch (e) {
+        console.error('csSaveMonitorCentralOnPremSite failed', e);
+        if (typeof showToast === 'function') showToast(e.message, 'error');
+        if (statusEl) { statusEl.textContent = (e.message || 'Save failed'); statusEl.classList.remove('hidden'); }
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+    }
+};
+
+// ── Central → Alerts (live active alerts from Central) ───────────────────────
+// Displays the live active alerts Central returns (/network-notifications/v1/
+// alerts, status Active) — the same data the source browse view shows. Alert
+// CHECK-TYPE monitoring (the fixed new_central alert types) lives in Setup ->
+// Central API; new_central does not expose insights as monitorable checks
+// (the poller never counts them), so these are inventory views like Clients.
+async function csRenderCentralOnPremAlerts() {
+    csSetToolbar('');
+    const [data, sitesCfg] = await Promise.all([
+        csCentralOnPremBrowse(),
+        csFetch(`/${csTenant()}/central-on-prem-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+    ]);
+    const alerts = (data && data.alerts) || [];
+    const warn = _csCentralOnPremWarn(data);
+    if (!alerts.length) { csSet(`${warn}${csEmpty('No Central On-Prem alerts.', 'Alerts come from Central On-Prem /network-notifications/v1/alerts (active + recently closed).')}`); return; }
+    const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
+        .filter(c => c && c.type === 'alert').map(c => `${c.id}::${c.site || ''}`));
+    const _sevRank = { critical: 4, error: 3, fail: 3, failed: 3, warning: 2, degraded: 2, info: 1, unknown: 0 };
+    const rows = alerts.map(a => {
+        const id = String((a.name || a.category) || '').trim();
+        const name = a.name || a.category || id;
+        const site = (a.site && a.site !== '—') ? a.site : '';
+        const isMon = id && monSet.has(`${id}::${site}`);
+        const btn = !id ? '—' : (isMon
+            ? `<button onclick="csToggleMonitorCentralOnPremCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorCentralOnPremCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this alert at ${csEscape(site || 'all sites')}">Monitor</button>`);
+        return { name: a.name || '—', site: a.site || '—', severity: a.severity || 'warning',
+                 category: a.category || '—', status: a.status || 'active', monitored: !!isMon, btn };
+    });
+    const alertCols = [
+        { label: 'Alert',    render: r => `<span class="text-sm">${csEscape(r.name)}</span>`, sort: r => r.name },
+        { label: 'Site',     render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'Severity', render: r => csStatusBadge(r.severity), sort: r => _sevRank[String(r.severity).toLowerCase()] || 0 },
+        { label: 'State',    render: r => r.status === 'cleared'
+            ? `<span class="text-[11px] font-semibold text-slate-500 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">Closed</span>`
+            : `<span class="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">Active</span>`,
+          sort: r => r.status === 'cleared' ? 0 : 1 },
+        { label: 'Category', render: r => `<span class="text-slate-500 text-xs">${csEscape(r.category)}</span>`, sort: r => r.category },
+        { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
+    ];
+    const _active = rows.filter(r => r.status !== 'cleared').length;
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralOnPremTable('central-on-prem-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} alert(s) — ${_active} active, ${alerts.length - _active} closed` })}</div></div>`);
+}
+
+// ── Central → Insights (live AI insights, with Monitor toggle) ───────────────
+// Displays live insights (/network-notifications/v1/insights) with a Monitor
+// toggle per row. Monitoring adds {type:'insight', id:name||category, name} to
+// central_sites_config.monitored_checks; the new_central poller counts insights
+// per site by that same key so the enrolled insight's status shows on the
+// dashboard Checks tab.
+async function csRenderCentralOnPremInsights() {
+    csSetToolbar('');
+    const [data, sitesCfg] = await Promise.all([
+        csCentralOnPremBrowse(),
+        csFetch(`/${csTenant()}/central-on-prem-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+    ]);
+    const insights = (data && data.insights) || [];
+    const warn = _csCentralOnPremWarn(data);
+    if (!insights.length) { csSet(`${warn}${csEmpty('No Central On-Prem insights.', 'AI insights come from Central On-Prem /network-notifications/v1/insights.')}`); return; }
+    const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
+        .filter(c => c && c.type === 'insight').map(c => `${c.id}::${c.site || ''}`));
+    const rows = insights.map(i => {
+        const id = String((i.name || i.category) || '').trim();
+        const name = i.name || i.category || id;
+        const site = i.site || '';
+        const isMon = id && monSet.has(`${id}::${site}`);
+        const btn = !id ? '—' : (isMon
+            ? `<button onclick="csToggleMonitorCentralOnPremCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorCentralOnPremCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this insight at ${csEscape(site || 'all sites')}">Monitor</button>`);
+        return { name: i.name || '—', category: i.category || '—', site: i.site || '—',
+                 monitored: !!isMon, btn };
+    });
+    const insightCols = [
+        { label: 'Insight',  render: r => `<span class="text-sm">${csEscape(r.name)}</span>`, sort: r => r.name },
+        { label: 'Category', render: r => `<span class="text-slate-500">${csEscape(r.category)}</span>`, sort: r => r.category },
+        { label: 'Site',     render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
+    ];
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralOnPremTable('central-on-prem-insights', insightCols, rows, { monitorOf: r => r.monitored, caption: `${insights.length} insight(s)` })}</div></div>`);
+}
+
+// Toggle an insight (or alert) TYPE in central_sites_config.monitored_checks
+// (keyed type:id), preserving site_mappings + hardware_checks.
+window.csToggleMonitorCentralOnPremCheck = async function (type, id, name, monitor, site) {
+    try {
+        const cfg = await csFetch(`/${csTenant()}/central-on-prem-sites-config?tenant_id=${csTenant()}`) || {};
+        site = site || '';
+        const key = `${type}:${id}:${site}`;
+        let checks = (Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : []).filter(c => `${c.type}:${c.id}:${c.site || ''}` !== key);
+        if (monitor) checks.push({ type, id, name, site });
+        const body = {
+            site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
+            monitored_checks: checks,
+            hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
+        };
+        const r = await csFetch(`/${csTenant()}/central-on-prem-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
+        if (typeof csPushToast === 'function') csPushToast(r, monitor ? `Monitoring ${name}` : `Stopped monitoring ${name}`);
+        else if (typeof showToast === 'function') showToast(monitor ? `Monitoring ${name}` : `Stopped monitoring ${name}`, 'success');
+        (type === 'alert' ? csRenderCentralOnPremAlerts : csRenderCentralOnPremInsights)();
+    } catch (e) {
+        console.error('csToggleMonitorCentralOnPremCheck failed', e);
+        if (typeof showToast === 'function') showToast(e.message, 'error');
+    }
+};
+
+// ── Central → Clients ────────────────────────────────────────────────────────
+async function csRenderCentralOnPremClients() {
+    csSetToolbar('');
+    const [data, sitesCfg] = await Promise.all([
+        csCentralOnPremBrowse(),
+        csFetch(`/${csTenant()}/central-on-prem-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+    ]);
+    const clients = (data && data.clients) || [];
+    const warn = _csCentralOnPremWarn(data);
+    if (!clients.length) { csSet(`${warn}${csEmpty('No Central On-Prem clients returned.')}`); return; }
+    const sm = (sitesCfg && sitesCfg.site_mappings && typeof sitesCfg.site_mappings === 'object') ? sitesCfg.site_mappings : {};
+    const monitored = new Set(Object.values(sm).map(v => String(v)));
+    const minBySite = (sitesCfg && sitesCfg.site_min_clients && typeof sitesCfg.site_min_clients === 'object') ? sitesCfg.site_min_clients : {};
+    const rows = clients.map(cl => {
+        const site = cl.site || '';
+        const isMon = site && monitored.has(String(site));
+        const _minLbl = site && minBySite[site] ? ` · min ${csEscape(String(minBySite[site]))}` : '';
+        const btn = !site ? '—' : (isMon
+            ? `<button onclick="csMonitorCentralOnPremSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Site monitored${_minLbl}</button>`
+            : `<button onclick="csMonitorCentralOnPremSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (set a min-client floor)">Monitor</button>`);
+        return { host: cl.hostname || cl.mac || '—', ip: cl.ip || '—', mac: cl.mac || '—',
+                 site: cl.site || '—', status: cl.status || 'unknown', monitored: !!isMon, btn };
+    });
+    const clientCols = [
+        { label: 'Client',  render: r => `<span class="text-sm">${csEscape(r.host)}</span>`, sort: r => r.host },
+        { label: 'IP',      render: r => `<span class="font-mono text-xs">${csEscape(r.ip)}</span>`, sort: r => r.ip },
+        { label: 'MAC',     render: r => `<span class="font-mono text-xs">${csEscape(r.mac)}</span>`, sort: r => r.mac },
+        { label: 'Site',    render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'Status',  render: r => csStatusBadge(r.status), sort: r => String(r.status || '') },
+        { label: 'Monitor', render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
+    ];
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralOnPremTable('central-on-prem-clients', clientCols, rows, { monitorOf: r => r.monitored, caption: `${clients.length} client(s)` })}</div></div>`);
+}
+
+// ── Central → Hardware (device-down check types) ─────────────────────────────
+// Lists the monitorable hardware checks (AP/Switch/Gateway Down) from the
+// available-checks catalog with a Monitor toggle -> central_sites_config
+// .hardware_checks (SEPARATE from monitored_checks). The poller consumes
+// hardware_checks to produce the dashboard Hardware alerts.
+let _csCentralOnPremAvailCache = null, _csCentralOnPremAvailAt = 0, _csCentralOnPremAvailTenant = null;
+async function csCentralOnPremAvailable() {
+    const t = csTenant();
+    if (_csCentralOnPremAvailCache && _csCentralOnPremAvailTenant === t && (Date.now() - _csCentralOnPremAvailAt) < 60000) return _csCentralOnPremAvailCache;
+    let cat;
+    try { cat = await csFetch(`/${t}/central-on-prem/available?tenant_id=${t}`) || {}; }
+    catch (e) { console.error('csCentralOnPremAvailable: fetch failed', e); cat = { warning: String(e && e.message || e) }; }
+    _csCentralOnPremAvailCache = cat; _csCentralOnPremAvailAt = Date.now(); _csCentralOnPremAvailTenant = t;
+    return cat;
+}
+
+async function csRenderCentralOnPremHardware() {
+    csSetToolbar('');
+    const [data, sitesCfg] = await Promise.all([
+        csCentralOnPremBrowse(),
+        csFetch(`/${csTenant()}/central-on-prem-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+    ]);
+    // Pull ALL hardware devices (APs / switches / gateways) from the browse
+    // inventory, flattened across sites.
+    const dbs = (data && data.devices_by_site) || {};
+    const devices = [];
+    Object.keys(dbs).forEach(site => (dbs[site] || []).forEach(d => devices.push(Object.assign({ site }, d))));
+    const warn = _csCentralOnPremWarn(data);
+    if (!devices.length) { csSet(`${warn}${csEmpty('No Central On-Prem hardware devices returned.', 'Devices (APs, switches, gateways) come from Central On-Prem for your monitored account.')}`); return; }
+    const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.hardware_checks) ? sitesCfg.hardware_checks : []).map(c => `${c.id}::${c.site || ''}`));
+    const rows = devices.map(d => {
+        const id = String((d.serial || d.name) || '').trim();
+        const name = d.name || d.serial || id;
+        const dt = d.type || '';
+        const site = d.site || '';
+        const isMon = id && monSet.has(`${id}::${site}`);
+        const btn = !id ? '—' : (isMon
+            ? `<button onclick="csToggleMonitorOnPremHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this device">✓ Monitored</button>`
+            : `<button onclick="csToggleMonitorOnPremHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this device (alerts on the dashboard when it goes down)">Monitor</button>`);
+        return { name, type: dt || '—', model: d.model || '—', site: site || '—',
+                 status: d.status || 'unknown', monitored: !!isMon, btn };
+    });
+    const hwCols = [
+        { label: 'Device',  render: r => `<span class="text-sm text-slate-700">${csEscape(r.name)}</span>`, sort: r => r.name },
+        { label: 'Type',    render: r => `<span class="text-slate-500">${csEscape(r.type)}</span>`, sort: r => r.type },
+        { label: 'Model',   render: r => `<span class="text-slate-500 text-xs">${csEscape(r.model)}</span>`, sort: r => r.model },
+        { label: 'Site',    render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'Status',  render: r => csStatusBadge(r.status), sort: r => String(r.status || '') },
+        { label: 'Monitor', render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
+    ];
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralOnPremTable('central-on-prem-hardware', hwCols, rows, { monitorOf: r => r.monitored, caption: `${devices.length} device(s) — Monitor a switch / AP / gateway to track it on the dashboard` })}</div></div>`);
+}
+
+// Toggle a hardware check in central_sites_config.hardware_checks (keyed by id),
+// preserving site_mappings + monitored_checks.
+window.csToggleMonitorOnPremHardware = async function (id, name, deviceType, site, monitor) {
+    try {
+        const cfg = await csFetch(`/${csTenant()}/central-on-prem-sites-config?tenant_id=${csTenant()}`) || {};
+        site = site || '';
+        const key = `${id}::${site}`;
+        let hw = (Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : []).filter(c => `${c.id}::${c.site || ''}` !== key);
+        if (monitor) hw.push({ id, name, device_type: deviceType, site });
+        const body = {
+            site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
+            monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
+            hardware_checks: hw,
+        };
+        const r = await csFetch(`/${csTenant()}/central-on-prem-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
+        if (typeof csPushToast === 'function') csPushToast(r, monitor ? `Monitoring ${name}` : `Stopped monitoring ${name}`);
+        else if (typeof showToast === 'function') showToast(monitor ? `Monitoring ${name}` : `Stopped monitoring ${name}`, 'success');
+        csRenderCentralOnPremHardware();
+    } catch (e) {
+        console.error('csToggleMonitorOnPremHardware failed', e);
+        if (typeof showToast === 'function') showToast(e.message, 'error');
+    }
+};// Copy text to the clipboard (async API with a legacy execCommand fallback for
 // non-secure contexts), flashing the button label on success.
 function csCopyText(text, btn) {
     const done = () => { if (btn) { const o = btn.textContent; btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = o; }, 1500); } };
@@ -2722,16 +3199,18 @@ function csCopyText(text, btn) {
 
 async function csRenderCentralDiagnostic() { return _csRenderDiag('central'); }
 async function csRenderMistDiagnostic() { return _csRenderDiag('mist'); }
+async function csRenderCentralOnPremDiagnostic() { return _csRenderDiag('central_on_prem'); }
 
-// Raw product API (Central/Mist alerts+insights) next to the derived dashboard
-// status + firing, per monitored check + site. `source` = 'central' | 'mist'.
+// Raw product API (Central / Central On-Prem / Mist alerts+insights) next to the
+// derived dashboard status + firing, per monitored check + site. `source` =
+// 'central' | 'central_on_prem' | 'mist' — each routes to its OWN browse + its
+// OWN monitored_checks (filtered by source) so the three tabs never collide.
 async function _csRenderDiag(source) {
     csSetToolbar('');
-    const isMist = source === 'mist';
-    const prod = isMist ? 'Mist' : 'Central';
+    const prod = source === 'mist' ? 'Mist' : source === 'central_on_prem' ? 'Central On-Prem' : 'Central';
     const t = csTenant();
     const [browse, st] = await Promise.all([
-        isMist ? csMistBrowse() : csCentralBrowse(),
+        source === 'mist' ? csMistBrowse() : source === 'central_on_prem' ? csCentralOnPremBrowse() : csCentralBrowse(),
         csFetch(`/${t}/sim-quota-state?tenant_id=${t}`).catch(e => ({ warning: String((e && e.message) || e) })),
     ]);
     const warn = _csCentralWarn(browse);
@@ -2817,7 +3296,7 @@ async function _csRenderDiag(source) {
         { label: 'Diagnosis', render: r => chip(r.diag, dc[r.dcls] || dc.slate), sort: r => r.dcls },
     ];
     // Copy payload: TSV of every row so it pastes cleanly into a sheet or chat.
-    const _cp = ['Check\tType\tSite\tCentral (raw)\tDashboard (derived)\tFiring\tDiagnosis'];
+    const _cp = [`Check\tType\tSite\t${prod} (raw)\tDashboard (derived)\tFiring\tDiagnosis`];
     rows.forEach(r => _cp.push([r.name, r.type || '', r.site,
         r.rawN > 0 ? `${r.rawN} present${r.rawSev ? ' · ' + r.rawSev : ''}` : 'none',
         r.derived != null ? r.derived : '—', r.firing, r.diag].join('\t')));
@@ -2833,6 +3312,13 @@ window.CS_CHILD_RENDERERS['Central::Insights']   = csRenderCentralInsights;
 window.CS_CHILD_RENDERERS['Central::Clients']    = csRenderCentralClients;
 window.CS_CHILD_RENDERERS['Central::Hardware']   = csRenderCentralHardware;
 window.CS_CHILD_RENDERERS['Central::Diagnostic'] = csRenderCentralDiagnostic;
+
+window.CS_CHILD_RENDERERS['Central On-Prem::Sites']      = csRenderCentralOnPrem;
+window.CS_CHILD_RENDERERS['Central On-Prem::Alerts']     = csRenderCentralOnPremAlerts;
+window.CS_CHILD_RENDERERS['Central On-Prem::Insights']   = csRenderCentralOnPremInsights;
+window.CS_CHILD_RENDERERS['Central On-Prem::Clients']    = csRenderCentralOnPremClients;
+window.CS_CHILD_RENDERERS['Central On-Prem::Hardware']   = csRenderCentralOnPremHardware;
+window.CS_CHILD_RENDERERS['Central On-Prem::Diagnostic'] = csRenderCentralOnPremDiagnostic;
 
 /* ===========================================================================
  * 4b. Mist — Juniper Mist cloud (MIRROR of Central, separate product)
@@ -6216,6 +6702,321 @@ window.csTestCentral = async function () {
     } catch (e) { console.error('csTestCentral: test-central failed', e); if (out) out.textContent = 'Test failed: ' + (e.message || e); }
 };
 
+// ── Central On-Prem API ─────────────────────────────────────────────────────────────
+async function csRenderSetupCentralOnPremApi() {
+    csSetToolbar('');
+    // Connection creds + mode live in central_config (surfaced via the
+    // central-status aggregate); sites/checks live in central_sites_config.
+    let conn = {}, sites = {};
+    try { conn = await csFetch(`/aggregate/central-on-prem-status?tenant_id=${csTenant()}`); } catch (e) { console.error('csRenderSetupCentralOnPremApi: central-status fetch failed, defaulting to {}', e); conn = {}; }
+    try { sites = await csFetch(`/${csTenant()}/central-on-prem-sites-config?tenant_id=${csTenant()}`); } catch (e) { console.error('csRenderSetupCentralOnPremApi: central-on-prem-sites-config fetch failed, defaulting to {}', e); sites = {}; }
+    conn = conn || {}; sites = sites || {};
+    const hc = conn.hub_central_on_prem_config || {};
+    const mode = conn.mode || (hc.api_version === 'new_central' ? 'central' : 'classic');
+    const sm = (sites.site_mappings && typeof sites.site_mappings === 'object') ? sites.site_mappings : {};
+    const mc = Array.isArray(sites.monitored_checks) ? sites.monitored_checks : [];
+    const hw = Array.isArray(sites.hardware_checks) ? sites.hardware_checks : [];
+    // Site-mapping <select>s seed SYNCHRONOUSLY from the existing mappings so the
+    // form renders instantly (no blocking on the slow Central browse). The full
+    // option lists (discovered Central sites + simulated wireless sites) are
+    // refreshed in place AFTER render by _csRefreshCentralOnPremSiteSelects — no re-render,
+    // so an open dropdown doesn't flash/close and each row keeps its selection.
+    const _wirelessSites = Object.keys(sm);
+    const _discoveredSites = Array.from(new Set(Object.values(sm).filter(Boolean)));
+    window._csWirelessSites = _wirelessSites.slice();
+    window._csCentralOnPremSites = _discoveredSites.slice();
+    window._csCopCscMonitoredChecks = mc.map(c => ({ type: c.type || 'alert', id: c.id, name: c.name || c.id }));
+    window._csCopCscCatalog = null;
+
+    const val = id => (csEl(id) && csEl(id).value) || '';
+    const f = (id, label, v, type) => `<label class="text-xs text-slate-500">${csEscape(label)}
+      <input id="${id}" ${type === 'password' ? 'type="password"' : 'type="text"'} value="${csEscape(v != null ? v : '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></label>`;
+    const modeSel = `<select id="cs-cop-csc-mode" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+      <option value="classic" ${mode === 'classic' ? 'selected' : ''}>Classic (access token)</option>
+      <option value="central" ${mode === 'central' ? 'selected' : ''}>Central (OAuth client)</option>
+    </select>`;
+
+    // Known Aruba Central API regional gateways (new Central platform). Rendered as a
+    // <datalist> so Cluster URL is a dropdown of known clusters AND still accepts a typed
+    // custom URL (private clusters, classic /oauth2/token hosts, future regions).
+    // Source: developer.arubanetworks.com new-central docs "Making API Calls".
+    const CENTRAL_CLUSTERS = [
+        ['US-1 (prod)', 'https://us1.api.central.arubanetworks.com'],
+        ['US-2', 'https://us2.api.central.arubanetworks.com'],
+        ['US-West-4', 'https://us4.api.central.arubanetworks.com'],
+        ['US-West-5', 'https://us5.api.central.arubanetworks.com'],
+        ['US-East-1', 'https://us6.api.central.arubanetworks.com'],
+        ['Canada-1', 'https://ca1.api.central.arubanetworks.com'],
+        ['EU-1', 'https://de1.api.central.arubanetworks.com'],
+        ['EU-Central-2', 'https://de2.api.central.arubanetworks.com'],
+        ['EU-Central-3', 'https://de3.api.central.arubanetworks.com'],
+        ['UK', 'https://gb1.api.central.arubanetworks.com'],
+        ['APAC-1 (India)', 'https://in1.api.central.arubanetworks.com'],
+        ['APAC-East-1 (Japan)', 'https://jp1.api.central.arubanetworks.com'],
+        ['APAC-South-1 (Australia)', 'https://au1.api.central.arubanetworks.com'],
+        ['UAE-North-1', 'https://ae1.api.central.arubanetworks.com'],
+        ['China', 'https://cn1.api.central.arubanetworks.com.cn'],
+        ['Internal', 'https://internal.api.central.arubanetworks.com'],
+    ];
+    const clusterField = `<label class="text-xs text-slate-500">Cluster URL
+      <input id="cs-cop-csc-cluster" list="cs-central-clusters" value="${csEscape(hc.cluster_url || '')}" placeholder="select a known cluster or type a custom URL" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+      <datalist id="cs-central-clusters">${CENTRAL_CLUSTERS.map(([region, url]) => `<option value="${url}" label="${csEscape(region)}">`).join('')}</datalist>
+    </label>`;
+
+    const connCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Central On-Prem API Connection ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <p class="text-xs text-slate-400 mb-3">Aruba Central cluster credentials. Pushed to the spoke as <code>central_config</code>; the spoke sentinel-merges them — secrets only overwrite when non-empty.</p>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <label class="text-xs text-slate-500">Mode${modeSel}</label>
+        ${clusterField}
+        ${f('cs-cop-csc-clientid', 'Client ID', hc.client_id)}
+        ${f('cs-cop-csc-customerid', 'Customer ID', hc.customer_id)}
+        ${f('cs-cop-csc-clientsecret', 'Client Secret', hc.client_secret, 'password')}
+        ${f('cs-cop-csc-accesstoken', 'Access Token (classic)', hc.access_token, 'password')}
+        ${f('cs-cop-csc-refreshtoken', 'Refresh Token (classic)', hc.refresh_token, 'password')}
+        <label class="text-xs text-slate-500">Poll interval (minutes)
+          <input id="cs-cop-csc-pollmin" type="number" min="1" step="1" value="${Math.max(1, Math.round((Number(hc.poll_interval_s) || 300) / 60))}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+          <span class="block text-[11px] text-slate-400 mt-1">How often the hub polls Aruba Central for this tenant (default 5, minimum 1).</span>
+        </label>
+        <div class="md:col-span-2 mt-1 pt-3 border-t border-slate-200">
+          <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Client-count check thresholds</p>
+          <p class="text-[11px] text-slate-400 mb-2">Controls how the <b>Steady Client Count</b> dashboard check colours a site. Two independent rules: a drop vs the recent hourly average, and a sustained fall below the site's historical peak.</p>
+        </div>
+        <label class="text-xs text-slate-500">Warning — drop vs recent average (%)
+          <input id="cs-cop-csc-cc-warn" type="number" min="0" max="100" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.warn_pct != null) ? hc.cc_thresholds.warn_pct : 20}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+          <span class="block text-[11px] text-slate-400 mt-1">Amber when a site's count is this % below its last-hour average (default 20).</span>
+        </label>
+        <label class="text-xs text-slate-500">Error — drop vs recent average (%)
+          <input id="cs-cop-csc-cc-error" type="number" min="0" max="100" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.error_pct != null) ? hc.cc_thresholds.error_pct : 50}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+          <span class="block text-[11px] text-slate-400 mt-1">Red when the drop reaches this % (default 50; kept ≥ warning).</span>
+        </label>
+        <label class="text-xs text-slate-500">Sustained die-off — % of peak
+          <input id="cs-cop-csc-cc-dieoff" type="number" min="0" max="100" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.die_off_pct != null) ? hc.cc_thresholds.die_off_pct : 20}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+          <span class="block text-[11px] text-slate-400 mt-1">Red when the hourly average falls below this % of the 7/30-day peak, even without a fresh drop (default 20). <b>Set 0 to disable</b> — this is the rule that reddens sites sitting well below their peak.</span>
+        </label>
+        <label class="text-xs text-slate-500">Die-off — minimum peak (clients)
+          <input id="cs-cop-csc-cc-minpeak" type="number" min="1" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.min_peak != null) ? hc.cc_thresholds.min_peak : 5}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+          <span class="block text-[11px] text-slate-400 mt-1">Only arm die-off when the peak is at least this many clients, so a quiet site can't false-trigger (default 5).</span>
+        </label>
+      </div>
+      <div class="flex justify-end gap-2 mt-4">
+        <button onclick="csSaveCentralOnPremConn()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
+        <button onclick="csTestCentralOnPrem()" class="bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Test Central On-Prem</button>
+      </div>
+      <div id="cs-cop-csc-test" class="mt-3 text-xs text-slate-500"></div>
+    </div>`;
+
+    const smRows = Object.keys(sm).map(w => csCopCscSmRow(w, sm[w])).join('');
+    const hwRows = hw.map(h => csCopCscHwRow(h.id, h.name, h.device_type)).join('');
+    const mcList = (mc && mc.length) ? mc.map(c => `<div class="text-xs text-slate-600">• ${csEscape(c.name || c.id)} <span class="text-slate-400 font-mono">(${csEscape(c.type || 'alert')}/${csEscape(c.id)})</span></div>`).join('')
+        : '<p class="text-xs text-slate-400 italic">None configured. Load the available-checks catalog to pick Aruba Central alerts/insights.</p>';
+
+    const sitesCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Sites &amp; Checks ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <p class="text-xs text-slate-400 mb-3">Hub-owned site mappings + Aruba Central sim/hardware monitors. Pushed to the spoke as <code>central_sites_config</code> and applied to the spoke's runtime monitoring when hub-managed.</p>
+
+      <div class="flex items-center gap-2 mb-2">
+        <button onclick="csLoadCentralOnPremAvailable()" class="bg-slate-200 text-slate-700 px-3 py-1.5 rounded-md text-xs font-bold">Load available checks</button>
+        <span id="cs-cop-csc-catalog-msg" class="text-xs text-slate-400"></span>
+      </div>
+
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Site Mappings (wireless site → Central site)</p>
+      ${_discoveredSites.length ? `<p class="text-[10px] text-slate-400 mb-1">${_discoveredSites.length} Central site(s) discovered — pick from the dropdown (refreshes as more are found).</p>` : '<p class="text-[10px] text-slate-400 mb-1">No Central sites discovered yet (check the connection); the dropdown lists discovered sites once loaded.</p>'}
+      <div id="cs-cop-csc-sm-rows" class="space-y-2">${smRows || '<p class="text-xs text-slate-400 italic">No site mappings.</p>'}</div>
+      <button onclick="csCopCscAddSm()" class="mt-2 text-xs text-[#01A982] font-bold hover:underline">+ Add mapping</button>
+
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Monitored Checks</p>
+      <div id="cs-cop-csc-monitored">${mcList}</div>
+
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Hardware Checks</p>
+      <div id="cs-cop-csc-hw-rows" class="space-y-2">${hwRows || '<p class="text-xs text-slate-400 italic">No hardware checks.</p>'}</div>
+      <button onclick="csCopCscAddHw()" class="mt-2 text-xs text-[#01A982] font-bold hover:underline">+ Add hardware check</button>
+
+      <div class="flex justify-end gap-2 mt-4">
+        <button onclick="csSaveCentralOnPremSites()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save Sites &amp; Checks</button>
+      </div>
+    </div>`;
+
+    csSet(`<div class="max-w-4xl space-y-4">${connCard}${sitesCard}</div>`);
+    // Refresh the site-mapping <select> options AFTER the form is on screen —
+    // rewrites each row's options in place (no re-render), so a dropdown stays
+    // open and each row keeps its selection. Fire-and-forget; the slow Central
+    // browse can't block the tab.
+    _csRefreshCentralOnPremSiteSelects();
+}
+
+// Build <option> markup for a site <select>: a blank "— select —" first, then
+// every known site, with `current` always present and selected (so an existing
+// mapping to a site not in the discovered list still shows). Sorted for stable
+// display.
+function _csSiteOptions(list, current) {
+    const set = new Set((list || []).filter(Boolean));
+    if (current) set.add(current);
+    const opts = Array.from(set).sort();
+    const cur = current || '';
+    return [`<option value=""${cur === '' ? ' selected' : ''}>— select —</option>`]
+        .concat(opts.map(o => `<option value="${csEscape(o)}"${o === cur ? ' selected' : ''}>${csEscape(o)}</option>`))
+        .join('');
+}
+
+// Refresh the site-mapping <select> options AFTER render: fetch the full
+// wireless + Central site lists, merge into the window globals, then rewrite
+// each row's <select> options in place (preserving its current selection). No
+// re-render, so an open dropdown doesn't flash/close.
+async function _csRefreshCentralOnPremSiteSelects() {
+    // Wireless sites (fast, local): connected clients' config.wsite.
+    try {
+        const cl = await csFetch(`/aggregate/clients?tenant_id=${csTenant()}`) || {};
+        const rows = cl.clients || cl.rows || [];
+        const found = rows.map(c => (c.config && c.config.wsite) || c.wsite).filter(Boolean);
+        window._csWirelessSites = Array.from(new Set((window._csWirelessSites || []).concat(found))).sort();
+    } catch (e) { /* clients optional */ }
+    // Central sites (slower: forwards to the spoke's Central browse).
+    try {
+        const b = await csCentralOnPremBrowse();
+        const found = ((b && b.sites) || []).map(s => s && s.name).filter(Boolean);
+        window._csCentralOnPremSites = Array.from(new Set((window._csCentralOnPremSites || []).concat(found))).sort();
+    } catch (e) { /* browse optional */ }
+    document.querySelectorAll('#cs-cop-csc-sm-rows .cs-cop-csc-sm-row').forEach(row => {
+        const wSel = row.querySelector('[data-cs-sm-w]');
+        const cSel = row.querySelector('[data-cs-sm-c]');
+        if (wSel) { const cur = wSel.value; wSel.innerHTML = _csSiteOptions(window._csWirelessSites, cur); wSel.value = cur; }
+        if (cSel) { const cur = cSel.value; cSel.innerHTML = _csSiteOptions(window._csCentralOnPremSites, cur); cSel.value = cur; }
+    });
+}
+
+function csCopCscSmRow(w, c) {
+    const selCls = 'flex-1 bg-white border border-slate-300 rounded-md px-2 py-1.5 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-green-500';
+    return `<div class="cs-cop-csc-sm-row flex gap-2 items-center">
+      <select data-cs-sm-w class="${selCls}">${_csSiteOptions(window._csWirelessSites, w)}</select>
+      <span class="text-slate-400">→</span>
+      <select data-cs-sm-c class="${selCls}">${_csSiteOptions(window._csCentralOnPremSites, c)}</select>
+      <button onclick="csCopCscRemoveRow(this)" class="text-red-500 text-xs px-2" title="Remove">✕</button>
+    </div>`;
+}
+
+function csCopCscHwRow(id, name, dt) {
+    return `<div class="cs-cop-csc-hw-row flex gap-2 items-center">
+      <input data-cs-hw-id value="${csEscape(id != null ? id : '')}" placeholder="id (AP_DOWN)" class="w-36 bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs font-mono">
+      <input data-cs-hw-name value="${csEscape(name != null ? name : '')}" placeholder="name" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs">
+      <input data-cs-hw-dt value="${csEscape(dt != null ? dt : '')}" placeholder="device type (ap/gateway/switch)" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs">
+      <button onclick="csCopCscRemoveRow(this)" class="text-red-500 text-xs px-2" title="Remove">✕</button>
+    </div>`;
+}
+
+window.csCopCscRemoveRow = function (btn) {
+    const row = btn && btn.closest('.cs-cop-csc-sm-row, .cs-cop-csc-hw-row');
+    if (row) row.remove();
+};
+
+window.csCopCscAddSm = function () {
+    const c = csEl('cs-cop-csc-sm-rows'); if (!c) return;
+    const empty = c.querySelector('p.italic'); if (empty) empty.remove();
+    const wrap = document.createElement('div'); wrap.innerHTML = csCopCscSmRow('', '');
+    c.appendChild(wrap.firstElementChild);
+};
+
+window.csCopCscAddHw = function () {
+    const c = csEl('cs-cop-csc-hw-rows'); if (!c) return;
+    const empty = c.querySelector('p.italic'); if (empty) empty.remove();
+    const wrap = document.createElement('div'); wrap.innerHTML = csCopCscHwRow('', '', '');
+    c.appendChild(wrap.firstElementChild);
+};
+
+window.csLoadCentralOnPremAvailable = async function () {
+    const msg = csEl('cs-cop-csc-catalog-msg');
+    if (msg) { msg.textContent = 'Loading…'; msg.className = 'text-xs text-slate-400'; }
+    try {
+        const cat = await csFetch(`/${csTenant()}/central-on-prem/available?tenant_id=${csTenant()}`) || {};
+        window._csCopCscCatalog = cat;
+        const alerts = cat.alerts || [], insights = cat.insights || [];
+        const ids = new Set((window._csCopCscMonitoredChecks || []).map(c => c.id));
+        const toggle = (c, type) => `<label class="flex items-center gap-2 text-xs text-slate-600 py-0.5">
+          <input type="checkbox" data-cs-mon-type="${csEscape(type)}" data-cs-mon-id="${csEscape(c.id)}" data-cs-mon-name="${csEscape(c.name || c.id)}" ${ids.has(c.id) ? 'checked' : ''} onchange="csCopCscMonToggle()">
+          <span>${csEscape(c.name || c.id)}</span><span class="text-slate-400 font-mono">(${csEscape(c.id)})</span>
+        </label>`;
+        csEl('cs-cop-csc-monitored').innerHTML = `<div class="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1">
+          <div><p class="text-[10px] font-bold text-slate-400 uppercase mb-1">Alerts</p>${alerts.map(a => toggle(a, 'alert')).join('') || '<p class="text-xs text-slate-400 italic">None.</p>'}</div>
+          <div><p class="text-[10px] font-bold text-slate-400 uppercase mb-1">Insights</p>${insights.map(a => toggle(a, 'insight')).join('') || '<p class="text-xs text-slate-400 italic">None.</p>'}</div>
+        </div>`;
+        csCopCscMonSync();
+        if (msg) { msg.textContent = (alerts.length + insights.length) + ' checks loaded' + (cat.warning ? ' — ' + cat.warning : ''); }
+    } catch (e) {
+        console.error('csLoadCentralOnPremAvailable: available-checks catalog load failed', e);
+        if (msg) { msg.textContent = 'Failed: ' + (e.message || e); msg.className = 'text-xs text-red-500'; }
+    }
+};
+
+window.csCopCscMonToggle = function () { csCopCscMonSync(); };
+window.csCopCscMonSync = function () {
+    const checks = [];
+    document.querySelectorAll('#cs-cop-csc-monitored input[type=checkbox]').forEach(cb => {
+        if (cb.checked) checks.push({ type: cb.getAttribute('data-cs-mon-type'), id: cb.getAttribute('data-cs-mon-id'), name: cb.getAttribute('data-cs-mon-name') });
+    });
+    window._csCopCscMonitoredChecks = checks;
+};
+
+window.csSaveCentralOnPremConn = async function () {
+    const v = id => (csEl(id) && csEl(id).value) || '';
+    const mode = v('cs-cop-csc-mode');
+    const hub_central_on_prem_config = {
+        cluster_url: v('cs-cop-csc-cluster'),
+        client_id: v('cs-cop-csc-clientid'),
+        customer_id: v('cs-cop-csc-customerid'),
+        api_version: mode === 'central' ? 'new_central' : 'classic',
+    };
+    // Secrets: include only when non-empty so the spoke's sentinel merge
+    // doesn't wipe an existing credential with a blank field.
+    if (v('cs-cop-csc-clientsecret')) hub_central_on_prem_config.client_secret = v('cs-cop-csc-clientsecret');
+    if (v('cs-cop-csc-accesstoken'))  hub_central_on_prem_config.access_token  = v('cs-cop-csc-accesstoken');
+    if (v('cs-cop-csc-refreshtoken')) hub_central_on_prem_config.refresh_token = v('cs-cop-csc-refreshtoken');
+    // Central poll interval (minutes in the UI → seconds stored; the hub floors at 60s).
+    const _pm = parseInt(v('cs-cop-csc-pollmin'), 10);
+    if (!isNaN(_pm) && _pm > 0) hub_central_on_prem_config.poll_interval_s = Math.max(60, _pm * 60);
+    // Client-count check thresholds → central_config.cc_thresholds. Sent as-is;
+    // the hub coerces + clamps (warn/error 0-100, error≥warn, die-off 0-100, peak≥1).
+    const _ccNum = (id, dflt) => { const n = parseFloat(v(id)); return isNaN(n) ? dflt : n; };
+    hub_central_on_prem_config.cc_thresholds = {
+        warn_pct: _ccNum('cs-cop-csc-cc-warn', 20),
+        error_pct: _ccNum('cs-cop-csc-cc-error', 50),
+        die_off_pct: _ccNum('cs-cop-csc-cc-dieoff', 20),
+        min_peak: _ccNum('cs-cop-csc-cc-minpeak', 5),
+    };
+    try {
+        const r = await csFetch('/aggregate/central-on-prem', { method: 'POST', body: JSON.stringify({ mode, hub_central_on_prem_config }) });
+        csPushToast(r, 'Saved');
+    } catch (e) { console.error('csSaveCentralOnPremConn: central connection save failed', e); showToast(e.message, 'error'); }
+};
+
+window.csSaveCentralOnPremSites = async function () {
+    const site_mappings = {};
+    document.querySelectorAll('#cs-cop-csc-sm-rows .cs-cop-csc-sm-row').forEach(row => {
+        const w = (row.querySelector('[data-cs-sm-w]').value || '').trim();
+        const c = (row.querySelector('[data-cs-sm-c]').value || '').trim();
+        if (w) site_mappings[w] = c;
+    });
+    const hardware_checks = [];
+    document.querySelectorAll('#cs-cop-csc-hw-rows .cs-cop-csc-hw-row').forEach(row => {
+        const id = (row.querySelector('[data-cs-hw-id]').value || '').trim();
+        if (!id) return;
+        hardware_checks.push({ id, name: (row.querySelector('[data-cs-hw-name]').value || '').trim() || id, device_type: (row.querySelector('[data-cs-hw-dt]').value || '').trim() });
+    });
+    const cfg = { site_mappings, monitored_checks: window._csCopCscMonitoredChecks || [], hardware_checks };
+    try {
+        const r = await csFetch(`/${csTenant()}/central-on-prem-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(cfg) });
+        csPushToast(r, 'Saved');
+    } catch (e) { console.error('csSaveCentralOnPremSites: central sites save failed', e); showToast(e.message, 'error'); }
+};
+
+window.csTestCentralOnPrem = async function () {
+    const out = csEl('cs-cop-csc-test');
+    try {
+        const r = await csFetch(`/${csTenant()}/test-central-on-prem?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify({}) });
+        const rows = (r.spokes || []).map(s => `<div>${csEscape(s.spoke_name)}: token=${csEscape(s.token_state || '—')} valid=${csEscape(s.token_valid)} status=${csEscape(s.status || '—')}</div>`).join('');
+        if (out) out.innerHTML = rows || '<i>No spokes reporting central state.</i>';
+    } catch (e) { console.error('csTestCentralOnPrem: test-central-on-prem failed', e); if (out) out.textContent = 'Test failed: ' + (e.message || e); }
+};
+
 // ── Setup → Mist API (MIRROR of Setup → Central API; separate product) ────────
 // Juniper Mist uses a static API token + org_id + region host — NOT Aruba's
 // OAuth client_id/secret/cluster_url. Creds live in mist_config (surfaced via
@@ -6630,6 +7431,7 @@ window.CS_CHILD_RENDERERS['Setup::General']        = csRenderSetup;
 // the old "Setup" child label before it re-persists as "General".
 window.CS_CHILD_RENDERERS['Setup::Setup']           = csRenderSetup;
 window.CS_CHILD_RENDERERS['Setup::Central API']    = csRenderSetupCentralApi;
+window.CS_CHILD_RENDERERS['Setup::Central On-Prem API'] = csRenderSetupCentralOnPremApi;
 window.CS_CHILD_RENDERERS['Setup::Mist API']       = csRenderSetupMistApi;
 window.CS_CHILD_RENDERERS['Setup::Proxmox']        = csRenderSetupProxmox;
 window.CS_CHILD_RENDERERS['Setup::GitHub']         = csRenderSetupGithub;
