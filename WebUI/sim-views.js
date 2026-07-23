@@ -4557,11 +4557,6 @@ async function csRenderSimQuotaState() {
                 <button onclick="csResetToKnownGood(${csEscape(JSON.stringify(ak))})" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2 py-0.5 rounded text-[10px] font-bold">Reset to known-good</button>
             </div>`;
         };
-        // Diagnostics carry the engine's EFFECTIVE (global) sharing per quota —
-        // sharing is a global sim property now (Simulation-Sharing tile), not a
-        // per-quota flag, so the Multi column reflects that, not q.multi_capable.
-        const diagByKey = {};
-        (st.diagnostics || []).forEach(d => { if (d && d.key) diagByKey[d.key] = d; });
         const rows = eff.map(q => {
             const k = keyOf(q);
             const e = ledger[k] || {};
