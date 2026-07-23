@@ -6099,40 +6099,54 @@ function csFleetRecloneProgress() {
 function csAutoProvLivePanel() {
     const el = csEl('cs-autoprov-live');
     if (!el) return;
-    // Aggregate in-flight USB entries across hosts (the per-VM "provisioning /
-    // tearing_down / missing / starting-up" states that already ride usb_devices).
-    // Mirrors renderAutoProvisionStatus: a present-but-VM-not-running dongle is
-    // "starting up". Cross-reference each host's proxmox_vms running set.
-    const flight = [];
-    (csVmHosts || []).forEach(h => {
-        const runningVmids = new Set(csHostVms(h)
-            .filter(v => String(v.status || '').toLowerCase() === 'running')
-            .map(v => Number(v.vmid)));
-        (h.usb_devices || []).forEach(u => {
-            const ps = String(u.prov_status || '').toLowerCase();
-            if (ps === 'provisioning' || ps === 'tearing_down' || ps === 'missing'
-                || (ps === 'active' && u.vmid != null && !runningVmids.has(Number(u.vmid)))) {
-                flight.push({ host: h.spoke_name || h.spoke_hostname || h.spoke_id || '', u });
-            }
-        });
-    });
     if (!csAutoProvOn) {
         el.innerHTML = `<div class="text-slate-400">Auto-Provisioning is off.</div>`;
         return;
     }
-    if (!flight.length) {
+    // Aggregate the fleet's in-flight VMs. Prefer the authoritative per-host
+    // prov_run (vmid + vm_name + phase) via csAutoProvRunState, then add VMs the
+    // fleet is tearing down or recloning (per-VM prov_status markers). These are
+    // the same sources the per-host "VM Auto-Provisioning" panel uses, so the
+    // labels/colors stay consistent — this covers clone/configure/check-in,
+    // delete and reclone, not just the USB-driven flow.
+    const flight = [];
+    (csVmHosts || []).forEach(h => {
+        const host = h.spoke_name || h.spoke_hostname || h.spoke_id || '';
+        const px = (h && h.proxmox) || {};
+        const vms = csHostVms(h);
+        csAutoProvRunState(px, vms).items
+            .filter(it => it.status !== 'done')
+            .forEach(it => flight.push({ host, vmid: it.vmid, name: it.vm_name, status: it.status }));
+        vms.forEach(v => {
+            const ps = String(v.prov_status || '').toLowerCase();
+            if (ps === 'tearing_down') flight.push({ host, vmid: v.vmid, name: v.name, status: 'deleting' });
+            else if (ps === 'recloning') flight.push({ host, vmid: v.vmid, name: v.name, status: 'recloning' });
+        });
+    });
+    // Dedup by host+vmid — a VM can surface in both prov_run and prov_status.
+    const seen = new Set();
+    const uniq = flight.filter(f => {
+        const k = f.host + '|' + (f.vmid ?? '');
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+    });
+    if (!uniq.length) {
         el.innerHTML = `<div class="text-slate-400">No active provisioning work.</div>`;
         return;
     }
-    el.innerHTML = flight.map(({ host, u }) => {
-        const ps = String(u.prov_status || '').toLowerCase();
-        const ic = ps === 'provisioning' ? '⏳' : ps === 'tearing_down' ? '🗑️'
-            : ps === 'missing' ? '⚠️' : '🔄';
-        const lbl = ps === 'provisioning' ? 'Cloning' : ps === 'tearing_down' ? 'Tearing Down'
-            : ps === 'missing' ? 'USB Missing' : 'Starting Up';
-        return `<div><span>${ic}</span> <b>VM ${csEscape(String(u.vmid ?? '—'))}</b>
-            <span class="text-slate-400">${csEscape(lbl)}</span>
-            <span class="text-slate-300">${csEscape(host)}</span></div>`;
+    el.innerHTML = uniq.map(f => {
+        const st = String(f.status || '').toLowerCase();
+        const ic = st === 'deleting' ? '🗑️' : st === 'recloning' ? '🔄'
+            : st === 'pending_checkin' ? '⌛' : st === 'configuring' ? '⚙️'
+            : st === 'failed' ? '❌' : '⏳';
+        const meta = st === 'deleting' ? { label: 'Deleting' }
+            : st === 'recloning' ? { label: 'Recloning' }
+            : csAutoProvPhaseMeta(st);
+        const name = f.name || (f.vmid != null ? `VM ${f.vmid}` : '—');
+        return `<div class="truncate"><span>${ic}</span> <b>${csEscape(name)}</b>
+            <span class="text-slate-400">${csEscape(meta.label)}</span>
+            <span class="text-slate-300">${csEscape(f.host)}</span></div>`;
     }).join('');
 }
 
