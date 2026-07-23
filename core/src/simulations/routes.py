@@ -27,7 +27,7 @@ from .mist import (
     test_mist_from_config, get_mist_available_from_config, browse_mist_from_config,
     validate_mist_host, _KNOWN_MIST_HOSTS, _DEFAULT_MIST_HOST,
 )
-from .sim_quota import validate_sim_quotas, sim_quota_catalog_from_ini, available_sims_from_ini, prefixed_alert_id
+from .sim_quota import validate_sim_quotas, sim_quota_catalog_from_ini, available_sims_from_ini, prefixed_alert_id, parse_alert_source
 from . import sim_quota
 from . import email_report
 from . import github_config_client
@@ -1228,7 +1228,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         ramped to max forever. Reading the dashboard value removes that whole
         second code path.
         """
-        alert_id = str(q.get("alert_id") or "").strip().lower()
+        # Compare BARE ids. The dashboard/poller key check_status by the BARE
+        # check name (the Central:/Mist: prefix is picker-only), so strip any
+        # prefix a stored quota alert_id kept — otherwise a prefixed alert_id
+        # never matches the bare check id and a FIRING alert reads as "not
+        # firing", making the controller ramp to max on an already-green check.
+        # This reads the same dashboard-computed status; no extra Central call.
+        alert_id = parse_alert_source(q.get("alert_id") or "")[1].strip().lower()
         if not alert_id:
             return None
         # Every (status_map, site_mappings) the dashboard has for this tenant.
@@ -1294,7 +1300,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         continue
                 for cid, info in checks_map.items():
                     seen_cids.add(str(cid))
-                    if str(cid).strip().lower() != alert_id:
+                    # Bare-compare both sides (check ids are already bare, but a
+                    # prefixed one must never hide a match).
+                    if parse_alert_source(cid)[1].strip().lower() != alert_id:
                         continue
                     s = (info.get("status") if isinstance(info, dict) else info) or ""
                     sl = str(s).strip().lower()

@@ -3941,7 +3941,17 @@ async function csRenderSimQuotaState() {
         const firingOf = (q) => {
             if (!q.alert_id) return '';  // presence / untethered — no alert to fire
             const siteMap = checkStatus[q.site || ''] || {};
-            const info = siteMap[q.alert_id];
+            // Compare BARE + case-insensitively: check_status is keyed by the
+            // bare check name, but a quota's alert_id may carry the Central:/Mist:
+            // picker prefix — matching raw would miss and read a firing check as
+            // "not firing" (mirrors the hub _alert_firing bare compare).
+            const _bare = v => String(v || '').trim().replace(/^(central|mist):/i, '').trim().toLowerCase();
+            const _want = _bare(q.alert_id);
+            let info = siteMap[q.alert_id];
+            if (info == null) {
+                const _k = Object.keys(siteMap).find(c => _bare(c) === _want);
+                info = _k != null ? siteMap[_k] : null;
+            }
             if (info == null) return '';
             const s = (typeof info === 'object' ? info.status : info) || '';
             return s ? csAlertBadge(s) : '';
