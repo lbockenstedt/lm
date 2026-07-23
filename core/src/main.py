@@ -6821,6 +6821,24 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         except Exception:  # noqa: BLE001
             return []
 
+    @staticmethod
+    def _window_log_lines(lines, minutes):
+        """Keep only lines whose leading 'YYYY-MM-DD HH:MM:SS' is within the last
+        `minutes` — so the LLM sees ONLY recent activity (e.g. the 5 lines from the last
+        15 min, not all 100). Lines without a parseable timestamp (multi-line tracebacks)
+        inherit the current keep state so they stay attached to their header line."""
+        from datetime import datetime as _dt, timedelta as _td
+        cutoff = _dt.now() - _td(minutes=minutes)
+        out, keeping = [], False
+        for ln in lines:
+            try:
+                keeping = _dt.strptime((ln or "")[:19], "%Y-%m-%d %H:%M:%S") >= cutoff
+            except Exception:
+                pass  # continuation line — inherit previous keep state
+            if keeping:
+                out.append(ln)
+        return out
+
     def _gather_module_log_lines(self, module, n=400):
         """Recent log lines for a module: hub.log for 'hub', else the relayed
         agent_logs of the spoke(s) advertising that module's type (or name-prefixed)."""
@@ -6893,7 +6911,8 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             try:
                 gc = self.state.get_global_config() if hasattr(self.state, "get_global_config") else {}
                 auto = gc.get("log_analysis_auto", True)
-                interval = max(60, int(gc.get("log_analysis_interval_min", 15) or 15) * 60)
+                interval_min = int(gc.get("log_analysis_interval_min", 15) or 15)
+                interval = max(60, interval_min * 60)
                 effective = max(interval, last_dur)  # self-throttle: never fire faster than a sweep takes
                 if not auto or not self.get_spoke_by_type("bugfixer") or (_t.time() - last_sweep) < effective:
                     await _aio.sleep(30)
@@ -6903,7 +6922,9 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 durations = []
                 for module in self._sentinel_modules():
                     try:
-                        lines = self._gather_module_log_lines(module)
+                        # Only the last interval-minutes of logs — send the LLM recent
+                        # activity, not the whole tail.
+                        lines = self._window_log_lines(self._gather_module_log_lines(module), interval_min)
                         errs = self._error_lines(lines)
                         sig = hashlib.sha256("\n".join(errs[-40:]).encode("utf-8", "ignore")).hexdigest() if errs else ""
                         # Cheap gate: skip unless this module has NEW error-level lines.

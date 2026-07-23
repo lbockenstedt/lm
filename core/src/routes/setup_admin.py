@@ -747,9 +747,14 @@ def register(app, hub, ctx):
             resp = {"logs": []}
         except Exception:
             resp = {"logs": []}
-        lines = (resp or {}).get("logs", []) if isinstance(resp, dict) else []
-        log_text = "\n".join(str(l) for l in lines[-400:])
-        label = "Lab Manager (hub) logs" if is_hub else f"{module} logs"
+        # Sources (get_hub_logs / get_module_logs) are oldest→newest, which _window_log_lines
+        # expects. Send the LLM only the recent window (configured interval, default 15 min)
+        # — not the whole tail. Quiet module (nothing in-window) → "no recent activity".
+        lines = [str(l) for l in ((resp or {}).get("logs", []) if isinstance(resp, dict) else [])]
+        win = int(hub.state.get_global_config().get("log_analysis_interval_min", 15) or 15)
+        windowed = hub._window_log_lines(lines, win)
+        log_text = "\n".join(windowed[-400:])
+        label = f"Lab Manager (hub) logs (last {win} min)" if is_hub else f"{module} logs (last {win} min)"
         return await hub.analyze_logs_via_bugfixer(module, log_text, label)
 
     @app.get("/setup/log-analysis")
