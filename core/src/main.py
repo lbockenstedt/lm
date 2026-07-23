@@ -35,6 +35,7 @@ del _os, _ensure_requirements
 import asyncio
 import base64
 import datetime as _dt
+import hashlib
 import hmac
 import json
 import logging
@@ -6749,12 +6750,21 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             logger.warning(f"[recovery] inspect failed for {unit}: {e}")
             return {}
 
+    # Short module name -> advertised spoke module_type, for the log sentinel +
+    # module log gathering (mirrors setup_admin.get_module_logs' map).
+    _SENTINEL_MODULE_TYPES = {
+        "opn": "firewall", "pxmx": "hypervisor", "cppm": "nac", "cs": "simulation",
+        "ldap": "directory", "netbox": "ipam", "dns": "dns", "dhcp": "dhcp",
+        "nw": "nw", "le": "certificates", "truenas": "storage",
+    }
+
     async def analyze_logs_via_bugfixer(self, module, log_text, title):
         """Delegate Log Analysis to the bugfixer spoke (which owns the LLM) and cache
         the result under `module`. The LM hub has no LLM of its own. Never raises —
-        returns {ok, running, module, title, analysis, error, at} and stores it in
-        self._log_analysis_cache. Long timeout: the LLM can be slow."""
+        returns {ok, module, title, analysis, verdict, duration_s, error, at} and stores
+        it in self._log_analysis_cache. Long timeout: the LLM can be slow."""
         from datetime import datetime as _dt
+        import time as _t
         cache = getattr(self, "_log_analysis_cache", None)
         if cache is None:
             cache = self._log_analysis_cache = {}
@@ -6768,55 +6778,156 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         sid = self.get_spoke_by_type("bugfixer")
         if not sid:
             return _store({"ok": False, "running": False, "module": key, "title": title,
-                           "analysis": "", "at": now,
+                           "analysis": "", "verdict": "unknown", "duration_s": None, "at": now,
                            "error": "BugFixer spoke is not connected — Log Analysis needs BugFixer online + approved."})
         if not (log_text or "").strip():
-            return _store({"ok": False, "running": False, "module": key, "title": title,
-                           "analysis": "", "at": now, "error": "No log lines available to analyze."})
+            return _store({"ok": True, "running": False, "module": key, "title": title,
+                           "analysis": "No log lines available to analyze.", "verdict": "none",
+                           "duration_s": 0, "at": now, "error": None})
+        t0 = _t.monotonic()
         try:
             resp = await self.request_response(sid, "ANALYZE_LOGS",
                                                {"logs": log_text, "title": title}, timeout=180.0)
         except Exception as e:  # noqa: BLE001
             return _store({"ok": False, "running": False, "module": key, "title": title,
-                           "analysis": "", "at": now, "error": f"request to bugfixer failed: {e}"})
+                           "analysis": "", "verdict": "unknown", "duration_s": round(_t.monotonic() - t0, 1),
+                           "at": now, "error": f"request to bugfixer failed: {e}"})
+        dur = round(_t.monotonic() - t0, 1)
         inner = resp.get("payload", {}).get("data", resp) if isinstance(resp, dict) else {}
         ok = inner.get("status") == "ok"
         return _store({"ok": ok, "running": False, "module": key,
                        "title": inner.get("title") or title,
                        "analysis": inner.get("analysis", "") if ok else "",
+                       "verdict": (inner.get("verdict") or ("none" if ok else "unknown")),
+                       "duration_s": dur,
                        "error": None if ok else (inner.get("error") or inner.get("message") or "analysis failed"),
                        "at": now})
 
     def _read_hub_log_tail(self, n=400):
-        """Last n lines of the hub's own log, for the idle Log Analysis precompute."""
+        """Last n lines (list) of the hub's own log."""
         try:
             from collections import deque
             p = "/var/log/lm/hub.log"
             if os.path.exists(p):
                 with open(p, "r") as f:
-                    return "".join(deque(f, maxlen=n))
+                    return [l.rstrip("\n") for l in deque(f, maxlen=n)]
         except Exception:  # noqa: BLE001
             pass
         try:
-            return "\n".join(str(l) for l in list(self.logs)[-n:]) if hasattr(self, "logs") else ""
+            return [str(l) for l in list(self.logs)[-n:]] if hasattr(self, "logs") else []
         except Exception:  # noqa: BLE001
-            return ""
+            return []
+
+    def _gather_module_log_lines(self, module, n=400):
+        """Recent log lines for a module: hub.log for 'hub', else the relayed
+        agent_logs of the spoke(s) advertising that module's type (or name-prefixed)."""
+        if module in ("hub", "recovery", "all", ""):
+            return self._read_hub_log_tail(n)
+        mtype = self._SENTINEL_MODULE_TYPES.get(module)
+        sids = set()
+        if mtype:
+            sids.update(sid for sid, mt in self.spoke_module_types.items() if mt == mtype)
+        sids.update(sid for sid in getattr(self, "agent_logs", {})
+                    if sid == module or sid.startswith(module + "-"))
+        out = []
+        for sid in sids:
+            for line in list(self.agent_logs.get(sid, []))[-n:]:
+                out.append(str(line))
+        return out[-n:]
+
+    def _sentinel_modules(self):
+        """Modules the log sentinel watches: 'hub' + every short-name module that has a
+        connected spoke (or buffered relayed logs)."""
+        mods = ["hub"]
+        for name, mtype in self._SENTINEL_MODULE_TYPES.items():
+            live = any(mt == mtype for mt in self.spoke_module_types.values())
+            buffered = any(sid == name or sid.startswith(name + "-")
+                           for sid in getattr(self, "agent_logs", {}))
+            if live or buffered:
+                mods.append(name)
+        return mods
+
+    @staticmethod
+    def _error_lines(lines):
+        """Error-level lines only — the cheap pre-gate before spending an LLM call."""
+        kws = ("ERROR", "CRITICAL", "Traceback", "Exception", "FATAL")
+        return [l for l in lines if any(k in l for k in kws)]
+
+    async def _escalate_to_bugfixer(self, module, log_slice, analysis, verdict):
+        """Ship a Tier-1 'escalate' verdict to the bugfixer spoke for deep triage
+        (ESCALATE_LOG_ISSUE → file_escalated_issue). Best-effort; logs the outcome."""
+        sid = self.get_spoke_by_type("bugfixer")
+        if not sid:
+            return
+        try:
+            resp = await self.request_response(
+                sid, "ESCALATE_LOG_ISSUE",
+                {"module": module, "logs": log_slice, "analysis": analysis, "verdict": verdict},
+                timeout=90.0)
+            inner = resp.get("payload", {}).get("data", resp) if isinstance(resp, dict) else {}
+            logger.info(f"[log-sentinel] escalated {module} → bugfixer: "
+                        f"{inner.get('status')} {inner.get('detail', '')}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[log-sentinel] escalation of {module} failed: {e}")
 
     async def run_log_health_loop(self):
-        """Pre-compute a health snapshot of the hub's own logs (delegated to the
-        bugfixer spoke) so the WebUI Log Analysis panel shows a ready answer on open.
-        Every ~15 min, best-effort, only when bugfixer is connected; the WebUI Refresh
-        button always triggers a live run. Never raises out of the loop."""
+        """Tier-1 log sentinel. Per module (hub + each connected spoke), cheaply gate on
+        NEW error-level lines; only then spend a (bugfixer-delegated) LLM analysis, cache
+        it for the WebUI panel, and — if the verdict is 'escalate' — ship it to bugfixer
+        for deep triage. Configurable via global_config: log_analysis_auto (default True)
+        + log_analysis_interval_min (default 15). Self-throttled so it never overlaps and
+        never fires faster than a sweep takes (effective gap = max(interval, last sweep
+        duration)). Records generation-time metrics. Never raises out of the loop."""
         import asyncio as _aio
+        import time as _t
+        if not hasattr(self, "_log_sentinel_sig"):
+            self._log_sentinel_sig = {}
+        self._log_sentinel_metric = getattr(self, "_log_sentinel_metric", {})
+        last_sweep = 0.0
+        last_dur = 0.0
         await _aio.sleep(120)  # let startup settle + bugfixer connect
         while True:
             try:
-                if self.get_spoke_by_type("bugfixer"):
-                    text = self._read_hub_log_tail()
-                    await self.analyze_logs_via_bugfixer("hub", text, "Lab Manager (hub) logs")
+                gc = self.state.get_global_config() if hasattr(self.state, "get_global_config") else {}
+                auto = gc.get("log_analysis_auto", True)
+                interval = max(60, int(gc.get("log_analysis_interval_min", 15) or 15) * 60)
+                effective = max(interval, last_dur)  # self-throttle: never fire faster than a sweep takes
+                if not auto or not self.get_spoke_by_type("bugfixer") or (_t.time() - last_sweep) < effective:
+                    await _aio.sleep(30)
+                    continue
+
+                sweep_t0 = _t.monotonic()
+                durations = []
+                for module in self._sentinel_modules():
+                    try:
+                        lines = self._gather_module_log_lines(module)
+                        errs = self._error_lines(lines)
+                        sig = hashlib.sha256("\n".join(errs[-40:]).encode("utf-8", "ignore")).hexdigest() if errs else ""
+                        # Cheap gate: skip unless this module has NEW error-level lines.
+                        if not errs or self._log_sentinel_sig.get(module) == sig:
+                            continue
+                        self._log_sentinel_sig[module] = sig
+                        title = ("Lab Manager (hub) logs" if module == "hub" else f"{module} logs")
+                        res = await self.analyze_logs_via_bugfixer(module, "\n".join(lines), title)
+                        if res.get("duration_s"):
+                            durations.append(res["duration_s"])
+                        if res.get("ok") and res.get("verdict") == "escalate":
+                            await self._escalate_to_bugfixer(
+                                module, "\n".join(errs[-60:]), res.get("analysis", ""), "escalate")
+                    except Exception as me:  # noqa: BLE001
+                        logger.debug(f"[log-sentinel] module {module} error: {me}")
+                last_dur = round(_t.monotonic() - sweep_t0, 1)
+                last_sweep = _t.time()
+                from datetime import datetime as _dt
+                self._log_sentinel_metric = {
+                    "last_sweep_s": last_dur,
+                    "modules_analyzed": len(durations),
+                    "avg_module_s": round(sum(durations) / len(durations), 1) if durations else None,
+                    "at": _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
             except Exception as e:  # noqa: BLE001
-                logger.debug(f"[log-health] precompute cycle error: {e}")
-            await _aio.sleep(900)
+                logger.debug(f"[log-sentinel] cycle error: {e}")
+            await _aio.sleep(30)
 
     async def run_spoke_recovery_loop(self):
         """Watchdog: recover approved-but-stranded spokes and surface it.
