@@ -2163,7 +2163,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 except Exception:  # noqa: BLE001 — no spoke / offline → empty
                     pass
             return {"hourly": hourly}
-        from .central_hub_poller import success_from_daily
+        from .mist_hub_poller import success_from_daily
         daily = dict(health.summary(tenant_id)) if health else {}
         success = dict(health.success_stats(tenant_id)) if health else {}
         # Merge relayed spoke health (distributed-mode tenants).

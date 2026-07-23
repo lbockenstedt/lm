@@ -62,6 +62,7 @@ from state.manager import StateManager
 from simulations.broadcaster import SimulationsBroadcaster
 from simulations.store import SimulationsStore
 from simulations.central_hub_poller import CentralHubPoller
+from simulations.mist_hub_poller import MistHubPoller
 from security.auth_manager import AuthManager, LDAPAuthProvider
 from security.threat_monitor import ThreatMonitor
 from alert_engine import AlertEngine, run_alert_loop
@@ -569,7 +570,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # only the general Hub log. Reuses the CSBridge handler/deque — these are
         # all hub-side Simulations activity. (Verbose per-cycle diagnostics in
         # these modules are logged at DEBUG so they don't flood either view.)
-        for _sim_logger_name in ("SimRoutes", "SimQuota", "CentralHubPoller"):
+        for _sim_logger_name in ("SimRoutes", "SimQuota", "CentralHubPoller", "MistHubPoller"):
             logging.getLogger(_sim_logger_name).addHandler(cs_bridge_handler)
 
         # Route uncaught SYNC exceptions through the "Hub" logger so they land in
@@ -802,6 +803,24 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self._central_status_path = os.path.join(self.state.data_dir, "central_hub_status.json")
         self._load_central_hub_status()
         self.central_hub_poller = CentralHubPoller(self)
+        # Hub-side Juniper Mist status for CENTRALIZED processing mode, keyed by
+        # tenant_id. Populated by MistHubPoller (the spoke has no Mist client in
+        # centralized mode); read by SimulationsService as a synthetic "Hub
+        # (centralized)" spoke. MIRRORS the central_hub_status apparatus —
+        # Central and Mist are separate products (not shared). See
+        # simulations/mist_hub_poller.py.
+        self.mist_hub_status: Dict[str, dict] = {}
+        # Warm-start persistence for the per-tenant Mist status (the Checks /
+        # Mist / Hardware / Client-Count dashboards in centralized mode). Same
+        # rationale as central_hub_status: without it the dict is empty on boot
+        # and stays blank until the 5-min poller cycle completes. Persisted
+        # encrypted each poll cycle and reloaded here so the dashboards seed from
+        # last-known data immediately, then the poller refreshes it. The 1h
+        # client-count baseline persists separately in MistClientCountTracker
+        # (mist_client_count_*.json).
+        self._mist_status_path = os.path.join(self.state.data_dir, "mist_hub_status.json")
+        self._load_mist_hub_status()
+        self.mist_hub_poller = MistHubPoller(self)
         self.cache_dir = os.path.join(self.state.data_dir, "cache")
         # Network Devices (nw) module: in-memory fleet + per-device cache,
         # persisted to cache/nw_data.json and reloaded on startup so the
@@ -5586,10 +5605,45 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         except Exception as e:  # noqa: BLE001
             logger.warning("central_hub_status persist failed: %s", e)
 
+    def _load_mist_hub_status(self) -> None:
+        """Warm-start mist_hub_status from per-tenant encrypted shards so the
+        centralized-mode Checks/Mist/Hardware dashboards seed on a restart
+        instead of blank-until-first-poll. One-time migration from legacy file.
+        Mirror of _load_central_hub_status (separate product, not shared)."""
+        try:
+            from security.encryption import hub_encryption
+            from tenant_sharded import migrate_legacy, shard_load
+            _dec = lambda b: hub_encryption.decrypt(b)  # noqa: E731
+            _enc = lambda s: hub_encryption.encrypt(s)  # noqa: E731
+            migrate_legacy(self.state.data_dir, "simulations", "mist_hub_status.json",
+                           tenant_of=lambda k: k, decrypt=_dec, encrypt=_enc)
+            data = shard_load(self.state.data_dir, "simulations", "mist_hub_status.json",
+                              decrypt=_dec) or {}
+            self.mist_hub_status = {str(k): v for k, v in data.items()
+                                    if isinstance(v, dict)}
+            if self.mist_hub_status:
+                logger.info("mist_hub_status: warm-loaded %d tenant status block(s) from shards",
+                            len(self.mist_hub_status))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("mist_hub_status warm load failed: %s — starting empty", e)
+
+    def _save_mist_hub_status(self) -> None:
+        """Encrypted per-tenant shard write of mist_hub_status. Never raises — a
+        failed persist must not break the poll loop. Called once per poll cycle.
+        Mirror of _save_central_hub_status."""
+        try:
+            from security.encryption import hub_encryption
+            from tenant_sharded import shard_save
+            shard_save(self.state.data_dir, "simulations", "mist_hub_status.json",
+                       self.mist_hub_status, tenant_of=lambda k: k,
+                       encrypt=lambda s: hub_encryption.encrypt(s))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("mist_hub_status persist failed: %s", e)
+
     def reset_derived_cache(self, tenant: "Optional[str]" = None) -> dict:
         """Corruption recovery: wipe DERIVED/cache/history state — the sharded
         simulations stores (check_health, poll_window, client_count,
-        simulations_cache, central_hub_status) — both the tenant shard FILES and
+        simulations_cache, central_hub_status, mist_hub_status) — both the tenant shard FILES and
         the resident in-memory dicts, globally or for one tenant.
 
         INVARIANT: NEVER touches config/identity (state.json,
@@ -5602,10 +5656,18 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         from tenant_sharded import reset_tenant_files, reset_all_tenant_files
         poller = getattr(self, "central_hub_poller", None)
         stores = [getattr(poller, a, None) for a in ("_health", "_cpw", "_cc")] if poller else []
+        # MistHubPoller owns its own Mist health/poll-window/client-count stores
+        # (separate product). Wipe them alongside Central's on a reset.
+        mist_poller = getattr(self, "mist_hub_poller", None)
+        stores += [getattr(mist_poller, a, None) for a in ("_health", "_cpw", "_cc")] if mist_poller else []
         if tenant:
             t = str(tenant)
             try:
                 self.central_hub_status.pop(t, None)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self.mist_hub_status.pop(t, None)
             except Exception:  # noqa: BLE001
                 pass
             try:
@@ -5625,6 +5687,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         else:
             try:
                 self.central_hub_status.clear()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self.mist_hub_status.clear()
             except Exception:  # noqa: BLE001
                 pass
             try:
@@ -7477,6 +7543,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # tabs render (distributed mode gets it from the spoke's CentralPoller
         # via CS_TELEMETRY instead). See simulations/central_hub_poller.py.
         central_hub_poll_task = asyncio.create_task(self.central_hub_poller.run_loop())
+        # Hub-side Juniper Mist poll loop for CENTRALIZED processing mode — MIRROR
+        # of the Central loop above (separate product). The hub holds the Mist
+        # token/org and the cs spoke has no Mist client, so this loop produces the
+        # mist_status the Checks/Hardware/Client-Count/Mist tabs render
+        # (distributed mode gets it from the spoke's MistPoller via CS_TELEMETRY).
+        # See simulations/mist_hub_poller.py.
+        mist_hub_poll_task = asyncio.create_task(self.mist_hub_poller.run_loop())
         # Scheduled email health report: fires each tenant's Checks + Client Count
         # report on its configured cadence via the tenant's SMTP (Setup →
         # Notifications → Email Reports). Off unless enabled per tenant.
