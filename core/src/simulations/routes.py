@@ -1538,6 +1538,46 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                         "time_to_stable_s": kg.get("time_to_stable_s"),
                                         "source_tenant": tid, "proposed_at": now}
                                     pending_changed = True
+                # (C) Max-ceiling alert: a quota that ramped its target to `max`
+                # and STILL isn't firing — AND actually filled to that max from the
+                # online pool — means the alert should have fired before we hit the
+                # ceiling; that's a separate problem worth telling the operator
+                # about ("hit max, alert should have fired"). Edge-triggered via
+                # alert_engine: one email on entry, one on recovery, silent while
+                # in-range. Only fetch the spoke ledger to confirm "actually filled"
+                # (matching the WebUI's honest at-max test, assigned >= max) when
+                # some quota is parked at max — the common case costs nothing.
+                try:
+                    _atmax = {kk for kk in live if (state.get(kk) or {}).get("phase") == "at_max"}
+                    _filled: dict = {}
+                    if _atmax:
+                        try:
+                            _res = await _cs_forward_all(tid, "CS_GET_SIM_QUOTA_STATE", {}, timeout=10.0)
+                        except Exception:  # noqa: BLE001
+                            _res = []
+                        for _sid, _d in (_res or []):
+                            if not isinstance(_d, dict):
+                                continue
+                            for _lk, _e in (_d.get("ledger") or {}).items():
+                                _filled.setdefault(_lk, set()).update(_e.get("clients") or [])
+                    # If a quota is at max but the spoke ledger was unreachable, we
+                    # can't confirm "actually filled" — skip this sweep rather than
+                    # emit a false recovery (the alert re-evaluates next tick).
+                    _confirmable = bool(_res) or not _atmax
+                    for q in (adaptive if _confirmable else []):
+                        _ph = (state.get(_adaptive_key(q)) or {}).get("phase")
+                        _mx = int(q.get("max") or 0)
+                        _have = len(_filled.get(sim_quota.quota_dedup_key(q), ()))
+                        _maxed = (_ph == "at_max" and _mx > 0 and _have >= _mx)
+                        _item = f"{q.get('alert_id') or q.get('sim_id') or 'quota'} @ {q.get('site') or 'all sites'}"
+                        _detail = (f"Filled to max ({_mx}) clients but the monitored alert still "
+                                   f"isn't firing — it should have fired below max. Check the "
+                                   f"alert/threshold or investigate the underlying issue.") if _maxed else ""
+                        await hub.alert_engine.evaluate(
+                            tid, "adaptive_quota_maxed", _item, is_bad=_maxed,
+                            detail=_detail, severity="error" if _maxed else "")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("adaptive max-alert (%s): %s", tid, exc)
                 for k in list(state.keys()):
                     if k not in live:
                         state.pop(k, None); changed = True

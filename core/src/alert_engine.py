@@ -27,13 +27,14 @@ from typing import Any, Dict
 
 logger = logging.getLogger("AlertEngine")
 
-SOURCES = ("dashboard_check", "vm_offline", "quota_unmet", "spoke_offline",
-           "cert_issue_failed", "cert_renew_failed", "cert_deploy_failed",
+SOURCES = ("dashboard_check", "vm_offline", "quota_unmet", "adaptive_quota_maxed",
+           "spoke_offline", "cert_issue_failed", "cert_renew_failed", "cert_deploy_failed",
            "bulk_dongle_failure", "single_bus_failing")
 _LABEL = {
     "dashboard_check": "Dashboard check",
     "vm_offline": "VM / hypervisor offline",
     "quota_unmet": "Quota engine — requirement unmet",
+    "adaptive_quota_maxed": "Adaptive quota — at max, alert not firing",
     "spoke_offline": "Spoke / agent offline",
     "cert_issue_failed": "Certificate Request Failed",
     "cert_renew_failed": "Certificate Renewal Failed",

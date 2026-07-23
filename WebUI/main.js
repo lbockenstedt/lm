@@ -3535,7 +3535,7 @@ async function loadAlertRules() {
     } catch (e) { el.innerHTML = `<p class="text-sm text-red-500">Could not load alert rules: ${escapeHtml(e.message)}</p>`; return; }
     window._alertSources = d.sources || [];
     window._alertRulesCache = d.rules || [];
-    const SRCL = { dashboard_check: 'Dashboard check breach', vm_offline: 'VM / hypervisor offline', quota_unmet: "Quota engine can't meet requirement", spoke_offline: 'Spoke / agent offline', cert_issue_failed: 'Certificate Request Failed', cert_renew_failed: 'Certificate Renewal Failed', cert_deploy_failed: 'Certificate Deploy Failed', bulk_dongle_failure: 'Dongle quarantine — bulk client failure', single_bus_failing: 'Dongle quarantine — single bus failing' };
+    const SRCL = { dashboard_check: 'Dashboard check breach', vm_offline: 'VM / hypervisor offline', quota_unmet: "Quota engine can't meet requirement", adaptive_quota_maxed: 'Adaptive quota — at max, alert not firing', spoke_offline: 'Spoke / agent offline', cert_issue_failed: 'Certificate Request Failed', cert_renew_failed: 'Certificate Renewal Failed', cert_deploy_failed: 'Certificate Deploy Failed', bulk_dongle_failure: 'Dongle quarantine — bulk client failure', single_bus_failing: 'Dongle quarantine — single bus failing' };
     const rules = d.rules || [];
     const rows = rules.length ? rules.map(r => `<tr class="border-b border-slate-100">
         <td class="px-3 py-2"><span class="font-semibold text-slate-700">${escapeHtml(r.name || '')}</span></td>
@@ -3554,7 +3554,7 @@ async function loadAlertRules() {
 
 function editAlertRule(id) {
     const existing = (window._alertRulesCache || []).find(r => r.id === id) || null;
-    const SRCL = { dashboard_check: 'Dashboard check breach', vm_offline: 'VM / hypervisor offline', quota_unmet: "Quota engine can't meet requirement", spoke_offline: 'Spoke / agent offline', cert_issue_failed: 'Certificate Request Failed', cert_renew_failed: 'Certificate Renewal Failed', cert_deploy_failed: 'Certificate Deploy Failed', bulk_dongle_failure: 'Dongle quarantine — bulk client failure', single_bus_failing: 'Dongle quarantine — single bus failing' };
+    const SRCL = { dashboard_check: 'Dashboard check breach', vm_offline: 'VM / hypervisor offline', quota_unmet: "Quota engine can't meet requirement", adaptive_quota_maxed: 'Adaptive quota — at max, alert not firing', spoke_offline: 'Spoke / agent offline', cert_issue_failed: 'Certificate Request Failed', cert_renew_failed: 'Certificate Renewal Failed', cert_deploy_failed: 'Certificate Deploy Failed', bulk_dongle_failure: 'Dongle quarantine — bulk client failure', single_bus_failing: 'Dongle quarantine — single bus failing' };
     const sources = (window._alertSources && window._alertSources.length) ? window._alertSources : ['dashboard_check', 'vm_offline', 'quota_unmet', 'spoke_offline'];
     document.getElementById('alert-edit-modal')?.remove();
     const modal = document.createElement('div');
