@@ -1104,22 +1104,37 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """Merge platform-wide default sim quotas with the tenant's overrides,
         enabled-only (per-alert: tenant wins if it declares any enabled row for
         that alert, else the global default applies). The cs spoke's
-        SimQuotaEngine consumes this list. Pure merge in sim_quota.merge_effective_quotas."""
+        SimQuotaEngine consumes this list. Pure merge in sim_quota.merge_effective_quotas.
+
+        Source-aware (Phase 4): the tenant's rows live in TWO configs —
+        ``central_sites_config.sim_quotas`` (``Central:`` rows) and
+        ``mist_sites_config.sim_quotas`` (``Mist:`` rows). They're UNIONED here;
+        the ``Central:``/``Mist:`` prefix on each row's ``alert_id`` makes them
+        distinct dedup/adaptive keys (independent learning + separate clients),
+        so the merge treats them as separate alerts. Global defaults are Central
+        (bare ids) and never collide with ``Mist:`` rows."""
         from .sim_quota import merge_effective_quotas, resolve_effective_quotas, SIM_META
         try:
             t_csc = await store.get_central_sites_config(tenant_id) or {}
         except Exception:  # noqa: BLE001
             t_csc = {}
+        try:
+            t_msc = await store.get_mist_sites_config(tenant_id) or {}
+        except Exception:  # noqa: BLE001
+            t_msc = {}
+        # Union the tenant's Central + Mist quota rows (prefixed alert_ids keep
+        # them distinct dedup keys, so both survive validate/merge).
+        tenant_rows = list(t_csc.get("sim_quotas") or []) + list(t_msc.get("sim_quotas") or [])
         # A tenant may opt OUT of the platform-wide quota defaults (Config → Sim
         # Quotas → "Ignore global quotas"): then only its own enabled rows apply.
         if t_csc.get("ignore_global_quotas"):
-            base = resolve_effective_quotas(t_csc.get("sim_quotas"), list(SIM_META.keys()))
+            base = resolve_effective_quotas(tenant_rows, list(SIM_META.keys()))
         else:
             try:
                 g_defaults = await store.get_sim_quota_defaults()
             except Exception:  # noqa: BLE001
                 g_defaults = []
-            base = merge_effective_quotas(g_defaults, t_csc.get("sim_quotas"))
+            base = merge_effective_quotas(g_defaults, tenant_rows)
         # Adaptive targets MUST be applied in BOTH branches — the controller ramps
         # state.target from csc.sim_quotas regardless of ignore_global_quotas, so
         # skipping apply here (the old early-return) left count pinned at the min
@@ -1227,28 +1242,41 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         alert the dashboard showed firing was invisible to the Engine, which then
         ramped to max forever. Reading the dashboard value removes that whole
         second code path.
+
+        Source-aware (Phase 4): the row's ``alert_id`` carries a ``Central:`` /
+        ``Mist:`` prefix. Status blocks are read ONLY from the matching source's
+        dashboard status (``central_status`` vs ``mist_status``) and the BARE id
+        (prefix stripped) is compared to the check id — so a Mist quota never
+        fires on a Central check or vice versa. The prefix is the only seam
+        between the two products.
         """
-        # Compare BARE ids. The dashboard/poller key check_status by the BARE
+        # Compare BARE ids. The dashboard/poller keys check_status by the BARE
         # check name (the Central:/Mist: prefix is picker-only), so strip any
         # prefix a stored quota alert_id kept — otherwise a prefixed alert_id
         # never matches the bare check id and a FIRING alert reads as "not
         # firing", making the controller ramp to max on an already-green check.
-        # This reads the same dashboard-computed status; no extra Central call.
-        alert_id = parse_alert_source(q.get("alert_id") or "")[1].strip().lower()
+        # Source-aware (Phase 4): capture the parsed ``source`` too — downstream
+        # reads ONLY the row's own source's status block (central vs mist).
+        raw_aid = str(q.get("alert_id") or "").strip()
+        source, bare_id = sim_quota.parse_alert_source(raw_aid)
+        alert_id = bare_id.strip().lower()
         if not alert_id:
             return None
-        # Every (status_map, site_mappings) the dashboard has for this tenant.
-        blocks = []
-        hub_central = service._hub_central(tenant_id)               # centralized
-        hub_present = isinstance(hub_central, dict)
-        if hub_present:
-            blocks.append((hub_central.get("status") or {},
-                           hub_central.get("site_mappings") or {}))
+        # Every (status_map, site_mappings) the dashboard has for this tenant FROM
+        # THE ROW'S SOURCE ONLY. Central: → central_status (hub poller + relayed
+        # spoke telemetry); Mist: → mist_status (MistHubPoller + relayed mist).
         spokes = list(service._spokes_for_tenant(tenant_id))        # distributed
+        blocks = []
+        data_key = "mist" if source == "mist" else "central"
+        hub_block = service._hub_mist(tenant_id) if source == "mist" else service._hub_central(tenant_id)
+        hub_present = isinstance(hub_block, dict)
+        if hub_present:
+            blocks.append((hub_block.get("status") or {},
+                           hub_block.get("site_mappings") or {}))
         for _sid, data in spokes:
-            central = (data or {}).get("central") or {}
-            blocks.append((central.get("status") or {},
-                           central.get("site_mappings") or {}))
+            src = (data or {}).get(data_key) or {}
+            blocks.append((src.get("status") or {},
+                           src.get("site_mappings") or {}))
         # No early-return on empty blocks: always fall through to the diag so
         # "engine sees NO dashboard status for this tenant" is visible in the log
         # (hub_status=False spokes=0) rather than silently producing no diag line.
@@ -1269,10 +1297,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if site:
             aliases.add(site.lower())
             try:
+                # alias_groups may be a per-source dict {"central": [...], "mist":
+                # [...]} (controller/learner sweeps), a plain list (legacy — Central
+                # groups), or None (compute from this row's source's sites config).
                 groups = alias_groups
                 if groups is None:
-                    csc = await store.get_central_sites_config(tenant_id) or {}
-                    groups = _alias_groups_from_csc(csc)
+                    if source == "mist":
+                        msc = await store.get_mist_sites_config(tenant_id) or {}
+                        groups = _alias_groups_from_csc(msc)
+                    else:
+                        csc = await store.get_central_sites_config(tenant_id) or {}
+                        groups = _alias_groups_from_csc(csc)
+                elif isinstance(groups, dict):
+                    groups = groups.get(source) or []
                 # Fixpoint: union any group that shares a member with the alias set,
                 # repeating until nothing new is added (bounded by len(groups)).
                 changed = True
@@ -1456,6 +1493,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         for tid in _all_tenant_ids():
             try:
                 csc = await store.get_central_sites_config(tid) or {}
+                msc = await store.get_mist_sites_config(tid) or {}
                 # (A) Reconcile-pass each 45s tick: re-push effective quotas when
                 # the spoke's effective set is missing/mismatched vs the hub's,
                 # regardless of adaptive state. The adaptive push below only fires
@@ -1467,10 +1505,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 # the pre-step effective set, the `if changed:` push carries the
                 # post-step target — the second wins, which is correct.
                 await _reconcile_push_tenant(tid)
-                # Resolve the tenant's site-alias groups ONCE for the whole sweep
-                # (was re-read + rebuilt inside _alert_firing per quota).
-                alias_groups = _alias_groups_from_csc(csc)
-                all_q = [normalize_quota(r) for r in (csc.get("sim_quotas") or [])]
+                # Resolve the tenant's site-alias groups ONCE for the whole sweep,
+                # per source (Central + Mist site configs each contribute their own
+                # mappings). _alert_firing picks the matching source's groups.
+                alias_groups = {"central": _alias_groups_from_csc(csc),
+                                "mist": _alias_groups_from_csc(msc)}
+                # Union Central (Central: rows) + Mist (Mist: rows) quota rows;
+                # prefixed alert_ids keep them distinct adaptive/dedup keys.
+                all_q = ([normalize_quota(r) for r in (csc.get("sim_quotas") or [])]
+                         + [normalize_quota(r) for r in (msc.get("sim_quotas") or [])])
                 adaptive = [q for q in all_q if q.get("enabled") and _adaptive_is_on(q)]
                 # DIAG: does the controller even reach _alert_firing for this tenant?
                 # total_quotas>0 but adaptive=0 = quotas aren't adaptive (min==max /
@@ -1648,6 +1691,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # callable seam (and a unit-test hook) without reaching into the closure.
     try:
         hub._reconcile_push_tenant = _reconcile_push_tenant
+        # Source-aware (Phase 4) seams for unit tests: the effective-quota union
+        # (Central + Mist rows) and the source-aware firing check.
+        hub._effective_sim_quotas = _effective_sim_quotas
+        hub._alert_firing = _alert_firing
     except Exception:  # noqa: BLE001
         pass
 
@@ -1697,12 +1744,18 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         for tid in _all_tenant_ids():
             try:
                 csc = await store.get_central_sites_config(tid) or {}
-                learn = [q for q in (normalize_quota(r) for r in (csc.get("sim_quotas") or []))
-                         if q.get("enabled") and q.get("learn_knobs") and knobs_for_sim(q.get("sim_id"))]
+                msc = await store.get_mist_sites_config(tid) or {}
+                # Union Central + Mist learn_knobs rows (prefixed alert_ids →
+                # distinct knob-learner state keys, independent floor search).
+                learn = ([q for q in (normalize_quota(r) for r in (csc.get("sim_quotas") or []))
+                          if q.get("enabled") and q.get("learn_knobs") and knobs_for_sim(q.get("sim_id"))]
+                         + [q for q in (normalize_quota(r) for r in (msc.get("sim_quotas") or []))
+                            if q.get("enabled") and q.get("learn_knobs") and knobs_for_sim(q.get("sim_id"))])
                 if not learn:
                     continue
-                # Site-alias groups resolved ONCE for the sweep (see controller).
-                alias_groups = _alias_groups_from_csc(csc)
+                # Site-alias groups resolved ONCE for the sweep, per source.
+                alias_groups = {"central": _alias_groups_from_csc(csc),
+                                "mist": _alias_groups_from_csc(msc)}
                 state = await store.get_knob_learn_state(tid)
                 changed = False
                 live = set()
