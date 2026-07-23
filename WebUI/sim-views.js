@@ -897,8 +897,8 @@ window.csKillSwitchMountChip = async function (elId) {
 // never hides the match). Empty when the check isn't a monitored alert/insight.
 function csCheckTypeTag(checkId) {
     const t = (window._csCheckType || {})[String(checkId || '').trim().replace(/^(central|mist):/i, '').toLowerCase()];
-    if (t === 'alert') return '<span class="text-[10px] font-bold text-sky-700" title="Alert">(A)</span> ';
-    if (t === 'insight') return '<span class="text-[10px] font-bold text-violet-700" title="Insight">(I)</span> ';
+    if (t === 'alert') return '<span class="text-[11px]" title="Alert">🔔</span> ';
+    if (t === 'insight') return '<span class="text-[11px]" title="Insight">ℹ️</span> ';
     return '';
 }
 
