@@ -166,6 +166,14 @@ class HubBugStoreMixin:
     def _mark_bug_filed(self, rid: str, issue_url: str) -> bool:
         return self._update_bug_status(rid, filed=True, issue_url=issue_url, status="filed")
 
+    def _mark_bug_duplicate(self, rid: str, issue_url: str) -> bool:
+        """bugfixer detected this report is a duplicate/recurrence of an EXISTING
+        GitHub issue instead of filing a fresh one → mark it 'duplicate' + link that
+        same issue. filed=True so it isn't re-filed and (for features) isn't gated.
+        The issue_url is recorded so the MARK_BUG_FIXED cascade later flips this
+        report to 'fixed' when bugfixer closes the shared issue."""
+        return self._update_bug_status(rid, filed=True, issue_url=issue_url, status="duplicate")
+
     @staticmethod
     def _bug_feature_gated(r: dict) -> bool:
         """True if this report is a feature request that an admin has NOT yet

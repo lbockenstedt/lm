@@ -4293,8 +4293,12 @@ async function loadBugReports(typeFilter) {
             // may file the GitHub issue and work it. Bugs skip the gate.
             const _st = (r.status || (r.filed ? 'filed' : '')).toLowerCase();
             let status;
-            if (_st === 'fixed') {
-                status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-green-600 font-semibold hover:underline" title="Fixed on GitHub">✓ Fixed ↗</a>`;
+            if (_st === 'fixed' || _st === 'closed') {
+                status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-green-600 font-semibold hover:underline" title="Closed on GitHub — fixed by BugFixer">✓ Fixed ↗</a>`;
+            } else if (_st === 'duplicate') {
+                // Recurrence: bugfixer matched this to an existing issue instead of
+                // filing a new one — link the SAME issue (must win over r.filed).
+                status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-slate-500 font-semibold hover:underline" title="Duplicate — links the same GitHub issue">⧉ Duplicate ↗</a>`;
             } else if (r.filed) {
                 status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline">Filed ↗</a>`;
             } else if (isFeat && _st !== 'approved') {
@@ -4460,8 +4464,10 @@ async function showBugReport(rid) {
         if (titleEl) titleEl.innerHTML = `${isFeat ? '💡 Feature Request' : '🐛 Bug Report'} <span class="font-mono text-slate-400">${escapeHtml(rid)}</span>`;
         const _dst = (r.status || (r.filed ? 'filed' : '')).toLowerCase();
         let status;
-        if (_dst === 'fixed') {
-            status = `<span class="text-green-600 font-semibold">✓ Fixed</span> — <a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline break-all">${escapeHtml(r.issue_url || 'GitHub issue')}</a>`;
+        if (_dst === 'fixed' || _dst === 'closed') {
+            status = `<span class="text-green-600 font-semibold">✓ Fixed (issue closed on GitHub)</span> — <a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline break-all">${escapeHtml(r.issue_url || 'GitHub issue')}</a>`;
+        } else if (_dst === 'duplicate') {
+            status = `<span class="text-slate-500 font-semibold">⧉ Duplicate</span> — same issue: <a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline break-all">${escapeHtml(r.issue_url || 'GitHub issue')}</a>`;
         } else if (r.filed) {
             status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline break-all">${escapeHtml(r.issue_url || 'Filed')}</a>`;
         } else if (isFeat && _dst !== 'approved') {

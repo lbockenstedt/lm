@@ -5493,6 +5493,19 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 )
                 return {"status": "ok" if ok else "not_found"}
 
+            if req_type == "MARK_BUG_DUPLICATE":
+                # bugfixer matched this report to an EXISTING issue (recurrence/same
+                # error) instead of filing a new one → the LM UI shows "Duplicate"
+                # linking that same issue.
+                rid = req.get("id", "")
+                issue_url = req.get("issue_url", "")
+                ok = await asyncio.to_thread(self._mark_bug_duplicate, rid, issue_url)
+                logger.info(
+                    f"[bug-report] MARK_BUG_DUPLICATE id={rid} url={issue_url} "
+                    f"from {spoke_id}: {'ok' if ok else 'not_found'}"
+                )
+                return {"status": "ok" if ok else "not_found"}
+
             # NetBox IPAM spoke (API-only, no cert helper) owns the cert-install
             # KNOWLEDGE and relays the actual install to the netbox-server agent
             # (the NetBox web host, which has nginx + the root sudoers helper).
