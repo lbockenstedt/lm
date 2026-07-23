@@ -761,7 +761,41 @@ def register(app, hub, ctx):
         if cached:
             return cached
         return {"ok": None, "running": False, "module": module or "hub",
-                "analysis": "", "error": None, "at": None}
+                "analysis": "", "verdict": None, "error": None, "at": None}
+
+    @app.get("/setup/log-analysis/config")
+    async def get_log_analysis_config():
+        """Log-sentinel settings + last-sweep generation-time metric for the UI."""
+        hub = app.state.hub
+        gc = hub.state.get_global_config()
+        return {
+            "auto": gc.get("log_analysis_auto", True),
+            "interval_min": int(gc.get("log_analysis_interval_min", 15) or 15),
+            "metric": getattr(hub, "_log_sentinel_metric", {}) or {},
+            "bugfixer_online": bool(hub.get_spoke_by_type("bugfixer")),
+        }
+
+    @app.post("/setup/log-analysis/config")
+    async def set_log_analysis_config(request: Request):
+        """Enable/disable the unattended sentinel + set its target interval (minutes).
+        The loop self-throttles so the effective gap is never shorter than a sweep takes."""
+        hub = app.state.hub
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        gc = hub.state.get_global_config()
+        if "auto" in data:
+            gc["log_analysis_auto"] = bool(data.get("auto"))
+        if "interval_min" in data:
+            try:
+                gc["log_analysis_interval_min"] = max(1, int(data.get("interval_min")))
+            except (TypeError, ValueError):
+                pass
+        hub.state.system_state["global_config"] = gc
+        hub.state._mark_dirty()
+        return {"ok": True, "auto": gc.get("log_analysis_auto", True),
+                "interval_min": int(gc.get("log_analysis_interval_min", 15) or 15)}
 
     @app.post("/setup/logs/clear")
     async def clear_all_logs(request: Request):

@@ -4115,10 +4115,13 @@ function _renderLogsSection(subMenu) {
     const analysisBtn = (isBugs || isFeatures) ? '' :
         `<button id="lm-log-analysis-btn" onclick="runLmLogAnalysis('${module}')" class="text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 px-2 py-1 rounded">✨ Log Analysis</button>`;
     const analysisPanel = (isBugs || isFeatures) ? '' : `
-            <div id="lm-log-analysis-panel" class="hidden px-4 py-3 border-b border-slate-200 bg-indigo-50/40">
-                <div class="flex items-center gap-2 mb-1">
+            <div id="lm-log-analysis-panel" class="px-4 py-3 border-b border-slate-200 bg-indigo-50/40">
+                <div class="flex items-center gap-2 mb-1 flex-wrap">
                     <span class="text-[11px] font-bold uppercase tracking-wider text-indigo-700">✨ Log Analysis</span>
+                    <span id="lm-log-analysis-verdict" class="hidden text-[10px] font-bold px-1.5 py-0.5 rounded"></span>
                     <span id="lm-log-analysis-meta" class="text-[10px] text-slate-400"></span>
+                    <span class="flex-1"></span>
+                    <span id="lm-log-analysis-config" class="text-[10px] text-slate-400 flex items-center gap-1"></span>
                 </div>
                 <div id="lm-log-analysis-body" class="text-xs text-slate-700 whitespace-pre-wrap leading-relaxed bg-white rounded border border-slate-200 p-3 max-h-72 overflow-y-auto">—</div>
             </div>`;
@@ -4152,9 +4155,16 @@ function _renderLogsSection(subMenu) {
 }
 
 // ── AI Log Analysis (delegated to the bugfixer spoke's LLM) ──
+const _lmAutoRan = new Set();  // per-session guard so tab-flipping doesn't fan out LLM calls
+const _LM_VERDICT = {
+    escalate: ['ESCALATE', 'bg-red-100 text-red-700'],
+    watch: ['WATCH', 'bg-amber-100 text-amber-700'],
+    none: ['HEALTHY', 'bg-green-100 text-green-700'],
+};
 function _lmLaRender(la) {
     const body = document.getElementById('lm-log-analysis-body');
     const meta = document.getElementById('lm-log-analysis-meta');
+    const vEl = document.getElementById('lm-log-analysis-verdict');
     const btn = document.getElementById('lm-log-analysis-btn');
     if (!body) return;
     if (la && la.running) { body.textContent = 'Analyzing…'; if (btn) btn.disabled = true; return; }
@@ -4162,22 +4172,57 @@ function _lmLaRender(la) {
     if (la && la.error) body.textContent = '⚠ ' + la.error;
     else if (la && la.analysis) body.textContent = la.analysis;
     else body.textContent = 'No analysis yet — click Log Analysis to run one.';
-    if (meta) meta.textContent = (la && la.title ? la.title + ' · ' : '') + (la && la.at ? 'analyzed ' + la.at : '');
+    if (vEl) {
+        const v = (la && la.verdict) || '';
+        if (_LM_VERDICT[v]) {
+            vEl.textContent = _LM_VERDICT[v][0];
+            vEl.className = 'text-[10px] font-bold px-1.5 py-0.5 rounded ' + _LM_VERDICT[v][1];
+            vEl.classList.remove('hidden');
+        } else { vEl.classList.add('hidden'); }
+    }
+    if (meta) meta.textContent = (la && la.title ? la.title + ' · ' : '')
+        + (la && la.at ? 'analyzed ' + la.at : '')
+        + (la && la.duration_s != null ? ' · ' + la.duration_s + 's' : '');
+}
+async function _lmLoadSentinelConfig() {
+    const el = document.getElementById('lm-log-analysis-config');
+    if (!el) return;
+    try {
+        const c = await (await setupFetch('/setup/log-analysis/config')).json();
+        const m = c.metric || {};
+        const metricTxt = m.at ? ` · last sweep ${m.last_sweep_s ?? '?'}s${m.avg_module_s != null ? ' · avg ' + m.avg_module_s + 's/mod' : ''}` : '';
+        el.innerHTML =
+            `<label class="cursor-pointer flex items-center gap-1" title="Unattended per-module log sentinel">Auto`
+            + `<input type="checkbox" ${c.auto ? 'checked' : ''} onchange="_lmSetSentinel({auto:this.checked})"></label>`
+            + ` every <input type="number" min="1" value="${c.interval_min}" onchange="_lmSetSentinel({interval_min:parseInt(this.value)||15})" class="w-9 text-center border border-slate-300 rounded">m`
+            + `<span class="text-slate-400">${metricTxt}</span>`
+            + (c.bugfixer_online ? '' : ' · <span class="text-red-500">BugFixer offline</span>');
+    } catch (e) { /* config unavailable */ }
+}
+async function _lmSetSentinel(patch) {
+    try {
+        await setupFetch('/setup/log-analysis/config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch)
+        });
+    } catch (e) { /* ignore */ }
+    _lmLoadSentinelConfig();
 }
 async function _lmLoadCachedAnalysis(module) {
     const panel = document.getElementById('lm-log-analysis-panel');
     if (!panel) return;
+    _lmLoadSentinelConfig();
     try {
-        const r = await setupFetch('/setup/log-analysis?module=' + encodeURIComponent(module || 'hub'));
-        const la = await r.json();
-        if (la && (la.analysis || la.error)) { panel.classList.remove('hidden'); _lmLaRender(la); }
+        const la = await (await setupFetch('/setup/log-analysis?module=' + encodeURIComponent(module || 'hub'))).json();
+        if (la && (la.analysis || la.error)) { _lmLaRender(la); return; }
+        // Option A: no cached analysis for this module — auto-run ONCE this session so
+        // the panel is populated on open (throttled so switching tabs doesn't fan out).
+        const key = module || 'hub';
+        if (!_lmAutoRan.has(key)) { _lmAutoRan.add(key); runLmLogAnalysis(module); }
     } catch (e) { /* no cached analysis */ }
 }
 async function runLmLogAnalysis(module) {
-    const panel = document.getElementById('lm-log-analysis-panel');
     const body = document.getElementById('lm-log-analysis-body');
     const btn = document.getElementById('lm-log-analysis-btn');
-    if (panel) panel.classList.remove('hidden');
     if (body) body.textContent = 'Asking BugFixer to read the logs… (this can take a bit)';
     if (btn) btn.disabled = true;
     try {
