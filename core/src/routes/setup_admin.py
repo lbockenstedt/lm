@@ -728,6 +728,41 @@ def register(app, hub, ctx):
             logger.error(f"Error reading logs for {module}: {e}")
             raise HTTPException(status_code=500, detail=f"Permission or I/O error reading {log_path}: {str(e)}")
 
+    @app.post("/setup/log-analysis")
+    async def run_log_analysis(request: Request):
+        """AI Log Analysis: gather this module's logs (same lines the Logs UI shows)
+        and delegate to the bugfixer spoke's LLM. The hub has no LLM of its own.
+        Blocks until the analysis returns (long — the LLM can be slow); admin-gated
+        by the /setup/* middleware."""
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        module = (body or {}).get("module") or "hub"
+        is_hub = module in ("hub", "recovery", "all", "")
+        try:
+            resp = await (get_hub_logs() if is_hub else get_module_logs(module))
+        except HTTPException:
+            resp = {"logs": []}
+        except Exception:
+            resp = {"logs": []}
+        lines = (resp or {}).get("logs", []) if isinstance(resp, dict) else []
+        log_text = "\n".join(str(l) for l in lines[-400:])
+        label = "Lab Manager (hub) logs" if is_hub else f"{module} logs"
+        return await hub.analyze_logs_via_bugfixer(module, log_text, label)
+
+    @app.get("/setup/log-analysis")
+    async def get_log_analysis(module: str = "hub"):
+        """Return the cached (pre-computed or last-run) Log Analysis for a module."""
+        hub = app.state.hub
+        cache = getattr(hub, "_log_analysis_cache", {}) or {}
+        cached = cache.get(module or "hub")
+        if cached:
+            return cached
+        return {"ok": None, "running": False, "module": module or "hub",
+                "analysis": "", "error": None, "at": None}
+
     @app.post("/setup/logs/clear")
     async def clear_all_logs(request: Request):
         """Clear Logs button in the Logs view. Wipes every log source the Hub

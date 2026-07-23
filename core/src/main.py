@@ -6749,6 +6749,75 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             logger.warning(f"[recovery] inspect failed for {unit}: {e}")
             return {}
 
+    async def analyze_logs_via_bugfixer(self, module, log_text, title):
+        """Delegate Log Analysis to the bugfixer spoke (which owns the LLM) and cache
+        the result under `module`. The LM hub has no LLM of its own. Never raises —
+        returns {ok, running, module, title, analysis, error, at} and stores it in
+        self._log_analysis_cache. Long timeout: the LLM can be slow."""
+        from datetime import datetime as _dt
+        cache = getattr(self, "_log_analysis_cache", None)
+        if cache is None:
+            cache = self._log_analysis_cache = {}
+        now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+        key = module or "hub"
+
+        def _store(res):
+            cache[key] = res
+            return res
+
+        sid = self.get_spoke_by_type("bugfixer")
+        if not sid:
+            return _store({"ok": False, "running": False, "module": key, "title": title,
+                           "analysis": "", "at": now,
+                           "error": "BugFixer spoke is not connected — Log Analysis needs BugFixer online + approved."})
+        if not (log_text or "").strip():
+            return _store({"ok": False, "running": False, "module": key, "title": title,
+                           "analysis": "", "at": now, "error": "No log lines available to analyze."})
+        try:
+            resp = await self.request_response(sid, "ANALYZE_LOGS",
+                                               {"logs": log_text, "title": title}, timeout=180.0)
+        except Exception as e:  # noqa: BLE001
+            return _store({"ok": False, "running": False, "module": key, "title": title,
+                           "analysis": "", "at": now, "error": f"request to bugfixer failed: {e}"})
+        inner = resp.get("payload", {}).get("data", resp) if isinstance(resp, dict) else {}
+        ok = inner.get("status") == "ok"
+        return _store({"ok": ok, "running": False, "module": key,
+                       "title": inner.get("title") or title,
+                       "analysis": inner.get("analysis", "") if ok else "",
+                       "error": None if ok else (inner.get("error") or inner.get("message") or "analysis failed"),
+                       "at": now})
+
+    def _read_hub_log_tail(self, n=400):
+        """Last n lines of the hub's own log, for the idle Log Analysis precompute."""
+        try:
+            from collections import deque
+            p = "/var/log/lm/hub.log"
+            if os.path.exists(p):
+                with open(p, "r") as f:
+                    return "".join(deque(f, maxlen=n))
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            return "\n".join(str(l) for l in list(self.logs)[-n:]) if hasattr(self, "logs") else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    async def run_log_health_loop(self):
+        """Pre-compute a health snapshot of the hub's own logs (delegated to the
+        bugfixer spoke) so the WebUI Log Analysis panel shows a ready answer on open.
+        Every ~15 min, best-effort, only when bugfixer is connected; the WebUI Refresh
+        button always triggers a live run. Never raises out of the loop."""
+        import asyncio as _aio
+        await _aio.sleep(120)  # let startup settle + bugfixer connect
+        while True:
+            try:
+                if self.get_spoke_by_type("bugfixer"):
+                    text = self._read_hub_log_tail()
+                    await self.analyze_logs_via_bugfixer("hub", text, "Lab Manager (hub) logs")
+            except Exception as e:  # noqa: BLE001
+                logger.debug(f"[log-health] precompute cycle error: {e}")
+            await _aio.sleep(900)
+
     async def run_spoke_recovery_loop(self):
         """Watchdog: recover approved-but-stranded spokes and surface it.
 
@@ -7504,6 +7573,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         rotation_task = asyncio.create_task(self.run_key_rotation_loop())
         mtls_renewal_task = asyncio.create_task(self.run_mtls_renewal_loop())
         threat_sweep_task = asyncio.create_task(self.run_threat_sweep_loop())
+        log_health_task = asyncio.create_task(self.run_log_health_loop())
         alert_engine_task = asyncio.create_task(run_alert_loop(self))
         tenant_sync_task = asyncio.create_task(self.run_tenant_sync_loop())
         # NetBox → CPPM endpoint sync: pulls each tenant's endpoints from the

@@ -4110,6 +4110,18 @@ function _renderLogsSection(subMenu) {
     // a log source.
     const clearBtn = (isBugs || isFeatures) ? '' :
         `<button onclick="clearLogs(()=>${refreshCall})" class="text-xs text-red-500 hover:text-red-700 font-medium">Clear</button>`;
+    // AI Log Analysis — delegated to the bugfixer spoke's LLM. Not a log source, so
+    // it's hidden on the Bug Reports / Feature Requests tabs.
+    const analysisBtn = (isBugs || isFeatures) ? '' :
+        `<button id="lm-log-analysis-btn" onclick="runLmLogAnalysis('${module}')" class="text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 px-2 py-1 rounded">✨ Log Analysis</button>`;
+    const analysisPanel = (isBugs || isFeatures) ? '' : `
+            <div id="lm-log-analysis-panel" class="hidden px-4 py-3 border-b border-slate-200 bg-indigo-50/40">
+                <div class="flex items-center gap-2 mb-1">
+                    <span class="text-[11px] font-bold uppercase tracking-wider text-indigo-700">✨ Log Analysis</span>
+                    <span id="lm-log-analysis-meta" class="text-[10px] text-slate-400"></span>
+                </div>
+                <div id="lm-log-analysis-body" class="text-xs text-slate-700 whitespace-pre-wrap leading-relaxed bg-white rounded border border-slate-200 p-3 max-h-72 overflow-y-auto">—</div>
+            </div>`;
     content.innerHTML = `
         <div class="${card}">
             <div class="px-4 py-3 border-b border-slate-200 flex justify-between items-center bg-slate-50">
@@ -4119,11 +4131,12 @@ function _renderLogsSection(subMenu) {
                         class="text-[10px] bg-white border border-slate-300 px-2 py-1 rounded hover:bg-slate-50 transition-colors font-medium flex items-center gap-1">
                         <span id="debug-mode-text">Debug Logging: OFF</span>
                     </button>
+                    ${analysisBtn}
                     <button onclick="copyLogs()" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Copy</button>
                     ${clearBtn}
                     <button onclick="${refreshCall}" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Refresh</button>
                 </div>
-            </div>
+            </div>${analysisPanel}
             <div id="system-logs-container" class="h-[32rem] overflow-y-auto font-mono text-xs bg-white border border-slate-200 rounded-md text-slate-700 space-y-0"></div>
         </div>${isRecovery && typeof isAdmin === 'function' && isAdmin() ? _stateResetCardHtml() : ''}`;
     if (isRecovery) {
@@ -4134,7 +4147,50 @@ function _renderLogsSection(subMenu) {
     } else {
         loadModuleLogs(module);
     }
+    if (!isBugs && !isFeatures) _lmLoadCachedAnalysis(module);
     refreshDebugButtonState();
+}
+
+// ── AI Log Analysis (delegated to the bugfixer spoke's LLM) ──
+function _lmLaRender(la) {
+    const body = document.getElementById('lm-log-analysis-body');
+    const meta = document.getElementById('lm-log-analysis-meta');
+    const btn = document.getElementById('lm-log-analysis-btn');
+    if (!body) return;
+    if (la && la.running) { body.textContent = 'Analyzing…'; if (btn) btn.disabled = true; return; }
+    if (btn) btn.disabled = false;
+    if (la && la.error) body.textContent = '⚠ ' + la.error;
+    else if (la && la.analysis) body.textContent = la.analysis;
+    else body.textContent = 'No analysis yet — click Log Analysis to run one.';
+    if (meta) meta.textContent = (la && la.title ? la.title + ' · ' : '') + (la && la.at ? 'analyzed ' + la.at : '');
+}
+async function _lmLoadCachedAnalysis(module) {
+    const panel = document.getElementById('lm-log-analysis-panel');
+    if (!panel) return;
+    try {
+        const r = await setupFetch('/setup/log-analysis?module=' + encodeURIComponent(module || 'hub'));
+        const la = await r.json();
+        if (la && (la.analysis || la.error)) { panel.classList.remove('hidden'); _lmLaRender(la); }
+    } catch (e) { /* no cached analysis */ }
+}
+async function runLmLogAnalysis(module) {
+    const panel = document.getElementById('lm-log-analysis-panel');
+    const body = document.getElementById('lm-log-analysis-body');
+    const btn = document.getElementById('lm-log-analysis-btn');
+    if (panel) panel.classList.remove('hidden');
+    if (body) body.textContent = 'Asking BugFixer to read the logs… (this can take a bit)';
+    if (btn) btn.disabled = true;
+    try {
+        const r = await setupFetch('/setup/log-analysis', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ module: module || 'hub' })
+        });
+        const la = await r.json();
+        _lmLaRender(la);
+    } catch (e) {
+        if (body) body.textContent = 'Log Analysis failed: ' + (e.message || e);
+        if (btn) btn.disabled = false;
+    }
 }
 
 // ── Corruption-recovery: reset DERIVED cached data (global / per-tenant) ──────
