@@ -23,6 +23,10 @@ import logging
 import re
 from .service import SimulationsService, _PASS, _FAIL
 from .aruba import test_central_from_config, get_central_available_from_config, browse_all_from_config
+from .mist import (
+    test_mist_from_config, get_mist_available_from_config, browse_mist_from_config,
+    validate_mist_host, _KNOWN_MIST_HOSTS, _DEFAULT_MIST_HOST,
+)
 from .sim_quota import validate_sim_quotas, sim_quota_catalog_from_ini, available_sims_from_ini, prefixed_alert_id
 from . import sim_quota
 from . import email_report
@@ -2132,6 +2136,130 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         pushed = await _push_config(tenant_id, {"central_config": cfg})
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
+    # ── Mist aggregate routes — mirror of Central (separate product) ──────────
+    @app.get("/sim/api/aggregate/mist")
+    async def get_mist(tenant_id: str = Depends(get_tenant_id)):
+        return await service.get_mist_data(tenant_id)
+
+    @app.get("/sim/api/aggregate/mist-health")
+    async def get_mist_health(request: Request, tenant_id: str = Depends(get_tenant_id)):
+        """30-day per-check health history for Mist checks (green/yellow/red).
+        Mirror of /aggregate/central-health: DAILY summaries by default, raw
+        HOURLY buckets with ?site=&check=. Merges the centralized MistHubPoller
+        history (Phase 3) with any DISTRIBUTED spoke's relayed daily summary
+        (mist_status.health); hourly for a distributed check is fetched on demand
+        from the owning spoke (CS_GET_MIST_HEALTH)."""
+        poller = getattr(hub, "mist_hub_poller", None)
+        health = getattr(poller, "_health", None)
+        site = request.query_params.get("site")
+        check = request.query_params.get("check")
+        if site and check:
+            hourly = health.hourly(tenant_id, site, check) if health else []
+            if not hourly:  # distributed → ask the owning spoke
+                try:
+                    r = await _cs_forward(tenant_id, "CS_GET_MIST_HEALTH",
+                                          {"site": site, "check": check}, timeout=10.0)
+                    hourly = (r or {}).get("hourly") or []
+                except Exception:  # noqa: BLE001 — no spoke / offline → empty
+                    pass
+            return {"hourly": hourly}
+        from .central_hub_poller import success_from_daily
+        daily = dict(health.summary(tenant_id)) if health else {}
+        success = dict(health.success_stats(tenant_id)) if health else {}
+        # Merge relayed spoke health (distributed-mode tenants).
+        for _sid, data in service._spokes_for_tenant(tenant_id):
+            sp = ((data or {}).get("mist") or {}).get("health") or {}
+            for site_name, checks in sp.items():
+                daily.setdefault(site_name, {}).update(checks)
+        for site_name, checks in daily.items():
+            for cid, dlist in (checks or {}).items():
+                if success.get(site_name, {}).get(cid) is None:
+                    success.setdefault(site_name, {})[cid] = success_from_daily(dlist)
+        return {"daily": daily, "success": success}
+
+    @app.get("/sim/api/aggregate/mist-status")
+    async def get_mist_status(tenant_id: str = Depends(get_tenant_id)):
+        data = await service.get_mist_status_data(tenant_id)
+        # Merge hub-owned mist config (token + org + host) from the store so the
+        # Mist tab's form populates.
+        mc = await store.get_mist_config(tenant_id)
+        if isinstance(mc, dict):
+            data["hub_mist_config"] = mc
+        return data
+
+    @app.get("/sim/api/aggregate/mist-browse")
+    async def get_mist_browse(tenant_id: str = Depends(get_tenant_id)):
+        """FULL Mist inventory (all sites / alerts / insights / clients), on-demand,
+        for the Mist → Sites/Alerts/Clients tabs — independent of site_mappings.
+        Mirror of /aggregate/central-browse: centralized mode → hub runs
+        ``browse_mist_from_config`` itself; distributed → forwards CS_MIST_BROWSE
+        to the spoke. Records every alert/insight seen into the SHARED history
+        tagged ``source=mist`` so the Sim-Quota picker can offer ``Mist:`` ids."""
+        modes = await store.get_processing_modes(tenant_id)
+        if store.mist_api_is_centralized(modes):  # unset defaults to centralized
+            mc = await store.get_mist_config(tenant_id)
+            result = await browse_mist_from_config(mc or {})
+        else:
+            try:
+                result = await _cs_forward(tenant_id, "CS_MIST_BROWSE", {}, timeout=30.0)
+            except HTTPException as exc:
+                return {"status": "SUCCESS", "sites": [], "alerts": [], "insights": [],
+                        "clients": [], "devices_by_site": {}, "clients_by_site": {},
+                        "warning": f"Mist browse unavailable: {exc.detail}"}
+        await _record_alert_insight_history(result, source="mist")
+        return result
+
+    @app.post("/sim/api/aggregate/mist")
+    async def save_mist(request: Request, tenant_id: str = Depends(get_tenant_id)):
+        body = await request.json()
+        hub_mc = body.get("hub_mist_config") or {}
+        cfg = dict(hub_mc)
+        # Mist's API host is constrained to a fixed, well-known set of public
+        # region hosts (api.mist.com / eu / gc1 / ac2 / ac5), so unlike Central's
+        # arbitrary cluster_url there is no DNS-rebinding surface — but still
+        # reject an unknown host server-side so a tenant user can't point the
+        # hub's outbound Mist calls at an arbitrary endpoint. Coerce + validate.
+        host = str(cfg.get("host") or "").strip() or _DEFAULT_MIST_HOST
+        host = validate_mist_host(host)
+        if host not in _KNOWN_MIST_HOSTS:
+            raise HTTPException(
+                status_code=400,
+                detail="host must be a known Mist region "
+                       "(api.mist.com / api.eu.mist.com / api.gc1.mist.com / "
+                       "api.ac2.mist.com / api.ac5.mist.com).",
+            )
+        cfg["host"] = host
+        # Poll interval (seconds). Optional; coerce + floor at 60s.
+        if "poll_interval_s" in cfg:
+            try:
+                cfg["poll_interval_s"] = max(60, int(cfg["poll_interval_s"] or 300))
+            except (TypeError, ValueError):
+                cfg["poll_interval_s"] = 300
+        # Client-count CHECK thresholds — same coerce+clamp as Central (Mist's
+        # _mist_cc_thresholds reads the same cc_thresholds key from mist_config).
+        if isinstance(cfg.get("cc_thresholds"), dict):
+            _t = cfg["cc_thresholds"]
+
+            def _cnum(val, dflt, lo, hi):
+                try:
+                    return max(lo, min(hi, float(val)))
+                except (TypeError, ValueError):
+                    return dflt
+
+            _warn = _cnum(_t.get("warn_pct"), 20.0, 0.0, 100.0)
+            _err = _cnum(_t.get("error_pct"), 50.0, 0.0, 100.0)
+            if _err < _warn:
+                _err = _warn
+            cfg["cc_thresholds"] = {
+                "warn_pct": _warn,
+                "error_pct": _err,
+                "die_off_pct": _cnum(_t.get("die_off_pct"), 20.0, 0.0, 100.0),
+                "min_peak": int(_cnum(_t.get("min_peak"), 5, 1, 1_000_000)),
+            }
+        await store.set_mist_config(tenant_id, cfg)
+        pushed = await _push_config(tenant_id, {"mist_config": cfg})
+        return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
+
     @app.post("/sim/api/aggregate/config-push")
     async def config_push(request: Request, tenant_id: str = Depends(get_tenant_id)):
         body = await request.json()
@@ -3920,6 +4048,66 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 "sim_quotas": clean,
                 "sim_quota_errors": sim_quota_errors}
 
+    @app.get("/sim/api/{tenant}/mist-sites-config")
+    async def get_mist_sites(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        return await store.get_mist_sites_config(tenant_id)
+
+    @app.post("/sim/api/{tenant}/mist-sites-config")
+    async def set_mist_sites(request: Request, tenant: str,
+                             tenant_id: str = Depends(get_tenant_id)):
+        """Mirror of set_central_sites for Mist (separate product). MERGES the
+        incoming body into the existing mist_sites_config so a partial save
+        updates only the keys it sends. ``sim_quotas`` here carry ``Mist:``-
+        prefixed alert_ids; the shared engine unions them with Central's in
+        ``_effective_sim_quotas`` (Phase 4). Pool/SSID config stays with Central
+        (central_sites_config) — Mist pushes only its sites config + the unioned
+        effective quotas + shareable map."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        try:
+            existing = await store.get_mist_sites_config(tenant_id) or {}
+        except Exception:  # noqa: BLE001
+            existing = {}
+        cfg = {**existing, **body}
+        _smc = cfg.get("site_min_clients") or {}
+        if isinstance(_smc, dict):
+            clean_smc: dict = {}
+            for k, v in _smc.items():
+                try:
+                    n = int(v)
+                except (TypeError, ValueError):
+                    continue
+                if n > 0:
+                    clean_smc[str(k)] = n
+            cfg["site_min_clients"] = clean_smc
+        else:
+            cfg.pop("site_min_clients", None)
+        sim_quota_errors: list[str] = []
+        clean: list = list(cfg.get("sim_quotas") or [])
+        try:
+            sim_txt = await store.get_sim_conf_content(tenant_id) or ""
+            sim_ids = [s["sim_id"] for s in available_sims_from_ini(sim_txt)] if sim_txt.strip() else None
+            clean, sim_quota_errors = validate_sim_quotas(cfg.get("sim_quotas"), sim_ids)
+            if sim_quota_errors:
+                logger.warning("set_mist_sites(%s): sim_quotas errors: %s", tenant_id, sim_quota_errors)
+            cfg = {**cfg, "sim_quotas": clean}
+        except Exception as exc:  # noqa: BLE001 — never block the save
+            logger.warning("set_mist_sites(%s): sim_quotas validate failed: %s", tenant_id, exc)
+        await store.set_mist_sites_config(tenant_id, cfg)
+        _invalidate_sim_quota_catalog(tenant_id)
+        pushed = await _push_config(tenant_id, {
+            "mist_sites_config": cfg,
+            "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
+            "sim_shareable": await _sim_shareable(tenant_id),
+        })
+        return {"saved": True, "pushed_to_spokes": pushed,
+                "queued": bool(getattr(pushed, "queued", False)),
+                "sim_quotas": clean,
+                "sim_quota_errors": sim_quota_errors}
+
     @app.get("/sim/api/{tenant}/sim-quota-catalog")
     async def get_sim_quota_catalog(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         """Catalog the Sim-Quota UI (Config → Sim Quotas) renders against: the
@@ -4581,6 +4769,74 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                             "token_state": cached_central.get("token_state"),
                             "token_valid": cached_central.get("token_valid"),
                             "status": cached_central.get("status") or "Spoke unreachable — see hub log."})
+        return {"spokes": out}
+
+    @app.get("/sim/api/{tenant}/mist/available")
+    async def get_mist_available(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Available-checks catalog (alerts/insights/hardware) for the Mist API
+        editor's monitored-check picker. Mirror of /{tenant}/central/available:
+        centralized mode → hub fetches via ``get_mist_available_from_config``;
+        distributed → forwards CS_GET_MIST_AVAILABLE (degrades to empty when no
+        spoke is connected)."""
+        modes = await store.get_processing_modes(tenant_id)
+        if store.mist_api_is_centralized(modes):  # unset defaults to centralized
+            mc = await store.get_mist_config(tenant_id)
+            return await get_mist_available_from_config(mc or {})
+        try:
+            return await _cs_forward(tenant_id, "CS_GET_MIST_AVAILABLE", {}, timeout=15.0)
+        except HTTPException:
+            return {"alerts": [], "insights": [], "warning": "Client-Sim spoke not connected."}
+
+    @app.post("/sim/api/{tenant}/test-mist")
+    async def test_mist(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Live Mist connectivity check. Mirror of test_central: centralized mode
+        → the HUB holds the Mist token/org and probes via ``test_mist_from_config``
+        (single Hub (centralized) row); distributed → fans CS_TEST_MIST out to
+        each of the tenant's cs spokes, falling back to the spoke's last relayed
+        ``mist`` telemetry when it is unreachable so the UI renders a row, not a
+        502."""
+        modes = await store.get_processing_modes(tenant_id)
+        if store.mist_api_is_centralized(modes):  # unset defaults to centralized
+            mc = await store.get_mist_config(tenant_id)
+            return {"spokes": [await test_mist_from_config(mc or {}, spoke_id="hub")]}
+        out: list = []
+        cache = _tenant_cache(tenant_id)
+        md = hub.state.system_state.get("module_metadata", {}) or {}
+        cs_types = {"Client-Sim", "simulation"}
+        reg_sids = []
+        for sid, meta in md.items():
+            if not isinstance(meta, dict) or meta.get("module_type") not in cs_types:
+                continue
+            if not getattr(hub, "approved_modules", {}).get(hub._primary_key(sid), False):
+                continue
+            tid = meta.get("tenant_id")
+            if tid == tenant_id or not tid:
+                reg_sids.append(sid)
+        all_sids = list(dict.fromkeys(list(cache.keys()) + reg_sids))
+        for sid in all_sids:
+            data = cache.get(sid, {})
+            cached_mist = data.get("mist") or {}
+            live_entry: Optional[dict] = None
+            try:
+                result = await hub.request_response(sid, "CS_TEST_MIST", {}, timeout=8.0)
+                payload = (result.get("payload", {}) or {}).get("data", result) if isinstance(result, dict) else result
+                spokes = (payload or {}).get("spokes") if isinstance(payload, dict) else None
+                if spokes:
+                    live_entry = spokes[0]
+            except Exception as exc:
+                logger.warning("test_mist: CS_TEST_MIST fan-out to %s failed: %s",
+                               sid, exc)
+            if live_entry:
+                out.append({"spoke_id": sid,
+                            "spoke_name": live_entry.get("spoke_name") or data.get("spoke_name") or sid,
+                            "token_state": live_entry.get("token_state"),
+                            "token_valid": live_entry.get("token_valid"),
+                            "status": live_entry.get("status")})
+            else:
+                out.append({"spoke_id": sid, "spoke_name": data.get("spoke_name") or sid,
+                            "token_state": cached_mist.get("token_state"),
+                            "token_valid": cached_mist.get("token_valid"),
+                            "status": cached_mist.get("status") or "Spoke unreachable — see hub log."})
         return {"spokes": out}
 
     @app.get("/sim/api/{tenant}/troubleshooting")

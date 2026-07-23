@@ -633,6 +633,74 @@ class SimulationsService:
         return {"tenant_id": tenant_id, "mode": "—", "token_valid": token_valid,
                 "hub_central_config": {}, "spokes": spokes}
 
+    # ── Mist — mirror of the Central reads (separate product, not shared) ─────
+    def _hub_mist(self, tenant_id: str) -> Any:
+        """Hub-side ``mist_status`` for a centralized-mode tenant, or None when
+        the tenant isn't centralized / hasn't been polled yet. Produced by
+        MistHubPoller (simulations/mist_hub_poller.py); presence implies
+        centralized mist_api mode. Mirror of _hub_central."""
+        return (getattr(self.hub, "mist_hub_status", {}) or {}).get(tenant_id)
+
+    def _mist_site_rows(self, mist: dict) -> List[dict]:
+        """Per-wsite ok/fail/unknown check tally + wireless client count from a
+        ``mist_status`` block. Mirror of _central_site_rows — Mist's status block
+        is the same shape the spoke's mist_poller writes (status / hardware_alerts
+        / client_count_status / health). ``mist_clients_by_site`` is populated by
+        the centralized MistHubPoller; a distributed spoke's relayed status lacks
+        it (wireless_clients=0), identical to Central's distributed path."""
+        status_map = mist.get("status") or {}
+        clients_by_site = mist.get("mist_clients_by_site") or {}
+        site_mappings = mist.get("site_mappings") or {}
+        sites: List[dict] = []
+        for wsite, checks_map in status_map.items():
+            ok = fail = unk = 0
+            for _chk, info in (checks_map or {}).items():
+                s = self._check_status(info)
+                if s in _PASS:
+                    ok += 1
+                elif s in _FAIL:
+                    fail += 1
+                else:
+                    unk += 1
+            sites.append({"wsite": wsite,
+                          "mist_site": site_mappings.get(wsite) or wsite,
+                          "check_ok": ok, "check_fail": fail, "check_unknown": unk,
+                          "wireless_clients": clients_by_site.get(wsite) or 0})
+        return sites
+
+    async def get_mist_data(self, tenant_id: str) -> Dict[str, Any]:
+        """Simulations tab: per-spoke Mist checks / hardware alerts / client
+        counts. Mirror of get_central_data (reads the relayed ``data["mist"]``
+        block + the centralized hub poller's synthetic spoke)."""
+        spokes: List[dict] = []
+        for sid, data in self._spokes_for_tenant(tenant_id):
+            mist = data.get("mist") or {}
+            spokes.append({**self._meta(sid, data), "mist_status": mist})
+        hub_mist = self._hub_mist(tenant_id)
+        if hub_mist is not None:
+            spokes.append({**self._hub_meta(), "mist_status": hub_mist})
+        return {"tenant_id": tenant_id, "mode": "—", "spokes": spokes}
+
+    async def get_mist_status_data(self, tenant_id: str) -> Dict[str, Any]:
+        """Mist tab: per-spoke site breakdown (ok/fail/unknown + wireless
+        clients). Mirror of get_central_status_data."""
+        spokes: List[dict] = []
+        token_valid: Any = None
+        for sid, data in self._spokes_for_tenant(tenant_id):
+            mist = data.get("mist") or {}
+            tv = mist.get("token_valid")
+            token_valid = tv if tv is not None else token_valid
+            spokes.append({**self._meta(sid, data),
+                           "sites": self._mist_site_rows(mist)})
+        hub_mist = self._hub_mist(tenant_id)
+        if hub_mist is not None:
+            tv = hub_mist.get("token_valid")
+            token_valid = tv if tv is not None else token_valid
+            spokes.append({**self._hub_meta(),
+                           "sites": self._mist_site_rows(hub_mist)})
+        return {"tenant_id": tenant_id, "mode": "—", "token_valid": token_valid,
+                "hub_mist_config": {}, "spokes": spokes}
+
     async def get_api_server_data(self, tenant_id: str) -> Dict[str, Any]:
         """Per-spoke API-server status block (the API Server view shape)."""
         spokes: List[dict] = []
