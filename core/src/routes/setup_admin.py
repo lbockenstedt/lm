@@ -751,7 +751,7 @@ def register(app, hub, ctx):
         # expects. Send the LLM only the recent window (configured interval, default 15 min)
         # — not the whole tail. Quiet module (nothing in-window) → "no recent activity".
         lines = [str(l) for l in ((resp or {}).get("logs", []) if isinstance(resp, dict) else [])]
-        win = int(hub.state.get_global_config().get("log_analysis_interval_min", 15) or 15)
+        win = int(hub.state.get_global_config().get("log_analysis_interval_min", 30) or 30)
         windowed = hub._window_log_lines(lines, win)
         log_text = "\n".join(windowed[-400:])
         label = f"Lab Manager (hub) logs (last {win} min)" if is_hub else f"{module} logs (last {win} min)"
@@ -775,7 +775,7 @@ def register(app, hub, ctx):
         gc = hub.state.get_global_config()
         return {
             "auto": gc.get("log_analysis_auto", True),
-            "interval_min": int(gc.get("log_analysis_interval_min", 15) or 15),
+            "interval_min": int(gc.get("log_analysis_interval_min", 30) or 30),
             "metric": getattr(hub, "_log_sentinel_metric", {}) or {},
             "bugfixer_online": bool(hub.get_spoke_by_type("bugfixer")),
         }
@@ -800,7 +800,7 @@ def register(app, hub, ctx):
         hub.state.system_state["global_config"] = gc
         hub.state._mark_dirty()
         return {"ok": True, "auto": gc.get("log_analysis_auto", True),
-                "interval_min": int(gc.get("log_analysis_interval_min", 15) or 15)}
+                "interval_min": int(gc.get("log_analysis_interval_min", 30) or 30)}
 
     @app.post("/setup/logs/clear")
     async def clear_all_logs(request: Request):

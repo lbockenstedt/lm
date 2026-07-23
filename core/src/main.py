@@ -6911,7 +6911,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             try:
                 gc = self.state.get_global_config() if hasattr(self.state, "get_global_config") else {}
                 auto = gc.get("log_analysis_auto", True)
-                interval_min = int(gc.get("log_analysis_interval_min", 15) or 15)
+                interval_min = int(gc.get("log_analysis_interval_min", 30) or 30)
                 interval = max(60, interval_min * 60)
                 effective = max(interval, last_dur)  # self-throttle: never fire faster than a sweep takes
                 if not auto or not self.get_spoke_by_type("bugfixer") or (_t.time() - last_sweep) < effective:
