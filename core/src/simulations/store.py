@@ -527,8 +527,10 @@ class SimulationsStore:
 
     async def get_alert_insight_history(self) -> List[Dict[str, Any]]:
         """Return the shared alert/insight history as a list of
-        {type, id, name, site, first_seen, last_seen, count}. Legacy entries
-        written before ``count`` existed default to 1."""
+        {type, id, name, site, source, first_seen, last_seen, count}. Legacy
+        entries written before ``count`` existed default to 1; entries written
+        before ``source`` existed (all pre-Mist rows are Aruba Central) default
+        to ``source="central"`` so the picker can prefix them ``Central:``."""
         hist = self._data.get(self._AIH_KEY)
         if not isinstance(hist, dict):
             return []
@@ -538,14 +540,18 @@ class SimulationsStore:
                 continue
             row = dict(v)
             row.setdefault("count", 1)
+            row.setdefault("source", "central")
             out.append(row)
         return out
 
     async def record_alert_insight_seen(self, items: List[Dict[str, Any]]) -> int:
         """Upsert observed alerts/insights into the shared history. Each item:
-        {type: 'alert'|'insight', id|name, site?}. Returns the count of NEW entries.
-        Persists only when a new entry is added or a name changes (last_seen alone
-        updates in memory), so routine browse polls don't rewrite the store."""
+        {type: 'alert'|'insight', id|name, site?, source?}. ``source`` is
+        ``'central'`` or ``'mist'`` (which product observed it — defaults to
+        ``'central'`` for legacy/missing so the picker can prefix it). Returns
+        the count of NEW entries. Persists only when a new entry is added or a
+        name/source changes (last_seen alone updates in memory), so routine
+        browse polls don't rewrite the store."""
         if not items:
             return 0
         now = time.time()
@@ -566,6 +572,9 @@ class SimulationsStore:
                         continue
                     name = str((it or {}).get("name") or ident).strip()
                     site = str((it or {}).get("site") or "").strip()
+                    source = str((it or {}).get("source") or "central").strip().lower()
+                    if source not in ("central", "mist"):
+                        source = "central"
                     # Optional enrichment: present from the rich browse objects,
                     # absent from the poller's count-only path. Stored when known,
                     # backfilled if a later observation supplies it.
@@ -578,7 +587,8 @@ class SimulationsStore:
                     entry = hist.get(key)
                     if entry is None:
                         hist[key] = {"type": typ, "id": ident, "name": name,
-                                     "site": site, "first_seen": now, "last_seen": now,
+                                     "site": site, "source": source,
+                                     "first_seen": now, "last_seen": now,
                                      "count": 1, **extra}
                         added += 1
                         changed = True
@@ -592,6 +602,13 @@ class SimulationsStore:
                         entry["count"] = int(entry.get("count") or 1) + 1
                         if name and entry.get("name") != name:
                             entry["name"] = name
+                            changed = True
+                        # Lazy one-time migration: pre-Mist entries have no
+                        # ``source`` — backfill "central" (all existing rows are
+                        # Aruba) and persist once. Also fix an observed source
+                        # drift (rare; an id re-seen from a different product).
+                        if entry.get("source") != source:
+                            entry["source"] = source
                             changed = True
                         for fld, val in extra.items():  # backfill enrichment seen later
                             if entry.get(fld) != val:

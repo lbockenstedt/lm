@@ -714,9 +714,11 @@ class CentralHubPoller:
             # no I/O, and a failure here can never break the poll cycle.
             try:
                 _cat_items = (
-                    [{"type": "alert", "id": k, "name": k, "site": central_site}
+                    [{"type": "alert", "id": k, "name": k, "site": central_site,
+                      "source": "central"}
                      for k in (alert_counts or {})]
-                    + [{"type": "insight", "id": k, "name": k, "site": central_site}
+                    + [{"type": "insight", "id": k, "name": k, "site": central_site,
+                        "source": "central"}
                        for k in (insight_counts or {})]
                 )
                 if _cat_items:

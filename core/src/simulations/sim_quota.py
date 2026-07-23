@@ -25,6 +25,53 @@ SIM_QUOTA_KEYS = ("alert_id", "alert_type", "sim_id", "count", "site",
                   "multi_capable", "rehome", "enabled", "learning", "learn_knobs")
 ALERT_TYPES = ("alert", "insight")
 
+# ── Source prefix — the seam between Central and Mist ──────────────────────
+# Central and Mist are SEPARATE products. A sim-quota row's ``alert_id`` carries
+# a ``Central:``/``Mist:`` prefix so the shared SimQuotaEngine can route a row to
+# the product that observed its alert (fire a Central: row against ``data["central"]``,
+# a Mist: row against ``data["mist"]``) and so two rows for the SAME sim at the
+# SAME site — one per product — are distinct ledger/adaptive states that keep
+# SEPARATE clients. Legacy bare ids (no prefix) are treated as Central — every
+# pre-Mist row is Aruba. The prefix is a Setup/picker/catalog concern only; the
+# spoke's bare ``alert_type_counts``, the dashboard Checks view, and reports all
+# stay on the bare id (the prefix is stripped before any comparison there).
+SOURCE_PREFIXES = {"central": "Central", "mist": "Mist"}
+# Reverse lookup is case-insensitive on the stored source name.
+_PREFIX_TO_SOURCE = {"central": "central", "mist": "mist"}
+
+
+def parse_alert_source(alert_id: str) -> Tuple[str, str]:
+    """Split a (possibly prefixed) ``alert_id`` into ``(source, bare_id)``.
+
+    ``"Central:DNS Fail"`` → ``("central", "DNS Fail")``;
+    ``"Mist:ap_offline"`` → ``("mist", "ap_offline")``;
+    ``"DNS Fail"`` (legacy / untethered-display) → ``("central", "DNS Fail")``.
+    An unknown/empty prefix falls back to ``central`` (bare). Returns the source
+    as the canonical lowercase key (``"central"``/``"mist"``)."""
+    aid = str(alert_id or "").strip()
+    if ":" in aid:
+        prefix, _, rest = aid.partition(":")
+        src = _PREFIX_TO_SOURCE.get(prefix.strip().lower())
+        if src and rest.strip():
+            return src, rest.strip()
+    return "central", aid
+
+
+def prefixed_alert_id(source: str, bare_id: str) -> str:
+    """Render a bare alert id with its product prefix for the picker/catalog:
+    ``prefixed_alert_id("mist", "ap_offline")`` → ``"Mist:ap_offline"``.
+    An unknown/empty source defaults to Central. A bare_id that is ALREADY
+    prefixed is returned unchanged (idempotent)."""
+    src = str(source or "central").strip().lower()
+    if src not in SOURCE_PREFIXES:
+        src = "central"
+    bid = str(bare_id or "").strip()
+    cur_src, cur_bare = parse_alert_source(bid)
+    if cur_src != "central" or bid != cur_bare:
+        # already prefixed (and not a bare-that-looks-prefixed) — keep as-is
+        return bid
+    return f"{SOURCE_PREFIXES[src]}:{bid}" if bid else bid
+
 SIM_META: Dict[str, Dict[str, object]] = {
     "dns_fail":    {"category": "failure", "multi_capable": False},
     "dhcp_fail":   {"category": "failure", "multi_capable": False},

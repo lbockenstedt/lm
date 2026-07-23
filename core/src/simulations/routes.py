@@ -23,7 +23,7 @@ import logging
 import re
 from .service import SimulationsService, _PASS, _FAIL
 from .aruba import test_central_from_config, get_central_available_from_config, browse_all_from_config
-from .sim_quota import validate_sim_quotas, sim_quota_catalog_from_ini, available_sims_from_ini
+from .sim_quota import validate_sim_quotas, sim_quota_catalog_from_ini, available_sims_from_ini, prefixed_alert_id
 from . import sim_quota
 from . import email_report
 from . import github_config_client
@@ -1737,18 +1737,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except Exception:  # noqa: BLE001
             return {}
 
-    async def _record_alert_insight_history(browse: dict) -> None:
+    async def _record_alert_insight_history(browse: dict, source: str = "central") -> None:
         """Upsert the alerts/insights from a browse result into the shared history.
-        Best-effort: swallows everything so recording can never break a browse."""
+        ``source`` is ``'central'`` or ``'mist'`` — which product's browse this is
+        (stamped on every item so the picker can prefix the id and the engine can
+        fire it against the matching source). Best-effort: swallows everything so
+        recording can never break a browse."""
         try:
             if not isinstance(browse, dict):
                 return
+            source = source if source in ("central", "mist") else "central"
             items: list = []
             for a in (browse.get("alerts") or []):
                 ident = str((a.get("name") or a.get("category") or "")).strip()
                 if ident:
                     items.append({"type": "alert", "id": ident, "name": a.get("name") or ident,
-                                  "site": a.get("site") or "",
+                                  "site": a.get("site") or "", "source": source,
                                   # Rich browse objects carry these; the poller path
                                   # doesn't. Recorded to enrich the global catalog.
                                   "category": a.get("category") or "",
@@ -1758,7 +1762,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 ident = str((i.get("name") or i.get("category") or "")).strip()
                 if ident:
                     items.append({"type": "insight", "id": ident, "name": i.get("name") or ident,
-                                  "site": i.get("site") or "",
+                                  "site": i.get("site") or "", "source": source,
                                   "category": i.get("category") or "",
                                   "severity": i.get("severity") or "",
                                   "device_type": i.get("device_type") or i.get("deviceType") or ""})
@@ -1769,15 +1773,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     async def _alert_insight_catalog() -> tuple[list, list]:
         """The shared alert/insight history split into (alerts, insights), each a
-        list of {id, name, site} sorted by display name — the option source for
-        every Sim-Quota "Alert / Insight ID" picker (tenant + system defaults)."""
+        list of {id, name, site, source} sorted by display name — the option
+        source for every Sim-Quota "Alert / Insight ID" picker (tenant + system
+        defaults). The ``id`` is PREFIXED with the product (``Central:`` /
+        ``Mist:``) so a Central alert and a Mist alert with the same bare name
+        are distinct picker options and the engine can route a row to its source;
+        the stored id stays BARE (dashboard / reports / firing compare bare)."""
         try:
             hist = await store.get_alert_insight_history()
         except Exception:  # noqa: BLE001
             hist = []
         def _sort(rows):
             return sorted(
-                [{"id": h.get("id"), "name": h.get("name") or h.get("id"), "site": h.get("site") or ""}
+                [{"id": prefixed_alert_id(h.get("source") or "central", h.get("id")),
+                  "name": h.get("name") or h.get("id"),
+                  "site": h.get("site") or "",
+                  "source": h.get("source") or "central"}
                  for h in rows if h.get("id")],
                 key=lambda r: str(r.get("name") or r.get("id") or "").lower(),
             )
