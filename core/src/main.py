@@ -6786,8 +6786,11 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                            "duration_s": 0, "at": now, "error": None})
         t0 = _t.monotonic()
         try:
+            # Generous deadline: on a CPU model the analysis is slow, and it QUEUES
+            # behind any in-flight fix on BugFixer's single LLM slot — 180s was too
+            # short and dropped completed replies. 10 min covers a fix + analysis.
             resp = await self.request_response(sid, "ANALYZE_LOGS",
-                                               {"logs": log_text, "title": title}, timeout=180.0)
+                                               {"logs": log_text, "title": title}, timeout=600.0)
         except Exception as e:  # noqa: BLE001
             return _store({"ok": False, "running": False, "module": key, "title": title,
                            "analysis": "", "verdict": "unknown", "duration_s": round(_t.monotonic() - t0, 1),
@@ -6863,7 +6866,7 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             resp = await self.request_response(
                 sid, "ESCALATE_LOG_ISSUE",
                 {"module": module, "logs": log_slice, "analysis": analysis, "verdict": verdict},
-                timeout=90.0)
+                timeout=300.0)
             inner = resp.get("payload", {}).get("data", resp) if isinstance(resp, dict) else {}
             logger.info(f"[log-sentinel] escalated {module} → bugfixer: "
                         f"{inner.get('status')} {inner.get('detail', '')}")
