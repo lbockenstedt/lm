@@ -18,6 +18,8 @@ The canonical doc set lives here in `lm/docs/`. Each separate repo also carries 
 
 - [pxmx.md](pxmx.md) — Proxmox (`hypervisor`): bridge spoke + per-host agent; USB auto-provisioning brain; VNC relay; `/ws/agent` byte-proxy.
 - [cs.md](cs.md) — Client Simulation (`simulation`): sim engine, client API :8080, per-client override panel, relay-only Proxmox.
+  - [mist.md](mist.md) — Juniper Mist API twin of Aruba Central (full twin + sim-quota): own `MistClient`/poller/telemetry/`Mist:` source/tab; the 7d alarms-window fix; insights not yet shipped.
+  - [central-on-prem.md](central-on-prem.md) — a second on-prem Aruba Central instance (full twin + sim-quota): reuses `ArubaClient`, separate config/poller/telemetry/`Central On-Prem:` source/tab; no-stepping guarantee vs cloud Central.
 - [netbox.md](netbox.md) — IPAM/DCIM (`ipam`): sync_vms/devices/nw_device/access_tracker, staleness sweep, custom fields, Kea sync.
 - [opnsense.md](opnsense.md) — Firewall (`firewall`): aliases/NAT/rules/DNS/DHCP-leases/ARP; categories-as-UUIDs; cache.
 - [nw.md](nw.md) — Network Devices (`nw`): SSH/CLI + REST + SNMP fleet driver; ARP-as-discovery-feed.
@@ -48,5 +50,6 @@ The canonical doc set lives here in `lm/docs/`. Each separate repo also carries 
 - **TLS verify:** off by default; opt in with `--tls-verify` (+ `--tls-ca-cert`).
 - **Discovery:** mDNS `_lm-hub._tcp.local.` TXT (`agent_port`=443, `tls_port`) + DNS `lm-hub.<search>`; same-box = IP-equality.
 - **Auto-provisioning brain:** the pxmx agent, not the hub or cs spoke.
+- **Sim-quota sources / product tabs:** three independent monitoring products under the Simulations left-nav — **Central** (cloud Aruba Central), **Central On-Prem** (a second on-prem Aruba Central instance), **Mist** (Juniper Mist) — each its own sim-quota source (`Central:` / `Central On-Prem:` / `Mist:`), own config/poller/telemetry, own Sites/Alerts/Insights/Clients/Hardware/Diagnostic tab + Setup API subtab. See [cs.md](cs.md), [mist.md](mist.md), [central-on-prem.md](central-on-prem.md).
 - **Spoke ERROR → hub HTTP 502** with the real reason.
 - **`request_response` for a spoke reply** (e.g. VNC ticket); `send_to_spoke_command` is fire-and-forget.

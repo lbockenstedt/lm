@@ -39,7 +39,7 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
 ## Key commands / handlers
 
 - **Inbound from hub** (`hub_agent.py::_handle_message`): `APPROVAL_REQUIRED`, `APPROVED`, `SPOKE_UPDATE_SESSION_KEY` (provisions session secret), `SPOKE_SET_HUB_SECRET`, `HUB_RESPONSE` (correlated reply to a `HUB_REQUEST`), `DENIED`, `get_version`/`GET_VERSION` (signed `COMMAND_RESULT` with `data.version`), `SET_LOG_LEVEL`/`SPOKE_SET_LOG_LEVEL` (WebUI "Enable Debug" broadcast).
-- **Outbound to hub** (`client.request_sync`): `GET_LOGS` (aggregated spoke logs, 20s timeout), `TRIGGER_ALL_UPDATES` (kick all spoke self-updates, 60s timeout). These replace the old static-token HTTP calls (`LM_ADMIN_TOKEN`/`X-Admin-Token`) the hub never honored.
+- **Outbound to hub** (`client.request_sync` over the reverse `HUB_REQUEST` channel): `GET_LOGS` (aggregated spoke logs, 20s timeout), `GET_ERROR_LOGS`, `GET_SPOKE_STATUS` (approved roster + per-spoke recovery state), `TRIGGER_ALL_UPDATES` (kick all spoke self-updates, 60s timeout), and the "File a Bug" handoff — `GET_BUG_REPORTS` (list metadata), `GET_BUG_REPORT` (pull full artifacts for AI-fix context), `MARK_BUG_FILED` (stop a report re-filing), `MARK_BUG_FIXED` (the GitHub issue was closed). These replace the old static-token HTTP calls (`LM_ADMIN_TOKEN`/`X-Admin-Token`) the hub never honored. The whole channel is **cert-bound**, not `spoke_id`-bound — see "BugFixer mTLS cert + LE tag flow" below; any approved spoke that is not presenting the pinned BugFixer client cert is denied before dispatch.
 - **FastAPI routes (own dashboard):** `/api/health`, settings, status/logs endpoints, `hub_agent_status`/`hub_agent_reregister`, scan/poll/fix/verify/iterate/deploy/sync workflow. The hub agent singleton starts at app startup via `_start_hub_agent()` → `hub_agent.start_agent_from_config(...)`.
 
 ## Key files
@@ -52,6 +52,10 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
 - **Reimplements lm-core signing** — `hub_agent.py::MessageSigner` mirrors `lm/core/src/security/signer.py` (HMAC-SHA256 canonical JSON) so it can talk to the hub without depending on lm-core.
 - **Watchdog rollback** — polls `/api/health` every 5s; rolls back via `update_state.json`/`update_pending` in `/etc/bugfixer/` only on a failed auto-update.
 - **`SET_LOG_LEVEL`** — bugfixer is in the hub's broadcast set, so the WebUI "Enable Debug" flips its log level too.
+- **Feature requests require admin approval — INVARIANT.** Feature reports filed from the footer modal never reach BugFixer until an admin approves them on the `/setup/bug-reports` view (`POST /setup/bug-reports/{rid}/approve`). The hub enforces this at **two** points: (1) `GET_BUG_REPORTS` annotates each gated feature with `gated_pending_approval=true` (annotated, not hard-filtered, so the Diagnostics card can still show an "awaiting approval" count), and (2) `GET_BUG_REPORT` denies the full-artifact fetch for a gated feature (`{"gated_pending_approval": true}`). Bugs are never gated; an already-`approved`/`filed`/`fixed` feature is not gated. Don't remove either gate — a single hard-filter would hide the "waiting on approval" count from BugFixer, and a missing deny would let BugFixer file + work an unapproved feature. Status flow is `pending` → `approved` → `filed` → `fixed`.
+- **`MARK_BUG_FIXED` cascades to sibling reports.** Because recurrence dedup folds several reports onto ONE GitHub issue (each reopens it / adds evidence), closing that issue only carries the single report id embedded in the issue body. `_mark_bug_fixed` (`hub_bug_store.py`), called by the `MARK_BUG_FIXED` HUB_REQUEST, therefore also marks every other report sharing the same `issue_url` `fixed`, logging a `[bug-report] MARK_BUG_FIXED cascaded to sibling …` line. Without the cascade, sibling recurrence reports would stick at `filed` forever even though the work is done.
+- **Hub heartbeat at INFO — heartbeat-triage gate is INVARIANT.** The hub's `run_hub_heartbeat_loop` emits a greppable `[heartbeat] ok module=hub …` line every ~60s (`LM_HEARTBEAT_INTERVAL_S`, default 60) at **INFO, not DEBUG** — at the default INFO level a DEBUG line is filtered before it reaches `HubLogHandler`, never buffered into `self.logs`, never returned by `GET_LOGS`, and BugFixer never observes the hub's own heartbeat. BugFixer's `scan_heartbeats` is gated on TWO conditions, both of which must hold before any per-spoke triage runs: (1) the agent is approved and a signed `GET_SPOKE_STATUS` actually round-trips to the hub, and (2) the hub's own `[heartbeat]` line has been observed at least once since this BugFixer process started. Suppressing until both hold is what prevents a false "hub unreachable — every spoke missing" reinstall flood after a reinstall or boot. A `HEARTBEAT_WARMUP_S` (300s) backstop since (re)approval lets a genuinely-broken hub-heartbeat loop be triaged — but hub-only, never the spokes, so a dead pipeline still can't flood. `heartbeat_triage_enabled` (default OFF) is the top-level Settings toggle for the whole triage path.
+- **BugFixer mTLS cert + LE tag flow (cert trust) — INVARIANT.** BugFixer's identity is an LE-issued cert: **one cert serves both its WebUI/server leg and its mTLS client leg**. The hub's reverse `HUB_REQUEST` channel is **cert-bound, not `spoke_id`-bound** — `_hub_request_authorized` (`core/src/main.py`) authorizes a request only when the calling connection presented a client cert whose SAN matches the pinned `global_config['bugfixer_cert_identities']` list; `spoke_id` is hostname-derived and spoofable (name a box `bugfixer`), so it is NOT the gate. Fail-closed: no pinned cert, no client cert presented, or SAN mismatch → denied and logged. `bugfixer` is in `CERT_CAPABLE_MODULES` (`core/src/cert_distribution.py`), so the LE module can target it; the LE Certificates page has a "★ BugFixer identity" checkbox inside the cert's **Manage** modal (`POST /api/le/certs/{domain}/bugfixer`) that adds/removes the domain in the pinned list, and stars `bugfixer` targets so the cert is deployed to the bugfixer agent. A persistent purple "★ BugFixer identity" banner above the cert table shows which cert is pinned (and whether it's deployed to a `bugfixer` target — flagging extras). The hub's client-cert verify path trusts the **system store** in addition to `LM_MTLS_CA` (`server_client_ca_file()` in `core/src/security/mtls.py` concatenates the Hub Local CA + retired CA + legacy `LM_MTLS_CA` + the system root bundle via `certifi`/OpenSSL paths) so an LE-issued, SAN-pinned BugFixer cert verifies without having to live in the private mTLS CA — mirroring the client leg's `create_default_context` symmetry. The admin-only `GET /api/mtls/trust-diag` surfaces what the hub trusts, per-connection mTLS state (who is actually presenting a verified client cert vs. cert-less permissive fallback), and a live check of each pinned BugFixer SAN against connected clients. See [le.md](le.md) for the one-cert-per-target cert-target model.
 
 ## How it works
 
@@ -82,6 +86,38 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
   model gives a final answer with no more tool calls. `GET /api/help/available` reports
   `true` only when a BugFixer agent connection is present in the hub's
   `active_connections` — that's what shows or hides the "Ask AI" button in the WebUI.
+- **"File a Bug" / feature-request pipeline.** The LM footer's "🐞 Bug/Feature
+  Request" button POSTs an explanation + console + HTML + screenshot to
+  `/api/bug-report`; the hub stores the full artifacts under
+  `<data_dir>/bugs/<id>/` and logs a short greppable `[bug-report] id=<id> …`
+  marker line (`core/src/hub_bug_store.py`). BugFixer scans the raw hub logs
+  (via `GET_LOGS`), pulls each report's metadata with `GET_BUG_REPORTS`,
+  fetches the full artifacts with `GET_BUG_REPORT` for AI-fix context, files a
+  clean-body GitHub issue labeled `automated-fix`+`bug`, and marks it filed
+  with `MARK_BUG_FILED`. A `type` field distinguishes `bug` (default; auto-fixable)
+  from `feature` (filed as an `enhancement` issue; never auto-implemented).
+  **Feature requests are gated on admin approval** — the hub annotates each
+  unapproved feature `gated_pending_approval=true` in `GET_BUG_REPORTS` (so
+  the BugFixer Diagnostics "LM Feature Request Ingestion" card can count them
+  as awaiting approval) but `GET_BUG_REPORT` denies the full fetch and
+  `scan_bugs` skips filing. Only after an admin hits **Approve** on the
+  admin-only `/setup/bug-reports` view (`POST /setup/bug-reports/{rid}/approve`)
+  does the report become visible to BugFixer. Status flows `pending` →
+  `approved` → `filed` (issue opened) → `fixed` (BugFixer closed the issue). A
+  stored report can be deleted from the same view via `DELETE /setup/bug-reports/{rid}`
+  (admin-only) — removes the hub's local copy only; the public GitHub issue
+  BugFixer may already have filed is NOT touched.
+- **Runtime-error banner auto-files a bug.** The WebUI's error boundary
+  (`WebUI/index.html`) shows a dismissible red "⚠ Runtime error" banner for any
+  uncaught runtime JS error (distinct from the one-shot fatal page-load banner,
+  which reloads once to cache-bust a stale deploy), and automatically calls
+  `window.fileBugAuto(message, where)`. That POSTs a `high`-severity bug report
+  to `/api/bug-report` with an `[Auto-filed from a runtime browser error — the
+  user did not type this.]` preamble plus the active view, tenant, URL, and user
+  agent; BugFixer picks it up through the same `[bug-report]` pipeline. Dedup is
+  per unique 200-char message signature per browser session (a `Set` in
+  `main.js`) so a spammy handler doesn't open a GitHub issue on every throw; the
+  banner's status span shows "Filing Bug with BugFixer…" → "Bug filed (id …)".
 - **Connecting to the hub.** BugFixer is a hub **agent**, never a spoke: it authenticates
   the same zero-touch/admin-approval + HMAC session-key flow every spoke uses, but
   registers as `module_type="agent"` and does not handle any `CS_*`/`PXMX_*`/`LE_*`
@@ -122,6 +158,15 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
 4. **Verify "Ask AI" is live.** Once BugFixer is connected and approved, the WebUI's
    help button should appear; `GET /api/help/available` on the hub should return
    `{"available": true}`.
+5. **Pin a BugFixer mTLS cert (enables the reverse `HUB_REQUEST` channel).** Until a
+   cert is pinned the channel is fail-closed — BugFixer connects and can be relayed
+   `HELP_ASK` answers, but cannot pull hub logs or file bugs. From the LE Certificates
+   page, issue a cert for a BugFixer hostname (or pick an existing one), open **Manage**,
+   tick **★ BugFixer identity** (`POST /api/le/certs/{domain}/bugfixer`), and add a
+   `bugfixer` target so the cert is deployed to the agent. The persistent purple
+   "★ BugFixer identity" banner confirms the pin. Verify with
+   `GET /api/mtls/trust-diag` — the pinned cert's `pinned_cert_checks` should be `ok`
+   once the agent reconnects presenting it.
 
 ## Troubleshooting / common questions
 
@@ -151,4 +196,4 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
 
 ## Related pages
 
-[architecture-topology.md](architecture-topology.md), [lm-hub.md](lm-hub.md), [generic-agent.md](generic-agent.md), [install-flags.md](install-flags.md).
+[architecture-topology.md](architecture-topology.md), [lm-hub.md](lm-hub.md), [generic-agent.md](generic-agent.md), [install-flags.md](install-flags.md), [le.md](le.md).
