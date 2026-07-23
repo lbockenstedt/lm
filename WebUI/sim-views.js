@@ -199,6 +199,18 @@ const SIM_ROUTES = {
     csSaveCentralSites:          { m: 'POST',   p: '/{tenant}/central-sites-config',             api: 'set_central_sites' },
     csTestCentral:               { m: 'POST',   p: '/{tenant}/test-central',                     api: 'test_central' },
 
+    // ── Mist (Setup → Mist API tab: status + sites / available / test) — MIRROR ──
+    csSimLoadMist:               { m: 'GET',    p: '/aggregate/mist',                            api: 'get_mist' },
+    csRenderMist:                { m: 'GET',    p: '/aggregate/mist-status',                     api: 'get_mist_status' },
+    csRenderMistAlerts:          { m: 'GET',    p: '/aggregate/mist',                            api: 'get_mist' },
+    csRenderMistClients:         { m: 'GET',    p: '/aggregate/mist',                            api: 'get_mist' },
+    csSaveMistConn:              { m: 'POST',   p: '/aggregate/mist',                            api: 'save_mist' },
+    csRenderSetupMistApi:        { m: 'GET',    p: '/aggregate/mist-status',                     api: 'get_mist_status',
+                                   m2: 'GET',   p2: '/{tenant}/mist-sites-config',               api2: 'get_mist_sites' },
+    csLoadMistAvailable:         { m: 'GET',    p: '/{tenant}/mist/available',                   api: 'get_mist_available' },
+    csSaveMistSites:             { m: 'POST',   p: '/{tenant}/mist-sites-config',                api: 'set_mist_sites' },
+    csTestMist:                  { m: 'POST',   p: '/{tenant}/test-mist',                        api: 'test_mist' },
+
     // ── Hub-config (Setup → Hub Config card) ──
     csHubConfigCard:             { m: 'GET',    p: '/tenant/{tenant}/hub-config',                api: 'get_hub_config' },
     csSaveHubConfig:             { m: 'PUT',    p: '/tenant/{tenant}/hub-config',                api: 'set_hub_config' },
@@ -721,6 +733,7 @@ async function loadCSData(subMenu, child, force) {
                 case 'Dashboard': await csRenderSimulations(force); break;
                 case 'Clients':     await csRenderClients(force); break;
                 case 'Central':     await csRenderCentral(force); break;
+                case 'Mist':        await csRenderMist(force); break;
                 case 'Config':      await csRenderConfigSimulation(force); break;
                 case 'Setup':       await csRenderSetup(force); break;
                 case 'VM Server':   await csRenderVmServer(force); break;
@@ -769,6 +782,14 @@ async function csSimLoadCentral() {
     try { return await csFetch(`/aggregate/central?tenant_id=${csTenant()}`) || {}; }
     catch (e) { console.error('csSimLoadCentral: aggregate/central fetch failed (likely 404/stub)', e); csSetToolbar(''); csSet(csEmpty('No simulation data yet.',
         'The /sim/api/aggregate/central endpoint is not wired in the backend yet (UI-first phase).')); return null; }
+}
+
+// MIRROR of csSimLoadCentral — the Dashboard Checks/Hardware/Client-Count tiles
+// call this to read s.mist_status (the per-spoke Mist status block). Separate
+// product; never shares Central's fetch or cache.
+async function csSimLoadMist() {
+    try { return await csFetch(`/aggregate/mist?tenant_id=${csTenant()}`) || {}; }
+    catch (e) { console.error('csSimLoadMist: aggregate/mist fetch failed', e); return null; }
 }
 
 function csSimSpokes(data) {
@@ -2775,6 +2796,437 @@ window.CS_CHILD_RENDERERS['Central::Hardware']   = csRenderCentralHardware;
 window.CS_CHILD_RENDERERS['Central::Diagnostic'] = csRenderCentralDiagnostic;
 
 /* ===========================================================================
+ * 4b. Mist — Juniper Mist cloud (MIRROR of Central, separate product)
+ *    Central and Mist are separate products: these renderers DUPLICATE the
+ *    Central patterns against /mist endpoints — they do not import or share
+ *    Central state. The Central:/Mist: prefix on a sim-quota row's alert_id is
+ *    the only seam (Phase 4); the dashboard Mist tiles read s.mist_status.
+ * ========================================================================= */
+
+// Full Mist inventory via /aggregate/mist-browse (hub forwards CS_MIST_BROWSE →
+// spoke, or the centralized MistHubPoller answers directly). Shared fetch with
+// a short in-memory cache so switching tabs doesn't re-hit Mist each time.
+// MIRROR of csCentralBrowse — separate cache, never shared with Central.
+let _csMistBrowseCache = null, _csMistBrowseAt = 0, _csMistBrowseTenant = null;
+async function csMistBrowse() {
+    const t = csTenant();
+    if (_csMistBrowseCache && _csMistBrowseTenant === t && (Date.now() - _csMistBrowseAt) < 60000) {
+        return _csMistBrowseCache;
+    }
+    let data = {};
+    try { data = await csFetch(`/aggregate/mist-browse?tenant_id=${t}`) || {}; }
+    catch (e) { console.error('csMistBrowse: /aggregate/mist-browse failed', e); data = { warning: String(e && e.message || e) }; }
+    _csMistBrowseCache = data; _csMistBrowseAt = Date.now(); _csMistBrowseTenant = t;
+    return data;
+}
+function _csMistWarn(data) {
+    return data && data.warning ? `<div class="text-xs text-amber-600 mb-3">${csEscape(data.warning)}</div>` : '';
+}
+
+// ── Mist shared table (MIRROR of csCentralTable — separate sort/filter cache) ──
+const _csMistTbl = {};
+function csMistTable(id, columns, rows, opts = {}) {
+    const st = _csMistTbl[id] || (_csMistTbl[id] = { sort: null, filter: 'all' });
+    st.columns = columns; st.rows = rows; st.opts = opts;
+    return `<div id="cs-mist-table-${csEscape(id)}">${_csMistTableBuild(id)}</div>`;
+}
+function _csMistTableBuild(id) {
+    const st = _csMistTbl[id]; if (!st) return '';
+    const { columns, rows, opts, sort, filter } = st;
+    const monOf = opts.monitorOf || null;
+    let view = rows;
+    if (monOf && filter !== 'all') view = rows.filter(r => filter === 'mon' ? !!monOf(r) : !monOf(r));
+    if (sort && columns[sort.col] && typeof columns[sort.col].sort === 'function') {
+        const ci = sort.col, dir = sort.dir, acc = columns[ci].sort;
+        view = view.slice().sort((a, b) => {
+            const av = acc(a), bv = acc(b);
+            let cmp;
+            if (typeof av === 'number' && typeof bv === 'number') cmp = av - bv;
+            else {
+                const as = String(av == null ? '' : av).toLowerCase();
+                const bs = String(bv == null ? '' : bv).toLowerCase();
+                cmp = as < bs ? -1 : as > bs ? 1 : 0;
+            }
+            return dir === 'desc' ? -cmp : cmp;
+        });
+    }
+    const ths = columns.map((c, i) => {
+        const active = sort && sort.col === i;
+        const arrow = active ? (sort.dir === 'desc' ? ' ▼' : ' ▲') : '';
+        const w = c.width ? ` style="width:${csEscape(String(c.width))}"` : '';
+        return `<th${w} class="px-3 py-2 text-left font-semibold cursor-pointer select-none hover:text-slate-700" onclick="csMistSort('${csEscape(id)}', ${i})" title="Sort by ${csEscape(c.label)}">${csEscape(c.label)}${active ? `<span class="text-slate-400">${arrow}</span>` : ''}</th>`;
+    }).join('');
+    const body = view.length
+        ? view.map(r => `<tr>${columns.map(c => `<td class="px-3 py-2">${c.render(r)}</td>`).join('')}</tr>`).join('')
+        : `<tr><td class="px-3 py-8 text-center text-slate-400 italic" colspan="${columns.length}">No data.</td></tr>`;
+    let bar = '';
+    if (monOf) {
+        const nMon = rows.filter(r => monOf(r)).length;
+        const mk = (val, label) => `<button onclick="csMistFilter('${csEscape(id)}','${val}')" class="px-2.5 py-1 rounded-md text-xs font-bold border ${filter === val ? 'bg-[#263040]/10 text-[#263040] border-[#263040]' : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'}">${label}</button>`;
+        bar = `<div class="flex items-center gap-2 mb-3">
+            <span class="text-xs text-slate-500 font-semibold uppercase tracking-wider">Monitored:</span>
+            ${mk('all', `All (${rows.length})`)}${mk('mon', `On (${nMon})`)}${mk('unmon', `Off (${rows.length - nMon})`)}
+        </div>`;
+    }
+    const caption = opts.caption ? `<div class="text-xs text-slate-400 mb-2">${csEscape(opts.caption)}</div>` : '';
+    return `${bar}${caption}<div class="overflow-x-auto"><table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 uppercase text-xs tracking-wider">${ths}</thead><tbody class="divide-y divide-slate-100">${body}</tbody></table></div>`;
+}
+window.csMistSort = function (id, col) {
+    const st = _csMistTbl[id]; if (!st) return;
+    if (st.sort && st.sort.col === col) st.sort.dir = st.sort.dir === 'asc' ? 'desc' : 'asc';
+    else st.sort = { col, dir: 'asc' };
+    const wrap = document.getElementById(`cs-mist-table-${id}`);
+    if (wrap) wrap.innerHTML = _csMistTableBuild(id);
+};
+window.csMistFilter = function (id, val) {
+    const st = _csMistTbl[id]; if (!st) return;
+    st.filter = val;
+    const wrap = document.getElementById(`cs-mist-table-${id}`);
+    if (wrap) wrap.innerHTML = _csMistTableBuild(id);
+};
+
+// ── Mist → Sites ────────────────────────────────────────────────────────────
+async function csRenderMist() {
+    csSetToolbar('');
+    const [data, sitesCfg] = await Promise.all([
+        csMistBrowse(),
+        csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+    ]);
+    const sites = (data && data.sites) || [];
+    const warn = _csMistWarn(data);
+    if (!sites.length) { csSet(`${warn}${csEmpty('No Mist sites returned.', 'Verify the Mist API token + org_id in Setup → Mist API and that the org has sites.')}`); return; }
+    const sm = (sitesCfg && sitesCfg.site_mappings && typeof sitesCfg.site_mappings === 'object') ? sitesCfg.site_mappings : {};
+    const monitored = new Set(Object.values(sm).map(v => String(v)));
+    const minBySite = (sitesCfg && sitesCfg.site_min_clients && typeof sitesCfg.site_min_clients === 'object') ? sitesCfg.site_min_clients : {};
+    const alertsBySite = {}, insightsBySite = {}; let globalInsights = 0;
+    ((data && data.alerts) || []).forEach(a => { const s = a.site || '—'; alertsBySite[s] = (alertsBySite[s] || 0) + 1; });
+    ((data && data.insights) || []).forEach(i => { const s = i.site || '—'; if (s === 'All Sites') globalInsights++; else insightsBySite[s] = (insightsBySite[s] || 0) + 1; });
+    const rows = sites.map(st => {
+        const name = st.name || '';
+        const isMon = monitored.has(String(name));
+        const nAlerts = alertsBySite[name] || 0;
+        const nInsights = (insightsBySite[name] || 0) + globalInsights;
+        const _minLbl = minBySite[name] ? ` · min ${csEscape(String(minBySite[name]))}` : '';
+        const btn = isMon
+            ? `<button onclick="csMonitorMistSiteModal(${csEscape(JSON.stringify(name))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Monitored${_minLbl}</button>`
+            : `<button onclick="csMonitorMistSiteModal(${csEscape(JSON.stringify(name))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this site's client count (set a min-client floor)">Monitor</button>`;
+        return { name, health: st.health_score, clients: st.wireless_clients != null ? st.wireless_clients : 0,
+                 alerts: nAlerts, insights: nInsights, monitored: isMon, btn: name ? btn : '' };
+    });
+    const siteCols = [
+        { label: 'Site',     render: r => `<span class="font-medium text-slate-700">${csEscape(r.name || '—')}</span>`, sort: r => r.name || '' },
+        { label: 'Health',   render: r => r.health != null && r.health !== '' ? csEscape(r.health) : '—', sort: r => (r.health == null || r.health === '' ? -1 : Number(r.health) || 0) },
+        { label: 'Clients',  render: r => `<span class="font-bold text-slate-700">${csEscape(r.clients)}</span>`, sort: r => r.clients },
+        { label: 'Alerts',   render: r => `<span class="${r.alerts ? 'text-amber-600 font-bold' : 'text-slate-400'}">${r.alerts}</span>`, sort: r => r.alerts },
+        { label: 'Insights', render: r => `<span class="${r.insights ? 'text-slate-600' : 'text-slate-400'}">${r.insights}</span>`, sort: r => r.insights },
+        { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
+    ];
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csMistTable('mist-sites', siteCols, rows, { monitorOf: r => r.monitored, caption: `${sites.length} site(s) — Monitor a site to track its client count for change on the dashboard` })}</div></div>`);
+}
+
+// Open the Monitor dialog for a Mist site (MIRROR of csMonitorSiteModal). Writes
+// site_mappings + site_min_clients into mist_sites_config.
+window.csMonitorMistSiteModal = async function (siteName, rerender) {
+    const existing = document.getElementById('cs-monitor-mist-site-modal');
+    if (existing) { existing.remove(); return; }
+    let cfg = {};
+    try { cfg = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`) || {}; } catch (e) { /* tolerate */ }
+    const sm = (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {};
+    const isMon = Object.values(sm).some(v => String(v) === String(siteName));
+    const minBySite = (cfg.site_min_clients && typeof cfg.site_min_clients === 'object') ? cfg.site_min_clients : {};
+    const curMin = minBySite[siteName] || '';
+    const rr = rerender === 'clients' ? 'clients' : 'sites';
+    const esc = csEscape;
+    const modal = document.createElement('div');
+    modal.id = 'cs-monitor-mist-site-modal';
+    modal.dataset.rerender = rr;
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm p-4';
+    modal.innerHTML = `
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                <h3 class="text-lg font-bold text-[#263040]">${isMon ? 'Monitored' : 'Monitor'} — ${esc(siteName)}</h3>
+                <button onclick="this.closest('#cs-monitor-mist-site-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div class="p-6 space-y-4">
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Minimum clients <span class="font-normal normal-case text-slate-400">(optional floor)</span></label>
+                    <input id="cs-monitor-mist-min" type="number" min="0" step="1" value="${esc(curMin)}" placeholder="blank = no floor (drop-based only)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    <p class="text-[11px] text-slate-400 leading-relaxed">If this site's live client count drops below this number, an error is raised on the dashboard — in addition to the existing % drop check. Leave blank to monitor for change only.</p>
+                </div>
+                <div id="cs-monitor-mist-status" class="text-xs text-slate-500 hidden"></div>
+                <div class="pt-2 flex justify-between gap-3">
+                    ${isMon ? `<button onclick="csSaveMistMonitorSite(${csEscape(JSON.stringify(siteName))}, false, null)" class="px-4 py-2 text-sm font-medium text-rose-600 hover:text-rose-800 border border-rose-200 rounded-md">Stop monitoring</button>` : `<span></span>`}
+                    <div class="flex gap-3">
+                        <button onclick="this.closest('#cs-monitor-mist-site-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
+                        <button id="cs-monitor-mist-save" class="bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border border-emerald-300 px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">${isMon ? 'Save' : 'Start monitoring'}</button>
+                    </div>
+                </div>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+    const inp = document.getElementById('cs-monitor-mist-min');
+    if (inp) { inp.focus(); inp.select(); }
+    const saveBtn = document.getElementById('cs-monitor-mist-save');
+    if (saveBtn) saveBtn.addEventListener('click', () => {
+        const raw = ((inp || {}).value || '').trim();
+        const n = raw === '' ? 0 : parseInt(raw, 10);
+        if (raw !== '' && (!Number.isFinite(n) || n < 0)) {
+            if (typeof showToast === 'function') showToast('Minimum clients must be a non-negative integer', 'error');
+            return;
+        }
+        csSaveMistMonitorSite(siteName, true, n);
+    });
+};
+
+// Worker: writes site_mappings (+ site_min_clients) into mist_sites_config,
+// preserving monitored_checks + hardware_checks. MIRROR of csSaveMonitorSite.
+window.csSaveMistMonitorSite = async function (siteName, monitor, minClients) {
+    const modal = document.getElementById('cs-monitor-mist-site-modal');
+    const statusEl = modal ? modal.querySelector('#cs-monitor-mist-status') : null;
+    const saveBtn = modal ? modal.querySelector('#cs-monitor-mist-save') : null;
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.classList.add('opacity-50', 'cursor-not-allowed'); }
+    if (statusEl) { statusEl.textContent = 'Saving…'; statusEl.classList.remove('hidden'); }
+    try {
+        const cfg = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`) || {};
+        const sm = (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? { ...cfg.site_mappings } : {};
+        const minBySite = (cfg.site_min_clients && typeof cfg.site_min_clients === 'object') ? { ...cfg.site_min_clients } : {};
+        if (monitor) {
+            sm[siteName] = siteName;
+            if (minClients === null) { /* keep existing floor */ }
+            else if (minClients > 0) { minBySite[siteName] = minClients; }
+            else { delete minBySite[siteName]; }
+        } else {
+            Object.keys(sm).forEach(k => { if (String(sm[k]) === String(siteName) || k === siteName) delete sm[k]; });
+            delete minBySite[siteName];
+        }
+        const body = {
+            site_mappings: sm,
+            site_min_clients: minBySite,
+            monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
+            hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
+        };
+        const r = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
+        if (typeof csPushToast === 'function') csPushToast(r, monitor ? `Monitoring ${siteName}` : `Stopped monitoring ${siteName}`);
+        else if (typeof showToast === 'function') showToast(monitor ? `Monitoring ${siteName}` : `Stopped monitoring ${siteName}`, 'success');
+        if (modal) modal.remove();
+        ((modal && modal.dataset.rerender) === 'clients' ? csRenderMistClients : csRenderMist)();
+    } catch (e) {
+        console.error('csSaveMistMonitorSite failed', e);
+        if (typeof showToast === 'function') showToast(e.message, 'error');
+        if (statusEl) { statusEl.textContent = (e.message || 'Save failed'); statusEl.classList.remove('hidden'); }
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+    }
+};
+
+// ── Mist → Alerts ───────────────────────────────────────────────────────────
+async function csRenderMistAlerts() {
+    csSetToolbar('');
+    const [data, sitesCfg] = await Promise.all([
+        csMistBrowse(),
+        csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+    ]);
+    const alerts = (data && data.alerts) || [];
+    const warn = _csMistWarn(data);
+    if (!alerts.length) { csSet(`${warn}${csEmpty('No Mist alerts.', 'Alerts come from the Mist org inventory (active + recently closed).')}`); return; }
+    const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
+        .filter(c => c && c.type === 'alert').map(c => `${c.id}::${c.site || ''}`));
+    const _sevRank = { critical: 4, error: 3, fail: 3, failed: 3, warning: 2, degraded: 2, info: 1, unknown: 0 };
+    const rows = alerts.map(a => {
+        const id = String((a.name || a.category) || '').trim();
+        const name = a.name || a.category || id;
+        const site = (a.site && a.site !== '—') ? a.site : '';
+        const isMon = id && monSet.has(`${id}::${site}`);
+        const btn = !id ? '—' : (isMon
+            ? `<button onclick="csToggleMistMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
+            : `<button onclick="csToggleMistMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this alert at ${csEscape(site || 'all sites')}">Monitor</button>`);
+        return { name: a.name || '—', site: a.site || '—', severity: a.severity || 'warning',
+                 category: a.category || '—', status: a.status || 'active', monitored: !!isMon, btn };
+    });
+    const alertCols = [
+        { label: 'Alert',    render: r => `<span class="text-sm">${csEscape(r.name)}</span>`, sort: r => r.name },
+        { label: 'Site',     render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'Severity', render: r => csStatusBadge(r.severity), sort: r => _sevRank[String(r.severity).toLowerCase()] || 0 },
+        { label: 'State',    render: r => r.status === 'cleared'
+            ? `<span class="text-[11px] font-semibold text-slate-500 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">Closed</span>`
+            : `<span class="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">Active</span>`,
+          sort: r => r.status === 'cleared' ? 0 : 1 },
+        { label: 'Category', render: r => `<span class="text-slate-500 text-xs">${csEscape(r.category)}</span>`, sort: r => r.category },
+        { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
+    ];
+    const _active = rows.filter(r => r.status !== 'cleared').length;
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csMistTable('mist-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} alert(s) — ${_active} active, ${alerts.length - _active} closed` })}</div></div>`);
+}
+
+// ── Mist → Insights ─────────────────────────────────────────────────────────
+async function csRenderMistInsights() {
+    csSetToolbar('');
+    const [data, sitesCfg] = await Promise.all([
+        csMistBrowse(),
+        csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+    ]);
+    const insights = (data && data.insights) || [];
+    const warn = _csMistWarn(data);
+    if (!insights.length) { csSet(`${warn}${csEmpty('No Mist insights.', 'AI insights come from the Mist org inventory.')}`); return; }
+    const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
+        .filter(c => c && c.type === 'insight').map(c => `${c.id}::${c.site || ''}`));
+    const rows = insights.map(i => {
+        const id = String((i.name || i.category) || '').trim();
+        const name = i.name || i.category || id;
+        const site = i.site || '';
+        const isMon = id && monSet.has(`${id}::${site}`);
+        const btn = !id ? '—' : (isMon
+            ? `<button onclick="csToggleMistMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
+            : `<button onclick="csToggleMistMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this insight at ${csEscape(site || 'all sites')}">Monitor</button>`);
+        return { name: i.name || '—', category: i.category || '—', site: i.site || '—',
+                 monitored: !!isMon, btn };
+    });
+    const insightCols = [
+        { label: 'Insight',  render: r => `<span class="text-sm">${csEscape(r.name)}</span>`, sort: r => r.name },
+        { label: 'Category', render: r => `<span class="text-slate-500">${csEscape(r.category)}</span>`, sort: r => r.category },
+        { label: 'Site',     render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
+    ];
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csMistTable('mist-insights', insightCols, rows, { monitorOf: r => r.monitored, caption: `${insights.length} insight(s)` })}</div></div>`);
+}
+
+// Toggle an insight/alert TYPE in mist_sites_config.monitored_checks. MIRROR of
+// csToggleMonitorCheck — writes to mist-sites-config, never Central's config.
+window.csToggleMistMonitorCheck = async function (type, id, name, monitor, site) {
+    try {
+        const cfg = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`) || {};
+        site = site || '';
+        const key = `${type}:${id}:${site}`;
+        let checks = (Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : []).filter(c => `${c.type}:${c.id}:${c.site || ''}` !== key);
+        if (monitor) checks.push({ type, id, name, site });
+        const body = {
+            site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
+            monitored_checks: checks,
+            hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
+        };
+        const r = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
+        if (typeof csPushToast === 'function') csPushToast(r, monitor ? `Monitoring ${name}` : `Stopped monitoring ${name}`);
+        else if (typeof showToast === 'function') showToast(monitor ? `Monitoring ${name}` : `Stopped monitoring ${name}`, 'success');
+        (type === 'alert' ? csRenderMistAlerts : csRenderMistInsights)();
+    } catch (e) {
+        console.error('csToggleMistMonitorCheck failed', e);
+        if (typeof showToast === 'function') showToast(e.message, 'error');
+    }
+};
+
+// ── Mist → Clients ──────────────────────────────────────────────────────────
+async function csRenderMistClients() {
+    csSetToolbar('');
+    const [data, sitesCfg] = await Promise.all([
+        csMistBrowse(),
+        csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+    ]);
+    const clients = (data && data.clients) || [];
+    const warn = _csMistWarn(data);
+    if (!clients.length) { csSet(`${warn}${csEmpty('No Mist clients returned.')}`); return; }
+    const sm = (sitesCfg && sitesCfg.site_mappings && typeof sitesCfg.site_mappings === 'object') ? sitesCfg.site_mappings : {};
+    const monitored = new Set(Object.values(sm).map(v => String(v)));
+    const minBySite = (sitesCfg && sitesCfg.site_min_clients && typeof sitesCfg.site_min_clients === 'object') ? sitesCfg.site_min_clients : {};
+    const rows = clients.map(cl => {
+        const site = cl.site || '';
+        const isMon = site && monitored.has(String(site));
+        const _minLbl = site && minBySite[site] ? ` · min ${csEscape(String(minBySite[site]))}` : '';
+        const btn = !site ? '—' : (isMon
+            ? `<button onclick="csMonitorMistSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Site monitored${_minLbl}</button>`
+            : `<button onclick="csMonitorMistSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (set a min-client floor)">Monitor</button>`);
+        return { host: cl.hostname || cl.mac || '—', ip: cl.ip || '—', mac: cl.mac || '—',
+                 site: cl.site || '—', status: cl.status || 'unknown', monitored: !!isMon, btn };
+    });
+    const clientCols = [
+        { label: 'Client',  render: r => `<span class="text-sm">${csEscape(r.host)}</span>`, sort: r => r.host },
+        { label: 'IP',      render: r => `<span class="font-mono text-xs">${csEscape(r.ip)}</span>`, sort: r => r.ip },
+        { label: 'MAC',     render: r => `<span class="font-mono text-xs">${csEscape(r.mac)}</span>`, sort: r => r.mac },
+        { label: 'Site',    render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'Status',  render: r => csStatusBadge(r.status), sort: r => String(r.status || '') },
+        { label: 'Monitor', render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
+    ];
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csMistTable('mist-clients', clientCols, rows, { monitorOf: r => r.monitored, caption: `${clients.length} client(s)` })}</div></div>`);
+}
+
+// ── Mist → Hardware (device-down checks) ────────────────────────────────────
+let _csMistAvailCache = null, _csMistAvailAt = 0, _csMistAvailTenant = null;
+async function csMistAvailable() {
+    const t = csTenant();
+    if (_csMistAvailCache && _csMistAvailTenant === t && (Date.now() - _csMistAvailAt) < 60000) return _csMistAvailCache;
+    let cat;
+    try { cat = await csFetch(`/${t}/mist/available?tenant_id=${t}`) || {}; }
+    catch (e) { console.error('csMistAvailable: fetch failed', e); cat = { warning: String(e && e.message || e) }; }
+    _csMistAvailCache = cat; _csMistAvailAt = Date.now(); _csMistAvailTenant = t;
+    return cat;
+}
+
+async function csRenderMistHardware() {
+    csSetToolbar('');
+    const [data, sitesCfg] = await Promise.all([
+        csMistBrowse(),
+        csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+    ]);
+    const dbs = (data && data.devices_by_site) || {};
+    const devices = [];
+    Object.keys(dbs).forEach(site => (dbs[site] || []).forEach(d => devices.push(Object.assign({ site }, d))));
+    const warn = _csMistWarn(data);
+    if (!devices.length) { csSet(`${warn}${csEmpty('No Mist hardware devices returned.', 'Devices (APs, switches, gateways) come from the Mist org inventory.')}`); return; }
+    const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.hardware_checks) ? sitesCfg.hardware_checks : []).map(c => `${c.id}::${c.site || ''}`));
+    const rows = devices.map(d => {
+        const id = String((d.serial || d.name) || '').trim();
+        const name = d.name || d.serial || id;
+        const dt = d.type || '';
+        const site = d.site || '';
+        const isMon = id && monSet.has(`${id}::${site}`);
+        const btn = !id ? '—' : (isMon
+            ? `<button onclick="csToggleMistMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, false)" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this device">✓ Monitored</button>`
+            : `<button onclick="csToggleMistMonitorHardware(${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, ${csEscape(JSON.stringify(dt))}, ${csEscape(JSON.stringify(site))}, true)" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this device (alerts on the dashboard when it goes down)">Monitor</button>`);
+        return { name, type: dt || '—', model: d.model || '—', site: site || '—',
+                 status: d.status || 'unknown', monitored: !!isMon, btn };
+    });
+    const hwCols = [
+        { label: 'Device',  render: r => `<span class="text-sm text-slate-700">${csEscape(r.name)}</span>`, sort: r => r.name },
+        { label: 'Type',    render: r => `<span class="text-slate-500">${csEscape(r.type)}</span>`, sort: r => r.type },
+        { label: 'Model',   render: r => `<span class="text-slate-500 text-xs">${csEscape(r.model)}</span>`, sort: r => r.model },
+        { label: 'Site',    render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'Status',  render: r => csStatusBadge(r.status), sort: r => String(r.status || '') },
+        { label: 'Monitor', render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
+    ];
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csMistTable('mist-hardware', hwCols, rows, { monitorOf: r => r.monitored, caption: `${devices.length} device(s) — Monitor a switch / AP / gateway to track it on the dashboard` })}</div></div>`);
+}
+
+// Toggle a hardware check in mist_sites_config.hardware_checks. MIRROR of
+// csToggleMonitorHardware — writes to mist-sites-config.
+window.csToggleMistMonitorHardware = async function (id, name, deviceType, site, monitor) {
+    try {
+        const cfg = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`) || {};
+        site = site || '';
+        const key = `${id}::${site}`;
+        let hw = (Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : []).filter(c => `${c.id}::${c.site || ''}` !== key);
+        if (monitor) hw.push({ id, name, device_type: deviceType, site });
+        const body = {
+            site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
+            monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
+            hardware_checks: hw,
+        };
+        const r = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
+        if (typeof csPushToast === 'function') csPushToast(r, monitor ? `Monitoring ${name}` : `Stopped monitoring ${name}`);
+        else if (typeof showToast === 'function') showToast(monitor ? `Monitoring ${name}` : `Stopped monitoring ${name}`, 'success');
+        csRenderMistHardware();
+    } catch (e) {
+        console.error('csToggleMistMonitorHardware failed', e);
+        if (typeof showToast === 'function') showToast(e.message, 'error');
+    }
+};
+
+window.CS_CHILD_RENDERERS['Mist::Sites']      = csRenderMist;
+window.CS_CHILD_RENDERERS['Mist::Alerts']     = csRenderMistAlerts;
+window.CS_CHILD_RENDERERS['Mist::Insights']   = csRenderMistInsights;
+window.CS_CHILD_RENDERERS['Mist::Clients']    = csRenderMistClients;
+window.CS_CHILD_RENDERERS['Mist::Hardware']   = csRenderMistHardware;
+
+/* ===========================================================================
  * 5. Config — config-push + simulation-conf editor + hub-config
  * ========================================================================= */
 
@@ -3102,39 +3554,61 @@ let csSimQuotaAvailable = [];        // all Central alerts+insights (active+clos
 async function csRenderConfigSimQuotas() {
     csSetToolbar('');
     try {
-        const [cat, cfg, browse] = await Promise.all([
+        // Source-aware (Phase 4): sim-quota rows live in TWO configs —
+        // central_sites_config.sim_quotas (Central: rows) and
+        // mist_sites_config.sim_quotas (Mist: rows). ONE editor unions them;
+        // each row's alert_id carries its Central:/Mist: prefix. The alert/insight
+        // picker draws from BOTH sources' browse + monitored checks (prefixed) so
+        // a row can be linked to a Central OR a Mist alert.
+        const [cat, cfg, mcfg, browse, mbrowse] = await Promise.all([
             csFetch(`/${csTenant()}/sim-quota-catalog?tenant_id=${csTenant()}`).catch(() => null),
             csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
+            csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`).catch(() => ({})),
             (typeof csCentralBrowse === 'function' ? csCentralBrowse() : Promise.resolve(null)).catch(() => null),
+            (typeof csMistBrowse === 'function' ? csMistBrowse() : Promise.resolve(null)).catch(() => null),
         ]);
-        // Full Central alert/insight universe (active AND closed) so the ID field
-        // can link a quota to any alert/insight Central has ever reported — not
-        // just the ones currently being monitored.
+        // Full alert/insight universe (active AND closed) from BOTH products, ids
+        // PREFIXED so the picker offers Central: / Mist: ids and a new row's
+        // alert_id carries its source. cat.alerts/insights are already prefixed
+        // (Phase 1 catalog); browse ids are bare → prefix here.
         const _av = [];
-        ((browse && browse.alerts) || []).forEach(a => {
-            const id = String((a.name || a.category) || '').trim();
-            if (id) _av.push({ type: 'alert', id, name: a.name || a.category || id, site: (a.site && a.site !== '—') ? a.site : '', status: a.status || 'active' });
-        });
-        ((browse && browse.insights) || []).forEach(i => {
-            const id = String((i.name || i.category) || '').trim();
-            if (id) _av.push({ type: 'insight', id, name: i.name || i.category || id, site: (i.site && i.site !== '—' && i.site !== 'All Sites') ? i.site : '', status: i.status || 'active' });
-        });
-        // Also fold in the SHARED alert/insight history (catalog.alerts/insights —
-        // every alert any tenant has ever seen) so the ID picker works even when
-        // this alert isn't firing right now (dedup happens in the options builder).
+        const _pushBrowse = (b, src) => {
+            if (!b) return;
+            ((b.alerts) || []).forEach(a => {
+                const id = String((a.name || a.category) || '').trim();
+                if (id) _av.push({ type: 'alert', id: _csPrefixId(src, id), name: a.name || a.category || id, site: (a.site && a.site !== '—') ? a.site : '', status: a.status || 'active' });
+            });
+            ((b.insights) || []).forEach(i => {
+                const id = String((i.name || i.category) || '').trim();
+                if (id) _av.push({ type: 'insight', id: _csPrefixId(src, id), name: i.name || i.category || id, site: (i.site && i.site !== '—' && i.site !== 'All Sites') ? i.site : '', status: i.status || 'active' });
+            });
+        };
+        _pushBrowse(browse, 'central');
+        _pushBrowse(mbrowse, 'mist');
+        // SHARED alert/insight history (catalog.alerts/insights — every alert any
+        // tenant has ever seen, already prefixed in Phase 1) so the picker works
+        // even when an alert isn't firing right now (dedup in the options builder).
         ((cat && cat.alerts) || []).forEach(a => { if (a && a.id) _av.push({ type: 'alert', id: a.id, name: a.name || a.id, site: a.site || '' }); });
         ((cat && cat.insights) || []).forEach(i => { if (i && i.id) _av.push({ type: 'insight', id: i.id, name: i.name || i.id, site: i.site || '' }); });
         csSimQuotaAvailable = _av;
-        csSimQuotaCatalog = cat || { sims: [], sites: [], suggested: {}, meta: {} };
-        // Per-sim shareable/stackable overrides (Simulation Sharing tile).
-        // Monitored alerts/insights (Central → Alerts/Insights → Monitor) are the
-        // source for the row's Alert / Insight ID dropdown — a quota is linked to
-        // an alert/insight the tenant actually monitors.
-        csSimQuotaMonitored = Array.isArray(cfg && cfg.monitored_checks)
-            ? cfg.monitored_checks.filter(c => c && c.id).map(c => ({
-                  type: c.type || 'alert', id: String(c.id),
-                  name: c.name || c.id, site: c.site || '',
-              })) : [];
+        // Augment the catalog's site list with Mist site_mappings so a Mist row's
+        // Site selector can target a Mist site (the engine resolves via the row's
+        // source's alias groups).
+        const _cat = cat || { sims: [], sites: [], suggested: {}, meta: {} };
+        const _mistSites = [];
+        Object.entries((mcfg && mcfg.site_mappings) || {}).forEach(([k, v]) => { if (k) _mistSites.push(k); if (v) _mistSites.push(String(v)); });
+        if (_mistSites.length) _cat.sites = Array.from(new Set(((_cat.sites) || []).concat(_mistSites))).sort();
+        csSimQuotaCatalog = _cat;
+        // Monitored checks from BOTH configs, ids PREFIXED (the picker's first
+        // section — alerts/insights the tenant explicitly watches).
+        const _mon = [];
+        (Array.isArray(cfg && cfg.monitored_checks) ? cfg.monitored_checks : []).forEach(c => {
+            if (c && c.id) _mon.push({ type: c.type || 'alert', id: _csPrefixId('central', String(c.id)), name: c.name || c.id, site: c.site || '' });
+        });
+        (Array.isArray(mcfg && mcfg.monitored_checks) ? mcfg.monitored_checks : []).forEach(c => {
+            if (c && c.id) _mon.push({ type: c.type || 'alert', id: _csPrefixId('mist', String(c.id)), name: c.name || c.id, site: c.site || '' });
+        });
+        csSimQuotaMonitored = _mon;
         window._csIgnoreGlobalQuotas = !!(cfg && cfg.ignore_global_quotas);
         // Site Links (name↔wsite) — the site selectors below route on the wsite
         // (the value), shown by the link Name, so every site field lines up.
@@ -3157,8 +3631,13 @@ async function csRenderConfigSimQuotas() {
             // Per-site load multiplier (100 = normal). Higher = more random load.
             ambient_site_weights: (cfg && cfg.ambient_site_weights && typeof cfg.ambient_site_weights === 'object') ? { ...cfg.ambient_site_weights } : {},
         };
-        const quotas = Array.isArray(cfg && cfg.sim_quotas) ? cfg.sim_quotas : [];
-        csSimQuotaRows = quotas.map(csSimQuotaRowFromServer);
+        // UNION the tenant's Central + Mist sim-quota rows. Each row's alert_id
+        // is normalized to prefixed form by csSimQuotaRowFromServer, so Central:
+        // and Mist: rows are distinct dedup keys (independent learning + separate
+        // clients, per Phase 4).
+        const centralQuotas = Array.isArray(cfg && cfg.sim_quotas) ? cfg.sim_quotas : [];
+        const mistQuotas = Array.isArray(mcfg && mcfg.sim_quotas) ? mcfg.sim_quotas : [];
+        csSimQuotaRows = centralQuotas.concat(mistQuotas).map(csSimQuotaRowFromServer);
         csRenderSimQuotaEditor();
     } catch (e) {
         console.error('csRenderConfigSimQuotas: load failed', e);
@@ -3167,9 +3646,16 @@ async function csRenderConfigSimQuotas() {
 }
 
 function csSimQuotaRowFromServer(q) {
+    // Source-aware (Phase 4): a row's alert_id carries a Central:/Mist: prefix
+    // (the only seam between the two products). Normalize to prefixed form on
+    // load so the editor's prefix-aware picker matches, and tag the row's source
+    // for the badge + split-save. Legacy bare ids default to Central.
+    const _src = _csQuotaSource(q.alert_id);
+    const _aid = q.alert_id ? _csPrefixId(_src, q.alert_id) : '';
     return {
         alert_type: q.alert_type || 'alert',
-        alert_id: q.alert_id || '',
+        alert_id: _aid,
+        source: _src,
         sim_id: q.sim_id || '',
         count: q.count != null ? q.count : 10,
         site: q.site || '',
@@ -3189,6 +3675,22 @@ function csSimQuotaRowFromServer(q) {
         min: q.min != null ? q.min : undefined,
         max: q.max != null ? q.max : undefined,
     };
+}
+
+// Source prefix helpers (mirror of the hub/spoke parse_alert_source /
+// prefixed_alert_id). The prefix is the ONLY seam between Central and Mist;
+// bare/legacy ids default to Central.
+function _csQuotaSource(alertId) {
+    const a = String(alertId || '').trim();
+    if (a.toLowerCase().startsWith('mist:')) return 'mist';
+    return 'central';
+}
+function _csPrefixId(source, bareOrPrefixed) {
+    const b = String(bareOrPrefixed || '').trim();
+    if (!b) return b;
+    const lo = b.toLowerCase();
+    if (lo.startsWith('central:') || lo.startsWith('mist:')) return b;  // already prefixed
+    return (source === 'mist' ? 'Mist:' : 'Central:') + b;
 }
 
 function csSimQuotaSelect(selected, items, placeholder) {
@@ -3301,14 +3803,22 @@ function csRenderSimQuotaEditor() {
         const simOpts = csSimQuotaSimOptions(r.sim_id, simIds);
         const siteOpts = csSsidCellOptions(r.site, '— all sites —');
         const idOpts = csSimQuotaAlertIdOptions(r.alert_type, r.alert_id);
+        // Source badge (Phase 4): Central vs Mist, derived from the row's alert_id
+        // prefix (presence / untethered rows default to Central). The prefix is the
+        // only seam; picking a Mist: alert makes the row a Mist row.
+        const _src = r.source || _csQuotaSource(r.alert_id);
+        const _srcBadge = _src === 'mist'
+            ? `<span class="inline-block text-[10px] font-bold px-2 py-0.5 rounded-full border text-violet-700 bg-violet-50 border-violet-200" title="Juniper Mist alert">Mist</span>`
+            : `<span class="inline-block text-[10px] font-bold px-2 py-0.5 rounded-full border text-sky-700 bg-sky-50 border-sky-200" title="Aruba Central alert">Central</span>`;
         // The "Tied to alert/insight" toggle leads the alert section of every sim
         // row so it's obvious it governs the Type / Alert ID fields. Off =
         // untethered (no alert needed). Presence rows have no alert at all.
         const alertCell = isPresence
-            ? `<label class="text-xs text-slate-500" data-cs-sq-presence-note>Presence
+            ? `<label class="text-xs text-slate-500" data-cs-sq-presence-note>${_srcBadge} Presence
                 <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">Homes N clients to the site — no sim. They stay free for stackable sims.</div>
               </label>`
             : `<div class="text-xs text-slate-500">
+                <div class="mb-1">${_srcBadge}</div>
                 <label class="flex items-center gap-1 cursor-pointer font-semibold text-slate-600"><input data-cs-sq="tied" type="checkbox" onchange="csSimQuotaOnTiedChange(this)" ${tied ? 'checked' : ''}> Tied to alert/insight</label>
                 ${tied
                   ? `<select data-cs-sq="alert_type" onchange="csSimQuotaOnTypeChange(this)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
@@ -3821,22 +4331,44 @@ window.csToggleIgnoreGlobalQuotas = async function () {
 
 window.csSimQuotaSave = async function () {
     const rows = csSimQuotaSyncFromDom();
+    // Source-aware split-save (Phase 4): each row's alert_id carries a Central:/
+    // Mist: prefix; dispatch the row to its source's config. Rows with no prefix
+    // (presence / untethered) default to Central. Each POST preserves that
+    // config's site_mappings / monitored_checks / hardware_checks.
+    const centralRows = rows.filter(r => _csQuotaSource(r.alert_id) === 'central');
+    const mistRows = rows.filter(r => _csQuotaSource(r.alert_id) === 'mist');
+    const allErrs = [];
+    const cleanRows = [];
     try {
-        const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
-        const body = {
-            site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
-            monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
-            hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
-            sim_quotas: rows,
-            ignore_global_quotas: !!cfg.ignore_global_quotas,
-        };
-        const r = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
+        if (centralRows.length) {
+            const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
+            const body = {
+                site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
+                monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
+                hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
+                sim_quotas: centralRows,
+                ignore_global_quotas: !!cfg.ignore_global_quotas,
+            };
+            const r = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
+            cleanRows.push(...(Array.isArray(r && r.sim_quotas) ? r.sim_quotas : centralRows));
+            allErrs.push(...(Array.isArray(r && r.sim_quota_errors) ? r.sim_quota_errors : []));
+        }
+        if (mistRows.length) {
+            const mcfg = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`) || {};
+            const body = {
+                site_mappings: (mcfg.site_mappings && typeof mcfg.site_mappings === 'object') ? mcfg.site_mappings : {},
+                monitored_checks: Array.isArray(mcfg.monitored_checks) ? mcfg.monitored_checks : [],
+                hardware_checks: Array.isArray(mcfg.hardware_checks) ? mcfg.hardware_checks : [],
+                sim_quotas: mistRows,
+            };
+            const r = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
+            cleanRows.push(...(Array.isArray(r && r.sim_quotas) ? r.sim_quotas : mistRows));
+            allErrs.push(...(Array.isArray(r && r.sim_quota_errors) ? r.sim_quota_errors : []));
+        }
         // Server re-validates + dedups; adopt its cleaned rows so the UI matches.
-        const clean = Array.isArray(r && r.sim_quotas) ? r.sim_quotas : rows;
-        const errs = Array.isArray(r && r.sim_quota_errors) ? r.sim_quota_errors : [];
-        csSimQuotaRows = clean.map(csSimQuotaRowFromServer);
+        csSimQuotaRows = cleanRows.map(csSimQuotaRowFromServer);
         csRenderSimQuotaEditor();
-        if (errs.length) showToast(`Saved with ${errs.length} issue(s): ${errs.join('; ')}`, 'error');
+        if (allErrs.length) showToast(`Saved with ${allErrs.length} issue(s): ${allErrs.join('; ')}`, 'error');
         else showToast('Sim quotas saved.', 'success');
     } catch (e) {
         console.error('csSimQuotaSave: save failed', e);
@@ -5646,6 +6178,263 @@ window.csTestCentral = async function () {
     } catch (e) { console.error('csTestCentral: test-central failed', e); if (out) out.textContent = 'Test failed: ' + (e.message || e); }
 };
 
+// ── Setup → Mist API (MIRROR of Setup → Central API; separate product) ────────
+// Juniper Mist uses a static API token + org_id + region host — NOT Aruba's
+// OAuth client_id/secret/cluster_url. Creds live in mist_config (surfaced via
+// the mist-status aggregate); sites/checks live in mist_sites_config. Pushed to
+// the spoke as mist_config / mist_sites_config. DOM ids are Mist-namespaced
+// (cs-msc-*) so the Central and Mist Setup forms never collide.
+async function csRenderSetupMistApi() {
+    csSetToolbar('');
+    let conn = {}, sites = {};
+    try { conn = await csFetch(`/aggregate/mist-status?tenant_id=${csTenant()}`); } catch (e) { console.error('csRenderSetupMistApi: mist-status fetch failed, defaulting to {}', e); conn = {}; }
+    try { sites = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`); } catch (e) { console.error('csRenderSetupMistApi: mist-sites-config fetch failed, defaulting to {}', e); sites = {}; }
+    conn = conn || {}; sites = sites || {};
+    const hc = conn.hub_mist_config || {};
+    const sm = (sites.site_mappings && typeof sites.site_mappings === 'object') ? sites.site_mappings : {};
+    const mc = Array.isArray(sites.monitored_checks) ? sites.monitored_checks : [];
+    const hw = Array.isArray(sites.hardware_checks) ? sites.hardware_checks : [];
+    const _wirelessSites = Object.keys(sm);
+    const _discoveredSites = Array.from(new Set(Object.values(sm).filter(Boolean)));
+    window._csWirelessSites = _wirelessSites.slice();
+    window._csMistSites = _discoveredSites.slice();
+    window._csMscMonitoredChecks = mc.map(c => ({ type: c.type || 'alert', id: c.id, name: c.name || c.id }));
+    window._csMscCatalog = null;
+
+    const f = (id, label, v, type) => `<label class="text-xs text-slate-500">${csEscape(label)}
+      <input id="${id}" ${type === 'password' ? 'type="password"' : 'type="text"'} value="${csEscape(v != null ? v : '')}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></label>`;
+
+    // Known Mist API regional hosts (constrained server-side to _KNOWN_MIST_HOSTS).
+    const MIST_HOSTS = [
+        ['Global (US)', 'api.mist.com'],
+        ['Europe', 'api.eu.mist.com'],
+        ['Global Cloud 1', 'api.gc1.mist.com'],
+        ['APAC East 2', 'api.ac2.mist.com'],
+        ['APAC Northeast 5', 'api.ac5.mist.com'],
+    ];
+    const curHost = hc.host || hc.api_host || 'api.mist.com';
+    const hostSel = `<select id="cs-msc-host" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+      ${MIST_HOSTS.map(([region, url]) => `<option value="${url}" ${url === curHost ? 'selected' : ''}>${csEscape(region)} — ${csEscape(url)}</option>`).join('')}
+    </select>`;
+
+    const connCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Mist API Connection ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <p class="text-xs text-slate-400 mb-3">Juniper Mist org credentials. Pushed to the spoke as <code>mist_config</code>; the spoke sentinel-merges them — the token only overwrites when non-empty.</p>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        ${f('cs-msc-token', 'API Token', hc.api_token, 'password')}
+        ${f('cs-msc-orgid', 'Org ID', hc.org_id)}
+        <label class="text-xs text-slate-500">Region / API host${hostSel}</label>
+        <label class="text-xs text-slate-500">Poll interval (minutes)
+          <input id="cs-msc-pollmin" type="number" min="1" step="1" value="${Math.max(1, Math.round((Number(hc.poll_interval_s) || 300) / 60))}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+          <span class="block text-[11px] text-slate-400 mt-1">How often the hub polls Mist for this tenant (default 5, minimum 1).</span>
+        </label>
+        <div class="md:col-span-2 mt-1 pt-3 border-t border-slate-200">
+          <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Client-count check thresholds</p>
+          <p class="text-[11px] text-slate-400 mb-2">Controls how the <b>Steady Client Count</b> dashboard check colours a site. Two independent rules: a drop vs the recent hourly average, and a sustained fall below the site's historical peak.</p>
+        </div>
+        <label class="text-xs text-slate-500">Warning — drop vs recent average (%)
+          <input id="cs-msc-cc-warn" type="number" min="0" max="100" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.warn_pct != null) ? hc.cc_thresholds.warn_pct : 20}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+          <span class="block text-[11px] text-slate-400 mt-1">Amber when a site's count is this % below its last-hour average (default 20).</span>
+        </label>
+        <label class="text-xs text-slate-500">Error — drop vs recent average (%)
+          <input id="cs-msc-cc-error" type="number" min="0" max="100" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.error_pct != null) ? hc.cc_thresholds.error_pct : 50}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+          <span class="block text-[11px] text-slate-400 mt-1">Red when the drop reaches this % (default 50; kept ≥ warning).</span>
+        </label>
+        <label class="text-xs text-slate-500">Sustained die-off — % of peak
+          <input id="cs-msc-cc-dieoff" type="number" min="0" max="100" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.die_off_pct != null) ? hc.cc_thresholds.die_off_pct : 20}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+          <span class="block text-[11px] text-slate-400 mt-1">Red when the hourly average falls below this % of the 7/30-day peak (default 20). <b>Set 0 to disable.</b></span>
+        </label>
+        <label class="text-xs text-slate-500">Die-off — minimum peak (clients)
+          <input id="cs-msc-cc-minpeak" type="number" min="1" step="1" value="${(hc.cc_thresholds && hc.cc_thresholds.min_peak != null) ? hc.cc_thresholds.min_peak : 5}" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">
+          <span class="block text-[11px] text-slate-400 mt-1">Only arm die-off when the peak is at least this many clients (default 5).</span>
+        </label>
+      </div>
+      <div class="flex justify-end gap-2 mt-4">
+        <button onclick="csSaveMistConn()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save Connection</button>
+        <button onclick="csTestMist()" class="bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-bold">Test Mist</button>
+      </div>
+      <div id="cs-msc-test" class="mt-3 text-xs text-slate-500"></div>
+    </div>`;
+
+    const smRows = Object.keys(sm).map(w => csMscSmRow(w, sm[w])).join('');
+    const hwRows = hw.map(h => csMscHwRow(h.id, h.name, h.device_type)).join('');
+    const mcList = (mc && mc.length) ? mc.map(c => `<div class="text-xs text-slate-600">• ${csEscape(c.name || c.id)} <span class="text-slate-400 font-mono">(${csEscape(c.type || 'alert')}/${csEscape(c.id)})</span></div>`).join('')
+        : '<p class="text-xs text-slate-400 italic">None configured. Load the available-checks catalog to pick Mist alerts/insights.</p>';
+
+    const sitesCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Sites &amp; Checks ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <p class="text-xs text-slate-400 mb-3">Hub-owned site mappings + Mist sim/hardware monitors. Pushed to the spoke as <code>mist_sites_config</code> and applied to the spoke's runtime monitoring when hub-managed.</p>
+
+      <div class="flex items-center gap-2 mb-2">
+        <button onclick="csLoadMistAvailable()" class="bg-slate-200 text-slate-700 px-3 py-1.5 rounded-md text-xs font-bold">Load available checks</button>
+        <span id="cs-msc-catalog-msg" class="text-xs text-slate-400"></span>
+      </div>
+
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Site Mappings (wireless site → Mist site)</p>
+      ${_discoveredSites.length ? `<p class="text-[10px] text-slate-400 mb-1">${_discoveredSites.length} Mist site(s) discovered — pick from the dropdown (refreshes as more are found).</p>` : '<p class="text-[10px] text-slate-400 mb-1">No Mist sites discovered yet (check the connection); the dropdown lists discovered sites once loaded.</p>'}
+      <div id="cs-msc-sm-rows" class="space-y-2">${smRows || '<p class="text-xs text-slate-400 italic">No site mappings.</p>'}</div>
+      <button onclick="csMscAddSm()" class="mt-2 text-xs text-[#01A982] font-bold hover:underline">+ Add mapping</button>
+
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Monitored Checks</p>
+      <div id="cs-msc-monitored">${mcList}</div>
+
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">Hardware Checks</p>
+      <div id="cs-msc-hw-rows" class="space-y-2">${hwRows || '<p class="text-xs text-slate-400 italic">No hardware checks.</p>'}</div>
+      <button onclick="csMscAddHw()" class="mt-2 text-xs text-[#01A982] font-bold hover:underline">+ Add hardware check</button>
+
+      <div class="flex justify-end gap-2 mt-4">
+        <button onclick="csSaveMistSites()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save Sites &amp; Checks</button>
+      </div>
+    </div>`;
+
+    csSet(`<div class="max-w-4xl space-y-4">${connCard}${sitesCard}</div>`);
+    _csRefreshMistSiteSelects();
+}
+
+// Mist site-mapping / hardware row builders (MIRROR of csCscSmRow/csCscHwRow;
+// right-hand select draws from window._csMistSites, containers are cs-msc-*).
+function csMscSmRow(w, c) {
+    const selCls = 'flex-1 bg-white border border-slate-300 rounded-md px-2 py-1.5 text-xs text-slate-700 outline-none focus:ring-2 focus:ring-green-500';
+    return `<div class="cs-msc-sm-row flex gap-2 items-center">
+      <select data-cs-sm-w class="${selCls}">${_csSiteOptions(window._csWirelessSites, w)}</select>
+      <span class="text-slate-400">→</span>
+      <select data-cs-sm-c class="${selCls}">${_csSiteOptions(window._csMistSites, c)}</select>
+      <button onclick="csMscRemoveRow(this)" class="text-red-500 text-xs px-2" title="Remove">✕</button>
+    </div>`;
+}
+function csMscHwRow(id, name, dt) {
+    return `<div class="cs-msc-hw-row flex gap-2 items-center">
+      <input data-cs-hw-id value="${csEscape(id != null ? id : '')}" placeholder="id (AP_DOWN)" class="w-36 bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs font-mono">
+      <input data-cs-hw-name value="${csEscape(name != null ? name : '')}" placeholder="name" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs">
+      <input data-cs-hw-dt value="${csEscape(dt != null ? dt : '')}" placeholder="device type (ap/gateway/switch)" class="flex-1 bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs">
+      <button onclick="csMscRemoveRow(this)" class="text-red-500 text-xs px-2" title="Remove">✕</button>
+    </div>`;
+}
+window.csMscRemoveRow = function (btn) {
+    const row = btn && btn.closest('.cs-msc-sm-row, .cs-msc-hw-row');
+    if (row) row.remove();
+};
+window.csMscAddSm = function () {
+    const c = csEl('cs-msc-sm-rows'); if (!c) return;
+    const empty = c.querySelector('p.italic'); if (empty) empty.remove();
+    const wrap = document.createElement('div'); wrap.innerHTML = csMscSmRow('', '');
+    c.appendChild(wrap.firstElementChild);
+};
+window.csMscAddHw = function () {
+    const c = csEl('cs-msc-hw-rows'); if (!c) return;
+    const empty = c.querySelector('p.italic'); if (empty) empty.remove();
+    const wrap = document.createElement('div'); wrap.innerHTML = csMscHwRow('', '', '');
+    c.appendChild(wrap.firstElementChild);
+};
+
+// Refresh the Mist site-mapping <select> options AFTER render (MIRROR of
+// _csRefreshSiteSelects): wireless sites from /aggregate/clients, Mist sites
+// from csMistBrowse(). Rewrites each row's options in place.
+async function _csRefreshMistSiteSelects() {
+    try {
+        const cl = await csFetch(`/aggregate/clients?tenant_id=${csTenant()}`) || {};
+        const rows = cl.clients || cl.rows || [];
+        const found = rows.map(c => (c.config && c.config.wsite) || c.wsite).filter(Boolean);
+        window._csWirelessSites = Array.from(new Set((window._csWirelessSites || []).concat(found))).sort();
+    } catch (e) { /* clients optional */ }
+    try {
+        const b = await csMistBrowse();
+        const found = ((b && b.sites) || []).map(s => s && s.name).filter(Boolean);
+        window._csMistSites = Array.from(new Set((window._csMistSites || []).concat(found))).sort();
+    } catch (e) { /* browse optional */ }
+    document.querySelectorAll('#cs-msc-sm-rows .cs-msc-sm-row').forEach(row => {
+        const wSel = row.querySelector('[data-cs-sm-w]');
+        const cSel = row.querySelector('[data-cs-sm-c]');
+        if (wSel) { const cur = wSel.value; wSel.innerHTML = _csSiteOptions(window._csWirelessSites, cur); wSel.value = cur; }
+        if (cSel) { const cur = cSel.value; cSel.innerHTML = _csSiteOptions(window._csMistSites, cur); cSel.value = cur; }
+    });
+}
+
+window.csLoadMistAvailable = async function () {
+    const msg = csEl('cs-msc-catalog-msg');
+    if (msg) { msg.textContent = 'Loading…'; msg.className = 'text-xs text-slate-400'; }
+    try {
+        const cat = await csFetch(`/${csTenant()}/mist/available?tenant_id=${csTenant()}`) || {};
+        window._csMscCatalog = cat;
+        const alerts = cat.alerts || [], insights = cat.insights || [];
+        const ids = new Set((window._csMscMonitoredChecks || []).map(c => c.id));
+        const toggle = (c, type) => `<label class="flex items-center gap-2 text-xs text-slate-600 py-0.5">
+          <input type="checkbox" data-cs-mon-type="${csEscape(type)}" data-cs-mon-id="${csEscape(c.id)}" data-cs-mon-name="${csEscape(c.name || c.id)}" ${ids.has(c.id) ? 'checked' : ''} onchange="csMscMonToggle()">
+          <span>${csEscape(c.name || c.id)}</span><span class="text-slate-400 font-mono">(${csEscape(c.id)})</span>
+        </label>`;
+        csEl('cs-msc-monitored').innerHTML = `<div class="grid grid-cols-1 md:grid-cols-2 gap-x-4 gap-y-1">
+          <div><p class="text-[10px] font-bold text-slate-400 uppercase mb-1">Alerts</p>${alerts.map(a => toggle(a, 'alert')).join('') || '<p class="text-xs text-slate-400 italic">None.</p>'}</div>
+          <div><p class="text-[10px] font-bold text-slate-400 uppercase mb-1">Insights</p>${insights.map(a => toggle(a, 'insight')).join('') || '<p class="text-xs text-slate-400 italic">None.</p>'}</div>
+        </div>`;
+        csMscMonSync();
+        if (msg) { msg.textContent = (alerts.length + insights.length) + ' checks loaded' + (cat.warning ? ' — ' + cat.warning : ''); }
+    } catch (e) {
+        console.error('csLoadMistAvailable: available-checks catalog load failed', e);
+        if (msg) { msg.textContent = 'Failed: ' + (e.message || e); msg.className = 'text-xs text-red-500'; }
+    }
+};
+window.csMscMonToggle = function () { csMscMonSync(); };
+window.csMscMonSync = function () {
+    const checks = [];
+    document.querySelectorAll('#cs-msc-monitored input[type=checkbox]').forEach(cb => {
+        if (cb.checked) checks.push({ type: cb.getAttribute('data-cs-mon-type'), id: cb.getAttribute('data-cs-mon-id'), name: cb.getAttribute('data-cs-mon-name') });
+    });
+    window._csMscMonitoredChecks = checks;
+};
+
+window.csSaveMistConn = async function () {
+    const v = id => (csEl(id) && csEl(id).value) || '';
+    const hub_mist_config = {
+        org_id: v('cs-msc-orgid'),
+        host: v('cs-msc-host'),
+    };
+    // Token: include only when non-empty so the spoke's sentinel merge doesn't
+    // wipe an existing token with a blank field.
+    if (v('cs-msc-token')) hub_mist_config.api_token = v('cs-msc-token');
+    const _pm = parseInt(v('cs-msc-pollmin'), 10);
+    if (!isNaN(_pm) && _pm > 0) hub_mist_config.poll_interval_s = Math.max(60, _pm * 60);
+    const _ccNum = (id, dflt) => { const n = parseFloat(v(id)); return isNaN(n) ? dflt : n; };
+    hub_mist_config.cc_thresholds = {
+        warn_pct: _ccNum('cs-msc-cc-warn', 20),
+        error_pct: _ccNum('cs-msc-cc-error', 50),
+        die_off_pct: _ccNum('cs-msc-cc-dieoff', 20),
+        min_peak: _ccNum('cs-msc-cc-minpeak', 5),
+    };
+    try {
+        const r = await csFetch('/aggregate/mist', { method: 'POST', body: JSON.stringify({ hub_mist_config }) });
+        csPushToast(r, 'Saved');
+    } catch (e) { console.error('csSaveMistConn: mist connection save failed', e); showToast(e.message, 'error'); }
+};
+
+window.csSaveMistSites = async function () {
+    const site_mappings = {};
+    document.querySelectorAll('#cs-msc-sm-rows .cs-msc-sm-row').forEach(row => {
+        const w = (row.querySelector('[data-cs-sm-w]').value || '').trim();
+        const c = (row.querySelector('[data-cs-sm-c]').value || '').trim();
+        if (w) site_mappings[w] = c;
+    });
+    const hardware_checks = [];
+    document.querySelectorAll('#cs-msc-hw-rows .cs-msc-hw-row').forEach(row => {
+        const id = (row.querySelector('[data-cs-hw-id]').value || '').trim();
+        if (!id) return;
+        hardware_checks.push({ id, name: (row.querySelector('[data-cs-hw-name]').value || '').trim() || id, device_type: (row.querySelector('[data-cs-hw-dt]').value || '').trim() });
+    });
+    const cfg = { site_mappings, monitored_checks: window._csMscMonitoredChecks || [], hardware_checks };
+    try {
+        const r = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(cfg) });
+        csPushToast(r, 'Saved');
+    } catch (e) { console.error('csSaveMistSites: mist sites save failed', e); showToast(e.message, 'error'); }
+};
+
+window.csTestMist = async function () {
+    const out = csEl('cs-msc-test');
+    try {
+        const r = await csFetch(`/${csTenant()}/test-mist?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify({}) });
+        const rows = (r.spokes || []).map(s => `<div>${csEscape(s.spoke_name)}: token=${csEscape(s.token_state || '—')} valid=${csEscape(s.token_valid)} status=${csEscape(s.status || '—')}</div>`).join('');
+        if (out) out.innerHTML = rows || '<i>No spokes reporting mist state.</i>';
+    } catch (e) { console.error('csTestMist: test-mist failed', e); if (out) out.textContent = 'Test failed: ' + (e.message || e); }
+};
+
 // ── Proxmox (full HUB_CONFIG editor) ────────────────────────────────────────
 async function csRenderSetupProxmox() {
     csSetToolbar('');
@@ -5803,6 +6592,7 @@ window.CS_CHILD_RENDERERS['Setup::General']        = csRenderSetup;
 // the old "Setup" child label before it re-persists as "General".
 window.CS_CHILD_RENDERERS['Setup::Setup']           = csRenderSetup;
 window.CS_CHILD_RENDERERS['Setup::Central API']    = csRenderSetupCentralApi;
+window.CS_CHILD_RENDERERS['Setup::Mist API']       = csRenderSetupMistApi;
 window.CS_CHILD_RENDERERS['Setup::Proxmox']        = csRenderSetupProxmox;
 window.CS_CHILD_RENDERERS['Setup::GitHub']         = csRenderSetupGithub;
 window.CS_CHILD_RENDERERS['Setup::Security']       = csRenderSetupSecurity;

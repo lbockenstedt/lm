@@ -1325,7 +1325,7 @@ const VIEW_SUBMENUS = {
     pxmx: ['Overview', 'Virtual Machines', 'Settings'],
     ldap: ['Users', 'Groups'],
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
-    cs: ['Dashboard', 'Clients', 'Central', 'VM Server', 'Config', 'Setup', 'Spoke Management'],
+    cs: ['Dashboard', 'Clients', 'Central', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
     dns: ['Records', 'Statistics', 'Forwarders'],
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations'],
@@ -1348,9 +1348,10 @@ const VIEW_CHILDREN = {
         'Dashboard': ['Checks', 'Hardware', 'Client Count'],
         'Clients':     ['All', 'T1', 'T2', 'T3'],
         'Central':     ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware', 'Diagnostic'],
+        'Mist':        ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware'],
         'VM Server':   ['Overview', 'VMs', 'Terminal', 'USB', 'IoT', 'VirtualHere', 'Command Queue', 'Details'],
         'Config':      ['Engine', 'Engine State', 'Engine Diagnostic', 'Sites', 'Config Editor'],
-        'Setup':       ['General', 'Central API', 'Proxmox', 'GitHub', 'Security', 'Notifications', 'Diagnostics'],
+        'Setup':       ['General', 'Central API', 'Mist API', 'Proxmox', 'GitHub', 'Security', 'Notifications', 'Diagnostics'],
     },
     settings: {
         // Azure gets a second-tier strip (SSO / NSG / Cloud NAC / Key Vault /
