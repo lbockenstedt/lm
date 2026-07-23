@@ -612,21 +612,92 @@ class CheckPollWindow:
         self._dirty.clear()
 
 
+# ── Central On-Prem tracker subclasses ─────────────────────────────────────
+# A SECOND Aruba Central instance (on-prem appliance) needs its OWN client-count
+# baseline / check-health / poll-window state so it never shares disk state with
+# cloud Central — otherwise the two instances monitoring the SAME wireless site
+# under one tenant would mix their 1h baselines and 7-day history. These are thin
+# subclasses that ONLY override the shard filenames (the in-memory dicts and the
+# {tenant}{sep}{site} key format are inherited unchanged); because the shard
+# system files are named, different filenames = fully separate state. This mirrors
+# how Mist uses separate tracker classes (mist_client_count_*.json). No parent
+# behavior changes — cloud Central still uses the original classes byte-identically.
+class CentralOnPremClientCountTracker(ClientCountTracker):
+    _BASELINE = "central_on_prem_client_count_baseline.json"
+    _SEVENDAY = "central_on_prem_client_count_7day.json"
+    _SAMPLES = "central_on_prem_client_count_samples.json"
+
+
+class CentralOnPremCheckHealthHistory(CheckHealthHistory):
+    _NAME = "central_on_prem_check_health_history.json"
+
+
+class CentralOnPremCheckPollWindow(CheckPollWindow):
+    _NAME = "central_on_prem_check_poll_window.json"
+
+
+# Per-instance wiring for CentralHubPoller. ONE poller class serves both cloud
+# Central (default) and Central On-Prem by reading its config/sites/status slot,
+# source stamp, and tracker classes from this dict — so the ~250 lines of poll
+# logic aren't copy-pasted. The "central" entry reproduces the original behavior
+# exactly (the safety anchor); "central_on_prem" is the additive second instance.
+_CENTRAL_INSTANCES = {
+    "central": {
+        "source": "central",
+        "status_attr": "central_hub_status",
+        "save_attr": "_save_central_hub_status",
+        "config_getter": "get_central_config",
+        "sites_getter": "get_central_sites_config",
+        "mode_check": "central_api_is_centralized",
+        "tracker_cc": ClientCountTracker,
+        "tracker_health": CheckHealthHistory,
+        "tracker_cpw": CheckPollWindow,
+    },
+    "central_on_prem": {
+        "source": "central_on_prem",
+        "status_attr": "central_on_prem_hub_status",
+        "save_attr": "_save_central_on_prem_hub_status",
+        "config_getter": "get_central_on_prem_config",
+        "sites_getter": "get_central_on_prem_sites_config",
+        "mode_check": "central_on_prem_api_is_centralized",
+        "tracker_cc": CentralOnPremClientCountTracker,
+        "tracker_health": CentralOnPremCheckHealthHistory,
+        "tracker_cpw": CentralOnPremCheckPollWindow,
+    },
+}
+
+
 class CentralHubPoller:
     """Polls Aruba Central hub-side for every centralized-mode tenant on a
-    5-minute loop, writing ``hub.central_hub_status[tenant_id]`` in the shape the
+    5-minute loop, writing ``hub.<status_attr>[tenant_id]`` in the shape the
     Simulations service / sim-views.js Checks/Hardware/Client-Count/Central tabs
-    expect. See the module docstring."""
+    expect. See the module docstring.
 
-    def __init__(self, hub) -> None:
+    ONE class serves TWO instances via the ``instance`` slot (see
+    ``_CENTRAL_INSTANCES``): ``"central"`` (cloud Aruba Central — the default,
+    writes ``hub.central_hub_status``) and ``"central_on_prem"`` (an on-prem
+    Aruba Central appliance — writes ``hub.central_on_prem_hub_status`` and
+    reads the on-prem config/sites slots). Both reuse ``ArubaClient`` unchanged;
+    only the config slot, status slot, source stamp, and tracker classes differ.
+    Default ``instance="central"`` reproduces the original behavior exactly."""
+
+    def __init__(self, hub, instance: str = "central") -> None:
+        if instance not in _CENTRAL_INSTANCES:
+            raise ValueError(f"unknown CentralHubPoller instance: {instance!r}")
         self.hub = hub
+        self._inst_name = instance
+        self._inst = _CENTRAL_INSTANCES[instance]
         ddir = getattr(getattr(hub, "state", None), "data_dir", ".") or "."
-        self._cc = ClientCountTracker(ddir)
+        # Per-instance trackers — cloud Central and Central On-Prem get SEPARATE
+        # tracker instances (and, via the on-prem subclasses, separate shard
+        # filenames) so their client-count baselines / health / poll-window state
+        # never mix, even when both monitor the same wireless site under one tenant.
+        self._cc = self._inst["tracker_cc"](ddir)
         # 30-day per-check status history (green/yellow/red) for the health graphs.
-        self._health = CheckHealthHistory(ddir)
+        self._health = self._inst["tracker_health"](ddir)
         # Rolling 1h PASS/FAIL window per check → the last-hour verdict override
         # (a check can't read OK if any poll failed within the hour).
-        self._cpw = CheckPollWindow(ddir)
+        self._cpw = self._inst["tracker_cpw"](ddir)
         # Per-tenant last-poll timestamps + the next loop sleep. The Central poll
         # interval is configurable per tenant (Setup → Central API → Connection);
         # tenants are gated by their own interval and the loop wakes on the
@@ -638,19 +709,36 @@ class CentralHubPoller:
     def _store(self):
         return self.hub.simulations_store
 
+    @property
+    def _status(self) -> Dict[str, dict]:
+        """This instance's per-tenant status dict on the hub (central_hub_status
+        for cloud, central_on_prem_hub_status for on-prem). Created on first
+        access if missing so the on-prem instance is safe before main.py wires
+        its dict (cloud Central's is always present from startup)."""
+        d = getattr(self.hub, self._inst["status_attr"], None)
+        if not isinstance(d, dict):
+            d = {}
+            setattr(self.hub, self._inst["status_attr"], d)
+        return d
+
     async def _centralized_tenants(self) -> list:
-        """(tenant_id, central_config) for every tenant in centralized central_api
-        mode with a non-empty central_config. Skips tenants with no creds."""
+        """(tenant_id, <instance>_config) for every tenant in centralized
+        <instance>_api mode with a non-empty config. Skips tenants with no creds.
+        Reads THIS instance's config getter + mode check (cloud Central vs Central
+        On-Prem), so the two instances poll independently and a tenant with only an
+        on-prem config is polled by the on-prem instance alone."""
         out = []
+        get_cfg = getattr(self._store, self._inst["config_getter"])
+        is_centralized = getattr(self._store, self._inst["mode_check"])
         for tid in self._store.tenant_ids():
             try:
                 modes = await self._store.get_processing_modes(tid)
-                # Central API defaults to CENTRALIZED — only explicit 'distributed'
-                # (a spoke owns the creds) opts out. So a hub with a Central config
-                # and no spoke still gets polled and its checks show.
-                if not self._store.central_api_is_centralized(modes):
+                # <instance> API defaults to CENTRALIZED — only explicit 'distributed'
+                # (a spoke owns the creds) opts out. So a hub with a config and no
+                # spoke still gets polled and its checks show.
+                if not is_centralized(modes):
                     continue
-                cc = await self._store.get_central_config(tid)
+                cc = await get_cfg(tid)
                 if cc:
                     out.append((tid, cc))
             except Exception:  # noqa: BLE001 — one bad tenant never blocks the rest
@@ -672,12 +760,13 @@ class CentralHubPoller:
         # ArubaClient maps central_config's ``mode`` -> api_version itself.
         client = ArubaClient(central_config)
         if not client.is_configured():
-            self.hub.central_hub_status.pop(tenant_id, None)
+            self._status.pop(tenant_id, None)
             self._cc.forget(tenant_id)
             self._cpw.forget(tenant_id)
             return
         cc_thresh = _cc_thresholds(central_config)
-        sites_cfg = await self._store.get_central_sites_config(tenant_id)
+        get_sites = getattr(self._store, self._inst["sites_getter"])
+        sites_cfg = await get_sites(tenant_id)
         site_mappings: Dict[str, str] = sites_cfg.get("site_mappings") or {}
         monitored: list = sites_cfg.get("monitored_checks") or []
         hw_checks: list = sites_cfg.get("hardware_checks") or []
@@ -734,10 +823,10 @@ class CentralHubPoller:
             try:
                 _cat_items = (
                     [{"type": "alert", "id": k, "name": k, "site": central_site,
-                      "source": "central"}
+                      "source": self._inst["source"]}
                      for k in (alert_counts or {})]
                     + [{"type": "insight", "id": k, "name": k, "site": central_site,
-                        "source": "central"}
+                        "source": self._inst["source"]}
                        for k in (insight_counts or {})]
                 )
                 if _cat_items:
@@ -844,7 +933,7 @@ class CentralHubPoller:
              "total": total}
             for aid, total in hw_totals.items()
         ]
-        self.hub.central_hub_status[tenant_id] = {
+        self._status[tenant_id] = {
             "status": status,
             "hardware_alerts": hardware_alerts,
             "client_count_status": client_count_status,
@@ -883,8 +972,8 @@ class CentralHubPoller:
         # Drop cached status for tenants that left centralized mode / cleared creds
         # so the UI stops showing a stale synthetic hub spoke.
         live = {tid for tid, _ in tenants}
-        for stale in [t for t in list(self.hub.central_hub_status.keys()) if t not in live]:
-            self.hub.central_hub_status.pop(stale, None)
+        for stale in [t for t in list(self._status.keys()) if t not in live]:
+            self._status.pop(stale, None)
             self._cc.forget(stale)
             self._cpw.forget(stale)
             self._last_poll.pop(stale, None)
@@ -937,12 +1026,14 @@ class CentralHubPoller:
             logger.debug("check health persist skipped: %s", exc)
         # Warm-start persistence for the whole per-tenant dashboard status. Off the
         # event loop — a bounded write once per 5-min cycle can't starve the WS.
-        save = getattr(self.hub, "_save_central_hub_status", None)
+        # Resolves to _save_central_hub_status (cloud) or _save_central_on_prem_hub_status
+        # (on-prem) so each instance persists its own status slot.
+        save = getattr(self.hub, self._inst["save_attr"], None)
         if save:
             try:
                 await asyncio.to_thread(save)
             except Exception as exc:  # noqa: BLE001 — never let persistence kill the poll
-                logger.debug("central_hub_status persist skipped: %s", exc)
+                logger.debug("%s persist skipped: %s", self._inst["status_attr"], exc)
 
     async def run_loop(self) -> None:
         while True:

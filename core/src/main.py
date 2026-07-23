@@ -821,6 +821,23 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self._mist_status_path = os.path.join(self.state.data_dir, "mist_hub_status.json")
         self._load_mist_hub_status()
         self.mist_hub_poller = MistHubPoller(self)
+        # Hub-side Central On-Prem status for CENTRALIZED processing mode, keyed
+        # by tenant_id. A SECOND, independent Aruba Central instance (an on-prem
+        # appliance) — same ArubaClient/API as cloud Central, separate config +
+        # status slot so the two never step on each other. Populated by the
+        # CentralHubPoller instance="central_on_prem" (the ONE poller class is
+        # parameterized by instance); read by SimulationsService as a synthetic
+        # "Hub (centralized)" spoke for the Central On-Prem tab. MIRRORS the
+        # central_hub_status apparatus above.
+        self.central_on_prem_hub_status: Dict[str, dict] = {}
+        # Warm-start persistence — same rationale as central_hub_status: without
+        # it the dict is empty on boot and the Central On-Prem dashboards stay
+        # blank until the first 5-min poll completes. Persisted encrypted each
+        # poll cycle (separate shard file) and reloaded here so the dashboards
+        # seed from last-known data immediately, then the poller refreshes it.
+        self._central_on_prem_status_path = os.path.join(self.state.data_dir, "central_on_prem_hub_status.json")
+        self._load_central_on_prem_hub_status()
+        self.central_on_prem_hub_poller = CentralHubPoller(self, instance="central_on_prem")
         self.cache_dir = os.path.join(self.state.data_dir, "cache")
         # Network Devices (nw) module: in-memory fleet + per-device cache,
         # persisted to cache/nw_data.json and reloaded on startup so the
@@ -5640,6 +5657,43 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         except Exception as e:  # noqa: BLE001
             logger.warning("mist_hub_status persist failed: %s", e)
 
+    def _load_central_on_prem_hub_status(self) -> None:
+        """Warm-start central_on_prem_hub_status from per-tenant encrypted shards
+        so the centralized-mode Central On-Prem dashboards seed on a restart
+        instead of blank-until-first-poll. Mirror of _load_central_hub_status
+        (separate shard file so cloud Central and Central On-Prem never share
+        persisted status)."""
+        try:
+            from security.encryption import hub_encryption
+            from tenant_sharded import migrate_legacy, shard_load
+            _dec = lambda b: hub_encryption.decrypt(b)  # noqa: E731
+            _enc = lambda s: hub_encryption.encrypt(s)  # noqa: E731
+            migrate_legacy(self.state.data_dir, "simulations", "central_on_prem_hub_status.json",
+                           tenant_of=lambda k: k, decrypt=_dec, encrypt=_enc)
+            data = shard_load(self.state.data_dir, "simulations", "central_on_prem_hub_status.json",
+                              decrypt=_dec) or {}
+            self.central_on_prem_hub_status = {str(k): v for k, v in data.items()
+                                               if isinstance(v, dict)}
+            if self.central_on_prem_hub_status:
+                logger.info("central_on_prem_hub_status: warm-loaded %d tenant status block(s) from shards",
+                            len(self.central_on_prem_hub_status))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("central_on_prem_hub_status warm load failed: %s — starting empty", e)
+
+    def _save_central_on_prem_hub_status(self) -> None:
+        """Encrypted per-tenant shard write of central_on_prem_hub_status. Never
+        raises — a failed persist must not break the poll loop. Called once per
+        poll cycle by the Central On-Prem poller instance. Mirror of
+        _save_central_hub_status (separate shard file)."""
+        try:
+            from security.encryption import hub_encryption
+            from tenant_sharded import shard_save
+            shard_save(self.state.data_dir, "simulations", "central_on_prem_hub_status.json",
+                       self.central_on_prem_hub_status, tenant_of=lambda k: k,
+                       encrypt=lambda s: hub_encryption.encrypt(s))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("central_on_prem_hub_status persist failed: %s", e)
+
     def reset_derived_cache(self, tenant: "Optional[str]" = None) -> dict:
         """Corruption recovery: wipe DERIVED/cache/history state — the sharded
         simulations stores (check_health, poll_window, client_count,
@@ -5660,6 +5714,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # (separate product). Wipe them alongside Central's on a reset.
         mist_poller = getattr(self, "mist_hub_poller", None)
         stores += [getattr(mist_poller, a, None) for a in ("_health", "_cpw", "_cc")] if mist_poller else []
+        # The Central On-Prem poller owns its own on-prem health/poll-window/
+        # client-count stores (separate shard files). Wipe them too on a reset.
+        on_prem_poller = getattr(self, "central_on_prem_hub_poller", None)
+        stores += [getattr(on_prem_poller, a, None) for a in ("_health", "_cpw", "_cc")] if on_prem_poller else []
         if tenant:
             t = str(tenant)
             try:
@@ -5668,6 +5726,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 pass
             try:
                 self.mist_hub_status.pop(t, None)
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self.central_on_prem_hub_status.pop(t, None)
             except Exception:  # noqa: BLE001
                 pass
             try:
@@ -5691,6 +5753,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                 pass
             try:
                 self.mist_hub_status.clear()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self.central_on_prem_hub_status.clear()
             except Exception:  # noqa: BLE001
                 pass
             try:
@@ -7550,6 +7616,14 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # (distributed mode gets it from the spoke's MistPoller via CS_TELEMETRY).
         # See simulations/mist_hub_poller.py.
         mist_hub_poll_task = asyncio.create_task(self.mist_hub_poller.run_loop())
+        # Hub-side Central On-Prem poll loop for CENTRALIZED processing mode — a
+        # SECOND, independent Aruba Central instance (on-prem appliance). Same
+        # CentralHubPoller class, parameterized with instance="central_on_prem"
+        # so it reads the on-prem config slot and writes central_on_prem_hub_status
+        # (separate from cloud Central's status). Produces the Central On-Prem tab
+        # data; distributed mode gets it from the spoke's on-prem poller via
+        # CS_TELEMETRY (Phase 5). See simulations/central_hub_poller.py.
+        central_on_prem_poll_task = asyncio.create_task(self.central_on_prem_hub_poller.run_loop())
         # Scheduled email health report: fires each tenant's Checks + Client Count
         # report on its configured cadence via the tenant's SMTP (Setup →
         # Notifications → Email Reports). Off unless enabled per tenant.
