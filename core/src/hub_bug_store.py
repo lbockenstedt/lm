@@ -184,10 +184,24 @@ class HubBugStoreMixin:
 
     def _mark_bug_fixed(self, rid: str, issue_url: str = "") -> bool:
         """bugfixer closed the GitHub issue for this report → mark it 'fixed' so the
-        LM bug-reports UI shows Fixed + the issue link."""
+        LM bug-reports UI shows Fixed + the issue link.
+
+        A recurrence dedups several reports onto ONE GitHub issue (each reopens it /
+        adds evidence), but bugfixer only passes the single report id embedded in the
+        issue body. So the sibling recurrence reports would stay stuck at 'filed' even
+        though the work is done. Mark every report sharing this issue_url fixed too."""
         import time as _t
-        return self._update_bug_status(rid, status="fixed", issue_url=issue_url or None,
-                                        fixed_at=_t.time())
+        now = _t.time()
+        ok = self._update_bug_status(rid, status="fixed", issue_url=issue_url or None, fixed_at=now)
+        url = (issue_url or (self.bug_reports.get(rid) or {}).get("issue_url") or "").strip()
+        if url:
+            for other_rid, meta in list(self.bug_reports.items()):
+                if other_rid == rid:
+                    continue
+                if (meta.get("issue_url") or "").strip() == url and str(meta.get("status") or "").lower() != "fixed":
+                    self._update_bug_status(other_rid, status="fixed", fixed_at=now)
+                    logger.info(f"[bug-report] MARK_BUG_FIXED cascaded to sibling {other_rid} (same issue {url})")
+        return ok
 
     def _update_bug_status(self, rid: str, *, filed=None, status=None,
                            issue_url=None, fixed_at=None) -> bool:
