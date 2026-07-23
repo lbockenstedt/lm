@@ -2701,6 +2701,25 @@ window.csToggleMonitorHardware = async function (id, name, deviceType, site, mon
 // fault is ABSENT (the sim stopped producing it) — red does NOT mean Central is
 // down. Uses only data already forwarded: /aggregate/central-browse (raw) +
 // /sim-quota-state (derived check_status + monitored_checks). No new endpoint.
+// Copy text to the clipboard (async API with a legacy execCommand fallback for
+// non-secure contexts), flashing the button label on success.
+function csCopyText(text, btn) {
+    const done = () => { if (btn) { const o = btn.textContent; btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = o; }, 1500); } };
+    const fallback = () => {
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text || ''; ta.style.position = 'fixed'; ta.style.opacity = '0';
+            document.body.appendChild(ta); ta.focus(); ta.select();
+            document.execCommand('copy'); document.body.removeChild(ta); done();
+        } catch (e) { console.error('csCopyText fallback failed', e); }
+    };
+    try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text || '').then(done, fallback);
+        } else { fallback(); }
+    } catch (e) { fallback(); }
+}
+
 async function csRenderCentralDiagnostic() {
     csSetToolbar('');
     const t = csTenant();
@@ -2784,8 +2803,15 @@ async function csRenderCentralDiagnostic() {
         { label: 'Firing', render: r => r.derived != null ? csAlertBadge(r.derived) : `<span class="text-[10px] text-slate-400 italic">unresolved</span>`, sort: r => r.firing },
         { label: 'Diagnosis', render: r => chip(r.diag, dc[r.dcls] || dc.slate), sort: r => r.dcls },
     ];
+    // Copy payload: TSV of every row so it pastes cleanly into a sheet or chat.
+    const _cp = ['Check\tType\tSite\tCentral (raw)\tDashboard (derived)\tFiring\tDiagnosis'];
+    rows.forEach(r => _cp.push([r.name, r.type || '', r.site,
+        r.rawN > 0 ? `${r.rawN} present${r.rawSev ? ' · ' + r.rawSev : ''}` : 'none',
+        r.derived != null ? r.derived : '—', r.firing, r.diag].join('\t')));
+    window._csDiagCopyText = _cp.join('\n');
+    const copyBtn = `<button onclick="csCopyText(window._csDiagCopyText, this)" class="text-xs font-semibold px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-50 text-slate-700">📋 Copy raw data</button>`;
     if (!rows.length) { csSet(`${warn}${legend}${csEmpty('No monitored checks / Central data to compare.', 'Monitor an alert or insight (Central → Alerts / Insights) and let the poller run, then compare here.')}`); return; }
-    csSet(`<div class="space-y-4">${warn}${legend}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-diag', cols, rows, { caption: `${rows.length} check × site row(s) — raw Central vs derived dashboard status` })}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}${legend}<div class="hpe-card rounded-lg p-5 shadow-sm"><div class="flex justify-end mb-2">${copyBtn}</div>${csCentralTable('central-diag', cols, rows, { caption: `${rows.length} check × site row(s) — raw Central vs derived dashboard status` })}</div></div>`);
 }
 
 window.CS_CHILD_RENDERERS['Central::Sites']      = csRenderCentral;

@@ -4348,6 +4348,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 if not isinstance(cmap, dict):
                     continue
                 check_status.setdefault(wsite, {}).update(cmap)
+        # CENTRALIZED mode: the HUB polls Central, so the spokes' check_status is
+        # empty and the real per-check status lives in central_hub_status. Merge it
+        # so the Engine-State firing badge AND the Central Diagnostic tab see the
+        # SAME status the dashboard Checks table does — otherwise every check read
+        # "unresolved" / "not firing" for a live, green check. (Distributed tenants
+        # have no hub block; this is a no-op there.)
+        _hubc = service._hub_central(tenant_id)
+        if isinstance(_hubc, dict):
+            for wsite, cmap in (_hubc.get("status") or {}).items():
+                if isinstance(cmap, dict):
+                    check_status.setdefault(wsite, {}).update(cmap)
+            if not monitored:
+                monitored = _hubc.get("monitored_checks") or monitored
         for m in merged_ledger.values():  # dedupe (a hostname is unique per tenant)
             m["clients"] = list(dict.fromkeys(m["clients"]))
         if not results:
