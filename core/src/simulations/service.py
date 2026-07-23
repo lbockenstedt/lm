@@ -725,6 +725,47 @@ class SimulationsService:
         return {"tenant_id": tenant_id, "mode": "—", "token_valid": token_valid,
                 "hub_mist_config": {}, "spokes": spokes}
 
+    # ── Central On-Prem — mirror of the Central reads (same ArubaClient/API as
+    # cloud Central, separate config + status slot so the two never step on each
+    # other). The on-prem status block has the SAME shape as cloud Central's (both
+    # are produced by CentralHubPoller against the Aruba Central API), so the
+    # shared _central_site_rows renderer is reused unchanged — only the telemetry
+    # key (``data["central_on_prem"]``) and the hub status slot differ.
+    async def get_central_on_prem_data(self, tenant_id: str) -> Dict[str, Any]:
+        """Simulations tab: per-spoke on-prem Central checks / hardware alerts /
+        client counts. Mirror of get_central_data (reads the relayed
+        ``data["central_on_prem"]`` block + the centralized on-prem hub poller's
+        synthetic spoke)."""
+        spokes: List[dict] = []
+        for sid, data in self._spokes_for_tenant(tenant_id):
+            on_prem = data.get("central_on_prem") or {}
+            spokes.append({**self._meta(sid, data), "central_status": on_prem})
+        hub_on_prem = self._hub_central_on_prem(tenant_id)
+        if hub_on_prem is not None:
+            spokes.append({**self._hub_meta(), "central_status": hub_on_prem})
+        return {"tenant_id": tenant_id, "mode": "—", "spokes": spokes}
+
+    async def get_central_on_prem_status_data(self, tenant_id: str) -> Dict[str, Any]:
+        """Central On-Prem tab: per-spoke site breakdown (ok/fail/unknown +
+        wireless clients). Mirror of get_central_status_data — same status-block
+        shape, so the shared _central_site_rows renderer is reused unchanged."""
+        spokes: List[dict] = []
+        token_valid: Any = None
+        for sid, data in self._spokes_for_tenant(tenant_id):
+            on_prem = data.get("central_on_prem") or {}
+            tv = on_prem.get("token_valid")
+            token_valid = tv if tv is not None else token_valid
+            spokes.append({**self._meta(sid, data),
+                           "sites": self._central_site_rows(on_prem)})
+        hub_on_prem = self._hub_central_on_prem(tenant_id)
+        if hub_on_prem is not None:
+            tv = hub_on_prem.get("token_valid")
+            token_valid = tv if tv is not None else token_valid
+            spokes.append({**self._hub_meta(),
+                           "sites": self._central_site_rows(hub_on_prem)})
+        return {"tenant_id": tenant_id, "mode": "—", "token_valid": token_valid,
+                "hub_central_on_prem_config": {}, "spokes": spokes}
+
     async def get_api_server_data(self, tenant_id: str) -> Dict[str, Any]:
         """Per-spoke API-server status block (the API Server view shape)."""
         spokes: List[dict] = []

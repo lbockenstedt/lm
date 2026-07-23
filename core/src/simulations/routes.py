@@ -1837,14 +1837,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     async def _record_alert_insight_history(browse: dict, source: str = "central") -> None:
         """Upsert the alerts/insights from a browse result into the shared history.
-        ``source`` is ``'central'`` or ``'mist'`` — which product's browse this is
-        (stamped on every item so the picker can prefix the id and the engine can
-        fire it against the matching source). Best-effort: swallows everything so
-        recording can never break a browse."""
+        ``source`` is ``'central'`` / ``'mist'`` / ``'central_on_prem'`` — which
+        product's browse this is (stamped on every item so the picker can prefix
+        the id and the engine can fire it against the matching source). An
+        unknown source falls back to ``central`` (legacy bare ids are Central).
+        Best-effort: swallows everything so recording can never break a browse."""
         try:
             if not isinstance(browse, dict):
                 return
-            source = source if source in ("central", "mist") else "central"
+            if source not in sim_quota.SOURCE_PREFIXES:
+                source = "central"
             items: list = []
             for a in (browse.get("alerts") or []):
                 ident = str((a.get("name") or a.get("category") or "")).strip()
@@ -2353,6 +2355,157 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         await store.set_mist_config(tenant_id, cfg)
         pushed = await _push_config(tenant_id, {"mist_config": cfg})
         return {"saved": True, "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
+
+    # ── Central On-Prem aggregate routes — mirror of Central (same Aruba Central
+    # API/ArubaClient, separate config + status slot). The on-prem instance is a
+    # SECOND Aruba Central appliance; it shares browse_all_from_config /
+    # test_central_from_config / get_central_available_from_config with cloud
+    # Central (the Aruba API is identical), and differs ONLY in the config slot
+    # it reads, the hub status slot it merges, and the source tag it records.
+    @app.get("/sim/api/aggregate/central-on-prem")
+    async def get_central_on_prem(tenant_id: str = Depends(get_tenant_id)):
+        return await service.get_central_on_prem_data(tenant_id)
+
+    @app.get("/sim/api/aggregate/central-on-prem-health")
+    async def get_central_on_prem_health(request: Request,
+                                          tenant_id: str = Depends(get_tenant_id)):
+        """30-day per-check health history for the on-prem Central instance
+        (green/yellow/red). Mirror of /aggregate/central-health: DAILY summaries
+        by default, raw HOURLY buckets with ?site=&check=. Merges the centralized
+        on-prem poller history (CentralHubPoller instance=central_on_prem._health)
+        with any DISTRIBUTED spoke's relayed daily summary
+        (central_on_prem_status.health); hourly for a distributed check is
+        fetched on demand from the owning spoke (CS_GET_CENTRAL_ON_PREM_HEALTH)."""
+        poller = getattr(hub, "central_on_prem_hub_poller", None)
+        health = getattr(poller, "_health", None)
+        site = request.query_params.get("site")
+        check = request.query_params.get("check")
+        if site and check:
+            hourly = health.hourly(tenant_id, site, check) if health else []
+            if not hourly:  # distributed → ask the owning spoke
+                try:
+                    r = await _cs_forward(tenant_id, "CS_GET_CENTRAL_ON_PREM_HEALTH",
+                                          {"site": site, "check": check}, timeout=10.0)
+                    hourly = (r or {}).get("hourly") or []
+                except Exception:  # noqa: BLE001 — no spoke / offline → empty
+                    pass
+            return {"hourly": hourly}
+        from .central_hub_poller import success_from_daily
+        daily = dict(health.summary(tenant_id)) if health else {}
+        success = dict(health.success_stats(tenant_id)) if health else {}
+        # Merge relayed spoke health (distributed-mode tenants). The on-prem
+        # telemetry is relayed under the ``central_on_prem`` key (Phase 5).
+        for _sid, data in service._spokes_for_tenant(tenant_id):
+            sp = ((data or {}).get("central_on_prem") or {}).get("health") or {}
+            for site_name, checks in sp.items():
+                daily.setdefault(site_name, {}).update(checks)
+        for site_name, checks in daily.items():
+            for cid, dlist in (checks or {}).items():
+                if success.get(site_name, {}).get(cid) is None:
+                    success.setdefault(site_name, {})[cid] = success_from_daily(dlist)
+        return {"daily": daily, "success": success}
+
+    @app.get("/sim/api/aggregate/central-on-prem-status")
+    async def get_central_on_prem_status(tenant_id: str = Depends(get_tenant_id)):
+        data = await service.get_central_on_prem_status_data(tenant_id)
+        # Merge hub-owned on-prem config (mode + cluster creds) from the store so
+        # the Central On-Prem tab's form populates (mirror of central-status).
+        cc = await store.get_central_on_prem_config(tenant_id)
+        if isinstance(cc, dict):
+            data["hub_central_on_prem_config"] = {k: v for k, v in cc.items() if k != "mode"}
+            if cc.get("mode"):
+                data["mode"] = cc["mode"]
+        return data
+
+    @app.get("/sim/api/aggregate/central-on-prem-browse")
+    async def get_central_on_prem_browse(tenant_id: str = Depends(get_tenant_id)):
+        """FULL on-prem Central inventory (all sites / alerts / insights /
+        clients), on-demand, for the Central On-Prem → Sites/Alerts/Clients tabs.
+        Mirror of /aggregate/central-browse: centralized mode → hub runs
+        ``browse_all_from_config`` against the ON-PREM config (same Aruba API as
+        cloud Central, so the SAME browse helper is reused); distributed →
+        forwards CS_CENTRAL_ON_PREM_BROWSE to the spoke. Records every alert/
+        insight seen into the SHARED history tagged ``source=central_on_prem`` so
+        the Sim-Quota picker can offer ``Central On-Prem:`` ids."""
+        modes = await store.get_processing_modes(tenant_id)
+        if store.central_on_prem_api_is_centralized(modes):  # unset → centralized
+            cc = await store.get_central_on_prem_config(tenant_id)
+            result = await browse_all_from_config(cc or {})
+        else:
+            try:
+                result = await _cs_forward(tenant_id, "CS_CENTRAL_ON_PREM_BROWSE",
+                                           {}, timeout=30.0)
+            except HTTPException as exc:
+                return {"status": "SUCCESS", "sites": [], "alerts": [], "insights": [],
+                        "clients": [], "devices_by_site": {}, "clients_by_site": {},
+                        "warning": f"Central On-Prem browse unavailable: {exc.detail}"}
+        await _record_alert_insight_history(result, source="central_on_prem")
+        return result
+
+    @app.post("/sim/api/aggregate/central-on-prem")
+    async def save_central_on_prem(request: Request,
+                                   tenant_id: str = Depends(get_tenant_id)):
+        body = await request.json()
+        mode = body.get("mode")
+        hub_cc = body.get("hub_central_on_prem_config") or {}
+        cfg = dict(hub_cc)
+        if mode:
+            cfg["mode"] = mode
+        # SSRF guard: same as cloud Central — on-prem cluster_url is still an
+        # outbound hub target (the hub POSTs the Aruba client_id/secret to it in
+        # classic mode and GETs monitoring data from it). This route is reachable
+        # by any cs-righted tenant user, so confine cluster_url to a public HTTPS
+        # host and DNS-resolve it to block rebinding to an internal IP. Only
+        # validate when present (new_central mode uses a fixed token URL).
+        cluster_url = (cfg.get("cluster_url") or "").strip()
+        if cluster_url:
+            if not safe_external_url(cluster_url, require_https=True):
+                raise HTTPException(
+                    status_code=400,
+                    detail="cluster_url must be a public https:// URL "
+                           "(internal hosts, IP literals, and plain http are blocked).",
+                )
+            host = urlsplit(cluster_url).hostname
+            if host and not await asyncio.to_thread(host_resolves_external, host):
+                raise HTTPException(
+                    status_code=400,
+                    detail="cluster_url resolves to an internal address — "
+                           "DNS rebinding to a private/loopback host is blocked.",
+                )
+        # Poll interval (seconds). Optional; coerce + floor at 60s (mirror of Central).
+        if "poll_interval_s" in cfg:
+            try:
+                cfg["poll_interval_s"] = max(60, int(cfg["poll_interval_s"] or 300))
+            except (TypeError, ValueError):
+                cfg["poll_interval_s"] = 300
+        # Client-count CHECK thresholds — same coerce+clamp as cloud Central (the
+        # on-prem poller's _cc_thresholds reads the same cc_thresholds key).
+        if isinstance(cfg.get("cc_thresholds"), dict):
+            _t = cfg["cc_thresholds"]
+
+            def _cnum(val, dflt, lo, hi):
+                try:
+                    return max(lo, min(hi, float(val)))
+                except (TypeError, ValueError):
+                    return dflt
+
+            _warn = _cnum(_t.get("warn_pct"), 20.0, 0.0, 100.0)
+            _err = _cnum(_t.get("error_pct"), 50.0, 0.0, 100.0)
+            if _err < _warn:
+                _err = _warn
+            cfg["cc_thresholds"] = {
+                "warn_pct": _warn,
+                "error_pct": _err,
+                "die_off_pct": _cnum(_t.get("die_off_pct"), 20.0, 0.0, 100.0),
+                "min_peak": int(_cnum(_t.get("min_peak"), 5, 1, 1_000_000)),
+            }
+        await store.set_central_on_prem_config(tenant_id, cfg)
+        # Push ``cfg`` (carries ``mode`` on top of the cluster creds) — mirror of
+        # cloud Central's save; the spoke's on-prem poller needs ``mode`` to pick
+        # classic vs new_central (Phase 5).
+        pushed = await _push_config(tenant_id, {"central_on_prem_config": cfg})
+        return {"saved": True, "pushed_to_spokes": pushed,
+                "queued": bool(getattr(pushed, "queued", False))}
 
     @app.post("/sim/api/aggregate/config-push")
     async def config_push(request: Request, tenant_id: str = Depends(get_tenant_id)):
@@ -4202,6 +4355,70 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 "sim_quotas": clean,
                 "sim_quota_errors": sim_quota_errors}
 
+    @app.get("/sim/api/{tenant}/central-on-prem-sites-config")
+    async def get_central_on_prem_sites(tenant: str,
+                                        tenant_id: str = Depends(get_tenant_id)):
+        return await store.get_central_on_prem_sites_config(tenant_id)
+
+    @app.post("/sim/api/{tenant}/central-on-prem-sites-config")
+    async def set_central_on_prem_sites(request: Request, tenant: str,
+                                        tenant_id: str = Depends(get_tenant_id)):
+        """Mirror of set_central_sites for the on-prem Central instance (same
+        Aruba API, separate config slot). MERGES the incoming body into the
+        existing central_on_prem_sites_config so a partial save updates only the
+        keys it sends. ``sim_quotas`` here carry ``Central On-Prem:``-prefixed
+        alert_ids; the shared engine unions them with Central's and Mist's in
+        ``_effective_sim_quotas`` (Phase 3). Pool/SSID config stays with cloud
+        Central (central_sites_config) — on-prem pushes only its sites config +
+        the unioned effective quotas + shareable map (same as Mist)."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        try:
+            existing = await store.get_central_on_prem_sites_config(tenant_id) or {}
+        except Exception:  # noqa: BLE001
+            existing = {}
+        cfg = {**existing, **body}
+        _smc = cfg.get("site_min_clients") or {}
+        if isinstance(_smc, dict):
+            clean_smc: dict = {}
+            for k, v in _smc.items():
+                try:
+                    n = int(v)
+                except (TypeError, ValueError):
+                    continue
+                if n > 0:
+                    clean_smc[str(k)] = n
+            cfg["site_min_clients"] = clean_smc
+        else:
+            cfg.pop("site_min_clients", None)
+        sim_quota_errors: list[str] = []
+        clean: list = list(cfg.get("sim_quotas") or [])
+        try:
+            sim_txt = await store.get_sim_conf_content(tenant_id) or ""
+            sim_ids = [s["sim_id"] for s in available_sims_from_ini(sim_txt)] if sim_txt.strip() else None
+            clean, sim_quota_errors = validate_sim_quotas(cfg.get("sim_quotas"), sim_ids)
+            if sim_quota_errors:
+                logger.warning("set_central_on_prem_sites(%s): sim_quotas errors: %s",
+                               tenant_id, sim_quota_errors)
+            cfg = {**cfg, "sim_quotas": clean}
+        except Exception as exc:  # noqa: BLE001 — never block the save
+            logger.warning("set_central_on_prem_sites(%s): sim_quotas validate failed: %s",
+                           tenant_id, exc)
+        await store.set_central_on_prem_sites_config(tenant_id, cfg)
+        _invalidate_sim_quota_catalog(tenant_id)
+        pushed = await _push_config(tenant_id, {
+            "central_on_prem_sites_config": cfg,
+            "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
+            "sim_shareable": await _sim_shareable(tenant_id),
+        })
+        return {"saved": True, "pushed_to_spokes": pushed,
+                "queued": bool(getattr(pushed, "queued", False)),
+                "sim_quotas": clean,
+                "sim_quota_errors": sim_quota_errors}
+
     @app.get("/sim/api/{tenant}/sim-quota-catalog")
     async def get_sim_quota_catalog(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         """Catalog the Sim-Quota UI (Config → Sim Quotas) renders against: the
@@ -4944,6 +5161,84 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                             "token_state": cached_mist.get("token_state"),
                             "token_valid": cached_mist.get("token_valid"),
                             "status": cached_mist.get("status") or "Spoke unreachable — see hub log."})
+        return {"spokes": out}
+
+    @app.get("/sim/api/{tenant}/central-on-prem/available")
+    async def get_central_on_prem_available(tenant: str,
+                                             tenant_id: str = Depends(get_tenant_id)):
+        """Available-checks catalog for the on-prem Central API editor's
+        monitored-check picker. Mirror of /{tenant}/central/available: the on-prem
+        instance uses the SAME Aruba Central API (so the SAME
+        ``get_central_available_from_config`` helper is reused); centralized mode
+        → hub fetches from the ON-PREM config; distributed → forwards
+        CS_GET_CENTRAL_ON_PREM_AVAILABLE (degrades to empty when no spoke is
+        connected)."""
+        modes = await store.get_processing_modes(tenant_id)
+        if store.central_on_prem_api_is_centralized(modes):  # unset → centralized
+            cc = await store.get_central_on_prem_config(tenant_id)
+            return await get_central_available_from_config(cc or {})
+        try:
+            return await _cs_forward(tenant_id, "CS_GET_CENTRAL_ON_PREM_AVAILABLE",
+                                     {}, timeout=15.0)
+        except HTTPException:
+            return {"alerts": [], "insights": [],
+                    "warning": "Client-Sim spoke not connected."}
+
+    @app.post("/sim/api/{tenant}/test-central-on-prem")
+    async def test_central_on_prem(tenant: str,
+                                   tenant_id: str = Depends(get_tenant_id)):
+        """Live on-prem Central connectivity check. Mirror of test_central: the
+        on-prem instance uses the SAME Aruba Central API (so the SAME
+        ``test_central_from_config`` helper is reused). Centralized mode → the
+        HUB holds the on-prem Aruba creds (Setup → Central On-Prem API →
+        ``central_on_prem_config``) and runs a real token exchange itself (single
+        ``Hub (centralized)`` row); distributed → fans CS_TEST_CENTRAL_ON_PREM
+        out to each of the tenant's cs spokes, falling back to the spoke's last
+        relayed ``central_on_prem`` telemetry when it is unreachable so the UI
+        renders a row, not a 502."""
+        modes = await store.get_processing_modes(tenant_id)
+        if store.central_on_prem_api_is_centralized(modes):  # unset → centralized
+            cc = await store.get_central_on_prem_config(tenant_id)
+            return {"spokes": [await test_central_from_config(cc or {}, spoke_id="hub")]}
+        out: list = []
+        cache = _tenant_cache(tenant_id)
+        md = hub.state.system_state.get("module_metadata", {}) or {}
+        cs_types = {"Client-Sim", "simulation"}
+        reg_sids = []
+        for sid, meta in md.items():
+            if not isinstance(meta, dict) or meta.get("module_type") not in cs_types:
+                continue
+            if not getattr(hub, "approved_modules", {}).get(hub._primary_key(sid), False):
+                continue
+            tid = meta.get("tenant_id")
+            if tid == tenant_id or not tid:
+                reg_sids.append(sid)
+        all_sids = list(dict.fromkeys(list(cache.keys()) + reg_sids))
+        for sid in all_sids:
+            data = cache.get(sid, {})
+            cached_on_prem = data.get("central_on_prem") or {}
+            live_entry: Optional[dict] = None
+            try:
+                result = await hub.request_response(sid, "CS_TEST_CENTRAL_ON_PREM",
+                                                     {}, timeout=8.0)
+                payload = (result.get("payload", {}) or {}).get("data", result) if isinstance(result, dict) else result
+                spokes = (payload or {}).get("spokes") if isinstance(payload, dict) else None
+                if spokes:
+                    live_entry = spokes[0]
+            except Exception as exc:
+                logger.warning("test_central_on_prem: CS_TEST_CENTRAL_ON_PREM fan-out to %s failed: %s",
+                               sid, exc)
+            if live_entry:
+                out.append({"spoke_id": sid,
+                            "spoke_name": live_entry.get("spoke_name") or data.get("spoke_name") or sid,
+                            "token_state": live_entry.get("token_state"),
+                            "token_valid": live_entry.get("token_valid"),
+                            "status": live_entry.get("status")})
+            else:
+                out.append({"spoke_id": sid, "spoke_name": data.get("spoke_name") or sid,
+                            "token_state": cached_on_prem.get("token_state"),
+                            "token_valid": cached_on_prem.get("token_valid"),
+                            "status": cached_on_prem.get("status") or "Spoke unreachable — see hub log."})
         return {"spokes": out}
 
     @app.get("/sim/api/{tenant}/troubleshooting")
