@@ -1347,7 +1347,7 @@ const VIEW_CHILDREN = {
     cs: {
         'Dashboard': ['Checks', 'Hardware', 'Client Count'],
         'Clients':     ['All', 'T1', 'T2', 'T3'],
-        'Central':     ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware'],
+        'Central':     ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware', 'Diagnostic'],
         'VM Server':   ['Overview', 'VMs', 'Terminal', 'USB', 'IoT', 'VirtualHere', 'Command Queue', 'Details'],
         'Config':      ['Engine', 'Engine State', 'Engine Diagnostic', 'Sites', 'Config Editor'],
         'Setup':       ['General', 'Central API', 'Proxmox', 'GitHub', 'Security', 'Notifications', 'Diagnostics'],

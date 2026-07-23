@@ -2653,11 +2653,108 @@ window.csToggleMonitorHardware = async function (id, name, deviceType, site, mon
     }
 };
 
-window.CS_CHILD_RENDERERS['Central::Sites']    = csRenderCentral;
-window.CS_CHILD_RENDERERS['Central::Alerts']   = csRenderCentralAlerts;
-window.CS_CHILD_RENDERERS['Central::Insights'] = csRenderCentralInsights;
-window.CS_CHILD_RENDERERS['Central::Clients']  = csRenderCentralClients;
-window.CS_CHILD_RENDERERS['Central::Hardware'] = csRenderCentralHardware;
+// ── Central → Diagnostic (RAW Central API vs derived dashboard status) ────────
+// Side-by-side of what Central's API actually reports (raw alerts/insights) and
+// the status the dashboard DERIVES from it, per monitored check + site — so an
+// operator can tell a LOGIC problem (our mapping) from an API/reality issue.
+// The INVERTED rule a sim quota lives by: it monitors an EXPECTED failure, so
+// green/"ok" = the fault IS present in Central (alert FIRING); red/"error" = the
+// fault is ABSENT (the sim stopped producing it) — red does NOT mean Central is
+// down. Uses only data already forwarded: /aggregate/central-browse (raw) +
+// /sim-quota-state (derived check_status + monitored_checks). No new endpoint.
+async function csRenderCentralDiagnostic() {
+    csSetToolbar('');
+    const t = csTenant();
+    const [browse, st] = await Promise.all([
+        csCentralBrowse(),
+        csFetch(`/${t}/sim-quota-state?tenant_id=${t}`).catch(e => ({ warning: String((e && e.message) || e) })),
+    ]);
+    const warn = _csCentralWarn(browse);
+    const norm = s => String(s == null ? '' : s).trim().toLowerCase();
+    const nsite = s => { const v = norm(s); return v === '—' ? '' : v; };
+
+    // RAW: index Central findings (alerts + insights) by normalized id = name||category.
+    const raw = [
+        ...((browse && browse.alerts) || []).map(a => ({ id: a.name || a.category, site: a.site, severity: a.severity, state: a.status, kind: 'alert' })),
+        ...((browse && browse.insights) || []).map(i => ({ id: i.name || i.category, site: i.site, severity: i.severity, state: i.status, kind: 'insight' })),
+    ];
+    const rawById = {};
+    raw.forEach(f => { const id = norm(f.id); if (id) (rawById[id] = rawById[id] || []).push(f); });
+
+    // DERIVED: check_status {site: {id: {status,message}}} + monitored_checks meta.
+    const checkStatus = (st && st.check_status && typeof st.check_status === 'object') ? st.check_status : {};
+    const mc = Array.isArray(st && st.monitored_checks) ? st.monitored_checks : [];
+    const metaOf = id => mc.find(c => c && norm(c.id) === norm(id)) || null;
+
+    // Row set = every (site,id) that HAS a derived status ∪ every monitored check
+    // (so a monitored check that never resolved to a status is surfaced too — the
+    // resolution-miss case behind "green on Checks but not firing").
+    const rowKeys = new Map();   // `${site}||${normId}` -> {site, id}
+    Object.keys(checkStatus).forEach(site => Object.keys(checkStatus[site] || {}).forEach(id =>
+        rowKeys.set(`${site}||${norm(id)}`, { site, id })));
+    mc.forEach(c => {
+        if (!c || !c.id) return;
+        const sites = c.site ? [c.site] : (Object.keys(checkStatus).length ? Object.keys(checkStatus) : ['']);
+        sites.forEach(s => { const k = `${s}||${norm(c.id)}`; if (!rowKeys.has(k)) rowKeys.set(k, { site: s, id: c.id }); });
+    });
+
+    const _FIRE = ['ok', 'pass', 'functional', 'up', 'healthy'];
+    const _NOFIRE = ['error', 'fail', 'failed', 'down', 'critical'];
+    const rows = [...rowKeys.values()].map(({ site, id }) => {
+        const meta = metaOf(id);
+        const name = (meta && meta.name) || id;
+        const type = (meta && meta.type) || '';
+        const info = (checkStatus[site] || {})[id];
+        const derived = info != null ? (typeof info === 'object' ? info.status : info) : null;
+        const dmsg = (info && typeof info === 'object') ? (info.message || '') : '';
+        const matches = (rawById[norm(id)] || []).filter(f => !nsite(site) || !nsite(f.site) || nsite(f.site) === nsite(site));
+        const rawN = matches.length;
+        const rawSev = [...new Set(matches.map(m => m.severity).filter(Boolean))].join(', ');
+        const ds = norm(derived);
+        const firing = _FIRE.includes(ds) ? 'firing' : _NOFIRE.includes(ds) ? 'not_firing'
+            : (derived == null ? 'unresolved' : 'other');
+        let diag, dcls;
+        if (derived == null) {
+            diag = rawN > 0 ? '⚠️ Resolution miss — Central reports it, but no derived status here (alert-id / site alias)'
+                : 'No derived status (not polled / not at this site)';
+            dcls = rawN > 0 ? 'amber' : 'slate';
+        } else if (rawN > 0 && firing === 'firing') { diag = '✓ Consistent — fault present, firing'; dcls = 'green'; }
+        else if (rawN === 0 && firing === 'not_firing') { diag = '✓ Consistent — fault absent (expected; red ≠ Central down)'; dcls = 'green'; }
+        else if (rawN > 0 && firing === 'not_firing') { diag = '⚠️ Logic — Central reports it, but the check reads absent (count / id mismatch)'; dcls = 'amber'; }
+        else if (rawN === 0 && firing === 'firing') { diag = '⚠️ Logic — check reads firing, but Central reports nothing'; dcls = 'amber'; }
+        else { diag = '—'; dcls = 'slate'; }
+        return { site: site || '(all)', name, id, type, rawN, rawSev, derived, dmsg, firing, diag, dcls };
+    }).sort((a, b) => ({ amber: 0, slate: 2, green: 1 }[a.dcls] - { amber: 0, slate: 2, green: 1 }[b.dcls]) || a.name.localeCompare(b.name));
+
+    const dc = { green: 'text-emerald-700 bg-emerald-50 border-emerald-200', amber: 'text-amber-700 bg-amber-50 border-amber-200', slate: 'text-slate-500 bg-slate-100 border-slate-200' };
+    const chip = (txt, cls) => `<span class="inline-block text-[10px] font-semibold px-2 py-0.5 rounded-full border ${cls}">${csEscape(txt)}</span>`;
+    const legend = `<div class="rounded-lg border border-sky-200 bg-sky-50 text-sky-900 text-xs px-4 py-3 space-y-1">
+        <div class="font-semibold">How to read this</div>
+        <div>Status is <b>inverted</b> on purpose: <b>green / OK = the alert IS firing in Central</b> (the expected fault is present); <b>red / error = the alert is NOT firing</b> (the sim stopped producing the fault). Red does <b>not</b> mean Central is down, and a device shown "offline" is a <b>separate</b> host/device signal, not this check's state.</div>
+        <div><b>Diagnosis</b> — <b>✓ Consistent</b>: raw Central and the derived status agree. <b>⚠️ Logic</b>: they disagree (a mapping / count / id bug). <b>⚠️ Resolution miss</b>: Central has the alert but it never resolved to a derived status for this site (alert-id or site-alias mismatch) — why a check can look green on Checks yet read "not firing".</div>
+    </div>`;
+    const cols = [
+        { label: 'Check', render: r => `<div><div class="text-sm">${csEscape(r.name)}</div><div class="text-[10px] text-slate-400 font-mono">${csEscape(r.id)}${r.type ? ' · ' + csEscape(r.type) : ''}</div></div>`, sort: r => r.name },
+        { label: 'Site', render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'Central (raw API)', render: r => r.rawN > 0
+            ? `<span class="text-emerald-700 font-semibold">${r.rawN} present</span>${r.rawSev ? `<span class="text-[10px] text-slate-400"> · ${csEscape(r.rawSev)}</span>` : ''}`
+            : `<span class="text-slate-400">none</span>`, sort: r => r.rawN },
+        { label: 'Dashboard (derived)', render: r => r.derived != null
+            ? `${csStatusBadge(r.derived)}${r.dmsg ? `<div class="text-[10px] text-slate-400 mt-0.5">${csEscape(r.dmsg)}</div>` : ''}`
+            : `<span class="text-slate-400">—</span>`, sort: r => String(r.derived || '~') },
+        { label: 'Firing', render: r => r.derived != null ? csAlertBadge(r.derived) : `<span class="text-[10px] text-slate-400 italic">unresolved</span>`, sort: r => r.firing },
+        { label: 'Diagnosis', render: r => chip(r.diag, dc[r.dcls] || dc.slate), sort: r => r.dcls },
+    ];
+    if (!rows.length) { csSet(`${warn}${legend}${csEmpty('No monitored checks / Central data to compare.', 'Monitor an alert or insight (Central → Alerts / Insights) and let the poller run, then compare here.')}`); return; }
+    csSet(`<div class="space-y-4">${warn}${legend}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-diag', cols, rows, { caption: `${rows.length} check × site row(s) — raw Central vs derived dashboard status` })}</div></div>`);
+}
+
+window.CS_CHILD_RENDERERS['Central::Sites']      = csRenderCentral;
+window.CS_CHILD_RENDERERS['Central::Alerts']     = csRenderCentralAlerts;
+window.CS_CHILD_RENDERERS['Central::Insights']   = csRenderCentralInsights;
+window.CS_CHILD_RENDERERS['Central::Clients']    = csRenderCentralClients;
+window.CS_CHILD_RENDERERS['Central::Hardware']   = csRenderCentralHardware;
+window.CS_CHILD_RENDERERS['Central::Diagnostic'] = csRenderCentralDiagnostic;
 
 /* ===========================================================================
  * 5. Config — config-push + simulation-conf editor + hub-config
