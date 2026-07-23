@@ -49,6 +49,25 @@ def min_client_check(current: int, min_floor: Optional[int]) -> Optional[Dict[st
 _POLL_INTERVAL_S = 300  # 5 min — default; matches the spoke poller + aruba.py cache TTLs
 _POLL_INTERVAL_FLOOR_S = 60  # min allowed per-tenant interval (protect the Central API)
 
+# Central refreshes several metrics on the 5-MINUTE WALL CLOCK (:00, :05, :10 …).
+# A query within _BOUNDARY_GUARD_S of a boundary reads transitional / half-updated
+# values that present as a FALSE POSITIVE (a check flips only because Central is
+# mid-refresh). Never let a poll land in that window — delay into the safe zone.
+_CENTRAL_UPDATE_PERIOD_S = 300
+_BOUNDARY_GUARD_S = 60
+
+
+def _boundary_guard_delay(now: float) -> float:
+    """Seconds to wait so a poll does NOT fall within ``_BOUNDARY_GUARD_S`` of a
+    5-minute wall-clock boundary. ``now`` is epoch seconds (UTC-aligned, so
+    ``now % 300`` = seconds since the last 5-minute mark). 0 = already safe."""
+    phase = now % _CENTRAL_UPDATE_PERIOD_S
+    if phase < _BOUNDARY_GUARD_S:                                  # just AFTER a boundary
+        return _BOUNDARY_GUARD_S - phase
+    if phase > _CENTRAL_UPDATE_PERIOD_S - _BOUNDARY_GUARD_S:       # just BEFORE the next boundary
+        return (_CENTRAL_UPDATE_PERIOD_S - phase) + _BOUNDARY_GUARD_S
+    return 0.0
+
 # Client-count baseline constants — ported verbatim from the source webui-spoke
 # (server.py). The alarm baseline is a 7-DAY rolling average of hourly snapshots
 # (NOT the 1h average), so a prolonged client drop stays flagged instead of the
@@ -869,6 +888,16 @@ class CentralHubPoller:
             self._cc.forget(stale)
             self._cpw.forget(stale)
             self._last_poll.pop(stale, None)
+        # Central refreshes metrics on the 5-min wall clock; a query within
+        # _BOUNDARY_GUARD_S of a boundary reads mid-refresh values as a false
+        # positive. If we woke inside that window, delay into the safe zone before
+        # querying Central this pass.
+        _guard = _boundary_guard_delay(time.time())
+        if _guard > 0:
+            logger.info("Central hub poll: within %ds of a 5-min clock boundary — "
+                        "delaying %.0fs to avoid a mid-refresh false positive.",
+                        _BOUNDARY_GUARD_S, _guard)
+            await asyncio.sleep(_guard)
         now = time.time()
         # Gate each tenant by its own configured interval; wake on the shortest.
         intervals = [self._interval_for(cc) for _, cc in tenants]
