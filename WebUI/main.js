@@ -51,6 +51,13 @@
 //   Dashboard (loadAllTenantsOverview, loadDashboardSummary, showDeviceDashboard)
 //
 // ────────────────────────────────────────────────────────────────────────────
+// ensureLDAPTennants — no-op stub. The directory spoke auto-creates the
+// tenant OU on the first relayed LDAP command, so there is nothing to
+// pre-ensure client-side. Defined here so loadLDAPData's call does not throw
+// a ReferenceError (Can't find variable) on Safari/older engines that do not
+// tolerate calls to undeclared identifiers.
+async function ensureLDAPTennants() { /* no-op */ }
+
 // ROUTES — handler → backend endpoint map. `api` is the handler function in
 // core/src/api.py; `sim` means the route is in core/src/simulations/routes.py.
 // Handlers marked "(modal)" only render UI; the fetch is issued by the sibling
