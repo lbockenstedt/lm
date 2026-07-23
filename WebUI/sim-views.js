@@ -3860,7 +3860,6 @@ function csRenderSimQuotaEditor() {
           <label class="text-xs text-slate-500 flex flex-col gap-1">
             ${(!isPresence && tied) ? `<span class="flex items-center gap-1"><input data-cs-sq="adaptive" type="checkbox" onchange="csSimQuotaOnAdaptiveChange(this)" ${r.adaptive ? 'checked' : ''}> Adaptive (keep firing)</span>` : ''}
             ${(tied && r.adaptive) ? `<span class="flex items-center gap-1" title="ON = this site is the 'learning lab': the controller ratchets DOWN to find the min count that fires, settles at floor+20%, and records a publishable learned value. OFF (default) = a consumer: seeds/lifts from the tenant or global learned value, never down-ratchets (never risks stopping the alert)."><input data-cs-sq="learning" type="checkbox" ${r.learning ? 'checked' : ''}> Learning</span>` : ''}
-            <span class="flex items-center gap-1"><input data-cs-sq="multi_capable" type="checkbox" ${isPresence ? 'checked disabled' : (r.multi_capable ? 'checked' : '')}> Multi-capable</span>
             <span class="flex items-center gap-1"><input data-cs-sq="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</span>
             <span class="flex items-center gap-1"><input data-cs-sq="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
             ${(!isPresence && knobSims.has(r.sim_id)) ? `<span class="flex items-center gap-1" title="Ratchet this sim's intensity knobs (e.g. dns_fail_rate/duration) down to the minimum that still fires the alert."><input data-cs-sq="learn_knobs" type="checkbox" ${r.learn_knobs ? 'checked' : ''}> Learn floor</span>` : ''}
@@ -4190,7 +4189,6 @@ function csSimQuotaSyncFromDom() {
             alert_id: tied ? ((g('alert_id') || {}).value || '').trim() : '',
             sim_id,
             site: g('site').value,
-            multi_capable: !!g('multi_capable').checked,
             rehome: !!g('rehome').checked,
             enabled: !!g('enabled').checked,
             learn_knobs: !!((g('learn_knobs') || {}).checked),
@@ -4559,6 +4557,11 @@ async function csRenderSimQuotaState() {
                 <button onclick="csResetToKnownGood(${csEscape(JSON.stringify(ak))})" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2 py-0.5 rounded text-[10px] font-bold">Reset to known-good</button>
             </div>`;
         };
+        // Diagnostics carry the engine's EFFECTIVE (global) sharing per quota —
+        // sharing is a global sim property now (Simulation-Sharing tile), not a
+        // per-quota flag, so the Multi column reflects that, not q.multi_capable.
+        const diagByKey = {};
+        (st.diagnostics || []).forEach(d => { if (d && d.key) diagByKey[d.key] = d; });
         const rows = eff.map(q => {
             const k = keyOf(q);
             const e = ledger[k] || {};
@@ -4614,7 +4617,7 @@ async function csRenderSimQuotaState() {
               <td class="px-2 pt-1.5 pb-0.5 text-xs">${simCell}</td>
               <td class="px-2 pt-1.5 pb-0.5 text-xs">${csEscape(q.site || '<all>')}</td>
               <td class="px-2 pt-1.5 pb-0.5 text-xs text-center">${fill}</td>
-              <td class="px-2 pt-1.5 pb-0.5 text-xs text-center">${q.multi_capable ? '✓' : '—'}</td>
+              <td class="px-2 pt-1.5 pb-0.5 text-xs text-center" title="Shareable (stacks onto other sims) — set globally in Setup → Simulations Sharing">${(diagByKey[k] ? diagByKey[k].multi : q.multi_capable) ? '✓' : '—'}</td>
               <td class="px-2 pt-1.5 pb-0.5 text-xs text-center">${q.rehome ? '✓' : '—'}</td>
             </tr>
             <tr>
