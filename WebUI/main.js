@@ -20354,7 +20354,7 @@ async function loadLDAPData(subMenu) {
     const bodyEl = document.getElementById('ldap-table-body');
     if (!headEl || !bodyEl) return;
 
-    await ensureLDAPTenants();
+    await ensureLDAPTennants();
     if (!window._ldapTenant) {
         headEl.innerHTML = '';
         bodyEl.innerHTML = `<tr><td colspan="100%" class="px-4 py-8 text-center text-slate-400 italic">No tenant available to manage.</td></tr>`;
