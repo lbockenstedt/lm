@@ -3881,22 +3881,26 @@ async function csRenderSimQuotaState() {
             const e = ledger[k] || {};
             const clients = Array.isArray(e.clients) ? e.clients : [];
             const target = q.count != null ? q.count : 0;
-            let fill = clients.length >= target
+            const _as = (st.adaptive_state || {})[`${q.alert_type || 'alert'}:${q.alert_id || ''}:${q.site || ''}`];
+            // Adaptive controller indicator (design §9): 🔄 Learning / ✅ Stable ·
+            // floor N / ⚠️ At max / ⚠️ Underfilled. "min" = the learned floor, "max"
+            // = the controller's ramp target. A quota BETWEEN floor and target is
+            // filling by design — NOT a warning. ⚠️ Underfilled fires ONLY when the
+            // engine can't reach the minimum (assigned < floor); ⚠️ At max ONLY
+            // when the engine actually filled to the target (assigned >= target)
+            // and the controller is parked at its ceiling (mode at_max) yet the
+            // alert still isn't firing. The count is amber only below the floor.
+            const _fl = _as ? _as.floor : null;
+            const _belowFloor = (_fl != null && _fl > 0) && clients.length < _fl;
+            let fill = (clients.length >= target || !_belowFloor)
                 ? `<span class="text-[#01A982] font-semibold">${clients.length}/${target}</span>`
                 : `<span class="text-amber-600 font-semibold">${clients.length}/${target}</span>`;
-            // Adaptive controller indicator (design §9): 🔄 Learning / ✅ Stable · floor N / ⚠️ At max.
-            // "At max" = the controller's target hit the configured ceiling. But the
-            // engine may only have filled a fraction of that target (pool too small /
-            // clients claimed by exclusive sims) — in that case "at max" is misleading
-            // (the alert isn't firing because the engine can't fill, not because max
-            // runners are running). When underfilled, say so instead.
-            const _as = (st.adaptive_state || {})[`${q.alert_type || 'alert'}:${q.alert_id || ''}:${q.site || ''}`];
             if (_as) {
-                const _m = _as.mode || 'learning', _fl = _as.floor;
-                const _under = target > 0 && clients.length < target;
-                fill += ' ' + (_under
-                    ? `<span class="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full" title="Engine can't reach the target from the online pool">⚠️ Underfilled</span>`
-                    : _m === 'at_max'
+                const _m = _as.mode || 'learning';
+                const _atMaxCount = target > 0 && clients.length >= target;
+                fill += ' ' + (_belowFloor
+                    ? `<span class="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full" title="Engine can't reach the learned minimum (floor ${_fl}) from the online pool">⚠️ Underfilled</span>`
+                    : (_atMaxCount && _m === 'at_max')
                     ? `<span class="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full" title="At max, alert not firing">⚠️ At max</span>`
                     : _m === 'stable'
                     ? `<span class="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full">✅ Stable${_fl != null ? ' · floor ' + _fl : ''}</span>`
@@ -3959,9 +3963,16 @@ async function csRenderSimQuotaState() {
             const _lk = ledger[k] || {};
             const assigned = Array.isArray(_lk.clients) ? _lk.clients.length : 0;
             const tgt = (v.target != null) ? v.target : 0;
-            if (tgt > 0 && assigned < tgt) {
-                _warns.push(`Adaptive quota <span class="font-mono">${csEscape(k)}</span> is underfilled (${assigned}/${tgt}) — the engine can't reach the target from the online pool, so the alert may not fire regardless of max.`);
-            } else if (v.mode === 'at_max') {
+            const fl = (v.floor != null) ? v.floor : null;
+            const atMaxCount = tgt > 0 && assigned >= tgt;
+            // ⚠️ Underfilled ONLY when below the learned minimum (floor) — a quota
+            // BETWEEN floor and target is filling by design, NOT a warning. ⚠️ At
+            // max ONLY when the engine filled to the target (assigned >= target)
+            // and the controller is parked at its ceiling (mode at_max) yet still
+            // not firing.
+            if (fl != null && fl > 0 && assigned < fl) {
+                _warns.push(`Adaptive quota <span class="font-mono">${csEscape(k)}</span> is underfilled (${assigned}/${tgt}) — below the learned minimum (floor ${csEscape(String(fl))}); the engine can't reach the minimum from the online pool, so the alert may not fire.`);
+            } else if (atMaxCount && v.mode === 'at_max') {
                 _warns.push(`Adaptive quota <span class="font-mono">${csEscape(k)}</span> is at max (${csEscape(String(tgt))}) and still not firing.`);
             }
         });
@@ -4001,10 +4012,15 @@ async function csRenderSimQuotaState() {
             // runners are running and still not firing. Surface that honestly.
             const _lk = ledger[k] || {};
             const assigned = Array.isArray(_lk.clients) ? _lk.clients.length : 0;
-            const underfilled = tgt > 0 && assigned < tgt;
+            const fl = (v && v.floor != null) ? v.floor : null;
+            const atMaxCount = tgt > 0 && assigned >= tgt;
+            // ⚠️ Underfilled ONLY below the learned minimum (floor); between floor
+            // and target is filling by design (no warning); ⚠️ At max ONLY when
+            // filled to target AND the controller is parked at its ceiling.
+            const underfilled = (fl != null && fl > 0) && assigned < fl;
             const badge = underfilled
                 ? `<span class="text-amber-700">⚠️ Underfilled ${assigned}/${tgt}</span>`
-                : (m === 'at_max'
+                : ((atMaxCount && m === 'at_max')
                     ? '<span class="text-amber-700">⚠️ At max</span>'
                     : m === 'stable' ? '<span class="text-emerald-700">✅ Stable</span>'
                     : '<span class="text-slate-600">🔄 Learning</span>');
