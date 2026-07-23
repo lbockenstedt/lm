@@ -30,7 +30,7 @@ import hashlib
 import json
 import logging
 import time
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import httpx
 
@@ -49,10 +49,18 @@ _KNOWN_MIST_HOSTS = {
 # mapped sites share 1 org-level API call per poll cycle instead of N calls.
 # Value: (timestamp_float, payload).
 _sites_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
-_alarms_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+# alarms cache value is (timestamp, (alarms_list, warning_str_or_None)) — the
+# warning lets a cached fetch-failed result surface to the UI like a fresh one.
+_alarms_cache: dict[str, tuple[float, tuple[list[dict[str, Any]], Optional[str]]]] = {}
 _inventory_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _ORG_CACHE_TTL = 270  # 4.5 min — just under the 5-min poll interval
 _ALARMS_CACHE_TTL = 300  # 5 min — matches the poll loop
+# Browse/picker alarms window. The Mist /alarms/search endpoint DEFAULTS to a
+# 1-day window when `duration` is omitted, which hides any alarm older than 24h
+# — so the Setup browse + alert-type picker pass this wider window (7d) to
+# surface recent history. The dashboard active-alarm poll keeps the 1d default
+# (current problems), so poll and browse use different cache keys (no collision).
+_ALARMS_BROWSE_DURATION = "7d"
 # Per-site client stats are site-scoped, so they're keyed by (config_hash, site_id).
 _site_clients_cache: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
 _SITE_CLIENTS_CACHE_TTL = 270
@@ -241,11 +249,14 @@ class MistClient:
                 out[sid] = nm
         return out
 
-    async def _fetch_alarms(self, include_cleared: bool = False) -> list[dict[str, Any]]:
+    async def _fetch_alarms(self, include_cleared: bool = False,
+                            duration: str = "1d") -> tuple[list[dict[str, Any]], Optional[str]]:
         """Fetch org alarms via ``GET /api/v1/orgs/:org_id/alarms/search`` and
         return ONE normalized entry per raw alarm (NOT grouped), each carrying
         its resolved site NAME, type, severity, group, device name, and active/
-        cleared state. Cached 5 min.
+        cleared state. Cached 5 min. Returns ``(alarms, warning)`` — ``warning``
+        is set ONLY when the fetch ERRORED, so the caller can tell "no alarms in
+        the window" (``([], None)``) from "the call failed" (``([], "…")``).
 
         ``include_cleared=False`` (default) returns only ACTIVE alarms — the set
         the dashboard counts as present problems (and the input to
@@ -253,13 +264,20 @@ class MistClient:
         two offline APs report ``ap_offline: 2``). ``include_cleared=True`` also
         returns acked/cleared alarms (tagged ``status``) so the Setup picker can
         offer the full universe of alarm types, not just the ones firing now.
+
+        ``duration`` is the Mist search window (e.g. ``"1d"``/``"7d"``). The
+        endpoint DEFAULTS to a 1-day window when omitted, which hides any alarm
+        older than 24h — so the browse/picker paths pass a wider window
+        (``_ALARMS_BROWSE_DURATION``) to surface recent history, while the
+        dashboard active-alarm poll keeps the 1d default (current problems).
         """
-        cache_key = f"{self._config_hash}:{'all' if include_cleared else 'active'}"
+        cache_key = f"{self._config_hash}:{duration}:{'all' if include_cleared else 'active'}"
         cached = _alarms_cache.get(cache_key)
         if cached and time.time() - cached[0] < _ALARMS_CACHE_TTL:
             return cached[1]
 
         alarms: list[dict[str, Any]] = []
+        warning: Optional[str] = None
         try:
             # Resolve site_id → site_name (original case) so alarms key to the
             # right site instead of falling to the global "—" bucket.
@@ -271,7 +289,7 @@ class MistClient:
                 # Bounded pagination (<=5 pages) so a looping cursor can never
                 # stall browse_all (which awaits alarms + sites in parallel).
                 while pages < 5:
-                    params: dict[str, Any] = {"limit": 100}
+                    params: dict[str, Any] = {"limit": 100, "duration": duration}
                     if next_cursor:
                         params["next"] = next_cursor
                     payload = await self._get(http, f"/api/v1/orgs/{self.org_id}/alarms/search",
@@ -309,19 +327,32 @@ class MistClient:
             body = getattr(getattr(exc, "response", None), "text", None)
             logger.warning("Mist alarms fetch [%s]: %s%s", self._config_hash, exc,
                            f" — {body}" if body else "")
-        logger.info("Mist alarms fetched [%s]: %d alarms (include_cleared=%s)",
-                    self._config_hash, len(alarms), include_cleared)
+            # Surface the failure to the caller so the UI can distinguish "no
+            # alarms in the window" from "the alarms call failed" — the old
+            # behavior swallowed this into a silent empty list.
+            warning = f"Mist alarms fetch failed: {exc}"
+        logger.info("Mist alarms fetched [%s]: %d alarms (duration=%s, include_cleared=%s, warning=%s)",
+                    self._config_hash, len(alarms), duration, include_cleared, bool(warning))
         ttl_offset = 0 if alarms else (_ALARMS_CACHE_TTL - 60)
-        _alarms_cache[cache_key] = (time.time() - ttl_offset, alarms)
-        return alarms
+        # Cache the (alarms, warning) tuple so a cached return matches a fresh
+        # one. An empty/failed result is cached for only 60s (backdated) so a
+        # transient empty doesn't mask the next real fetch for the full 5 min.
+        result = (alarms, warning)
+        _alarms_cache[cache_key] = (time.time() - ttl_offset, result)
+        return result
 
-    async def _list_alarms(self, include_cleared: bool = False) -> list[dict[str, Any]]:
+    async def _list_alarms(self, include_cleared: bool = False,
+                            duration: str = "1d") -> tuple[list[dict[str, Any]], Optional[str]]:
         """Return alarms GROUPED by (type, site) for the browse view — the same
         alarm firing multiple times shows as one row with an ``N occurrences``
         detail, mirroring Aruba's ``_new_central_alerts`` grouping. Built on top
-        of the cached ``_fetch_alarms`` (no extra API call)."""
+        of the cached ``_fetch_alarms`` (no extra API call). Returns
+        ``(grouped, warning)`` — the warning is propagated from
+        ``_fetch_alarms`` so a fetch failure surfaces to the browse/picker."""
         groups: dict[tuple[str, str], dict[str, Any]] = {}
-        for al in await self._fetch_alarms(include_cleared=include_cleared):
+        alarms, warning = await self._fetch_alarms(include_cleared=include_cleared,
+                                                    duration=duration)
+        for al in alarms:
             name = str(al.get("name") or "alarm").strip()
             site = str(al.get("site") or "—").strip()
             key = (name.lower(), site.lower())
@@ -346,7 +377,7 @@ class MistClient:
             if cnt > 1:
                 entry["detail"] = f"{cnt} occurrences" + (f" — {entry['detail']}" if entry["detail"] else "")
             out.append(entry)
-        return out
+        return out, warning
 
     @staticmethod
     def _device_type_for(alarm_type: str) -> str:
@@ -456,7 +487,7 @@ class MistClient:
         # by bare type — two offline APs report ``ap_offline: 2``.
         # NOTE: alert_type_counts keys are BARE Mist alarm types (no ``Mist:``
         # prefix) — the prefix is applied only in the sim-quota catalog layer.
-        alarms = await self._fetch_alarms()
+        alarms, _ = await self._fetch_alarms()
         site_cf = str(site).casefold().strip()
         for al in alarms:
             al_site = str(al.get("site") or "—").strip()
@@ -568,18 +599,24 @@ class MistClient:
             return {"sites": [], "alerts": [], "insights": [], "clients": [],
                     "devices_by_site": {}, "clients_by_site": {}}
 
-        sites, all_alarms, all_inventory = await asyncio.gather(
+        sites, alarms_result, all_inventory = await asyncio.gather(
             self.list_sites(),
-            self._list_alarms(include_cleared=True),
+            self._list_alarms(include_cleared=True, duration=_ALARMS_BROWSE_DURATION),
             self._list_inventory(),
             return_exceptions=True,
         )
         if isinstance(sites, Exception):
             raise sites
-        if isinstance(all_alarms, Exception):
-            all_alarms = []
         if isinstance(all_inventory, Exception):
             all_inventory = []
+        # _list_alarms returns (grouped_list, warning). A gather-returned
+        # Exception (it doesn't raise in practice, but be defensive) → empty
+        # list + a synthesized warning so the Alerts tab still shows a reason.
+        if isinstance(alarms_result, Exception):
+            all_alarms: list[dict[str, Any]] = []
+            alarms_warning: Optional[str] = f"Mist alarms fetch failed: {alarms_result}"
+        else:
+            all_alarms, alarms_warning = alarms_result
 
         # Inventory → devices_by_site (group by site name).
         id_to_name = await self._site_id_to_name()
@@ -624,7 +661,7 @@ class MistClient:
                     "connection_type": "wireless" if self._client_is_wireless(cl) else "wired",
                 })
 
-        return {
+        result = {
             "sites": sites,
             "alerts": list(all_alarms),
             "insights": [],  # TODO: SLE site insights (follow-on chunk)
@@ -632,6 +669,12 @@ class MistClient:
             "devices_by_site": devices_by_site,
             "clients_by_site": clients_by_site,
         }
+        if alarms_warning:
+            # Surface "the alarms call failed" so the Alerts tab can distinguish
+            # it from a genuine no-alarms-in-window empty state. The renderer's
+            # _csMistWarn(data) reads data.warning, so no frontend change needed.
+            result["warning"] = alarms_warning
+        return result
 
     async def available_checks(self) -> dict[str, Any]:
         """Return the Mist alarm + hardware catalogs for the Setup picker (same
@@ -644,7 +687,15 @@ class MistClient:
         alert_types: dict[str, str] = {}
         warnings: list[str] = []
         try:
-            for al in await self._list_alarms(include_cleared=True):
+            # _list_alarms returns (grouped_list, warning). Use the wider browse
+            # window so the picker sees the same recent-history universe the
+            # browse view does, and surface a fetch failure (if any) instead of
+            # silently falling back to the known-type list on a transient error.
+            alarms_list, alarms_warning = await self._list_alarms(
+                include_cleared=True, duration=_ALARMS_BROWSE_DURATION)
+            if alarms_warning:
+                warnings.append(alarms_warning)
+            for al in alarms_list:
                 aid = str(al.get("name") or "").strip()
                 if not aid:
                     continue
