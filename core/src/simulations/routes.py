@@ -411,7 +411,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             obj.message = message
             return obj
 
-    async def _push_config(tenant_id: str, payload: dict) -> "_PushResult":
+    async def _push_config(tenant_id: str, payload: dict,
+                           force_live: bool = False) -> "_PushResult":
         """Best-effort CS_CONFIG_UPDATE push to ALL of the tenant's Client-Sim
         spokes. Returns a _PushResult whose int value is the NUMBER of spokes
         the config reached (0 if none connected/assigned; N if pushed to N
@@ -683,7 +684,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             queued — a queued push still counts, it WILL apply on reconnect),
             (0, False, '') on transport failure."""
             payload = _payload_for(sid)
-            if callable(drain_aware):
+            # force_live (reconcile unsticking a queued-only spoke) bypasses the
+            # drain-aware shortcut: skip is_draining → queue, and attempt a real
+            # live request_response so a stale drain window doesn't keep
+            # suppressing the delivery. Falls through to push_or_queue_to_spoke
+            # (live + queue-on-unreachable) below.
+            if callable(drain_aware) and not force_live:
                 try:
                     outcome = await drain_aware(sid, "CS_CONFIG_UPDATE", payload, timeout=30.0)
                     queued = bool(outcome.get("queued"))
@@ -1317,6 +1323,17 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                      sorted(aliases), matched_status, firing, status_wsites, sorted(seen_cids))
         return firing
 
+    # Per-tenant consecutive stalled re-push counter. Incremented each reconcile
+    # tick where the re-push only QUEUED (drain shortcut / unreachable) or
+    # reached 0 spokes — i.e. the spoke's effective set did NOT adopt the hub
+    # target this tick. Reset the moment a push lands live OR the spoke is no
+    # longer stale. A perpetually-stale spoke used to be invisible: the re-push
+    # "succeeded" (a queued push counts as pushed), so the warning repeated
+    # forever with no signal that the delivery itself was the problem. This
+    # turns that into a visible, escalating signal (warn at ≥3 stalled ticks)
+    # and gates the force-live actuator (after 2 stalled ticks).
+    _reconcile_stall: dict = {}
+
     async def _reconcile_push_tenant(tenant_id: str) -> bool:
         """Re-push the tenant's effective sim quotas when the cs spoke's
         effective set is missing or count-mismatched vs the hub's. Returns True
@@ -1350,6 +1367,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             return False
         stale = _compute_stale_push(eff, spoke_counts)
         if not stale:
+            # Spoke is current — clear any prior stall counter.
+            _reconcile_stall.pop(tenant_id, None)
             return False
         logger.info(
             "reconcile-push [%s]: %d stale quota(s) — re-pushing: %s",
@@ -1357,12 +1376,53 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             ", ".join(
                 f"{s['key']} spoke={s['spoke_count']} hub={s['hub_count']}"
                 f"{'(missing)' if s['missing'] else ''}" for s in stale))
+        # After 2 consecutive stalled ticks, force a LIVE attempt (bypass the
+        # drain-aware shortcut) so a spoke that's been queued-only — a stale
+        # drain window or a mailbox delivery that never settled — gets a real
+        # live request_response instead of re-queueing forever. The cs spoke
+        # never reports draining:true itself, so an is_draining(cs spoke) on the
+        # hub can only be a leftover 90s window from a prior live-push timeout;
+        # force-live blows past it. (A genuinely-restarting spoke just times out
+        # and re-queues — no worse than today.)
+        prev_stall = _reconcile_stall.get(tenant_id, 0)
+        force_live = prev_stall >= 2
         try:
-            await _push_sim_quotas(tenant_id)
+            result = await _push_sim_quotas(tenant_id, force_live=force_live)
         except Exception as exc:  # noqa: BLE001
             logger.warning("reconcile-push [%s] re-push failed: %s",
                            tenant_id, exc)
             return False
+        pushed = int(result or 0)
+        queued = bool(getattr(result, "queued", False))
+        if pushed and not queued:
+            # Landed live — the spoke adopted the new set this tick.
+            _reconcile_stall.pop(tenant_id, None)
+            logger.info("reconcile-push [%s]: re-push landed live on %d spoke(s)%s",
+                        tenant_id, pushed, " (force_live)" if force_live else "")
+            return True
+        # Pushed 0 (no cs spoke connected/bound) OR only queued (drain shortcut /
+        # unreachable — applies on reconnect, but if the spoke never reconnects-
+        # stable the queued push never lands and the effective set stays stale).
+        # Surface it: a perpetually-stale spoke used to be silent because the
+        # re-push "succeeded" (queued counts as pushed). Count consecutive
+        # stalled ticks and escalate so this can't hide "for a long time" again.
+        n = prev_stall + 1
+        _reconcile_stall[tenant_id] = n
+        if not pushed:
+            reason = "no cs spoke connected/bound — push reached 0 spokes"
+        else:
+            reason = (f"push only queued (didn't land live): "
+                      f"{getattr(result, 'message', '') or 'draining/unreachable'}")
+        if n >= 3:
+            logger.warning(
+                "reconcile-push [%s]: STILL stale after %d re-push(es) — %s; "
+                "the spoke's effective set isn't adopting the hub target. "
+                "Check the spoke is connected and not stuck draining; the "
+                "effective_sim_quotas push may be timing out the live ack.",
+                tenant_id, n, reason)
+        else:
+            logger.info("reconcile-push [%s]: %s (stall tick %d%s)",
+                        tenant_id, reason, n, ", force_live" if force_live else "")
         return True
 
     async def _run_adaptive_controller() -> None:
@@ -1761,16 +1821,23 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             pass
         return out
 
-    async def _push_sim_quotas(tenant_id: str) -> int:
+    async def _push_sim_quotas(tenant_id: str, force_live: bool = False) -> int:
         """Push the tenant's effective sim quotas + per-sim shareable overrides +
         pool/SSID config to its cs spoke(s) as a CS_CONFIG_UPDATE the
-        SimQuotaEngine reconciles against."""
+        SimQuotaEngine reconciles against.
+
+        ``force_live`` bypasses the drain-aware shortcut in ``_push_config`` so a
+        spoke that's been queued-only (stale drain window / mailbox delivery that
+        never settled) gets a real live attempt; used by the reconcile-push
+        actuator after consecutive stalls. Default False preserves the existing
+        drain-aware behavior for every other caller (Save buttons, adaptive
+        state-change pushes, the hub seam)."""
         return await _push_config(tenant_id, {
             "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
             "sim_shareable": await _sim_shareable(tenant_id),
             "sim_knob_overrides": await _knob_overrides_for_tenant(tenant_id),
             **await _pool_config(tenant_id),
-        })
+        }, force_live=force_live)
 
     async def _push_sim_quotas_all_tenants() -> int:
         """Re-push effective sim quotas to every tenant after a global-defaults
