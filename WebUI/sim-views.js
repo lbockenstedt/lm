@@ -871,6 +871,16 @@ window.csKillSwitchMountChip = async function (elId) {
     el.innerHTML = ksBtn + purgeBtn;
 };
 
+// (A) Alert / (I) Insight tag for a check row, from the tenant's monitored_checks
+// (window._csCheckType, keyed by BARE lowercased id so a Central:/Mist: prefix
+// never hides the match). Empty when the check isn't a monitored alert/insight.
+function csCheckTypeTag(checkId) {
+    const t = (window._csCheckType || {})[String(checkId || '').trim().replace(/^(central|mist):/i, '').toLowerCase()];
+    if (t === 'alert') return '<span class="text-[10px] font-bold text-sky-700" title="Alert">(A)</span> ';
+    if (t === 'insight') return '<span class="text-[10px] font-bold text-violet-700" title="Insight">(I)</span> ';
+    return '';
+}
+
 async function csRenderSimulations() {
     // Simulations → Checks child (default).
     csSetToolbar('');
@@ -888,6 +898,14 @@ async function csRenderSimulations() {
         window._csHealthSuccess = _ch.success || {};
     } catch (e) { console.error('central-health fetch failed', e); window._csHealthDaily = {}; window._csHealthSuccess = {}; }
     window._csHealthHourly = window._csHealthHourly || {};
+    // Type map for the (A)/(I) row tag: bare lowercased check id → 'alert'|'insight'
+    // from the tenant's monitored_checks. Rebuilt each render.
+    try {
+        const _cfg = (await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`)) || {};
+        const _mc = Array.isArray(_cfg.monitored_checks) ? _cfg.monitored_checks : [];
+        window._csCheckType = {};
+        _mc.forEach(c => { if (c && c.id) window._csCheckType[String(c.id).trim().replace(/^(central|mist):/i, '').toLowerCase()] = c.type || 'alert'; });
+    } catch (e) { window._csCheckType = window._csCheckType || {}; }
     // Collect the universe of check ids + per-bucket counts.
     const checkIds = new Set();
     let bf = 0, bw = 0, bo = 0;
@@ -938,7 +956,7 @@ window.csSimChecksFilter = function () {
       const sx = ((window._csHealthSuccess || {})[r.site] || {})[r.check] || {};
       return `<tr>
       <td class="px-3 pt-2 pb-1 font-mono text-xs text-slate-600">${csEscape(r.site)}</td>
-      <td class="px-3 pt-2 pb-1 font-mono text-xs">${csEscape(r.check)}</td>
+      <td class="px-3 pt-2 pb-1 font-mono text-xs">${csCheckTypeTag(r.check)}${csEscape(r.check)}</td>
       <td class="px-3 pt-2 pb-1">${csStatusBadge(r.status)}</td>
       <td class="px-3 pt-2 pb-1 text-right">${csPct(sx.h24)}</td>
       <td class="px-3 pt-2 pb-1 text-right">${csPct(sx.d7)}</td>
