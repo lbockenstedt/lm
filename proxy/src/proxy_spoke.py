@@ -85,6 +85,16 @@ class ProxySpoke(BaseSpoke):
         self._data_dir = cfg.get("data_dir") or os.environ.get(
             "LM_PROXY_DATA_DIR", "/var/lib/lm/proxy")
 
+        # Phase 2 console shortcut: the co-located spoke's agent-listener base
+        # (where /ws/console-relay lives), e.g. wss://<spoke-ip>:443 or
+        # ws://<spoke-ip>:8443. When set, console sessions relay browser↔proxy↔
+        # spoke↔agent↔Proxmox locally (hub out of the byte path); unset → the
+        # Phase-1 hub proxy carries console too. Descriptor cache is filled by
+        # snooping the hub's /api/pxmx/console response.
+        self.relay_spoke_url = (cfg.get("relay_spoke_url")
+                                or os.environ.get("LM_PROXY_RELAY_SPOKE_URL") or "")
+        self._console_relay_cache = {}  # session_id → relay descriptor
+
         self._proxy_app = None
         self._runner = None
         self._site = None
@@ -164,6 +174,8 @@ class ProxySpoke(BaseSpoke):
 
     async def _apply_config(self, data: Dict[str, Any]) -> Dict[str, Any]:
         changed = False
+        if "relay_spoke_url" in data and data["relay_spoke_url"] is not None:
+            self.relay_spoke_url = data["relay_spoke_url"]  # hot — no re-bind needed
         for key in ("web_host", "tls_cert", "tls_key", "upstream_url",
                     "upstream_cert", "upstream_key"):
             if key in data and data[key] is not None and getattr(self, key) != data[key]:
@@ -209,6 +221,8 @@ class ProxySpoke(BaseSpoke):
             "upstream": self.upstream_url or None,
             "upstream_verify": self.upstream_verify,
             "upstream_mtls": bool(self.upstream_cert and self.upstream_key),
+            "console_relay": bool(self.relay_spoke_url),
+            "relay_sessions": len(self._console_relay_cache),
         }
 
     def get_version(self) -> str:
