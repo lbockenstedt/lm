@@ -40,6 +40,15 @@ class FakeState:
     async def save_state_now(self):
         self.save_state()
 
+    # Parity with StateManager's soft-retire surface (decommissioned_spokes list).
+    # The spoke alert loop calls state.is_module_decommissioned(pk) to skip
+    # retired spokes; tests assert on the in-memory list.
+    def is_module_decommissioned(self, module_id: str) -> bool:
+        return module_id in (self.system_state.get("decommissioned_spokes") or [])
+
+    def is_agent_decommissioned(self, agent_id: str) -> bool:
+        return agent_id in (self.system_state.get("decommissioned_agents") or [])
+
     def get_tenant(self, tid: str) -> Optional[dict]:
         return self._tenants.get(tid)
 

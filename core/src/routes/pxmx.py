@@ -113,6 +113,7 @@ async def _aggregate_agents(hub, agent_spokes):
             a["hostname"] = cfg.get("hostname", "") or a.get("hostname", "") or aid
             a["install_uuid"] = cfg.get("install_uuid", "")
             a["identity_change"] = _agent_identity_change_for(hub, parent_spoke, aid, cfg)
+            a["decommissioned"] = bool(hub.state.is_agent_decommissioned(agent_pk))
             all_agents.append(a)
         for p in data.get("pending_agents", []) or []:
             p["spoke_id"] = parent_spoke
@@ -186,6 +187,7 @@ def _offline_relay_agents(hub, live_ids):
                 "heartbeat_status": "OFFLINE",
                 "last_seen": last if isinstance(last, (int, float)) else None,
                 "offline": True,
+                "decommissioned": bool(hub.state.is_agent_decommissioned(apk)),
             })
         return out
     except Exception:  # noqa: BLE001 — the offline roster must never blank the tile
@@ -799,6 +801,53 @@ def register(app, hub, ctx):
         _purge_agent_state(hub, agent_id)
         msg = ("Agent disconnected and removed." if relayed else "Agent removed (was not connected).")
         return {"status": "ok", "message": msg}
+
+    @app.post("/api/pxmx/agents/{agent_id}/decommission")
+    async def decommission_pxmx_agent(request: Request, agent_id: str):
+        """Soft-retire a Proxmox node-agent: keep its persisted record so it
+        stays visible (and re-onboardable) but flag it decommissioned so the UI
+        badged it grey and (for relayed agents surfaced out-of-contact) it's a
+        don't-alert marker. Works while the parent spoke is offline — the whole
+        point of cleanup. Reversible via /restore; for a full wipe use DELETE."""
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        hub = app.state.hub
+        try:
+            apk = hub._agent_primary_key(agent_id)
+            changed = hub.state.decommission_agent(apk)
+            if changed:
+                logger.info("Agent '%s' decommissioned (soft-retire).", agent_id)
+            try:
+                _AGENTS_CACHE["data"] = None
+                _AGENTS_CACHE["ts"] = 0.0
+            except Exception:  # noqa: BLE001
+                pass
+            return {"status": "ok", "decommissioned": True, "changed": changed}
+        except Exception as e:
+            logger.exception("decommission_pxmx_agent failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/api/pxmx/agents/{agent_id}/restore")
+    async def restore_pxmx_agent(request: Request, agent_id: str):
+        """Un-decommission a soft-retired Proxmox node-agent. The record was
+        never removed."""
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        hub = app.state.hub
+        try:
+            apk = hub._agent_primary_key(agent_id)
+            changed = hub.state.restore_agent(apk)
+            if changed:
+                logger.info("Agent '%s' restored from decommission.", agent_id)
+            try:
+                _AGENTS_CACHE["data"] = None
+                _AGENTS_CACHE["ts"] = 0.0
+            except Exception:  # noqa: BLE001
+                pass
+            return {"status": "ok", "decommissioned": False, "changed": changed}
+        except Exception as e:
+            logger.exception("restore_pxmx_agent failed")
+            raise HTTPException(status_code=500, detail=str(e))
 
     @app.delete("/api/pxmx/server")
     async def delete_pxmx_server(request: Request):

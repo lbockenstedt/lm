@@ -219,6 +219,10 @@ async def _aggregate_diagnostics(hub):
             # stall / brief reconnect doesn't flip a module offline.
             "in_contact": hub.is_spoke_in_contact(sid),
             "approved": hub.approved_modules.get(hub._primary_key(sid), False),
+            # Soft-retire flag (decommission_module): kept record, suppressed
+            # out-of-contact alerting, reversible. UI badged grey + offers
+            # Restore / Force-Delete instead of the normal Delete.
+            "decommissioned": hub.state.is_module_decommissioned(hub._primary_key(sid)),
             "heartbeat_status": hub.heartbeat.get_status(sid),
             "heartbeat_age_s": heartbeat_age_s,
             # Forgiving out-of-contact alert (separate from heartbeat_status):

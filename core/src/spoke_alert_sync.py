@@ -303,6 +303,21 @@ class SpokeAlertMixin:
             if leaked:
                 approved -= leaked
 
+            # Decommissioned (retired) spokes are excluded from the alert loop
+            # entirely — a retired-but-offline box must not keep firing
+            # spoke_out_of_contact. Clear any active alert so the UI/log drop it
+            # immediately (the loop is the only writer here besides the
+            # decommission endpoint, which also clears). is_module_decommissioned
+            # is keyed by primary key, matching approved_modules' keys.
+            decomm = {s for s in approved
+                      if self.state.is_module_decommissioned(s)}
+            if decomm:
+                approved -= decomm
+                for sid in decomm:
+                    self._spoke_alert_clear(sid)
+                    self._spoke_alert_tier.pop(sid, None)
+                    self._spoke_absent_since.pop(sid, None)
+
             for sid in sorted(approved):
                 duration, since_ts = self._spoke_alert_duration(sid, now)
                 tier = self._spoke_alert_tier_for(duration, warn_s, error_s)

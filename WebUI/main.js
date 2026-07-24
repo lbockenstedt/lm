@@ -251,6 +251,8 @@ const CRUD_ROUTES = {
     approveSpoke:           { m: 'POST', p: '/setup/approve_spoke',                          api: 'approve_spoke' },
     unapproveSpoke:         { m: 'POST', p: '/setup/approve_spoke',                          api: 'approve_spoke' }, // unapprove action
     deleteSpoke:            { m: 'DELETE', p: '/setup/spokes/{spokeId}',                     api: 'delete_spoke' },
+    decommissionSpoke:     { m: 'POST', p: '/setup/spokes/{spokeId}/decommission',           api: 'decommission_spoke' },
+    restoreSpoke:          { m: 'POST', p: '/setup/spokes/{spokeId}/restore',               api: 'restore_spoke' },
     resetSpokeSecret:       { m: 'POST', p: '/setup/spokes/{spokeId}/reset-secret',          api: 'reset_spoke_secret' },
     openSpokeMetadataModal: { m: 'GET',  p: '/setup/spoke-metadata/{spokeId}',               api: 'get_spoke_metadata' }, // (modal)
     saveSpokeMetadata:      { m: 'POST', p: '/setup/spoke-metadata',                         api: 'update_spoke_metadata',
@@ -268,6 +270,8 @@ const CRUD_ROUTES = {
                               m2: 'GET', p2: '/setup/tenants',                               api2: 'get_tenants' }, // (modal) dedicated Tenant button
     saveAgentTenant:        { m: 'POST', p: '/api/pxmx/agents/{agentId}/config',             api: 'set_pxmx_agent_config' },
     deleteAgent:            { m: 'DELETE', p: '/api/pxmx/agents/{agentId}',                  api: 'delete_pxmx_agent' },
+    decommissionAgent:     { m: 'POST', p: '/api/pxmx/agents/{agentId}/decommission',        api: 'decommission_pxmx_agent' },
+    restoreAgent:          { m: 'POST', p: '/api/pxmx/agents/{agentId}/restore',             api: 'restore_pxmx_agent' },
 
     // ── Tenants / users / sessions ──
     setTenant:              { m: 'POST', p: '/setup/tenant',                                 api: 'update_tenant' },
@@ -5083,11 +5087,11 @@ function _renderSetupSpokesTile(content) {
             <div class="flex items-center gap-2 text-xs mb-1">
                 <label for="sa-tenant-filter" class="font-bold text-slate-500 uppercase tracking-wider">Tenant</label>
                 <select id="sa-tenant-filter" onchange="_onSaTenantFilterChange()" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-green-500">
-                    <option value="default" selected>Default</option>
+                    <option value="default">Default</option>
                     <option value="__unassigned__">Unassigned</option>
-                    <option value="__all__">All tenants</option>
+                    <option value="__all__" selected>All tenants</option>
                 </select>
-                <span class="text-[10px] text-slate-400 italic">show spokes &amp; agents for this tenant (Unassigned = not yet bound to one)</span>
+                <span class="text-[10px] text-slate-400 italic">show spokes &amp; agents for this tenant (Unassigned = not yet bound to one; All tenants = every spoke/agent incl. offline)</span>
             </div>
             <div class="grid grid-cols-1 xl:grid-cols-2 gap-4 items-start">
                 <div class="${saCard}">
@@ -5228,14 +5232,18 @@ function _spokesAgentsLegend() {
 // first, then the two sentinels Unassigned + All tenants. The initial selection
 // is the system "default" tenant (guaranteed present — the backend injects it
 // when absent, tenants_users.py get_tenants), pre-seeded as a static <option> so
-// loadSpokesAndAgents reads the right value with no async race. A user's choice
-// is preserved across refresh; if it's gone, fall back to "default" then
-// Unassigned. Best-effort: on a failed fetch the static options remain usable.
+// loadSpokesAndAgents reads the right value with no async race. The DEFAULT
+// selection is "All tenants" so an admin sees every spoke/agent — including
+// offline ones across all tenants (the user's "I can't see them" gap: stale
+// systems bound to a non-default tenant were hidden behind the Default filter).
+// A user's choice is preserved across refresh; if it's gone, fall back to
+// "All tenants" then "default" then Unassigned. Best-effort: on a failed fetch
+// the static options remain usable.
 async function _populateSaTenantFilter() {
     const sel = document.getElementById('sa-tenant-filter');
     if (!sel) return;
     const esc = escapeHtml;  // shared escaper (escapes &<>"')
-    const current = sel.value || 'default';
+    const current = sel.value || '__all__';
     try {
         const res = await setupFetch('/setup/tenants');
         if (!res.ok) return;
@@ -5247,7 +5255,9 @@ async function _populateSaTenantFilter() {
             '<option value="__unassigned__">Unassigned</option>' +
             '<option value="__all__">All tenants</option>';
         const has = v => [...sel.options].some(o => o.value === v);
-        sel.value = has(current) ? current : (has('default') ? 'default' : '__unassigned__');
+        sel.value = has(current) ? current
+            : (has('__all__') ? '__all__'
+               : (has('default') ? 'default' : '__unassigned__'));
     } catch (_e) { /* leave the static options in place */ }
 }
 
@@ -11558,7 +11568,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
             // the agent is connected/approved — pending keeps amber.
             const extras = isSpokeKind
                 ? (diagBy && diagBy.has(aid) ? _diagTelemetryExtras(diagBy.get(aid)) : null)
-                : _diagTelemetryExtras(_normalizePxmxAgent(a), { resetFn: 'revokeAgent', deleteFn: 'deleteAgent', allowRecoveryPause: false, allowReset: false });
+                : _diagTelemetryExtras(_normalizePxmxAgent(a), { resetFn: 'revokeAgent', deleteFn: 'deleteAgent', decommissionFn: 'decommissionAgent', restoreFn: 'restoreAgent', allowRecoveryPause: false, allowReset: false });
             const editFn = isSpokeKind ? 'openSpokeMetadataModal' : 'openAgentConfigModal';
             const approveFnName = isSpokeKind ? 'approveSpoke' : 'approveAgent';
             const unapproveFnName = isSpokeKind ? 'unapproveSpoke' : 'revokeAgent';
@@ -12227,9 +12237,9 @@ async function saveSpokeAssign(spokeId) {
 
 async function deleteSpoke(spokeId, label) {
     const name = label || spokeId;
-    if (!await showConfirmToast(`Delete '${name}'?\n\nThis permanently removes the registration and its secret. ` +
+    if (!await showConfirmToast(`Force delete '${name}'?\n\nThis permanently removes the registration and its secret. ` +
                  `If it is currently connected it will be disconnected and must fully re-onboard to return. ` +
-                 `This cannot be undone.`)) return;
+                 `This cannot be undone — prefer Decommission (reversible) unless you mean to wipe it.`)) return;
     try {
         const res = await setupFetch(`/setup/spokes/${encodeURIComponent(spokeId)}`, { method: 'DELETE' });
         const d = await res.json().catch(() => ({}));
@@ -12239,9 +12249,10 @@ async function deleteSpoke(spokeId, label) {
 }
 
 async function deleteAgent(agentId) {
-    if (!await showConfirmToast(`Delete agent '${agentId}'?\n\nThis disconnects it if connected and clears its hub-side ` +
+    if (!await showConfirmToast(`Force delete agent '${agentId}'?\n\nThis disconnects it if connected and clears its hub-side ` +
                  `state (config, display name, heartbeat, approval). Works even if its parent spoke is offline. ` +
-                 `It will need re-approval to reconnect. This cannot be undone.`)) return;
+                 `It will need re-approval to reconnect. This cannot be undone — prefer Decommission (reversible) ` +
+                 `unless you mean to wipe it.`)) return;
     try {
         const res = await fetch(`/api/pxmx/agents/${encodeURIComponent(agentId)}`, {
             method: 'DELETE', credentials: 'same-origin',
@@ -12249,6 +12260,58 @@ async function deleteAgent(agentId) {
         const d = await res.json().catch(() => ({}));
         if (res.ok) { showToast(d.message || 'Agent removed', 'success'); _reloadActiveMgmtView(); }
         else showToast(d.detail || 'Delete failed', 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+// Soft-retire a spoke/generic-agent: keep the record (stays visible +
+// re-onboardable) but flag it decommissioned so the out-of-contact alert loop
+// skips it + the UI badged it grey. Reversible via restoreSpoke.
+async function decommissionSpoke(spokeId, label) {
+    const name = label || spokeId;
+    if (!await showConfirmToast(`Decommission '${name}'?\n\nThis RETIRES it (keeps the record, suppresses its ` +
+                 `out-of-contact alert) — reversible with Restore. Use Force Delete to remove it entirely.`)) return;
+    try {
+        const res = await setupFetch(`/setup/spokes/${encodeURIComponent(spokeId)}/decommission`, { method: 'POST' });
+        const d = await res.json().catch(() => ({}));
+        if (res.ok) { showToast('Decommissioned', 'success'); _reloadActiveMgmtView(); }
+        else showToast(d.detail || 'Decommission failed', 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+async function restoreSpoke(spokeId, label) {
+    const name = label || spokeId;
+    if (!await showConfirmToast(`Restore '${name}' from decommission?\n\nThis re-enables its out-of-contact alerting. ` +
+                 `If it is still offline the alert will resume next cycle.`)) return;
+    try {
+        const res = await setupFetch(`/setup/spokes/${encodeURIComponent(spokeId)}/restore`, { method: 'POST' });
+        const d = await res.json().catch(() => ({}));
+        if (res.ok) { showToast('Restored', 'success'); _reloadActiveMgmtView(); }
+        else showToast(d.detail || 'Restore failed', 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+async function decommissionAgent(agentId) {
+    if (!await showConfirmToast(`Decommission agent '${agentId}'?\n\nThis RETIRES it (keeps the record, badged grey) — ` +
+                 `reversible with Restore. Use Force Delete to remove it entirely.`)) return;
+    try {
+        const res = await fetch(`/api/pxmx/agents/${encodeURIComponent(agentId)}/decommission`, {
+            method: 'POST', credentials: 'same-origin',
+        });
+        const d = await res.json().catch(() => ({}));
+        if (res.ok) { showToast('Agent decommissioned', 'success'); _reloadActiveMgmtView(); }
+        else showToast(d.detail || 'Decommission failed', 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+async function restoreAgent(agentId) {
+    if (!await showConfirmToast(`Restore agent '${agentId}' from decommission?`)) return;
+    try {
+        const res = await fetch(`/api/pxmx/agents/${encodeURIComponent(agentId)}/restore`, {
+            method: 'POST', credentials: 'same-origin',
+        });
+        const d = await res.json().catch(() => ({}));
+        if (res.ok) { showToast('Agent restored', 'success'); _reloadActiveMgmtView(); }
+        else showToast(d.detail || 'Restore failed', 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
@@ -13306,6 +13369,13 @@ async function setRecoveryPause(spokeId, pause) {
 function _diagTelemetryExtras(s, fns) {
     fns = fns || {};
     const deleteFn = fns.deleteFn || 'deleteSpoke';
+    const decommFn = fns.decommissionFn || 'decommissionSpoke';
+    const restoreFn = fns.restoreFn || 'restoreSpoke';
+    // Soft-retire flag: the record is kept (stays visible + re-onboardable) but
+    // the out-of-contact alert loop skips it. UI badged grey + the action row
+    // swaps to Restore / Force Delete. Decommission is only meaningful for an
+    // approved/connected box — a pending one is just deleted.
+    const decomm = !!(s.decommissioned && (s.approved || s.authenticated));
     // resetFn/allowReset are no longer consumed here — Reset Secret moved into
     // the spoke Edit modal (openSpokeMetadataModal). Callers may still pass them.
     const status = spokeStatusMessage(s);
@@ -13330,7 +13400,11 @@ function _diagTelemetryExtras(s, fns) {
     // Out-of-contact alert badge (SpokeAlertMixin) — separate, forgiving tier
     // (warning >=5m / error >=30m) distinct from the realtime heartbeat light.
     const aTier = String(s.alert_tier || '');
-    const alertBadge = (aTier === 'error' || aTier === 'warning')
+    // A decommissioned (retired) box never fires spoke_out_of_contact (the alert
+    // loop skips it + the endpoint clears any active tier), so suppress the red
+    // alert badge for it — it would otherwise read as "alerting" when it's
+    // intentionally retired.
+    const alertBadge = (aTier === 'error' || aTier === 'warning') && !decomm
         ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${aTier === 'error' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'}" title="Out of contact ${Math.round((s.alert_duration_s || 0) / 60)}m — forgiving alert tier (separate from the heartbeat light)">alert · ${aTier}</span>`
         : '';
     // Version chip color: GREEN = up to date, RED = out of date, slate =
@@ -13358,7 +13432,8 @@ function _diagTelemetryExtras(s, fns) {
     // telemetry is available AND the spoke is approved/connected — a pending
     // spoke keeps its amber approval dot (heartbeat is meaningless pre-approval)
     // but an approved-but-silent spoke goes red even though it is approved.
-    const dot = !s.authenticated
+    const dot = decomm ? 'bg-slate-400'
+              : !s.authenticated
               // Offline: red only if we have NO recent last-seen, or last contact
               // was >15 min ago. A spoke that was connected seconds before a hub
               // reboot (persisted last_seen re-seeded at startup → real
@@ -13380,21 +13455,30 @@ function _diagTelemetryExtras(s, fns) {
         // Quiet metadata fragments (version · seen · recovery · alert). Colour
         // ONLY when it matters: out-of-date version red, recovery/alert states.
         metaParts: [
+            decomm ? `<span class="text-slate-500 font-semibold" title="Soft-retired — record kept, out-of-contact alert suppressed. Restore to re-enable.">decommissioned</span>` : '',
             _verUnknown ? '' : `<span class="${_outOfDate ? 'text-red-600 font-semibold' : ''}" title="${_verTitle}">v${escapeHtml(_ver)}${_outOfDate ? ' · out of date' : ''}</span>`,
             `<span title="Time since the last inbound heartbeat frame">${hbAge === 'never' ? 'never seen' : (hbAge === 'now' ? 'seen just now' : `seen ${escapeHtml(hbAge)} ago`)}</span>`,
             (badge.text !== '—') ? `<span class="${_recTextTone} font-semibold" title="${escapeHtml(badge.title)}">${escapeHtml(badge.text)}</span>` : '',
-            (aTier === 'error' || aTier === 'warning') ? `<span class="${aTier === 'error' ? 'text-red-600' : 'text-amber-600'} font-semibold" title="Out of contact ${Math.round((s.alert_duration_s || 0) / 60)}m — forgiving alert tier">alert: ${escapeHtml(aTier)}</span>` : '',
+            ((aTier === 'error' || aTier === 'warning') && !decomm) ? `<span class="${aTier === 'error' ? 'text-red-600' : 'text-amber-600'} font-semibold" title="Out of contact ${Math.round((s.alert_duration_s || 0) / 60)}m — forgiving alert tier">alert: ${escapeHtml(aTier)}</span>` : '',
         ],
         metaLines: [
             // status text moved INLINE to the caller's host/tenant row.
             s.last_error ? `<div class="text-[10px] text-red-500 font-mono pl-6 break-all">${escapeHtml(s.last_error)}</div>` : '',
         ],
-        actions: [
-            // Reset Secret moved into the spoke Edit modal (openSpokeMetadataModal)
-            // to declutter the row; pxmx agents never showed it (allowReset=false),
-            // so removing it here changes nothing for the Agents card.
-            _mgmtBtn('Delete', `${deleteFn}('${eSid}')`, 'bg-red-600 hover:bg-red-700 text-white'),
-        ],
+        actions: decomm ? [
+            // Retired box: Restore (re-enables alerting) + Force Delete (the hard
+            // wipe — the existing DELETE, now labelled to make the destructiveness
+            // obvious next to the reversible Decommission/Restore).
+            _mgmtBtn('Restore', `${restoreFn}('${eSid}')`, 'bg-green-600 hover:bg-green-700 text-white'),
+            _mgmtBtn('Force Delete', `${deleteFn}('${eSid}')`, 'bg-red-600 hover:bg-red-700 text-white'),
+        ] : (s.approved || s.authenticated ? [
+            // Live/approved: soft-retire (reversible) OR hard delete.
+            _mgmtBtn('Decommission', `${decommFn}('${eSid}')`, 'bg-slate-500 hover:bg-slate-600 text-white'),
+            _mgmtBtn('Force Delete', `${deleteFn}('${eSid}')`, 'bg-red-600 hover:bg-red-700 text-white'),
+        ] : [
+            // Pending (not yet approved): only the hard delete makes sense.
+            _mgmtBtn('Force Delete', `${deleteFn}('${eSid}')`, 'bg-red-600 hover:bg-red-700 text-white'),
+        ]),
         // Events (+ Copy) pinned to the far right of the header row (next to the
         // ID) via _mgmtEntryCard's cornerActions slot, not the bottom action row.
         eventsActions: [
@@ -13467,6 +13551,8 @@ function _normalizePxmxAgent(a) {
         recent_drops: 0,
         events: [],
         recovery: {},
+        // Soft-retire flag from /api/pxmx/agents (hub.state.is_agent_decommissioned).
+        decommissioned: !!a.decommissioned,
         _kind: 'pxmx',
     };
 }
@@ -22749,8 +22835,46 @@ async function loadAllTenantsOverview(forceRefresh = false) {
         const esc = escapeHtml;  // shared escaper (escapes &<>"')
         const num = v => (v == null || v === '' ? '—' : v);
         const cell = 'px-4 py-2 text-sm text-slate-700';
+        // Spokes column: "N up · M down" (red when any down), plus a count of
+        // decommissioned. Built from the per-tenant roster the backend now ships
+        // (O(spokes), no fan-out) so OFFLINE spokes the connected-spoke count
+        // queries hide still surface here — the user's "I can't see them" gap.
+        const spokeCell = sp => {
+            if (!sp) return num(null);
+            const up = sp.up || 0, down = sp.down || 0, decomm = sp.decommissioned || 0;
+            const downPart = down > 0
+                ? `<span class="text-red-600 font-semibold">${down} down</span>`
+                : `<span class="text-slate-400">0 down</span>`;
+            return `<span class="whitespace-nowrap"><span class="text-slate-700">${up} up</span> · ${downPart}${decomm ? ` <span class="text-slate-400">· ${decomm} decomm</span>` : ''}</span>`;
+        };
+        // Expandable list of down spokes under a tenant row — each entry links
+        // to Setup → Spokes & Agents filtered to that tenant so the operator can
+        // decommission/force-delete the stale box.
+        const ago = epoch => {
+            if (epoch == null) return 'never seen';
+            const s = Math.max(0, Math.floor(Date.now() / 1000 - epoch));
+            if (s < 60) return `${s}s ago`;
+            if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+            if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+            return `${Math.floor(s / 86400)}d ago`;
+        };
+        const downList = (sp, tid) => {
+            const ds = (sp && sp.down_spokes) || [];
+            if (!ds.length) return '';
+            const items = ds.map(d => `<div class="flex items-center gap-2 py-0.5">
+                <span class="inline-block w-2 h-2 rounded-full bg-red-500"></span>
+                <span class="font-mono text-xs text-slate-600 truncate">${esc(d.name || d.spoke_id)}</span>
+                ${d.module_type ? `<span class="text-[10px] text-slate-400">${esc(d.module_type)}</span>` : ''}
+                <span class="text-[10px] text-red-500">offline · ${esc(ago(d.last_seen_epoch))}</span>
+                <button class="text-[11px] text-blue-500 hover:text-blue-700 font-medium ml-1" data-jump-tid="${esc(tid)}">manage →</button>
+            </div>`).join('');
+            return `<div class="pl-4 py-1 border-l-2 border-red-200 ml-4 mb-1">${items}</div>`;
+        };
+        const shared = d.shared_spokes || null;
         const rows = tenants.map(t => {
             const active = t.id === currentTenant;
+            const sp = t.spokes || null;
+            const hasDown = sp && (sp.down || 0) > 0;
             return `<tr class="border-b border-slate-100 hover:bg-slate-50 cursor-pointer at-row ${active ? 'bg-green-50/60' : ''}" data-tid="${esc(t.id)}">
                 <td class="px-4 py-2 text-sm">
                     <span class="font-medium text-[#263040] ${active ? 'text-[#01A982]' : ''}">${esc(t.name)}</span>
@@ -22761,9 +22885,20 @@ async function loadAllTenantsOverview(forceRefresh = false) {
                 <td class="${cell}">${num(t.sessions)}</td>
                 <td class="${cell}">${num(t.prefixes)}</td>
                 <td class="${cell}">${num(t.ips_used)}</td>
+                <td class="${cell}">${spokeCell(sp)}</td>
                 <td class="px-4 py-2 text-xs text-slate-400 text-right">${active ? '<span class="text-[#01A982] font-medium">viewing</span>' : 'View →'}</td>
-            </tr>`;
+            </tr>${hasDown ? `<tr class="bg-red-50/30"><td colspan="8">${downList(sp, t.id)}</td></tr>` : ''}`;
         }).join('');
+        // Shared/unassigned spokes (untagged) get their own trailing block so an
+        // offline shared spoke is never lost from the overview.
+        const sharedBlock = shared && ((shared.down || 0) + (shared.decommissioned || 0) + (shared.up || 0)) > 0
+            ? `<tr class="border-b border-slate-100 bg-slate-50/60 at-row" data-tid="__all__">
+                <td class="px-4 py-2 text-sm"><span class="font-medium text-slate-500">Shared / unassigned</span><span class="block text-xs text-slate-400">spokes bound to no tenant</span></td>
+                <td class="${cell}" colspan="5"></td>
+                <td class="${cell}">${spokeCell(shared)}</td>
+                <td class="px-4 py-2 text-xs text-slate-400 text-right">View →</td>
+            </tr>${(shared.down || 0) > 0 ? `<tr class="bg-red-50/30"><td colspan="8">${downList(shared, '__all__')}</td></tr>` : ''}`
+            : '';
         container.innerHTML = `<table class="w-full text-left">
             <thead class="text-slate-400 uppercase text-xs border-b border-slate-200"><tr>
                 <th class="px-4 py-2">Tenant</th>
@@ -22772,13 +22907,35 @@ async function loadAllTenantsOverview(forceRefresh = false) {
                 <th class="px-4 py-2">NAC Sessions</th>
                 <th class="px-4 py-2">Prefixes</th>
                 <th class="px-4 py-2">IPs Used</th>
+                <th class="px-4 py-2">Spokes</th>
                 <th class="px-4 py-2"></th>
             </tr></thead>
-            <tbody>${rows}</tbody>
+            <tbody>${rows}${sharedBlock}</tbody>
         </table>
-        <p class="mt-2 text-xs text-slate-400">Click a row to view as that tenant. Counts are cached for 60s — use Refresh for live numbers.</p>`;
+        <p class="mt-2 text-xs text-slate-400">Click a row to view as that tenant. Spokes shows up/down from the spoke roster (offline spokes included). “manage →” jumps to Spokes &amp; Agents for that tenant. Counts cached 60s — use Refresh for live numbers.</p>`;
         container.querySelectorAll('.at-row').forEach(tr => {
-            tr.addEventListener('click', () => viewAsTenant(tr.dataset.tid));
+            tr.addEventListener('click', () => {
+                const tid = tr.dataset.tid;
+                if (tid === '__all__') { setView('setup'); setSubView('Spokes & Agents'); return; }
+                viewAsTenant(tid);
+            });
+        });
+        // The per-down-spoke "manage →" buttons jump straight to Spokes & Agents
+        // filtered to the owning tenant (or All tenants for the shared block).
+        container.querySelectorAll('[data-jump-tid]').forEach(btn => {
+            btn.addEventListener('click', e => {
+                e.stopPropagation();
+                const tid = btn.dataset.jumpTid;
+                if (typeof setView === 'function') setView('setup');
+                if (typeof setSubView === 'function') setSubView('Spokes & Agents');
+                const sel = document.getElementById('sa-tenant-filter');
+                if (sel) {
+                    const has = v => [...sel.options].some(o => o.value === v);
+                    sel.value = has(tid) ? tid : '__all__';
+                    if (typeof _onSaTenantFilterChange === 'function') _onSaTenantFilterChange();
+                    else if (typeof loadSpokesAndAgents === 'function') loadSpokesAndAgents();
+                }
+            });
         });
     } catch (err) {
         container.innerHTML = `<p class="text-sm text-red-500">Overview unavailable: ${err.message}</p>`;

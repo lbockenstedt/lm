@@ -459,6 +459,49 @@ def register(app, hub, ctx):
             logger.exception("delete_spoke failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/setup/spokes/{spoke_id}/decommission")
+    async def decommission_spoke(spoke_id: str):
+        """Soft-retire a spoke/generic-agent: keep the registration record (so it
+        stays visible + re-onboardable) but flag it decommissioned so the
+        out-of-contact alert loop skips it and the UI badged it grey. Reversible
+        via /setup/spokes/{id}/restore. For a full wipe use DELETE instead."""
+        hub = app.state.hub
+        try:
+            pk = hub._primary_key(spoke_id)
+            changed = hub.state.decommission_module(pk)
+            # Clear any active out-of-contact alert immediately so a just-retired
+            # box stops firing this cycle (the alert loop also clears, but this
+            # makes the UI/log drop it without waiting up to 30 s).
+            try:
+                hub._spoke_alert_clear(pk)
+                hub._spoke_alert_tier.pop(pk, None)
+                hub._spoke_absent_since.pop(pk, None)
+            except Exception:  # noqa: BLE001 — alert state is best-effort
+                pass
+            if changed:
+                logger.info("Spoke '%s' decommissioned (soft-retire, alerts suppressed).", spoke_id)
+            _bust_spokes_cache()
+            return {"decommissioned": True, "changed": changed}
+        except Exception as e:
+            logger.exception("decommission_spoke failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/setup/spokes/{spoke_id}/restore")
+    async def restore_spoke(spoke_id: str):
+        """Un-decommission a soft-retired spoke/generic-agent (re-enables
+        out-of-contact alerting). The record was never removed."""
+        hub = app.state.hub
+        try:
+            pk = hub._primary_key(spoke_id)
+            changed = hub.state.restore_module(pk)
+            if changed:
+                logger.info("Spoke '%s' restored from decommission.", spoke_id)
+            _bust_spokes_cache()
+            return {"decommissioned": False, "changed": changed}
+        except Exception as e:
+            logger.exception("restore_spoke failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.post("/setup/spokes/purge-prefix")
     async def purge_spokes_prefix(request: Request):
         """Bulk-remove every spoke/agent whose id starts with a prefix (default

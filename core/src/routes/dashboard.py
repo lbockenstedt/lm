@@ -4,6 +4,59 @@ from api import (
 )
 
 
+def _spoke_rosters(hub) -> dict:
+    """Per-tenant spoke up/down/decommissioned roster built straight from
+    ``known_modules`` + ``module_metadata`` + heartbeat — NOT from the
+    connected-spoke count queries (those route only to live spokes, so an
+    OFFLINE spoke contributes nothing and the user "can't see it" in the
+    all-tenants overview). This is O(spokes), no fan-out.
+
+    Returns ``{tenant_id: {up, down, decommissioned, down_spokes:[...]}}`` plus
+    a ``"__shared__"`` bucket for untagged (shared / unassigned) spokes so they
+    are never lost. A spoke is:
+      * decommissioned → decommissioned bucket (record kept, alerts suppressed),
+      * approved + in-contact → up,
+      * approved + not in-contact → down (listed in down_spokes with last_seen),
+      * not approved → skipped (pending onboarding, not a "down system").
+    down_spokes entries: ``{spoke_id, name, module_type, last_seen_epoch}``.
+    Never raises — best-effort so the overview never blanks on a bad state."""
+    try:
+        md = hub.state.system_state.get("module_metadata", {}) or {}
+        connected = set((hub.active_connections or {}).keys())
+        out: dict = {}
+        def _bucket(tid):
+            return out.setdefault(tid or "__shared__",
+                                  {"up": 0, "down": 0, "decommissioned": 0,
+                                   "down_spokes": []})
+        for sid in (hub.state.system_state.get("known_modules", []) or []):
+            pk = hub._primary_key(sid)
+            meta = (md.get(sid) or {}) if isinstance(md, dict) else {}
+            tid = meta.get("tenant_id") or ""
+            if hub.state.is_module_decommissioned(pk):
+                _bucket(tid)["decommissioned"] += 1
+                continue
+            if not hub.approved_modules.get(pk, False):
+                continue  # pending — not a down system
+            if hub.is_spoke_in_contact(sid) or pk in connected:
+                _bucket(tid)["up"] += 1
+            else:
+                b = _bucket(tid)
+                b["down"] += 1
+                last = hub.heartbeat.last_seen.get(sid)
+                b["down_spokes"].append({
+                    "spoke_id": sid,
+                    "name": (meta.get("display_name") or meta.get("name")
+                            or meta.get("hostname") or sid),
+                    "module_type": (hub.spoke_module_types.get(pk)
+                                     or meta.get("module_type") or ""),
+                    "last_seen_epoch": last if isinstance(last, (int, float)) else None,
+                })
+        return out
+    except Exception:  # noqa: BLE001 — the roster must never blank the overview
+        logger.exception("spoke roster build failed")
+        return {}
+
+
 def register(app, hub, ctx):
     """Register dashboard routes on the Hub app."""
     _session_user = ctx._session_user
@@ -168,6 +221,11 @@ def register(app, hub, ctx):
         tenants = hub.state.tenant_state.get("tenants", {})
         tids = [tid for tid in tenants.keys() if tid != "default"]
 
+        # Per-tenant spoke up/down/decommissioned roster (cheap, no fan-out) so
+        # the overview surfaces OFFLINE spokes the connected-spoke count queries
+        # hide. Built once, merged per row.
+        rosters = _spoke_rosters(hub)
+
         sem = _asyncio.Semaphore(5)
         # Shared across the fan-out: a spoke that times out for one tenant is
         # skipped for the rest (it's the same ipam/hypervisor spoke for all), so a
@@ -187,6 +245,9 @@ def register(app, hub, ctx):
                 "name":        cfg.get("name") or tid,
                 "slug":        cfg.get("netbox_tenant_slug") or tid,
                 "description": cfg.get("description", ""),
+                "spokes":      rosters.get(tid,
+                                          {"up": 0, "down": 0, "decommissioned": 0,
+                                           "down_spokes": []}),
                 **counts,
             }
 
@@ -200,12 +261,21 @@ def register(app, hub, ctx):
                     "id": tid, "name": cfg.get("name") or tid,
                     "slug": cfg.get("netbox_tenant_slug") or tid,
                     "description": cfg.get("description", ""),
+                    "spokes": rosters.get(tid,
+                                          {"up": 0, "down": 0, "decommissioned": 0,
+                                           "down_spokes": []}),
                     "devices": 0, "vms": 0, "sessions": 0, "prefixes": 0, "ips_used": 0,
                 })
             else:
                 out.append(row)
         out.sort(key=lambda r: r["name"].lower())
-        data = {"tenants": out}
+        # Untagged (shared / unassigned) spokes are not bound to a tenant row;
+        # surface them separately so an offline shared spoke is never lost from
+        # the overview (an admin still needs to see it to clean it up).
+        shared = rosters.get("__shared__",
+                             {"up": 0, "down": 0, "decommissioned": 0,
+                              "down_spokes": []})
+        data = {"tenants": out, "shared_spokes": shared}
         _all_tenants_summary_cache["ts"] = _time.time()
         _all_tenants_summary_cache["data"] = data
         return data

@@ -112,6 +112,17 @@ class StateManager:
             # tick never costs a disk write. Stale entries are pruned when a
             # spoke is deleted (delete_module).
             "spoke_last_seen": {},
+            # Decommissioned (retired) spokes + relayed node-agents — a SOFT
+            # delete. The registration record + last-known summary are KEPT (so an
+            # operator can see/restore a retired box), but the spoke is excluded
+            # from the out-of-contact alert loop (run_spoke_alert_loop) so a
+            # retired-but-offline box stops firing spoke_out_of_contact. The UI
+            # badges it "Decommissioned" (grey) and offers Restore. A full wipe is
+            # still DELETE /setup/spokes/{id} (remove_module). Spokes are keyed by
+            # their primary key; relayed node-agents (pxmx) by agent_id (hub-side,
+            # so cleanup works even when the parent spoke is offline).
+            "decommissioned_spokes": [],
+            "decommissioned_agents": [],
         }
 
         # Tenant-level state: User settings, Quotas, Mappings
@@ -289,7 +300,11 @@ class StateManager:
                 "active_sessions": {},
                 "active_tenant": "default",
                 "users": {},
-                "agent_config": {}
+                "agent_config": {},
+                "spoke_last_seen": {},
+                "permission_groups": {},
+                "decommissioned_spokes": [],
+                "decommissioned_agents": []
             }
             sys_state = self._merge_defaults(sys_state, sys_defaults)
             self.system_state = sys_state
@@ -464,7 +479,60 @@ class StateManager:
         self.system_state.get("module_metadata", {}).pop(module_id, None)
         # Proxmox node-agent display-name overrides live here; harmless if absent.
         self.system_state.get("agent_display_names", {}).pop(module_id, None)
+        # A full delete also clears any decommission marker (moot — the record
+        # is gone — but keeps the list from accreting dead ids).
+        ds = self.system_state.get("decommissioned_spokes", [])
+        if module_id in ds:
+            ds.remove(module_id)
         self.save_state()
+
+    # ── Decommission (soft retire) ─────────────────────────────────────────
+    # See the system_state["decommissioned_*"] comment for semantics. Spokes +
+    # generic Hub-direct agents are module-type "agent" spokes → keyed by their
+    # primary key (decommissioned_spokes). Relayed Proxmox node-agents connect
+    # through a parent spoke → keyed by agent_id (decommissioned_agents), so a
+    # stale agent can be retired even while its parent spoke is offline.
+    def decommission_module(self, module_id: str) -> bool:
+        """Soft-retire a spoke/generic-agent: keep its record, but exclude it
+        from the out-of-contact alert loop. Returns True if the flag changed."""
+        lst = self.system_state.setdefault("decommissioned_spokes", [])
+        if module_id in lst:
+            return False
+        lst.append(module_id)
+        self.save_state()
+        return True
+
+    def restore_module(self, module_id: str) -> bool:
+        """Un-decommission a spoke/generic-agent (re-enables out-of-contact
+        alerting). Returns True if it was decommissioned."""
+        lst = self.system_state.get("decommissioned_spokes", [])
+        if module_id not in lst:
+            return False
+        lst.remove(module_id)
+        self.save_state()
+        return True
+
+    def is_module_decommissioned(self, module_id: str) -> bool:
+        return module_id in self.system_state.get("decommissioned_spokes", [])
+
+    def decommission_agent(self, agent_id: str) -> bool:
+        lst = self.system_state.setdefault("decommissioned_agents", [])
+        if agent_id in lst:
+            return False
+        lst.append(agent_id)
+        self.save_state()
+        return True
+
+    def restore_agent(self, agent_id: str) -> bool:
+        lst = self.system_state.get("decommissioned_agents", [])
+        if agent_id not in lst:
+            return False
+        lst.remove(agent_id)
+        self.save_state()
+        return True
+
+    def is_agent_decommissioned(self, agent_id: str) -> bool:
+        return agent_id in self.system_state.get("decommissioned_agents", [])
 
     def update_module_metadata(self, module_id: str, metadata: Dict[str, Any]):
         """Updates the display name and description for a spoke."""

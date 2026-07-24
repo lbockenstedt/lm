@@ -351,3 +351,57 @@ def test_active_alerts_severity_ordering():
 def test_active_alerts_empty_when_none():
     h = _AlertHub(approved={})
     assert h.get_active_spoke_alerts() == []
+
+
+# ── decommissioned spokes are skipped + cleared ──────────────────────────────
+
+@pytest.mark.asyncio
+async def test_decommissioned_spoke_skipped_and_alert_cleared(monkeypatch):
+    """A decommissioned (soft-retired) approved spoke must NOT fire
+    spoke_out_of_contact even when it's been offline a long time — and any
+    alert already active for it is cleared this cycle (so a just-retired box
+    stops alerting immediately instead of waiting for the next transition)."""
+    h = _AlertHub(global_config={"spoke_alert": {"enabled": True}},
+                  approved={"retired": True, "live": True},
+                  last_seen={"retired": 0.0, "live": 0.0})
+    h._spoke_alert_duration = lambda sid, now: (max(0.0, now - 0.0), 0.0)  # type: ignore
+    # Mark 'retired' decommissioned + pre-seed an active error alert so we can
+    # assert it's cleared this cycle (simulating decommission of a box that was
+    # already alerting).
+    h.state.system_state["decommissioned_spokes"] = ["retired"]
+    h._spoke_alert_tier["retired"] = _TIER_ERROR
+    h._spoke_alert_set("retired", _TIER_ERROR, 0.0, 2000.0, "escalated")
+
+    stages = [2000]
+    clock = {"t": 0.0}
+    iters = {"n": 0}
+
+    async def fake_sleep(t):
+        iters["n"] += 1
+        if iters["n"] <= len(stages):
+            clock["t"] = stages[iters["n"] - 1]
+            return
+        raise asyncio.CancelledError()
+    monkeypatch.setattr(sa.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(sa.time, "time", lambda: clock["t"])
+
+    with pytest.raises(asyncio.CancelledError):
+        await h.run_spoke_alert_loop()
+
+    # retired: skipped + its pre-seeded alert cleared (no new alert, no event).
+    assert "retired" not in h._spoke_alerts
+    assert "retired" not in h._spoke_alert_tier
+    assert "retired" not in h._spoke_absent_since
+    assert not any(e[0] == "retired" for e in h.events)
+    # live: still evaluated — escalates to error at 2000s (last_seen 0).
+    assert h._spoke_alerts["live"]["tier"] == _TIER_ERROR
+
+
+def test_decommissioned_predicate_reads_state_list():
+    """The loop's skip predicate is state.is_module_decommissioned(pk) — verify
+    it reads the decommissioned_spokes list and returns False when absent/empty."""
+    h = _AlertHub(approved={"s1": True})
+    assert h.state.is_module_decommissioned("s1") is False
+    h.state.system_state["decommissioned_spokes"] = ["s1"]
+    assert h.state.is_module_decommissioned("s1") is True
+    assert h.state.is_module_decommissioned("other") is False
