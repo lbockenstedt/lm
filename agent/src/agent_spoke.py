@@ -130,6 +130,10 @@ def _infra_install_cmd(installer_url: str) -> list:
 
 
 _LDAP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/ldap/main/install_ldap.sh"
+# dns/dhcp installers live IN the lm repo (in-repo modules), so their deploy-role
+# installer URL is the lm raw path (not a sibling repo like netbox/ldap).
+_DNS_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dns/install_dns.sh"
+_DHCP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dhcp/install_dhcp.sh"
 
 _DEPLOY_ROLES: Dict[str, Dict[str, Any]] = {
     "bugfixer": {
@@ -163,6 +167,23 @@ _DEPLOY_ROLES: Dict[str, Dict[str, Any]] = {
     # netbox-server.
     "ldap-server": {
         "cmd": _infra_install_cmd(_LDAP_INSTALLER_URL),
+        "module_type": "agent",
+    },
+    # DNS SERVER: deploy Unbound (server + remote-control + conf.d include) via the
+    # dns installer's --infra-only mode — stands up the server but NOT an lm-dns
+    # spoke unit. The DNS MODULE that manages it is the SEPARATE "dns" role
+    # (module_type "dns") in _ROLE_MAP; load that too. Mirrors netbox-server/
+    # ldap-server so the server deploy and the management spoke are independent.
+    "dns-server": {
+        "cmd": _infra_install_cmd(_DNS_INSTALLER_URL),
+        "module_type": "agent",
+    },
+    # DHCP SERVER: deploy Kea (kea-dhcp4-server + kea-ctrl-agent on :8001) via the
+    # dhcp installer's --infra-only mode — server only, NOT an lm-dhcp spoke unit.
+    # The DHCP MODULE that manages it is the SEPARATE "dhcp" role (module_type
+    # "dhcp") in _ROLE_MAP. Mirrors netbox-server/ldap-server.
+    "dhcp-server": {
+        "cmd": _infra_install_cmd(_DHCP_INSTALLER_URL),
         "module_type": "agent",
     },
 }

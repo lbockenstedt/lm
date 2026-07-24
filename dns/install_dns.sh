@@ -7,13 +7,17 @@ INSTALL_DIR="/opt/lm"
 SERVICE_NAME="lm-dns"
 ENV_FILE="$INSTALL_DIR/dns/.env"
 
-HUB_URL=""; SPOKE_ID=""; SPOKE_SECRET=""
+HUB_URL=""; SPOKE_ID=""; SPOKE_SECRET=""; INFRA_ONLY=false
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
         --hub)    HUB_URL="$2";      shift ;;
         --id)     SPOKE_ID="$2";     shift ;;
         --secret) SPOKE_SECRET="$2"; shift ;;
+        # Deploy-role mode: install the Unbound SERVER only (no lm-dns spoke unit).
+        # The DNS module that manages it is the SEPARATE "dns" role. Mirrors
+        # netbox/ldap --infra-only.
+        --infra-only) INFRA_ONLY=true ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac; shift
 done
@@ -29,7 +33,9 @@ if [ -n "${HUB_URL:-}" ] && [ "$HUB_URL" != "auto" ]; then
     esac
 fi
 
-[[ -z "$HUB_URL" ]] && { echo "Usage: $0 --hub <ws://HUB:8765> [--id dns-spoke-1]"; exit 1; }
+if [[ "$INFRA_ONLY" == false && -z "$HUB_URL" ]]; then
+    echo "Usage: $0 --hub <ws://HUB:8765> [--id dns-spoke-1]  |  --infra-only"; exit 1
+fi
 SPOKE_ID="${SPOKE_ID:-${SERVICE_NAME}-$(hostname -s)}"
 mkdir -p /var/log/lm
 
@@ -81,6 +87,14 @@ unbound-control-setup 2>/dev/null || true
 # version), still install/start the lm-dns spoke below instead of aborting the
 # whole install under `set -e` — the spoke must reach --hub regardless.
 systemctl enable --now unbound || echo "⚠️  unbound failed to start — DNS spoke will still install; check 'unbound-checkconf'"
+
+# Deploy-role: server-only. The lm-dns spoke that manages this Unbound is loaded
+# SEPARATELY as the "dns" role (module_type dns), exactly like netbox-server /
+# ldap-server + their client modules. Skip the spoke venv/.env/unit below.
+if [[ "$INFRA_ONLY" == true ]]; then
+    echo "DNS server (Unbound) installed (infra-only) — load the 'dns' role to manage it."
+    exit 0
+fi
 
 # Python venv
 cd "$INSTALL_DIR/dns"

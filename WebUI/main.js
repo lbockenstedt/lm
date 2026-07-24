@@ -466,8 +466,10 @@ function updateContextActions() {
 
 // Roles available to load on a generic agent (matches lm/agent/src/agent_spoke.py _ROLE_MAP)
 const AGENT_ROLES = {
-    'dns':        { name: 'DNS Server (Unbound)',  desc: 'Manages Unbound DNS. Syncs records from NetBox.', deploy: false },
-    'dhcp':       { name: 'DHCP Server (Kea)',     desc: 'Manages Kea DHCP4. Syncs subnets and reservations from NetBox.', deploy: false },
+    'dns':        { name: 'DNS (Unbound module)',  desc: 'Manages a running Unbound. Syncs records from NetBox. Needs an Unbound server — deploy the "DNS Server" role (or install standalone).', deploy: false },
+    'dns-server': { name: 'DNS Server (Unbound)', desc: 'Deploys Unbound itself (server + remote-control + conf.d include). Runs as its own service on this host; does NOT create a spoke. Load the "DNS (Unbound module)" role to manage it.', deploy: true },
+    'dhcp':       { name: 'DHCP (Kea module)',     desc: 'Manages a running Kea DHCP4. Syncs subnets and reservations from NetBox. Needs a Kea server — deploy the "DHCP Server" role (or install standalone).', deploy: false },
+    'dhcp-server':{ name: 'DHCP Server (Kea)', desc: 'Deploys Kea itself (kea-dhcp4-server + kea-ctrl-agent on :8001). Runs as its own service on this host; does NOT create a spoke. Load the "DHCP (Kea module)" role to manage it.', deploy: true },
     'network':    { name: 'Network Devices (nw)',  desc: 'Polls fleet switches for ARP/MAC topology and syncs device/MAC/ARP data into NetBox.', deploy: false },
     'netbox':     { name: 'IPAM/DCIM (NetBox)',    desc: 'Source-of-truth for sites, racks, devices, prefixes, IPs, VMs, tenants. Sinks every discovery sync and runs the NetBox→Kea DHCP scope sync. This is the API MODULE — it needs a running NetBox server (deploy the "NetBox Server" role, then point this module\'s connection settings at it).', deploy: false },
     'netbox-server': { name: 'NetBox Server', desc: 'Deploys the NetBox application itself — PostgreSQL, Redis, gunicorn, and nginx serving the WebUI on port 80. Runs as its own service on this host; does NOT create a spoke. Load the "IPAM/DCIM (NetBox)" module role to talk to it.', deploy: true },

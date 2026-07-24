@@ -7,13 +7,17 @@ INSTALL_DIR="/opt/lm"
 SERVICE_NAME="lm-dhcp"
 ENV_FILE="$INSTALL_DIR/dhcp/.env"
 
-HUB_URL=""; SPOKE_ID=""; SPOKE_SECRET=""
+HUB_URL=""; SPOKE_ID=""; SPOKE_SECRET=""; INFRA_ONLY=false
 
 while [[ "$#" -gt 0 ]]; do
     case "$1" in
         --hub)    HUB_URL="$2";      shift ;;
         --id)     SPOKE_ID="$2";     shift ;;
         --secret) SPOKE_SECRET="$2"; shift ;;
+        # Deploy-role mode: install the Kea SERVER only (no lm-dhcp spoke unit).
+        # The DHCP module that manages it is the SEPARATE "dhcp" role. Mirrors
+        # netbox/ldap --infra-only.
+        --infra-only) INFRA_ONLY=true ;;
         *) echo "Unknown arg: $1"; exit 1 ;;
     esac; shift
 done
@@ -29,7 +33,9 @@ if [ -n "${HUB_URL:-}" ] && [ "$HUB_URL" != "auto" ]; then
     esac
 fi
 
-[[ -z "$HUB_URL" ]] && { echo "Usage: $0 --hub <ws://HUB:8765> [--id dhcp-spoke-1]"; exit 1; }
+if [[ "$INFRA_ONLY" == false && -z "$HUB_URL" ]]; then
+    echo "Usage: $0 --hub <ws://HUB:8765> [--id dhcp-spoke-1]  |  --infra-only"; exit 1
+fi
 SPOKE_ID="${SPOKE_ID:-${SERVICE_NAME}-$(hostname -s)}"
 mkdir -p /var/log/lm
 
@@ -80,6 +86,14 @@ KEACONF
 # interfaces yet), but the lm-dhcp spoke talks to the ctrl-agent at RUNTIME and
 # doesn't need Kea already up at install time — don't abort under `set -e`.
 systemctl enable --now kea-ctrl-agent kea-dhcp4-server || echo "⚠️  Kea failed to start — DHCP spoke will still install; configure Kea via the module"
+
+# Deploy-role: server-only. The lm-dhcp spoke that manages this Kea is loaded
+# SEPARATELY as the "dhcp" role (module_type dhcp), exactly like netbox-server /
+# ldap-server + their client modules. Skip the spoke venv/.env/unit below.
+if [[ "$INFRA_ONLY" == true ]]; then
+    echo "DHCP server (Kea) installed (infra-only) — load the 'dhcp' role to manage it."
+    exit 0
+fi
 
 # Python venv
 cd "$INSTALL_DIR/dhcp"
