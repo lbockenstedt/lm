@@ -6760,10 +6760,15 @@ async function showRackElevationModal(rackId) {
             return;
         }
         const r = d.rack || {};
-        const meta = `<div class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600 mb-3">
+        // Stash the site slug + rack name so the "+ Add device" button can prefill
+        // the add form (add_device_to_rack takes a site slug, not the display name).
+        window._nbElevMeta = window._nbElevMeta || {};
+        window._nbElevMeta[rackId] = { site_slug: r.site_slug || '', rack: r.name || rackName };
+        const meta = `<div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600 mb-3">
             <span><span class="text-slate-400">Site:</span> ${escapeHtml(r.site || '—')}</span>
             <span><span class="text-slate-400">Tenant:</span> ${escapeHtml(r.tenant || '—')}</span>
             <span><span class="text-slate-400">Height:</span> ${r.u_height || 0}U</span>
+            <button onclick="_addDeviceFromElev(${rackId})" class="ml-auto bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all">+ Add device</button>
         </div>`;
         const front = (d.faces && d.faces.front) || [];
         const rear  = (d.faces && d.faces.rear)  || [];
@@ -6786,6 +6791,15 @@ async function showRackElevationModal(rackId) {
     }
 }
 window.showRackElevationModal = showRackElevationModal;
+
+// Open the Add-Device form from the rack elevation view, prefilled with this
+// rack (+ its site slug). On success submitNetboxAddDevice re-opens the elevation.
+function _addDeviceFromElev(rackId) {
+    const m = (window._nbElevMeta || {})[rackId] || {};
+    showNetboxAddDeviceModal(null, { site: m.site_slug, rack: m.rack, face: 'front',
+                                     elevRackId: rackId });
+}
+window._addDeviceFromElev = _addDeviceFromElev;
 
 async function uploadRackImportXlsx(input) {
     const file = input && input.files && input.files[0];
@@ -17071,7 +17085,7 @@ function editNetboxDevice(id) {
     showNetboxAddDeviceModal(item);
 }
 
-function showNetboxAddDeviceModal(editItem) {
+function showNetboxAddDeviceModal(editItem, prefill) {
     const editing = !!editItem;
     const val = v => (v == null ? '' : String(v).replace(/"/g, '&quot;'));
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
@@ -17095,6 +17109,18 @@ function showNetboxAddDeviceModal(editItem) {
     if (editing && editItem.status) {
         const st = document.getElementById('nb-d-status');
         if (st) st.value = editItem.status;
+    }
+    // Add-mode prefill (e.g. opened from the rack elevation view): seed the
+    // rack/site/unit/face fields but keep them editable + stay in add (POST) mode.
+    if (!editing && prefill) {
+        const setv = (id, v) => { const el = document.getElementById(id); if (el && v != null && v !== '') el.value = v; };
+        setv('nb-d-site', prefill.site);
+        setv('nb-d-rack', prefill.rack);
+        setv('nb-d-unit', prefill.rack_unit);
+        const face = document.getElementById('nb-d-face');
+        if (face && prefill.face) face.value = prefill.face;
+        // Remember the elevation we came from so a successful add refreshes it.
+        if (prefill.elevRackId != null) modal.dataset.elevRackId = String(prefill.elevRackId);
     }
 }
 
@@ -17125,8 +17151,13 @@ async function submitNetboxAddDevice() {
     try {
         const d = await apiJson('/api/netbox/devices', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
         if (d.status === 'SUCCESS') {
+            const elevRackId = modal && modal.dataset.elevRackId;
             document.getElementById('nb-device-modal')?.remove();
-            loadNetboxData('Devices');
+            showToast('Device added', 'success');
+            // Came from the rack elevation view → re-open it so the new device shows;
+            // otherwise refresh the Devices list.
+            if (elevRackId) showRackElevationModal(elevRackId);
+            else loadNetboxData('Devices');
         } else {
             showToast('Error: ' + (d.message || 'Unknown error'), 'error');
         }
