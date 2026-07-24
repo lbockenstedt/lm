@@ -789,6 +789,90 @@ function _lmToastRegion() {
     return el;
 }
 
+// ─── API-field reveal + copy (admin-only) ───────────────────────────────────
+// Adds an eye (show/hide) + copy button to every API-CREDENTIAL password input
+// so an admin can view/copy a stored token/key. Auto-detects by id/name/
+// placeholder (EXCLUDES user login/admin passwords), is idempotent, admin-gated,
+// and a MutationObserver picks up dynamically-rendered Setup forms. Opt a field
+// out with data-no-api-reveal="1"; force one in with data-api-field.
+const _API_FIELD_RE = /(api|token|secret|apikey|access[-_ ]?key|client[-_ ]?secret|bearer|psk|credential|passphrase)/i;
+const _API_FIELD_EXCLUDE = /(login|sign[-_ ]?in|confirm|current[-_ ]?pass|new[-_ ]?pass|admin[-_ ]?pass)/i;
+const _EYE_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>';
+const _EYE_OFF_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.9 17.9A10.9 10.9 0 0 1 12 20C5 20 1 12 1 12a18.5 18.5 0 0 1 5.1-6M9.9 4.2A10.9 10.9 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.2 3.2M1 1l22 22"/></svg>';
+const _COPY_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+
+function _isApiSecretInput(el) {
+    if (!el || el.tagName !== 'INPUT') return false;
+    if ((el.getAttribute('type') || '').toLowerCase() !== 'password') return false;
+    if (el.getAttribute('data-no-api-reveal') === '1') return false;
+    if (el.hasAttribute('data-api-field')) return true;
+    const hay = [el.id, el.name, el.getAttribute('placeholder'),
+                 el.getAttribute('aria-label'), el.className].filter(Boolean).join(' ');
+    if (_API_FIELD_EXCLUDE.test(hay)) return false;
+    return _API_FIELD_RE.test(hay);
+}
+
+function _enhanceApiField(el) {
+    if (el.dataset.apiEnhanced === '1') return;
+    // Admin-only. Don't mark enhanced yet if perms haven't loaded — a later
+    // observer tick (after /auth/me) re-checks and wires it then.
+    if (typeof isAdmin !== 'function' || !isAdmin()) return;
+    el.dataset.apiEnhanced = '1';
+    const wrap = document.createElement('span');
+    wrap.style.cssText = 'position:relative;display:block;';
+    el.parentNode.insertBefore(wrap, el);
+    wrap.appendChild(el);
+    // Room for the two 1.5rem buttons at the right edge.
+    el.style.paddingRight = '3.6rem';
+    const bar = document.createElement('span');
+    bar.style.cssText = 'position:absolute;top:50%;right:.4rem;transform:translateY(-50%);display:inline-flex;gap:.1rem;z-index:2;';
+    const mk = (title, html, fn) => {
+        const b = document.createElement('button');
+        b.type = 'button'; b.title = title; b.tabIndex = -1; b.innerHTML = html;
+        b.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;width:1.5rem;height:1.5rem;color:#64748b;background:transparent;border:none;cursor:pointer;border-radius:.25rem;padding:0;';
+        b.addEventListener('mouseover', () => { b.style.color = '#0f172a'; });
+        b.addEventListener('mouseout', () => { b.style.color = '#64748b'; });
+        b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); fn(b); });
+        return b;
+    };
+    const eye = mk('Show / hide', _EYE_SVG, (b) => {
+        const show = el.getAttribute('type') === 'password';
+        el.setAttribute('type', show ? 'text' : 'password');
+        b.innerHTML = show ? _EYE_OFF_SVG : _EYE_SVG;
+    });
+    const copy = mk('Copy', _COPY_SVG, async () => {
+        const v = el.value || '';
+        try {
+            if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(v);
+            else { const t = el.getAttribute('type'); el.setAttribute('type', 'text'); el.select(); document.execCommand('copy'); el.setAttribute('type', t); }
+            if (typeof showToast === 'function') showToast('Copied', 'success');
+        } catch (err) { if (typeof showToast === 'function') showToast('Copy failed', 'error'); }
+    });
+    bar.appendChild(eye); bar.appendChild(copy);
+    wrap.appendChild(bar);
+}
+
+function wireApiFieldControls(root) {
+    try {
+        (root || document).querySelectorAll('input[type="password"]').forEach((el) => {
+            if (_isApiSecretInput(el)) _enhanceApiField(el);
+        });
+    } catch (e) { /* never break a render */ }
+}
+
+let _apiFieldObserver = null;
+function startApiFieldObserver() {
+    wireApiFieldControls(document);
+    if (_apiFieldObserver || typeof MutationObserver === 'undefined') return;
+    let pending = false;
+    _apiFieldObserver = new MutationObserver(() => {
+        if (pending) return;
+        pending = true;
+        setTimeout(() => { pending = false; wireApiFieldControls(document); }, 150);
+    });
+    try { _apiFieldObserver.observe(document.body, { childList: true, subtree: true }); } catch (e) { /* noop */ }
+}
+
 function showToast(message, type = 'success') {
     // Green for everything except errors (red) — no grey/info toasts.
     const colors = { success: '#01A982', error: '#e53e3e', info: '#01A982' };
@@ -22355,6 +22439,9 @@ async function _pingSession() {
 }
 
 async function _initApp() {
+    // Admin-only eye + copy on every API-credential field. Idempotent + covers
+    // all login paths (session restore + fresh login); observes dynamic forms.
+    try { startApiFieldObserver(); } catch (e) { /* noop */ }
     try {
         // Pick the active tenant: user's first assigned tenant > localStorage > default.
         // Non-admin users with assigned tenants cannot switch outside their list.
