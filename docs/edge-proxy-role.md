@@ -141,6 +141,44 @@ Advantages: uniform across all three types (they already share the `VNC_FRAME_*`
 `CONSOLE_DATA_*` relay frame protocol); no PVE token leak; hub leaves the byte path; console
 stays on the tenant LAN.
 
+### 5.1a Concrete routing (from the code) — where the seam is
+Console frames **pivot at the spoke, not the hub**. Full VNC down-path today:
+```
+browser ─ws/console/{sid}─▶ HUB (per-session queue + send_to_spoke_command)
+        ─/ws/spoke────────▶ pxmx SPOKE  handle_command VNC_FRAME_DOWN → send_raw_to_agent
+        ─/ws/agent────────▶ pxmx AGENT  down_q → px_ws
+        ─vncwebsocket─────▶ Proxmox :8006
+```
+- **Spoke→agent leg** = the spoke's `/ws/agent` listener; the spoke maps `session_id→agent_id`
+  (`proxmox_spoke.py:388`) and forwards via `send_raw_to_agent` (`agent_hosting.py:705`).
+- **Hub→spoke leg** = `/ws/spoke`; `VNC_FRAME_DOWN`↓ (hub `send_to_spoke_command`) and
+  `VNC_FRAME_UP`↑ (wrapped `AGENT_RELAY_UP`, landing in the hub session queue,
+  `main.py:3772`). **Phase 2 excises this leg** — the proxy replaces the hub↔spoke frame relay.
+- **Serial is different**: the console spoke owns `/dev/tty*` directly (no agent) — a simpler
+  two-party relay of `CONSOLE_DATA`/`CONSOLE_DATA_UP` against the console spoke itself.
+
+### 5.1b The seam — a NEW spoke endpoint (not the agent listener)
+Do **not** reuse `/ws/agent` (shared `agent_secret` PSK + per-frame HMAC — wrong blast radius,
+and the proxy isn't an agent). Add a spoke-side **`/ws/console-relay/{session_id}`**:
+- Auth = the **per-session token** the hub mints at `*_START` (same shape as the browser
+  `ws_token`), scoping the proxy to one session — never `agent_secret`.
+- DOWN (proxy→Proxmox): resolve `agent_id = vnc_sessions[session_id]` and call the *existing*
+  `control_plane.send_raw_to_agent(agent_id, "VNC_FRAME_DOWN", data)` — same branch
+  `handle_command` uses, just triggered by the relay leg.
+- UP (Proxmox→proxy): add a per-session **sink registry** (`session_id → relay_ws`) so the
+  `VNC_`/`SHELL_` branch of `_agent_handler`/`_relay_agent_msg_up` (`agent_hosting.py:565,604`)
+  routes UP frames to the proxy leg for a proxied session instead of `self._hub_ws`.
+- Frame format = the existing `{session_id, data:b64}` under `VNC_FRAME_DOWN`/`_UP`,
+  `SHELL_IN`/`SHELL_OUT`/`SHELL_RESIZE`, plus `VNC_READY`/`_DISCONNECT`/`_ERROR`.
+
+### 5.1c State disposition for an edge-relayed session
+- `queue` (browser buffer) + `ws_token` → **move to the proxy** (it terminates the browser WS).
+- `spoke_id`/relay endpoint + per-session token + **`ticket`** (RFB password, agent-side today)
+  → **hub hands to the proxy** in the `*_START` response.
+- `agent_id` resolution → **stays on the spoke** (keyed by session_id); proxy needn't know it.
+- `tenant_id`/authz + TTL/`connected` → hub keeps a light setup/teardown registry; proxy owns
+  liveness while it holds the browser WS. **Relax VNC's hard 60s reap** for edge sessions.
+
 ### 5.2 Session broker flow
 The `*_START` / `*_OPEN` handshakes are already synchronous `request_response` and cleanly
 separable from the fire-and-forget byte stream. Reuse them; add a relay descriptor.

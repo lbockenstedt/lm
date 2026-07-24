@@ -1151,11 +1151,18 @@ def register(app, hub, ctx):
                                   "Hypervisor")
         session_id = str(uuid.uuid4())
         ws_token = secrets.token_urlsafe(32)
+        # Edge-proxy relay token (Phase 2): scopes an edge proxy's /ws/console-relay
+        # leg to THIS session (never the shared agent_secret). Passed to the spoke so
+        # it can validate the proxy leg, and returned in the `relay` descriptor for
+        # the proxy to dial the spoke directly (hub out of the console byte path).
+        # Purely additive — the browser flow ignores `relay` and still works via the hub.
+        relay_token = secrets.token_urlsafe(32)
         tenant_id = sess.get("tenant_id") or ""
         hub.register_vnc_session(session_id, {
             "spoke_id": pxmx_spoke,
             "tenant_id": tenant_id,
             "ws_token": ws_token,
+            "relay_token": relay_token,
             "vmid": vmid,
             "node": node,
             "unique_id": unique_id,
@@ -1175,6 +1182,7 @@ def register(app, hub, ctx):
                 "node": node,
                 "type": str((body or {}).get("type", "qemu")),
                 "target_agent_id": hub._agent_relay_name(agent_id),
+                "relay_token": relay_token,   # spoke stores it to auth the proxy relay leg
             }, timeout=50.0)
         except Exception as e:
             hub.unregister_vnc_session(session_id)
@@ -1207,4 +1215,11 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=502, detail=f"failed to start console: {detail}")
             ticket = str(vnc_res.get("ticket") or "")
         return {"session_id": session_id, "ws_token": ws_token,
-                "ticket": ticket, "expires_in": 60}
+                "ticket": ticket, "expires_in": 60,
+                # Phase 2 edge-proxy relay descriptor. A co-located proxy snoops this
+                # to relay console bytes straight to the spoke (browser↔proxy↔spoke↔
+                # agent↔Proxmox), keeping the hub out of the byte path. Ignored by the
+                # default WebUI (which relays through the hub).
+                "relay": {"session_id": session_id, "relay_token": relay_token,
+                          "spoke_id": pxmx_spoke, "agent_id": agent_id, "kind": "vnc",
+                          "ticket": ticket}}
