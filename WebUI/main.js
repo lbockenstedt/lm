@@ -10679,6 +10679,10 @@ async function toggleSubnetFilter(module) {
     loadSubnetFilterToggles();
 }
 
+function ensureLDAPTenant() {
+    // Placeholder function to avoid variable not found error
+}
+
 // Curated VID:PID → product name (common USB Wi-Fi adapter chipsets used as sim
 // dongles) with a VID → vendor fallback, so the USB management UI can show a
 // human-friendly name/type even when no live telemetry label is available.
