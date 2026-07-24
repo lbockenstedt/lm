@@ -56,9 +56,9 @@ MODULES=(
 # ── Colors (degrade gracefully when not a terminal) ──
 if [ -t 1 ]; then
     C_BOLD=$'\033[1m'; C_DIM=$'\033[2m'; C_GREEN=$'\033[32m'; C_CYAN=$'\033[36m'
-    C_YELLOW=$'\033[33m'; C_RESET=$'\033[0m'
+    C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'; C_RESET=$'\033[0m'
 else
-    C_BOLD=""; C_DIM=""; C_GREEN=""; C_CYAN=""; C_YELLOW=""; C_RESET=""
+    C_BOLD=""; C_DIM=""; C_GREEN=""; C_CYAN=""; C_YELLOW=""; C_RED=""; C_RESET=""
 fi
 
 #======================================================================
@@ -120,14 +120,16 @@ top_menu() {
     echo "${C_BOLD}${C_CYAN}=== Lab Manager Installer ===${C_RESET}"
     echo "  1) ${C_BOLD}Hub${C_RESET}        — this box runs the LM hub (+ WebUI); optionally co-locate spokes"
     echo "  2) ${C_BOLD}Agent${C_RESET} — leaf spoke that calls home, morphs into a role later (netbox/ldap/…)"
+    echo "  3) ${C_BOLD}${C_RED}Uninstall${C_RESET}  — remove ALL LM components from this box (destructive)"
     echo "  q) Quit"
     while true; do
-        read -rp "Select [1/2/q]: " choice || choice=""
+        read -rp "Select [1/2/3/q]: " choice || choice=""
         case "$choice" in
-            1|h|H|hub)     MODE="hub";     return 0 ;;
-            2|g|G|generic) MODE="generic"; return 0 ;;
-            q|Q|quit|exit) echo "Aborted."; exit 0 ;;
-            *) echo "  (enter 1, 2, or q)" ;;
+            1|h|H|hub)       MODE="hub";       return 0 ;;
+            2|g|G|generic)   MODE="generic";   return 0 ;;
+            3|u|U|uninstall) MODE="uninstall"; return 0 ;;
+            q|Q|quit|exit)   echo "Aborted."; exit 0 ;;
+            *) echo "  (enter 1, 2, 3, or q)" ;;
         esac
     done
 }
@@ -309,6 +311,18 @@ run_generic_install() {
 }
 
 #======================================================================
+# Uninstall path: hand off to uninstall.sh (discovery + guarded teardown).
+#======================================================================
+run_uninstall() {
+    echo
+    echo "${C_BOLD}${C_RED}--- Uninstall: remove all Lab Manager components ---${C_RESET}"
+    echo "${C_DIM}Stops + removes hub/agent/spoke services, deletes /opt/lm + state + config + logs,${C_RESET}"
+    echo "${C_DIM}clears LM env values, and removes the svc_lm user. It asks you to type REMOVE first.${C_RESET}"
+    echo "${C_DIM}Add --bugfixer (and --ollama) to also remove those. --dry-run to preview.${C_RESET}"
+    reexec_root bash "$CLONE_ROOT/uninstall.sh" "$@"
+}
+
+#======================================================================
 # Re-exec the target installer as root if we aren't already.
 #======================================================================
 reexec_root() {
@@ -324,9 +338,8 @@ trap '[ -n "${CLONE_DIR:-}" ] && rm -rf "$CLONE_DIR"' EXIT
 
 locate_clone
 top_menu
-if [ "$MODE" = "hub" ]; then
-    module_menu_loop
-    run_hub_install "$@"
-else
-    run_generic_install
-fi
+case "$MODE" in
+    hub)       module_menu_loop; run_hub_install "$@" ;;
+    generic)   run_generic_install ;;
+    uninstall) run_uninstall "$@" ;;
+esac
