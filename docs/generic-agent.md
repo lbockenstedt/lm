@@ -33,7 +33,7 @@ role's live status.
 
 ## Install flags
 
-- `agent/install_agent.sh`: `--hub` (optional; omit/`auto` → auto-discover), `--id` (default `agent-<hostname>`), `--secret`, `--hub-secret`, `--role <one>` / `--roles <csv>` (merged + de-duplicated; roles: `dns|dhcp|network|netbox|opnsense|ldap|simulation|cppm|proxmox|le|console|truenas`), `--loopback` (co-located with hub), `--clone` (stage + enable but leave stopped), `--tls-verify` (+ optional `--tls-ca-cert`). Roles persist in `.env` `LOADED_ROLES`. See [install-flags.md](install-flags.md) for the full canonical flag list.
+- `agent/install_agent.sh`: `--hub` (optional; omit/`auto` → auto-discover), `--id` (default `agent-<hostname>`), `--secret`, `--hub-secret`, `--role <one>` / `--roles <csv>` (merged + de-duplicated; roles: `dns|dhcp|network|netbox|opnsense|ldap|simulation|cppm|proxmox|le|console|statuspage|proxy|truenas`), `--loopback` (co-located with hub), `--clone` (stage + enable but leave stopped), `--tls-verify` (+ optional `--tls-ca-cert`). Roles persist in `.env` `LOADED_ROLES`. See [install-flags.md](install-flags.md) for the full canonical flag list.
 
 ## Key commands / handlers
 

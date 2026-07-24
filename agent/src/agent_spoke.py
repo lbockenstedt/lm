@@ -70,6 +70,7 @@ _ROLE_MAP = {
     "le":         ("le/src/le_spoke.py",            "LESpoke",   "certificates", "https://github.com/lbockenstedt/le.git"),
     "console":    ("console/src/console_spoke.py",  "ConsoleSpoke", "console",   None),
     "statuspage": ("statuspage/src/statuspage_spoke.py", "StatusPageSpoke", "statuspage", None),
+    "proxy":      ("proxy/src/proxy_spoke.py",      "ProxySpoke", "proxy",       None),
     "truenas":    ("truenas/src/truenas_spoke.py",  "TruenasSpoke", "storage",   "https://github.com/lbockenstedt/truenas.git"),
 }
 
@@ -110,6 +111,7 @@ _ROLE_LOG_PREFIXES: Dict[str, tuple] = {
     "le":         ("LE", "le."),
     "console":    ("Console",),
     "statuspage": ("StatusPageSpoke",),
+    "proxy":      ("ProxySpoke",),
     "truenas":    ("Truenas",),
 }
 
