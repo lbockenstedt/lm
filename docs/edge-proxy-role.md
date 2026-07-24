@@ -101,13 +101,16 @@ Registration:
   (`_cookie_secure`, `core/src/api.py:383`).
 
 ### 4.4 Hub-side changes (Phase 1)
-- **Honor `X-Forwarded-For`** — the single most important change. The per-IP login lockout and
-  IP-spray defense (`api_login_ratelimit`) otherwise see every request from the proxy's one IP
-  → false global lockouts. Trust the forwarded header **only** when the peer is an approved proxy
-  (verified by the proxy's mTLS cert identity — add a `proxy_cert_identities` pin, mirroring
-  `bugfixer_cert_identities`, `core/src/main.py:5321`).
+- **`X-Forwarded-For` — ALREADY SUPPORTED, config only.** The hub's `_client_ip()`
+  (`core/src/api.py:349`) already recovers the real client IP from XFF, but ONLY when the
+  immediate TCP peer is in **`LM_TRUSTED_PROXIES`** (env; comma/space IPs or CIDRs) — it walks
+  the chain right-to-left skipping trusted hops, and fail-safes to the peer IP when the peer
+  isn't trusted (spoofable XFF is never trusted). The proxy stamps XFF (`proxy_app.py`). **So
+  the only step is operational: add each proxy's source IP to `LM_TRUSTED_PROXIES` on the hub.**
+  No new hub code. (Optional future: auto-add connected `proxy`-role spokes' IPs.)
+- **`Secure` cookie** — `_cookie_secure()` (`api.py`) already auto-on when a hub TLS cert is
+  set; set `LM_COOKIE_SECURE=1` explicitly if needed for the public hostname.
 - **Origin allowlist** — if any route checks `Origin`, allow the proxy hostname(s).
-- Cookie domain/Secure aligned to the public hostname.
 
 ### 4.5 What Phase 1 delivers
 Cert prompt gone; WebUI reachable locally per tenant. **No route refactor**, auth/RBAC unchanged.
