@@ -264,7 +264,12 @@ separable from the fire-and-forget byte stream. Reuse them; add a relay descript
 - **Phase 1 (front door):** `proxy` role + `_ROLE_MAP`/`install_agent.sh` wiring + browser
   listener (CERT_NONE) + Option-A reverse proxy + LE server cert + hub `X-Forwarded-For` trust
   (+ `proxy_cert_identities`) + cookie/origin. **Ships the cert-prompt fix and local WebUI.**
-- **Phase 2 (console shortcut) — VNC BUILT (needs fleet test):** hub broker mints `relay_token`
+- **Phase 2 (console shortcut) — VNC + SHELL + SERIAL BUILT (needs fleet test):** VNC/shell
+  relay through the co-located pxmx agent (`send_raw_to_agent`); **serial** has no agent so the
+  console spoke registers a `down_handler` that writes `CONSOLE_DATA` to its own `/dev/tty*`
+  and routes `CONSOLE_DATA_UP` through the sink — its `/ws/console-relay` listener is opt-in via
+  `LM_CONSOLE_RELAY_LISTENER=1`, and the proxy connect-first-falls-back to the hub when it's off.
+  Base mechanics: hub broker mints `relay_token`
   + returns a `relay` descriptor (`pxmx.py`); spoke registers the token at VNC_START
   (`proxmox_spoke.py`) + serves `/ws/console-relay/{sid}` with a per-session-token auth and a
   UP sink (`agent_hosting.py`); proxy snoops the descriptor + relays browser↔spoke
