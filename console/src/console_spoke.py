@@ -83,10 +83,40 @@ class ConsoleSpoke(BaseSpoke):
             # Empty read → the device/handle went away; tell the browser leg.
             ptype = "CONSOLE_ERROR"
             payload = {"session_id": session_id, "error": "serial read ended"}
+
+        async def _push():
+            # Phase 2: if an edge proxy owns this session, deliver straight to it
+            # (hub out of the byte path); otherwise up to the hub → browser (normal).
+            routed = False
+            if hasattr(cp, "_route_console_up"):
+                try:
+                    routed = await cp._route_console_up(ptype, payload)
+                except Exception:  # noqa: BLE001
+                    routed = False
+            if not routed:
+                await cp.send_to_hub(ptype, payload)
+
         try:
-            asyncio.run_coroutine_threadsafe(cp.send_to_hub(ptype, payload), loop)
+            asyncio.run_coroutine_threadsafe(_push(), loop)
         except Exception as e:  # noqa: BLE001
             logger.debug("push %s failed: %s", ptype, e)
+
+    async def _serial_relay_down(self, cmd: str, data: Dict[str, Any]) -> None:
+        """DOWN frames from an edge-proxy relay leg → the local serial port (serial
+        has NO agent, so the console spoke is the endpoint). CONSOLE_DATA writes
+        bytes; CONSOLE_CLOSE closes the session."""
+        sid = data.get("session_id")
+        if not sid:
+            return
+        if cmd == "CONSOLE_DATA":
+            raw = data.get("data", "")
+            try:
+                payload = base64.b64decode(raw) if raw else b""
+            except Exception:  # noqa: BLE001
+                return
+            self.sessions.write(sid, payload)
+        elif cmd == "CONSOLE_CLOSE":
+            self.sessions.close(sid)
 
     def _port_device(self, port_id: str) -> Optional[str]:
         for p in enumerate_ports():
@@ -239,6 +269,9 @@ class ConsoleSpoke(BaseSpoke):
             sid = data.get("session_id")
             if sid:
                 self.sessions.close(sid)
+                if self.control_plane is not None and hasattr(
+                        self.control_plane, "unregister_console_relay"):
+                    self.control_plane.unregister_console_relay(sid)
             return {"status": "SUCCESS"}
 
         return {"status": "ERROR", "error": f"Unknown command: {command_type}"}
@@ -262,6 +295,18 @@ class ConsoleSpoke(BaseSpoke):
             return {"status": "ERROR", "message": f"could not open {dev}: {e}"}
         logger.info("console session %s opened on %s (%s) writer=%s",
                     sid, pid, dev, info.get("writer"))
+        # Phase 2: register the relay token so a co-located edge proxy can attach a
+        # /ws/console-relay leg. Serial has no agent — DOWN frames go to our own
+        # serial-write via down_handler. Requires LM_CONSOLE_RELAY_LISTENER=1 so the
+        # console role runs the listener; otherwise the proxy falls back to the hub.
+        relay_token = data.get("relay_token")
+        cp = self.control_plane
+        if relay_token and cp is not None and hasattr(cp, "register_console_relay"):
+            try:
+                cp.register_console_relay(sid, relay_token, "", "serial",
+                                          down_handler=self._serial_relay_down)
+            except Exception:  # noqa: BLE001
+                pass
         # Tell the browser leg the stream is live (relay consumes CONSOLE_READY).
         if self.control_plane is not None:
             await self.control_plane.send_to_hub("CONSOLE_READY", {"session_id": sid})

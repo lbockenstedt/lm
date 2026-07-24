@@ -416,13 +416,18 @@ class AgentHostingControlPlane(BaseControlPlane):
         return self._console_relay_tokens, self._console_relay_sinks
 
     def register_console_relay(self, session_id: str, relay_token: str,
-                               agent_id: str, kind: str = "vnc") -> None:
+                               agent_id: str, kind: str = "vnc",
+                               down_handler=None) -> None:
         """Called by the spoke's *_START handler so an edge proxy can later attach
-        a per-session relay leg (validated by relay_token). agent_id is the target
-        the DOWN frames are forwarded to via send_raw_to_agent."""
+        a per-session relay leg (validated by relay_token).
+
+        DOWN frames go to ``down_handler(cmd, data)`` when given (serial: the
+        console spoke writes to its own /dev/tty*), else to the agent via
+        ``send_raw_to_agent(agent_id, ...)`` (VNC/shell)."""
         tokens, _ = self._console_relay_state()
         tokens[str(session_id)] = {"token": str(relay_token or ""),
-                                   "agent_id": str(agent_id or ""), "kind": kind}
+                                   "agent_id": str(agent_id or ""), "kind": kind,
+                                   "down_handler": down_handler}
 
     def unregister_console_relay(self, session_id: str) -> None:
         tokens, sinks = self._console_relay_state()
@@ -462,6 +467,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         if not rec or not token or not hmac.compare_digest(str(token), str(rec["token"])):
             await websocket.close(1008, "bad relay token"); return
         agent_id = rec.get("agent_id") or ""
+        down_handler = rec.get("down_handler")
         await websocket.send(json.dumps({"status": "RELAY_OK"}))
         sinks[session_id] = websocket
         logger.info("Console relay leg attached for session %s (agent %s)", session_id, agent_id)
@@ -474,10 +480,17 @@ class AgentHostingControlPlane(BaseControlPlane):
                 cmd = msg.get("type")
                 d = msg.get("data") or {}
                 d["session_id"] = session_id
-                # Forward DOWN frames to the agent exactly as handle_command does.
+                # DOWN frames: serial uses a down_handler (write to /dev/tty*);
+                # VNC/shell forward to the agent exactly as handle_command does.
                 if cmd in ("VNC_FRAME_DOWN", "VNC_DISCONNECT",
-                           "SHELL_IN", "SHELL_RESIZE", "SHELL_DISCONNECT"):
-                    if agent_id:
+                           "SHELL_IN", "SHELL_RESIZE", "SHELL_DISCONNECT",
+                           "CONSOLE_DATA", "CONSOLE_CLOSE"):
+                    if down_handler is not None:
+                        try:
+                            await down_handler(cmd, d)
+                        except Exception as _e:  # noqa: BLE001
+                            logger.warning("console relay down_handler error (%s): %s", session_id, _e)
+                    elif agent_id:
                         await self.send_raw_to_agent(agent_id, cmd, d)
         except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
             pass

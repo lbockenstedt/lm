@@ -473,13 +473,16 @@ def register(app, hub, ctx):
                                     detail="not authorized for this console port's tenant")
         session_id = str(uuid.uuid4())
         ws_token = secrets.token_urlsafe(32)
+        relay_token = secrets.token_urlsafe(32)   # edge-proxy relay leg (Phase 2)
         tenant_id = (sess or {}).get("tenant_id") or ""
         hub.register_console_session(session_id, {
-            "spoke_id": sid, "tenant_id": tenant_id, "ws_token": ws_token, "port_id": port_id,
+            "spoke_id": sid, "tenant_id": tenant_id, "ws_token": ws_token,
+            "relay_token": relay_token, "port_id": port_id,
         })
         try:
             r = await hub.request_response(sid, "CONSOLE_OPEN", {
                 "session_id": session_id, "port_id": port_id, "mode": mode,
+                "relay_token": relay_token,
             }, timeout=15.0)
         except Exception as e:
             hub.unregister_console_session(session_id)
@@ -491,7 +494,14 @@ def register(app, hub, ctx):
                                 detail=data.get("message") or "console spoke refused CONSOLE_OPEN")
         return {"session_id": session_id, "ws_token": ws_token,
                 "settings": data.get("settings", {}), "read_only": bool(data.get("read_only")),
-                "writer": data.get("writer"), "expires_in": 60}
+                "writer": data.get("writer"), "expires_in": 60,
+                # Phase 2 edge-proxy relay descriptor (serial: no agent — the console
+                # spoke writes DOWN frames to /dev/tty* itself via its down_handler).
+                # A proxy relay only works when the console role runs its listener
+                # (LM_CONSOLE_RELAY_LISTENER=1); otherwise the proxy falls back to
+                # the hub relay.
+                "relay": {"session_id": session_id, "relay_token": relay_token,
+                          "spoke_id": sid, "kind": "serial"}}
 
     @app.post("/api/console/config/get")
     async def console_config_get(request: Request):

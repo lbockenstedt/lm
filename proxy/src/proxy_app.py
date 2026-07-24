@@ -88,7 +88,12 @@ async def _dispatch(request: web.Request) -> web.StreamResponse:
         if sid and spoke.relay_spoke_url:
             cached = (spoke._console_relay_cache or {}).get(sid)
             if cached and cached.get("relay"):
-                return await _proxy_console_relay(request, spoke, sid, cached)
+                relayed = await _proxy_console_relay(request, spoke, sid, cached)
+                # None → the spoke relay leg was unavailable (e.g. the console
+                # role's listener is off): fall through to the hub WS proxy so the
+                # console still works, just via the hub.
+                if relayed is not None:
+                    return relayed
         return await _proxy_ws(request, spoke, target)
     return await _proxy_http(request, spoke, target)
 
@@ -191,79 +196,90 @@ async def _proxy_console_relay(request: web.Request, spoke, session_id: str,
         ws = web.WebSocketResponse()
         await ws.prepare(request)
         await ws.close(code=4401, reason="invalid or expired console session")
-        return ws
+        return ws  # authoritative reject (NOT a fall-back)
     kind = desc.get("kind") or "vnc"
-    down_cmd = "SHELL_IN" if kind == "shell" else "VNC_FRAME_DOWN"
-    up_type = "SHELL_OUT" if kind == "shell" else "VNC_FRAME_UP"
-    disc_cmd = "SHELL_DISCONNECT" if kind == "shell" else "VNC_DISCONNECT"
-
-    ws_browser = web.WebSocketResponse(max_msg_size=0)
-    await ws_browser.prepare(request)
+    down_cmd, up_type, disc_cmd = {
+        "shell":  ("SHELL_IN",     "SHELL_OUT",      "SHELL_DISCONNECT"),
+        "serial": ("CONSOLE_DATA", "CONSOLE_DATA_UP", "CONSOLE_CLOSE"),
+    }.get(kind, ("VNC_FRAME_DOWN", "VNC_FRAME_UP", "VNC_DISCONNECT"))
+    disconnect_types = ("VNC_DISCONNECT", "VNC_ERROR", "SHELL_DISCONNECT",
+                        "SHELL_ERROR", "CONSOLE_CLOSE", "CONSOLE_CLOSED", "CONSOLE_ERROR")
 
     relay_url = (spoke.relay_spoke_url.rstrip("/") + "/ws/console-relay/" + session_id)
     relay_url = relay_url.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
     ssl_ctx = spoke.upstream_ssl() if relay_url.startswith("wss://") else None
     sess = _session(spoke)
+
+    # Connect to the spoke FIRST (before committing the browser WS) so an
+    # unavailable relay endpoint falls back to the hub proxy (return None).
     try:
-        async with sess.ws_connect(relay_url, ssl=ssl_ctx, max_msg_size=0,
-                                   autoping=True) as ws_sp:
-            await ws_sp.send_json({"relay_token": desc.get("relay_token")})
-            ack = await ws_sp.receive()
-            ok = (ack.type == WSMsgType.TEXT
-                  and (json.loads(ack.data) or {}).get("status") == "RELAY_OK")
-            if not ok:
-                await ws_browser.close(code=1011, reason="relay auth failed")
-                return ws_browser
+        ws_sp = await sess.ws_connect(relay_url, ssl=ssl_ctx, max_msg_size=0, autoping=True)
+    except (client_exceptions.ClientError, OSError, asyncio.TimeoutError) as e:
+        logger.info("console relay to spoke unavailable (%s): %s — hub fallback", relay_url, e)
+        return None
+    ws_browser = None
+    try:
+        await ws_sp.send_json({"relay_token": desc.get("relay_token")})
+        ack = await ws_sp.receive()
+        ok = (ack.type == WSMsgType.TEXT
+              and (json.loads(ack.data) or {}).get("status") == "RELAY_OK")
+        if not ok:
+            return None  # relay refused → hub fallback (finally closes ws_sp)
 
-            async def browser_to_spoke():
-                async for msg in ws_browser:
-                    if msg.type == WSMsgType.BINARY:
-                        await ws_sp.send_json({"type": down_cmd,
-                                               "data": {"data": base64.b64encode(msg.data).decode()}})
-                    elif msg.type == WSMsgType.TEXT:
-                        await ws_sp.send_json({"type": down_cmd,
-                                               "data": {"data": base64.b64encode(msg.data.encode()).decode()}})
-                    elif msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING,
-                                      WSMsgType.CLOSED, WSMsgType.ERROR):
+        ws_browser = web.WebSocketResponse(max_msg_size=0)
+        await ws_browser.prepare(request)
+
+        async def browser_to_spoke():
+            async for msg in ws_browser:
+                if msg.type == WSMsgType.BINARY:
+                    await ws_sp.send_json({"type": down_cmd,
+                                           "data": {"data": base64.b64encode(msg.data).decode()}})
+                elif msg.type == WSMsgType.TEXT:
+                    await ws_sp.send_json({"type": down_cmd,
+                                           "data": {"data": base64.b64encode(msg.data.encode()).decode()}})
+                elif msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING,
+                                  WSMsgType.CLOSED, WSMsgType.ERROR):
+                    break
+            try:
+                await ws_sp.send_json({"type": disc_cmd, "data": {}})
+            except Exception:  # noqa: BLE001
+                pass
+
+        async def spoke_to_browser():
+            async for msg in ws_sp:
+                if msg.type != WSMsgType.TEXT:
+                    if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING,
+                                    WSMsgType.CLOSED, WSMsgType.ERROR):
                         break
+                    continue
                 try:
-                    await ws_sp.send_json({"type": disc_cmd, "data": {}})
+                    obj = json.loads(msg.data)
                 except Exception:  # noqa: BLE001
-                    pass
-
-            async def spoke_to_browser():
-                async for msg in ws_sp:
-                    if msg.type != WSMsgType.TEXT:
-                        if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING,
-                                        WSMsgType.CLOSED, WSMsgType.ERROR):
-                            break
-                        continue
+                    continue
+                t = obj.get("type")
+                d = obj.get("data") or {}
+                if t == up_type:
                     try:
-                        obj = json.loads(msg.data)
+                        await ws_browser.send_bytes(base64.b64decode(d.get("data") or ""))
                     except Exception:  # noqa: BLE001
-                        continue
-                    t = obj.get("type")
-                    d = obj.get("data") or {}
-                    if t == up_type:
-                        try:
-                            await ws_browser.send_bytes(base64.b64decode(d.get("data") or ""))
-                        except Exception:  # noqa: BLE001
-                            break
-                    elif t in ("VNC_DISCONNECT", "VNC_ERROR",
-                               "SHELL_DISCONNECT", "SHELL_ERROR"):
                         break
-                    # *_READY carries no bytes — the RFB/PTY stream itself signals readiness.
+                elif t in disconnect_types:
+                    break
+                # *_READY carries no bytes — the RFB/PTY stream itself signals readiness.
 
-            b2s = asyncio.ensure_future(browser_to_spoke())
-            s2b = asyncio.ensure_future(spoke_to_browser())
-            _, pending = await asyncio.wait({b2s, s2b},
-                                            return_when=asyncio.FIRST_COMPLETED)
-            for t in pending:
-                t.cancel()
+        b2s = asyncio.ensure_future(browser_to_spoke())
+        s2b = asyncio.ensure_future(spoke_to_browser())
+        _, pending = await asyncio.wait({b2s, s2b}, return_when=asyncio.FIRST_COMPLETED)
+        for t in pending:
+            t.cancel()
     except client_exceptions.ClientError as e:
         logger.warning("console relay to spoke failed (%s): %s", relay_url, e)
     finally:
         spoke._console_relay_cache.pop(session_id, None)
-        if not ws_browser.closed:
+        try:
+            await ws_sp.close()
+        except Exception:  # noqa: BLE001
+            pass
+        if ws_browser is not None and not ws_browser.closed:
             await ws_browser.close()
     return ws_browser

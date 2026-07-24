@@ -245,8 +245,18 @@ class RoleConnection(AgentHostingControlPlane):
         """Only the pxmx (hypervisor) role hosts node-agents. Other roles
         (dns/dhcp/ldap/…) never bind a /ws/agent listener — the inherited
         AgentHostingControlPlane gate (always-on for pxmx) is overridden so a
-        multi-role agent doesn't bind :8766/:443 for non-agent-hosting roles."""
-        return self.role_name == "proxmox"
+        multi-role agent doesn't bind :8766/:443 for non-agent-hosting roles.
+
+        The console role opts in via ``LM_CONSOLE_RELAY_LISTENER=1`` ONLY to serve
+        the edge-proxy ``/ws/console-relay`` endpoint (Phase 2 serial shortcut) on
+        the same listener; off by default so console never binds a port unless an
+        operator wires an edge proxy to it."""
+        if self.role_name == "proxmox":
+            return True
+        if self.role_name == "console" and str(
+                os.environ.get("LM_CONSOLE_RELAY_LISTENER", "")).strip() in ("1", "true", "yes", "on"):
+            return True
+        return False
 
     async def run(self):
         """Start the hub WS connection (BaseControlPlane.run) and, for the
