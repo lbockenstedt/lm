@@ -289,7 +289,7 @@ class AgentHostingControlPlane(BaseControlPlane):
                 serve_kwargs["ping_interval"] = _ws_keepalive_env("LM_WS_PING_INTERVAL_S", 30.0)
                 serve_kwargs["ping_timeout"] = _ws_keepalive_env("LM_WS_PING_TIMEOUT_S", 90.0)
                 async with websockets.serve(
-                    self._agent_handler, host, port, **serve_kwargs,
+                    self._ws_dispatch, host, port, **serve_kwargs,
                 ):
                     logger.info(f"Agent listener on {scheme}://{host}:{port}")
                     await asyncio.Future()
@@ -390,6 +390,103 @@ class AgentHostingControlPlane(BaseControlPlane):
             logger.info(f"Agent '{agent_id}' revoked (was pending)")
             return
         logger.warning(f"Revoke requested for unknown agent '{agent_id}'")
+
+    # ── WS path dispatch (agent listener + edge-proxy console relay) ─────────
+
+    async def _ws_dispatch(self, websocket, path=None):
+        """Route by path on the shared agent-listener server: an edge proxy dials
+        ``/ws/console-relay/{session_id}`` (Phase 2), everything else is the agent
+        on ``/ws/agent``. Keeps the console relay off the agent's PSK path."""
+        if path is None:
+            path = getattr(websocket, "path", None) or getattr(
+                getattr(websocket, "request", None), "path", None)
+        if path and path.startswith("/ws/console-relay/"):
+            return await self._console_relay_handler(websocket, path)
+        return await self._agent_handler(websocket, path)
+
+    # ── Edge-proxy console relay (Phase 2) ──────────────────────────────────
+
+    def _console_relay_state(self):
+        """Lazily-init per-session relay registries (mixin has no __init__ hook).
+        tokens: session_id → {token, agent_id, kind}; sinks: session_id → proxy ws."""
+        if not hasattr(self, "_console_relay_tokens"):
+            self._console_relay_tokens = {}
+        if not hasattr(self, "_console_relay_sinks"):
+            self._console_relay_sinks = {}
+        return self._console_relay_tokens, self._console_relay_sinks
+
+    def register_console_relay(self, session_id: str, relay_token: str,
+                               agent_id: str, kind: str = "vnc") -> None:
+        """Called by the spoke's *_START handler so an edge proxy can later attach
+        a per-session relay leg (validated by relay_token). agent_id is the target
+        the DOWN frames are forwarded to via send_raw_to_agent."""
+        tokens, _ = self._console_relay_state()
+        tokens[str(session_id)] = {"token": str(relay_token or ""),
+                                   "agent_id": str(agent_id or ""), "kind": kind}
+
+    def unregister_console_relay(self, session_id: str) -> None:
+        tokens, sinks = self._console_relay_state()
+        tokens.pop(str(session_id), None)
+        sinks.pop(str(session_id), None)
+
+    async def _route_console_up(self, msg_type: str, data: Dict[str, Any]) -> bool:
+        """If a proxy relay leg owns this session, deliver the UP frame to it and
+        return True (hub relay skipped). Otherwise return False → hub relay (the
+        existing path). Inert when no sink is registered, so normal console is
+        unaffected."""
+        _, sinks = self._console_relay_state()
+        sid = (data or {}).get("session_id")
+        sink = sinks.get(str(sid)) if sid else None
+        if sink is None:
+            return False
+        try:
+            await sink.send(json.dumps({"type": msg_type, "data": data}))
+            return True
+        except Exception:  # noqa: BLE001 — dead proxy leg: drop it, fall back to hub
+            sinks.pop(str(sid), None)
+            return False
+
+    async def _console_relay_handler(self, websocket, path):
+        """Serve an edge proxy's per-session console relay leg. Auth = the
+        per-session relay_token minted by the hub at *_START (NOT agent_secret).
+        DOWN frames (proxy→Proxmox/PTY) are forwarded to the agent via the existing
+        send_raw_to_agent; UP frames are routed here by _route_console_up."""
+        session_id = path.rsplit("/", 1)[-1]
+        tokens, sinks = self._console_relay_state()
+        try:
+            auth = json.loads(await asyncio.wait_for(websocket.recv(), timeout=5.0))
+        except Exception:  # noqa: BLE001
+            await websocket.close(1008, "no auth"); return
+        rec = tokens.get(session_id)
+        token = (auth or {}).get("relay_token")
+        if not rec or not token or not hmac.compare_digest(str(token), str(rec["token"])):
+            await websocket.close(1008, "bad relay token"); return
+        agent_id = rec.get("agent_id") or ""
+        await websocket.send(json.dumps({"status": "RELAY_OK"}))
+        sinks[session_id] = websocket
+        logger.info("Console relay leg attached for session %s (agent %s)", session_id, agent_id)
+        try:
+            async for raw in websocket:
+                try:
+                    msg = json.loads(raw if isinstance(raw, str) else raw.decode("utf-8", "replace"))
+                except Exception:  # noqa: BLE001
+                    continue
+                cmd = msg.get("type")
+                d = msg.get("data") or {}
+                d["session_id"] = session_id
+                # Forward DOWN frames to the agent exactly as handle_command does.
+                if cmd in ("VNC_FRAME_DOWN", "VNC_DISCONNECT",
+                           "SHELL_IN", "SHELL_RESIZE", "SHELL_DISCONNECT"):
+                    if agent_id:
+                        await self.send_raw_to_agent(agent_id, cmd, d)
+        except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
+            pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning("console relay leg error (session %s): %s", session_id, e)
+        finally:
+            if sinks.get(session_id) is websocket:
+                sinks.pop(session_id, None)
+            logger.info("Console relay leg detached for session %s", session_id)
 
     # ── Agent connection handler ────────────────────────────────────────────
 
@@ -564,18 +661,18 @@ class AgentHostingControlPlane(BaseControlPlane):
 
                 elif msg_type and msg_type.startswith("VNC_"):
                     # VNC console frames from the agent (VNC_FRAME_UP / VNC_READY
-                    # / VNC_ERROR / VNC_DISCONNECT) — relay up to the hub's
-                    # AGENT_RELAY_UP dispatcher, which routes them to the browser
-                    # WS for the session. data carries session_id (+ b64 frame for
-                    # VNC_FRAME_UP). No Future involved — one-way.
-                    await self._relay_agent_msg_up(agent_id, msg_type, data)
+                    # / VNC_ERROR / VNC_DISCONNECT). Phase 2: if an edge proxy owns
+                    # this session, deliver straight to it (hub out of the byte
+                    # path); otherwise relay up to the hub's AGENT_RELAY_UP
+                    # dispatcher → browser WS (the existing path).
+                    if not await self._route_console_up(msg_type, data):
+                        await self._relay_agent_msg_up(agent_id, msg_type, data)
 
                 elif msg_type and msg_type.startswith("SHELL_"):
-                    # Host-shell (xterm terminal) frames from the agent (SHELL_OUT
-                    # / SHELL_READY / SHELL_ERROR / SHELL_DISCONNECT) — relayed up
-                    # exactly like VNC_*; the hub routes them to the browser shell
-                    # WS for the session (session_id + b64 bytes on SHELL_OUT).
-                    await self._relay_agent_msg_up(agent_id, msg_type, data)
+                    # Host-shell (xterm) frames — same edge-proxy short-circuit as
+                    # VNC_*, else relay up to the hub → browser shell WS.
+                    if not await self._route_console_up(msg_type, data):
+                        await self._relay_agent_msg_up(agent_id, msg_type, data)
 
         except (websockets.exceptions.ConnectionClosed, asyncio.CancelledError):
             # Expected disconnect — the agent rebooted, the network blipped,
