@@ -20412,7 +20412,7 @@ const LDAP_ICONS = {
 // Currently-selected tenant id (the OU to manage). Populated by ensureLDAPTenants.
 window._ldapTenant = window._ldapTenant || '';
 
-async function ensureLDAPTenants(force) {
+async function ensureLDAPTennants(force) {
     if (!window._ldapTenants || force) {
         try {
             const data = await apiJson('/api/ldap/tenants');
