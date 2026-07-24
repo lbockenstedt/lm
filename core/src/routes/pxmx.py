@@ -1084,9 +1084,10 @@ def register(app, hub, ctx):
                                 detail="Host terminal is disabled for this hypervisor — enable it in Setup → Hypervisors")
         session_id = str(uuid.uuid4())
         ws_token = secrets.token_urlsafe(32)
+        relay_token = secrets.token_urlsafe(32)   # edge-proxy relay leg (Phase 2)
         hub.register_shell_session(session_id, {
             "spoke_id": pxmx_spoke, "tenant_id": tenant_id,
-            "agent_id": agent_id, "ws_token": ws_token,
+            "agent_id": agent_id, "ws_token": ws_token, "relay_token": relay_token,
         })
         logger.info("AUDIT host-shell OPEN user=%s tenant=%s spoke=%s agent=%s session=%s",
                     sess.get("username") or sess.get("user_id"), tenant_id or "-",
@@ -1095,6 +1096,7 @@ def register(app, hub, ctx):
             res = await hub.request_response(pxmx_spoke, "SHELL_START", {
                 "session_id": session_id, "unique_id": unique_id,
                 "agent_id": agent_id, "target_agent_id": hub._agent_relay_name(agent_id),
+                "relay_token": relay_token,
             }, timeout=30.0)
         except Exception as e:
             hub.unregister_shell_session(session_id)
@@ -1105,7 +1107,10 @@ def register(app, hub, ctx):
             hub.unregister_shell_session(session_id)
             raise HTTPException(status_code=502, detail=data.get("message", "agent refused SHELL_START"))
         return {"session_id": session_id, "ws_token": ws_token,
-                "ws_url": f"/ws/console-shell/{session_id}"}
+                "ws_url": f"/ws/console-shell/{session_id}",
+                # Phase 2 edge-proxy relay descriptor (shell reuses the VNC relay path).
+                "relay": {"session_id": session_id, "relay_token": relay_token,
+                          "spoke_id": pxmx_spoke, "agent_id": agent_id, "kind": "shell"}}
 
     @app.post("/api/pxmx/console")
     async def pxmx_create_console(request: Request):
