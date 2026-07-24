@@ -1,8 +1,16 @@
 # Version-Scheme Migration — `.NN` → `MAJOR.MM`
 
-> Status: **ANALYSIS / not yet executed.** Target: production `1.00`, hotfixes `1.02`,
-> `1.04`, …; major release `2.00`. Format `^\d+\.\d{2}$` (2-digit zero-padded minor),
-> compared numerically as `(major, minor)`.
+> Target: production `1.00`, hotfixes `1.02`, `1.04`, …; major release `2.00`. Format
+> `^\d+\.\d{2}$` (2-digit zero-padded minor), compared numerically as `(major, minor)`.
+>
+> **Status: MECHANISM SHIPPED (dual-format transition).** The hub now accepts BOTH `.NN`
+> and `MAJOR.MM` (`_parse_nn`→tuple, `_is_nn`/`_isNN` dual, `_version_behind` tuple-compare),
+> and every repo's `version-bump.yml` is format-aware (`minor+=2`, hold at `.98`, legacy
+> `.NN` preserved). `scripts/set-version.sh` handles the coordinated major/cutover.
+> **Not yet done:** the actual cutover (resetting VERSIONs to `1.00`) is the deliberate
+> production milestone — run `set-version.sh 1.00` per repo when you're ready. **`nw` repo
+> workflow still pending** (its checkout is divergent — update when synced). `cs` `.sh`
+> `version=` headers left as-is (optional, §D).
 
 ## TL;DR
 The **update delivery** is keyed on git commit SHA, not version — the spoke fan-out's
