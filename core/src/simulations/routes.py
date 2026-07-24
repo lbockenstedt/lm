@@ -81,6 +81,38 @@ def _compute_stale_push(eff_quotas: list, spoke_counts: dict) -> list:
     return out
 
 
+def _reduce_spoke_effective_counts(results) -> dict:
+    """Tenant-total per-quota effective count, SUMMED across the cs spokes that
+    replied — ``{dedup_key: count}``.
+
+    ``_push_config`` APPORTIONS the tenant-total target N across a tenant's cs
+    spokes (alert-tied even, presence/untethered pool-proportional), so each
+    spoke's pushed ``effective_sim_quotas`` carries its SHARE of N, not N. A
+    single spoke's count is therefore a SHARE; only the SUM across spokes
+    reconstructs the tenant total that compares to the hub's applied count.
+
+    The old reduction used ``setdefault`` (first-wins) on the premise that
+    "every spoke reports the same count for a key" — a premise that predates
+    apportionment and is now false. First-wins picked ONE spoke's share and
+    handed it to ``_compute_stale_push``, which compared share-vs-total — a
+    share can never equal the total, so EVERY quota in a multi-spoke tenant read
+    as a perpetual "lags hub target" false positive (e.g. 3 vs 10 forever),
+    and the 45s reconcile-push self-heal re-pushed a no-op every tick. Summing
+    fixes it: when all spokes adopt their shares, sum == hub total → not stale;
+    a spoke that didn't reply (None data) contributes 0, so its missing share
+    drops the sum and a genuine missed push still flags. Pure so the unit test
+    can drive it without a hub/spoke."""
+    counts: dict = {}
+    for _sid, data in results or []:
+        if not isinstance(data, dict):
+            continue
+        for q in (data.get("effective") or []):
+            if isinstance(q, dict):
+                k = sim_quota.quota_dedup_key(q)
+                counts[k] = counts.get(k, 0) + int(q.get("count") or 0)
+    return counts
+
+
 def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                   is_admin_fn, check_tenant_access_fn=None, sessions=None,
                                   has_cs_access_fn=None, is_tenant_admin_fn=None):
@@ -1174,27 +1206,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return sim_quota.apply_adaptive_targets(quotas, state, global_lv)
 
     async def _spoke_effective_counts(tenant_id: str) -> dict:
-        """Per-quota effective count as the cs spoke's engine is ACTUALLY running
-        it (vs the hub's pushed target) — ``{dedup_key: count}``. Gathered by
-        forwarding ``CS_GET_SIM_QUOTA_STATE`` to every cs spoke and reducing each
-        reply's ``effective`` list. Empty when no spokes reply (spoke down or no
-        cs spoke bound). The first spoke's count wins per key (the effective set
-        is pushed tenant-wide, so every spoke reports the same count for a key);
-        mirrors the reduction in ``get_sim_quota_state``."""
-        counts: dict = {}
+        """Per-quota effective count the cs spokes are ACTUALLY running, SUMMED
+        to a tenant total — ``{dedup_key: count}`` — vs the hub's pushed target.
+        Gathered by forwarding ``CS_GET_SIM_QUOTA_STATE`` to every cs spoke and
+        reducing each reply's ``effective`` list via
+        ``_reduce_spoke_effective_counts`` (which sums, not first-wins — each
+        spoke holds its APPORTIONED SHARE of the tenant-total target, so the
+        sum, not one spoke's share, is what compares to the hub's applied
+        count). Empty when no spokes reply (spoke down or no cs spoke bound)."""
         try:
             results = await _cs_forward_all(tenant_id, "CS_GET_SIM_QUOTA_STATE",
                                             {}, timeout=10.0)
         except Exception:  # noqa: BLE001
-            return counts
-        for _sid, data in results:
-            if not isinstance(data, dict):
-                continue
-            for q in (data.get("effective") or []):
-                if isinstance(q, dict):
-                    counts.setdefault(sim_quota.quota_dedup_key(q),
-                                      int(q.get("count") or 0))
-        return counts
+            return {}
+        return _reduce_spoke_effective_counts(results)
 
     def _ceil(x: float) -> int:
         return sim_quota.ceil_to_int(x)
@@ -4550,11 +4575,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # dashboard Checks table uses (csStatusBadge), with no extra API query.
         check_status: dict = {}
         pool = {"online": 0, "by_site": {}, "tenant_pool": 0}   # cheap tenant-wide sum
-        # The spoke's ACTUAL effective_sim_quotas (what its engine is running
-        # against) — the hub pushes count to the spoke, but until it lands the
-        # spoke runs a stale count. Capture per-quota count so the UI can show
-        # the engine's real target vs. the controller's and flag a stale push
-        # (the root cause of "4/15" that looks like an eligibility problem).
+        # The spokes' ACTUAL effective_sim_quotas (what their engines are running
+        # against) — the hub pushes count to each spoke, but until it lands a
+        # spoke runs a stale count. Each spoke holds its APPORTIONED SHARE of the
+        # tenant-total target, so SUM the per-quota count across spokes (see
+        # ``_reduce_spoke_effective_counts``) — the tenant total is what compares
+        # to the hub's applied count. First-wins here used to pick one spoke's
+        # share and flag every quota in a multi-spoke tenant as a perpetual
+        # "lags hub target" false positive (share can never equal total).
         spoke_counts: dict = {}
         # Per-quota "why (under)filled" diagnostics, summed across the tenant's cs
         # spokes (each fills its split share) — the same shape the spoke's
@@ -4586,7 +4614,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     md["blocked"][r] = md["blocked"].get(r, 0) + int(n or 0)
             for q in (data.get("effective") or []):
                 if isinstance(q, dict):
-                    spoke_counts.setdefault(sim_quota.quota_dedup_key(q), int(q.get("count") or 0))
+                    k = sim_quota.quota_dedup_key(q)
+                    spoke_counts[k] = spoke_counts.get(k, 0) + int(q.get("count") or 0)
             p = data.get("pool") or {}
             pool["online"] += int(p.get("online") or 0)
             pool["tenant_pool"] += int(p.get("tenant_pool") or 0)
@@ -4631,9 +4660,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except Exception:  # noqa: BLE001
             pass
         eff_quotas = await _effective_sim_quotas(tenant_id)
-        # Flag adaptive quotas whose spoke count (engine's real target) lags the
-        # hub count (controller's applied target) — a push that hasn't landed yet,
-        # which presents as "underfilled" but is really a stale count on the spoke.
+        # Flag quotas whose tenant-total spoke count (the SUM of the shares the
+        # spokes adopted) lags the hub's applied count — a genuine push-propagation
+        # gap (a spoke offline or missing its share), NOT the share-vs-total false
+        # positive the old first-wins reduction produced in multi-spoke tenants.
         stale_push = _compute_stale_push(eff_quotas, spoke_counts)
         result = {"status": "SUCCESS",
                   "effective": eff_quotas,

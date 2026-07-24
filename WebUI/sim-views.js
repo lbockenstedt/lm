@@ -5190,7 +5190,7 @@ async function csRenderSimQuotaState() {
             if (s.missing) {
                 _warns.push(`Quota <span class="font-mono">${csEscape(s.key || '')}</span> is <b>missing from the spoke</b> (hub target ${csEscape(String(s.hub_count))}) — the engine never tries to fill it, so it reads 0 with no eligibility explanation. The effective-quota push hasn't landed; Reset &amp; Reshuffle (or the next adaptive push) re-pushes it.`);
             } else {
-                _warns.push(`Quota <span class="font-mono">${csEscape(s.key || '')}</span> spoke count (${csEscape(String(s.spoke_count))}) lags hub target (${csEscape(String(s.hub_count))}) — the engine is running a stale count; the adaptive push hasn't landed on the spoke yet.`);
+                _warns.push(`Quota <span class="font-mono">${csEscape(s.key || '')}</span> tenant count (${csEscape(String(s.spoke_count))}) lags hub target (${csEscape(String(s.hub_count))}) — a cs spoke is offline or hasn't adopted its apportioned share of the latest push. The self-heal re-pushes every 45s (Reset &amp; Reshuffle forces it).`);
             }
         });
         const warnBanner = _warns.length
