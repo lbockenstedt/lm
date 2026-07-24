@@ -5104,14 +5104,15 @@ async function csRenderSimQuotaState() {
                 : `<span class="text-amber-600 font-semibold">${clients.length}/${target}</span>`;
             if (_as) {
                 const _m = _as.mode || 'learning';
+                const _op = _as.learned_op != null ? _as.learned_op : null;
                 const _atMaxCount = target > 0 && clients.length >= target;
                 fill += ' ' + (_belowFloor
-                    ? `<span class="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full" title="Engine can't reach the learned minimum (floor ${_fl}) from the online pool">⚠️ Underfilled</span>`
+                    ? `<span class="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full" title="Underfilled ${clients.length}/${target} — below the learned floor ${_fl}. The engine can't fill to the floor from the online pool, so the alert may not fire reliably.">⚠️ Underfilled</span>`
                     : (_atMaxCount && _m === 'at_max')
                     ? `<span class="text-[10px] font-semibold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded-full" title="At max, alert not firing">⚠️ At max</span>`
                     : _m === 'stable'
-                    ? `<span class="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full">✅ Stable${_fl != null ? ' · floor ' + _fl : ''}</span>`
-                    : `<span class="text-[10px] font-semibold text-slate-600 bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded-full">🔄 Learning</span>`);
+                    ? `<span class="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full" title="Learned the firing floor; holding at floor + 20% (the operating point the admin approves and production sites maintain).">✅ Learned ${_fl != null ? _fl : '—'}${_op != null ? ' · +20% → ' + _op + ' per design' : ''}</span>`
+                    : `<span class="text-[10px] font-semibold text-slate-600 bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded-full" title="Probing down to find/confirm the minimum count that fires the alert.">🔄 Learning</span>`);
             }
             const fname = nameOf(q.alert_type, q.alert_id);
             const isPresence = !q.sim_id;

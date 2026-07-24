@@ -487,14 +487,32 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
     target = max(mn, min(mx, int(target)))
     if not learning_started_at:
         learning_started_at = now  # backfill for pre-metadata states
+    # Stale-floor guard: floor is a learned FIRING count, so it must lie within
+    # [min, max] (you can't probe above max). A floor outside the range — e.g.
+    # floor=11 with max=10 — is a leftover from a prior, higher max whose stored
+    # state was never re-clamped when the range was lowered. Clear it and re-learn
+    # fresh this tick (the next firing re-records floor within the new range), so
+    # a stale floor can't make the "below floor" warning unsatisfiable.
+    if floor is not None and (floor < mn or floor > mx):
+        floor = None
+        learned_op = None
+        phase = "up_find"
+        target = max(mn, min(mx, int(target)))
+        last = now
 
     def _stable_at(fl: int) -> None:
-        """Enter `stable`: record learned_op + the time-to-stable, and park target
-        at floor+buffer. A stable transition is when the known-good is captured."""
+        """Enter `stable`: record learned_op + the time-to-stable. The internal
+        probe ``target`` parks at the FLOOR (the re-probe baseline, <= max); the
+        OPERATING POINT (``learned_op`` = floor+buffer) is pushed separately by
+        ``apply_adaptive_targets`` and may EXCEED max — max is the probe-UP
+        ceiling, not the operating-point cap (so floor 10 + 20% -> 12 is pushed
+        even with max 10). That operating point is the number the admin approves
+        and production (consumer) sites maintain. A stable transition is when the
+        known-good is captured."""
         nonlocal floor, learned_op, target, phase, last, stable_since, time_to_stable_s
         floor = fl
         learned_op = max(mn, ceil_to_int(float(fl) * (1 + buffer)))
-        target = min(mx, learned_op)
+        target = fl              # probe baseline = floor (<= max); op pushed separately
         phase = "stable"
         last = now
         # Only stamp time-to-stable on the FIRST entry into stable this run (not
@@ -715,7 +733,11 @@ def apply_adaptive_targets(quotas: List[Dict[str, Any]],
         ak = _alert_key(q)
         op = applied_op.get(ak)
         if _as_bool(q.get("learning"), False):
-            # lab runs its own probe target
+            # lab runs at its own probe target — the FLOOR once stable (the min
+            # count that fires), never the +20% operating point. The learner
+            # never adds 20%; learned_op (floor+buffer) is RECORDED for
+            # publication only (known-good → admin approval → consumers). The
+            # lab keeps probing down from the floor to re-test it.
             tgt = st.get("target")
             q["count"] = int(tgt) if tgt is not None else int(q.get("min") or 1)
         else:

@@ -305,19 +305,21 @@ def test_apply_learning_row_runs_own_probe_target_not_lifted():
 
 def test_apply_consumer_adopts_max_of_target_and_applied_op():
     """A learning-OFF consumer takes max(its target, applied_op) — lifted up to
-    the learned op but never dropped below its working count."""
+    the learned op but never dropped below its working count. The learning-ON
+    lab runs at its FLOOR (target), never the +20% op; the consumer is the one
+    that adopts the op (floor+20%) once it's learned + approved."""
     lab = _aq(site="DFW", learning=True, min=1, max=15)
     cons = _aq(site="MIA-PSK", learning=False, min=1, max=15)
     state = {
-        sim_quota.adaptive_key(lab): {"target": 11, "phase": "stable",
+        sim_quota.adaptive_key(lab): {"target": 9, "floor": 9, "phase": "stable",
                                       "learned_op": 11, "last_change": 0},
         sim_quota.adaptive_key(cons): {"target": 5, "phase": "up_find",
                                        "last_change": 0},
     }
     out = sim_quota.apply_adaptive_targets([dict(lab), dict(cons)], state)
     by_site = {q["site"]: q for q in out}
-    assert by_site["DFW"]["count"] == 11      # lab own target
-    assert by_site["MIA-PSK"]["count"] == 11  # consumer lifted 5 → 11
+    assert by_site["DFW"]["count"] == 9        # lab runs at the FLOOR, not the +20%
+    assert by_site["MIA-PSK"]["count"] == 11   # consumer lifted 5 → op 11
 
 
 def test_apply_consumer_never_drops_below_working_target():
@@ -380,22 +382,23 @@ def test_apply_leaves_fixed_quotas_untouched():
 def test_learning_on_full_cycle_settles_at_floor_plus_buffer():
     """up_find → down_floor → up_confirm → stable. Threshold fires at >=9;
     the lab ramps to 9, ratchets down to 8 (stops), restores 9, confirms, and
-    settles at ceil(9*1.2)=11 with learned_op=11."""
+    settles at floor 9 — its pushed target (the learner NEVER adds 20%) —
+    recording learned_op=ceil(9*1.2)=11 for publication to consumers."""
     q = _aq(learning=True, min=1, max=15, step=1, buffer=0.2)
     threshold = 9
     # (firing, now) ticks spaced 1800s. The target entering tick i is i (tick 0
     # cold-seeds to 1; each not-firing up_find tick +1). So targets 1..8 don't
-    # fire, 9 fires (down_floor→8), 8 stops (up_confirm→9), 9 fires (stable@11).
+    # fire, 9 fires (down_floor→8), 8 stops (up_confirm→9), 9 fires (stable@9).
     firings = [False, False, False, False, False, False, False, False, False,  # 1..8
                True,   # target=9 fires → down_floor, target→8
                False,  # target=8 stops → up_confirm, target→9
-               True]   # target=9 fires → stable @ 11
+               True]   # target=9 fires → stable @ floor 9
     seq = [(f, i * 1800) for i, f in enumerate(firings)]
     st = _run_thermostat(q, seq)
     assert st["phase"] == "stable"
     assert st["floor"] == 9
-    assert st["learned_op"] == 11
-    assert st["target"] == 11
+    assert st["learned_op"] == 11        # +20% op, recorded for publication
+    assert st["target"] == 9             # lab pushes the FLOOR, never the +20%
     assert st["mode"] == "stable"
 
 
@@ -419,6 +422,22 @@ def test_learning_on_drift_up_relearning_when_stable_stops_firing():
     after = sim_quota.adaptive_step(start, q, firing=False, now=10_000)
     assert after["phase"] == "up_find"
     assert after["target"] == 12
+
+
+def test_stale_floor_outside_range_is_cleared_and_relearned():
+    """A floor learned under a prior, HIGHER max (floor=11 with max=10) is
+    impossible under the current range — you can't probe above max, so floor can
+    never exceed max. It's a stale leftover that was never re-clamped when the
+    range was lowered. The guard clears it and re-learns within [min,max], so the
+    stale 11 can't make the 'below floor' warning permanently unsatisfiable."""
+    q = _aq(learning=True, min=1, max=10, step=1, buffer=0.2)
+    start = {"target": 11, "floor": 11, "phase": "stable", "learned_op": 14,
+             "last_change": 0}
+    after = sim_quota.adaptive_step(start, q, firing=True, now=10_000)
+    assert after["floor"] is None          # stale 11 cleared
+    assert after["learned_op"] is None     # op cleared; recomputed at next stable
+    assert after["phase"] == "up_find"     # re-learning (settle window restarts)
+    assert after["target"] == 10           # re-clamped to the current max
 
 
 # ── adaptive_step: learning-OFF consumer (up-only) ──────────────────────────
