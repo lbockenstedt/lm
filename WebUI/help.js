@@ -39,6 +39,13 @@
         cs: 'cs',
         simulation: 'cs',
         simulations: 'cs',
+        // sim-quota product twins (each its own canonical doc; see docs/cs.md)
+        mist: 'mist',
+        'central-on-prem': 'central-on-prem',
+        centralonprem: 'central-on-prem',
+        'central on-prem': 'central-on-prem',
+        onprem: 'central-on-prem',
+        'on-prem': 'central-on-prem',
         dns: 'dns',
         dhcp: 'dhcp',
         nw: 'nw',

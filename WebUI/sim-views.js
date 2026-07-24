@@ -6764,7 +6764,7 @@ async function csRenderSetupCentralOnPremApi() {
     </label>`;
 
     const connCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Central On-Prem API Connection ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Central On-Prem API Connection ${helpIcon('central-on-prem', null, 'Central On-Prem help')}</h3>
       <p class="text-xs text-slate-400 mb-3">Aruba Central cluster credentials. Pushed to the spoke as <code>central_config</code>; the spoke sentinel-merges them — secrets only overwrite when non-empty.</p>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         <label class="text-xs text-slate-500">Mode${modeSel}</label>
@@ -6812,8 +6812,8 @@ async function csRenderSetupCentralOnPremApi() {
         : '<p class="text-xs text-slate-400 italic">None configured. Load the available-checks catalog to pick Aruba Central alerts/insights.</p>';
 
     const sitesCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Sites &amp; Checks ${helpIcon('cs', null, 'Simulations help')}</h3>
-      <p class="text-xs text-slate-400 mb-3">Hub-owned site mappings + Aruba Central sim/hardware monitors. Pushed to the spoke as <code>central_sites_config</code> and applied to the spoke's runtime monitoring when hub-managed.</p>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Sites &amp; Checks ${helpIcon('central-on-prem', null, 'Central On-Prem help')}</h3>
+      <p class="text-xs text-slate-400 mb-3">Hub-owned site mappings + Aruba Central sim/hardware monitors. Pushed to the spoke as <code>central_on_prem_sites_config</code> and applied to the spoke's runtime monitoring when hub-managed.</p>
 
       <div class="flex items-center gap-2 mb-2">
         <button onclick="csLoadCentralOnPremAvailable()" class="bg-slate-200 text-slate-700 px-3 py-1.5 rounded-md text-xs font-bold">Load available checks</button>
@@ -7057,7 +7057,7 @@ async function csRenderSetupMistApi() {
     </select>`;
 
     const connCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Mist API Connection ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Mist API Connection ${helpIcon('mist', null, 'Mist help')}</h3>
       <p class="text-xs text-slate-400 mb-3">Juniper Mist org credentials. Pushed to the spoke as <code>mist_config</code>; the spoke sentinel-merges them — the token only overwrites when non-empty.</p>
       <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
         ${f('cs-msc-token', 'API Token', hc.api_token, 'password')}
@@ -7101,7 +7101,7 @@ async function csRenderSetupMistApi() {
         : '<p class="text-xs text-slate-400 italic">None configured. Load the available-checks catalog to pick Mist alerts/insights.</p>';
 
     const sitesCard = `<div class="hpe-card rounded-lg p-5 shadow-sm">
-      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Sites &amp; Checks ${helpIcon('cs', null, 'Simulations help')}</h3>
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Sites &amp; Checks ${helpIcon('mist', null, 'Mist help')}</h3>
       <p class="text-xs text-slate-400 mb-3">Hub-owned site mappings + Mist sim/hardware monitors. Pushed to the spoke as <code>mist_sites_config</code> and applied to the spoke's runtime monitoring when hub-managed.</p>
 
       <div class="flex items-center gap-2 mb-2">
