@@ -27,10 +27,15 @@ from update_pipeline import (
 
 
 def test_parse_nn():
-    assert _parse_nn(".486") == 486
-    assert _parse_nn(".0") == 0
-    assert _parse_nn("  .400 ") == 400
-    # Anything not on the .NN numbering → None (no comparison possible).
+    # Legacy ".NN" → (0, N); new "MAJOR.MINOR" → (major, minor).
+    assert _parse_nn(".486") == (0, 486)
+    assert _parse_nn(".0") == (0, 0)
+    assert _parse_nn("  .400 ") == (0, 400)
+    assert _parse_nn("1.00") == (1, 0)
+    assert _parse_nn("1.02") == (1, 2)
+    assert _parse_nn("2.14") == (2, 14)
+    assert _parse_nn(" 2.00 ") == (2, 0)
+    # Anything on neither scheme → None (no comparison possible).
     for bad in ("unknown", "v.01", "1.2.3", "486", ".", ".x", "", None):
         assert _parse_nn(bad) is None, bad
 
@@ -38,20 +43,30 @@ def test_parse_nn():
 def test_version_behind_true_when_strictly_older():
     assert _version_behind(".400", ".486") is True
     assert _version_behind(".0", ".1") is True
+    # New scheme, same major.
+    assert _version_behind("1.00", "1.02") is True
+    assert _version_behind("2.14", "2.30") is True
+    # Across a major rollout: legacy/old-major spoke is behind the new major.
+    assert _version_behind(".486", "1.00") is True   # cutover: .NN → 1.00
+    assert _version_behind("1.98", "2.00") is True
 
 
 def test_version_behind_false_when_current_or_ahead():
     assert _version_behind(".486", ".486") is False   # current
     assert _version_behind(".500", ".486") is False   # ahead of a stale checkout
+    assert _version_behind("1.02", "1.02") is False   # current (new scheme)
+    assert _version_behind("2.00", "1.98") is False   # ahead across a major
+    assert _version_behind("1.30", "1.14") is False   # ahead, same major
 
 
 def test_version_behind_never_false_positive_on_unknown():
-    # Either side unknown / non-.NN → NEVER behind (the invariant).
+    # Either side unknown / unparseable → NEVER behind (the invariant).
     assert _version_behind("unknown", ".486") is False
     assert _version_behind(".400", None) is False
     assert _version_behind(".400", "unknown") is False
     assert _version_behind("v.01", ".486") is False
-    assert _version_behind("1.2.3", ".486") is False
+    assert _version_behind("1.2.3", ".486") is False   # X.Y.Z is not on either scheme
+    assert _version_behind("unknown", "1.00") is False
     assert _version_behind(None, None) is False
 
 

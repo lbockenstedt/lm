@@ -137,24 +137,37 @@ _MODULE_REPO_DIR = {
 }
 
 
-def _parse_nn(v) -> Optional[int]:
-    """Parse a per-repo ``.NN`` version string into its integer ``N`` (e.g.
-    ``".486" -> 486``), or ``None`` for anything that is NOT on the ``.NN``
-    numbering (``"unknown"``, ``"v.01"``, an ``X.Y.Z`` tag, ``None``, ``""``).
-    Pure + module-level so the diagnostics handler and its test share one parser."""
+def _parse_nn(v) -> Optional[tuple]:
+    """Parse a version string into a comparable ``(major, minor)`` tuple.
+
+    Supports BOTH schemes so the fleet migration is seamless:
+      * legacy per-repo ``.NN`` counter — ``".486" -> (0, 486)``
+      * new ``MAJOR.MINOR``            — ``"1.02" -> (1, 2)``, ``"2.14" -> (2, 14)``
+    Returns ``None`` for anything on neither scheme (``"unknown"``, ``"v.01"``, an
+    ``X.Y.Z`` tag, ``None``, ``""``). Legacy ``.NN`` sorts as major 0, so a spoke
+    still on ``.486`` is correctly "behind" a repo that cut over to ``1.00``
+    (``(0, 486) < (1, 0)``). Pure + module-level so the diagnostics handler and its
+    test share one parser."""
     import re as _re
-    m = _re.match(r"^\.(\d+)$", str(v if v is not None else "").strip())
-    return int(m.group(1)) if m else None
+    s = str(v if v is not None else "").strip()
+    m = _re.match(r"^\.(\d+)$", s)          # legacy .NN
+    if m:
+        return (0, int(m.group(1)))
+    m = _re.match(r"^(\d+)\.(\d+)$", s)     # new MAJOR.MINOR (rejects X.Y.Z)
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
+    return None
 
 
 def _version_behind(running, latest) -> bool:
-    """True iff BOTH ``running`` and ``latest`` are valid ``.NN`` versions and
-    ``running`` is strictly older (smaller ``N``) than ``latest``.
+    """True iff BOTH ``running`` and ``latest`` parse to a ``(major, minor)`` tuple
+    (legacy ``.NN`` or new ``MAJOR.MINOR``) and ``running`` is strictly older.
 
-    NEVER true when either side is unknown / non-``.NN`` — so a spoke is only
+    NEVER true when either side is unknown / unparseable — so a spoke is only
     flagged "behind" when the hub genuinely knows a newer version exists for that
-    repo. Strictly-less (not ``!=``) so a spoke that is somehow AHEAD of a stale
-    local checkout is not mislabeled behind. Pure → unit-testable."""
+    repo. Tuple compare orders both schemes AND across a major rollout
+    (``(0, 486) < (1, 0)``, ``(1, 98) < (2, 0)``). Strictly-less (not ``!=``) so a
+    spoke somehow AHEAD of a stale local checkout is not mislabeled behind."""
     r = _parse_nn(running)
     l = _parse_nn(latest)
     if r is None or l is None:

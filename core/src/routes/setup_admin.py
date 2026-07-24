@@ -101,7 +101,11 @@ async def _aggregate_diagnostics(hub):
     # X.Y.Z / v-tag / pre-reset values.
     import re as _re
     def _is_nn(v) -> bool:
-        return bool(_re.match(r"^\.\d+$", str(v).strip()))
+        # Accept BOTH the legacy ".NN" counter and the new "MAJOR.MINOR" scheme
+        # (e.g. "1.02", "2.14"). SKEW flags only versions on NEITHER (stale
+        # X.Y.Z / v-tag / pre-reset). Mirrors _isNN in WebUI/main.js.
+        s = str(v).strip()
+        return bool(_re.match(r"^\.\d+$", s) or _re.match(r"^\d+\.\d+$", s))
 
     # Relayed node agents (pxmx) connect THROUGH their hypervisor spoke, not
     # directly to the hub, so the hub has no WebSocket for the bare agent

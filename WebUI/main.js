@@ -13323,7 +13323,7 @@ function _diagTelemetryExtras(s, fns) {
 // is an independent bump counter, so a component .NN differing from the hub's
 // .NN is normal; SKEW now flags only versions NOT in this shape (stale X.Y.Z /
 // v-tag / pre-reset). Mirrors the backend _is_nn check in api.py get_diagnostics.
-function _isNN(v) { return /^\.\d+$/.test(String(v == null ? '' : v).trim()); }
+function _isNN(v) { const s = String(v == null ? '' : v).trim(); return /^\.\d+$/.test(s) || /^\d+\.\d+$/.test(s); }
 
 function _normalizePxmxAgent(a) {
     const connected = a._status === 'connected';
