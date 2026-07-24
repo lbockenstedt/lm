@@ -300,6 +300,38 @@ def validate_sim_quotas(
     return clean, errors
 
 
+def guard_sim_quota_wipe(
+    existing_quotas: Any, clean: List[Dict[str, Any]], body: Any,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Anti-blast safeguard: refuse to replace a non-empty ``sim_quotas`` list
+    with an empty one unless the caller explicitly opts in via
+    ``body["force_sim_quotas_clear"]``.
+
+    A config save that takes a tenant from N>0 quotas to 0 is almost always
+    unintentional — a stale ``simulation.conf`` (``available_sims`` no longer
+    lists the quota sims, so ``validate_sim_quotas`` drops every row on the
+    next save of *anything* — even an unrelated editor that re-sends or
+    re-validates the merged config), a UI render bug that serializes an empty
+    editor, or a partial save that accidentally sends ``sim_quotas: []``. Each
+    has, in the field, wiped a tenant's entire quota table on a single save.
+    This guard makes that impossible without an explicit, unambiguous opt-in.
+
+    Returns ``(quotas_to_persist, wipe_blocked)``. When blocked, the existing
+    quotas are returned unchanged so the caller keeps them and reports the
+    block; the caller must persist THESE, not the empty ``clean``. A deliberate
+    "clear all" sets ``force_sim_quotas_clear`` (truthy) and is honored. A
+    partial drop (some rows survive) is NOT blocked — only a full wipe is.
+    Mirrored in the cs spoke twin.
+    """
+    had = len(existing_quotas or [])
+    if had and not (clean or []):
+        force = body.get("force_sim_quotas_clear") if isinstance(body, dict) else None
+        if str(force).strip().lower() in ("1", "true", "yes", "on"):
+            return list(clean or []), False
+        return list(existing_quotas or []), True
+    return list(clean or []), False
+
+
 def resolve_effective_quotas(
     tenant_quotas: Any, available_sims: List[str] | None = None,
 ) -> List[Dict[str, Any]]:

@@ -27,7 +27,7 @@ from .mist import (
     test_mist_from_config, get_mist_available_from_config, browse_mist_from_config,
     validate_mist_host, _KNOWN_MIST_HOSTS, _DEFAULT_MIST_HOST,
 )
-from .sim_quota import validate_sim_quotas, sim_quota_catalog_from_ini, available_sims_from_ini, prefixed_alert_id, parse_alert_source
+from .sim_quota import validate_sim_quotas, guard_sim_quota_wipe, sim_quota_catalog_from_ini, available_sims_from_ini, prefixed_alert_id, parse_alert_source
 from . import sim_quota
 from . import email_report
 from . import github_config_client
@@ -4339,12 +4339,26 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             cfg.pop("site_min_clients", None)
         sim_quota_errors: list[str] = []
         clean: list = list(cfg.get("sim_quotas") or [])
+        wipe_blocked = False
         try:
             sim_txt = await store.get_sim_conf_content(tenant_id) or ""
             sim_ids = [s["sim_id"] for s in available_sims_from_ini(sim_txt)] if sim_txt.strip() else None
             clean, sim_quota_errors = validate_sim_quotas(cfg.get("sim_quotas"), sim_ids)
             if sim_quota_errors:
                 logger.warning("set_central_sites(%s): sim_quotas errors: %s", tenant_id, sim_quota_errors)
+            # Anti-blast safeguard: never let a save take sim_quotas from N>0 to
+            # 0 without an explicit force_sim_quotas_clear. A stale
+            # simulation.conf (sim_ids no longer lists the quota sims) makes
+            # validate_sim_quotas drop every row on ANY save that re-sends or
+            # re-validates the merged config — wiping the whole table. Keep the
+            # existing quotas and report the block instead.
+            existing_quotas = existing.get("sim_quotas") or []
+            clean, wipe_blocked = guard_sim_quota_wipe(existing_quotas, clean, body)
+            if wipe_blocked:
+                logger.error("set_central_sites(%s): sim_quotas wipe BLOCKED — save "
+                             "would drop %d quota(s) to 0 (stale sim_ids or empty send) "
+                             "without force_sim_quotas_clear; existing quotas preserved",
+                             tenant_id, len(existing_quotas))
             cfg = {**cfg, "sim_quotas": clean}
         except Exception as exc:  # noqa: BLE001 — never block the save
             logger.warning("set_central_sites(%s): sim_quotas validate failed: %s", tenant_id, exc)
@@ -4359,7 +4373,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return {"saved": True, "pushed_to_spokes": pushed,
                 "queued": bool(getattr(pushed, "queued", False)),
                 "sim_quotas": clean,
-                "sim_quota_errors": sim_quota_errors}
+                "sim_quota_errors": sim_quota_errors,
+                "sim_quotas_wipe_blocked": wipe_blocked}
 
     @app.get("/sim/api/{tenant}/mist-sites-config")
     async def get_mist_sites(tenant: str, tenant_id: str = Depends(get_tenant_id)):
@@ -4400,12 +4415,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             cfg.pop("site_min_clients", None)
         sim_quota_errors: list[str] = []
         clean: list = list(cfg.get("sim_quotas") or [])
+        wipe_blocked = False
         try:
             sim_txt = await store.get_sim_conf_content(tenant_id) or ""
             sim_ids = [s["sim_id"] for s in available_sims_from_ini(sim_txt)] if sim_txt.strip() else None
             clean, sim_quota_errors = validate_sim_quotas(cfg.get("sim_quotas"), sim_ids)
             if sim_quota_errors:
                 logger.warning("set_mist_sites(%s): sim_quotas errors: %s", tenant_id, sim_quota_errors)
+            existing_quotas = existing.get("sim_quotas") or []
+            clean, wipe_blocked = guard_sim_quota_wipe(existing_quotas, clean, body)
+            if wipe_blocked:
+                logger.error("set_mist_sites(%s): sim_quotas wipe BLOCKED — save "
+                             "would drop %d quota(s) to 0 (stale sim_ids or empty send) "
+                             "without force_sim_quotas_clear; existing quotas preserved",
+                             tenant_id, len(existing_quotas))
             cfg = {**cfg, "sim_quotas": clean}
         except Exception as exc:  # noqa: BLE001 — never block the save
             logger.warning("set_mist_sites(%s): sim_quotas validate failed: %s", tenant_id, exc)
@@ -4419,7 +4442,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return {"saved": True, "pushed_to_spokes": pushed,
                 "queued": bool(getattr(pushed, "queued", False)),
                 "sim_quotas": clean,
-                "sim_quota_errors": sim_quota_errors}
+                "sim_quota_errors": sim_quota_errors,
+                "sim_quotas_wipe_blocked": wipe_blocked}
 
     @app.get("/sim/api/{tenant}/central-on-prem-sites-config")
     async def get_central_on_prem_sites(tenant: str,
@@ -4462,6 +4486,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             cfg.pop("site_min_clients", None)
         sim_quota_errors: list[str] = []
         clean: list = list(cfg.get("sim_quotas") or [])
+        wipe_blocked = False
         try:
             sim_txt = await store.get_sim_conf_content(tenant_id) or ""
             sim_ids = [s["sim_id"] for s in available_sims_from_ini(sim_txt)] if sim_txt.strip() else None
@@ -4469,6 +4494,13 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             if sim_quota_errors:
                 logger.warning("set_central_on_prem_sites(%s): sim_quotas errors: %s",
                                tenant_id, sim_quota_errors)
+            existing_quotas = existing.get("sim_quotas") or []
+            clean, wipe_blocked = guard_sim_quota_wipe(existing_quotas, clean, body)
+            if wipe_blocked:
+                logger.error("set_central_on_prem_sites(%s): sim_quotas wipe BLOCKED — "
+                             "save would drop %d quota(s) to 0 (stale sim_ids or empty send) "
+                             "without force_sim_quotas_clear; existing quotas preserved",
+                             tenant_id, len(existing_quotas))
             cfg = {**cfg, "sim_quotas": clean}
         except Exception as exc:  # noqa: BLE001 — never block the save
             logger.warning("set_central_on_prem_sites(%s): sim_quotas validate failed: %s",
@@ -4483,7 +4515,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return {"saved": True, "pushed_to_spokes": pushed,
                 "queued": bool(getattr(pushed, "queued", False)),
                 "sim_quotas": clean,
-                "sim_quota_errors": sim_quota_errors}
+                "sim_quota_errors": sim_quota_errors,
+                "sim_quotas_wipe_blocked": wipe_blocked}
 
     @app.get("/sim/api/{tenant}/sim-quota-catalog")
     async def get_sim_quota_catalog(tenant: str, tenant_id: str = Depends(get_tenant_id)):

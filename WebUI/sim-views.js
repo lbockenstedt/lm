@@ -4866,21 +4866,34 @@ window.csSimQuotaDel = function (i) {
 // Persists ignore_global_quotas on central-sites-config (preserving the other
 // fields + current row edits) and re-renders so the button + engine reflect it.
 window.csToggleIgnoreGlobalQuotas = async function () {
-    const rows = csSimQuotaSyncFromDom();
     const next = !window._csIgnoreGlobalQuotas;
     try {
-        const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
-        const body = {
-            site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
-            monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
-            hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
-            sim_quotas: rows,
-            ignore_global_quotas: next,
-        };
-        await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
+        // Send ONLY the toggle boolean. The server MERGES this into the existing
+        // central_sites_config, so the tenant's sim_quotas (and every other
+        // field — site_mappings, monitored_checks, hardware_checks) are preserved
+        // untouched. Enabling global defaults then ADDS the platform defaults on
+        // top via the effective-quota merge (_effective_sim_quotas unions global
+        // defaults with the tenant's own rows — the tenant's rows still apply for
+        // alerts it has declared; global fills the rest). Never re-send the
+        // editor's sim_quotas here: a load race (empty rows) previously REPLACED
+        // the stored table with [] on this toggle, stripping the tenant's
+        // settings. Use Save Quotas to edit rows; this toggle only flips the flag.
+        const r = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`,
+            { method: 'POST', body: JSON.stringify({ ignore_global_quotas: next }) });
         window._csIgnoreGlobalQuotas = next;
-        csRenderSimQuotaEditor();
-        showToast(next ? 'Now ignoring global quota defaults.' : 'Now using global quota defaults.', 'success');
+        // Anti-blast backstop: even a boolean-only save re-validates the merged
+        // sim_quotas, so a stale simulation.conf could still drop them — the
+        // server guard refuses that wipe and returns the preserved rows. Re-adopt
+        // them so the editor doesn't desync to empty.
+        if (r && r.sim_quotas_wipe_blocked && Array.isArray(r.sim_quotas) && r.sim_quotas.length) {
+            csSimQuotaRows = r.sim_quotas.map(csSimQuotaRowFromServer);
+            csRenderSimQuotaEditor();
+            showToast('⚠️ Quota wipe blocked — existing sim quotas preserved '
+                + '(stale simulation.conf). Toggle applied; quotas kept.', 'error');
+        } else {
+            csRenderSimQuotaEditor();
+            showToast(next ? 'Now ignoring global quota defaults.' : 'Now using global quota defaults.', 'success');
+        }
     } catch (e) {
         showToast((e && e.message) || 'Save failed', 'error');
     }
@@ -4896,6 +4909,7 @@ window.csSimQuotaSave = async function () {
     const mistRows = rows.filter(r => _csQuotaSource(r.alert_id) === 'mist');
     const allErrs = [];
     const cleanRows = [];
+    let wipeBlocked = false;
     try {
         if (centralRows.length) {
             const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
@@ -4909,6 +4923,7 @@ window.csSimQuotaSave = async function () {
             const r = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
             cleanRows.push(...(Array.isArray(r && r.sim_quotas) ? r.sim_quotas : centralRows));
             allErrs.push(...(Array.isArray(r && r.sim_quota_errors) ? r.sim_quota_errors : []));
+            if (r && r.sim_quotas_wipe_blocked) wipeBlocked = true;
         }
         if (mistRows.length) {
             const mcfg = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`) || {};
@@ -4921,11 +4936,20 @@ window.csSimQuotaSave = async function () {
             const r = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
             cleanRows.push(...(Array.isArray(r && r.sim_quotas) ? r.sim_quotas : mistRows));
             allErrs.push(...(Array.isArray(r && r.sim_quota_errors) ? r.sim_quota_errors : []));
+            if (r && r.sim_quotas_wipe_blocked) wipeBlocked = true;
         }
         // Server re-validates + dedups; adopt its cleaned rows so the UI matches.
         csSimQuotaRows = cleanRows.map(csSimQuotaRowFromServer);
         csRenderSimQuotaEditor();
-        if (allErrs.length) showToast(`Saved with ${allErrs.length} issue(s): ${allErrs.join('; ')}`, 'error');
+        if (wipeBlocked) {
+            // Anti-blast safeguard fired: the server refused to wipe the existing
+            // quotas (a stale simulation.conf would have dropped them all) and
+            // returned the preserved rows, which we re-adopted above. Surface it
+            // so the operator knows the save didn't clear their quotas and can
+            // fix the drifted sim catalog (Setup → Simulations) if intended.
+            showToast('⚠️ Quota wipe blocked — existing sim quotas preserved '
+                + '(likely a stale simulation.conf). Re-checking sims in Setup may be needed.', 'error');
+        } else if (allErrs.length) showToast(`Saved with ${allErrs.length} issue(s): ${allErrs.join('; ')}`, 'error');
         else showToast('Sim quotas saved.', 'success');
     } catch (e) {
         console.error('csSimQuotaSave: save failed', e);
