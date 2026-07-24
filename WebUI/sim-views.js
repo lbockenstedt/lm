@@ -4188,16 +4188,18 @@ function csSimQuotaRowFromServer(q) {
         multi_capable: !!q.multi_capable,
         rehome: !!q.rehome,
         enabled: !!q.enabled,
-        // Knob-floor learner: ratchet this sim's [simulation] intensity knobs to
-        // the minimum that still fires the alert (only for knob-capable sims).
-        learn_knobs: !!q.learn_knobs,
         // A sim quota with no alert_id was saved untethered; presence rows ignore this.
         tied: !!(q.sim_id && q.alert_id),
-        // Adaptive when a max above the min was saved (design §9).
-        adaptive: !!(q.max != null && Number(q.max) > Number(q.min != null ? q.min : q.count)),
-        // Learning lab toggle (design §9): OFF = consumer (up-only), ON = runs the
-        // full thermostat + records a publishable learned_op. Default OFF.
+        // Learning lab toggle (design §9): ON = the LAB — full thermostat (ramps
+        // up AND down to find the floor) + tunes the sim's config knobs + publishes
+        // the learned count + knobs so production goes straight to learned + 20%.
+        // Default OFF.
         learning: !!q.learning,
+        // Adaptive (keep firing) = the production CONSUMER — up-only, seeded from
+        // the learned op + knobs, CAPPED at Max. Mutually exclusive with Learning:
+        // a stored lab row (learning ON, max>min) loads with Adaptive OFF. Both
+        // off = fixed count. Derived = max>min AND not learning.
+        adaptive: !!(q.max != null && Number(q.max) > Number(q.min != null ? q.min : q.count)) && !q.learning,
         min: q.min != null ? q.min : undefined,
         max: q.max != null ? q.max : undefined,
     };
@@ -4364,33 +4366,33 @@ function csRenderSimQuotaEditor() {
               : `<label class="text-xs text-slate-500">Alert / Insight ID
                 <select data-cs-sq="alert_id" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${idOpts}</select>
               </label>`);
-        return `<div class="grid grid-cols-1 md:grid-cols-7 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-sqrow="${i}">
+        return `<div class="grid grid-cols-1 md:grid-cols-6 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-sqrow="${i}">
           ${alertCell}
           ${idCell}
           <label class="text-xs text-slate-500">Simulation
             <select data-cs-sq="sim_id" onchange="csSimQuotaOnSimChange(this)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${simOpts}</select>
           </label>
-          ${(tied && r.adaptive)
-            ? `<label class="text-xs text-slate-500" title="Min = keep-alive floor; Max = ceiling. The hub ramps between them to keep the alert firing, then holds at the learned floor + 20%.">Min / Max
+          ${(tied && (r.adaptive || r.learning))
+            ? `<label class="text-xs text-slate-500" title="Min = keep-alive floor; Max = the hard cap for lab + production (one alert can't exhaust the client pool). Adaptive ramps clients UP to keep the alert firing, capped at Max; Learning ramps up AND down to find the floor.">Min / Max
             <div class="flex gap-1 mt-1">
               <input data-cs-sq="min" type="number" min="1" value="${csEscape(String(r.min != null ? r.min : (r.count || 1)))}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm">
               <input data-cs-sq="max" type="number" min="1" value="${csEscape(String(r.max != null ? r.max : (r.count || 1)))}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm">
             </div>
           </label>`
-            : `<label class="text-xs text-slate-500">Clients
+            : `<label class="text-xs text-slate-500">${isPresence ? 'Min (floor)' : 'Clients'}
             <input data-cs-sq="count" type="number" min="1" value="${csEscape(String(r.count))}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
           </label>`}
           <label class="text-xs text-slate-500">Site
             <select data-cs-sq="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${siteOpts}</select>
           </label>
-          <label class="text-xs text-slate-500 flex flex-wrap gap-x-3 gap-y-1">
-            ${(!isPresence && tied) ? `<span class="flex items-center gap-1"><input data-cs-sq="adaptive" type="checkbox" onchange="csSimQuotaOnAdaptiveChange(this)" ${r.adaptive ? 'checked' : ''}> Adaptive (keep firing)</span>` : ''}
-            ${(tied && r.adaptive) ? `<span class="flex items-center gap-1" title="ON = this site is the 'learning lab': the controller ratchets DOWN to find the min count that fires, settles at floor+20%, and records a publishable learned value. OFF (default) = a consumer: seeds/lifts from the tenant or global learned value, never down-ratchets (never risks stopping the alert)."><input data-cs-sq="learning" type="checkbox" ${r.learning ? 'checked' : ''}> Learning</span>` : ''}
+          <button onclick="csSimQuotaDel(${i})" class="text-red-600 hover:text-red-800 text-xs font-bold py-1">Remove</button>
+          <label class="text-xs text-slate-500 md:col-span-6 flex flex-wrap gap-x-3 gap-y-1">
+            ${(!isPresence && tied) ? `<span class="flex items-center gap-1" title="Production consumer: ramps clients UP to trigger + keep the alert alive, seeded from the learned base + config, CAPPED at Max. Hits Max and still not firing → max-hit alert (lab/prod divergence). Mutually exclusive with Learning."><input data-cs-sq="adaptive" type="checkbox" onchange="csSimQuotaOnAdaptiveChange(this)" ${r.adaptive ? 'checked' : ''}> Adaptive (keep firing)</span>` : ''}
+            ${(!isPresence && tied) ? `<span class="flex items-center gap-1" title="The lab: ramps up AND down continuously to re-evaluate the floor (what it takes), tunes the sim's config knobs (e.g. dns_fail_rate/duration), and publishes the learned count + knobs so production goes straight to learned + 20%. Mutually exclusive with Adaptive."><input data-cs-sq="learning" type="checkbox" onchange="csSimQuotaOnLearningChange(this)" ${r.learning ? 'checked' : ''}> Learning</span>` : ''}
+            ${(r.learning && knobSims.has(r.sim_id)) ? `<span class="text-slate-400 italic" title="The lab ratchets these [simulation] knobs down to the floor that still fires the alert.">tunes ${csEscape(((cat.meta[r.sim_id] || {}).knobs || []).join(', '))}</span>` : ''}
             <span class="flex items-center gap-1"><input data-cs-sq="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</span>
             <span class="flex items-center gap-1"><input data-cs-sq="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
-            ${(!isPresence && knobSims.has(r.sim_id)) ? `<span class="flex items-center gap-1" title="Ratchet this sim's intensity knobs (e.g. dns_fail_rate/duration) down to the minimum that still fires the alert."><input data-cs-sq="learn_knobs" type="checkbox" ${r.learn_knobs ? 'checked' : ''}> Learn floor</span>` : ''}
           </label>
-          <button onclick="csSimQuotaDel(${i})" class="text-red-600 hover:text-red-800 text-xs font-bold py-1">Remove</button>
         </div>`;
     }).join('');
     const suggestHtml = Object.keys(suggested).length ? `
@@ -4709,6 +4711,7 @@ function csSimQuotaSyncFromDom() {
         const sim_id = g('sim_id').value;
         const tied = sim_id ? !!(g('tied') || {}).checked : false;
         const adaptive = (sim_id && tied) ? !!(g('adaptive') || {}).checked : false;
+        const learning = (sim_id && tied) ? !!(g('learning') || {}).checked : false;
         const row = {
             alert_type: (g('alert_type') || {}).value || 'alert',
             // An untethered row (not tied) carries no alert_id.
@@ -4717,16 +4720,15 @@ function csSimQuotaSyncFromDom() {
             site: g('site').value,
             rehome: !!g('rehome').checked,
             enabled: !!g('enabled').checked,
-            learn_knobs: !!((g('learn_knobs') || {}).checked),
             tied,
             adaptive,
-            learning: adaptive ? !!(g('learning') || {}).checked : false,
+            learning,
         };
-        if (adaptive) {
-            // Adaptive rows use Min/Max; count is the floor the controller ramps from.
-            // ONLY read min/max when the fields are actually rendered — when the
-            // user just ticked Adaptive they aren't yet, and reading absent fields
-            // as 1/1 would make min==max so the row saves as NON-adaptive (the
+        if (adaptive || learning) {
+            // Adaptive/Learning rows use Min/Max; count is the floor the controller
+            // ramps from. ONLY read min/max when the fields are actually rendered —
+            // when the user just ticked the box they aren't yet, and reading absent
+            // fields as 1/1 would make min==max so the row saves as NON-adaptive (the
             // "Adaptive unchecks on save" bug). Leave min/max for the toggle
             // handler's seed (min=count, max=count*2) when the fields are absent.
             const minEl = g('min'), maxEl = g('max');
@@ -4739,6 +4741,11 @@ function csSimQuotaSyncFromDom() {
             }
         } else {
             row.count = parseInt((g('count') || {}).value || '1', 10) || 1;
+            // Fixed count: collapse any leftover min/max so adaptive_is_on is false
+            // on reload (max==min → not adaptive). Without this a row toggled off
+            // would re-load as Adaptive/Learning because the old max>min persisted.
+            row.min = row.count;
+            row.max = row.count;
         }
         rows.push(row);
     });
@@ -4761,8 +4768,10 @@ window.csSimQuotaOnTiedChange = function (cb) {
     csRenderSimQuotaEditor();
 };
 
-// Toggling "Adaptive" swaps the Clients field for Min/Max (the hub controller
-// then ramps between them to keep the alert firing). Sync first so nothing is lost.
+// Toggling "Adaptive" (the production consumer) swaps Clients for Min/Max and
+// is MUTUALLY EXCLUSIVE with Learning (the lab) — checking Adaptive unchecks
+// Learning. The hub controller ramps between Min/Max to keep the alert firing,
+// capped at Max. Sync first so nothing is lost.
 window.csSimQuotaOnAdaptiveChange = function (cb) {
     csSimQuotaSyncFromDom();
     const row = cb && cb.closest('[data-cs-sqrow]');
@@ -4772,6 +4781,29 @@ window.csSimQuotaOnAdaptiveChange = function (cb) {
         if (r) {
             r.adaptive = !!cb.checked;
             if (r.adaptive) {  // seed min/max so max > min (else it saves non-adaptive)
+                r.learning = false;  // mutual exclusivity: Adaptive ⊕ Learning
+                if (r.min == null) r.min = r.count || 1;
+                if (r.max == null || r.max <= r.min) r.max = Math.max(r.min + 1, (r.count || 1) * 2);
+            }
+        }
+    }
+    csRenderSimQuotaEditor();
+};
+
+// Toggling "Learning" (the lab) swaps Clients for Min/Max and is MUTUALLY
+// EXCLUSIVE with Adaptive — checking Learning unchecks Adaptive. The lab ramps
+// up AND down to find the floor + tunes the sim's config knobs + publishes the
+// learned count + knobs. Sync first so nothing is lost.
+window.csSimQuotaOnLearningChange = function (cb) {
+    csSimQuotaSyncFromDom();
+    const row = cb && cb.closest('[data-cs-sqrow]');
+    if (row) {
+        const idx = parseInt(row.getAttribute('data-cs-sqrow'), 10);
+        const r = csSimQuotaRows[idx];
+        if (r) {
+            r.learning = !!cb.checked;
+            if (r.learning) {  // seed min/max so max > min (else it saves non-adaptive)
+                r.adaptive = false;  // mutual exclusivity: Learning ⊕ Adaptive
                 if (r.min == null) r.min = r.count || 1;
                 if (r.max == null || r.max <= r.min) r.max = Math.max(r.min + 1, (r.count || 1) * 2);
             }
@@ -4793,6 +4825,7 @@ window.csSimQuotaAdd = function (preset) {
         rehome: p.rehome != null ? !!p.rehome : false,
         enabled: p.enabled != null ? !!p.enabled : false,
         tied: p.tied != null ? !!p.tied : true,
+        adaptive: p.adaptive != null ? !!p.adaptive : false,
         learning: p.learning != null ? !!p.learning : false,
     });
     csRenderSimQuotaEditor();

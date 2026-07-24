@@ -1763,34 +1763,71 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # twin + unit-tested); the sweep below drives it with the live firing signal.
 
     async def _knob_overrides_for_tenant(tenant_id: str) -> dict:
-        """The tenant-wide ``[simulation]`` knob values the learner currently
-        wants delivered = per-knob MIN across all this tenant's ``learn_knobs``
-        quota states (most conservative floor when several quotas tune the same
-        global knob). Empty when nothing is learning."""
-        from .sim_quota import normalize_quota, knobs_for_sim
+        """The tenant-wide ``[simulation]`` knob values to deliver to this
+        tenant's clients. Two sources, merged:
+
+        * LAB rows (``learning`` ON, a sim with declared knobs): the per-knob MIN
+          across this tenant's own live ``knob_learn_state`` (most conservative
+          floor when several lab quotas tune the same global knob) — the lab's
+          in-flight tuned values.
+        * CONSUMER rows (``learning`` OFF, Adaptive, a sim with declared knobs):
+          the APPROVED ``global_learned_values[alert].knobs`` published by a lab
+          (the production consumer runs the lab's tuned config, not the base
+          simulation.conf defaults). A pure-consumer tenant (no own lab) still
+          gets the approved knobs this way.
+
+        Empty when nothing applies. NOTE: the override is spoke-WIDE (one value
+        per knob key), not per-site — the spoke overlays it onto every client's
+        ``[simulation]`` section."""
+        from .sim_quota import normalize_quota, knobs_for_sim, adaptive_is_on, _alert_key
         try:
             csc = await store.get_central_sites_config(tenant_id) or {}
-            learn = [q for q in (normalize_quota(r) for r in (csc.get("sim_quotas") or []))
-                     if q.get("enabled") and q.get("learn_knobs") and knobs_for_sim(q.get("sim_id"))]
-            if not learn:
+            quotas = [normalize_quota(r) for r in (csc.get("sim_quotas") or [])]
+            labs = [q for q in quotas
+                    if q.get("enabled") and q.get("learning") and knobs_for_sim(q.get("sim_id"))]
+            consumers = [q for q in quotas
+                         if q.get("enabled") and not q.get("learning")
+                         and adaptive_is_on(q) and knobs_for_sim(q.get("sim_id"))]
+            if not labs and not consumers:
                 return {}
             state = await store.get_knob_learn_state(tenant_id)
+            global_lv = await store.get_global_learned_values()
         except Exception:  # noqa: BLE001
             return {}
         out: dict = {}
-        for q in learn:
-            vals = (state.get(_adaptive_key(q)) or {}).get("values") or {}
+
+        def _ints(vals: dict) -> dict:
+            o = {}
             for kk, vv in vals.items():
                 try:
-                    iv = int(vv)
+                    o[kk] = int(vv)
                 except (TypeError, ValueError):
                     continue
-                out[kk] = iv if kk not in out else min(out[kk], iv)
+            return o
+
+        # (1) CONSUMER rows: the approved lab's tuned knobs (production runs the
+        # lab's config, not the base simulation.conf defaults). A pure-consumer
+        # tenant gets its knobs entirely from here.
+        for q in consumers:
+            gv = global_lv.get(_alert_key(q)) or {}
+            out.update(_ints(gv.get("knobs") or {}))
+        # (2) LAB rows: the lab's OWN live tuned values WIN for the keys it's
+        # actively testing (more current than the approved snapshot), MIN across
+        # this tenant's lab quotas for the same key. Approved knobs fill the rest
+        # (keys no lab is currently tuning).
+        lab_vals: dict = {}
+        for q in labs:
+            vals = _ints((state.get(_adaptive_key(q)) or {}).get("values") or {})
+            for kk, iv in vals.items():
+                lab_vals[kk] = iv if kk not in lab_vals else min(lab_vals[kk], iv)
+        out.update(lab_vals)
         return out
 
     async def _run_knob_learner() -> None:
-        """One learner pass over every tenant's ``learn_knobs`` quotas — advance
-        the floor search and re-push the delivered knob values when they move."""
+        """One learner pass over every tenant's ``learning`` (lab) quotas that have
+        declared knobs — advance the floor search and re-push the delivered knob
+        values when they move. Learning folds knob-tuning: a lab tunes both client
+        count (the adaptive controller) and the sim's [simulation] knobs (here)."""
         import time as _t
         from .sim_quota import normalize_quota, knobs_for_sim, knob_step
         now = _t.time()
@@ -1799,15 +1836,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 csc = await store.get_central_sites_config(tid) or {}
                 msc = await store.get_mist_sites_config(tid) or {}
                 opc = await store.get_central_on_prem_sites_config(tid) or {}
-                # Union Central + Mist + Central On-Prem learn_knobs rows (prefixed
-                # alert_ids → distinct knob-learner state keys, independent floor
-                # search per source).
+                # Union Central + Mist + Central On-Prem learning (lab) rows with
+                # declared knobs (prefixed alert_ids → distinct knob-learner state
+                # keys, independent floor search per source).
                 learn = ([q for q in (normalize_quota(r) for r in (csc.get("sim_quotas") or []))
-                          if q.get("enabled") and q.get("learn_knobs") and knobs_for_sim(q.get("sim_id"))]
+                          if q.get("enabled") and q.get("learning") and knobs_for_sim(q.get("sim_id"))]
                          + [q for q in (normalize_quota(r) for r in (msc.get("sim_quotas") or []))
-                            if q.get("enabled") and q.get("learn_knobs") and knobs_for_sim(q.get("sim_id"))]
+                            if q.get("enabled") and q.get("learning") and knobs_for_sim(q.get("sim_id"))]
                          + [q for q in (normalize_quota(r) for r in (opc.get("sim_quotas") or []))
-                            if q.get("enabled") and q.get("learn_knobs") and knobs_for_sim(q.get("sim_id"))])
+                            if q.get("enabled") and q.get("learning") and knobs_for_sim(q.get("sim_id"))])
                 if not learn:
                     continue
                 # Site-alias groups resolved ONCE for the sweep, per source.
@@ -1846,6 +1883,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     try:
         hub._knob_learner_loop = _knob_learner_loop
+        # Knob-push seam (Phase 2): the sim_knob_overrides a tenant's clients get —
+        # consumer (Adaptive) rows fold in the approved global learned knobs; lab
+        # (Learning) rows overlay their own live tuned values. Unit-test hook.
+        hub._knob_overrides_for_tenant = _knob_overrides_for_tenant
     except Exception:  # noqa: BLE001
         pass
 
@@ -4882,6 +4923,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 clean[str(ak)] = {
                     "op": op,
                     "floor": int(v["floor"]) if v.get("floor") is not None else None,
+                    # Preserve the lab's tuned [simulation] knobs so an admin-curated
+                    # replacement doesn't strip them — consumers fold these into the
+                    # delivered sim_knob_overrides (production runs the lab's config).
+                    "knobs": {str(kk): vv for kk, vv in (v.get("knobs") or {}).items()
+                              if isinstance(vv, (int, float)) or str(vv).strip() != ""},
                     "source_tenant": str(v.get("source_tenant") or ""),
                     "published_at": float(v.get("published_at") or now),
                 }

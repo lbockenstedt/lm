@@ -22,7 +22,7 @@ logger = logging.getLogger("SimQuota")
 
 # ── Schema (byte-identical to cs/lm-spoke/src/sim_quota.py) ───────────────
 SIM_QUOTA_KEYS = ("alert_id", "alert_type", "sim_id", "count", "site",
-                  "multi_capable", "rehome", "enabled", "learning", "learn_knobs")
+                  "multi_capable", "rehome", "enabled", "learning")
 ALERT_TYPES = ("alert", "insight")
 
 # ── Source prefix — the seam between Central and Mist ──────────────────────
@@ -229,17 +229,17 @@ def normalize_quota(raw: Any) -> Dict[str, Any]:
         else _as_bool(raw.get("multi_capable"), bool(meta.get("multi_capable", False))),
         "rehome": _as_bool(raw.get("rehome"), False),
         "enabled": _as_bool(raw.get("enabled"), False),
-        # `learning` ON = this row is the "learning lab" that runs the full
-        # thermostat (down-ratchet to find the floor, settle floor+20%, record a
-        # publishable learned_op). OFF (default) = a consumer: up-only, seeds/lifts
-        # from the tenant/global learned operating point, never down-ratchets (never
-        # risks stopping a firing alert). See design doc §9 / adaptive_step.
+        # `learning` ON = this row is the "learning lab": it runs the full
+        # thermostat (ramp up AND down continuously to re-evaluate the floor) AND
+        # tunes the sim's [simulation] intensity knobs (SIM_KNOBS[sim_id]) down to
+        # the floor that still fires, then publishes the learned count + knobs so
+        # production consumers go straight to learned + 20% (no days of learning).
+        # OFF (default) = a consumer (Adaptive): up-only, seeds/lifts from the
+        # tenant/global learned operating point + knobs, never down-ratchets (never
+        # risks stopping a firing alert). The two are MUTUALLY EXCLUSIVE — a tied
+        # quota is either a lab or a consumer (both off = fixed count). See design
+        # doc §9 / adaptive_step.
         "learning": _as_bool(raw.get("learning"), False),
-        # `learn_knobs` ON = the config-value learner tunes this sim's
-        # [simulation] intensity knobs (SIM_KNOBS[sim_id]) one at a time, DOWN to
-        # the floor that still fires the alert. Orthogonal to `learning` (which
-        # modulates client count); a no-op for a sim with no declared knobs.
-        "learn_knobs": _as_bool(raw.get("learn_knobs"), False),
     }
     # Adaptive-controller fields (design doc §9) — carried through only when the
     # quota declares them, so a fixed-count quota stays exactly as before. The
@@ -502,13 +502,14 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
 
     def _stable_at(fl: int) -> None:
         """Enter `stable`: record learned_op + the time-to-stable. The internal
-        probe ``target`` parks at the FLOOR (the re-probe baseline, <= max); the
-        OPERATING POINT (``learned_op`` = floor+buffer) is pushed separately by
-        ``apply_adaptive_targets`` and may EXCEED max — max is the probe-UP
-        ceiling, not the operating-point cap (so floor 10 + 20% -> 12 is pushed
-        even with max 10). That operating point is the number the admin approves
-        and production (consumer) sites maintain. A stable transition is when the
-        known-good is captured."""
+        probe ``target`` parks at the FLOOR (the re-probe baseline, <= max). The
+        OPERATING POINT (``learned_op`` = floor+buffer) is RECORDED for
+        publication only — the +20% the admin approves and consumers adopt as
+        their seed. It may exceed the lab's max on paper, but the lab itself runs
+        at the floor (<= max) and every consumer CLAMPS its running count to its
+        own max — max is the hard cap for lab + production alike (one alert can't
+        exhaust the client pool). A stable transition is when the known-good is
+        captured."""
         nonlocal floor, learned_op, target, phase, last, stable_since, time_to_stable_s
         floor = fl
         learned_op = max(mn, ceil_to_int(float(fl) * (1 + buffer)))
@@ -741,13 +742,20 @@ def apply_adaptive_targets(quotas: List[Dict[str, Any]],
             tgt = st.get("target")
             q["count"] = int(tgt) if tgt is not None else int(q.get("min") or 1)
         else:
-            # consumer: up-only, seed/lift from applied_op, never drop
+            # consumer (Adaptive): up-only, seed/lift from applied_op, never drop —
+            # but CAPPED at max. Max is the hard ceiling for EVERYTHING (lab +
+            # production) so one alert can't exhaust the client pool. Reaching max
+            # and still not firing is the max-hit alert (lab/prod divergence: the
+            # learned count isn't enough in production). The published learned_op
+            # (floor+20%) may exceed this consumer's max on paper; the consumer
+            # clamps its RUNNING count to its own max rather than running above it.
             tgt = st.get("target")
             if tgt is None:  # cold start
-                q["count"] = int(op) if op is not None else int(q.get("min") or 1)
+                base = int(op) if op is not None else int(q.get("min") or 1)
             else:
-                base = int(tgt)
-                q["count"] = max(base, int(op)) if op is not None else base
+                base = max(int(tgt), int(op)) if op is not None else int(tgt)
+            mx = int(q.get("max") or base)
+            q["count"] = min(mx, base)
     return quotas
 
 
@@ -814,5 +822,8 @@ def sim_quota_catalog_from_ini(
         "sims": available_sims_from_ini(sim_conf_text),
         "sites": available_sites_from_ini(sim_conf_text, central_site_mappings),
         "suggested": dict(SUGGESTED_ALERT_SIM),
-        "meta": {k: dict(v) for k, v in SIM_META.items()},
+        # `knobs` per sim = the [simulation] key names the lab tunes (so the UI can
+        # label them on a Learning row); empty for sims with no declared knobs.
+        "meta": {k: {**dict(v), "knobs": [kn["key"] for kn in SIM_KNOBS.get(k, [])]}
+                 for k, v in SIM_META.items()},
     }
