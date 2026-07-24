@@ -264,9 +264,14 @@ separable from the fire-and-forget byte stream. Reuse them; add a relay descript
 - **Phase 1 (front door):** `proxy` role + `_ROLE_MAP`/`install_agent.sh` wiring + browser
   listener (CERT_NONE) + Option-A reverse proxy + LE server cert + hub `X-Forwarded-For` trust
   (+ `proxy_cert_identities`) + cookie/origin. **Ships the cert-prompt fix and local WebUI.**
-- **Phase 2 (console shortcut):** hub broker descriptor + `relay_token` + VNC TTL relaxation +
-  spoke `/ws/agent` relay-token acceptance + proxy console-relay engine. **Ships local
-  VNC/shell/serial.**
+- **Phase 2 (console shortcut) — VNC BUILT (needs fleet test):** hub broker mints `relay_token`
+  + returns a `relay` descriptor (`pxmx.py`); spoke registers the token at VNC_START
+  (`proxmox_spoke.py`) + serves `/ws/console-relay/{sid}` with a per-session-token auth and a
+  UP sink (`agent_hosting.py`); proxy snoops the descriptor + relays browser↔spoke
+  (`proxy_app.py`), needing `relay_spoke_url` set on the role. All additive/guarded — normal
+  hub-relayed console is unaffected until a proxy attaches. **Shell/serial**: reuse the same
+  shape once their brokers emit a `relay` descriptor (shell is a near-copy; serial is the
+  two-party console-spoke relay). Untested against a live VM — validate a real VNC session next.
 
 ## 10. Open questions / risks
 
