@@ -446,8 +446,31 @@ class SelfUpdateMixin:
             # capture_output so a failure's stderr (e.g. git's "Could not resolve
             # host") reaches the CalledProcessError handler and the log — otherwise
             # a DNS outage just logged an opaque "exit code 128".
-            subprocess.run(["git", "fetch", "origin"], cwd=cwd, check=True, timeout=120,
-                           capture_output=True, text=True)
+            try:
+                subprocess.run(["git", "fetch", "origin"], cwd=cwd, check=True, timeout=120,
+                               capture_output=True, text=True)
+            except subprocess.CalledProcessError as _fe:
+                # Self-heal a git OBJECT-STORE PERMISSION failure (exit 128:
+                # "insufficient permission for adding an object to repository
+                # database .git/objects" / "failed to write object"). The repo's
+                # .git got owned by another user — a prior `sudo git`, or an update
+                # that ran as root once left root-owned objects — so this
+                # (service-user) fetch can't write and the box FREEZES on stale
+                # code forever (it can't even pull the fix for this). Best-effort:
+                # chown the repo back to the running uid via `sudo -n` and retry
+                # ONCE. If sudo isn't available it re-raises the original error.
+                _blob = (_fe.stderr or "") + (_fe.stdout or "")
+                if any(s in _blob for s in ("insufficient permission",
+                                            "failed to write object",
+                                            "unpack-objects failed")):
+                    logger.warning("self-update: git object-store PERMISSION error in "
+                                   "%s — attempting `sudo -n chown` self-heal + retry", cwd)
+                    subprocess.run(["sudo", "-n", "chown", "-R", str(os.getuid()), cwd],
+                                   check=False, timeout=60, capture_output=True, text=True)
+                    subprocess.run(["git", "fetch", "origin"], cwd=cwd, check=True, timeout=120,
+                                   capture_output=True, text=True)
+                else:
+                    raise
             pull = self._run_git(["pull", "--rebase", "--autostash", "origin"], cwd=cwd)
             if pull.returncode != 0:
                 logger.warning(f"git pull --rebase failed (rc={pull.returncode}); resetting hard to origin")
