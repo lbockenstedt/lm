@@ -2225,7 +2225,22 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     @app.get("/sim/api/aggregate/api-server")
     async def get_api_server(tenant_id: str = Depends(get_tenant_id)):
-        return await service.get_api_server_data(tenant_id)
+        data = await service.get_api_server_data(tenant_id)
+        # Enrich each spoke card with its LIVE repo/update status (branch +
+        # served VERSION + key script versions) so Setup → Diagnostics shows,
+        # from the UI, whether the spoke's checkout actually has the latest push
+        # — the answer to "did my change reach the spoke?" without the CLI.
+        try:
+            repos = await _cs_forward_all(tenant_id, "CS_GET_REPO_STATUS", {}, timeout=10.0)
+            by_sid = {sid: (r or {}).get("repo") for sid, r in (repos or [])
+                      if isinstance(r, dict)}
+            for sp in data.get("spokes", []):
+                rp = by_sid.get(sp.get("spoke_id"))
+                if rp:
+                    sp.setdefault("api_server", {}).setdefault("health", {})["repo"] = rp
+        except Exception:  # noqa: BLE001 — diagnostics enrich must never break the card
+            logger.debug("api-server repo enrich failed", exc_info=True)
+        return data
 
     # ── aggregate actions ──────────────────────────────────────────────────
     @app.post("/sim/api/aggregate/central")
@@ -2675,7 +2690,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     vm_count = len(clients)
             out.append({
                 "spoke_id": sid,
-                "display_name": m.get("display_name") or sid,
+                # Prefer a friendly name — an explicit display_name, else the
+                # reported hostname — and only fall back to the raw guid when
+                # neither exists, so Spoke Management's Name column isn't just the
+                # spoke_id. hostname is also returned so the UI can fall back too.
+                "display_name": m.get("display_name") or m.get("hostname") or sid,
+                "hostname": m.get("hostname") or "",
                 "module_type": _spoke_type(sid, live_types, m),
                 "connected": hub._primary_key(sid) in conns,
                 "approved": bool(approved.get(hub._primary_key(sid), False)),
