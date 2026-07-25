@@ -4313,6 +4313,23 @@ function csSimQuotaAlertIdOptions(alertType, selectedId) {
         opts.map(o => `<option value="${csEscape(o.id)}" ${o.selected ? 'selected' : ''}>${csEscape(o.label)}</option>`).join('');
 }
 
+// Learned operating point (floor +20%, capped) the platform has learned for a
+// row's alert, or null. Keyed per ALERT ("alert_type:alert_id", no site) — the
+// same sharing key the engine uses — and sourced from the catalog's `learned`
+// map (max of this tenant's stable learned_op and the global published op).
+// Only meaningful for a tied (alert-bound) non-presence row.
+function _csLearnedForRow(r) {
+    if (!r || !r.alert_id || r.tied === false || !r.sim_id) return null;
+    const lm = (csSimQuotaCatalog && csSimQuotaCatalog.learned) || {};
+    const ak = `${r.alert_type || 'alert'}:${r.alert_id || ''}`;
+    const v = lm[ak];
+    return (v && v.op != null) ? v : null;
+}
+function _csLearnedOpForRow(r) {
+    const v = _csLearnedForRow(r);
+    return v ? Number(v.op) : null;
+}
+
 function csRenderSimQuotaEditor() {
     const cat = csSimQuotaCatalog || { sims: [], sites: [], suggested: {}, meta: {} };
     const simIds = (cat.sims || []).map(s => s.sim_id);
@@ -4373,12 +4390,24 @@ function csRenderSimQuotaEditor() {
             <select data-cs-sq="sim_id" onchange="csSimQuotaOnSimChange(this)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${simOpts}</select>
           </label>
           ${(tied && (r.adaptive || r.learning))
-            ? `<label class="text-xs text-slate-500" title="Min = keep-alive floor; Max = the hard cap for lab + production (one alert can't exhaust the client pool). Adaptive ramps clients UP to keep the alert firing, capped at Max; Learning ramps up AND down to find the floor.">Min / Max
+            ? (() => {
+                // Learned operating point (floor +20%) the platform has learned
+                // for this alert. Default Min to it when the user hasn't set one,
+                // and warn when Max sits below it (the cap would starve the
+                // learned operating count).
+                const _lop = _csLearnedOpForRow(r);
+                const _lv = _csLearnedForRow(r);
+                const _minVal = r.min != null ? r.min : (_lop != null ? _lop : (r.count || 1));
+                const _maxVal = r.max != null ? r.max : (r.count || 1);
+                const _maxUnder = _lop != null && Number(_maxVal) < _lop;
+                return `<label class="text-xs text-slate-500" title="Min = keep-alive floor; Max = the hard cap for lab + production (one alert can't exhaust the client pool). Adaptive ramps clients UP to keep the alert firing, capped at Max; Learning ramps up AND down to find the floor.">Min / Max
             <div class="flex gap-1 mt-1">
-              <input data-cs-sq="min" type="number" min="1" value="${csEscape(String(r.min != null ? r.min : (r.count || 1)))}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm">
-              <input data-cs-sq="max" type="number" min="1" value="${csEscape(String(r.max != null ? r.max : (r.count || 1)))}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm">
+              <input data-cs-sq="min" type="number" min="1" value="${csEscape(String(_minVal))}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm">
+              <input data-cs-sq="max" type="number" min="1" value="${csEscape(String(_maxVal))}" class="w-full bg-white border ${_maxUnder ? 'border-amber-400' : 'border-slate-300'} rounded-md px-2 py-1.5 text-sm">
             </div>
-          </label>`
+            ${_lop != null ? `<div class="text-[11px] mt-1 ${_maxUnder ? 'text-amber-700 font-semibold' : 'text-slate-400'}">Learned: ${_lop}${_lv && _lv.floor != null ? ` <span class="text-slate-400 font-normal">(floor ${_lv.floor})</span>` : ''}${_lv && _lv.source === 'global' ? ' <span class="text-slate-400 font-normal">· global</span>' : ''}${_maxUnder ? ` — ⚠️ Max is below the learned value (${_lop})` : ''}</div>` : ''}
+          </label>`;
+              })()
             : `<label class="text-xs text-slate-500">${isPresence ? 'Min (floor)' : 'Clients'}
             <input data-cs-sq="count" type="number" min="1" value="${csEscape(String(r.count))}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
           </label>`}
@@ -4782,7 +4811,9 @@ window.csSimQuotaOnAdaptiveChange = function (cb) {
             r.adaptive = !!cb.checked;
             if (r.adaptive) {  // seed min/max so max > min (else it saves non-adaptive)
                 r.learning = false;  // mutual exclusivity: Adaptive ⊕ Learning
-                if (r.min == null) r.min = r.count || 1;
+                // Default Min to the learned operating point when the platform has
+                // learned one for this alert; else the row's own count.
+                if (r.min == null) r.min = _csLearnedOpForRow(r) || r.count || 1;
                 if (r.max == null || r.max <= r.min) r.max = Math.max(r.min + 1, (r.count || 1) * 2);
             }
         }
@@ -4804,7 +4835,9 @@ window.csSimQuotaOnLearningChange = function (cb) {
             r.learning = !!cb.checked;
             if (r.learning) {  // seed min/max so max > min (else it saves non-adaptive)
                 r.adaptive = false;  // mutual exclusivity: Learning ⊕ Adaptive
-                if (r.min == null) r.min = r.count || 1;
+                // Default Min to the learned operating point when the platform has
+                // learned one for this alert; else the row's own count.
+                if (r.min == null) r.min = _csLearnedOpForRow(r) || r.count || 1;
                 if (r.max == null || r.max <= r.min) r.max = Math.max(r.min + 1, (r.count || 1) * 2);
             }
         }
