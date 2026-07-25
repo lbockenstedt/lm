@@ -113,6 +113,11 @@ async def _aggregate_spokes(hub):
             "spoke_id": sid,
             "display_name": module_names.get(sid, sid),
             "approved": hub.approved_modules.get(hub._primary_key(sid), False),
+            # Soft-retire flag so the WebUI can pick Decommission vs Restore even
+            # for a spoke with NO /setup/diagnostics telemetry entry (the delete
+            # action row must not depend on diag being present).
+            "decommissioned": bool(getattr(hub.state, "is_module_decommissioned",
+                                            lambda _pk: False)(hub._primary_key(sid))),
             "module_type": _module_type_for(hub, sid),
             "hostname": meta.get("hostname", ""),
             "install_uuid": meta.get("install_uuid", ""),

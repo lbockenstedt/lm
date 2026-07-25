@@ -11323,6 +11323,35 @@ function _mgmtBtn(label, onclick, extraCls) {
     return `<button onclick="${onclick}" class="${_SPOKES_TBL_CLS.btnCls} ${extraCls || ''}">${label}</button>`;
 }
 
+// _mgmtDeleteActions(o) — the Decommission / Force Delete / Restore action set,
+// built WITHOUT a /setup/diagnostics telemetry entry. _diagTelemetryExtras
+// produces the same buttons, but ONLY when a diag entry exists for the row — so
+// a spoke/agent with no telemetry (offline, never-diagnosed, or an approved
+// entry not mirrored into known_modules) rendered with NO way to delete it. This
+// mirrors the actions branch in _diagTelemetryExtras from the row's own
+// approved/decommissioned flags so the destructive actions are ALWAYS present.
+// o = { eSid, approved, decommissioned, deleteFn, decommFn, restoreFn }
+function _mgmtDeleteActions(o) {
+    const eSid = o.eSid;
+    const deleteFn = o.deleteFn || 'deleteSpoke';
+    const decommFn = o.decommissionFn || o.decommFn || 'decommissionSpoke';
+    const restoreFn = o.restoreFn || 'restoreSpoke';
+    if (o.decommissioned) {
+        return [
+            _mgmtBtn('Restore', `${restoreFn}('${eSid}')`, 'bg-green-600 hover:bg-green-700 text-white'),
+            _mgmtBtn('Force Delete', `${deleteFn}('${eSid}')`, 'bg-red-600 hover:bg-red-700 text-white'),
+        ];
+    }
+    if (o.approved) {
+        return [
+            _mgmtBtn('Decommission', `${decommFn}('${eSid}')`, 'bg-slate-500 hover:bg-slate-600 text-white'),
+            _mgmtBtn('Force Delete', `${deleteFn}('${eSid}')`, 'bg-red-600 hover:bg-red-700 text-white'),
+        ];
+    }
+    // Pending (not yet approved): only the hard delete makes sense.
+    return [_mgmtBtn('Force Delete', `${deleteFn}('${eSid}')`, 'bg-red-600 hover:bg-red-700 text-white')];
+}
+
 // _mgmtEntryCard(o) — a multi-line stacked card row for the Setup → Spokes &
 // Agents tiles. Replaces the cramped fixed-width <table table-fixed> layout
 // whose narrow columns wrapped text and stacked buttons awkwardly. Each entry
@@ -11470,7 +11499,12 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                     // Decommission / Force Delete (+ Restore for a retired spoke)
                     // drop to their own line — matches the Agents table so the
                     // destructive actions never wrap into the primary buttons.
-                    actionsSecondary: extras ? extras.actions : [],
+                    // With diagnostics telemetry present, reuse its action set;
+                    // otherwise build the same buttons from the row's own
+                    // approved/decommissioned flags so a spoke with no diag entry
+                    // is still deletable (was: no action row at all).
+                    actionsSecondary: extras ? extras.actions
+                        : _mgmtDeleteActions({ eSid, approved, decommissioned: !!s.decommissioned }),
                     cornerActions: extras ? extras.eventsActions : [],
                 }) + (extras ? extras.eventsPanel : '');
             }).join('')}</div>`;
@@ -11505,6 +11539,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
             identity_change: s.identity_change || null,
             tenant_id: s.tenant_id || '',
             _status: s.approved ? 'connected' : 'pending',
+            _decommissioned: !!s.decommissioned,
             _kind: 'spoke',
             _module_type: String(s.module_type || '').toLowerCase(),
             _module: module,
@@ -11641,8 +11676,12 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                 // Decommission / Force Delete (+ Restore for a retired agent) drop
                 // to their own line — the Agents rows carry more primary buttons
                 // (Edit, Tenant, Load Role, Approve) than the Spokes rows, so
-                // keeping the destructive actions inline made the row wrap.
-                actionsSecondary: extras ? extras.actions : [],
+                // keeping the destructive actions inline made the row wrap. When a
+                // spoke-kind agent has no diagnostics entry, fall back to the same
+                // buttons built from its own approved/decommissioned flags so it is
+                // still deletable (pxmx agents always carry a synthesized extras).
+                actionsSecondary: extras ? extras.actions
+                    : (isSpokeKind ? _mgmtDeleteActions({ eSid: eAid, approved: !isPending, decommissioned: !!a._decommissioned }) : []),
                 cornerActions: extras ? extras.eventsActions : [],
             }) + (extras ? extras.eventsPanel : '');
         }).join('')}</div>`;
