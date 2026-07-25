@@ -848,6 +848,18 @@ for repo in "${REPOS[@]}"; do
     fi
 done
 
+# Every clone/pull/reset above ran as ROOT (installer is root), so each repo's
+# .git/objects is root-owned. Chown EVERY repo's .git to the service user NOW —
+# not only via the later recursive $BASE_DIR chown — so the ongoing, unattended
+# self-update (lm.self_update runs as $SvcUser) can write objects. A root-owned
+# .git/objects is the exact "insufficient permission for adding an object to
+# repository database .git/objects" that fails `git fetch` and strands a box on
+# stale code forever (it can't even pull the fix for itself). Belt-and-suspenders
+# with the $BASE_DIR chown below + the runtime self-heal in self_update.py.
+# -maxdepth 2 catches $BASE_DIR/.git and $BASE_DIR/<component>/.git.
+find "$BASE_DIR" -maxdepth 2 -type d -name .git \
+    -exec chown -R "$SvcUser:$SvcUser" {} + 2>/dev/null || true
+
 # 5. Run Modular Installers
 log_c "🛠️ Running modular installations..."
 
