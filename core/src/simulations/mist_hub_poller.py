@@ -738,8 +738,23 @@ class MistHubPoller:
                 # is HEALTHY (ok) when its error IS present, and FAILING (error) when
                 # the expected error is NOT detected — the sim stopped producing it.
                 # Monitor-for-absence: notify when the expected error goes missing.
-                checks[cid] = {"status": "ok" if n > 0 else "error",
-                               "message": f"{n} active (as expected)" if n else "Expected error NOT detected"}
+                if n > 0:
+                    checks[cid] = {"status": "ok", "message": f"{n} active (as expected)"}
+                else:
+                    # Surface WHY the expected error is absent (mirrors central twin):
+                    # site returned NOTHING → site dropped / name mismatch; vs the
+                    # site reporting other conditions → sim not firing THIS alert.
+                    _seen = len(alert_ci) + len(insight_ci)
+                    _cc = int(data.get("client_count", 0) or 0)
+                    if _seen == 0:
+                        _msg = (f"Expected error NOT detected — site returned no "
+                                f"alerts/insights ({_cc} clients; site dropped or "
+                                f"name mismatch?)")
+                    else:
+                        _msg = (f"Expected error NOT detected — sim not firing "
+                                f"(0 seen; {_seen} other condition(s) at site, "
+                                f"{_cc} clients)")
+                    checks[cid] = {"status": "error", "message": _msg}
             status[wireless_site] = checks
             current = int(data.get("client_count", 0) or 0)
             wired = int(data.get("wired_clients", 0) or 0)
