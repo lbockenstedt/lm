@@ -237,6 +237,7 @@ class ClientCountTracker:
         hourly_avg = sum(s[1] for s in samples) / len(samples)
         max_7day = round(max(vals_7d + [hourly_avg]), 1)
         max_30day = round(max(vals_30d + [hourly_avg]), 1)
+        die_off_peak = 0.0  # the peak the current avg fell below, if die-off tripped
         if len(samples) < _CC_MIN_SAMPLES:
             drop_pct, status = 0.0, "no_data"
         else:
@@ -252,14 +253,21 @@ class ClientCountTracker:
             else:
                 status = "ok"
             # Sustained die-off vs the 7d/30d peak → hard ERROR (overrides warn/ok);
-            # die_off_frac=0 disables this rule.
-            if (die_off_frac > 0
-                    and ((max_7day >= min_peak and hourly_avg < die_off_frac * max_7day)
-                         or (max_30day >= min_peak and hourly_avg < die_off_frac * max_30day))):
-                status = "error"
+            # die_off_frac=0 disables this rule. Capture WHICH peak tripped it so
+            # the dashboard message can explain an error the within-hour drop
+            # (often 0%) does not account for — otherwise the site reads "down 0%"
+            # yet still shows ERROR with no visible reason.
+            if die_off_frac > 0:
+                if max_7day >= min_peak and hourly_avg < die_off_frac * max_7day:
+                    die_off_peak = max_7day
+                elif max_30day >= min_peak and hourly_avg < die_off_frac * max_30day:
+                    die_off_peak = max_30day
+                if die_off_peak:
+                    status = "error"
         return {"site_name": central_site, "current": current,
                 "hourly_avg": round(hourly_avg, 1), "drop_pct": round(drop_pct, 1),
                 "max_7day": max_7day, "max_30day": max_30day,
+                "die_off": die_off_peak, "die_off_frac": die_off_frac,
                 "status": status, "ts": samples[-1][0]}
 
     def maybe_snapshot(self) -> None:
@@ -878,11 +886,23 @@ class CentralHubPoller:
             # Surface the site's client-count monitor as a CHECK so "everything
             # monitored" shows on the dashboard Checks view. Direct (NOT inverted)
             # semantics: a DROP in clients means the sim clients died -> warning / error.
+            _cc_msg = (f"{cc_entry['current']} clients vs {cc_entry['hourly_avg']} hr-avg "
+                       f"(down {cc_entry['drop_pct']}%) · wired {wired} (down {w_entry['drop_pct']}%) "
+                       f"· wireless {wireless} (down {wl_entry['drop_pct']}%)")
+            # When the ERROR is the sustained die-off-vs-peak rule (not the within-
+            # hour drop, which is often 0%), name it + show the peak that tripped
+            # it. A peak wildly above the site's live count is the fingerprint of a
+            # stale/foreign sample poisoning the 30d baseline — surface it so the
+            # operator can see WHY an otherwise-steady site reads red.
+            _do = [(lbl, e) for lbl, e in (("total", cc_entry), ("wired", w_entry),
+                                           ("wireless", wl_entry)) if e.get("die_off")]
+            if _do:
+                _frac = int((_do[0][1].get("die_off_frac") or 0) * 100)
+                _do_txt = ", ".join(f"{lbl} {e['hourly_avg']} < {_frac}% of peak {e['die_off']}"
+                                    for lbl, e in _do)
+                _cc_msg += f" · ⚠ sustained die-off vs peak ({_do_txt})"
             checks["Steady Client Count 1hr Average"] = {
-                "status": cc_entry["status"],
-                "message": (f"{cc_entry['current']} clients vs {cc_entry['hourly_avg']} hr-avg "
-                            f"(down {cc_entry['drop_pct']}%) · wired {wired} (down {w_entry['drop_pct']}%) "
-                            f"· wireless {wireless} (down {wl_entry['drop_pct']}%)"),
+                "status": cc_entry["status"], "message": _cc_msg,
             }
             # Per-site minimum client floor. Direct semantics: current below the
             # configured min = error (clients died below an absolute floor, not
