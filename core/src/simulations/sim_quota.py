@@ -79,6 +79,7 @@ def prefixed_alert_id(source: str, bare_id: str) -> str:
 
 SIM_META: Dict[str, Dict[str, object]] = {
     "dns_fail":    {"category": "failure", "multi_capable": False},
+    "dns_latency": {"category": "failure", "multi_capable": False},
     "dhcp_fail":   {"category": "failure", "multi_capable": False},
     "assoc_fail":  {"category": "failure", "multi_capable": False},
     "auth_fail":   {"category": "failure", "multi_capable": False},
@@ -112,6 +113,10 @@ SIM_KNOBS: Dict[str, List[Dict[str, int]]] = {
     "dns_fail": [
         {"key": "dns_fail_rate",     "min": 200, "max": 3000, "step": 200, "start": 3000},
         {"key": "dns_fail_duration", "min": 120, "max": 600,  "step": 60,  "start": 600},
+    ],
+    "dns_latency": [
+        {"key": "dns_latency_rate",     "min": 200, "max": 3000, "step": 200, "start": 3000},
+        {"key": "dns_latency_duration", "min": 120, "max": 600,  "step": 60,  "start": 600},
     ],
 }
 
