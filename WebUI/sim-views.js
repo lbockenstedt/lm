@@ -9912,14 +9912,50 @@ async function csRenderVmServerApiServer() {
 // Simulations) as greppable [cs-bridge] lines; this panel surfaces it structured.
 // Read-only; refreshes on render. Global across the tenant's agents — that's
 // why it lives under Setup/Diagnostics, not under a host-scoped VM Server tab.
+// Spoke Repo / Update Status cards (Setup → Diagnostics) — from
+// /aggregate/api-server's health.repo (CS_GET_REPO_STATUS). Answers "did my push
+// reach the spoke?" from the UI: branch, served VERSION, key script versions,
+// and warnings when a spoke tracks a non-main branch (main pushes never arrive)
+// or is serving pre-split scripts.
+function _csRepoStatusSection(apiData) {
+    const spokes = (apiData && apiData.spokes) || [];
+    const cards = spokes.map(sp => {
+        const rp = ((sp.api_server || {}).health || {}).repo;
+        const name = sp.spoke_name || sp.display_name || sp.spoke_id;
+        if (!rp) return `<div class="hpe-card rounded-lg p-4 shadow-sm"><span class="font-bold text-slate-700">${csEscape(name)}</span> <span class="text-xs text-slate-400">— repo status unavailable (spoke offline or pre-update)</span></div>`;
+        const rs = rp.scripts || {};
+        const warns = [];
+        if (rp.configured_branch && rp.configured_branch !== 'main') warns.push([`⚠️ tracks branch <b>${csEscape(rp.configured_branch)}</b>, not <b>main</b> — changes pushed to main won't reach this spoke.`, 'text-amber-600']);
+        if (!rp.dns_latency_present) warns.push(['⚠️ dns_latency.sh missing — serving pre-split client scripts.', 'text-red-500']);
+        return `<div class="hpe-card rounded-lg p-4 shadow-sm">
+          <div class="flex items-center justify-between"><span class="font-bold text-slate-700">${csEscape(name)}</span>${typeof csOnlineBadge === 'function' ? csOnlineBadge(sp.spoke_online) : ''}</div>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
+            ${csStat('Branch', rp.configured_branch || '—')}${csStat('Deploy VERSION', rp.served_version || '—')}
+            ${csStat('simulation.sh', rs['simulation.sh'] || '—')}${csStat('dns_latency.sh', rp.dns_latency_present ? (rs['dns_latency.sh'] || 'yes') : 'MISSING')}
+          </div>
+          ${warns.map(([w, c]) => `<p class="text-xs ${c} mt-1">${w}</p>`).join('')}
+          <p class="text-[11px] text-slate-400 font-mono mt-1">head ${csEscape(rp.head || '?')} · checked-out ${csEscape(rp.checked_out_branch || '?')} · source ${csEscape(rp.source_of_truth || '?')} · dns_fail ${csEscape(rs['dns_fail.sh'] || '?')}</p>
+        </div>`;
+    }).join('');
+    return `<p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Spoke Repo / Update Status</p>
+      <div class="space-y-2 mb-6">${cards || '<p class="text-sm text-slate-500">No spokes reporting.</p>'}</div>`;
+}
+
 async function csRenderSetupDiagnostics() {
     csSetToolbar('');
+    // Repo/update status per spoke (best-effort; shown even if the CS bridge
+    // isn't up yet — it's the "did my change reach the spoke?" panel).
+    let repoSection = '';
+    try {
+        const apiData = await csFetch(`/aggregate/api-server?tenant_id=${csTenant()}`);
+        repoSection = _csRepoStatusSection(apiData);
+    } catch (e) { console.error('csRenderSetupDiagnostics: api-server fetch failed', e); }
     let snap = null;
     try {
         snap = await csFetch(`/${csTenant()}/cs-bridge-status?tenant_id=${csTenant()}`);
-    } catch (e) { console.error('csRenderSetupDiagnostics: load failed', e); csSet(csErrorBox('Could not load CS bridge status', e)); return; }
+    } catch (e) { console.error('csRenderSetupDiagnostics: load failed', e); csSet(`<div>${repoSection}${csErrorBox('Could not load CS bridge status', e)}</div>`); return; }
     if (!snap || !snap.available) {
-        csSet(`<div>
+        csSet(`<div>${repoSection}
           <p class="text-sm text-slate-500">CS bridge not started on this hub yet. The bridge poller runs on the hub; status appears here once it completes its first cycle (a few seconds after hub boot).</p>
         </div>`);
         return;
@@ -9962,7 +9998,7 @@ async function csRenderSetupDiagnostics() {
     const _disabledLine = _disabled.length
       ? `<p class="text-[11px] text-amber-600 mb-2">${csEscape(String(_disabled.length))} agent(s) hidden (CS disabled) — enable in Agent Config to manage their VMs.</p>`
       : '';
-    csSet(`<div>${cfg}
+    csSet(`<div>${repoSection}${cfg}
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">CS Bridge — per-agent relay status (${_shown.length} shown${_disabled.length ? ', ' + _disabled.length + ' hidden' : ''})</p>
       ${_disabledLine}
       <p class="text-[11px] text-slate-400 mb-3">ACTIVE = the bridge is polling + relaying this agent's queue. <b>Via</b> = the spoke the agent is actually connected to (commands are delivered through it); <b>cs_spoke</b> in the Decision is the tenant's queue broker (one per tenant — every lrb agent shares it). <b>Inbox</b> = commands found in the agent's inbox on the cs spoke last poll (0 with 0 Accepted = nothing queued / hostname-key mismatch; &gt;0 with 0 Accepted = relay path issue). SKIP no-cs-spoke = no client-sim spoke bound to the tenant. Re-queued climbing = agent too busy to ACK (transient, retried up to max retries). Gave up / Failed = retries exhausted or a genuine rejection. The same data streams to <b>WebUI Logs → Simulations</b> as <code>[cs-bridge]</code> lines.</p>
