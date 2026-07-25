@@ -11466,8 +11466,11 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                         // spoke); Un-approve lives inside Edit for approved ones.
                         ...(approved ? [] : [_mgmtBtn('Approve', `approveSpoke('${eSid}')`, 'bg-blue-600 hover:bg-blue-700 text-white')]),
                         ...(s._roleName ? [_mgmtBtn('Unload Role', `unloadRole('${eRoleParent}','${eRoleName}')`, 'bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-200')] : []),
-                        ...(extras ? extras.actions : []),
                     ],
+                    // Decommission / Force Delete (+ Restore for a retired spoke)
+                    // drop to their own line — matches the Agents table so the
+                    // destructive actions never wrap into the primary buttons.
+                    actionsSecondary: extras ? extras.actions : [],
                     cornerActions: extras ? extras.eventsActions : [],
                 }) + (extras ? extras.eventsPanel : '');
             }).join('')}</div>`;
