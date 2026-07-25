@@ -4564,9 +4564,12 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         continue
                     if stx.get("phase") != "stable" or stx.get("learned_op") is None:
                         continue
-                    # skey = "{alert_type}:{alert_id}:{site}" → alert_key drops site.
-                    parts = str(skey).split(":", 2)
-                    ak = ":".join(parts[:2]) if len(parts) >= 2 else str(skey)
+                    # skey = "{alert_type}:{alert_id}:{site}" → alert_key drops the
+                    # trailing site. alert_id itself may carry a "Central:"/"Mist:"
+                    # prefix (extra colons), so strip only the LAST segment via
+                    # rpartition — the head IS the alert_key (== _alert_key). Mirrors
+                    # the global roll-up's derivation.
+                    ak = str(skey).rpartition(":")[0] or str(skey)
                     try:
                         op = int(stx["learned_op"])
                     except (TypeError, ValueError):
