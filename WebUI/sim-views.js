@@ -1750,7 +1750,7 @@ function csRenderClientRows(rows, targetId) {
         const _demoOn = window._csDemoActive && window._csDemoActive[host];
         const _ls = csLastSeenAgo(c.last_seen);
         const line1 = `<tr class="border-t border-slate-100 ${_demoOn ? 'bg-amber-50' : ''}">
-          <td class="px-4 py-2 font-mono text-xs whitespace-nowrap">${csClientStatusDot(c)}${csEscape(host || '—')}</td>
+          <td class="px-4 py-2 font-mono text-xs whitespace-nowrap">${csClientStatusDot(c)}${csEscape(host || '—')}${c.dns_ceiling ? `<span class="ml-1 text-[10px] font-semibold text-amber-600" title="Learned DNS self-throttle ceiling this client reported — failures/min it sustains before self-DOSing its gateway${c.dns_ceiling_converged ? ' (converged)' : ''}">DNS≤${csEscape(c.dns_ceiling)}/m${c.dns_ceiling_converged ? '✓' : ''}</span>` : ''}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(cfg.wsite || '—')}</td>
           <td class="px-4 py-2 font-mono text-xs text-slate-500">${csEscape(c.simulation_id || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(cfg.sim_phy || '—')}</td>
