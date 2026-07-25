@@ -11749,9 +11749,22 @@ async function loadSpokesAndAgents() {
     // concurrently with Promise.all so the Spokes & Agents view resolves in one
     // round-trip instead of three; each branch keeps its own try/catch so a
     // single failure degrades the same as before (best-effort).
+    // The Agents fetch must follow THIS view's own tenant dropdown
+    // (sa-tenant-filter), NOT the global currentTenant. /api/pxmx/agents filters
+    // its (offline) roster server-side to the passed tenant, so pinning
+    // currentTenant dropped an offline/unassigned pxmx agent BEFORE the "All
+    // tenants" client-side filter (_saMatch) below could include it — the agent
+    // whose parent spoke is offline then showed in neither list (invisible +
+    // undeletable). For "All tenants"/"Unassigned" we fetch the FULL roster
+    // (omit the param → admin session resolves to no scope) and let _saMatch
+    // narrow; a specific-tenant selection is passed straight through.
+    const _saFilterForFetch = document.getElementById('sa-tenant-filter')?.value || '__all__';
+    const _agentsUrl = (_saFilterForFetch === '__all__' || _saFilterForFetch === '__unassigned__')
+        ? '/api/pxmx/agents'
+        : '/api/pxmx/agents?tenant=' + encodeURIComponent(_saFilterForFetch);
     const [spokesRes, agentsRes, diagRes] = await Promise.allSettled([
         (async () => setupFetch('/setup/pending_spokes'))(),
-        (async () => fetch('/api/pxmx/agents?tenant=' + encodeURIComponent(currentTenant), { credentials: 'same-origin' }))(),
+        (async () => fetch(_agentsUrl, { credentials: 'same-origin' }))(),
         (async () => setupFetch('/setup/diagnostics'))(),
     ]);
 
