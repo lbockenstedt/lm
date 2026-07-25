@@ -4445,7 +4445,7 @@ function csRenderSimQuotaEditor() {
     csSet(`<div class="space-y-4">
       <div class="hpe-card rounded-lg p-5 shadow-sm">
         <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
-          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Engine Config ${helpIcon('cs', null, 'Simulations help')}</h3>
+          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Engine Config ${helpIcon('cs', null, 'Simulations help')}${helpIcon('alert-generation', null, 'How to generate each alert (negative sims): config + quota settings')}</h3>
           <div class="flex justify-end gap-2">
             ${window._csIgnoreGlobalQuotas
               ? `<button onclick="csToggleIgnoreGlobalQuotas()" title="This tenant ignores the platform-wide Sim Quota defaults — only its own rows apply. Click to use global defaults again." class="bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-300 px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Global Defaults: Ignored</button>`
