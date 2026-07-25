@@ -83,9 +83,29 @@ async def _aggregate_spokes(hub):
     a route closure) so it depends only on ``hub`` and is unit-testable with a
     stub hub. Does not itself catch exceptions — ``_maybe_refresh_spokes``
     serves stale on failure rather than blanking the tile."""
-    known_spokes = hub.state.system_state.get("known_modules", [])
+    known_spokes = list(hub.state.system_state.get("known_modules", []) or [])
     module_names = hub.state.system_state.get("module_names", {})
     module_metadata = hub.state.system_state.get("module_metadata", {})
+
+    # An approved spoke can exist in ``approved_modules`` (keyed by primary key)
+    # WITHOUT ever being mirrored into ``known_modules`` — see the
+    # /setup/spokes/purge-prefix "not yet mirrored into known_modules" catch.
+    # The out-of-contact alert loop iterates ``approved_modules``, so such a
+    # spoke fires a footer alert while never getting a row here → the admin sees
+    # "out of contact" but has no row to Decommission/Force Delete. Union the
+    # orphans in so every approved (non-relayed-agent) spoke gets a deletable
+    # row. Relayed pxmx node-agents that leaked into approved_modules are
+    # excluded (they render in the Agents table, keyed by composite id — the
+    # same set the alert loop skips via _selfheal_leaked_agents).
+    _covered = {hub._primary_key(sid) for sid in known_spokes}
+    try:
+        _relay_ids = hub._relayed_agent_ids()
+    except Exception:
+        _relay_ids = set()
+    for pk, ap in (hub.approved_modules or {}).items():
+        if ap and pk not in _covered and pk not in _relay_ids:
+            known_spokes.append(pk)
+
     spokes_status = []
     for sid in known_spokes:
         meta = module_metadata.get(sid, {}) or {}

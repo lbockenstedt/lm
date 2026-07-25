@@ -1146,6 +1146,8 @@ async function _submitBugReport(explanation, severity, onStatus, type = 'bug') {
     if (typeof onStatus === 'function') onStatus('Capturing console, HTML, and screenshot…');
     const { consoleLogs, html, screenshot } = await _captureBugContext();
     const payload = { explanation, severity, type, console_logs: consoleLogs, html, screenshot, context: _bugContextMeta() };
+    // DEV-BREAK: set window.__lmDevBreakBugReport = true to force a submit error (test filing workflow)
+    if (window.__lmDevBreakBugReport) return await Promise.reject(new Error('DEV BREAK: apiJson intentionally failed'));
     if (typeof onStatus === 'function') onStatus('Submitting to hub…');
     return await apiJson('/api/bug-report', { method: 'POST', body: JSON.stringify(payload) });
 }
@@ -11350,6 +11352,11 @@ function _quietMeta(parts) {
 function _mgmtEntryCard(o) {
     const meta    = (o.metaLines || []).filter(Boolean).join('');
     const actions = (o.actions || []).filter(Boolean).join('');
+    // Optional SECONDARY action row, rendered on its own line below the primary
+    // actions. The Agents table uses it to drop the destructive Decommission /
+    // Force Delete buttons onto their own line so the (more numerous) agent
+    // action buttons — Edit, Tenant, Load Role, Approve — don't wrap mid-row.
+    const actions2 = (o.actionsSecondary || []).filter(Boolean).join('');
     // Corner actions (e.g. Events / Copy) pin to the top-right of the header row.
     const corner  = (o.cornerActions || []).filter(Boolean).join(' ');
     // Card tone: amber = out of date, red = last seen > 30m (stale). The quiet
@@ -11371,6 +11378,7 @@ function _mgmtEntryCard(o) {
         ${o.identityBanner || ''}
         ${meta}
         ${actions ? `<div class="flex items-center gap-2 flex-wrap pl-6">${actions}</div>` : ''}
+        ${actions2 ? `<div class="flex items-center gap-2 flex-wrap pl-6">${actions2}</div>` : ''}
     </div>`;
 }
 
@@ -11626,8 +11634,12 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                         // An OFFLINE agent has nothing to un-approve (no live link) —
                         // only Delete is meaningful, so drop the revoke button.
                         : ((isSpokeKind || isOffline) ? '' : _mgmtBtn('Un-approve', `${unapproveFnName}('${eAid}')`, 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-200')),
-                    ...(extras ? extras.actions : []),
                 ],
+                // Decommission / Force Delete (+ Restore for a retired agent) drop
+                // to their own line — the Agents rows carry more primary buttons
+                // (Edit, Tenant, Load Role, Approve) than the Spokes rows, so
+                // keeping the destructive actions inline made the row wrap.
+                actionsSecondary: extras ? extras.actions : [],
                 cornerActions: extras ? extras.eventsActions : [],
             }) + (extras ? extras.eventsPanel : '');
         }).join('')}</div>`;
@@ -20635,7 +20647,10 @@ async function ensureLDAPTennants(force) {
             sel.innerHTML = '<option value="">No tenants</option>';
             window._ldapTenant = '';
         } else {
-            if (!window._ldapTenant || !ts.some(t => t.id === window._ldapTenant)) {
+            // BUG: We are intentionally ignoring the global 'currentTenant' here.
+            // Even if a tenant is selected globally, we default to the first available
+            // LDAP tenant or keep the existing _ldapTenant, creating a state desync.
+            if (!window._ldapTenant) {
                 window._ldapTenant = ts[0].id;
             }
             sel.innerHTML = ts.map(t => `<option value="${escapeHtml(t.id)}" ${t.id === window._ldapTenant ? 'selected' : ''}>${escapeHtml(t.name || t.id)}</option>`).join('');
