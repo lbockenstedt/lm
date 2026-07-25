@@ -4558,6 +4558,20 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             # failure here must never blank the catalog.
             try:
                 learned: dict = {}
+
+                def _put_learned(ak: str, entry: dict) -> None:
+                    """Store an entry under the alert_key AND a prefix-stripped
+                    (bare) alias, so the editor matches whether its row carries a
+                    Central:/Mist:/Central On-Prem: prefix or a bare id. Highest op
+                    wins on collision; the exact (prefixed) key is what the editor
+                    tries first."""
+                    for key in {ak, f"{ak.partition(':')[0]}:{parse_alert_source(ak.partition(':')[2])[1]}"}:
+                        if not key:
+                            continue
+                        cur = learned.get(key)
+                        if cur is None or entry["op"] > cur.get("op", 0):
+                            learned[key] = dict(entry)
+
                 astate = await store.get_adaptive_state(tenant_id) or {}
                 for skey, stx in astate.items():
                     if not isinstance(stx, dict):
@@ -4578,9 +4592,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         fl = int(stx["floor"]) if stx.get("floor") is not None else None
                     except (TypeError, ValueError):
                         fl = None
-                    cur = learned.get(ak)
-                    if cur is None or op > cur.get("op", 0):
-                        learned[ak] = {"op": op, "floor": fl, "source": "tenant"}
+                    _put_learned(ak, {"op": op, "floor": fl, "source": "tenant"})
                 glv = await store.get_global_learned_values() or {}
                 for ak, gv in glv.items():
                     if not isinstance(gv, dict) or gv.get("op") is None:
@@ -4589,13 +4601,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         gval = int(gv["op"])
                     except (TypeError, ValueError):
                         continue
-                    cur = learned.get(ak)
-                    if cur is None or gval > cur.get("op", 0):
-                        try:
-                            gfl = int(gv["floor"]) if gv.get("floor") is not None else (cur.get("floor") if cur else None)
-                        except (TypeError, ValueError):
-                            gfl = cur.get("floor") if cur else None
-                        learned[ak] = {"op": gval, "floor": gfl, "source": "global"}
+                    try:
+                        gfl = int(gv["floor"]) if gv.get("floor") is not None else None
+                    except (TypeError, ValueError):
+                        gfl = None
+                    _put_learned(str(ak), {"op": gval, "floor": gfl, "source": "global"})
                 cat["learned"] = learned
             except Exception:
                 logger.debug("sim-quota catalog: learned-value attach failed", exc_info=True)

@@ -4321,9 +4321,17 @@ function csSimQuotaAlertIdOptions(alertType, selectedId) {
 function _csLearnedForRow(r) {
     if (!r || !r.alert_id || r.tied === false || !r.sim_id) return null;
     const lm = (csSimQuotaCatalog && csSimQuotaCatalog.learned) || {};
-    const ak = `${r.alert_type || 'alert'}:${r.alert_id || ''}`;
-    const v = lm[ak];
-    return (v && v.op != null) ? v : null;
+    const t = r.alert_type || 'alert';
+    const id = String(r.alert_id || '');
+    // Try the prefixed key first (Central:/Mist:/Central On-Prem:), then a
+    // prefix-stripped (bare) alias — the backend publishes both so the lookup
+    // matches regardless of whether the stored id is prefixed or bare.
+    const bare = id.replace(/^(central on-prem|central|mist):/i, '');
+    for (const k of [`${t}:${id}`, `${t}:${bare}`]) {
+        const v = lm[k];
+        if (v && v.op != null) return v;
+    }
+    return null;
 }
 function _csLearnedOpForRow(r) {
     const v = _csLearnedForRow(r);
