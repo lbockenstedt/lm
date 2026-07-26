@@ -22,8 +22,13 @@ logger = logging.getLogger("SimQuota")
 
 # ── Schema (byte-identical to cs/lm-spoke/src/sim_quota.py) ───────────────
 SIM_QUOTA_KEYS = ("alert_id", "alert_type", "sim_id", "count", "site",
-                  "multi_capable", "rehome", "enabled", "learning")
+                  "multi_capable", "rehome", "enabled", "learning", "tier")
 ALERT_TYPES = ("alert", "insight")
+# Per-quota client-tier policy (twin of cs sim_quota.QUOTA_TIERS). "best"
+# (default) = prefer T1 (dedicated PCI, most reliable) then fall back to T2 (USB
+# dongle); "t1"/"t2" = that tier ONLY (underfill rather than degrade onto a
+# less-reliable client).
+QUOTA_TIERS = ("best", "t1", "t2")
 
 # ── Source prefix — the seam between Central and Mist ──────────────────────
 # Central and Mist are SEPARATE products. A sim-quota row's ``alert_id`` carries
@@ -245,6 +250,9 @@ def normalize_quota(raw: Any) -> Dict[str, Any]:
         # quota is either a lab or a consumer (both off = fixed count). See design
         # doc §9 / adaptive_step.
         "learning": _as_bool(raw.get("learning"), False),
+        # Client-tier policy (see QUOTA_TIERS). "best" prefers T1 then T2.
+        "tier": (lambda t: t if t in QUOTA_TIERS else "best")(
+            str(raw.get("tier") or "best").strip().lower()),
     }
     # Adaptive-controller fields (design doc §9) — carried through only when the
     # quota declares them, so a fixed-count quota stays exactly as before. The
