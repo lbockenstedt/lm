@@ -343,18 +343,16 @@ class SimulationsService:
         cs/docs/t2-usb-dongle-throttle-recover.md) — NOT against 100%.
 
         working = clients that are supposed to be connected AND are: online +
-        gateway_reachable. EXCLUSIVE clients (running a connectivity-breaking
-        failure sim — dns/ssidpw/auth/assoc/dhcp/port_flap, SIM_META
-        multi_capable=False) are EXCLUDED entirely: they're MEANT to be
-        disconnected, so judging them on the gateway would be wrong.
+        gateway_reachable. Clients running a CONNECTIVITY-BREAKING sim are EXCLUDED
+        entirely: they're MEANT to be off-network, so the gateway test is wrong for
+        them. That is NOT SIM_META multi_capable=False — dns_fail/dns_latency/
+        dhcp_fail monopolize a client but stay CONNECTED (they need the network to
+        flood), and count as working. Only the association/auth breakers qualify.
         total = clients provisioned across the tenant's Proxmox hosts (summed
-        vm_count). pct = working / (provisioned - exclusive)."""
-        try:
-            from .sim_quota import SIM_META
-            exclusive = {k for k, v in SIM_META.items()
-                         if isinstance(v, dict) and v.get("multi_capable") is False}
-        except Exception:  # noqa: BLE001
-            exclusive = set()
+        vm_count). pct = working / (provisioned - excluded)."""
+        # Sims where the client intentionally can't associate/authenticate (or the
+        # wired link flaps) → it won't hold a gateway by design.
+        exclusive = {"ssidpw_fail", "auth_fail", "assoc_fail", "port_flap"}
         try:
             pdata = self._build_proxmox_data(tenant_id)
             provisioned = sum(int(h.get("vm_count") or 0) for h in (pdata.get("hosts") or []))
