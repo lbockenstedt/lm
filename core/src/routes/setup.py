@@ -227,14 +227,19 @@ async def _aggregate_status(hub):
         "spoke_module_types": dict(hub.spoke_module_types),
         "heartbeats": {sid: str(s) for sid, s in hub.heartbeat.get_all_statuses().items()},
         # Operator alerts surfaced in the header badge: spoke out-of-contact +
-        # fleet-availability (per-tenant client-sim health). Both share the
-        # {spoke_id, name, tier, ...} shape so the WebUI renders them uniformly.
+        # fleet-availability (per-tenant client-sim health) + out-of-dongles
+        # (per Proxmox host). All share the {spoke_id, name, tier, ...} shape so
+        # the WebUI renders them uniformly.
         "active_alert_count": (len(getattr(hub, "_spoke_alerts", {}) or {})
                                + (len(getattr(hub, "_fleet_alerts", {}) or {})
-                                  if hasattr(hub, "get_fleet_alerts") else 0)),
+                                  if hasattr(hub, "get_fleet_alerts") else 0)
+                               + (len(getattr(hub, "_dongle_alerts", {}) or {})
+                                  if hasattr(hub, "get_dongle_alerts") else 0)),
         "active_alerts": (hub.get_active_spoke_alerts()
                           + (hub.get_fleet_alerts()
-                             if hasattr(hub, "get_fleet_alerts") else [])),
+                             if hasattr(hub, "get_fleet_alerts") else [])
+                          + (hub.get_dongle_alerts()
+                             if hasattr(hub, "get_dongle_alerts") else [])),
         "metrics": metrics,
     }
 

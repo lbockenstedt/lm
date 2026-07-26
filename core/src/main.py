@@ -477,6 +477,12 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self._fleet_alerts: Dict[str, Dict[str, Any]] = {}
         self._fleet_alert_tier: Dict[str, str] = {}
         self._fleet_bad_since: Dict[str, float] = {}
+        # Out-of-dongles alerting (same mixin/loop): per Proxmox host, a dead/
+        # quarantined dongle with NO spare leaves a VM slot unfilled — the "replace
+        # hardware" signal. Keyed "<tenant>::<host>".
+        self._dongle_alerts: Dict[str, Dict[str, Any]] = {}
+        self._dongle_alert_tier: Dict[str, str] = {}
+        self._dongle_bad_since: Dict[str, float] = {}
         # "File a Bug" reports from the WebUI footer button. The WebUI POSTs an
         # explanation + browser console + raw HTML + html2canvas screenshot to
         # /api/bug-report; the hub stores the full artifacts under data_dir/bugs/
