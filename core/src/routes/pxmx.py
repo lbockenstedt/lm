@@ -108,8 +108,24 @@ async def _aggregate_agents(hub, agent_spokes):
             # the owning spoke relaying AGENT_HEARTBEAT up).
             hb_key = f"{spoke_pk}:{agent_pk}"
             hb_last = hub.heartbeat.last_seen.get(hb_key)
+            hb_status_s = str(hub.heartbeat.get_status(hb_key).value)  # GREEN/YELLOW/RED
+            # Fallback liveness: agent_info[agent_pk]["last_seen"] is stamped on
+            # EVERY relayed frame (log/telemetry/CS_*/heartbeat — main.py
+            # _dispatch_relayed_agent_frame), so an agent that's actively relaying
+            # but whose AGENT_HEARTBEAT frames never landed under the composite key
+            # (e.g. dropped during a no-hub-relay startup window) must NOT read as
+            # "Never connected". Take the freshest of the two signals and, when the
+            # fallback wins, re-derive status using the SAME 120s/300s GREEN/YELLOW/
+            # RED bands as HeartbeatManager.get_status. agent_info[pk] is evicted on
+            # spoke disconnect, so a genuinely-dead agent still ages out to RED.
+            ai_last = (getattr(hub, "agent_info", {}) or {}).get(agent_pk, {}).get("last_seen")
+            if isinstance(ai_last, (int, float)) and (
+                    not isinstance(hb_last, (int, float)) or ai_last > hb_last):
+                hb_last = ai_last
+                _el = now - ai_last
+                hb_status_s = "GREEN" if _el < 120 else ("YELLOW" if _el < 300 else "RED")
             a["heartbeat_age_s"] = max(0, int(now - hb_last)) if isinstance(hb_last, (int, float)) else None
-            a["heartbeat_status"] = str(hub.heartbeat.get_status(hb_key).value)
+            a["heartbeat_status"] = hb_status_s
             a["hostname"] = cfg.get("hostname", "") or a.get("hostname", "") or aid
             a["install_uuid"] = cfg.get("install_uuid", "")
             a["identity_change"] = _agent_identity_change_for(hub, parent_spoke, aid, cfg)
