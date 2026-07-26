@@ -1901,6 +1901,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         except Exception:  # noqa: BLE001
             return {}
 
+    async def _sim_stacking(tenant_id: str = "") -> dict:
+        """The GLOBAL sim-stacking knobs (sim_weights / stack_cap /
+        stack_rotation_s) pushed to every spoke's SimQuotaEngine._reconcile_stacked.
+        Platform-wide like ``_sim_shareable`` — ``tenant_id`` accepted but ignored."""
+        try:
+            return {
+                "sim_weights": await store.get_sim_weights_global(),
+                "stack_cap": await store.get_stack_cap_global(),
+                "stack_rotation_s": await store.get_stack_rotation_s_global(),
+            }
+        except Exception:  # noqa: BLE001
+            return {}
+
     async def _record_alert_insight_history(browse: dict, source: str = "central") -> None:
         """Upsert the alerts/insights from a browse result into the shared history.
         ``source`` is ``'central'`` / ``'mist'`` / ``'central_on_prem'`` — which
@@ -2053,6 +2066,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             "effective_sim_quotas": await _effective_sim_quotas(tenant_id),
             "sim_shareable": await _sim_shareable(tenant_id),
             "sim_knob_overrides": await _knob_overrides_for_tenant(tenant_id),
+            **await _sim_stacking(tenant_id),
             **await _pool_config(tenant_id),
         }, force_live=force_live)
 
@@ -4869,6 +4883,11 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # Global Simulation Sharing (stacking) + N/A hide maps live here now.
         catalog["sim_shareable"] = await _sim_shareable()
         catalog["sim_na"] = await _sim_na()
+        # Global sim-stacking knobs (weighted multi-sim fill) for the Sim-Stacking
+        # tile: per-sim breadth weight, max sims/client, re-shuffle cadence.
+        catalog["sim_weights"] = await store.get_sim_weights_global()
+        catalog["stack_cap"] = await store.get_stack_cap_global()
+        catalog["stack_rotation_s"] = await store.get_stack_rotation_s_global()
         # Dongle-quarantine: the platform-wide exclusion-sim set (sims whose
         # no-IP/no-SSID outcome is the point — don't QT a client running only
         # these). A tenant csc ``qt_exclude_sims`` overrides per-tenant; this
@@ -4946,6 +4965,24 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if isinstance((body or {}).get("sim_na"), dict):
             await store.set_sim_na_global(
                 {str(k): bool(v) for k, v in body["sim_na"].items()})
+        # GLOBAL sim-stacking knobs (weighted multi-sim fill of the spare pool).
+        # sim_weights = {sim_id: breadth weight} (coerce to float, drop bad/<0);
+        # stack_cap / stack_rotation_s are ints (the store clamps). Each omitted →
+        # leave the stored value as-is.
+        if isinstance((body or {}).get("sim_weights"), dict):
+            _sw = {}
+            for k, v in body["sim_weights"].items():
+                try:
+                    fv = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if fv >= 0:
+                    _sw[str(k)] = fv
+            await store.set_sim_weights_global(_sw)
+        if (body or {}).get("stack_cap") is not None:
+            await store.set_stack_cap_global(body.get("stack_cap"))
+        if (body or {}).get("stack_rotation_s") is not None:
+            await store.set_stack_rotation_s_global(body.get("stack_rotation_s"))
         # Dongle-quarantine exclusion sims (global default). Coerce to a list of
         # known sim ids; unknown ids are dropped (an admin typo shouldn't widen
         # the exclusion set silently). Empty list = exclude nothing (every sim

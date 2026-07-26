@@ -7149,6 +7149,20 @@ function _renderSetupSimulationsTile(content) {
                 <p class="text-xs text-slate-500 mb-3">Platform-wide (all tenants): which simulations may be <b>stacked</b> onto a client already running another sim. A <b>non-shareable</b> sim is exclusive — no tenant's Quota Engine will pack it onto a client running other sims (authoritative, overrides a quota's Multi-capable). Mark a sim <b>N/A</b> to hide it via Hide N/A.</p>
                 <div id="sim-sharing-rows" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
+            <div class="${card}">
+                <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
+                  <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Sim Stacking (Weighted)</h3>
+                  <button onclick="saveSimStacking()" class="${btnSecCls} text-xs px-3 py-1">Save</button>
+                </div>
+                <p class="text-xs text-slate-500 mb-3">Platform-wide (all tenants): the ambient pool <b>stacks multiple shareable sims</b> onto each spare client. A sim's <b>weight</b> sets its breadth — weight 3 runs on ~3× the clients of weight 1 (default 1). <b>Max / client</b> caps how many sims one client runs at once; <b>Rotation</b> is how often the assignment re-shuffles so no client keeps the same set forever. Only <b>shareable</b> sims (above) stack, and only sims a tenant lists in <span class="font-mono">randomizable_sims</span> (Config → Pool & SSID) are eligible — empty = stacking off.</p>
+                <div class="flex flex-wrap items-center gap-4 mb-3">
+                  <label class="text-xs text-slate-600 flex items-center gap-2">Max sims / client
+                    <input id="stack-cap" type="number" min="0" max="20" class="${inputCls} text-xs px-2 py-1 w-20"></label>
+                  <label class="text-xs text-slate-600 flex items-center gap-2">Rotation (s)
+                    <input id="stack-rotation-s" type="number" min="30" step="30" class="${inputCls} text-xs px-2 py-1 w-24"></label>
+                </div>
+                <div id="sim-stacking-rows" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+            </div>
             </div>
             <div id="simtab-catalog" class="space-y-4 hidden">
             <div class="${card}">
@@ -7476,8 +7490,12 @@ async function loadSimQuotaDefaults() {
         _simSharing = (cat.sim_shareable && typeof cat.sim_shareable === 'object') ? { ...cat.sim_shareable } : {};
         _simSharingNA = (cat.sim_na && typeof cat.sim_na === 'object') ? { ...cat.sim_na } : {};
         _qtExcludeSims = Array.isArray(cat.qt_exclude_sims) ? cat.qt_exclude_sims.slice() : [];
+        _simWeights = (cat.sim_weights && typeof cat.sim_weights === 'object') ? { ...cat.sim_weights } : {};
+        _stackCap = (cat.stack_cap != null) ? cat.stack_cap : 3;
+        _stackRotationS = (cat.stack_rotation_s != null) ? cat.stack_rotation_s : 600;
         _renderSimQuotaDefaultsEditor();
         _renderSimSharing();
+        _renderSimStacking();
         _renderQtExcludeSims();
     } catch (e) {
         rowsEl.innerHTML = '<p class="text-xs text-red-400 italic">Failed to load sim quota defaults</p>';
@@ -7493,6 +7511,14 @@ async function loadSimQuotaDefaults() {
 let _simSharing = {};
 let _simSharingNA = {};
 let _simSharingHideNA = false;
+
+// ── Sim Stacking (Weighted) — GLOBAL, sibling of Simulation Sharing ──────────
+// Per-sim breadth weight (weight 3 → ~3× the clients of weight 1), max sims per
+// client, and re-shuffle cadence. Saved via the same sim-quota-defaults PUT (which
+// also carries defaults + sharing so they aren't wiped). Only shareable sims stack.
+let _simWeights = {};
+let _stackCap = 3;
+let _stackRotationS = 600;
 
 // ── Dongle-quarantine exclusion sims (GLOBAL, Setup → Simulations → Sim Quotas) ─
 // The platform-wide set of sim ids whose no-IP/no-SSID outcome is the POINT of
@@ -7556,8 +7582,74 @@ function _renderSimSharing() {
     }).join('');
 }
 
-window.simSharingOnNA = function () { _simSharingSyncFromDom(); _renderSimSharing(); };
+window.simSharingOnNA = function () {
+    _simSharingSyncFromDom(); _renderSimSharing();
+    // A sharing change adds/removes a stackable sim → refresh the weight list
+    // (sync typed weights first so they survive the re-render).
+    _simStackingSyncFromDom(); _renderSimStacking();
+};
 window.simSharingToggleHide = function (cb) { _simSharingSyncFromDom(); _simSharingHideNA = !!(cb && cb.checked); _renderSimSharing(); };
+
+// ── Sim Stacking (Weighted) render / sync / save ─────────────────────────────
+function _simStackingSyncFromDom() {
+    document.querySelectorAll('[data-simweight]').forEach(el => {
+        const v = parseFloat(el.value);
+        _simWeights[el.getAttribute('data-simweight')] = (isFinite(v) && v >= 0) ? v : 1;
+    });
+    const capEl = document.getElementById('stack-cap');
+    const rotEl = document.getElementById('stack-rotation-s');
+    if (capEl) { const c = parseInt(capEl.value, 10); if (isFinite(c) && c >= 0) _stackCap = c; }
+    if (rotEl) { const r = parseInt(rotEl.value, 10); if (isFinite(r) && r >= 30) _stackRotationS = r; }
+}
+
+function _renderSimStacking() {
+    const capEl = document.getElementById('stack-cap');
+    const rotEl = document.getElementById('stack-rotation-s');
+    if (capEl && document.activeElement !== capEl) capEl.value = (_stackCap != null ? _stackCap : 3);
+    if (rotEl && document.activeElement !== rotEl) rotEl.value = (_stackRotationS != null ? _stackRotationS : 600);
+    const el = document.getElementById('sim-stacking-rows');
+    if (!el) return;
+    const cat = _simQuotaDefaultsCatalog || {};
+    const meta = cat.meta || {};
+    // Only SHAREABLE sims stack — mirror _renderSimSharing's effective share.
+    const isShare = f => Object.prototype.hasOwnProperty.call(_simSharing, f)
+        ? !!_simSharing[f] : !!(meta[f] && meta[f].multi_capable);
+    let sims = (cat.sims || []).map(s => s.sim_id).filter(Boolean);
+    Object.keys(_simWeights).forEach(k => { if (sims.indexOf(k) < 0) sims.push(k); });
+    sims = sims.filter(isShare).sort((a, b) =>
+        String(a).toLowerCase().localeCompare(String(b).toLowerCase()));
+    if (!sims.length) {
+        el.innerHTML = '<p class="text-xs text-slate-400 italic">No shareable simulations — mark sims <b>Share</b> above to weight them for stacking.</p>';
+        return;
+    }
+    const esc = escapeHtml;
+    el.innerHTML = sims.map(f => {
+        const w = Object.prototype.hasOwnProperty.call(_simWeights, f) ? _simWeights[f] : 1;
+        return `<label class="grid grid-cols-[minmax(0,1fr)_5rem] items-center gap-2 py-1 border-b border-slate-100">
+          <span class="text-xs font-mono text-slate-600 truncate">${esc(f)}</span>
+          <input data-simweight="${esc(f)}" type="number" min="0" step="0.5" value="${esc(String(w))}" class="border border-slate-300 rounded px-2 py-0.5 text-xs w-16">
+        </label>`;
+    }).join('');
+}
+
+window.saveSimStacking = async function () {
+    _simStackingSyncFromDom();
+    try {
+        const r = await fetch(SIM_QUOTA_DEFAULTS_URL, {
+            method: 'PUT', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            // Carry defaults + sharing so the shared PUT doesn't wipe them.
+            body: JSON.stringify({ defaults: _simQuotaDefaultsSyncFromDom(),
+                                   sim_shareable: _simSharing, sim_na: _simSharingNA,
+                                   sim_weights: _simWeights, stack_cap: _stackCap,
+                                   stack_rotation_s: _stackRotationS }),
+        });
+        if (!r.ok) throw new Error(`${r.status}`);
+        if (typeof showToast === 'function') showToast('Sim stacking saved.', 'success');
+    } catch (e) {
+        if (typeof showToast === 'function') showToast((e && e.message) || 'Save failed', 'error');
+        console.error('saveSimStacking failed', e);
+    }
+};
 
 window.saveQtExcludeSims = async function () {
     _qtExcludeSyncFromDom();

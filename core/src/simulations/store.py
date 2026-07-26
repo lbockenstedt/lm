@@ -1068,6 +1068,48 @@ class SimulationsStore:
             self._global()["sim_na"] = dict(mapping) if isinstance(mapping, dict) else {}
             await self._asave()
 
+    # Sim-stacking globals (weighted multi-sim fill of the spare pool). Live under
+    # ``__global__`` and pushed to every spoke as CS_CONFIG_UPDATE.{sim_weights,
+    # stack_cap,stack_rotation_s}. sim_weights = {sim_id: breadth weight}; stack_cap
+    # = max sims/client; stack_rotation_s = re-shuffle cadence. See SimQuotaEngine
+    # ._reconcile_stacked.
+    async def get_sim_weights_global(self) -> Dict[str, Any]:
+        v = self._global().get("sim_weights")
+        return dict(v) if isinstance(v, dict) else {}
+
+    async def set_sim_weights_global(self, mapping: Dict[str, Any]) -> None:
+        with self._lock:
+            self._global()["sim_weights"] = dict(mapping) if isinstance(mapping, dict) else {}
+            await self._asave()
+
+    async def get_stack_cap_global(self) -> int:
+        try:
+            return int(self._global().get("stack_cap", 3))
+        except (TypeError, ValueError):
+            return 3
+
+    async def set_stack_cap_global(self, n: Any) -> None:
+        with self._lock:
+            try:
+                self._global()["stack_cap"] = max(0, int(n))
+            except (TypeError, ValueError):
+                self._global()["stack_cap"] = 3
+            await self._asave()
+
+    async def get_stack_rotation_s_global(self) -> int:
+        try:
+            return int(self._global().get("stack_rotation_s", 600))
+        except (TypeError, ValueError):
+            return 600
+
+    async def set_stack_rotation_s_global(self, s: Any) -> None:
+        with self._lock:
+            try:
+                self._global()["stack_rotation_s"] = max(30, int(s))
+            except (TypeError, ValueError):
+                self._global()["stack_rotation_s"] = 600
+            await self._asave()
+
     async def get_global_usb_vidpids(self) -> List[Dict[str, Any]]:
         """Platform-wide (superadmin-certified) USB device list —
         {vidpid, type, label} dicts (the cs-spoke re-filter shape)."""
