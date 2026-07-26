@@ -335,7 +335,50 @@ class SimulationsService:
             except (TypeError, ValueError):
                 pass
         rows = [best[k] for k in order] + extras
-        return {"tenant_id": tenant_id, "clients": rows}
+        return {"tenant_id": tenant_id, "clients": rows,
+                "fleet_health": self._fleet_health(tenant_id, rows)}
+
+    def _fleet_health(self, tenant_id: str, clients: List[dict]) -> Dict[str, Any]:
+        """Fleet availability, judged against the ~80% USB-dongle churn floor (see
+        cs/docs/t2-usb-dongle-throttle-recover.md) — NOT against 100%.
+
+        working = clients that are supposed to be connected AND are: online +
+        gateway_reachable. EXCLUSIVE clients (running a connectivity-breaking
+        failure sim — dns/ssidpw/auth/assoc/dhcp/port_flap, SIM_META
+        multi_capable=False) are EXCLUDED entirely: they're MEANT to be
+        disconnected, so judging them on the gateway would be wrong.
+        total = clients provisioned across the tenant's Proxmox hosts (summed
+        vm_count). pct = working / (provisioned - exclusive)."""
+        try:
+            from .sim_quota import SIM_META
+            exclusive = {k for k, v in SIM_META.items()
+                         if isinstance(v, dict) and v.get("multi_capable") is False}
+        except Exception:  # noqa: BLE001
+            exclusive = set()
+        try:
+            pdata = self._build_proxmox_data(tenant_id)
+            provisioned = sum(int(h.get("vm_count") or 0) for h in (pdata.get("hosts") or []))
+        except Exception:  # noqa: BLE001
+            provisioned = 0
+        excl = working = 0
+        for c in clients:
+            if any(s in exclusive for s in (c.get("active_simulations") or [])):
+                excl += 1
+                continue
+            if c.get("online") and c.get("gateway_reachable"):
+                working += 1
+        eligible = max(0, provisioned - excl)
+        pct = round(100.0 * working / eligible, 1) if eligible > 0 else None
+        if pct is None:
+            status = "no_data"
+        elif pct >= 75:
+            status = "ok"
+        elif pct >= 50:
+            status = "warning"
+        else:
+            status = "critical"
+        return {"provisioned": provisioned, "exclusive": excl, "eligible": eligible,
+                "working": working, "pct": pct, "status": status}
 
     async def get_simulations_data(self, tenant_id: str) -> Dict[str, Any]:
         """One row per active simulation across the tenant's cached clients (the Simulations view shape)."""

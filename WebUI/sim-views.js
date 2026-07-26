@@ -1610,11 +1610,31 @@ async function csRenderClients(tier) {
         csDemoCard(),
     ]);
     csClientCache = csNormalizeClients(data);
-    // Faceted drill-down: the demo card, then the Simulation/Tier/Site facet bar,
-    // then the (drill-gated, capped) client list, then a static legend. Kill
-    // switch stays in the secondary-nav chip (renderSecondaryNav → csKillSwitchMountChip).
-    csSet(`<div class="space-y-4">${demoCard}<div id="cs-facets"></div><div id="cs-client-body"></div>${csClientsLegend()}</div>`);
+    const fhBadge = csFleetHealthBadge(data && data.fleet_health);
+    // Faceted drill-down: fleet-health banner, the demo card, then the
+    // Simulation/Tier/Site facet bar, then the (drill-gated, capped) client list,
+    // then a static legend. Kill switch stays in the secondary-nav chip.
+    csSet(`<div class="space-y-4">${fhBadge}${demoCard}<div id="cs-facets"></div><div id="cs-client-body"></div>${csClientsLegend()}</div>`);
     csRenderClientsFaceted();
+}
+
+// Fleet-health banner: working ÷ (provisioned − exclusive), judged against the
+// ~80% USB-dongle churn floor (NOT 100%). ≥75% OK, 50–75% WARNING (blink amber),
+// <50% CRITICAL (blink red). See cs/docs/t2-usb-dongle-throttle-recover.md.
+function csFleetHealthBadge(fh) {
+    if (!fh || fh.pct == null) return '';
+    const cls = fh.status === 'ok' ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+        : fh.status === 'warning' ? 'bg-amber-50 text-amber-800 border-amber-300 animate-pulse'
+        : fh.status === 'critical' ? 'bg-red-50 text-red-700 border-red-300 animate-pulse'
+        : 'bg-slate-50 text-slate-500 border-slate-200';
+    const label = fh.status === 'critical' ? 'CRITICAL' : fh.status === 'warning' ? 'LOW' : 'OK';
+    return `<div class="flex items-center gap-3 text-sm px-4 py-2 rounded-md border ${cls}"
+        title="Working clients (online + gateway reachable) ÷ provisioned, EXCLUDING exclusive failure sims (which are meant to be disconnected). Bands: ≥75% OK, 50–75% warning, <50% critical — ~80% is normal USB-dongle churn.">
+      <span class="font-bold">Fleet Health</span>
+      <span class="font-mono">${csEscape(String(fh.working))}/${csEscape(String(fh.eligible))} working · ${csEscape(String(fh.pct))}%</span>
+      <span class="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/60">${label}</span>
+      ${fh.exclusive ? `<span class="text-[11px] text-slate-500">(${csEscape(String(fh.exclusive))} exclusive excluded)</span>` : ''}
+    </div>`;
 }
 
 // Static legend under the Clients view — what the sim-bar button colors, the
