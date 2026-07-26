@@ -3896,6 +3896,7 @@ const CS_SIM_SECTION_FIELDS = {
         ['dns_fail_duration', 'DNS Fail Duration (s)'],
         ['dns_latency_rate', 'DNS Latency Rate (/min)'],
         ['dns_latency_duration', 'DNS Latency Duration (s)'],
+        ['dns_latency_threshold_ms', 'DNS Latency Threshold (ms) — a server must be this slow to feed the alert'],
         ['dns_max_inflight', 'DNS Max In-Flight Digs'],
     ],
     server: [['server_url', 'Server Url']],
