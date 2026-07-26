@@ -10308,9 +10308,14 @@ async function loadSpokeAlerts() {
         const isErr = String(a.tier) === 'error';
         const pill = isErr ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700';
         const mins = Math.max(0, Math.round((a.duration_s || 0) / 60));
+        // Resolve a friendly name (the alert entry carries only spoke_id) —
+        // mirror the header-tray resolver: display_name/name on the entry, else
+        // the spokeHealth map, else the raw id. Keep the UUID in a hover title.
+        const _h = (window.spokeHealth || {})[a.spoke_id];
+        const _nm = a.display_name || a.name || (_h && _h.name) || a.spoke_id;
         return `<div class="border border-slate-200 rounded-md p-3">
             <div class="flex items-center justify-between mb-1">
-                <span class="text-sm font-mono text-slate-700">${esc(a.spoke_id)}</span>
+                <span class="text-sm font-mono text-slate-700" title="${esc(a.spoke_id)}">${esc(_nm)}</span>
                 <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(a.tier)}</span>
             </div>
             <p class="text-xs text-slate-500">out of contact ${mins}m <span class="text-slate-400">· since ${fmtDate(a.since_ts)}</span></p>

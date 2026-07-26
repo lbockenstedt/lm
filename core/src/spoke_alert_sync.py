@@ -181,11 +181,21 @@ class SpokeAlertMixin:
         warning), then by ``since_ts`` ascending. Each entry is
         ``{spoke_id, tier, since_ts, duration_s, detail}``."""
         order = {_TIER_ERROR: 0, _TIER_WARN: 1}
+        md = self.state.system_state.get("module_metadata", {}) or {}
         out: List[Dict[str, Any]] = []
         for sid, a in (getattr(self, "_spoke_alerts", {}) or {}).items():
             if a.get("tier") in (_TIER_WARN, _TIER_ERROR):
+                # Resolve a friendly NAME here — these alerts fire for
+                # out-of-contact / offline / never-seen spokes, exactly the ones
+                # the WebUI's live spoke map may not carry, so it would fall back
+                # to the raw UUID. The hub has module_metadata for every approved
+                # spoke; resolve display_name → name → hostname (≠ the id).
+                m = md.get(sid) or {}
+                nm = (m.get("display_name") or m.get("name")
+                      or m.get("hostname") or "").strip()
                 out.append({
                     "spoke_id": sid,
+                    "name": nm if (nm and nm != sid) else sid,
                     "tier": a.get("tier"),
                     "since_ts": a.get("since_ts"),
                     "duration_s": int(a.get("duration_s", 0) or 0),
