@@ -3901,8 +3901,7 @@ const CS_SIM_SECTION_FIELDS = {
     server: [['server_url', 'Server Url']],
     address: [
         ['smb_address', 'Smb Address'], ['ping_address', 'Ping Address'],
-        ['dns_latency_1', 'Dns Latency 1'], ['dns_latency_2', 'Dns Latency 2'],
-        ['dns_latency_3', 'Dns Latency 3'],
+        ['dns_latency', 'DNS Latency Servers (one per line — unlimited; sim auto-selects a slow one + rotates off blacklisted)', 'list'],
         ['dns_bad_ip_1', 'Dns Bad Ip 1'], ['dns_bad_ip_2', 'Dns Bad Ip 2'],
         ['dns_bad_ip_3', 'Dns Bad Ip 3'],
         ['dns_bad_record_1', 'Dns Bad Record 1'], ['dns_bad_record_2', 'Dns Bad Record 2'],
@@ -3941,9 +3940,19 @@ function csParseIni(text) {
 // Render one labeled field for a section. on/off keys → a select; others → text
 // input. Each input carries data-cs-section + data-cs-key so the serializer can
 // walk them regardless of which section card they live in.
-function csSimField(section, key, label, value) {
+function csSimField(section, key, label, value, type) {
     const id = `cs-sim-${csEscape(section)}-${csEscape(key)}`;
     const v = (value === undefined || value === null) ? '' : String(value);
+    if (type === 'list') {
+        // Space/comma-separated config value ↔ one-per-line textarea (unlimited).
+        // data-cs-list tells the serializer to re-join lines with a space.
+        const lines = String(v).trim().split(/[\s,]+/).filter(Boolean).join('\n');
+        return `<div class="flex flex-col gap-1 md:col-span-3">
+          <label class="text-[10px] text-slate-500 uppercase font-bold tracking-wider">${csEscape(label)}</label>
+          <textarea id="${id}" data-cs-section="${csEscape(section)}" data-cs-key="${csEscape(key)}" data-cs-list="1"
+                    rows="6" placeholder="one DNS server IP per line — add as many as you want" class="border border-slate-200 rounded-md px-2 py-1.5 text-sm font-mono">${csEscape(lines)}</textarea>
+        </div>`;
+    }
     if (CS_ONOFF_KEYS.has(key)) {
         const lc = v.toLowerCase();
         const on = lc === 'on', off = lc === 'off';
@@ -3977,9 +3986,9 @@ function csSimExtraField(section, key, value) {
 function csSimSectionFields(section, schema, kv) {
     kv = kv || {};
     const seen = new Set();
-    const fields = schema.map(([key, label]) => {
+    const fields = schema.map(([key, label, type]) => {
         seen.add(key);
-        return csSimField(section, key, label, kv[key]);
+        return csSimField(section, key, label, kv[key], type);
     }).join('');
     // Extra keys not in the schema → generic rows so they survive a save.
     const extras = Object.keys(kv).filter(k => !seen.has(k))
@@ -5761,7 +5770,11 @@ function csSerializeSimConf() {
     document.querySelectorAll('[data-cs-section][data-cs-key]').forEach(el => {
         const s = el.getAttribute('data-cs-section');
         const k = el.getAttribute('data-cs-key');
-        const v = el.value;
+        let v = el.value;
+        // A list textarea (one-per-line) serializes back to a space-separated value.
+        if (el.hasAttribute('data-cs-list')) {
+            v = String(v).split(/[\s,]+/).map(x => x.trim()).filter(Boolean).join(' ');
+        }
         if (v === '' || v === null || v === undefined) return;  // empty → revert
         bySection[s] = bySection[s] || {};
         bySection[s][k] = v;
