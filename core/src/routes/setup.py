@@ -226,8 +226,15 @@ async def _aggregate_status(hub):
         "in_contact": hub.spokes_in_contact(),
         "spoke_module_types": dict(hub.spoke_module_types),
         "heartbeats": {sid: str(s) for sid, s in hub.heartbeat.get_all_statuses().items()},
-        "active_alert_count": len(getattr(hub, "_spoke_alerts", {}) or {}),
-        "active_alerts": hub.get_active_spoke_alerts(),
+        # Operator alerts surfaced in the header badge: spoke out-of-contact +
+        # fleet-availability (per-tenant client-sim health). Both share the
+        # {spoke_id, name, tier, ...} shape so the WebUI renders them uniformly.
+        "active_alert_count": (len(getattr(hub, "_spoke_alerts", {}) or {})
+                               + (len(getattr(hub, "_fleet_alerts", {}) or {})
+                                  if hasattr(hub, "get_fleet_alerts") else 0)),
+        "active_alerts": (hub.get_active_spoke_alerts()
+                          + (hub.get_fleet_alerts()
+                             if hasattr(hub, "get_fleet_alerts") else [])),
         "metrics": metrics,
     }
 

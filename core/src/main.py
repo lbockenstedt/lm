@@ -88,6 +88,7 @@ from staleness_sweep import StalenessSweepMixin
 from self_backup import SelfBackupMixin
 from key_vault import KeyVaultSchedulerMixin
 from spoke_alert_sync import SpokeAlertMixin
+from fleet_health_alert import FleetHealthAlertMixin
 from repo_sync import RepoSyncMixin
 from hub_vnc_console import HubVncConsoleMixin
 from hub_cert_distribution import HubCertDistributionMixin
@@ -276,7 +277,7 @@ def _mdns_hub_properties(version_str: str, agent_port: int,
     return props
 
 
-class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
+class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, FleetHealthAlertMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -469,6 +470,13 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         self._spoke_alerts: Dict[str, Dict[str, Any]] = {}
         self._spoke_alert_tier: Dict[str, str] = {}
         self._spoke_absent_since: Dict[str, float] = {}
+        # Fleet-availability alerting (FleetHealthAlertMixin) — per-tenant client-
+        # sim fleet health (working/eligible); a persistent degraded status fires a
+        # dashboard alert on the same /status channel. Transient runtime state,
+        # never persisted. See fleet_health_alert.py.
+        self._fleet_alerts: Dict[str, Dict[str, Any]] = {}
+        self._fleet_alert_tier: Dict[str, str] = {}
+        self._fleet_bad_since: Dict[str, float] = {}
         # "File a Bug" reports from the WebUI footer button. The WebUI POSTs an
         # explanation + browser console + raw HTML + html2canvas screenshot to
         # /api/bug-report; the hub stores the full artifacts under data_dir/bugs/
@@ -7810,6 +7818,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # 300s RED). Emits on transition only; ERROR tier surfaces in GET_ERROR_LOGS.
         # See run_spoke_alert_loop (SpokeAlertMixin).
         spoke_alert_task = asyncio.create_task(self.run_spoke_alert_loop())
+        # Fleet-availability alerting: a tenant whose client-sim fleet health stays
+        # degraded (working/eligible below the ok band) past the debounce fires a
+        # dashboard alert on the same /status channel. See run_fleet_health_alert_loop.
+        fleet_alert_task = asyncio.create_task(self.run_fleet_health_alert_loop())
         # CS bridge: polls the cs (Client-Simulation) spoke's command inbox for
         # every CS-enabled connected pxmx agent and relays commands to the agent
         # as CS_COMMAND (one-socket invariant — the agent never talks to the cs
