@@ -336,28 +336,26 @@ class SimulationsService:
                 pass
         rows = [best[k] for k in order] + extras
         return {"tenant_id": tenant_id, "clients": rows,
-                "fleet_health": self._fleet_health(tenant_id, rows)}
+                "fleet_health": self._fleet_health(rows)}
 
-    def _fleet_health(self, tenant_id: str, clients: List[dict]) -> Dict[str, Any]:
+    def _fleet_health(self, clients: List[dict]) -> Dict[str, Any]:
         """Fleet availability, judged against the ~80% USB-dongle churn floor (see
         cs/docs/t2-usb-dongle-throttle-recover.md) — NOT against 100%.
 
-        working = clients that are supposed to be connected AND are: online +
-        gateway_reachable. Clients running a CONNECTIVITY-BREAKING sim are EXCLUDED
-        entirely: they're MEANT to be off-network, so the gateway test is wrong for
-        them. That is NOT SIM_META multi_capable=False — dns_fail/dns_latency/
-        dhcp_fail monopolize a client but stay CONNECTED (they need the network to
-        flood), and count as working. Only the association/auth breakers qualify.
-        total = clients provisioned across the tenant's Proxmox hosts (summed
-        vm_count). pct = working / (provisioned - excluded)."""
-        # Sims where the client intentionally can't associate/authenticate (or the
-        # wired link flaps) → it won't hold a gateway by design.
+        Denominator = the tenant's REGISTERED clients (the stable pool the engine
+        sees). We do NOT use the Proxmox vm_count sum — it swings wildly as hosts
+        drop in/out of the telemetry cache (seen 87 then 21 for the same fleet),
+        and could go below the reporting-client count → pct > 100%. The registry
+        count matches the engine's harvestable-pool number.
+
+        working = clients that are online AND gateway_reachable. Clients running a
+        CONNECTIVITY-BREAKING sim (ssidpw_fail/auth_fail/assoc_fail/port_flap — they
+        can't associate/auth by design) are EXCLUDED from both sides. NOTE:
+        dns_fail/dns_latency/dhcp_fail stay CONNECTED (they flood over a live link)
+        so they COUNT as working — do NOT use SIM_META multi_capable here.
+        eligible = registered - excluded; pct = working / eligible (working <=
+        eligible, so it can never exceed 100%)."""
         exclusive = {"ssidpw_fail", "auth_fail", "assoc_fail", "port_flap"}
-        try:
-            pdata = self._build_proxmox_data(tenant_id)
-            provisioned = sum(int(h.get("vm_count") or 0) for h in (pdata.get("hosts") or []))
-        except Exception:  # noqa: BLE001
-            provisioned = 0
         excl = working = 0
         for c in clients:
             if any(s in exclusive for s in (c.get("active_simulations") or [])):
@@ -365,7 +363,8 @@ class SimulationsService:
                 continue
             if c.get("online") and c.get("gateway_reachable"):
                 working += 1
-        eligible = max(0, provisioned - excl)
+        registered = len(clients)
+        eligible = max(0, registered - excl)
         pct = round(100.0 * working / eligible, 1) if eligible > 0 else None
         if pct is None:
             status = "no_data"
@@ -375,7 +374,7 @@ class SimulationsService:
             status = "warning"
         else:
             status = "critical"
-        return {"provisioned": provisioned, "exclusive": excl, "eligible": eligible,
+        return {"provisioned": registered, "exclusive": excl, "eligible": eligible,
                 "working": working, "pct": pct, "status": status}
 
     async def get_simulations_data(self, tenant_id: str) -> Dict[str, Any]:
