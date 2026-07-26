@@ -714,9 +714,17 @@ class AgentHostingControlPlane(BaseControlPlane):
         hub_ws = getattr(self, "_hub_ws", None)
         if not hub_ws:
             if msg_type == "AGENT_LOG":
-                level = data.get("level", "INFO")
+                level = str(data.get("level", "INFO")).upper()
                 msg_text = data.get("message", "")
-                logger.warning("[agent:%s no-hub-relay] %s: %s", agent_id, level, msg_text)
+                # Log at the agent record's OWN level, not always WARNING. Logging
+                # an agent INFO ("Auth complete", "resolved listener") at WARNING
+                # made benign relayed-info show up in Setup → Errors & Warnings and
+                # lit the module-status tray dot as if the module were erroring.
+                _lvl = {"DEBUG": logging.DEBUG, "INFO": logging.INFO,
+                        "WARNING": logging.WARNING, "WARN": logging.WARNING,
+                        "ERROR": logging.ERROR, "CRITICAL": logging.CRITICAL,
+                        }.get(level, logging.INFO)
+                logger.log(_lvl, "[agent:%s no-hub-relay] %s: %s", agent_id, level, msg_text)
             else:
                 logger.debug("[agent:%s no-hub-relay] %s dropped", agent_id, msg_type)
             return
