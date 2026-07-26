@@ -253,6 +253,11 @@ class SimulationsService:
                     "has_usb": c.get("has_usb"),
                     "vmid": c.get("vmid"),
                     "tier": c.get("tier"),
+                    # In-guest dongle health (agent QGA probe, relayed by the
+                    # spoke): healthy / no_driver / no_assoc / no_gateway /
+                    # not_visible. Cherry-picked like tier — this row rebuild MUST
+                    # pass it through or the Clients-tab health flag never renders.
+                    "health": c.get("health"),
                     # Per-client sim overrides + config so the Clients tab's per-sim
                     # override buttons reflect what's SET and stay across refreshes.
                     "config": c.get("config") or {},
