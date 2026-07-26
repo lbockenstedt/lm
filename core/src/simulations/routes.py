@@ -1910,6 +1910,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 "sim_weights": await store.get_sim_weights_global(),
                 "stack_cap": await store.get_stack_cap_global(),
                 "stack_rotation_s": await store.get_stack_rotation_s_global(),
+                "harvest_cooldown_s": await store.get_harvest_cooldown_s_global(),
             }
         except Exception:  # noqa: BLE001
             return {}
@@ -4888,6 +4889,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         catalog["sim_weights"] = await store.get_sim_weights_global()
         catalog["stack_cap"] = await store.get_stack_cap_global()
         catalog["stack_rotation_s"] = await store.get_stack_rotation_s_global()
+        catalog["harvest_cooldown_s"] = await store.get_harvest_cooldown_s_global()
         # Dongle-quarantine: the platform-wide exclusion-sim set (sims whose
         # no-IP/no-SSID outcome is the point — don't QT a client running only
         # these). A tenant csc ``qt_exclude_sims`` overrides per-tenant; this
@@ -4983,6 +4985,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             await store.set_stack_cap_global(body.get("stack_cap"))
         if (body or {}).get("stack_rotation_s") is not None:
             await store.set_stack_rotation_s_global(body.get("stack_rotation_s"))
+        if (body or {}).get("harvest_cooldown_s") is not None:
+            await store.set_harvest_cooldown_s_global(body.get("harvest_cooldown_s"))
         # Dongle-quarantine exclusion sims (global default). Coerce to a list of
         # known sim ids; unknown ids are dropped (an admin typo shouldn't widen
         # the exclusion set silently). Empty list = exclude nothing (every sim

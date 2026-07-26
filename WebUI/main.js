@@ -7160,6 +7160,8 @@ function _renderSetupSimulationsTile(content) {
                     <input id="stack-cap" type="number" min="0" max="20" class="${inputCls} text-xs px-2 py-1 w-20"></label>
                   <label class="text-xs text-slate-600 flex items-center gap-2">Rotation (s)
                     <input id="stack-rotation-s" type="number" min="30" step="30" class="${inputCls} text-xs px-2 py-1 w-24"></label>
+                  <label class="text-xs text-slate-600 flex items-center gap-2" title="After a client is harvested for an alert sim it rests this long before it can be re-harvested — keeps Central data realistic (no flapping). 0 = off.">Harvest cooldown (h)
+                    <input id="harvest-cooldown-h" type="number" min="0" step="0.5" class="${inputCls} text-xs px-2 py-1 w-20"></label>
                 </div>
                 <div id="sim-stacking-rows" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
@@ -7493,6 +7495,7 @@ async function loadSimQuotaDefaults() {
         _simWeights = (cat.sim_weights && typeof cat.sim_weights === 'object') ? { ...cat.sim_weights } : {};
         _stackCap = (cat.stack_cap != null) ? cat.stack_cap : 3;
         _stackRotationS = (cat.stack_rotation_s != null) ? cat.stack_rotation_s : 600;
+        _harvestCooldownS = (cat.harvest_cooldown_s != null) ? cat.harvest_cooldown_s : 14400;
         _renderSimQuotaDefaultsEditor();
         _renderSimSharing();
         _renderSimStacking();
@@ -7519,6 +7522,7 @@ let _simSharingHideNA = false;
 let _simWeights = {};
 let _stackCap = 3;
 let _stackRotationS = 600;
+let _harvestCooldownS = 14400;   // 4h; edited in HOURS in the UI
 
 // ── Dongle-quarantine exclusion sims (GLOBAL, Setup → Simulations → Sim Quotas) ─
 // The platform-wide set of sim ids whose no-IP/no-SSID outcome is the POINT of
@@ -7598,8 +7602,10 @@ function _simStackingSyncFromDom() {
     });
     const capEl = document.getElementById('stack-cap');
     const rotEl = document.getElementById('stack-rotation-s');
+    const cdEl = document.getElementById('harvest-cooldown-h');
     if (capEl) { const c = parseInt(capEl.value, 10); if (isFinite(c) && c >= 0) _stackCap = c; }
     if (rotEl) { const r = parseInt(rotEl.value, 10); if (isFinite(r) && r >= 30) _stackRotationS = r; }
+    if (cdEl) { const h = parseFloat(cdEl.value); if (isFinite(h) && h >= 0) _harvestCooldownS = Math.round(h * 3600); }
 }
 
 function _renderSimStacking() {
@@ -7607,6 +7613,8 @@ function _renderSimStacking() {
     const rotEl = document.getElementById('stack-rotation-s');
     if (capEl && document.activeElement !== capEl) capEl.value = (_stackCap != null ? _stackCap : 3);
     if (rotEl && document.activeElement !== rotEl) rotEl.value = (_stackRotationS != null ? _stackRotationS : 600);
+    const cdEl = document.getElementById('harvest-cooldown-h');
+    if (cdEl && document.activeElement !== cdEl) cdEl.value = ((_harvestCooldownS != null ? _harvestCooldownS : 14400) / 3600);
     const el = document.getElementById('sim-stacking-rows');
     if (!el) return;
     const cat = _simQuotaDefaultsCatalog || {};
@@ -7641,7 +7649,8 @@ window.saveSimStacking = async function () {
             body: JSON.stringify({ defaults: _simQuotaDefaultsSyncFromDom(),
                                    sim_shareable: _simSharing, sim_na: _simSharingNA,
                                    sim_weights: _simWeights, stack_cap: _stackCap,
-                                   stack_rotation_s: _stackRotationS }),
+                                   stack_rotation_s: _stackRotationS,
+                                   harvest_cooldown_s: _harvestCooldownS }),
         });
         if (!r.ok) throw new Error(`${r.status}`);
         if (typeof showToast === 'function') showToast('Sim stacking saved.', 'success');

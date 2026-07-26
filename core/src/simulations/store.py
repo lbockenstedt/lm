@@ -1110,6 +1110,20 @@ class SimulationsStore:
                 self._global()["stack_rotation_s"] = 600
             await self._asave()
 
+    async def get_harvest_cooldown_s_global(self) -> int:
+        try:
+            return int(self._global().get("harvest_cooldown_s", 14400))
+        except (TypeError, ValueError):
+            return 14400
+
+    async def set_harvest_cooldown_s_global(self, s: Any) -> None:
+        with self._lock:
+            try:
+                self._global()["harvest_cooldown_s"] = max(0, int(s))
+            except (TypeError, ValueError):
+                self._global()["harvest_cooldown_s"] = 14400
+            await self._asave()
+
     async def get_global_usb_vidpids(self) -> List[Dict[str, Any]]:
         """Platform-wide (superadmin-certified) USB device list —
         {vidpid, type, label} dicts (the cs-spoke re-filter shape)."""
