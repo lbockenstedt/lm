@@ -10212,10 +10212,15 @@ async function loadRepoSyncStatus() {
     const spokeRows = spokes.length ? spokes.map(line => {
         const str = String(line);
         const i = str.indexOf(':');
-        const sid = i >= 0 ? str.slice(0, i) : str;
+        const sid = (i >= 0 ? str.slice(0, i) : str).trim();
         const txt = i >= 0 ? str.slice(i + 1).trim() : '';
+        // Resolve the spoke UUID → friendly name (same spokeHealth map the header
+        // tray uses; /setup/diagnostics lists every approved spoke incl. offline).
+        // Keep the raw id on hover. Falls back to the UUID if the map isn't loaded.
+        const _h = (window.spokeHealth || {})[sid];
+        const nm = (_h && _h.name && _h.name !== sid) ? _h.name : sid;
         return `<div class="flex items-center gap-2"><span class="w-2 h-2 rounded-full ${_spokeDot(txt)}"></span>
-            <span class="text-xs text-slate-600 font-medium">${esc(sid)}</span>
+            <span class="text-xs text-slate-600 font-medium" title="${esc(sid)}">${esc(nm)}</span>
             <span class="text-xs text-slate-400">${esc(txt)}</span></div>`;
     }).join('') : '<p class="text-xs text-slate-400 italic">No module updates this sync (the hub was current — spokes fan out only when the hub or a module repo advances, or on a forced Sync).</p>';
     wrap.innerHTML = `<div class="border border-slate-200 rounded-md p-3">
