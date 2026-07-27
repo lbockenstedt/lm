@@ -107,6 +107,20 @@ class SpokeRegistryMixin:
         for _iu, _guid in list(getattr(self, "install_uuid_index", {}).items()):
             if _guid == pk or _iu == pk:
                 self.install_uuid_index.pop(_iu, None)
+        # Purge the out-of-contact alert-loop state too (SpokeAlertMixin). Without
+        # this a spoke/agent deleted WHILE it has an active alert leaves an orphaned
+        # entry in _spoke_alerts: the alert loop only re-evaluates APPROVED modules,
+        # so the deleted id never transitions to NONE and the entry lingers until a
+        # hub restart. That orphan keeps inflating the header "Module Status"
+        # out-of-contact count (len(_spoke_alerts)) even though the Spokes & Agents
+        # page — which only walks known_modules — shows nothing out of contact. The
+        # decommission route already does this (setup.py); delete must match.
+        try:
+            self._spoke_alert_clear(pk)
+            self._spoke_alert_tier.pop(pk, None)
+            self._spoke_absent_since.pop(pk, None)
+        except Exception:  # noqa: BLE001 — alert state is best-effort
+            pass
 
     def _mark_spoke_disconnected(self, spoke_id: str) -> None:
         """Record a clean-WS-close disconnect in ``spoke_telemetry``.
