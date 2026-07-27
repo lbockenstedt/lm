@@ -3898,6 +3898,7 @@ const CS_SIM_SECTION_FIELDS = {
         ['dns_latency_duration', 'DNS Latency Duration (s)'],
         ['dns_latency_threshold_ms', 'DNS Latency Threshold (ms) — a server must be this slow to feed the alert'],
         ['dns_max_inflight', 'DNS Max In-Flight Digs'],
+        ['gw_ping_timeout_s', 'Gateway Ping Timeout (s) — per-ping ICMP timeout for the gateway-alive check (raise if a busy gateway RTT under load false-trips the DNS backoff; default 4)'],
     ],
     server: [['server_url', 'Server Url']],
     address: [
