@@ -6095,6 +6095,7 @@ const CS_HUB_CONFIG_FIELDS = [
     { key: 'usb_ignored_vidpids',         label: 'USB Ignored VID:PIDs', type: 'list', ph: '1a2b:3c4d, 5678:9abc  (comma or space separated)', full: true },
     { key: 't1_pci_vidpids',              label: 'T1 PCI VID:PIDs (VM whose PCI passthrough matches → T1)', type: 'list', ph: '1912:0015, 168c:0034  (comma or space separated)', full: true },
     { key: 't3_pci_vidpids',              label: 'T3 PCI VID:PIDs (VM whose PCI passthrough matches → T3)', type: 'list', ph: '168c:0034  (comma or space separated)', full: true },
+    { key: 't1_exclude_hosts',            label: 'T1 Exclude Hosts (hub mode — these hosts do NOT PCI-pass their T1 card; its dongles run as USB/T2 clients)', type: 'list', ph: 'sim-svr-05, sim-svr-06  (hostname or prefix)', full: true },
     { key: 'ignored_hostnames',           label: 'Ignored Hostnames', type: 'list', ph: 'sim-rpi-0000, sim-rpi-0001  (comma or space separated)', full: true },
 ];
 

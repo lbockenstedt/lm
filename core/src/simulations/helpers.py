@@ -149,6 +149,7 @@ _HUB_CONFIG_LIST_KEYS = (
     "usb_ignored_vidpids",   # list of "vid:pid"
     "t1_pci_vidpids",        # list of "vid:pid"
     "t3_pci_vidpids",        # list of "vid:pid"
+    "t1_exclude_hosts",      # list of str (hostname/prefix — per-host T1 opt-out / hub mode)
     "ignored_hostnames",     # list of str
 )
 _HUB_CONFIG_VIDPID_OBJ_KEY = "usb_vidpids"  # list of {vidpid,type,label}
