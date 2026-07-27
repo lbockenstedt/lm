@@ -219,6 +219,16 @@ async def _aggregate_status(hub):
     the same dict the handler used to build inline; module-level (not a closure)
     so it depends only on ``hub`` and is unit-testable with a stub hub."""
     metrics = await hub.get_system_metrics()
+    # Operator alerts surfaced in the header badge: spoke out-of-contact +
+    # fleet-availability (per-tenant client-sim health) + out-of-dongles (per
+    # Proxmox host). All share the {spoke_id, name, tier, ...} shape so the WebUI
+    # renders them uniformly. Derive the COUNT from this same filtered list so the
+    # badge number can never disagree with the dropdown — the count used to be a
+    # raw len(_spoke_alerts), which over-counts any entry the tier-filtered getter
+    # drops (e.g. an orphaned/non-active entry).
+    active_alerts = (hub.get_active_spoke_alerts()
+                     + (hub.get_fleet_alerts() if hasattr(hub, "get_fleet_alerts") else [])
+                     + (hub.get_dongle_alerts() if hasattr(hub, "get_dongle_alerts") else []))
     return {
         "ready": True,
         "active_connections": list(hub.active_connections.keys()),
@@ -226,20 +236,8 @@ async def _aggregate_status(hub):
         "in_contact": hub.spokes_in_contact(),
         "spoke_module_types": dict(hub.spoke_module_types),
         "heartbeats": {sid: str(s) for sid, s in hub.heartbeat.get_all_statuses().items()},
-        # Operator alerts surfaced in the header badge: spoke out-of-contact +
-        # fleet-availability (per-tenant client-sim health) + out-of-dongles
-        # (per Proxmox host). All share the {spoke_id, name, tier, ...} shape so
-        # the WebUI renders them uniformly.
-        "active_alert_count": (len(getattr(hub, "_spoke_alerts", {}) or {})
-                               + (len(getattr(hub, "_fleet_alerts", {}) or {})
-                                  if hasattr(hub, "get_fleet_alerts") else 0)
-                               + (len(getattr(hub, "_dongle_alerts", {}) or {})
-                                  if hasattr(hub, "get_dongle_alerts") else 0)),
-        "active_alerts": (hub.get_active_spoke_alerts()
-                          + (hub.get_fleet_alerts()
-                             if hasattr(hub, "get_fleet_alerts") else [])
-                          + (hub.get_dongle_alerts()
-                             if hasattr(hub, "get_dongle_alerts") else [])),
+        "active_alert_count": len(active_alerts),
+        "active_alerts": active_alerts,
         "metrics": metrics,
     }
 
