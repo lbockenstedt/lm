@@ -890,6 +890,39 @@ def available_sites_from_ini(
     return sorted(sites)
 
 
+# The T3 IoT device menu the Sim-Quota UI renders in the Device dropdown for a
+# ``kind=device`` row. DERIVED from cs/clients/t3/iot_catalog.json (the t3-vwlan
+# devices with an OUI) — the hub can't read that cross-repo file, so the menu is
+# embedded here and kept in sync when devices are added. Twin of the cs spoke's
+# IOT_DEVICE_MENU. Each entry: {id (the device_id a device quota carries), label,
+# category}.
+IOT_DEVICE_MENU = [
+    {"id": "mercury-sd", "label": "Mercury MercurySD", "category": "industrial-controller"},
+    {"id": "liftmaster-myq", "label": "LiftMaster myQ Garage Hub", "category": "garage-door"},
+    {"id": "brightsign-xt1144", "label": "BrightSign XT1144", "category": "digital-signage"},
+    {"id": "zebra-zt230", "label": "Zebra ZT230 (203dpi ZPL)", "category": "printer"},
+    {"id": "sonos-speaker", "label": "Sonos Sonos Speaker", "category": "smart-speaker"},
+    {"id": "hp-jetdirect", "label": "HP JetDirect Printer", "category": "printer"},
+    {"id": "polycom-ip-phone", "label": "Polycom IP Phone", "category": "ip-phone"},
+    {"id": "axis-p3265", "label": "Axis P3265-LV Dome Camera", "category": "ip-camera"},
+    {"id": "moxa-device-server", "label": "Moxa NPort Device Server", "category": "serial-server"},
+    {"id": "ring-doorbell", "label": "Ring Stick Up Cam / Doorbell", "category": "doorbell"},
+    {"id": "resideo-thermostat", "label": "Resideo LCC Thermostat", "category": "thermostat"},
+    {"id": "density-sensor", "label": "Density Occupancy Sensor", "category": "occupancy-sensor"},
+    {"id": "oculus-quest", "label": "Meta Oculus Quest", "category": "vr-headset"},
+    {"id": "tesla-vehicle", "label": "Tesla Vehicle Telemetry", "category": "ev"},
+    {"id": "crestron-controller", "label": "Crestron Control Processor", "category": "industrial-controller"},
+    {"id": "samsung-mobile-a", "label": "Samsung Galaxy Device (OUI 28:cd:c1)", "category": "mobile"},
+    {"id": "samsung-mobile-b", "label": "Samsung Galaxy Device (OUI 40:b8:37)", "category": "mobile"},
+    {"id": "cisco-ap", "label": "Cisco AP / Network Device", "category": "network-infra"},
+    {"id": "lutron-bridge-a", "label": "Lutron Smart Bridge (OUI 00:04:a5)", "category": "smart-lighting"},
+    {"id": "lutron-bridge-b", "label": "Lutron Smart Bridge (OUI 00:12:5f)", "category": "smart-lighting"},
+    {"id": "apple-mobile", "label": "Apple iPhone / iPad", "category": "mobile"},
+    {"id": "amazon-echo", "label": "Amazon Echo / Fire Device", "category": "smart-speaker"},
+    {"id": "honeywell-thermostat", "label": "Honeywell Lyric / Home Thermostat", "category": "thermostat"},
+]
+
+
 def sim_quota_catalog_from_ini(
     sim_conf_text: str, central_site_mappings: Dict[str, str] | None = None,
 ) -> Dict[str, Any]:
@@ -901,4 +934,6 @@ def sim_quota_catalog_from_ini(
         # label them on a Learning row); empty for sims with no declared knobs.
         "meta": {k: {**dict(v), "knobs": [kn["key"] for kn in SIM_KNOBS.get(k, [])]}
                  for k, v in SIM_META.items()},
+        # T3 IoT device menu for the Device dropdown on a kind=device quota row.
+        "devices": list(IOT_DEVICE_MENU),
     }

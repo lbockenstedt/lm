@@ -4409,6 +4409,29 @@ function csRenderSimQuotaEditor() {
     const meta = cat.meta || {};
     const suggested = cat.suggested || {};
     const rowHtml = csSimQuotaRows.map((r, i) => {
+        // T3 IoT device quota (kind=device): pick an IoT device profile + count +
+        // site. The engine stages that many of the device on the T3 host(s) serving
+        // the site (the vwlan fleet). No alert/sim/tier — a device quota just
+        // declares the fleet composition.
+        if (r.kind === 'device') {
+            const siteOpts = csSimQuotaSelect(r.site, sites, '— all sites —');
+            const devOpts = cat.device.map(d =>
+                `<option value="${csEscape(d.id)}" ${r.device_id === d.id ? 'selected' : ''}>${csEscape(d.label)}</option>`).join('');
+            return `<div class="grid grid-cols-1 md:grid-cols-6 gap-2 items-end bg-white border border-indigo-200 rounded-md p-2" data-cs-sqrow="${i}">
+              <label class="text-xs text-slate-500 md:col-span-2">IoT Device
+                <select data-cs-sq="device_id" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1"><option value="">— select device —</option>${devOpts}</select>
+              </label>
+              <label class="text-xs text-slate-500">Count
+                <input data-cs-sq="count" type="number" min="1" value="${csEscape(String(r.count || 1))}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
+              </label>
+              <label class="text-xs text-slate-500">Site
+                <select data-cs-sq="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${siteOpts}</select>
+              </label>
+              <label class="text-xs text-slate-500 flex items-center gap-1 pb-2"><input data-cs-sq="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</label>
+              <button onclick="csSimQuotaDel(${i})" class="text-red-600 hover:text-red-800 text-xs font-bold py-1">Remove</button>
+              <div class="md:col-span-6 text-[11px] text-slate-400 italic">T3 IoT device quota — stages N of this device on the T3 host(s) serving the site (vwlan fleet). No alert/sim.</div>
+            </div>`;
+        }
         const isPresence = !r.sim_id;
         // A non-presence quota may be UNTETHERED (not tied to an alert/insight):
         // then no alert ID is needed — it just keeps N clients on the sim at the
@@ -4516,6 +4539,7 @@ function csRenderSimQuotaEditor() {
               ? `<button onclick="csToggleIgnoreGlobalQuotas()" title="This tenant ignores the platform-wide Sim Quota defaults — only its own rows apply. Click to use global defaults again." class="bg-amber-50 hover:bg-amber-100 text-amber-700 border border-amber-300 px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Global Defaults: Ignored</button>`
               : `<button onclick="csToggleIgnoreGlobalQuotas()" title="This tenant inherits the platform-wide Sim Quota defaults, merged with its own rows. Click to ignore them." class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Global Defaults: On</button>`}
             <button onclick="csSimQuotaAdd()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add Quota</button>
+            <button onclick="csSimQuotaAddDevice()" class="bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-300 px-4 py-1.5 rounded-md text-sm font-bold shadow-sm" title="T3 IoT device quota — stage N of an IoT device profile on the T3 host(s) serving a site (vwlan fleet)">+ Add Device</button>
             <button onclick="csSimQuotaSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Quotas</button>
           </div>
         </div>
@@ -4810,6 +4834,19 @@ function csSimQuotaSyncFromDom() {
     const rows = [];
     document.querySelectorAll('[data-cs-sqrow]').forEach(el => {
         const g = (k) => el.querySelector(`[data-cs-sq="${k}"]`);
+        // Device-kind row (T3 IoT fleet): device_id + count + site + enabled only —
+        // it has no sim/alert controls, so read it here and skip the sim path below.
+        const devEl = g('device_id');
+        if (devEl) {
+            rows.push({
+                kind: 'device',
+                device_id: devEl.value,
+                count: parseInt((g('count') || {}).value || '1', 10) || 1,
+                site: (g('site') || {}).value || '',
+                enabled: !!(g('enabled') || {}).checked,
+            });
+            return;
+        }
         // A presence row (Clients Associated) has no Type / Alert ID controls
         // (they're replaced by static labels) — nullish-guard so the sync
         // doesn't throw and preserves alert_type/alert_id defaults.
@@ -4939,6 +4976,14 @@ window.csSimQuotaAdd = function (preset) {
         adaptive: p.adaptive != null ? !!p.adaptive : false,
         learning: p.learning != null ? !!p.learning : false,
     });
+    csRenderSimQuotaEditor();
+};
+
+// Add a T3 IoT device-quota row (kind=device): stage N of an IoT device profile
+// on the T3 host(s) serving a site. No alert/sim/tier — just the fleet composition.
+window.csSimQuotaAddDevice = function () {
+    csSimQuotaSyncFromDom();
+    csSimQuotaRows.push({ kind: 'device', device_id: '', count: 5, site: '', enabled: false });
     csRenderSimQuotaEditor();
 };
 
