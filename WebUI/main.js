@@ -1442,7 +1442,7 @@ const VIEW_CHILDREN = {
         'Central':         ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware', 'Diagnostic'],
         'Central On-Prem': ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware', 'Diagnostic'],
         'Mist':            ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware', 'Diagnostic'],
-        'VM Server':   ['Overview', 'VMs', 'Terminal', 'USB', 'IoT', 'VirtualHere', 'Command Queue', 'Details'],
+        'VM Server':   ['Overview', 'VMs', 'Terminal', 'USB', 'PCI', 'IoT', 'VirtualHere', 'Command Queue', 'Details'],
         'Config':      ['Engine', 'Engine State', 'Engine Diagnostic', 'Sites', 'Config Editor'],
         'Setup':       ['General', 'Central API', 'Central On-Prem API', 'Mist API', 'Proxmox', 'GitHub', 'Security', 'Notifications', 'Diagnostics'],
     },

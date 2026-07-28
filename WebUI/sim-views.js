@@ -9450,6 +9450,50 @@ function csRenderVmServerIot() {
     </div>`);
 }
 
+// ── PCI — allow-listed T1/T3 PCI vid:pids (counts) + present devices ──────────
+async function csRenderVmServerPci() {
+    csSetToolbar('');
+    // Allow-listed T1/T3 PCI vid:pids come from this tenant's hub_config (the same
+    // t1_pci_vidpids / t3_pci_vidpids the agent classifies + provisions against).
+    let t1 = [], t3 = [];
+    try {
+        const _hc = await csFetch('/tenant/' + csTenant() + '/hub-config');
+        const hc = (_hc && _hc.hub_config) || {};
+        const _parse = (r) => {
+            if (typeof r === 'string' && r.trim()) { try { r = JSON.parse(r); } catch (_) { r = r.split(/[,\s]+/); } }
+            return (Array.isArray(r) ? r : []).map(x => String(x || '').trim().toLowerCase()).filter(Boolean);
+        };
+        t1 = _parse(hc.t1_pci_vidpids); t3 = _parse(hc.t3_pci_vidpids);
+    } catch (e) { console.error('csRenderVmServerPci: hub-config load failed', e); }
+    // Present T1/T3 PCI devices on the selected host (if the spoke relays them).
+    const h = csVmSelectedHost() || (csVmHosts.length ? csVmHosts[0] : null);
+    const px = (h && h.proxmox) || {};
+    const t1Present = px.t1_pci_devices || [];
+    const t3Present = px.t3_pci_devices || [];
+    const _chips = (arr) => arr.length
+        ? '<div class="flex flex-wrap gap-1.5 mt-1">' + arr.map(v => `<span class="font-mono text-[11px] px-2 py-0.5 rounded bg-slate-100 border border-slate-200 text-slate-700">${csEscape(v)}</span>`).join('') + '</div>'
+        : '<div class="text-xs text-slate-400 mt-1">none allow-listed</div>';
+    const _devTable = (arr, label) => arr.length
+        ? csTable(['Device', 'Address', 'Driver'], arr.map(d => `<tr>
+            <td class="px-3 py-2 text-sm">${csEscape(d.name || d.device || '—')}</td>
+            <td class="px-3 py-2 font-mono text-xs">${csEscape(d.address || '—')}</td>
+            <td class="px-3 py-2 text-slate-500">${csEscape(d.driver || '—')}</td></tr>`).join(''))
+        : csEmpty('No present ' + label + ' PCI devices reported.', 'Present PCI devices surface once the spoke relays them.');
+    csSet(`<div>${csVmHostBanner()}
+      <div class="grid grid-cols-2 gap-3 mb-4">
+        ${csStat('T1 allow-listed', t1.length)}${csStat('T3 allow-listed', t3.length)}
+      </div>
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">T1 PCI VID:PIDs — allow-list (${t1.length})</p>
+      ${_chips(t1)}
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-1">T3 PCI VID:PIDs — allow-list (${t3.length})</p>
+      ${_chips(t3)}
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-5 mb-2">Present T1 PCI devices (${t1Present.length})</p>
+      ${_devTable(t1Present, 'T1')}
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-2">Present T3 PCI devices (${t3Present.length})</p>
+      ${_devTable(t3Present, 'T3')}
+    </div>`);
+}
+
 // ── VirtualHere — status + device table (data not in relay yet) ─────────────
 async function csRenderVmServerVh() {
     csSetToolbar('');
@@ -10074,6 +10118,7 @@ window.CS_CHILD_RENDERERS['VM Server::Overview']     = csRenderVmServer;
 window.CS_CHILD_RENDERERS['VM Server::VMs']          = csRenderVmServerVms;
 window.CS_CHILD_RENDERERS['VM Server::Terminal']     = csRenderVmServerTerminal;
 window.CS_CHILD_RENDERERS['VM Server::USB']           = csRenderVmServerUsb;
+window.CS_CHILD_RENDERERS['VM Server::PCI']           = csRenderVmServerPci;
 window.CS_CHILD_RENDERERS['VM Server::IoT']           = csRenderVmServerIot;
 window.CS_CHILD_RENDERERS['VM Server::VirtualHere']   = csRenderVmServerVh;
 window.CS_CHILD_RENDERERS['VM Server::Command Queue'] = csRenderVmServerQueue;
