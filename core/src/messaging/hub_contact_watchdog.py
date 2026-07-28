@@ -172,7 +172,17 @@ class HubContactWatchdogMixin:
                 st = self._hcw_load()
 
                 if connected or outage < 1:
-                    if st:  # recovered → wipe the ladder
+                    # Only a REAL recovery logs + clears — i.e. an escalation ladder
+                    # was actually in progress (a run started / a stage advanced / we
+                    # gave up). The heartbeat save below persists a
+                    # ``{last_contact_at}``-only state so a later boot inherits the
+                    # last-contact time; ``if st:`` alone treated THAT heartbeat as an
+                    # active ladder every cycle, so on a perfectly healthy link it
+                    # logged "hub reachable again — clearing escalation state" every
+                    # ~30s (and churned the state file). Gate on the ladder fields,
+                    # not mere non-emptiness.
+                    if (st.get("run_start_at") or st.get("stage")
+                            or st.get("run") or st.get("gave_up")):
                         logger.info("hub-contact watchdog: hub reachable again — clearing escalation state.")
                         self._hcw_clear()
                     # Persist a periodic contact heartbeat so a later boot inherits it.
