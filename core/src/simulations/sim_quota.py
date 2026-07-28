@@ -22,7 +22,10 @@ logger = logging.getLogger("SimQuota")
 
 # ── Schema (byte-identical to cs/lm-spoke/src/sim_quota.py) ───────────────
 SIM_QUOTA_KEYS = ("alert_id", "alert_type", "sim_id", "count", "site",
-                  "multi_capable", "rehome", "enabled", "learning", "tier")
+                  "multi_capable", "rehome", "enabled", "learning", "tier",
+                  # Device quota kind (T3 IoT fleet): kind=device + a catalog
+                  # device_id, count of that device profile, at a site. No sim/alert.
+                  "kind", "device_id")
 ALERT_TYPES = ("alert", "insight")
 # Per-quota client-tier policy (twin of cs sim_quota.QUOTA_TIERS). "best"
 # (default) = prefer T1 (dedicated PCI, most reliable) then fall back to T2 (USB
@@ -229,7 +232,16 @@ def normalize_quota(raw: Any) -> Dict[str, Any]:
     if alert_type not in ALERT_TYPES:
         alert_type = "alert"
     is_presence = not sim_id
+    # Device quota (T3 IoT fleet): a catalog ``device_id`` + count + site, no
+    # sim/alert. ``kind`` is explicit when the UI sends it, else derived:
+    # device_id → device, sim_id → sim, else presence. Twin of the cs spoke.
+    device_id = str(raw.get("device_id") or "").strip()
+    kind = str(raw.get("kind") or "").strip().lower()
+    if kind not in ("sim", "presence", "device"):
+        kind = "device" if device_id else ("sim" if sim_id else "presence")
     q = {
+        "kind": kind,
+        "device_id": device_id,
         "alert_id": str(raw.get("alert_id") or "").strip(),
         "alert_type": alert_type,
         "sim_id": sim_id,
@@ -272,6 +284,9 @@ def quota_dedup_key(q: Dict[str, Any]) -> str:
     namespace. An UNTETHERED sim quota (``sim_id`` set but no ``alert_id`` — the
     row's "Tied to alert/insight" box is off) has no alert to key on, so it's
     keyed by ``sim:{sim_id}:{site}``. The engine's ``_quota_key`` mirrors this."""
+    if q.get("kind") == "device" or q.get("device_id"):
+        # One quota per device profile per site (last-wins).
+        return f"device:{q.get('device_id', '')}:{q.get('site', '')}"
     if not q.get("sim_id"):
         return f"presence::{q.get('site', '')}"
     if not q.get("alert_id"):
@@ -281,6 +296,7 @@ def quota_dedup_key(q: Dict[str, Any]) -> str:
 
 def validate_sim_quotas(
     quotas: Any, available_sims: List[str] | None = None,
+    available_devices: List[str] | None = None,
 ) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Normalize + validate a ``sim_quotas`` list.
 
@@ -294,9 +310,23 @@ def validate_sim_quotas(
     errors: List[str] = []
     seen: Dict[str, Dict[str, Any]] = {}
     sim_set = set(available_sims or [])
+    device_set = set(available_devices or [])
     for i, raw in enumerate(quotas or []):
         q = normalize_quota(raw)
-        if not q["sim_id"]:
+        if q["kind"] == "device":
+            # Device quota (T3 IoT fleet) — needs a site + a catalog device_id;
+            # no sim/alert. Validate the device_id against the catalog when given.
+            if not q["site"]:
+                errors.append(f"quota #{i}: device quota requires a site — dropped")
+                continue
+            if not q["device_id"]:
+                errors.append(f"quota #{i}: device quota requires a device_id — dropped")
+                continue
+            if device_set and q["device_id"] not in device_set:
+                errors.append(f"quota #{i}: device_id '{q['device_id']}' "
+                              f"not in the IoT catalog — dropped")
+                continue
+        elif not q["sim_id"]:
             if not q["site"]:
                 errors.append(f"quota #{i}: presence quota (Clients Associated) "
                               f"requires a site — dropped")
