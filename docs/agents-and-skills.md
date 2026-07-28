@@ -32,8 +32,24 @@ and `dns_fail.txt` ×3. Two modes: **guard** (after an edit, check its twin) and
 The end-to-end recipe for adding a new client traffic simulation: both linux `.sh`
 and windows `.ps1` scripts, the shared config, both orchestrators, **both**
 `sim-views.js` UI copies, the quota engine + its hub twin, and the alert docs — with
-the boundaries baked in (shared DNS ceiling, never self-kill, edit canonical not
-generated, T3 out of scope).
+the boundaries baked in. Top boundary: **a sim is a NEW FILE, never a function in
+the orchestrator** — `cs/clients/linux/<sim>.sh` (+ `.ps1` twin), dispatched by
+`simulation.sh`/`.ps1` ONLY as a flag-gated `run_simulation "<sim>.sh" <pause>`
+call. Plus: shared DNS ceiling, never self-kill, edit canonical not generated, T3
+out of scope.
+
+## Subagents
+Beyond the skills above, a Claude Code **subagent** (`.claude/agents/<name>.md`,
+spawnable via the Agent tool) can wrap a skill to drive a whole task hands-off.
+These are a *convenience for interactive Claude* — BugFixer loads **skills**
+(`.claude/skills`), not subagents, so a subagent's value is the skill it follows.
+
+### `sim-builder`
+Adds one new simulation end-to-end by loading + following the `add-simulation`
+skill: gathers the spec (name/flag/kind/targets), builds the ~15 touch-points
+across cs + lm holding every boundary (new-file-not-orchestrator-function first),
+then verifies with `dual-copy-guard`. Invoke it for "add a sim" / "create a
+simulation" / "new traffic-or-alert generator" instead of hand-walking the recipe.
 
 ## Who uses them
 1. **Interactive Claude** — invoked as `/dual-copy-guard` / `/add-simulation`, or

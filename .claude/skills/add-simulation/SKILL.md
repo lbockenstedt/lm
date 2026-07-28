@@ -45,6 +45,16 @@ the exact patterns. This file is the shape + the rules.
    the standard commit/push per the terse-commit convention.
 
 ## Boundaries — the rules a sim MUST obey
+- **New file per sim — NEVER a function in the orchestrator.** A sim's traffic /
+  failure logic lives in its OWN `cs/clients/linux/<sim>.sh` (+ the `.ps1` twin).
+  `simulation.sh` / `simulation.ps1` invoke it ONLY as a flag-gated dispatch —
+  `if [[ "$<flag>" == "on" ]]; then run_simulation "<sim>.sh" <pause>; fi` (the
+  `.ps1` uses the same shape). Do NOT add the sim's logic as a function inside
+  the orchestrator: it only reads flags, connects, dispatches, and reports. The
+  new file delivers itself via the content-hash manifest and self-manages its
+  own single-instance (the dispatch skip-if-running guard). The ONLY exception
+  is a connectivity-failure sim (ssidpw_fail / auth_fail), which extends the
+  connect loop instead of a script — see Kinds of sim.
 - **One shared DNS ceiling.** Flood sims (anything that hammers DNS) share the
   single `dns_ceiling` self-throttle + gateway circuit-breaker in common.sh/ps1.
   Do NOT invent a second throttle. Use `dns_ceiling_rate`/`Get-DnsCeilingRate`
