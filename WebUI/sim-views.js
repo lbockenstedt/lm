@@ -6249,10 +6249,12 @@ window.csSaveHubConfig = async function () {
         // hub_config — the VM Auto-Provisioning card's keys are preserved.
         const cur = await csFetch('/tenant/' + csTenant() + '/hub-config');
         const merged = Object.assign({}, (cur && cur.hub_config) || {}, config);
-        const body = {
-            hub_config_enabled: !!(csEl('cs-hc-enabled') && csEl('cs-hc-enabled').checked),
-            hub_config: merged
-        };
+        // Only send the enable flag when this card's toggle checkbox is actually in
+        // the DOM. Otherwise OMIT it so the route preserves the stored value — a
+        // field save must never silently disable "hub as source of truth".
+        const _enEl = csEl('cs-hc-enabled');
+        const body = { hub_config: merged };
+        if (_enEl) body.hub_config_enabled = !!_enEl.checked;
         const r = await csFetch('/tenant/' + csTenant() + '/hub-config', { method: 'PUT', body: JSON.stringify(body) });
         csPushToast(r, 'Saved');
     } catch (e) {
@@ -6437,11 +6439,12 @@ window.csSaveAutoProvConfig = async function () {
         // provision loop never started (the Setup dropdown looked "not linked"
         // to the real auto-provision the Overview checkbox controls).
         const autoProvOn = String(merged.usb_auto_provision || '').toLowerCase() === 'on';
-        const hcEnabled = !!(cur && cur.hub_config_enabled) || autoProvOn;
-        const body = {
-            hub_config_enabled: hcEnabled,
-            hub_config: merged
-        };
+        // The Auto-Provisioning card does NOT own the "hub as source of truth"
+        // toggle — OMIT hub_config_enabled so the route preserves the stored value
+        // (a field edit here must not flip it off). Turning Auto-Provision ON still
+        // enables the hub push, so send true only in that case.
+        const body = { hub_config: merged };
+        if (autoProvOn) body.hub_config_enabled = true;
         const r = await csFetch('/tenant/' + csTenant() + '/hub-config', { method: 'PUT', body: JSON.stringify(body) });
         csPushToast(r, 'Saved');
         // Keep the Overview/USB auto-provision checkbox + status in sync with

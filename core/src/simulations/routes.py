@@ -2776,17 +2776,25 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.put("/sim/api/tenant/{tenant}/hub-config")
     async def set_hub_config(request: Request, tenant: str, tenant_id: str = Depends(get_tenant_id)):
         body = await request.json()
-        enabled = bool(body.get("hub_config_enabled", False))
         hc = body.get("hub_config") or {}
-        # Normalize Setup/Proxmox list fields: the WebUI sends comma/space-
-        # delimited text for usb_vidpids / usb_ignored_vidpids / t1/t3_pci_vidpids
-        # / ignored_hostnames; downstream expects lists. Preserve usb_vidpids
-        # type/label from the currently-stored entry (fetch it here).
+        # Fetch the stored snapshot up front — used to normalize list fields AND to
+        # PRESERVE the enable state when a save OMITS the flag.
         try:
             stored = await store.get_hub_config(tenant_id)
         except Exception:
             stored = None
         stored_hc = (stored and stored.get("hub_config")) or {}
+        # Preserve the stored enable state when the caller omits hub_config_enabled.
+        # The old `default False` was a footgun: a partial save from another card
+        # (e.g. the Auto-Provisioning card tabbing out of a field) that didn't carry
+        # the flag SILENTLY flipped "hub as source of truth" off, hiding the Hub
+        # Config fields. Only an EXPLICIT boolean in the body changes it now.
+        enabled = bool(body.get("hub_config_enabled",
+                                (stored or {}).get("hub_config_enabled", False)))
+        # Normalize Setup/Proxmox list fields: the WebUI sends comma/space-
+        # delimited text for usb_vidpids / usb_ignored_vidpids / t1/t3_pci_vidpids
+        # / ignored_hostnames; downstream expects lists. Preserve usb_vidpids
+        # type/label from the currently-stored entry.
         hc = normalize_hub_config_lists(hc, stored_hc)
         await store.set_hub_config(tenant_id, enabled, hc)
         pushed = await _push_config(tenant_id, hc if enabled else {}) if enabled else 0
