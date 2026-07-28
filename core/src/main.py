@@ -3676,12 +3676,32 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # agent_id (raw name) is stored for guid→name relay translation; spoke_id
         # is the raw connect name (relay destinations resolve via _primary_key).
         if agent_id and agent_pk is not None:
+            _spk_pk = self._primary_key(spoke_id)
+            _now = time.time()
             self.agent_info[agent_pk] = {
-                "spoke_id":  self._primary_key(spoke_id),
+                "spoke_id":  _spk_pk,
                 "agent_id":  agent_id,
                 "hostname":  (relay_data.get("hostname") or "").strip() or agent_id,
-                "last_seen": time.time(),
+                "last_seen": _now,
             }
+            # Durable last-seen for the agent card: stamp the PERSISTED composite
+            # heartbeat key ({spoke_pk}:{agent_pk}) on EVERY relayed frame — not
+            # only AGENT_HEARTBEAT (which for a pxmx agent may never land under
+            # this key, see routes/pxmx.py:107-127). ``agent_info[pk]`` above is
+            # evicted on spoke disconnect and wiped on hub restart, so without a
+            # durable signal a pxmx agent that isn't actively relaying reads as
+            # "Never connected" — both liveness signals gone. The composite key
+            # survives via spoke_last_seen (persisted; re-seeded into
+            # heartbeat.last_seen on boot in __init__), so the card shows the
+            # agent's REAL last-seen age after a disconnect/hub-restart instead of
+            # "Never connected". get_status derives GREEN/YELLOW/RED from this age,
+            # so a genuinely-dead agent still ages out.
+            _hb_key = f"{_spk_pk}:{agent_pk}"
+            self.heartbeat.last_seen[_hb_key] = _now
+            try:
+                self.state.set_spoke_last_seen(_hb_key, _now)
+            except Exception:  # noqa: BLE001
+                pass
 
         # Inherit the spoke's tenant onto the agent's client_simulation.tenant_id
         # so a pxmx server attached to a tenant-assigned cs spoke carries that
