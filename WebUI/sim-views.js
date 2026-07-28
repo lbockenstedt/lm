@@ -356,7 +356,16 @@ function _csAgeLabel(secs) {
 }
 function csHostStateBadge(h) {
     if (!h) return csOnlineBadge(false);
-    if (h.host_online) return csOnlineBadge(true);
+    if (h.host_online) {
+        // In contact (fresh frame), but the agent reused a snapshot this tick
+        // because its live collect is failing/timing out — flag the data as stale
+        // so it doesn't read as freshly-accurate (and so a busy/wedged host reads
+        // "online · stale", never "offline while still connected").
+        if (h.telemetry_stale) {
+            return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold uppercase tracking-wider" title="Connected — but the agent's live collect is failing/timing out, so VM/node data is a reused snapshot"><span class="w-1.5 h-1.5 rounded-full bg-amber-500"></span>Online · stale</span>`;
+        }
+        return csOnlineBadge(true);
+    }
     // Spoke is up but this host's agent frame has gone stale → surface it
     // distinctly (amber) with the age so a dead/hung agent is obvious.
     if (h.host_stale && h.spoke_online) {
