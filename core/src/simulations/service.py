@@ -451,8 +451,16 @@ class SimulationsService:
             # Per-hop lag chain for the detail page (seconds, one-decimal).
             at = h.get("agent_telemetry") or {}
             gen = at.get("gen_ts")
+            # Frame is flowing (host in-contact) but the agent reused a snapshot
+            # because its live collect failed/timed out — so the VM/node data is
+            # stale even though last_seen is fresh. Surface it as its own state so a
+            # busy/wedged host reads "online · telemetry stale", NOT a false "fresh"
+            # and NOT "offline" (the frame keeps last_seen advancing, which is what
+            # stops the "offline while connected" symptom).
+            h["telemetry_stale"] = bool(at.get("stale_collect"))
             h["freshness"] = {
                 "agent_gen_age_s":  round(now - gen, 1) if isinstance(gen, (int, float)) else None,
+                "stale_collect":    bool(at.get("stale_collect")),
                 "agent_to_spoke_s": at.get("agent_to_spoke_lag_s"),
                 "spoke_ingest_age_s": round(now - hls, 1) if isinstance(hls, (int, float)) and hls else None,
                 "hub_cache_age_s":  h.get("cache_age_s"),
