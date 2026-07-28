@@ -217,7 +217,10 @@ def _hub_config_list_value(key: str, raw: Any, stored_raw: Any = None) -> list:
                             "label": p["label"] if p else vp})
         return out
     items = _coerce_to_list(raw)
-    if key == "ignored_hostnames":
+    if key in ("ignored_hostnames", "t1_exclude_hosts"):
+        # Plain hostname/prefix string lists — NOT vid:pid. Keep non-empty tokens
+        # verbatim (order/case preserved). Must NOT fall through to the vidpid
+        # branch below, which would drop every hostname (fails _USB_VIDPID_RE).
         out, seen = [], set()
         for it in items:
             s = str(it).strip()
