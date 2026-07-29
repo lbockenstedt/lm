@@ -3108,13 +3108,20 @@ function renderSpokeIndicators() {
 
     // Append a forgiving out-of-contact alert summary (SpokeAlertMixin) to the
     // tooltip. Distinct from the realtime dots above — these fire only after a
-    // spoke has been out of contact >=5m (warning) / >=30m (error). An active
-    // error alert also turns the module dot red so an operator scanning the
-    // header notices a sustained outage.
+    // spoke has been out of contact >=5m (warning) / >=30m (error). A sustained
+    // spoke/agent outage also turns the module dot red so an operator scanning
+    // the header notices it.
     const alerts = Array.isArray(window.activeAlerts) ? window.activeAlerts : [];
     let alertHtml = '';
     if (alerts.length) {
-        const hasErr = alerts.some(a => String(a.tier) === 'error');
+        // MODULE STATUS reports SPOKE AND AGENT health — nothing else may colour
+        // it. Fleet-availability and out-of-dongles ride the same /status channel
+        // but describe lab capacity (a degraded client fleet, a host with no
+        // working dongles left); neither is a module that can be up or down, so a
+        // dongle shortage turning this dot red made every spoke look unhealthy.
+        // They stay listed below for visibility, under their own headings.
+        const isSpokeAlert = a => (a.source || 'spoke_out_of_contact') === 'spoke_out_of_contact';
+        const hasErr = alerts.some(a => isSpokeAlert(a) && String(a.tier) === 'error');
         if (hasErr) overallColor = 'bg-red-500';
         moduleDot.className = `w-2 h-2 rounded-full ${overallColor} transition-all`;
         const esc = escapeHtml;  // shared escaper (escapes &<>"')
