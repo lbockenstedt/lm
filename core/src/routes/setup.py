@@ -1320,6 +1320,159 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=403, detail="admin required")
         return {"active_alerts": hub.get_active_spoke_alerts()}
 
+    # ── Alert-state forensics (System → Hub Status) ──────────────────────────
+    # The footer MODULE STATUS dot turns red on ANY active error-tier alert, and
+    # /status merges THREE unrelated producers into one list (spoke
+    # out-of-contact + fleet availability + dongle exhaustion). That makes "every
+    # spoke is green but the dot is red" look like a contradiction when it isn't.
+    # Worse, a relayed pxmx node-agent that leaks into approved_modules is keyed
+    # in heartbeat under a COMPOSITE "{parent}:{agent_id}" key, so the alert
+    # loop's bare-id lookup misses, the absent clock runs, and it escalates to a
+    # permanent false "out of contact" for an agent the Agents table shows
+    # online (spoke_alert_sync.py:296-311). This route dumps the raw state both
+    # code paths read and pre-computes the verdicts, so the answer is on the page
+    # instead of requiring a live Python shell on the hub. Read-only.
+    @app.get("/setup/alert-diagnostics")
+    async def alert_diagnostics(request: Request):
+        """Forensics for the footer alert badge: every active alert tagged with
+        its PRODUCER, the raw id sets both the alert loop and the Spokes & Agents
+        filter compare against, and computed ``findings`` naming any false
+        positive / stale-state condition. Admin only."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+
+        def _safe(fn, default):
+            try:
+                return fn()
+            except Exception as e:                      # noqa: BLE001 — diag never 500s
+                logger.debug("[alert-diag] %s failed: %s", getattr(fn, "__name__", fn), e)
+                return default
+
+        now = time.time()
+        approved = {s for s, a in (hub.approved_modules or {}).items() if a}
+        relay_ids = _safe(hub._relayed_agent_ids, set())
+        spoke_alerts = dict(getattr(hub, "_spoke_alerts", {}) or {})
+        tier_map = dict(getattr(hub, "_spoke_alert_tier", {}) or {})
+        absent = dict(getattr(hub, "_spoke_absent_since", {}) or {})
+        last_seen = dict(getattr(hub.heartbeat, "last_seen", {}) or {})
+        connected = set(getattr(hub, "active_connections", {}) or {})
+        # Persisted copy — hub.approved_modules is normally the SAME object
+        # (main.py:330 → manager.get_approved_modules), but a self-heal pop that
+        # never marks state dirty (or a get() that returned a fresh dict) makes
+        # these diverge, which is how an evicted agent id comes BACK on restart.
+        persisted = {s for s, a in ((hub.state.system_state.get("approved_modules") or {})
+                                    ).items() if a}
+
+        warn_s, error_s = _safe(hub._spoke_alert_thresholds, (300, 1800))
+        cfg = _safe(hub._spoke_alert_cfg, {})
+
+        # Composite heartbeat keys, grouped by the agent-id tail the alert loop
+        # FAILS to match (the bare id) — the direct evidence for a false positive.
+        composite = {}
+        for k in last_seen:
+            if ":" in k:
+                parent, tail = k.split(":", 1)
+                composite.setdefault(tail, []).append(
+                    {"key": k, "parent": parent,
+                     "age_s": int(max(0.0, now - (last_seen.get(k) or now)))})
+
+        # Every active alert, tagged with the module that produced it.
+        alerts = []
+        for src, getter in (("spoke_out_of_contact", "get_active_spoke_alerts"),
+                            ("fleet_availability", "get_fleet_alerts"),
+                            ("dongle_exhaustion", "get_dongle_alerts")):
+            fn = getattr(hub, getter, None)
+            if not fn:
+                continue
+            for a in _safe(fn, []):
+                alerts.append({**a, "source": src})
+
+        # Per-alert forensics for the spoke producer only (fleet/dongle alerts
+        # are synthetic keys with no heartbeat/approval to cross-check).
+        rows = []
+        for sid, a in spoke_alerts.items():
+            rows.append({
+                "spoke_id": sid,
+                "tier": a.get("tier"),
+                "detail": a.get("detail", ""),
+                "duration_s": int(a.get("duration_s", 0) or 0),
+                "is_approved": sid in approved,
+                "is_relayed_agent": sid in relay_ids,
+                "heartbeat_bare": last_seen.get(sid),
+                "heartbeat_composite": composite.get(sid, []),
+                "is_connected": sid in connected,
+                "absent_since": absent.get(sid),
+                "latched_tier": tier_map.get(sid),
+            })
+        rows.sort(key=lambda r: (r["tier"] != "error", r["spoke_id"]))
+
+        # ── verdicts ─────────────────────────────────────────────────────────
+        findings = []
+
+        def _add(code, severity, detail, ids):
+            if ids:
+                findings.append({"code": code, "severity": severity,
+                                 "detail": detail, "ids": sorted(ids)})
+
+        _add("relayed_agent_false_positive", "error",
+             "Relayed node-agent has an active out-of-contact alert. Its heartbeat "
+             "lives under a composite '{parent}:{agent_id}' key, so the alert loop's "
+             "bare-id lookup returns None and the absent clock escalates it — the "
+             "Agents table shows it ONLINE. Not a real outage.",
+             {r["spoke_id"] for r in rows if r["is_relayed_agent"]})
+
+        _add("leaked_agent_approved", "warning",
+             "Relayed node-agent id is still in approved_modules; the alert loop "
+             "self-heal (_selfheal_leaked_agents) should have popped it.",
+             approved & relay_ids)
+
+        _add("alert_without_approval", "warning",
+             "Active alert for an id that is no longer approved — orphaned entry in "
+             "_spoke_alerts that no loop iteration will clear (the loop only walks "
+             "approved ids).",
+             {r["spoke_id"] for r in rows if not r["is_approved"]})
+
+        _add("latched_tier_without_alert", "warning",
+             "_spoke_alert_tier still holds warning/error with no matching "
+             "_spoke_alerts entry. If the id re-enters approved_modules the loop "
+             "reads tier == current, takes the no-transition branch, and RE-ARMS "
+             "the alert instead of clearing it.",
+             {s for s, t in tier_map.items()
+              if t in ("warning", "error") and s not in spoke_alerts})
+
+        _add("approved_persist_drift", "warning",
+             "In-memory approved_modules disagrees with the persisted copy. A "
+             "self-heal eviction that was never marked dirty returns on the next "
+             "hub restart — the alert then re-fires after the error threshold.",
+             approved ^ persisted)
+
+        _add("connected_but_alerting", "warning",
+             "Spoke holds a live hub connection yet has an active out-of-contact "
+             "alert.",
+             {r["spoke_id"] for r in rows if r["is_connected"]})
+
+        return {
+            "generated_ts": now,
+            "config": {"enabled": bool(cfg.get("enabled", False)),
+                       "warn_s": warn_s, "error_s": error_s},
+            "counts": {
+                "approved": len(approved),
+                "relay_ids": len(relay_ids),
+                "spoke_alerts": len(spoke_alerts),
+                "alerts_total": len(alerts),
+                "by_source": {s: sum(1 for a in alerts if a["source"] == s)
+                              for s in ("spoke_out_of_contact", "fleet_availability",
+                                        "dongle_exhaustion")},
+            },
+            "alerts": alerts,
+            "spoke_alert_rows": rows,
+            "findings": findings,
+            "approved_ids": sorted(approved),
+            "relay_ids": sorted(relay_ids),
+        }
+
     # ── Network Devices → NetBox device-discovery sync (Setup → Sync) ──
     # global_config["nw_netbox_device_sync"] is saved via the generic POST
     # /setup/config shallow-merge — no dedicated config route needed. The

@@ -140,6 +140,7 @@ const ROUTES = {
     loadSpokeAlertConfig:     { m: 'GET',  p: '/setup/config',                  api: 'get_global_config' },
     loadSpokeAlerts:          { m: 'GET',  p: '/setup/spoke-alerts',            api: 'spoke_alerts' },
     saveSpokeAlertConfig:     { m: 'POST', p: '/setup/config',                  api: 'update_global_config' },
+    loadAlertDiagnostics:     { m: 'GET',  p: '/setup/alert-diagnostics',       api: 'alert_diagnostics' },
 
     // ── Source-of-truth per module (System → Sync; saved via /setup/config) ──
     loadSourceOfTruthConfig:  { m: 'GET',  p: '/setup/config',              api: 'get_global_config' },
@@ -4801,6 +4802,14 @@ function _renderSettingsSection(subMenu) {
                     <div id="hub-health-body"><p class="text-slate-400 italic text-xs">Loading…</p></div>
                 </div>
                 <div class="${card} p-6">
+                    <div class="flex justify-between items-center mb-1">
+                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Alert Diagnostics ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <button onclick="loadAlertDiagnostics()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Why the footer MODULE STATUS dot is red — which producer raised each alert, and whether any are false positives">↻ Refresh</button>
+                    </div>
+                    <p class="text-[10px] text-slate-400 mb-3">The footer <b>MODULE STATUS</b> dot turns red on <b>any</b> active error-tier alert, and that badge merges <b>three</b> producers — spoke out-of-contact, fleet availability, and dongle exhaustion. Every spoke green while the dot is red is therefore not a contradiction. This card names the producer behind each alert and flags the ones that are stale or false.</p>
+                    <div id="alert-diag-body"><p class="text-slate-400 italic text-xs">Loading…</p></div>
+                </div>
+                <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-3">
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Message Backlog &amp; Rate Limiting ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                         <div class="flex items-center gap-2">
@@ -4936,6 +4945,7 @@ function _renderSettingsSection(subMenu) {
             </div>`;
         updateStatus();
         loadHubHealthCard();
+        loadAlertDiagnostics();
         loadBackpressureConfig();
         loadUpdateGateConfig();
         loadActiveSessions();
@@ -19882,6 +19892,119 @@ function _hubHealthHtml(d) {
         </tr></thead><tbody>${rows}</tbody></table>
       </div>
       <div class="text-[11px] text-slate-500">RTT = WS keepalive round-trip (network latency to the spoke). Write buffer = hub→spoke outbound backlog (growing = that spoke/network isn't draining). <b>High loop lag + low RTT/buffers = hub loop; high RTT or growing buffers = network transport.</b></div>
+    </div>`;
+}
+
+// Alert Diagnostics — inline card on System → Hub Status. Explains the footer
+// MODULE STATUS dot: which of the THREE producers raised each active alert
+// (spoke out-of-contact / fleet availability / dongle exhaustion, merged into
+// one list by /status), and which alerts are false positives or stale state.
+// Backed by GET /setup/alert-diagnostics (core/src/routes/setup.py).
+async function loadAlertDiagnostics() {
+    const body = document.getElementById('alert-diag-body');
+    if (!body) return;
+    try {
+        const d = await apiJson('/setup/alert-diagnostics');
+        body.innerHTML = _alertDiagHtml(d);
+    } catch (e) {
+        body.innerHTML = `<p class="text-red-500 text-xs">Alert diagnostics failed: ${escapeHtml(e.message)}</p>`;
+    }
+}
+window.loadAlertDiagnostics = loadAlertDiagnostics;
+
+// Producer labels — the merge at setup.py get_status() is exactly what makes the
+// footer tooltip's single "Out-of-contact alerts" heading misleading.
+const _ALERT_SOURCE_LABEL = {
+    spoke_out_of_contact: 'Spoke out-of-contact',
+    fleet_availability:   'Fleet availability',
+    dongle_exhaustion:    'Dongle exhaustion',
+};
+
+function _alertDiagHtml(d) {
+    const esc = escapeHtml;  // shared escaper (escapes &<>"')
+    const cfg = d.config || {}, counts = d.counts || {}, bySrc = counts.by_source || {};
+    const alerts = d.alerts || [], rows = d.spoke_alert_rows || [], findings = d.findings || [];
+    const dur = s => s == null ? '—' : s >= 3600 ? `${(s/3600).toFixed(1)}h`
+        : s >= 60 ? `${Math.floor(s/60)}m` : `${s}s`;
+    const ago = ts => ts == null ? '—' : dur(Math.max(0, Math.floor(Date.now()/1000 - ts)));
+
+    // Headline verdict: the dot is red iff any error-tier alert is active, and a
+    // false positive means red for a fleet that is actually healthy.
+    const anyErr = alerts.some(a => String(a.tier) === 'error');
+    const falsePos = findings.filter(f => f.severity === 'error')
+                             .reduce((n, f) => n + (f.ids || []).length, 0);
+    let verdict, vClass;
+    if (!alerts.length) { verdict = 'No active alerts — dot should be green'; vClass = 'bg-green-100 text-green-700'; }
+    else if (falsePos)  { verdict = `Dot is RED on ${falsePos} FALSE alert(s)`; vClass = 'bg-red-100 text-red-700'; }
+    else if (anyErr)    { verdict = 'Dot is RED — error-tier alert active'; vClass = 'bg-red-100 text-red-700'; }
+    else                { verdict = 'Warning-tier alerts only'; vClass = 'bg-amber-100 text-amber-700'; }
+
+    const sevClass = s => s === 'error' ? 'border-red-300 bg-red-50 text-red-700'
+                                        : 'border-amber-300 bg-amber-50 text-amber-700';
+    const findingHtml = findings.length ? findings.map(f => `
+        <div class="border ${sevClass(f.severity)} rounded p-2 text-xs">
+            <div class="font-bold uppercase tracking-wide text-[10px] mb-0.5">${esc(f.code.replace(/_/g, ' '))}</div>
+            <div class="mb-1">${esc(f.detail)}</div>
+            <div class="font-mono text-[11px] opacity-80">${f.ids.map(esc).join(', ')}</div>
+        </div>`).join('')
+        : `<p class="text-xs text-[#01A982]">No stale or false alert state detected — every active alert reflects a real condition.</p>`;
+
+    const alertRows = alerts.length ? alerts.map(a => `
+        <tr class="border-b border-slate-100">
+            <td class="px-3 py-1.5 font-medium" title="${esc(a.spoke_id)}">${esc(a.name || a.spoke_id)}</td>
+            <td class="px-3 py-1.5 text-xs text-slate-600">${esc(_ALERT_SOURCE_LABEL[a.source] || a.source)}</td>
+            <td class="px-3 py-1.5 text-center"><span class="text-xs font-bold ${a.tier === 'error' ? 'text-red-600' : 'text-amber-600'}">${esc(a.tier)}</span></td>
+            <td class="px-3 py-1.5 text-center text-xs text-slate-600">${dur(a.duration_s)}</td>
+            <td class="px-3 py-1.5 text-xs text-slate-500">${esc(a.detail || '')}</td>
+        </tr>`).join('')
+        : `<tr><td colspan="5" class="px-3 py-3 text-slate-400 italic">No active alerts.</td></tr>`;
+
+    // Per-spoke forensics: the exact lookups the alert loop performs, so a false
+    // positive is visible as "no bare heartbeat, but a fresh composite one".
+    const yn = (v, good) => `<span class="${v === good ? 'text-[#01A982]' : 'text-red-600'} font-bold">${v ? 'yes' : 'no'}</span>`;
+    const forensicRows = rows.length ? rows.map(r => {
+        const comp = (r.heartbeat_composite || []);
+        return `<tr class="border-b border-slate-100">
+            <td class="px-3 py-1.5 font-mono text-xs">${esc(r.spoke_id)}</td>
+            <td class="px-3 py-1.5 text-center text-xs ${r.tier === 'error' ? 'text-red-600 font-bold' : 'text-amber-600'}">${esc(r.tier)}</td>
+            <td class="px-3 py-1.5 text-center text-xs">${r.heartbeat_bare != null ? ago(r.heartbeat_bare) + ' ago' : '<span class="text-red-600">none</span>'}</td>
+            <td class="px-3 py-1.5 text-center text-xs">${comp.length ? comp.map(c => `<span class="text-[#01A982]" title="${esc(c.key)}">${c.age_s}s ago</span>`).join(', ') : '—'}</td>
+            <td class="px-3 py-1.5 text-center text-xs">${yn(r.is_relayed_agent, false)}</td>
+            <td class="px-3 py-1.5 text-center text-xs">${yn(r.is_approved, true)}</td>
+            <td class="px-3 py-1.5 text-center text-xs text-slate-500">${esc(r.latched_tier || '—')}</td>
+        </tr>`;
+    }).join('') : `<tr><td colspan="7" class="px-3 py-3 text-slate-400 italic">No spoke out-of-contact alerts.</td></tr>`;
+
+    return `<div class="space-y-4">
+      <div class="flex items-center justify-end">
+        <span class="text-xs px-2 py-1 rounded-full ${vClass}">${esc(verdict)}</span>
+      </div>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+        <div><div class="text-slate-500 text-xs">Spoke out-of-contact</div><div class="font-bold ${bySrc.spoke_out_of_contact ? 'text-red-600' : 'text-slate-800'}">${bySrc.spoke_out_of_contact || 0}</div></div>
+        <div><div class="text-slate-500 text-xs">Fleet availability</div><div class="font-bold ${bySrc.fleet_availability ? 'text-red-600' : 'text-slate-800'}">${bySrc.fleet_availability || 0}</div></div>
+        <div><div class="text-slate-500 text-xs">Dongle exhaustion</div><div class="font-bold ${bySrc.dongle_exhaustion ? 'text-red-600' : 'text-slate-800'}">${bySrc.dongle_exhaustion || 0}</div></div>
+        <div><div class="text-slate-500 text-xs">Approved · relayed agents</div><div class="font-bold text-slate-800">${counts.approved || 0} · ${counts.relay_ids || 0}</div></div>
+      </div>
+      <div class="space-y-2">${findingHtml}</div>
+      <div class="overflow-x-auto border border-slate-200 rounded-lg">
+        <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
+          <th class="px-3 py-1 text-left">Alert</th><th class="px-3 py-1 text-left">Producer</th>
+          <th class="px-3 py-1 text-center">Tier</th><th class="px-3 py-1 text-center">Active</th><th class="px-3 py-1 text-left">Detail</th>
+        </tr></thead><tbody>${alertRows}</tbody></table>
+      </div>
+      <div>
+        <p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest mb-1">Out-of-contact lookups (per alerted id)</p>
+        <div class="overflow-x-auto border border-slate-200 rounded-lg">
+          <table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
+            <th class="px-3 py-1 text-left">Id</th><th class="px-3 py-1 text-center">Tier</th>
+            <th class="px-3 py-1 text-center" title="heartbeat.last_seen[bare_id] — what the alert loop reads">Bare heartbeat</th>
+            <th class="px-3 py-1 text-center" title="heartbeat.last_seen['{parent}:{agent_id}'] — where a relayed agent actually reports">Composite heartbeat</th>
+            <th class="px-3 py-1 text-center">Relayed agent</th><th class="px-3 py-1 text-center">Approved</th>
+            <th class="px-3 py-1 text-center" title="_spoke_alert_tier — a latched warning/error here re-arms the alert instead of clearing it">Latched tier</th>
+          </tr></thead><tbody>${forensicRows}</tbody></table>
+        </div>
+      </div>
+      <div class="text-[11px] text-slate-500">Thresholds: warn ${dur(cfg.warn_s)} · error ${dur(cfg.error_s)} · alerting ${cfg.enabled ? 'on' : '<b class="text-amber-600">off</b>'}. <b>No bare heartbeat + a fresh composite one = a relayed node-agent that is online but alerting</b> — the loop looks up the bare id, the Agents table reads the composite key, so the two disagree.</div>
     </div>`;
 }
 
