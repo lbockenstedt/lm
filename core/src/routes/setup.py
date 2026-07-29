@@ -226,9 +226,23 @@ async def _aggregate_status(hub):
     # badge number can never disagree with the dropdown — the count used to be a
     # raw len(_spoke_alerts), which over-counts any entry the tier-filtered getter
     # drops (e.g. an orphaned/non-active entry).
-    active_alerts = (hub.get_active_spoke_alerts()
-                     + (hub.get_fleet_alerts() if hasattr(hub, "get_fleet_alerts") else [])
-                     + (hub.get_dongle_alerts() if hasattr(hub, "get_dongle_alerts") else []))
+    # Tag each entry with its PRODUCER. They share a shape, but they are not the
+    # same kind of thing: only the first is a spoke/agent that has stopped talking
+    # to the hub. A fleet-availability or out-of-dongles alert is a synthetic key
+    # (fleet:<tenant> / dongles:<host>) describing lab capacity — listing those
+    # under "Out-of-contact alerts" told the operator three Proxmox hosts and a
+    # tenant had gone silent, which is not what they mean. The WebUI groups on
+    # this field; entries from an older hub carry no source and are treated as
+    # spoke out-of-contact (the previous behaviour).
+    def _tag(alerts, source):
+        return [{**a, "source": source} for a in (alerts or [])]
+
+    active_alerts = (
+        _tag(hub.get_active_spoke_alerts(), "spoke_out_of_contact")
+        + _tag(hub.get_fleet_alerts() if hasattr(hub, "get_fleet_alerts") else [],
+               "fleet_availability")
+        + _tag(hub.get_dongle_alerts() if hasattr(hub, "get_dongle_alerts") else [],
+               "dongle_exhaustion"))
     return {
         "ready": True,
         "active_connections": list(hub.active_connections.keys()),

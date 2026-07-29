@@ -3118,10 +3118,26 @@ function renderSpokeIndicators() {
         if (hasErr) overallColor = 'bg-red-500';
         moduleDot.className = `w-2 h-2 rounded-full ${overallColor} transition-all`;
         const esc = escapeHtml;  // shared escaper (escapes &<>"')
-        alertHtml = `<div class="mt-2 pt-2 border-t border-white/15">
-            <div class="text-[9px] uppercase opacity-60 mb-1">Out-of-contact alerts</div>
-            ${alerts.map(a => { const _h = (window.spokeHealth || {})[a.spoke_id]; const _nm = (a.display_name || a.name || (_h && _h.name) || a.spoke_id); return `<div class="flex items-center justify-between gap-4 py-0.5"><span class="opacity-80" title="${esc(a.spoke_id)}">${esc(_nm)}</span><div class="flex items-center gap-1.5"><div class="w-1.5 h-1.5 rounded-full ${a.tier === 'error' ? 'bg-red-400' : 'bg-amber-400'}"></div><span class="text-[9px]">${a.tier}</span></div></div>`; }).join('')}
+        const row = a => { const _h = (window.spokeHealth || {})[a.spoke_id]; const _nm = (a.display_name || a.name || (_h && _h.name) || a.spoke_id); return `<div class="flex items-center justify-between gap-4 py-0.5"><span class="opacity-80" title="${esc(a.spoke_id)}">${esc(_nm)}</span><div class="flex items-center gap-1.5"><div class="w-1.5 h-1.5 rounded-full ${a.tier === 'error' ? 'bg-red-400' : 'bg-amber-400'}"></div><span class="text-[9px]">${a.tier}</span></div></div>`; };
+        // Group by PRODUCER. Only spoke_out_of_contact entries are spokes/agents
+        // that stopped talking to the hub; fleet-availability and out-of-dongles
+        // are lab-capacity signals keyed on synthetic ids (fleet:<tenant> /
+        // dongles:<host>). Listing them all under one "Out-of-contact alerts"
+        // heading read as "these hosts went silent", which they had not. An
+        // untagged entry (older hub) falls back to out-of-contact = old behaviour.
+        const GROUPS = [
+            ['spoke_out_of_contact', 'Out-of-contact alerts'],
+            ['fleet_availability',   'Fleet availability'],
+            ['dongle_exhaustion',    'Dongle exhaustion'],
+        ];
+        alertHtml = GROUPS.map(([src, label]) => {
+            const inGroup = alerts.filter(a => (a.source || 'spoke_out_of_contact') === src);
+            if (!inGroup.length) return '';
+            return `<div class="mt-2 pt-2 border-t border-white/15">
+            <div class="text-[9px] uppercase opacity-60 mb-1">${esc(label)}</div>
+            ${inGroup.map(row).join('')}
         </div>`;
+        }).join('');
     }
     tooltipEl.innerHTML = tooltipHtml + alertHtml;
 }
