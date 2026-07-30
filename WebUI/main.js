@@ -4833,6 +4833,14 @@ function _renderSettingsSection(subMenu) {
                     <div id="alert-diag-body"><p class="text-slate-400 italic text-xs">Loading…</p></div>
                 </div>
                 <div class="${card} p-6">
+                    <div class="flex justify-between items-center mb-1">
+                        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spoke Registry Diagnostics ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                        <button onclick="loadSpokeRegistryDiag()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Every spoke registration the hub holds — including ones a tenant view hides — plus which one is elected as each tenant's Client-Sim broker">↻ Refresh</button>
+                    </div>
+                    <p class="text-[10px] text-slate-400 mb-3">A rebuilt spoke that was never deregistered leaves its <b>old id</b> behind, still tenant-bound and still electable. The Client-Sim broker is <code>bound[0]</code> over the <b>connected</b> candidates, so with leftovers present it can <b>flip between cycles</b> — the same host logs a different <code>cs_spoke</code>, and quota re-pushes never converge. Registrations with <b>no tenant</b> are hidden from a non-admin Spokes list yet can still be claimed as a tenant's broker, which is why deleting everything visible does not always fix it.</p>
+                    <div id="spoke-registry-diag-body"><p class="text-slate-400 italic text-xs">Loading…</p></div>
+                </div>
+                <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-3">
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Message Backlog &amp; Rate Limiting ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                         <div class="flex items-center gap-2">
@@ -4969,6 +4977,7 @@ function _renderSettingsSection(subMenu) {
         updateStatus();
         loadHubHealthCard();
         loadAlertDiagnostics();
+        loadSpokeRegistryDiag();
         loadBackpressureConfig();
         loadUpdateGateConfig();
         loadActiveSessions();
@@ -19913,6 +19922,110 @@ function _hubHealthHtml(d) {
       <div class="text-[11px] text-slate-500">RTT = WS keepalive round-trip (network latency to the spoke). Write buffer = hub→spoke outbound backlog (growing = that spoke/network isn't draining). <b>High loop lag + low RTT/buffers = hub loop; high RTT or growing buffers = network transport.</b></div>
     </div>`;
 }
+
+// Spoke Registry Diagnostics — inline card on System → Hub Status. Answers
+// "I deleted every spoke I could see and they still step on each other".
+// Two facts the Spokes list cannot show: (1) a registration with no tenant_id is
+// admin-only in the list (access.py spoke_visible_to_session) yet is still
+// claimable as a tenant's Client-Sim broker (hub_spoke_registry.py:446), so a
+// tenant-scoped operator cannot even enumerate what is stepping on them; and
+// (2) the broker is bound[0] over the CONNECTED candidates, so leftovers from a
+// rebuilt box make it flip between cycles. Backed by GET
+// /setup/spoke-registry-diag (core/src/routes/setup.py).
+async function loadSpokeRegistryDiag() {
+    const body = document.getElementById('spoke-registry-diag-body');
+    if (!body) return;
+    try {
+        const d = await apiJson('/setup/spoke-registry-diag');
+        body.innerHTML = _spokeRegistryDiagHtml(d);
+    } catch (e) {
+        body.innerHTML = `<p class="text-red-500 text-xs">Spoke registry diagnostics failed: ${escapeHtml(e.message)}</p>`;
+    }
+}
+window.loadSpokeRegistryDiag = loadSpokeRegistryDiag;
+
+function _srdAge(s) {
+    if (s === null || s === undefined) return 'never';
+    if (s < 90) return s + 's ago';
+    if (s < 5400) return Math.round(s / 60) + 'm ago';
+    if (s < 172800) return Math.round(s / 3600) + 'h ago';
+    return Math.round(s / 86400) + 'd ago';
+}
+
+function _spokeRegistryDiagHtml(d) {
+    const rows = (d && d.rows) || [];
+    const brokers = (d && d.brokers) || {};
+    const findings = (d && d.findings) || [];
+    if (!rows.length) return `<p class="text-slate-400 italic text-xs">No spoke registrations.</p>`;
+
+    // Elected brokers first — this is the value that flips, so it leads.
+    let html = '';
+    const bk = Object.keys(brokers).sort();
+    if (bk.length) {
+        html += `<div class="mb-4"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest mb-2">Client-Sim broker election</p>
+            <div class="space-y-1">` + bk.map(t => {
+            const b = brokers[t] || {};
+            const warn = b.unstable;
+            return `<div class="flex items-start justify-between gap-3 text-xs p-2 rounded ${warn ? 'bg-amber-50 border border-amber-200' : 'bg-slate-50'}">
+                <div><span class="font-bold text-slate-600">${escapeHtml(t)}</span>
+                    <span class="text-slate-400"> → </span>
+                    <span class="font-mono text-slate-700">${escapeHtml(b.elected || 'none')}</span></div>
+                <div class="text-right whitespace-nowrap ${warn ? 'text-amber-700' : 'text-slate-400'}">
+                    ${(b.candidates || []).length} connected candidate(s)${warn ? ' — can flip' : ''}</div>
+            </div>`;
+        }).join('') + `</div></div>`;
+    }
+
+    html += `<div class="overflow-x-auto"><table class="w-full text-xs">
+        <thead><tr class="text-left text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-200">
+            <th class="py-1 pr-2">Spoke</th><th class="py-1 pr-2">Type</th><th class="py-1 pr-2">Tenant</th>
+            <th class="py-1 pr-2">State</th><th class="py-1 pr-2">Last seen</th><th class="py-1 pr-2 text-right">Action</th>
+        </tr></thead><tbody>`;
+
+    rows.forEach(r => {
+        const badges = [];
+        if (r.connected) badges.push('<span class="px-1.5 py-0.5 rounded bg-green-100 text-green-700 font-bold">connected</span>');
+        else badges.push('<span class="px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-bold">offline</span>');
+        if (!r.has_key) badges.push('<span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">no key</span>');
+        if (!r.approved) badges.push('<span class="px-1.5 py-0.5 rounded bg-slate-200 text-slate-600">unapproved</span>');
+        if (r.admin_only) badges.push('<span class="px-1.5 py-0.5 rounded bg-purple-100 text-purple-700" title="No tenant_id — hidden from a non-admin Spokes list, but still claimable as a tenant broker">hidden</span>');
+        const del = r.connected
+            ? `<span class="text-slate-300" title="Connected — this is a live spoke, not a leftover">live</span>`
+            : `<button onclick="deleteSpokeRegistration('${escapeHtml(r.spoke_id)}')" class="px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50">Delete</button>`;
+        html += `<tr class="border-b border-slate-100 ${r.connected ? '' : 'bg-slate-50/60'}">
+            <td class="py-1.5 pr-2 font-mono text-slate-700">${escapeHtml(r.spoke_id)}
+                ${r.hostname ? `<span class="text-slate-400"> (${escapeHtml(r.hostname)})</span>` : ''}</td>
+            <td class="py-1.5 pr-2 text-slate-500">${escapeHtml(r.module_type || '—')}</td>
+            <td class="py-1.5 pr-2 text-slate-500">${escapeHtml(r.tenant_id || 'unassigned')}</td>
+            <td class="py-1.5 pr-2"><div class="flex flex-wrap gap-1">${badges.join('')}</div></td>
+            <td class="py-1.5 pr-2 text-slate-400 whitespace-nowrap">${escapeHtml(_srdAge(r.last_seen_age_s))}</td>
+            <td class="py-1.5 pr-2 text-right whitespace-nowrap">${del}</td>
+        </tr>`;
+    });
+    html += `</tbody></table></div>`;
+
+    if (findings.length) {
+        html += `<div class="mt-3 pt-3 border-t border-slate-100 space-y-1">` + findings.map(f =>
+            `<p class="text-[11px] text-slate-500">• ${escapeHtml(f)}</p>`).join('') + `</div>`;
+    }
+    return html;
+}
+
+// Delete a leftover registration. Deliberately offered ONLY for offline rows —
+// deleting a connected spoke would tear down a live one, and the whole point of
+// this card is to remove ghosts without that risk.
+async function deleteSpokeRegistration(spokeId) {
+    if (!confirm(`Delete spoke registration "${spokeId}"?\n\nOnly do this if the box is gone or was rebuilt. `
+                 + `If it is still running it will re-register on its next connect.`)) return;
+    try {
+        await apiJson(`/setup/spokes/${encodeURIComponent(spokeId)}`, { method: 'DELETE' });
+        showToast(`Deleted registration ${spokeId}`, 'success');
+    } catch (e) {
+        showToast(`Delete failed: ${e.message}`, 'error');
+    }
+    loadSpokeRegistryDiag();
+}
+window.deleteSpokeRegistration = deleteSpokeRegistration;
 
 // Alert Diagnostics — inline card on System → Hub Status. Explains the footer
 // MODULE STATUS dot: which of the THREE producers raised each active alert

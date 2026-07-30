@@ -1346,6 +1346,140 @@ def register(app, hub, ctx):
     # online (spoke_alert_sync.py:296-311). This route dumps the raw state both
     # code paths read and pre-computes the verdicts, so the answer is on the page
     # instead of requiring a live Python shell on the hub. Read-only.
+    # ── Spoke Registry Diagnostics ───────────────────────────────────────────
+    # A rebuilt spoke that was never deregistered leaves its OLD id in hub state,
+    # still tenant-bound and still ELECTABLE. get_client_sim_spoke() returns
+    # bound[0] over the CONNECTED candidates (hub_spoke_registry.py:441), so with
+    # several cs spokes on one tenant the broker flips cycle to cycle: the same
+    # host logs a different cs_spoke minutes apart, and the quota reconcile reads
+    # a different effective set each pass and never converges ("STILL stale after
+    # 3 re-push(es)"). The operator often CANNOT clean this up from the Spokes
+    # list, because a registration with no tenant_id is admin-only in
+    # spoke_visible_to_session() (access.py:859) while get_client_sim_spoke()
+    # will still claim it for a tenant (hub_spoke_registry.py:446). This route is
+    # the authoritative enumeration — every registration, whether or not the
+    # caller's tenant view would show it — plus the elected broker per tenant so
+    # a flip is visible rather than inferred. Read-only; deletion goes through
+    # the existing DELETE /setup/spokes/{id}.
+    @app.get("/setup/spoke-registry-diag")
+    async def spoke_registry_diag(request: Request):
+        """Every spoke registration the hub holds, with the ghost/visibility/
+        broker-election facts needed to tell a live spoke from a leftover.
+        Admin only."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+
+        now = time.time()
+        md = (hub.state.system_state.get("module_metadata", {}) or {})
+        approved = hub.approved_modules or {}
+        conns = getattr(hub, "active_connections", {}) or {}
+        types = getattr(hub, "spoke_module_types", {}) or {}
+        try:
+            keys = set((hub.key_manager.keys or {}).keys())
+        except Exception:                               # noqa: BLE001 — diag never 500s
+            keys = set()
+        try:
+            last_seen = dict(hub.heartbeat.last_seen or {})
+        except Exception:                               # noqa: BLE001
+            last_seen = {}
+
+        # Union of every store a registration can live in — a ghost is usually
+        # missing from some of them, so intersecting would hide the thing we are
+        # looking for.
+        ids = set(md) | set(approved) | set(conns) | set(types)
+
+        rows = []
+        for sid in sorted(ids):
+            meta = md.get(sid) or {}
+            tenant = meta.get("tenant_id") or ""
+            try:
+                pk = hub._primary_key(sid)
+            except Exception:                           # noqa: BLE001
+                pk = sid
+            seen = last_seen.get(pk) or last_seen.get(sid)
+            connected = sid in conns
+            has_key = sid in keys or pk in keys
+            reasons = []
+            if not connected:
+                reasons.append("not connected")
+            if not has_key:
+                reasons.append("no session key")
+            if not approved.get(sid, False):
+                reasons.append("not approved")
+            rows.append({
+                "spoke_id": sid,
+                "module_type": types.get(sid) or meta.get("module_type") or "",
+                "tenant_id": tenant,
+                "install_uuid": (meta.get("install_uuid") or "")[:8],
+                "hostname": meta.get("hostname") or "",
+                "approved": bool(approved.get(sid, False)),
+                "connected": connected,
+                "has_key": has_key,
+                "last_seen": seen,
+                "last_seen_age_s": int(now - seen) if seen else None,
+                # The exact rule the Spokes list applies: no tenant_id → only an
+                # admin session sees the row. This column is what explains
+                # "I deleted everything I could see and it still flaps".
+                "admin_only": not tenant,
+                # Advisory, never automatic: a live spoke is simply one that is
+                # connected. Everything else is a deletion CANDIDATE for a human.
+                "ghost_candidate": not connected,
+                "ghost_reasons": reasons,
+            })
+
+        # Broker election per tenant, using the SAME helper the cs bridge calls,
+        # so the page shows what the bridge will actually pick — not a re-derived
+        # guess that could disagree with it.
+        cs_ids = {r["spoke_id"] for r in rows
+                  if (r["module_type"] or "").lower() in ("client-sim", "simulation")}
+        brokers = {}
+        tenants = {r["tenant_id"] for r in rows if r["spoke_id"] in cs_ids}
+        tenants.discard("")
+        for t in sorted(tenants):
+            try:
+                elected = hub.get_client_sim_spoke(t)
+            except Exception as e:                      # noqa: BLE001
+                logger.debug("[registry-diag] election for %s failed: %s", t, e)
+                elected = None
+            cands = [r["spoke_id"] for r in rows
+                     if r["spoke_id"] in cs_ids and r["connected"]
+                     and r["approved"] and (r["tenant_id"] == t or not r["tenant_id"])]
+            brokers[t] = {
+                "elected": elected,
+                "candidates": cands,
+                # >1 connected candidate = bound[0] is order-dependent, so the
+                # broker can change between cycles with nothing else changing.
+                "unstable": len(cands) > 1,
+            }
+
+        findings = []
+        for t, b in brokers.items():
+            if b["unstable"]:
+                findings.append(
+                    f"Tenant {t!r} has {len(b['candidates'])} connected Client-Sim spokes. "
+                    f"The broker is bound[0] over that set, so it can flip between cycles "
+                    f"(same host logging a different cs_spoke, quota re-pushes never "
+                    f"converging). Delete the leftovers so exactly one remains per box.")
+        hidden = [r["spoke_id"] for r in rows if r["admin_only"]]
+        if hidden:
+            findings.append(
+                f"{len(hidden)} registration(s) have no tenant_id — invisible in a "
+                f"non-admin Spokes list, yet still claimable as a tenant's broker. "
+                f"They can only be found and deleted from an admin session.")
+        ghosts = [r["spoke_id"] for r in rows if r["ghost_candidate"] and r["spoke_id"] in cs_ids]
+        if ghosts:
+            findings.append(
+                f"{len(ghosts)} Client-Sim registration(s) are not connected — the usual "
+                f"signature of a rebuilt box whose old id was never deregistered. "
+                f"Confirm the box is gone, then delete.")
+        if not findings:
+            findings.append("No duplicate-registration or visibility problems detected.")
+
+        return {"generated": now, "rows": rows, "brokers": brokers,
+                "findings": findings}
+
     @app.get("/setup/alert-diagnostics")
     async def alert_diagnostics(request: Request):
         """Forensics for the footer alert badge: every active alert tagged with
