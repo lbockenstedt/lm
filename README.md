@@ -2,6 +2,115 @@
 
 This repository serves as the central orchestrator for a Hub-and-Spoke management system. It is designed to provide a "single pane of glass" for managing multitenant infrastructure across various specialized spokes.
 
+<!-- INSTALLERS:START -->
+## Installation
+
+Every installer in this repo, with every flag and environment variable it accepts.
+Installers are idempotent — re-running one updates code and preserves credentials.
+
+### Every module, one table
+
+Each module is its own repo with its own installer. Unless noted, they take the
+same core flags: `--hub`, `--id`/`--name`, `--secret`, `--hub-secret`,
+`--all-prereqs`, and accept a bare hostname for `--hub`.
+
+| Module | Installer | One-liner |
+| :--- | :--- | :--- |
+| **lm** (hub) | `install_menu.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_menu.sh \| sudo bash` |
+| **agent** (any role) | `lm/agent/install_agent.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \| sudo bash -s -- --hub HUB` |
+| **cs** (simulation) | `cs/install_cs.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/cs/main/install_cs.sh \| sudo bash -s -- --hub HUB` |
+| **pxmx** (hypervisor) | `pxmx/install_pxmx.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/install_pxmx.sh \| sudo bash -s -- --hub HUB` |
+| **pxmx agent** (Proxmox host) | `pxmx/agent/install_agent.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install_agent.sh \| sudo bash` |
+| **netbox** (IPAM) | `netbox/install.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/netbox/main/install.sh \| sudo bash -s -- --hub HUB` |
+| **opnsense** (firewall) | `opnsense/install_opnsense.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/opnsense/main/install_opnsense.sh \| sudo bash -s -- --hub HUB` |
+| **cppm** (NAC) | `cppm/install.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/cppm/main/install.sh \| sudo bash -s -- --hub HUB` |
+| **ldap** (directory) | `ldap/install_ldap.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/ldap/main/install_ldap.sh \| sudo bash -s -- --hub HUB` |
+| **nw** (network devices) | `nw/install_nw.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/nw/main/install_nw.sh \| sudo bash -s -- --hub HUB` |
+| **le** (certificates) | `le/install_le.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/le/main/install_le.sh \| sudo bash -s -- --hub HUB` |
+| **truenas** (storage) | `truenas/install_truenas.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/truenas/main/install_truenas.sh \| sudo bash -s -- --hub HUB` |
+| **kvm** | `kvm/install_kvm.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/kvm/main/install_kvm.sh \| sudo bash -s -- --hub ws://HUB:8765` |
+| **qa** (auditor) | `qa/install_qa.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/qa/main/install_qa.sh \| sudo bash -s -- --hub ws://HUB:8765` |
+| **bugfixer** | `bugfixer/install.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh \| bash -s -- wss://HUB` |
+| **tsa** | `tsa/install.sh` | `curl -fsSL https://raw.githubusercontent.com/lbockenstedt/tsa/main/install.sh \| bash -s -- azure` |
+| **dns**, **dhcp** | *(no installer)* | Agent roles `dns` / `dhcp`, or `/opt/lm/<mod>/install_<mod>.sh` |
+
+`kvm` and `qa` are the two exceptions: they do **not** normalize a bare hostname,
+so give them a full `ws://`/`wss://` URL.
+
+### Hub — `install_menu.sh` (start here)
+
+Interactive bootstrap covering both deployment shapes: this box becomes the hub
+(plus WebUI) with an optional checklist of co-located spokes, or it becomes a
+remote spoke. No flags.
+
+```bash
+curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_menu.sh | sudo bash
+```
+
+### Hub — `install_all.sh` (non-interactive)
+
+What the menu calls underneath. Installs the hub and every co-located module.
+
+```bash
+sudo bash /opt/lm/install_all.sh --hub-only
+```
+
+| Flag | Purpose |
+| :--- | :--- |
+| `--reinstall` | Full reinstall rather than an in-place update. |
+| `--reset-secrets` | Regenerate spoke secrets. |
+| `--reset-users` | Reset WebUI user accounts. |
+| `--exclude a,b,c` | Comma-separated modules to skip. |
+| `--hub-only` | Hub and its self-update/watchdog/restart machinery only — shorthand for `--exclude cs,pxmx,opnsense,cppm,netbox,ldap,dns,dhcp,nw,le`. Those then onboard as remote spokes. |
+| `--tls-verify` | Verify TLS to the hub. |
+| `--tls-ca-cert PATH` | CA certificate for that verification. |
+| `--no-setup-token` | Leave first-run `/auth/setup` open instead of gating it behind `LM_SETUP_TOKEN`. Dev/loopback only. |
+
+### Hub — `install_production.sh`
+
+Hub plus the full spoke set (CS, NetBox, Proxmox, OPNsense, ClearPass, LDAP). No flags.
+
+### Generic agent — `agent/install_agent.sh`
+
+One agent **hosts many roles at once**: each loaded role opens its own sub-spoke
+(`{spoke_id}-{role}`) that auto-approves through the agent. Assign roles from
+the hub WebUI, or pre-load them here.
+
+```bash
+curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \
+  | sudo bash -s -- --hub lm-hub.lrbtechnologies.com --roles dns,dhcp
+```
+
+| Flag | Purpose |
+| :--- | :--- |
+| `--hub URL` | Hub WebSocket URL. |
+| `--id` | Pin the agent id. |
+| `--secret` | Pre-shared agent secret. |
+| `--hub-secret` | Hub PSK for auto-approval. |
+| `--role NAME` | Load a single role at boot. |
+| `--roles a,b,c` | Load several roles at boot. |
+| `--spoke-ip IP` | Address of the spoke this agent serves. |
+| `--spoke-url URL` | Full spoke URL. |
+| `--clone` | Golden-image prep — install without minting identity. |
+| `--loopback` | Agent is co-located with the hub. |
+| `--tls-verify` | Verify the hub certificate. |
+| `--tls-ca-cert PATH` | CA certificate for that verification. |
+
+Valid roles: `dns`, `dhcp`, `network`, `netbox`, `opnsense`, `ldap`,
+`simulation`, `cppm`, `proxmox`, `le`, `console`, `statuspage`, `proxy`,
+`truenas`.
+
+**Environment overrides:** `HUB_URL`, `SPOKE_ID`, `STARTUP_ROLES_CSV`, `LM_BRANCH`.
+
+### Hub-native extras
+
+| Installer | Purpose |
+| :--- | :--- |
+| `collab_sink/install_collab_sink.sh` | Hub-side UDP listener for Teams/Zoom/WebEx traffic simulation. Hub-native, not an agent role; stdlib-only, no venv. Called by `install_all.sh`. |
+| `scripts/install-lm-watchdog.sh` | The hub auto-heal watchdog. Idempotent; run as root on the hub box: `sudo bash install-lm-watchdog.sh`. |
+| `dns/install_dns.sh`, `dhcp/install_dhcp.sh` | Co-located Unbound DNS / Kea DHCP spokes. Flags: `--hub`, `--id`, `--secret`, `--infra-only`. |
+<!-- INSTALLERS:END -->
+
 ## 🗺️ Repository & Directory Map
 
 The project is consolidated under the `/opt/lm` (on server) or local directory structure:
