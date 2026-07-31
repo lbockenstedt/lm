@@ -9433,12 +9433,15 @@ window.csVmBulk = async function (action) {
     const byHost = {};
     items.forEach(v => { const hl = v._hostlabel || v._host || '?'; byHost[hl] = (byHost[hl] || 0) + 1; });
     const hostList = Object.keys(byHost);
-    // Destructive + cross-host → confirm with the per-host breakdown.
-    if (action === 'delete_vm') {
+    // No confirm dialog on delete (operator request): the toast below already
+    // names the count and the hosts, and the rows go into an in-flight state
+    // immediately, so the action is visible without a modal. The per-host
+    // breakdown that used to live in the dialog rides the toast instead, so a
+    // cross-host bulk still shows WHERE the VMs are going.
+    if (typeof showToast === 'function') {
         const bd = hostList.map(h => `${h} (${byHost[h]})`).join(', ');
-        if (!confirm(`Delete ${items.length} VM(s) across ${hostList.length} host(s)?\n\n${bd}`)) return;
+        showToast(`${csVmActionLabel(action)} ${items.length} VM(s) across ${hostList.length} host(s): ${bd}`, 'info');
     }
-    if (typeof showToast === 'function') showToast(`${csVmActionLabel(action)} ${items.length} VM(s) across ${hostList.length} host(s)…`, 'info');
     // Optimistic in-flight: mark every selected VM the moment we dispatch (before
     // awaiting) and re-render so their rows show the operation instantly.
     const _op = _CS_ACTION_OP[action];
