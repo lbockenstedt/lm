@@ -3690,17 +3690,64 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         action = str(body.get("action") or "").strip()
         if not action:
             raise HTTPException(status_code=400, detail="missing 'action'")
-        sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
-        if not sid:
-            raise HTTPException(status_code=503, detail="Client-Sim spoke not connected")
         # Accept either an explicit "args" object or inline fields
         # ({action:"start_vm", vmid:90050}) — the legacy cs UI posts the latter.
         if isinstance(body.get("args"), dict):
             args = body["args"]
         else:
-            args = {k: v for k, v in body.items() if k not in ("action", "target", "type")}
+            args = {k: v for k, v in body.items()
+                    if k not in ("action", "target", "type", "all_spokes")}
         payload = {"target": body.get("target") or "proxmox",
                    "action": action, "args": args, "type": body.get("type")}
+
+        # FLEET-WIDE actions (all_spokes) fan out to every bound cs spoke instead
+        # of the tenant's first one. The USB quarantine / exclusion lists are
+        # PER-HOST state and each cs spoke owns its own Proxmox host(s), so
+        # "clear the quarantine" is only meaningful across the whole fleet —
+        # sending it to whichever spoke get_client_sim_spoke happened to return
+        # cleared exactly one host and silently left the rest quarantined.
+        # Everything else stays single-spoke: a start_vm/stop_vm targets one VM
+        # on one host and must NOT be broadcast.
+        if body.get("all_spokes"):
+            spoke_ids: list = []
+            get_spokes = getattr(hub, "get_client_sim_spokes", None)
+            if callable(get_spokes):
+                try:
+                    spoke_ids = list(get_spokes(tenant_id) or [])
+                except Exception:  # noqa: BLE001
+                    spoke_ids = []
+            if not spoke_ids:
+                get_spoke = getattr(hub, "get_client_sim_spoke", None)
+                sid = get_spoke(tenant_id) if callable(get_spoke) else None
+                spoke_ids = [sid] if sid else []
+            if not spoke_ids:
+                raise HTTPException(status_code=503, detail="Client-Sim spoke not connected")
+            pushed, errors, refusals = 0, [], []
+            for sid in spoke_ids:
+                try:
+                    r = await hub.request_response(sid, "CS_QUEUE_COMMAND", payload, timeout=5.0)
+                except Exception as exc:  # noqa: BLE001 — one spoke must not abort the fan-out
+                    errors.append(f"{sid}: {exc}")
+                    continue
+                d = r.get("payload", {}).get("data", r) if isinstance(r, dict) else r
+                if isinstance(d, dict) and d.get("status") == "ERROR":
+                    refusals.append(f"{sid}: {d.get('message', 'refused')}")
+                    continue
+                pushed += 1
+            # Partial success is reported, not raised: clearing 3 of 4 spokes is
+            # a materially different outcome from clearing none, and the operator
+            # needs to know WHICH failed.
+            if not pushed:
+                raise HTTPException(
+                    status_code=502,
+                    detail="; ".join(errors + refusals) or "no spoke accepted the command")
+            return {"status": "SUCCESS", "pushed_to_spokes": pushed,
+                    "spokes_total": len(spoke_ids),
+                    "errors": errors, "refusals": refusals}
+
+        sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
+        if not sid:
+            raise HTTPException(status_code=503, detail="Client-Sim spoke not connected")
         try:
             result = await hub.request_response(sid, "CS_QUEUE_COMMAND", payload, timeout=5.0)
         except Exception as exc:
