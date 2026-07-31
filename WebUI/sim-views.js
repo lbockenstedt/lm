@@ -4236,9 +4236,10 @@ async function csRenderConfigSimQuotas() {
             ambient_weights: (cfg && cfg.ambient_weights && typeof cfg.ambient_weights === 'object') ? { ...cfg.ambient_weights } : {},
             // Per-site load multiplier (100 = normal). Higher = more random load.
             ambient_site_weights: (cfg && cfg.ambient_site_weights && typeof cfg.ambient_site_weights === 'object') ? { ...cfg.ambient_site_weights } : {},
-            // Tier priority: T1 = dedicated PCI radios, T2 = USB dongles. Sets the
-            // default tier for quotas that don't pin one AND reserves the other
-            // tier out of the ambient spread. Default t1_first (historical).
+            // Tier priority: T1 = dedicated PCI radios (reliable → run the
+            // issue-generating quota sims), T2 = USB dongles (background noise,
+            // fill quotas only when the T1s run out). Sets the default tier for
+            // quotas that don't pin one. Default t1_first (historical).
             tier_priority: (cfg && ['t1_first', 't2_first', 't1_only', 't2_only'].indexOf(cfg.tier_priority) >= 0) ? cfg.tier_priority : 't1_first',
         };
         // UNION the tenant's Central + Mist sim-quota rows. Each row's alert_id
@@ -4631,7 +4632,7 @@ function csAmbientDistHtml() {
               </select>
             </label>
           </div>
-          <p class="text-[11px] text-slate-400 mt-1 leading-tight"><span class="font-semibold">Tier priority</span> decides which radio a simulation gets. Quotas pick the preferred tier first, and the other tier is <span class="font-semibold">held back from ambient</span> so it stays free for specific simulations — the default <code>T1 first</code> keeps PCI radios for quotas and leaves USB dongles as background noise. A quota that pins its own tier always wins. <code>T1/T2 only</code> restricts both quotas and ambient to that tier. If a reservation would leave ambient with no clients at all it is dropped for that sweep (<code>only</code> modes are honoured regardless).</p>
+          <p class="text-[11px] text-slate-400 mt-1 leading-tight"><span class="font-semibold">Tier priority</span> decides which radio a quota gets. T1 (PCI) clients are the more reliable ones, so by default quotas fill with T1 first and only reach for T2 dongles once the T1s run out — if the T1s cover every quota, no T2 is used for one. <span class="font-semibold">Every spare client still does background work</span>, T1 included; nothing sits idle. When a quota needs a T1 that is running background traffic, it is <span class="font-semibold">harvested into the quota</span> — displacing a T2 already in it if necessary. A quota that pins its own tier always wins over this setting. <code>T1/T2 only</code> makes unpinned quotas use that tier exclusively, underfilling rather than degrading.</p>
           ${simGrid}
           ${siteGrid}
         </div>`;
