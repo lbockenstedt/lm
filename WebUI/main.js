@@ -20040,12 +20040,66 @@ function _spokeRegistryDiagHtml(d) {
     });
     html += `</tbody></table></div>`;
 
+    // Orphaned telemetry — cache entries with no matching registration. Kept in
+    // its own block because these are NOT spokes: deleting a spoke cannot reach
+    // them, so mixing them into the table above would imply the wrong action.
+    const orphans = (d && d.orphan_telemetry) || [];
+    if (orphans.length) {
+        html += `<div class="mt-4 pt-3 border-t border-slate-200">
+            <div class="flex items-center justify-between mb-1">
+                <p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Orphaned telemetry (no such spoke)</p>
+                <button type="button" id="srd-orph-btn" onclick="srdPurgeTelemetry()" disabled
+                        class="text-xs px-3 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-bold">Purge selected (<span id="srd-orph-count">0</span>)</button>
+            </div>
+            <p class="text-[10px] text-slate-400 mb-2">Cached telemetry keyed to a spoke id that no longer exists — typically an id that changed under a box. It keeps claiming the Proxmox hosts it last reported, so those hosts render under a spoke that no longer runs them. Deleting a spoke cannot remove these; purge them here.</p>
+            <div class="space-y-1">` + orphans.map(o =>
+            `<label class="flex items-start gap-2 text-xs p-2 rounded bg-amber-50 border border-amber-200 cursor-pointer">
+                <input type="checkbox" class="srd-orph mt-0.5" value="${escapeHtml(o.spoke_id)}" onchange="srdSyncOrphCount()">
+                <span class="flex-1"><span class="font-mono text-slate-700">${escapeHtml(o.spoke_id)}</span>
+                    <span class="text-slate-400"> — tenant ${escapeHtml(o.tenant_id || 'none')}, claims ${o.host_count} host(s)</span>
+                    ${(o.hosts || []).length ? `<span class="block text-slate-500 mt-0.5">${(o.hosts || []).map(escapeHtml).join(', ')}</span>` : ''}
+                </span>
+            </label>`).join('') + `</div></div>`;
+    }
+
     if (findings.length) {
         html += `<div class="mt-3 pt-3 border-t border-slate-100 space-y-1">` + findings.map(f =>
             `<p class="text-[11px] text-slate-500">• ${escapeHtml(f)}</p>`).join('') + `</div>`;
     }
     return html;
 }
+
+function srdSyncOrphCount() {
+    const n = Array.from(document.querySelectorAll('.srd-orph')).filter(b => b.checked).length;
+    const label = document.getElementById('srd-orph-count');
+    const btn = document.getElementById('srd-orph-btn');
+    if (label) label.textContent = String(n);
+    if (btn) btn.disabled = (n === 0);
+}
+window.srdSyncOrphCount = srdSyncOrphCount;
+
+async function srdPurgeTelemetry() {
+    const ids = Array.from(document.querySelectorAll('.srd-orph'))
+                     .filter(b => b.checked).map(b => b.value);
+    if (!ids.length) return;
+    if (!confirm(`Purge cached telemetry for ${ids.length} id(s)?\n\n` + ids.join('\n')
+                 + `\n\nThis drops stale cached data only — no running spoke is affected. `
+                 + `The hub refuses any id that IS a registered spoke.`)) return;
+    try {
+        const d = await apiJson('/setup/spoke-registry-diag/purge-telemetry', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ids: ids }),
+        });
+        const refused = (d.refused || []).length
+            ? ` Refused (still registered): ${(d.refused || []).join(', ')}.` : '';
+        showToast(`Purged ${(d.purged || []).length} entr(ies).${refused}`,
+                  (d.refused || []).length ? 'error' : 'success');
+    } catch (e) {
+        showToast(`Purge failed: ${e.message}`, 'error');
+    }
+    loadSpokeRegistryDiag();
+}
+window.srdPurgeTelemetry = srdPurgeTelemetry;
 
 // ── Bulk selection / delete for the registry card ───────────────────────────
 // Only offline rows carry a checkbox, so nothing here can select a running

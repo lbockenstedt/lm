@@ -1371,6 +1371,12 @@ def register(app, hub, ctx):
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
 
+        def _safe_tenant(h, sid):
+            try:
+                return h.state.get_spoke_tenant(sid) or ""
+            except Exception:                       # noqa: BLE001 — diag never 500s
+                return ""
+
         now = time.time()
         md = (hub.state.system_state.get("module_metadata", {}) or {})
         approved = hub.approved_modules or {}
@@ -1509,8 +1515,80 @@ def register(app, hub, ctx):
         if not findings:
             findings.append("No duplicate-registration or visibility problems detected.")
 
+        # ── Orphaned telemetry ──────────────────────────────────────────────
+        # simulations_cache is keyed by spoke id and PERSISTS independently of
+        # the registration table. Deleting a spoke pops its entry
+        # (hub_spoke_registry._evict_spoke_caches), but an id that exists ONLY
+        # in the cache — a spoke whose id changed under it, e.g. the cs
+        # "<hostname>-spoke" era before 2026-07-20 — is unreachable that way:
+        # DELETE /setup/spokes/<id> has no registration to act on. The entry
+        # then keeps claiming the proxmox_hosts it last reported, so those
+        # hosts render under a spoke that no longer runs them and the fleet
+        # looks like it is fighting over ownership. Surface them separately —
+        # they are NOT spokes and must not be mixed into the rows above.
+        orphans = []
+        for sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
+            if sid in ids:
+                continue
+            data = data or {}
+            hosts = data.get("proxmox_hosts")
+            hostnames = ([(h or {}).get("hostname") or "?" for h in hosts]
+                         if isinstance(hosts, list) else [])
+            orphans.append({
+                "spoke_id": sid,
+                "hosts": hostnames,
+                "host_count": len(hostnames),
+                "tenant_id": _safe_tenant(hub, sid),
+            })
+        orphans.sort(key=lambda o: o["spoke_id"])
+        if orphans:
+            findings.append(
+                f"{len(orphans)} cached telemetry entr(ies) belong to spoke id(s) that no "
+                f"longer exist: " + ", ".join(
+                    f"{o['spoke_id']} (claims {o['host_count']} host(s))" for o in orphans) +
+                ". These are NOT registrations — deleting a spoke cannot reach them — so the "
+                "hosts they claim keep rendering under an id that no longer runs them. "
+                "Purge them below.")
+
         return {"generated": now, "rows": rows, "brokers": brokers,
-                "findings": findings}
+                "orphan_telemetry": orphans, "findings": findings}
+
+    @app.post("/setup/spoke-registry-diag/purge-telemetry")
+    async def purge_orphan_telemetry(request: Request):
+        """Drop cached telemetry for ids that are not registered spokes.
+
+        Refuses any id that IS a live registration — that entry is real data
+        for a real spoke, and this route exists only to reap the unreachable
+        leftovers. Admin only."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        body = await request.json()
+        want = [str(x) for x in (body.get("ids") or [])]
+        if not want:
+            raise HTTPException(status_code=400, detail="ids required")
+
+        md = (hub.state.system_state.get("module_metadata", {}) or {})
+        known = (set(md) | set(hub.approved_modules or {})
+                 | set(getattr(hub, "active_connections", {}) or {})
+                 | set(getattr(hub, "spoke_module_types", {}) or {}))
+        cache = getattr(hub, "simulations_cache", {}) or {}
+        purged, refused = [], []
+        for sid in want:
+            if sid in known:
+                refused.append(sid)          # a real spoke — never reap from here
+                continue
+            if cache.pop(sid, None) is not None:
+                purged.append(sid)
+        if purged:
+            try:
+                await asyncio.to_thread(hub._save_simulations_cache)
+            except Exception as e:           # noqa: BLE001 — in-memory drop already took
+                logger.warning("[registry-diag] purged %s but could not persist: %s",
+                               purged, e)
+            logger.warning("[registry-diag] purged orphan telemetry for %s", purged)
+        return {"status": "ok", "purged": purged, "refused": refused}
 
     @app.get("/setup/alert-diagnostics")
     async def alert_diagnostics(request: Request):
