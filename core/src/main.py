@@ -1294,29 +1294,6 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             self._pending_liveness_nonces.discard(nonce)
             raise
 
-    async def send_to_agent(self, spoke_id: str, agent_id: str, command_type: str, data: Dict[str, Any]):
-        """
-        Sends a command to a specific agent by relaying it through its parent spoke.
-        """
-        msg_id = str(uuid.uuid4())
-        msg = Message(
-            header=MessageHeader(
-                message_id=msg_id,
-                timestamp=time.time(),
-                sender_id="hub",
-                destination_id=spoke_id
-            ),
-            payload=MessagePayload(
-                type="SPOKE_RELAY",
-                data={
-                    "target_agent_id": self._agent_relay_name(agent_id),
-                    "command_type": command_type,
-                    "data": data
-                }
-            )
-        )
-        await self.send_to_spoke(msg)
-        return msg_id
 
     async def request_response(self, spoke_id: str, command_type: str, data: Dict[str, Any], timeout: float = 5.0, signing_secret: Optional[str] = None) -> Dict[str, Any]:
         """

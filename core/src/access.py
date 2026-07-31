@@ -897,19 +897,6 @@ def can_bind_spoke(hub, sess, spoke_id: str) -> bool:
     return bool(spoke_tenant) and spoke_tenant in allowed
 
 
-def bindable_spoke_ids(hub, sess, module_type: str):
-    """Spoke ids of ``module_type`` this session may bind a device to. Global
-    Admin → all connected spokes of that type; tenant-admin → only those in their
-    own tenant(s); plain user → none. Backs both the WebUI spoke dropdown and the
-    server-side enforcement in the add-device handlers (same rule, no drift)."""
-    try:
-        sids = list(hub.get_all_spokes_by_type(module_type) or [])
-    except Exception:  # noqa: BLE001
-        sids = []
-    if is_admin(sess):
-        return sids
-    return [sid for sid in sids if can_bind_spoke(hub, sess, sid)]
-
 
 def check_tenant_access(sess, tenant_id: str) -> bool:
     """True if the session user may access ``tenant_id``.
