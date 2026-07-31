@@ -2050,6 +2050,14 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     out["qt_exclude_sims"] = g_qt
         except Exception:  # noqa: BLE001
             pass
+        # Quota tier priority: T1 (dedicated PCI radios) vs T2 (USB dongles).
+        # Sets the default tier for quotas that do not pin one AND reserves the
+        # other tier out of the ambient/background spread, so "T1s for specific
+        # simulations, T2s for background noise" is enforced rather than merely
+        # preferred. Absent → the spoke engine's 't1_first' default.
+        tp = str(csc.get("tier_priority") or "").strip().lower()
+        if tp in ("t1_first", "t2_first", "t1_only", "t2_only"):
+            out["tier_priority"] = tp
         return out
 
     async def _push_sim_quotas(tenant_id: str, force_live: bool = False) -> int:

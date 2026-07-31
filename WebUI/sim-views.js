@@ -4236,6 +4236,10 @@ async function csRenderConfigSimQuotas() {
             ambient_weights: (cfg && cfg.ambient_weights && typeof cfg.ambient_weights === 'object') ? { ...cfg.ambient_weights } : {},
             // Per-site load multiplier (100 = normal). Higher = more random load.
             ambient_site_weights: (cfg && cfg.ambient_site_weights && typeof cfg.ambient_site_weights === 'object') ? { ...cfg.ambient_site_weights } : {},
+            // Tier priority: T1 = dedicated PCI radios, T2 = USB dongles. Sets the
+            // default tier for quotas that don't pin one AND reserves the other
+            // tier out of the ambient spread. Default t1_first (historical).
+            tier_priority: (cfg && ['t1_first', 't2_first', 't1_only', 't2_only'].indexOf(cfg.tier_priority) >= 0) ? cfg.tier_priority : 't1_first',
         };
         // UNION the tenant's Central + Mist sim-quota rows. Each row's alert_id
         // is normalized to prefixed form by csSimQuotaRowFromServer, so Central:
@@ -4566,6 +4570,7 @@ function csAmbientDistHtml() {
     const esc = csEscape;  // shared escaper (escapes &<>"')
     const pct = (pc.ambient_pct != null) ? pc.ambient_pct : 50;
     const control = !!pc.ambient_control;
+    const tier = pc.tier_priority || 't1_first';
     const rsims = pc.randomizable_sims || [];
     const w = pc.ambient_weights || {};
     const sw = pc.ambient_site_weights || {};
@@ -4618,7 +4623,15 @@ function csAmbientDistHtml() {
               <input data-cs-ambient="control" type="checkbox" ${control ? 'checked' : ''} onchange="csAmbientControlToggle()">
               Control distribution by weight
             </label>
+            <label class="text-xs text-slate-500 flex items-center gap-2">Tier priority <span class="text-slate-400">(T1 = PCI radio, T2 = USB dongle)</span>
+              <select data-cs-ambient="tier" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm">
+                ${[['t1_first', 'T1 first, then T2'], ['t2_first', 'T2 first, then T1'],
+                   ['t1_only', 'T1 only'], ['t2_only', 'T2 only']].map(([v, lbl]) =>
+                     `<option value="${v}" ${tier === v ? 'selected' : ''}>${esc(lbl)}</option>`).join('')}
+              </select>
+            </label>
           </div>
+          <p class="text-[11px] text-slate-400 mt-1 leading-tight"><span class="font-semibold">Tier priority</span> decides which radio a simulation gets. Quotas pick the preferred tier first, and the other tier is <span class="font-semibold">held back from ambient</span> so it stays free for specific simulations — the default <code>T1 first</code> keeps PCI radios for quotas and leaves USB dongles as background noise. A quota that pins its own tier always wins. <code>T1/T2 only</code> restricts both quotas and ambient to that tier. If a reservation would leave ambient with no clients at all it is dropped for that sweep (<code>only</code> modes are honoured regardless).</p>
           ${simGrid}
           ${siteGrid}
         </div>`;
@@ -4744,6 +4757,11 @@ function csPoolSyncFromDom() {
     }
     const ctrlEl = document.querySelector('[data-cs-ambient="control"]');
     if (ctrlEl) pc.ambient_control = !!ctrlEl.checked;
+    // Tier priority is independent of weight control — it applies in every mode.
+    const tierEl = document.querySelector('[data-cs-ambient="tier"]');
+    if (tierEl && ['t1_first', 't2_first', 't1_only', 't2_only'].indexOf(tierEl.value) >= 0) {
+        pc.tier_priority = tierEl.value;
+    }
     if (pc.ambient_control) {
         // Per-sim relative weights (default 1). Keep only non-default entries so a
         // config with an even split stays clean.
@@ -4816,6 +4834,7 @@ window.csSavePoolConfig = async function () {
             ambient_control: !!pc.ambient_control,
             ambient_weights: pc.ambient_control ? (pc.ambient_weights || {}) : {},
             ambient_site_weights: pc.ambient_control ? (pc.ambient_site_weights || {}) : {},
+            tier_priority: pc.tier_priority || 't1_first',
         };
         await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
         showToast('Pool & SSID config saved.', 'success');
