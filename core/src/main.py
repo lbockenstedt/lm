@@ -3955,7 +3955,21 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
             #     the instant the frame is BUFFERED, false-alive on a half-open
             #     socket) and evict if no pong so the real reconnect takes over.
             alive = False
-            last_seen = self.heartbeat.last_seen.get(spoke_id)
+            # Read by PRIMARY KEY. Heartbeats are written as
+            # update_heartbeat(pk) (the guid), while this read used the bare
+            # spoke_id (the name) — so for every guid-keyed spoke the lookup was
+            # always None, the "live duplicate" fast path never fired, and the
+            # guard silently degraded to the pong probe below on EVERY duplicate
+            # connect. That is the exact failure this fast path exists to avoid:
+            # a live duplicate whose pong is delayed >2s gets false-evicted, the
+            # evicted side reconnects and evicts the other, and the two boxes
+            # mutually evict forever (the regression that got the earlier
+            # pong-only probe reverted). Invisible until duplicates exist —
+            # which is what replacing a host under the same name, or cloning a
+            # spoke, creates. Bare-id fallback mirrors routes/setup.py:1407 for
+            # spokes that are still name-keyed.
+            last_seen = (self.heartbeat.last_seen.get(pk)
+                         or self.heartbeat.last_seen.get(spoke_id))
             if last_seen is not None and (time.time() - last_seen) < 30.0:
                 alive = True
             else:
