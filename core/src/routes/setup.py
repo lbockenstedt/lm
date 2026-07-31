@@ -1427,7 +1427,29 @@ def register(app, hub, ctx):
                 # connected. Everything else is a deletion CANDIDATE for a human.
                 "ghost_candidate": not connected,
                 "ghost_reasons": reasons,
+                # Filled in below once every row is known.
+                "legacy_twin_of": "",
             })
+
+        # ── Pre-rename twins ────────────────────────────────────────────────
+        # The cs spoke derived its id as "<hostname>-spoke" from 2026-07-02
+        # (cs 5259950) until 2026-07-20 (cs ab7176d, "derive spoke id as bare
+        # hostname"). A box that ran across that change therefore holds TWO
+        # registrations for one machine — "cs-svr-02-spoke" and "cs-svr-02".
+        # install_uuid correlation would normally migrate the old id onto the
+        # new one, but it cannot when the UUID was regenerated in between (a
+        # --purge-env / rebuild), so the pre-rename record survives as an
+        # orphan: usually tenant-less and disconnected, yet still holding the
+        # host/USB telemetry it accumulated. The hub keeps rendering that, so
+        # hosts appear under a spoke that no longer runs them and the fleet
+        # looks like it is fighting over ownership. Name the pair here; the
+        # operator decides, we never auto-delete a registration.
+        _by_id = {r["spoke_id"] for r in rows}
+        for r in rows:
+            sid = r["spoke_id"]
+            if sid.endswith("-spoke") and sid[: -len("-spoke")] in _by_id:
+                r["legacy_twin_of"] = sid[: -len("-spoke")]
+                r["ghost_reasons"] = list(r["ghost_reasons"]) + ["pre-rename twin"]
 
         # Broker election per tenant, using the SAME helper the cs bridge calls,
         # so the page shows what the bridge will actually pick — not a re-derived
@@ -1475,6 +1497,15 @@ def register(app, hub, ctx):
                 f"{len(ghosts)} Client-Sim registration(s) are not connected — the usual "
                 f"signature of a rebuilt box whose old id was never deregistered. "
                 f"Confirm the box is gone, then delete.")
+        twins = [r for r in rows if r["legacy_twin_of"]]
+        if twins:
+            findings.append(
+                "Pre-rename twins found: " + ", ".join(
+                    f"{r['spoke_id']} → {r['legacy_twin_of']}" for r in twins) +
+                ". The cs spoke derived its id as '<hostname>-spoke' until 2026-07-20; each "
+                "of these is the SAME box as the id on the right, registered twice. The old "
+                "record still holds host/USB telemetry, so hosts show up under a spoke that "
+                "no longer runs them. Delete the '-spoke' side once its twin is connected.")
         if not findings:
             findings.append("No duplicate-registration or visibility problems detected.")
 

@@ -12129,11 +12129,27 @@ async function approveAgent(agentId) {
     try {
         const res = await fetch('/api/pxmx/agents?tenant=' + encodeURIComponent(currentTenant), { credentials: 'same-origin' });
         const data = res.ok ? await res.json() : {};
-        const all = [...(data.agents || []), ...(data.pending_agents || [])];
+        // offline_agents too: its rows carry spoke_id (routes/pxmx.py
+        // _offline_relay_agents), and an agent whose parent spoke is briefly
+        // disconnected appears ONLY there. Omitting it made Approve fail with
+        // "could not determine which spoke owns this agent" for a row the
+        // operator can plainly see in the tile.
+        const all = [...(data.agents || []), ...(data.pending_agents || []),
+                     ...(data.offline_agents || [])];
         const found = all.find(a => a.agent_id === agentId);
         spokeId = found && found.spoke_id;
     } catch (e) { console.error('approveAgent: could not resolve owning spoke', e); }
-    if (!spokeId) { showToast('Could not determine which spoke owns this agent', 'error'); return; }
+    if (!spokeId) {
+        // The other way this misses: /api/pxmx/agents filters by the tenant
+        // picker, keeping only agents whose OWNING SPOKE carries a matching
+        // module_metadata tenant_id. A spoke that is not yet bound to a tenant
+        // (freshly onboarded, or unassigned) therefore hides its agents from
+        // every tenant-scoped view — so say that, instead of a dead end.
+        showToast('Could not determine which spoke owns this agent — its spoke may be '
+                  + 'unbound or not visible under the selected tenant. Switch the tenant '
+                  + 'picker to All and retry.', 'error');
+        return;
+    }
     try {
         const res = await setupFetch(`/setup/spokes/${encodeURIComponent(spokeId)}/agents/${encodeURIComponent(agentId)}/approve`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}),
@@ -19976,8 +19992,23 @@ function _spokeRegistryDiagHtml(d) {
         }).join('') + `</div></div>`;
     }
 
+    // Bulk-delete toolbar. Quick-selects match the two classes that actually
+    // accumulate: offline leftovers from a rebuild, and pre-rename '-spoke'
+    // twins. Connected spokes are never selectable — a diagnostics page must
+    // not be able to tear down a running spoke.
+    const nOffline = rows.filter(r => !r.connected).length;
+    const nTwins = rows.filter(r => r.legacy_twin_of).length;
+    html += `<div class="flex flex-wrap items-center gap-2 mb-2 text-xs">
+        <button type="button" onclick="srdSelect('offline')" class="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">Select offline (${nOffline})</button>
+        <button type="button" onclick="srdSelect('twins')" class="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">Select pre-rename twins (${nTwins})</button>
+        <button type="button" onclick="srdSelect('none')" class="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">Clear</button>
+        <span class="flex-1"></span>
+        <button type="button" id="srd-del-btn" onclick="srdDeleteSelected()" disabled
+                class="px-3 py-1 rounded border border-red-300 text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed font-bold">Delete selected (<span id="srd-del-count">0</span>)</button>
+    </div>`;
     html += `<div class="overflow-x-auto"><table class="w-full text-xs">
         <thead><tr class="text-left text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-200">
+            <th class="py-1 pr-2 w-6"></th>
             <th class="py-1 pr-2">Spoke</th><th class="py-1 pr-2">Type</th><th class="py-1 pr-2">Tenant</th>
             <th class="py-1 pr-2">State</th><th class="py-1 pr-2">Last seen</th><th class="py-1 pr-2 text-right">Action</th>
         </tr></thead><tbody>`;
@@ -19989,10 +20020,15 @@ function _spokeRegistryDiagHtml(d) {
         if (!r.has_key) badges.push('<span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">no key</span>');
         if (!r.approved) badges.push('<span class="px-1.5 py-0.5 rounded bg-slate-200 text-slate-600">unapproved</span>');
         if (r.admin_only) badges.push('<span class="px-1.5 py-0.5 rounded bg-purple-100 text-purple-700" title="No tenant_id — hidden from a non-admin Spokes list, but still claimable as a tenant broker">hidden</span>');
+        if (r.legacy_twin_of) badges.push('<span class="px-1.5 py-0.5 rounded bg-orange-100 text-orange-700" title="Same box as ' + escapeHtml(r.legacy_twin_of) + ' — registered under the pre-2026-07-20 &quot;-spoke&quot; id. Safe to delete once the twin is connected.">twin of ' + escapeHtml(r.legacy_twin_of) + '</span>');
         const del = r.connected
             ? `<span class="text-slate-300" title="Connected — this is a live spoke, not a leftover">live</span>`
-            : `<button onclick="deleteSpokeRegistration('${escapeHtml(r.spoke_id)}')" class="px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50">Delete</button>`;
+            : `<button onclick="deleteSpokeRegistration('${escJsAttr(r.spoke_id)}')" class="px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50">Delete</button>`;
+        const sel = r.connected ? '' :
+            `<input type="checkbox" class="srd-sel" data-twin="${r.legacy_twin_of ? '1' : '0'}" ` +
+            `value="${escapeHtml(r.spoke_id)}" onchange="srdSyncCount()">`;
         html += `<tr class="border-b border-slate-100 ${r.connected ? '' : 'bg-slate-50/60'}">
+            <td class="py-1.5 pr-2">${sel}</td>
             <td class="py-1.5 pr-2 font-mono text-slate-700">${escapeHtml(r.spoke_id)}
                 ${r.hostname ? `<span class="text-slate-400"> (${escapeHtml(r.hostname)})</span>` : ''}</td>
             <td class="py-1.5 pr-2 text-slate-500">${escapeHtml(r.module_type || '—')}</td>
@@ -20010,6 +20046,58 @@ function _spokeRegistryDiagHtml(d) {
     }
     return html;
 }
+
+// ── Bulk selection / delete for the registry card ───────────────────────────
+// Only offline rows carry a checkbox, so nothing here can select a running
+// spoke. Deletes are issued one at a time (not Promise.all): each is a state
+// mutation on the hub, and a serial loop keeps the failure report per-id
+// instead of one opaque rejection.
+function srdSyncCount() {
+    const boxes = Array.from(document.querySelectorAll('.srd-sel'));
+    const n = boxes.filter(b => b.checked).length;
+    const label = document.getElementById('srd-del-count');
+    const btn = document.getElementById('srd-del-btn');
+    if (label) label.textContent = String(n);
+    if (btn) btn.disabled = (n === 0);
+}
+window.srdSyncCount = srdSyncCount;
+
+function srdSelect(which) {
+    document.querySelectorAll('.srd-sel').forEach(b => {
+        if (which === 'none') b.checked = false;
+        else if (which === 'offline') b.checked = true;          // every box IS offline
+        else if (which === 'twins') b.checked = b.dataset.twin === '1';
+    });
+    srdSyncCount();
+}
+window.srdSelect = srdSelect;
+
+async function srdDeleteSelected() {
+    const ids = Array.from(document.querySelectorAll('.srd-sel'))
+                     .filter(b => b.checked).map(b => b.value);
+    if (!ids.length) return;
+    if (!confirm(`Delete ${ids.length} spoke registration(s)?\n\n` + ids.join('\n')
+                 + `\n\nOnly do this for boxes that are gone, were rebuilt, or are a `
+                 + `pre-rename twin. A box that is still running will re-register on its `
+                 + `next connect.`)) return;
+    const btn = document.getElementById('srd-del-btn');
+    if (btn) btn.disabled = true;
+    const failed = [];
+    for (const id of ids) {
+        try {
+            await apiJson(`/setup/spokes/${encodeURIComponent(id)}`, { method: 'DELETE' });
+        } catch (e) {
+            failed.push(`${id}: ${e.message}`);
+        }
+    }
+    if (failed.length) {
+        showToast(`Deleted ${ids.length - failed.length}/${ids.length}. Failed: ${failed.join('; ')}`, 'error');
+    } else {
+        showToast(`Deleted ${ids.length} registration(s)`, 'success');
+    }
+    loadSpokeRegistryDiag();
+}
+window.srdDeleteSelected = srdDeleteSelected;
 
 // Delete a leftover registration. Deliberately offered ONLY for offline rows —
 // deleting a connected spoke would tear down a live one, and the whole point of
