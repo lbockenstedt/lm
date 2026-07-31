@@ -5600,7 +5600,8 @@ function _csDhcpHealthText(d) {
         L.push(`  lease db     : ${leaseTxt}  ${s.lease_file || ''}`);
         L.push(`  config test  : ${(s.config_test || {}).ok ? 'valid' : 'INVALID — ' + ((s.config_test || {}).detail || '')}`);
         (s.apparmor_denials || []).forEach(x => L.push(`  apparmor     : ${x}`));
-        (s.last_errors || []).forEach(x => L.push(`  error        : ${x}`));
+        const _lbl = s.last_errors_are_fatal ? 'error' : 'log  ';
+        (s.last_errors || []).forEach(x => L.push(`  ${_lbl}        : ${x}`));
         (s.notes || []).forEach(x => L.push(`  note         : ${x}`));
         L.push('');
     });
@@ -5699,7 +5700,7 @@ function _csDhcpHealthHtml(d) {
                  <pre class="text-[10px] bg-red-50 border border-red-200 rounded p-2 overflow-x-auto whitespace-pre-wrap">${escapeHtml((s.apparmor_denials || []).join('\n'))}</pre>
                  <p class="text-[10px] text-slate-500 mt-1">Kea names its runtime files after the config file, so the <span class="font-mono">-sim</span> instance falls outside Debian's stock profiles. Re-running the installer grants them.</p></div>` : '';
         const errs = (s.last_errors || []).length
-            ? `<div class="mt-2"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest mb-1">Last errors <span class="normal-case font-normal text-slate-400">(may predate the current start — check the timestamps)</span></p>
+            ? `<div class="mt-2"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest mb-1">${s.last_errors_are_fatal ? 'Last errors' : 'Recent log'} <span class="normal-case font-normal text-slate-400">(may predate the current start — check the timestamps)</span></p>
                  <pre class="text-[10px] bg-slate-50 border border-slate-200 rounded p-2 overflow-x-auto whitespace-pre-wrap">${escapeHtml((s.last_errors || []).join('\n'))}</pre></div>` : '';
         const notes = (s.notes || []).length
             ? `<p class="text-[10px] text-slate-400 mt-2">${(s.notes || []).map(escapeHtml).join(' · ')}</p>` : '';
