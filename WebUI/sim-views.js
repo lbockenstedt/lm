@@ -976,7 +976,12 @@ async function csRenderSimulations() {
             window._csSimCheckRows.push({ spoke: name, site: w, check: c, status: cell && cell.status, detail: cell });
         }));
     });
-    csSet(`<div class="space-y-4">${pills}<div id="cs-sim-checks-body"></div></div>`);
+    // Client OS mix (10 Tesla / 40 Windows / 500 Linux) from the Central browse
+    // payload, which is 60s-cached — opening the dashboard doesn't hit Central.
+    // Filled in ASYNC so the dashboard paints immediately instead of blocking on
+    // a browse; the strip stays empty if Central is unreachable.
+    csSet(`<div class="space-y-4">${pills}<div id="cs-dash-os"></div><div id="cs-sim-checks-body"></div></div>`);
+    csOsStripAsync('cs-dash-os');
     csSimChecksFilter();
 }
 
@@ -2316,6 +2321,59 @@ window.csClientFilterKey = csDebounce(function () { csClientResetPage(); }, 200)
 // independent of site_mappings. Shared fetch with a short in-memory cache so
 // switching tabs doesn't re-hit Central each time.
 let _csCentralBrowseCache = null, _csCentralBrowseAt = 0, _csCentralBrowseTenant = null;
+// ── client OS breakdown ──────────────────────────────────────────────────────
+// "500 Linux · 40 Windows · 10 Tesla" from a browse payload. The spoke already
+// aggregates this into os_counts (so the WebUI, the dashboard and any API caller
+// all read the same numbers); recompute locally only when talking to a spoke
+// that predates that field.
+function csOsCounts(data) {
+    const oc = data && data.os_counts;
+    if (oc && typeof oc === 'object' && Object.keys(oc).length) return oc;
+    const out = {};
+    ((data && data.clients) || []).forEach(c => {
+        const raw = String((c && c.os) || '').trim();
+        const k = (raw && raw !== '\u2014') ? raw : 'Unknown';
+        out[k] = (out[k] || 0) + 1;
+    });
+    return out;
+}
+
+// Ordered [label, count], biggest first (the spoke already sorts; sort again so
+// the locally-computed fallback matches).
+function csOsCountPairs(data) {
+    return Object.entries(csOsCounts(data))
+        .sort((a, b) => (b[1] - a[1]) || a[0].toLowerCase().localeCompare(b[0].toLowerCase()));
+}
+
+function csOsChipsHtml(data, opts) {
+    opts = opts || {};
+    const pairs = csOsCountPairs(data);
+    if (!pairs.length) return '';
+    const total = pairs.reduce((n, p) => n + p[1], 0);
+    const chips = pairs.map(function (p) {
+        return '<span class="inline-flex items-baseline gap-1 bg-white border border-slate-200 rounded-full px-2.5 py-0.5">'
+            + '<span class="font-bold text-slate-700">' + csEscape(String(p[1])) + '</span>'
+            + '<span class="text-slate-500">' + csEscape(p[0]) + '</span></span>';
+    }).join('');
+    const label = opts.label === undefined ? 'Client OS' : opts.label;
+    return '<div class="flex flex-wrap items-center gap-1.5 text-xs">'
+        + (label ? '<span class="text-[10px] text-slate-400 uppercase tracking-wider mr-1">' + csEscape(label) + '</span>' : '')
+        + chips
+        + '<span class="text-slate-400 ml-1">\u00b7 ' + csEscape(String(total)) + ' total</span></div>';
+}
+
+// Dashboard OS strip — fills the placeholder once the (cached) browse resolves.
+// Silent on failure: an unreachable Central should not put an error banner on
+// the dashboard, the Central tab already reports that.
+async function csOsStripAsync(elId) {
+    try {
+        const data = await csCentralBrowse();
+        const html = csOsChipsHtml(data);
+        const el = document.getElementById(elId);
+        if (el && html) el.innerHTML = html;
+    } catch (e) { /* dashboard must still render */ }
+}
+
 async function csCentralBrowse() {
     const t = csTenant();
     if (_csCentralBrowseCache && _csCentralBrowseTenant === t && (Date.now() - _csCentralBrowseAt) < 60000) {
@@ -2680,17 +2738,21 @@ async function csRenderCentralClients() {
             ? `<button onclick="csMonitorSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Site monitored${_minLbl}</button>`
             : `<button onclick="csMonitorSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (set a min-client floor)">Monitor</button>`);
         return { host: cl.hostname || cl.mac || '—', ip: cl.ip || '—', mac: cl.mac || '—',
-                 site: cl.site || '—', status: cl.status || 'unknown', monitored: !!isMon, btn };
+                 site: cl.site || '—', os: cl.os || '—', status: cl.status || 'unknown',
+                 monitored: !!isMon, btn };
     });
     const clientCols = [
         { label: 'Client',  render: r => `<span class="text-sm">${csEscape(r.host)}</span>`, sort: r => r.host },
         { label: 'IP',      render: r => `<span class="font-mono text-xs">${csEscape(r.ip)}</span>`, sort: r => r.ip },
         { label: 'MAC',     render: r => `<span class="font-mono text-xs">${csEscape(r.mac)}</span>`, sort: r => r.mac },
         { label: 'Site',    render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'OS',      render: r => `<span class="text-slate-500">${csEscape(r.os)}</span>`, sort: r => String(r.os || '') },
         { label: 'Status',  render: r => csStatusBadge(r.status), sort: r => String(r.status || '') },
         { label: 'Monitor', render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-clients', clientCols, rows, { monitorOf: r => r.monitored, caption: `${clients.length} client(s)` })}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">
+        <div class="mb-3">${csOsChipsHtml(data)}</div>
+        ${csCentralTable('central-clients', clientCols, rows, { monitorOf: r => r.monitored, caption: `${clients.length} client(s)` })}</div></div>`);
 }
 
 // ── Central → Hardware (device-down check types) ─────────────────────────────
@@ -3156,17 +3218,21 @@ async function csRenderCentralOnPremClients() {
             ? `<button onclick="csMonitorCentralOnPremSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Site monitored${_minLbl}</button>`
             : `<button onclick="csMonitorCentralOnPremSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (set a min-client floor)">Monitor</button>`);
         return { host: cl.hostname || cl.mac || '—', ip: cl.ip || '—', mac: cl.mac || '—',
-                 site: cl.site || '—', status: cl.status || 'unknown', monitored: !!isMon, btn };
+                 site: cl.site || '—', os: cl.os || '—', status: cl.status || 'unknown',
+                 monitored: !!isMon, btn };
     });
     const clientCols = [
         { label: 'Client',  render: r => `<span class="text-sm">${csEscape(r.host)}</span>`, sort: r => r.host },
         { label: 'IP',      render: r => `<span class="font-mono text-xs">${csEscape(r.ip)}</span>`, sort: r => r.ip },
         { label: 'MAC',     render: r => `<span class="font-mono text-xs">${csEscape(r.mac)}</span>`, sort: r => r.mac },
         { label: 'Site',    render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'OS',      render: r => `<span class="text-slate-500">${csEscape(r.os)}</span>`, sort: r => String(r.os || '') },
         { label: 'Status',  render: r => csStatusBadge(r.status), sort: r => String(r.status || '') },
         { label: 'Monitor', render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralOnPremTable('central-on-prem-clients', clientCols, rows, { monitorOf: r => r.monitored, caption: `${clients.length} client(s)` })}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">
+        <div class="mb-3">${csOsChipsHtml(data)}</div>
+        ${csCentralOnPremTable('central-on-prem-clients', clientCols, rows, { monitorOf: r => r.monitored, caption: `${clients.length} client(s)` })}</div></div>`);
 }
 
 // ── Central → Hardware (device-down check types) ─────────────────────────────
@@ -3727,17 +3793,21 @@ async function csRenderMistClients() {
             ? `<button onclick="csMonitorMistSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Edit monitoring / min-client threshold">✓ Site monitored${_minLbl}</button>`
             : `<button onclick="csMonitorMistSiteModal(${csEscape(JSON.stringify(site))}, 'clients')" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this client's site (set a min-client floor)">Monitor</button>`);
         return { host: cl.hostname || cl.mac || '—', ip: cl.ip || '—', mac: cl.mac || '—',
-                 site: cl.site || '—', status: cl.status || 'unknown', monitored: !!isMon, btn };
+                 site: cl.site || '—', os: cl.os || '—', status: cl.status || 'unknown',
+                 monitored: !!isMon, btn };
     });
     const clientCols = [
         { label: 'Client',  render: r => `<span class="text-sm">${csEscape(r.host)}</span>`, sort: r => r.host },
         { label: 'IP',      render: r => `<span class="font-mono text-xs">${csEscape(r.ip)}</span>`, sort: r => r.ip },
         { label: 'MAC',     render: r => `<span class="font-mono text-xs">${csEscape(r.mac)}</span>`, sort: r => r.mac },
         { label: 'Site',    render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'OS',      render: r => `<span class="text-slate-500">${csEscape(r.os)}</span>`, sort: r => String(r.os || '') },
         { label: 'Status',  render: r => csStatusBadge(r.status), sort: r => String(r.status || '') },
         { label: 'Monitor', render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csMistTable('mist-clients', clientCols, rows, { monitorOf: r => r.monitored, caption: `${clients.length} client(s)` })}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">
+        <div class="mb-3">${csOsChipsHtml(data)}</div>
+        ${csMistTable('mist-clients', clientCols, rows, { monitorOf: r => r.monitored, caption: `${clients.length} client(s)` })}</div></div>`);
 }
 
 // ── Mist → Hardware (device-down checks) ────────────────────────────────────
