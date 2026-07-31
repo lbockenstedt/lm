@@ -8667,7 +8667,9 @@ async function csRenderVmServerVms() {
     const grouped = {};
     cats.forEach(c => grouped[c] = vms.filter(v => csVmCategory(v) === c));
     const tabs = cats.map((c, i) => `<button onclick="csVmVmsTab('${c}')" id="cs-vmtab-${csEscape(c)}" class="px-3 py-1.5 rounded-md text-xs font-bold ${i === 0 ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}">${csEscape(c)} <span class="opacity-60">(${grouped[c].length})</span></button>`).join('');
-    const rows = csVmRenderRows(grouped['Simulation Clients'] || []);
+    csVmPage = 1;
+    const _initList = grouped['Simulation Clients'] || [];
+    const rows = csVmRenderRows(_initList);
     // Auto-prov panel is per-host — only when exactly one host is in scope.
     const apPanel = single ? csAutoProvPanel(single) : '';
     csSet(`<div>${csVmHostBanner()}${apPanel}${tabs}
@@ -8679,7 +8681,7 @@ async function csRenderVmServerVms() {
         <button onclick="csVmBulk('delete_vm')" class="bg-red-100 text-red-700 px-2 py-1 rounded font-bold" title="Permanently delete the selected VMs from Proxmox">Delete</button>
         ${moreQueued > 0 ? `<span class="text-slate-400" title="Auto-provisioning has more VMs queued than are shown yet">· ${moreQueued} more queued</span>` : ''}
       </div>
-      <div id="cs-vm-list">${csVmTable(rows)}</div>
+      <div id="cs-vm-list">${csVmTable(rows)}${csVmPager(_initList.length)}</div>
       ${csVmStatusLegend()}
     </div>`);
     window._csVmGrouped = grouped;
@@ -9124,21 +9126,74 @@ function csVmRow(v) {
 
 // Render a category's rows, capped for scale (100s of hosts × VMs). Beyond the
 // cap, prompt to narrow the Host filter rather than DOM tens of thousands of rows.
-const CS_VM_ROW_CAP = 400;
+// Paged, not capped. The old behaviour rendered the first 400 and told the
+// operator to "narrow the Host filter" — which is not a way to read a list, and
+// on a tab holding fewer than the cap it just looked like the list ended. Same
+// pager the Clients view uses, so the two behave identically.
+const CS_VM_ROW_CAP = 400;          // kept: hard ceiling per PAGE render
+const CS_VM_PAGE_SIZES = [25, 50, 100, 250, 'All'];
+let csVmPageSize = 50;
+let csVmPage = 1;
+
+window.csVmSetPageSize = function (v) {
+    csVmPageSize = (String(v) === 'All') ? 'All' : Math.max(1, Number(v) || 50);
+    csVmPage = 1;
+    csVmVmsTab(window._csVmActiveTab || 'Simulation Clients');
+};
+window.csVmGoPage = function (delta) {
+    csVmPage = Math.max(1, csVmPage + delta);
+    csVmVmsTab(window._csVmActiveTab || 'Simulation Clients');
+};
+
+// Pager markup for the CURRENT tab's list. Returned separately from the rows so
+// it can sit outside <table>, matching the Clients view.
+function csVmPager(total) {
+    const size = (csVmPageSize === 'All') ? Math.max(1, total) : csVmPageSize;
+    const totalPages = Math.max(1, Math.ceil(total / size));
+    if (csVmPage > totalPages) csVmPage = totalPages;
+    const start = (csVmPage - 1) * size;
+    const first = total ? start + 1 : 0;
+    const last = Math.min(start + size, total);
+    const opts = CS_VM_PAGE_SIZES.map(n =>
+        `<option value="${n}"${String(n) === String(csVmPageSize) ? ' selected' : ''}>${n}</option>`).join('');
+    const btn = (label, delta, disabled) =>
+        `<button onclick="csVmGoPage(${delta})" ${disabled ? 'disabled' : ''} class="px-2 py-0.5 rounded border ${disabled ? 'border-slate-100 text-slate-300 cursor-not-allowed' : 'border-slate-200 text-slate-600 hover:bg-slate-50'}">${label}</button>`;
+    return `<div class="flex flex-wrap items-center justify-between gap-2 mt-3 text-xs text-slate-500">
+        <span>Showing ${first.toLocaleString()}–${last.toLocaleString()} of ${total.toLocaleString()}</span>
+        <div class="flex items-center gap-2">
+          ${btn('‹ Prev', -1, csVmPage <= 1)}
+          <span>Page ${csVmPage} of ${totalPages}</span>
+          ${btn('Next ›', 1, csVmPage >= totalPages)}
+          <span class="ml-2">Per page</span>
+          <select onchange="csVmSetPageSize(this.value)" class="bg-white border border-slate-200 rounded px-2 py-0.5 text-xs">${opts}</select>
+        </div>
+      </div>`;
+}
+
 function csVmRenderRows(list) {
-    const shown = (list || []).slice(0, CS_VM_ROW_CAP);
+    const all = list || [];
+    const size = (csVmPageSize === 'All') ? Math.max(1, all.length) : csVmPageSize;
+    const totalPages = Math.max(1, Math.ceil(all.length / size));
+    if (csVmPage > totalPages) csVmPage = totalPages;
+    if (csVmPage < 1) csVmPage = 1;
+    const start = (csVmPage - 1) * size;
+    const shown = all.slice(start, start + Math.min(size, CS_VM_ROW_CAP));
     let html = shown.map(csVmRow).join('');
-    if ((list || []).length > CS_VM_ROW_CAP) {
-        html += `<tr><td colspan="6" class="px-3 py-2 text-xs text-amber-700 bg-amber-50">Showing ${CS_VM_ROW_CAP} of ${list.length} VMs — narrow the Host filter to see the rest.</td></tr>`;
+    if (size > CS_VM_ROW_CAP && all.length > CS_VM_ROW_CAP) {
+        html += `<tr><td colspan="6" class="px-3 py-2 text-xs text-amber-700 bg-amber-50">Rendering is capped at ${CS_VM_ROW_CAP} rows per page — choose a smaller page size to page through all ${all.length.toLocaleString()}.</td></tr>`;
     }
     return html;
 }
 
 window.csVmVmsTab = function (cat) {
+    // Switching tab resets to page 1 — landing on page 7 of a list you have not
+    // seen yet reads as an empty tab.
+    if (window._csVmActiveTab !== cat) csVmPage = 1;
     window._csVmActiveTab = cat;   // so csVmRerenderInflight targets the right tab
-    const rows = csVmRenderRows((window._csVmGrouped && window._csVmGrouped[cat]) || []);
+    const _list = (window._csVmGrouped && window._csVmGrouped[cat]) || [];
+    const rows = csVmRenderRows(_list);
     const list = csEl('cs-vm-list');
-    if (list) list.innerHTML = csVmTable(rows);
+    if (list) list.innerHTML = csVmTable(rows) + csVmPager(_list.length);
     ['Simulation Clients','Other','Containers','Templates'].forEach(c => {
         const b = csEl('cs-vmtab-' + c);
         if (b) b.className = 'px-3 py-1.5 rounded-md text-xs font-bold ' + (c === cat ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50');
