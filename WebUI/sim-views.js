@@ -5555,7 +5555,12 @@ async function csRenderDhcpHealth() {
     if (!el) return;
     try {
         const d = await csFetch(`/${csTenant()}/dhcp-health?tenant_id=${csTenant()}`);
-        window._csDhcpLast = d;          // kept for the Copy button
+        // Stamp the fetch. Copy reads the LAST payload, so without a visible
+        // timestamp a stale panel gets pasted into a ticket as if it were live —
+        // which happened: a spoke that had already been fixed was reported as
+        // still failing because the panel had not been refreshed.
+        d._fetched_at = new Date().toLocaleTimeString();
+        window._csDhcpLast = d;
         el.innerHTML = _csDhcpHealthHtml(d);
     } catch (e) {
         el.innerHTML = csErrorBox('Could not load sim DHCP health', e);
@@ -5574,7 +5579,8 @@ function _csDhcpHealthText(d) {
     const spokes = [...((d && d.spokes) || [])].sort((a, b) =>
         String(a.spoke_name || a.spoke_id || '').localeCompare(
             String(b.spoke_name || b.spoke_id || ''), undefined, { numeric: true }));
-    const L = [`Sim DHCP (Kea) health — ${spokes.length} spoke(s)`, ''];
+    const L = [`Sim DHCP (Kea) health — ${spokes.length} spoke(s)`
+               + (d && d._fetched_at ? `  (as of ${d._fetched_at} — press Refresh for live data)` : ''), ''];
     spokes.forEach(s => {
         const who = `${s.spoke_name || '(unnamed)'} [${s.spoke_id || ''}]`;
         if (s.unreachable) { L.push(`${who}: UNREACHABLE — ${s.error || ''}`, ''); return; }
@@ -5622,6 +5628,8 @@ function _csDhcpPill(txt, tone) {
 }
 
 function _csDhcpHealthHtml(d) {
+    const stamp = (d && d._fetched_at)
+        ? `<p class="text-[10px] text-slate-400 mb-2">Data as of <b>${escapeHtml(d._fetched_at)}</b></p>` : '';
     // Sort by NAME so the fleet reads in a stable, predictable order
     // (cs-svr-01..04) instead of whatever order the fan-out happened to
     // complete in — which changes every refresh and makes it hard to see that
@@ -5636,7 +5644,7 @@ function _csDhcpHealthHtml(d) {
     if (!spokes.length) {
         return `<p class="text-xs text-slate-500 italic">${escapeHtml((d && d.warning) || 'No Client-Sim spoke reported.')}</p>`;
     }
-    return spokes.map(s => {
+    return stamp + spokes.map(s => {
         if (s.unreachable) {
             return `<div class="p-3 rounded border border-slate-200 bg-slate-50 mb-2">
                 ${_csDhcpWho(s)}
@@ -5691,7 +5699,7 @@ function _csDhcpHealthHtml(d) {
                  <pre class="text-[10px] bg-red-50 border border-red-200 rounded p-2 overflow-x-auto whitespace-pre-wrap">${escapeHtml((s.apparmor_denials || []).join('\n'))}</pre>
                  <p class="text-[10px] text-slate-500 mt-1">Kea names its runtime files after the config file, so the <span class="font-mono">-sim</span> instance falls outside Debian's stock profiles. Re-running the installer grants them.</p></div>` : '';
         const errs = (s.last_errors || []).length
-            ? `<div class="mt-2"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest mb-1">Last errors</p>
+            ? `<div class="mt-2"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest mb-1">Last errors <span class="normal-case font-normal text-slate-400">(may predate the current start — check the timestamps)</span></p>
                  <pre class="text-[10px] bg-slate-50 border border-slate-200 rounded p-2 overflow-x-auto whitespace-pre-wrap">${escapeHtml((s.last_errors || []).join('\n'))}</pre></div>` : '';
         const notes = (s.notes || []).length
             ? `<p class="text-[10px] text-slate-400 mt-2">${(s.notes || []).map(escapeHtml).join(' · ')}</p>` : '';
