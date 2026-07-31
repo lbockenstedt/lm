@@ -1407,7 +1407,7 @@ const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
     settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs', 'logs-features'],
-    setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console'],
+    setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'OS Updates'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines', 'Settings'],
     ldap: ['Users', 'Groups'],
@@ -5246,6 +5246,136 @@ function _onSaTenantFilterChange() {
 // doesn't mean dropping into CLI. Global-Admin only (nav + backend gated), OFF by
 // default, audit-logged. Endpoints: /api/exec/config (GET/POST knobs),
 // /api/exec/targets (GET), /api/exec (POST run).
+// ── Setup → OS Updates (Global-Admin) ───────────────────────────────────────
+// Fleet OS package updates. The HUB is the module: it collects pending-update
+// state from every spoke and agent and, on explicit approval, sends the apply
+// commands. Nodes never update themselves.
+// Behaviour is fixed by design, not exposed as knobs (see hub_os_updates.py):
+// dist-upgrade (everything), NEVER auto-reboot, rolling one node at a time, hub
+// last. Ineligible nodes are listed as unmanaged WITH a reason rather than
+// hidden, so "up to date" is never confused with "not covered".
+let _osuPoll = null;
+
+function _renderSetupOsUpdatesTile(content) {
+    const { card, btnCls, btnSecCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card} space-y-4">
+            <div class="flex items-center justify-between">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">OS Updates ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <span id="osu-status" class="text-xs text-slate-400"></span>
+            </div>
+            <div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-[11px] text-amber-800 leading-snug">
+                Operating-system package updates for every spoke and agent — <b>Global-Admin only, every approval is audit-logged</b>.
+                Applies <code>apt dist-upgrade</code>: security, regular and dependency updates together.
+                <b>Nothing is ever rebooted automatically</b> — a host needing one is badged, and you reboot it deliberately.
+                Nodes are updated <b>one at a time</b>, and the <b>hub goes last</b> (updating it restarts this page).
+                This is separate from LM code updates.
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+                <button onclick="osuCheck()" class="${btnSecCls}">↻ Check for updates</button>
+                <button id="osu-apply" onclick="osuApply()" class="${btnCls}">Approve &amp; deploy all</button>
+                <span id="osu-run" class="text-xs text-slate-500"></span>
+            </div>
+            <div id="osu-body"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+        </div>`;
+    osuLoad();
+}
+
+async function osuLoad() {
+    try { _osuRender(await apiFetch('/api/os-updates')); }
+    catch (e) { const b = document.getElementById('osu-body'); if (b) b.innerHTML = `<p class="text-xs text-red-500">${escapeHtml(String(e.message || e))}</p>`; }
+}
+
+window.osuCheck = async function () {
+    const st = document.getElementById('osu-status');
+    if (st) st.textContent = 'checking every node…';
+    try { _osuRender(await apiFetch('/api/os-updates/check', { method: 'POST', body: JSON.stringify({ refresh: true }) })); showToast('Update check complete.', 'success'); }
+    catch (e) { showToast('Check failed: ' + (e.message || e), 'error'); }
+    finally { if (st) st.textContent = ''; }
+};
+
+window.osuApply = async function () {
+    const d = window._osuData || {};
+    const n = (d.totals || {}).with_updates || 0;
+    if (!n) { showToast('No nodes have pending updates.', 'info'); return; }
+    // Deliberate friction: this changes packages on every node in the fleet.
+    if (!confirm(`Approve and deploy OS updates to ${n} node(s)?\n\n` +
+                 `• apt dist-upgrade (security + regular + dependency changes)\n` +
+                 `• one node at a time, hub last\n` +
+                 `• nothing is rebooted automatically — you'll get a badge instead`)) return;
+    try {
+        const r = await apiFetch('/api/os-updates/apply', { method: 'POST', body: JSON.stringify({}) });
+        showToast(`Deploying to ${r.queued} node(s) — one at a time.`, 'success');
+        _osuStartPoll();
+    } catch (e) { showToast('Apply failed: ' + (e.message || e), 'error'); }
+};
+
+function _osuStartPoll() {
+    if (_osuPoll) clearInterval(_osuPoll);
+    // A dist-upgrade takes minutes; poll the snapshot so the roll's progress is
+    // visible without the operator refreshing.
+    _osuPoll = setInterval(async () => {
+        try {
+            const d = await apiFetch('/api/os-updates');
+            _osuRender(d);
+            if (!d.run || d.run.status !== 'running') { clearInterval(_osuPoll); _osuPoll = null; }
+        } catch (e) { clearInterval(_osuPoll); _osuPoll = null; }
+    }, 5000);
+}
+
+function _osuRender(d) {
+    window._osuData = d;
+    const body = document.getElementById('osu-body');
+    if (!body) return;
+    const t = d.totals || {};
+    const run = d.run;
+    const runEl = document.getElementById('osu-run');
+    if (runEl) {
+        runEl.textContent = run && run.status === 'running'
+            ? `deploying ${run.done}/${run.total} — current: ${run.current || '…'}`
+            : (run && run.status === 'finished' ? `last run: ${run.done}/${run.total} complete` : '');
+    }
+    const btn = document.getElementById('osu-apply');
+    if (btn) btn.disabled = !!(run && run.status === 'running');
+    const chip = (label, val, cls) => `<span class="inline-flex items-baseline gap-1 border rounded-full px-2.5 py-0.5 ${cls || 'bg-white border-slate-200'}"><b class="text-slate-700">${escapeHtml(String(val))}</b><span class="text-slate-500">${escapeHtml(label)}</span></span>`;
+    const summary = `<div class="flex flex-wrap items-center gap-1.5 text-xs mb-3">
+        ${chip('nodes with updates', t.with_updates || 0, (t.with_updates ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'))}
+        ${chip('packages', t.packages || 0)}
+        ${chip('security', t.security || 0, (t.security ? 'bg-red-50 border-red-200' : 'bg-white border-slate-200'))}
+        ${chip('need reboot', t.reboot_required || 0, (t.reboot_required ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'))}
+        ${chip('unmanaged', t.unmanaged || 0)}
+        ${chip('unreachable', t.unreachable || 0, (t.unreachable ? 'bg-red-50 border-red-200' : 'bg-white border-slate-200'))}
+      </div>`;
+    const rows = (d.nodes || []).map(n => {
+        const key = `${n.kind}:${n.id}`;
+        const item = run && (run.items || []).find(i => i.key === key);
+        let state;
+        if (item && item.status === 'applying') state = '<span class="text-[10px] font-bold text-blue-700 bg-blue-50 border border-blue-200 rounded-full px-2 py-0.5">applying…</span>';
+        else if (item && item.status === 'failed') state = `<span class="text-[10px] font-bold text-red-700 bg-red-50 border border-red-200 rounded-full px-2 py-0.5">failed</span>`;
+        else if (item && item.status === 'done') state = '<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">updated</span>';
+        else if (n.unreachable) state = `<span class="text-[10px] font-bold text-red-700 bg-red-50 border border-red-200 rounded-full px-2 py-0.5">unreachable</span>`;
+        else if (n.unmanaged) state = '<span class="text-[10px] font-bold text-slate-500 bg-slate-100 border border-slate-200 rounded-full px-2 py-0.5">unmanaged</span>';
+        else if (!n.count) state = '<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">up to date</span>';
+        else state = `<span class="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">${n.count} pending</span>`;
+        const reboot = n.reboot_required ? '<span class="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5" title="A kernel/PVE update needs a reboot. Nothing reboots automatically — do it deliberately.">reboot required</span>' : '';
+        const pkgs = (n.packages || []).slice(0, 40).map(p =>
+            `<span class="inline-block mr-2 ${p.security ? 'text-red-700' : 'text-slate-500'}">${escapeHtml(p.package)} <span class="text-slate-400">${escapeHtml(p.current)}→${escapeHtml(p.candidate)}</span></span>`).join('');
+        const more = (n.packages || []).length > 40 ? `<span class="text-slate-400">… +${(n.packages || []).length - 40} more</span>` : '';
+        const detail = n.reason
+            ? `<div class="text-[11px] text-slate-500 mt-1">${escapeHtml(n.reason)}</div>`
+            : (n.count ? `<details class="mt-1"><summary class="cursor-pointer text-[11px] text-slate-400">${n.count} package(s)${n.security_count ? ` · ${n.security_count} security` : ''}</summary><div class="text-[11px] mt-1 leading-relaxed">${pkgs}${more}</div></details>` : '');
+        const msg = item && item.message ? `<div class="text-[11px] text-red-600 mt-1">${escapeHtml(item.message)}</div>` : '';
+        return `<div class="border border-slate-200 rounded-md p-3 mb-2">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <span class="text-xs font-bold text-slate-600">${escapeHtml(n.label)} <span class="font-normal text-slate-400">${escapeHtml(n.kind)}${n.flavor ? ' · ' + escapeHtml(n.flavor) : ''}</span></span>
+              <span class="flex flex-wrap items-center gap-2 justify-end">${reboot}${state}</span>
+            </div>${detail}${msg}</div>`;
+    }).join('');
+    const when = d.checked_at ? new Date(d.checked_at * 1000).toLocaleString() : 'never';
+    body.innerHTML = summary + (rows || '<p class="text-xs text-slate-400 italic">No nodes reporting.</p>') +
+        `<p class="text-[11px] text-slate-400 mt-2">Last checked: ${escapeHtml(when)}</p>`;
+}
+
 function _renderSetupRemoteConsoleTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
@@ -9408,6 +9538,7 @@ const SETUP_TILES = {
     'User Access':      _renderSetupUserAccessTile,
     'Simulations':      _renderSetupSimulationsTile,
     'Remote Console':   _renderSetupRemoteConsoleTile,
+    'OS Updates':       _renderSetupOsUpdatesTile,
 };
 
 // Global Learned Values (Global Admin only) — now the "Learned Values" tab of

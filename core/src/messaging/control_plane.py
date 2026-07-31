@@ -1700,6 +1700,31 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # SPOKE_UPDATE. Runs off the event loop (subprocess) so a slow command
         # never stalls the shared spoke/role loop; the runner enforces the
         # allowlist (when not shell), a timeout, and an output cap.
+        # Fleet OS updates (hub module → every spoke). Hub-side gated on
+        # Global-Admin + explicit approval and audit-logged, exactly like
+        # RUN_COMMAND below; the frame is HMAC-signed by the authenticated hub so
+        # a spoke trusts it the same way it trusts SPOKE_UPDATE. Answered HERE so
+        # EVERY spoke type inherits it — a per-module implementation would mean
+        # dns/dhcp/le/netbox/... each needing their own copy, and the ones that
+        # forgot would silently report "not supported" and look up to date.
+        #
+        # NOTE: this is the OS package axis, NOT SPOKE_UPDATE (our code). Both
+        # run off the event loop so a long dist-upgrade never stalls the shared
+        # spoke/role loop.
+        if cmd_type in ("OS_UPDATE_CHECK", "OS_UPDATE_APPLY"):
+            try:
+                from ..os_update import check_updates, apply_updates
+            except ImportError:  # bare-module path (production: core/src on sys.path)
+                from os_update import check_updates, apply_updates  # type: ignore
+            if cmd_type == "OS_UPDATE_CHECK":
+                res = await asyncio.to_thread(
+                    check_updates, bool(data.get("refresh", True)))
+            else:
+                res = await asyncio.to_thread(apply_updates)
+            res.setdefault("status", "SUCCESS")
+            res["node_id"] = getattr(self, "spoke_id", "") or ""
+            return res
+
         if cmd_type == "RUN_COMMAND":
             try:
                 from ..command_runner import run_local_command

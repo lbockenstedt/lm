@@ -1221,7 +1221,7 @@ def create_app(hub):
         #                        fleet). Admin-only; /api/help/available stays authed-read.
         _ADMIN_API_PREFIXES = ("/api/agent/", "/api/generic/", "/api/pxmx/agents/",
                                "/api/cppm/probe", "/api/cppm/test-auth", "/cppm/refresh", "/cppm/health",
-                               "/api/help/ask", "/api/exec")
+                               "/api/help/ask", "/api/exec", "/api/os-updates")
         if any(path.startswith(p) for p in _ADMIN_API_PREFIXES):
             if not _is_admin(sess):
                 return JSONResponse(status_code=403, content={"detail": "Admin access required"})
@@ -1693,7 +1693,7 @@ def create_app(hub):
 
     # ── Register relocated route groups (one module per coherent area) ──
     from routes import (
-        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes, self_backup, tenant_devices, oidc, templates, azure_nsg, cloud_nac as cloud_nac_routes, key_vault as key_vault_routes, notifications as notifications_routes, collab, truenas,
+        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes, os_updates as os_updates_routes, self_backup, tenant_devices, oidc, templates, azure_nsg, cloud_nac as cloud_nac_routes, key_vault as key_vault_routes, notifications as notifications_routes, collab, truenas,
     hub_watchdog as hub_watchdog_routes, netbox_sso as netbox_sso_routes, security as security_routes, client_debug as client_debug_routes,
     )
     security_routes.register(app, hub, ctx)
@@ -1727,6 +1727,7 @@ def create_app(hub):
     admin_cache.register(app, hub, ctx)
     help_assistant.register(app, hub, ctx)
     exec_routes.register(app, hub, ctx)
+    os_updates_routes.register(app, hub, ctx)
     self_backup.register(app, hub, ctx)
     collab.register(app, hub, ctx)
     client_debug_routes.register(app, hub, ctx)

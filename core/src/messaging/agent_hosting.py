@@ -142,6 +142,22 @@ class AgentHostingControlPlane(BaseControlPlane):
         # spoke has send_to_agent, so relay RUN_COMMAND down the /ws/agent channel
         # and return the agent's runner result. The hub already gated this on
         # Global-Admin + remote_exec.enabled and audit-logged it.
+        # Fleet OS updates relayed to a hosted AGENT (hub → owning spoke → agent).
+        # Mirrors AGENT_RUN_COMMAND below. The apply timeout is generous because a
+        # Proxmox dist-upgrade genuinely runs for many minutes; the agent bounds
+        # it too, so a wedged apt can't hold the relay open forever.
+        if cmd_type in ("AGENT_OS_UPDATE_CHECK", "AGENT_OS_UPDATE_APPLY"):
+            _apply = cmd_type.endswith("APPLY")
+            _to = 3700.0 if _apply else 240.0
+            resp = await self.send_to_agent(
+                "OS_UPDATE_APPLY" if _apply else "OS_UPDATE_CHECK",
+                {"refresh": bool(data.get("refresh", True))},
+                agent_id=data.get("agent_id"),
+                timeout=_to)
+            if isinstance(resp, dict):
+                return resp
+            return {"status": "ERROR", "message": "no response from agent"}
+
         if cmd_type == "AGENT_RUN_COMMAND":
             _to = float(data.get("timeout", 30.0) or 30.0)
             resp = await self.send_to_agent(
