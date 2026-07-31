@@ -1449,19 +1449,20 @@ def register(app, hub, ctx):
             brokers[t] = {
                 "elected": elected,
                 "candidates": cands,
-                # >1 connected candidate = bound[0] is order-dependent, so the
-                # broker can change between cycles with nothing else changing.
-                "unstable": len(cands) > 1,
+                # >1 connected candidate is now informational, not a fault: the
+                # election is sticky (hub_spoke_registry._sticky_cs_broker), so
+                # the broker holds until the incumbent stops being eligible.
+                "multiple": len(cands) > 1,
             }
 
         findings = []
         for t, b in brokers.items():
-            if b["unstable"]:
+            if b["multiple"]:
                 findings.append(
                     f"Tenant {t!r} has {len(b['candidates'])} connected Client-Sim spokes. "
-                    f"The broker is bound[0] over that set, so it can flip between cycles "
-                    f"(same host logging a different cs_spoke, quota re-pushes never "
-                    f"converging). Delete the leftovers so exactly one remains per box.")
+                    f"The broker is pinned to {b['elected']} and only moves if that spoke "
+                    f"stops being connected/approved/bound — a reconnect elsewhere no longer "
+                    f"reassigns it. Extra spokes are still worth pruning if they are leftovers.")
         hidden = [r["spoke_id"] for r in rows if r["admin_only"]]
         if hidden:
             findings.append(

@@ -8,8 +8,11 @@ module_metadata, agent_info, netbox_server_agents, ...) plus the
 change — ``LabManagerHub`` inherits these exactly as before.
 """
 
+import logging
 import time
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 # module_type → spoke_id prefix substring, for legacy spoke resolution.
 # Used by get_spoke_by_type / get_all_spokes_by_type. The prefix is matched as
@@ -436,19 +439,57 @@ class SpokeRegistryMixin:
             return None
         if tenant_id:
             md = self.state.system_state.get("module_metadata", {})
-            bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
+            bound = sorted(sid for sid in cands
+                           if md.get(sid, {}).get("tenant_id") == tenant_id)
             if bound:
-                return bound[0]
+                return self._sticky_cs_broker(tenant_id, bound)
             # No spoke bound to this tenant — claim an UNASSIGNED one (no
             # tenant_id in metadata). Never cands[0] blindly: that may be a
             # spoke bound to another tenant, whose CSSettings this tenant's
             # push would overwrite (cross-tenant leak).
-            unassigned = [sid for sid in cands if not md.get(sid, {}).get("tenant_id")]
+            unassigned = sorted(sid for sid in cands
+                                if not md.get(sid, {}).get("tenant_id"))
             if unassigned:
-                return unassigned[0]
+                return self._sticky_cs_broker(tenant_id, unassigned)
             return None
-        # tenant_id is None: admin / global view — any connected spoke.
-        return cands[0]
+        # tenant_id is None: admin / global view — any connected spoke. Sorted
+        # so repeated calls agree with each other.
+        return sorted(cands)[0]
+
+    def _sticky_cs_broker(self, tenant_id: str, candidates: list) -> Optional[str]:
+        """Pick a tenant's Client-Sim broker and KEEP it while it stays eligible.
+
+        The caller passes the connected+approved candidates. Returning
+        ``candidates[0]`` off a raw list made the broker a function of dict
+        ordering over a set that changes every time any spoke reconnects — so a
+        single flapping spoke reassigned the broker fleet-wide. Observed
+        2026-07-30: one spoke dropping every 60-130s ("no close frame received
+        or sent") made the same host log a different ``cs_spoke`` minutes apart,
+        and the sim-quota reconcile read a DIFFERENT spoke's effective set each
+        pass — reporting "STILL stale after 3 re-push(es)" when nothing was
+        refusing the push; several spokes were answering the same question.
+
+        So: hold the previous choice as long as it is still a candidate, and
+        only re-elect when it genuinely drops out. Re-election is logged, which
+        makes a real broker change visible instead of inferred from a diff of
+        two log lines. Falls back to a SORTED pick so a cold hub (or a broker
+        that really did go away) is at least deterministic across calls.
+        """
+        store = getattr(self, "_cs_broker_sticky", None)
+        if store is None:
+            store = {}
+            self._cs_broker_sticky = store
+        prev = store.get(tenant_id)
+        if prev and prev in candidates:
+            return prev
+        chosen = candidates[0]                      # candidates arrive sorted
+        if prev:
+            logger.info(
+                "[cs-broker] tenant %s: broker %s -> %s (previous no longer "
+                "connected/approved/bound; %d candidate(s))",
+                tenant_id, prev, chosen, len(candidates))
+        store[tenant_id] = chosen
+        return chosen
 
     def get_client_sim_spokes(self, tenant_id: str = None) -> list:
         """Return ALL approved, connected Client-Sim spokes for a tenant.

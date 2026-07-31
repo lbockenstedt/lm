@@ -4837,7 +4837,7 @@ function _renderSettingsSection(subMenu) {
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spoke Registry Diagnostics ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                         <button onclick="loadSpokeRegistryDiag()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Every spoke registration the hub holds — including ones a tenant view hides — plus which one is elected as each tenant's Client-Sim broker">↻ Refresh</button>
                     </div>
-                    <p class="text-[10px] text-slate-400 mb-3">A rebuilt spoke that was never deregistered leaves its <b>old id</b> behind, still tenant-bound and still electable. The Client-Sim broker is <code>bound[0]</code> over the <b>connected</b> candidates, so with leftovers present it can <b>flip between cycles</b> — the same host logs a different <code>cs_spoke</code>, and quota re-pushes never converge. Registrations with <b>no tenant</b> are hidden from a non-admin Spokes list yet can still be claimed as a tenant's broker, which is why deleting everything visible does not always fix it.</p>
+                    <p class="text-[10px] text-slate-400 mb-3">A rebuilt spoke that was never deregistered leaves its <b>old id</b> behind, still tenant-bound and still electable. The Client-Sim broker is now <b>sticky</b>: it holds until the elected spoke stops being connected/approved/bound, so a spoke that reconnects no longer reassigns it. Before that, election was <code>bound[0]</code> over the connected set, and one flapping spoke moved the broker fleet-wide — the same host logging a different <code>cs_spoke</code>, quota re-pushes never converging. Registrations with <b>no tenant</b> are hidden from a non-admin Spokes list yet can still be claimed as a tenant's broker, which is why deleting everything visible does not always fix it.</p>
                     <div id="spoke-registry-diag-body"><p class="text-slate-400 italic text-xs">Loading…</p></div>
                 </div>
                 <div class="${card} p-6">
@@ -19965,13 +19965,13 @@ function _spokeRegistryDiagHtml(d) {
         html += `<div class="mb-4"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest mb-2">Client-Sim broker election</p>
             <div class="space-y-1">` + bk.map(t => {
             const b = brokers[t] || {};
-            const warn = b.unstable;
+            const warn = b.multiple;
             return `<div class="flex items-start justify-between gap-3 text-xs p-2 rounded ${warn ? 'bg-amber-50 border border-amber-200' : 'bg-slate-50'}">
                 <div><span class="font-bold text-slate-600">${escapeHtml(t)}</span>
                     <span class="text-slate-400"> → </span>
                     <span class="font-mono text-slate-700">${escapeHtml(b.elected || 'none')}</span></div>
                 <div class="text-right whitespace-nowrap ${warn ? 'text-amber-700' : 'text-slate-400'}">
-                    ${(b.candidates || []).length} connected candidate(s)${warn ? ' — can flip' : ''}</div>
+                    ${(b.candidates || []).length} connected candidate(s)${warn ? ' — pinned to the incumbent' : ''}</div>
             </div>`;
         }).join('') + `</div></div>`;
     }
