@@ -5702,6 +5702,18 @@ window.csRenderSimTagHealth = async function () {
             const agentBadge = h.agent_connected
                 ? '<span class="text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full text-[10px] font-bold">agent connected</span>'
                 : `<span class="text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full text-[10px] font-bold">NOT TAGGED — ${esc(h.skip_reason || 'agent not connected')}</span>`;
+            // A GHOST host: retained in proxmox_states from an old registration
+            // (rebuild / rename / clone) and never aged out, so its stale VM list
+            // still enters the tag map. Called out explicitly because a ghost is
+            // otherwise indistinguishable from a live host that is merely down —
+            // and the fix is different (purge it, don't chase its agent).
+            const ageTxt = h.telemetry_age_s == null ? 'never reported'
+                : h.telemetry_age_s < 90 ? `${Math.round(h.telemetry_age_s)}s ago`
+                : h.telemetry_age_s < 5400 ? `${Math.round(h.telemetry_age_s / 60)}m ago`
+                : `${(h.telemetry_age_s / 3600).toFixed(1)}h ago`;
+            const staleBadge = (h.stale || h.telemetry_age_s == null)
+                ? `<span class="text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full text-[10px] font-bold" title="No telemetry for a long time — likely a ghost entry left by a rebuild/rename. Its VM list is stale and should not be trusted.">STALE — last telemetry ${esc(ageTxt)}</span>`
+                : `<span class="text-[10px] text-slate-400">telemetry ${esc(ageTxt)}</span>`;
             const detail = !bad.length
                 ? '<div class="text-[11px] text-emerald-700 mt-1">all VMs in sync</div>'
                 : `<div class="overflow-x-auto mt-2"><table class="w-full text-[11px]">
@@ -5718,11 +5730,15 @@ window.csRenderSimTagHealth = async function () {
             return `<div class="border border-slate-200 rounded-md p-3 mb-2">
                 <div class="flex items-center justify-between gap-2">
                   <span class="text-xs font-bold text-slate-600">${esc(h.hostname)}</span>
-                  <span class="flex items-center gap-2">${agentBadge}
+                  <span class="flex flex-wrap items-center gap-2 justify-end">${agentBadge}${staleBadge}
+                    ${h.agent_points_at ? `<span class="text-[10px] text-slate-500" title="Where this host's agent is configured to dial. It should be THIS spoke — telemetry landing on another spoke is what makes a host look untagged.">points at ${esc(h.agent_points_at)}</span>` : ''}
                     <span class="text-[10px] text-slate-400">${esc(String(h.drift_count))}/${esc(String(h.vm_count))} out of sync</span></span>
                 </div>${detail}</div>`;
         }).join('');
-        return `<div class="mb-3"><div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">${title}</div>${rows}</div>`;
+        const self_ = sp.spoke_self || {};
+        const selfTxt = self_.hostname
+            ? `<span class="font-normal normal-case text-slate-400">· ${esc(self_.hostname)}${self_.hub_url ? ' → hub ' + esc(self_.hub_url) : ''}</span>` : '';
+        return `<div class="mb-3"><div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">${title} ${selfTxt}</div>${rows}</div>`;
     }).join('');
 };
 
@@ -5731,10 +5747,15 @@ window.csCopySimTagHealth = function (btn) {
     if (!d) return;
     const lines = [];
     (d.spokes || []).forEach(sp => {
-        lines.push(`SPOKE ${sp.spoke_name || sp.spoke_id}${sp.unreachable ? ' — UNREACHABLE: ' + (sp.message || '') : ''}`);
+        const _s = sp.spoke_self || {};
+        lines.push(`SPOKE ${sp.spoke_name || sp.spoke_id}` +
+                   `${_s.hostname ? ' host=' + _s.hostname : ''}${_s.hub_url ? ' hub=' + _s.hub_url : ''}` +
+                   `${sp.unreachable ? ' — UNREACHABLE: ' + (sp.message || '') : ''}`);
         (sp.hosts || []).forEach(h => {
             lines.push(`  HOST ${h.hostname} agent_connected=${h.agent_connected}` +
-                       `${h.skip_reason ? ' skip=' + h.skip_reason : ''} drift=${h.drift_count}/${h.vm_count}`);
+                       `${h.skip_reason ? ' skip=' + h.skip_reason : ''} drift=${h.drift_count}/${h.vm_count}` +
+                       ` telemetry_age_s=${h.telemetry_age_s == null ? 'never' : Math.round(h.telemetry_age_s)}` +
+                       `${h.stale ? ' STALE' : ''}${h.agent_points_at ? ' points_at=' + h.agent_points_at : ''}`);
             (h.vms || []).filter(v => !v.in_sync).forEach(v => {
                 lines.push(`    ${v.vmid} ${v.name}: desired=[${(v.desired || []).join(' ')}] ` +
                            `actual=[${(v.actual || []).join(' ')}]${v.excluded ? ' why=' + v.excluded : ''}`);
