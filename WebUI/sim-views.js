@@ -5543,6 +5543,101 @@ async function csRenderEngineDiag() {
     }
 }
 
+
+// ── Sim DHCP (Kea) health ────────────────────────────────────────────────────
+// Answers "why is the sim network not handing out IPs" without ssh. Built from
+// a live incident where the config was valid and the NIC correct, but AppArmor
+// denied Kea its runtime files so it crash-looped with no lease file — five
+// round trips, because each signal lived somewhere different (systemctl, the
+// journal, dmesg, the conf, ip addr). All of them are here, per cs spoke.
+async function csRenderDhcpHealth() {
+    const el = document.getElementById('cs-dhcp-health');
+    if (!el) return;
+    try {
+        const d = await csFetch(`/${csTenant()}/dhcp-health?tenant_id=${csTenant()}`);
+        el.innerHTML = _csDhcpHealthHtml(d);
+    } catch (e) {
+        el.innerHTML = csErrorBox('Could not load sim DHCP health', e);
+    }
+}
+window.csRenderDhcpHealth = csRenderDhcpHealth;
+
+function _csDhcpPill(txt, tone) {
+    const map = { ok: 'bg-green-100 text-green-700', bad: 'bg-red-100 text-red-700',
+                  warn: 'bg-amber-100 text-amber-700', dim: 'bg-slate-200 text-slate-600' };
+    return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold ${map[tone] || map.dim}">${escapeHtml(txt)}</span>`;
+}
+
+function _csDhcpHealthHtml(d) {
+    const spokes = (d && d.spokes) || [];
+    if (!spokes.length) {
+        return `<p class="text-xs text-slate-500 italic">${escapeHtml((d && d.warning) || 'No Client-Sim spoke reported.')}</p>`;
+    }
+    return spokes.map(s => {
+        if (s.unreachable) {
+            return `<div class="p-3 rounded border border-slate-200 bg-slate-50 mb-2">
+                <span class="font-mono text-xs text-slate-700">${escapeHtml(s.spoke_id)}</span>
+                ${_csDhcpPill('unreachable', 'bad')}
+                <span class="text-xs text-slate-500"> ${escapeHtml(s.error || '')}</span></div>`;
+        }
+        const u4 = (s.units || {})['kea-dhcp4-sim'] || {};
+        const uca = (s.units || {})['kea-ctrl-agent-sim'] || {};
+        const active = u4.ActiveState === 'active';
+        const restarts = parseInt(u4.NRestarts || '0', 10) || 0;
+        const lease = s.lease_db || {};
+        // The verdict line: what an operator needs before reading anything else.
+        let verdict, tone;
+        if (active && lease.exists) { verdict = `serving — ${lease.leases} lease(s)`; tone = 'ok'; }
+        else if (active && !lease.exists) { verdict = 'running, no leases yet'; tone = 'warn'; }
+        else if ((s.interface_missing || []).length) { verdict = 'NOT serving — configured NIC is gone'; tone = 'bad'; }
+        else if ((s.apparmor_denials || []).length) { verdict = 'NOT serving — blocked by AppArmor'; tone = 'bad'; }
+        else { verdict = 'NOT serving'; tone = 'bad'; }
+
+        const rows = [];
+        rows.push(['DHCP4 service', `${escapeHtml(u4.ActiveState || '?')}/${escapeHtml(u4.SubState || '?')}`
+            + (restarts ? ` ${_csDhcpPill(restarts + ' restarts', restarts > 5 ? 'bad' : 'warn')}` : '')]);
+        rows.push(['Control agent', `${escapeHtml(uca.ActiveState || '?')}/${escapeHtml(uca.SubState || '?')}`]);
+        rows.push(['Subnet / pool', `${escapeHtml(s.subnet || '?')} &nbsp; ${escapeHtml(s.pool || '?')}`]);
+        const ifWant = (s.interfaces_configured || []).join(', ') || '?';
+        if ((s.interface_missing || []).length) {
+            rows.push(['Interface', `${_csDhcpPill('MISSING', 'bad')} config says <span class="font-mono">${escapeHtml(ifWant)}</span>`
+                + (s.interface_suggested
+                    ? ` — this box has <span class="font-mono">${escapeHtml(s.interface_suggested)}</span>. Re-run the installer with <span class="font-mono">--dhcp-iface ${escapeHtml(s.interface_suggested)}</span>.`
+                    : '')]);
+        } else {
+            rows.push(['Interface', `${_csDhcpPill('ok', 'ok')} <span class="font-mono">${escapeHtml(ifWant)}</span>`
+                + ((s.interface_holding_gateway || []).length ? '' : ` ${_csDhcpPill('no server IP on it', 'warn')}`)]);
+        }
+        rows.push(['Lease DB', lease.exists
+            ? `${lease.leases} lease(s) · ${escapeHtml(String(s.lease_file || ''))}`
+            : `${_csDhcpPill('missing', 'bad')} <span class="font-mono">${escapeHtml(String(s.lease_file || ''))}</span>`]);
+        rows.push(['Config test', (s.config_test || {}).ok
+            ? _csDhcpPill('valid', 'ok')
+            : `${_csDhcpPill('INVALID', 'bad')} <span class="text-[10px]">${escapeHtml(((s.config_test || {}).detail || '').slice(-300))}</span>`]);
+
+        const denials = (s.apparmor_denials || []).length
+            ? `<div class="mt-2"><p class="text-[10px] uppercase text-red-500 font-bold tracking-widest mb-1">AppArmor denials</p>
+                 <pre class="text-[10px] bg-red-50 border border-red-200 rounded p-2 overflow-x-auto whitespace-pre-wrap">${escapeHtml((s.apparmor_denials || []).join('\n'))}</pre>
+                 <p class="text-[10px] text-slate-500 mt-1">Kea names its runtime files after the config file, so the <span class="font-mono">-sim</span> instance falls outside Debian's stock profiles. Re-running the installer grants them.</p></div>` : '';
+        const errs = (s.last_errors || []).length
+            ? `<div class="mt-2"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest mb-1">Last errors</p>
+                 <pre class="text-[10px] bg-slate-50 border border-slate-200 rounded p-2 overflow-x-auto whitespace-pre-wrap">${escapeHtml((s.last_errors || []).join('\n'))}</pre></div>` : '';
+        const notes = (s.notes || []).length
+            ? `<p class="text-[10px] text-slate-400 mt-2">${(s.notes || []).map(escapeHtml).join(' · ')}</p>` : '';
+
+        return `<div class="p-3 rounded border ${tone === 'ok' ? 'border-slate-200' : 'border-red-200 bg-red-50/30'} mb-3">
+            <div class="flex items-center justify-between mb-2">
+                <span class="font-mono text-xs text-slate-700">${escapeHtml(s.spoke_id)}</span>
+                ${_csDhcpPill(verdict, tone)}
+            </div>
+            <table class="w-full text-xs"><tbody>${rows.map(r =>
+                `<tr><td class="py-0.5 pr-3 text-slate-400 whitespace-nowrap align-top w-32">${r[0]}</td>
+                     <td class="py-0.5 text-slate-600">${r[1]}</td></tr>`).join('')}</tbody></table>
+            ${denials}${errs}${notes}
+        </div>`;
+    }).join('');
+}
+
 // ── Sites: assign each connected pxmx server (agent host) to a site ───────────
 // The SimQuotaEngine resolves a client's site via its hosting server's entry
 // here (after a per-client wsite override, before the bucket-default wsite), so
@@ -10125,7 +10220,16 @@ async function csRenderSetupDiagnostics() {
       ${_disabledLine}
       <p class="text-[11px] text-slate-400 mb-3">ACTIVE = the bridge is polling + relaying this agent's queue. <b>Via</b> = the spoke the agent is actually connected to (commands are delivered through it); <b>cs_spoke</b> in the Decision is the tenant's queue broker (one per tenant — every lrb agent shares it). <b>Inbox</b> = commands found in the agent's inbox on the cs spoke last poll (0 with 0 Accepted = nothing queued / hostname-key mismatch; &gt;0 with 0 Accepted = relay path issue). SKIP no-cs-spoke = no client-sim spoke bound to the tenant. Re-queued climbing = agent too busy to ACK (transient, retried up to max retries). Gave up / Failed = retries exhausted or a genuine rejection. The same data streams to <b>WebUI Logs → Simulations</b> as <code>[cs-bridge]</code> lines.</p>
       ${_shown.length ? csTable(head, body) : '<p class="text-sm text-slate-500">No active agents seen yet.</p>'}
+      <div class="mt-6 pt-4 border-t border-slate-200">
+        <div class="flex items-center justify-between mb-1">
+          <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Sim DHCP (Kea) health — per cs spoke</p>
+          <button type="button" onclick="csRenderDhcpHealth()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
+        </div>
+        <p class="text-[11px] text-slate-400 mb-3">The cs-owned Kea instance (<code>kea-dhcp4-sim</code>) that serves the isolated sim-client network. <b>Serving</b> needs all of: the unit active, the configured NIC present, and a lease DB. A crash-looping Kea hands out nothing while the spoke itself looks perfectly healthy, so this is deliberately separate from spoke status.</p>
+        <div id="cs-dhcp-health"><p class="text-slate-400 italic text-xs">Loading…</p></div>
+      </div>
     </div>`);
+    csRenderDhcpHealth();
 }
 
 // ── Register all VM Server children ─────────────────────────────────────────

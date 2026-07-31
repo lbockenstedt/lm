@@ -4661,6 +4661,30 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # hostname) to a site; the spoke's SimQuotaEngine resolves a client's site
     # via its hosting server's entry. Forwarded to the cs spoke (which owns the
     # agents + the map); 503 when no spoke is connected so the UI can say so.
+    @app.get("/sim/api/{tenant}/dhcp-health")
+    async def get_dhcp_health(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Per-cs-spoke sim-DHCP (Kea) health for the Setup -> Diagnostics panel.
+
+        Fans out to EVERY Client-Sim spoke on the tenant, not just the elected
+        broker: sim DHCP is per-spoke infrastructure, and the failing one is
+        exactly the one you cannot see from the broker. Never raises -- a spoke
+        that cannot answer is reported as unreachable so the panel still renders
+        the spokes that did.
+        """
+        results = await _cs_forward_all(tenant_id, "CS_GET_DHCP_HEALTH", {}, timeout=25.0)
+        spokes = []
+        for sid, data in results:
+            if isinstance(data, dict) and data.get("status") == "SUCCESS":
+                row = dict(data)
+                row["spoke_id"] = sid
+                spokes.append(row)
+            else:
+                spokes.append({"spoke_id": sid, "unreachable": True,
+                               "error": (data if isinstance(data, str)
+                                         else (data or {}).get("message", "no response"))})
+        return {"status": "SUCCESS", "spokes": spokes,
+                "warning": "" if results else "No Client-Sim spoke connected."}
+
     @app.get("/sim/api/{tenant}/pxmx-site-map")
     async def get_pxmx_site_map(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         # Cached per tenant for _PXMX_SITE_MAP_TTL_S (60s), invalidated on save.
