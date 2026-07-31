@@ -36,7 +36,7 @@
 //   Diagnostics & logs (loadModuleLogs, loadRecoveryLogs,
 //          loadBugReports, showBugReport)
 //   Generic agents & roles (loadApprovedSpokes, fetchLoadedRoles,
-//          showLoadRoleModal, loadRole, showDeployAgentInfo)
+//          showLoadRoleModal, loadRole)
 //   OPNsense management (loadOpnsenseManagement + add/edit modals)
 //   Proxmox (loadPxmxData)
 //   NetBox IPAM/DCIM (loadNetboxData + device/rack/prefix/IP modals)
@@ -87,7 +87,6 @@ const ROUTES = {
     loadApprovedSpokes:     { m: 'GET',  p: '/setup/pending_spokes',      api: 'get_all_spokes_status' },
     loadRole:               { m: 'POST', p: '/api/agent/{spokeId}/load-role', api: 'load_agent_role' },
     showLoadRoleModal:      { modal: true, via: 'loadRole' },
-    showDeployAgentInfo:    { modal: true, via: null }, // static modal, no fetch
     showAddFirewallModal:   { m: 'POST', p: '/setup/firewalls',           api: 'add_firewall', via: 'saveFirewall' }, // (modal)
 
     // ── Endpoint sync (IPAM → NAC) ──
@@ -263,7 +262,6 @@ const CRUD_ROUTES = {
     approveAgent:           { m: 'POST', p: '/setup/spokes/{spokeId}/agents/{agentId}/approve', api: 'approve_agent_under_spoke',
                               m2: 'GET', p2: '/api/pxmx/agents',                              api2: 'get_pxmx_agents' }, // resolves the agent's real owning spoke first (hypervisor OR simulation)
     revokeAgent:            { m: 'POST', p: '/api/pxmx/agents/{agentId}/revoke',             api: 'revoke_pxmx_agent' },
-    editAgentName:          { m: 'POST', p: '/api/pxmx/agents/{agentId}/rename',             api: 'rename_pxmx_agent' },
     openAgentConfigModal:   { m: 'GET',  p: '/api/pxmx/agents/{agentId}/config',             api: 'get_pxmx_agent_config',
                               m2: 'GET', p2: '/setup/tenants',                               api2: 'get_tenants' }, // (modal)
     saveAgentConfig:        { m: 'POST', p: '/api/pxmx/agents/{agentId}/config',             api: 'set_pxmx_agent_config' },
@@ -277,7 +275,6 @@ const CRUD_ROUTES = {
     // ── Tenants / users / sessions ──
     setTenant:              { m: 'POST', p: '/setup/tenant',                                 api: 'update_tenant' },
     editTenant:             { m: 'GET',  p: '/setup/tenants/{tenantId}',                     api: 'get_tenant_details' }, // (modal) form-save via saveTenantConfig
-    updateGlobalConfig:     { m: 'POST', p: '/setup/config',                                 api: 'update_global_config' },
     saveUser:               { m: 'POST', p: '/setup/users',                                  api: 'update_user' },
     editUser:               { m: 'GET',  p: '/setup/users',                                  api: 'get_users',
                               m2: 'GET', p2: '/setup/tenants',                               api2: 'get_tenants' }, // (modal)
@@ -295,10 +292,8 @@ const CRUD_ROUTES = {
     deleteInstance:         { m: 'DELETE', p: '/setup/{nac|ipam|ldap|dns|dhcp}-instances/{id}', api: 'delete_instance (_instance_crud)' },
 
     // ── Recovery / diagnostics / debug / cache ──
-    setRecoveryPause:       { m: 'POST', p: '/setup/spoke/{spokeId}/recovery',               api: 'set_spoke_recovery_pause' },
     toggleDebugLogging:     { m: 'GET',  p: '/setup/debug-mode',                             api: 'get_debug_mode',
                               m2: 'POST', p2: '/setup/debug-mode',                           api2: 'toggle_debug_mode' },
-    executeProbe:           { m: 'GET',  p: '/setup/api-probe',                              api: 'probe_spoke_api' },
     toggleSubnetFilter:     { m: 'PUT',  p: '/admin/subnet-filter-config',                   api: 'set_subnet_filter_config' },
     refreshModuleCache:     { m: 'POST', p: '/auth/cache/refresh?module={key}',              api: 'refresh_my_cache' },
     refreshOpnsenseCache:   { m: 'GET',  p: '/api/firewall/{fwId}/refresh',                  api: 'refresh_firewall_cache' },
@@ -329,7 +324,6 @@ const CRUD_ROUTES = {
     deleteOpnsenseItem:     { m: 'DELETE', p: '/api/firewall/{fwId}/{rules|aliases|nat|dns}/{id}', api: 'delete_firewall_rule/delete_firewall_alias/delete_nat_rule/delete_dns_record' },
 
     // ── Proxmox ──
-    lookupVMDetails:        { m: 'GET',  p: '/vm/{vmId}/details',                            api: 'get_vm_details' },
     showPxmxInstallModal:   { m: 'GET',  p: '/api/pxmx/agent-install-cmd',                   api: 'get_pxmx_agent_install_cmd' }, // (modal)
 
     // ── USB management (sim routes) ──
@@ -1552,17 +1546,6 @@ async function setTenant(tenant) {
     }
 }
 
-async function updateGlobalConfig(key, value) {
-    try {
-        await setupFetch('/setup/config', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ config: { [key]: value } })
-        });
-    } catch (err) {
-        console.error('Failed to update config', err);
-    }
-}
 
 async function scanGitHubRepos() {
     const btn = event?.target;
@@ -4018,40 +4001,8 @@ async function _securityReq(url, method, body, okMsg) {
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
-function _reportsToggleWhen() {
-    const f = document.getElementById('rp-freq') && document.getElementById('rp-freq').value;
-    const dow = document.getElementById('rp-dow-w'), dom = document.getElementById('rp-dom-w');
-    if (dow) dow.style.display = f === 'weekly' ? '' : 'none';
-    if (dom) dom.style.display = f === 'monthly' ? '' : 'none';
-}
 
-async function saveReportConfig() {
-    const g = id => document.getElementById(id);
-    const body = {
-        enabled: g('rp-enabled').checked,
-        sections: { checks: g('rp-checks').checked, clients: g('rp-clients').checked },
-        schedule: {
-            freq: g('rp-freq').value,
-            dow: parseInt(g('rp-dow').value, 10) || 0,
-            dom: parseInt((g('rp-dom') && g('rp-dom').value) || 1, 10) || 1,
-            hour: parseInt(g('rp-hour').value, 10) || 7,
-        },
-        recipients: g('rp-to').value.split(',').map(s => s.trim()).filter(Boolean),
-    };
-    const tq = 'tenant=' + encodeURIComponent(currentTenant || 'default');
-    try {
-        await apiJson('/api/reports/email-report?' + tq, { method: 'PUT', body: JSON.stringify(body) });
-        showToast('Report settings saved.', 'success');
-    } catch (e) { console.error('saveReportConfig', e); showToast(e.message || 'Save failed', 'error'); }
-}
 
-async function testReportNow() {
-    const tq = 'tenant=' + encodeURIComponent(currentTenant || 'default');
-    try {
-        const r = await apiJson('/api/reports/email-report/test?' + tq, { method: 'POST' });
-        showToast('Test report sent to ' + ((r.to || []).join(', ') || 'the configured recipients'), 'success');
-    } catch (e) { console.error('testReportNow', e); showToast(e.message || 'Send failed — check SMTP + recipients', 'error'); }
-}
 
 function initView(viewId, subView) {
     switch (viewId) {
@@ -5090,28 +5041,6 @@ const _SETUP_CLS = {
     btnSecCls: 'bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium border border-slate-200',
 };
 
-// Setup → Spokes & Agents tile. Renders the spokes/agents admin cards, then
-// kicks off loadSpokesAndAgents() which fans out to GET /setup/pending_spokes
-// + GET /api/pxmx/agents + GET /setup/diagnostics (core/src/api.py
-// get_pending_spokes / get_pxmx_agents / get_diagnostics). The diagnostics
-// telemetry (heartbeat/version/recovery/events) is folded inline into the
-// Spokes / Agents / Generic Agents cards; the summary bar above Spokes carries
-// the Hub/WebUI version + recovery counts that used to head the standalone
-// Diagnostics card (now removed).
-// Bulk-remove synthetic load-test spokes (id prefix 'loadtest-') in one click —
-// the loadtest harness registers hundreds; deleting them one by one is misery.
-window.purgeLoadtestSpokes = async function () {
-    if (!confirm("Remove ALL spokes/agents whose id starts with 'loadtest-'? "
-               + "For cleaning up synthetic load-test spokes.")) return;
-    try {
-        const data = await apiJson('/setup/spokes/purge-prefix?prefix=loadtest-', { method: 'POST' });
-        if (typeof showToast === 'function') showToast(`Purged ${data.removed} load-test spoke(s).`, 'success');
-        loadSpokesAndAgents();
-    } catch (e) {
-        if (typeof showToast === 'function') showToast(`Purge failed: ${e.message}`, 'error');
-        else showToast(`Purge failed: ${e.message}`, 'error');
-    }
-};
 
 function _renderSetupSpokesTile(content) {
     const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
@@ -5557,51 +5486,7 @@ function _renderSetupUserAccessTile(content) {
     loadGroups();
 }
 
-// Setup → Firewalls tile. GET /api/firewalls (core/src/api.py get_firewalls).
-function _renderSetupFirewallsTile(content) {
-    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
-    content.innerHTML = `
-            <div class="${card}">
-                <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Firewalls</h3>
-                    <button onclick="showAddFirewallModal()" class="${btnCls}">+ Add Firewall</button>
-                </div>
-                <div id="firewalls-list" class="space-y-2"></div>
-            </div>`;
-    loadFirewallsList();
-}
 
-// Setup → Network Devices tile. GET /setup/nw-devices (core/src/api.py
-// get_nw_devices). Mirrors the Firewalls tile: a fleet of switches + gateways
-// (AOS-S / AOS-CX / Juniper EX / Aruba-HPE gateway) with per-row Edit/Delete
-// and an "+ Add Device" modal. Creds live in runtime system.json only.
-function _renderSetupNwTile(content) {
-    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
-    content.innerHTML = `
-            <div class="${card}">
-                <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Network Devices</h3>
-                    <button onclick="showAddNwDeviceModal()" class="${btnCls}">+ Add Device</button>
-                </div>
-                <div id="nw-devices-list" class="space-y-2"></div>
-            </div>`;
-    loadNwDevicesList();
-}
-// GET /api/instances/nac (core/src/api.py get_instances).
-// The IPAM → NAC endpoint sync schedule moved to the dedicated
-// System → Sync tile (_renderSetupSyncTile).
-function _renderSetupNacTile(content) {
-    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
-    content.innerHTML = `
-            <div class="${card}">
-                <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">NAC / ClearPass Instances</h3>
-                    <button onclick="showAddInstanceModal('nac')" class="${btnCls}">+ Add Instance</button>
-                </div>
-                <div id="nac-instances-list" class="space-y-2"></div>
-            </div>`;
-    loadInstances('nac');
-}
 
 // System → Sync tile. The unified home for cross-system sync schedules:
 //   1. IPAM → NAC endpoint sync (moved here from Setup → Security/NAC)
@@ -6308,36 +6193,7 @@ function _attachAutoSave(root, mapFn, flag) {
     });
 }
 
-// Setup → IPAM tile. IPAM / NetBox instances only.
-// GET /api/instances/ipam (core/src/api.py get_instances).
-// The Hypervisor → NetBox VM sync schedule moved to the dedicated
-// System → Sync tile (_renderSetupSyncTile).
-function _renderSetupIpamTile(content) {
-    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
-    content.innerHTML = `
-            <div class="${card}">
-                <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">IPAM / NetBox Instances</h3>
-                    <button onclick="showAddInstanceModal('ipam')" class="${btnCls}">+ Add Instance</button>
-                </div>
-                <div id="ipam-instances-list" class="space-y-2"></div>
-            </div>`;
-    loadInstances('ipam');
-}
 
-// Setup → LDAP tile. GET /api/instances/ldap (core/src/api.py get_instances).
-function _renderSetupLdapTile(content) {
-    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
-    content.innerHTML = `
-            <div class="${card}">
-                <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Directory / LDAP Instances</h3>
-                    <button onclick="showAddInstanceModal('ldap')" class="${btnCls}">+ Add Instance</button>
-                </div>
-                <div id="ldap-instances-list" class="space-y-2"></div>
-            </div>`;
-    loadInstances('ldap');
-}
 
 // Setup → Directory (LDAP) — SERVER connection config (Global Admin only).
 // GET/POST /setup/ldap-config (core/src/routes/ldap.py) store the connection
@@ -6479,33 +6335,7 @@ async function pushLdapConfig() {
 }
 window.saveLdapConfig = saveLdapConfig; window.pushLdapConfig = pushLdapConfig;
 
-// Setup → DNS tile. GET /api/instances/dns (core/src/api.py get_instances).
-function _renderSetupDnsTile(content) {
-    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
-    content.innerHTML = `
-            <div class="${card}">
-                <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">DNS / Unbound Instances</h3>
-                    <button onclick="showAddInstanceModal('dns')" class="${btnCls}">+ Add Instance</button>
-                </div>
-                <div id="dns-instances-list" class="space-y-2"></div>
-            </div>`;
-    loadInstances('dns');
-}
 
-// Setup → DHCP tile. GET /api/instances/dhcp (core/src/api.py get_instances).
-function _renderSetupDhcpTile(content) {
-    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
-    content.innerHTML = `
-            <div class="${card}">
-                <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">DHCP / Kea Instances</h3>
-                    <button onclick="showAddInstanceModal('dhcp')" class="${btnCls}">+ Add Instance</button>
-                </div>
-                <div id="dhcp-instances-list" class="space-y-2"></div>
-            </div>`;
-    loadInstances('dhcp');
-}
 
 // Setup → Module Management tile. One unified device-management page for every
 // managed module (Firewalls, Network Devices, Security/NAC, IPAM, LDAP, DNS,
@@ -10991,9 +10821,6 @@ function usbDeviceName(vidpid) {
     return '';
 }
 
-function _usbChip(vp, label, onRemove, extra) {
-    return `<span class="inline-flex items-center gap-1 bg-slate-100 rounded-full pl-2 pr-1 py-0.5 text-xs font-mono text-slate-700">${label || vp}${extra || ''}<button onclick="${onRemove}" class="text-slate-400 hover:text-red-500 font-bold">&times;</button></span>`;
-}
 
 async function loadUsbOverview() {
     let data;
@@ -11501,22 +11328,6 @@ function _mgmtDeleteActions(o) {
     return [_mgmtBtn('Force Delete', `${deleteFn}('${eSid}')`, 'bg-red-600 hover:bg-red-700 text-white')];
 }
 
-// _mgmtEntryCard(o) — a multi-line stacked card row for the Setup → Spokes &
-// Agents tiles. Replaces the cramped fixed-width <table table-fixed> layout
-// whose narrow columns wrapped text and stacked buttons awkwardly. Each entry
-// is a vertical card: a header line (status dot + name/id + badges), optional
-// meta lines (hostname, roles), and an actions row that wraps freely. Shared
-// by _renderSpokesTable and _renderAgentsTable.
-//
-// o = { dot, name, sid, identityBanner, metaLines: [html], badges: [html],
-//       actions: [html] }
-// _bslot(w, html) — wrap a badge in a FIXED-WIDTH inline-block column so the
-// badge values land in the SAME x-position on every Spokes/Agents tile instead
-// of shifting with the module-name length. An absent badge renders an EMPTY
-// fixed-width slot (reserves the column, shows no "—" placeholder).
-function _bslot(w, html) {
-    return `<span class="inline-block ${w} shrink-0 overflow-hidden align-middle whitespace-nowrap">${html || ''}</span>`;
-}
 
 // _quietMeta(parts) — join non-empty metadata fragments into ONE muted line
 // separated by a faint middot. The Spokes/Agents rows use this instead of a row
@@ -12172,20 +11983,6 @@ async function revokeAgent(agentId) {
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
-async function editAgentName(agentId, currentLabel) {
-    const name = prompt(`Display name for agent '${agentId}':`, currentLabel === agentId ? '' : currentLabel);
-    if (name === null) return;
-    try {
-        const res = await fetch(`/api/pxmx/agents/${encodeURIComponent(agentId)}/rename`, {
-            method: 'POST', credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ display_name: name.trim() || agentId }),
-        });
-        const d = await res.json();
-        if (res.ok) { showToast('Agent renamed', 'success'); loadSpokesAndAgents(); }
-        else showToast(d.detail || 'Rename failed', 'error');
-    } catch (e) { showToast('Error: ' + e.message, 'error'); }
-}
 
 // Agent Configuration modal for Proxmox node agents — display name + Client
 // Simulation mode toggle + tenant. Supersedes the editAgentName prompt; the
@@ -13570,17 +13367,6 @@ function recoveryBadge(rec) {
     return { text: '—', tone: 'bg-slate-50 text-slate-400', title: 'No recovery activity' };
 }
 
-async function setRecoveryPause(spokeId, pause) {
-    try {
-        await apiJson(`/setup/spoke/${encodeURIComponent(spokeId)}/recovery`, {
-            method: 'POST',
-            body: JSON.stringify({ pause }),
-        });
-        await loadSpokesAndAgents();  // refresh to reflect new badge
-    } catch (err) {
-        showToast(`Failed to ${pause ? 'pause' : 'resume'} recovery for ${spokeId}: ${err.message}`, 'error');
-    }
-}
 
 // _diagTelemetryExtras(s, fns) — the diagnostics-only telemetry bits for one
 // spoke/agent, factored out of the former standalone Diagnostics tile so the
@@ -14367,140 +14153,11 @@ async function unloadRole(spokeId, role) {
     }
 }
 
-function showDeployAgentInfo() {
-    const existing = document.getElementById('deploy-agent-modal');
-    if (existing) existing.remove();
-
-    const hubHost = window.location.hostname;
-    // Unified-443: the hub serves wss on 443 with path /ws/spoke for spokes.
-    // Over HTTPS (the normal case) the port is implicit; HTTP dev fallback uses
-    // the legacy plaintext loopback port. The agent appends /ws/spoke itself,
-    // but pinning the full path avoids any ambiguity on a pathless pin.
-    const hubWS   = window.location.protocol === "https:"
-        ? `wss://${hubHost}:443/ws/spoke`
-        : `ws://${hubHost}:443/ws/spoke`;
-    const cmd = `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \\\n  | sudo bash -s -- \\\n    --hub ${hubWS} \\\n    --id my-agent-1`;
-
-    const modal = document.createElement('div');
-    modal.id = 'deploy-agent-modal';
-    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm p-4';
-    modal.innerHTML = `
-        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden border border-slate-200">
-            <div class="px-6 py-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
-                <h3 class="text-lg font-bold text-[#263040]">Deploy Agent</h3>
-                <button onclick="document.getElementById('deploy-agent-modal').remove()" class="text-slate-400 hover:text-slate-600">
-                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
-                </button>
-            </div>
-            <div class="p-6 space-y-4">
-                <p class="text-sm text-slate-600">Run this on the target server (requires root):</p>
-                <div class="relative">
-                    <pre id="deploy-cmd-pre" class="bg-slate-900 text-green-300 text-xs p-4 rounded-lg overflow-x-auto whitespace-pre-wrap">${cmd}</pre>
-                    <button onclick="navigator.clipboard.writeText(document.getElementById('deploy-cmd-pre').innerText).then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',1500)})"
-                        class="absolute top-2 right-2 bg-slate-700 hover:bg-slate-600 text-white text-xs px-2 py-1 rounded">Copy</button>
-                </div>
-                <p class="text-xs text-slate-500">To pre-load a role at deploy time, add <code class="bg-slate-100 px-1 rounded">--role dns</code> or <code class="bg-slate-100 px-1 rounded">--role dhcp</code> to the command above.</p>
-            </div>
-            <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end">
-                <button onclick="document.getElementById('deploy-agent-modal').remove()"
-                    class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Close</button>
-            </div>
-        </div>`;
-    document.body.appendChild(modal);
-}
-
-async function executeProbe() {
-    const spokeId = document.getElementById('probe-spoke-selector').value;
-    const path = document.getElementById('probe-path').value;
-    const responseEl = document.getElementById('probe-response');
-
-    if (!spokeId || !path) {
-        showToast('Please select a spoke and enter a path', 'error');
-        return;
-    }
-
-    responseEl.textContent = 'Probing...';
-    try {
-        const data = await apiJson(`/setup/api-probe?spoke_id=${spokeId}&path=${encodeURIComponent(path)}`);
-        responseEl.textContent = JSON.stringify(data, null, 2);
-    } catch (err) {
-        responseEl.textContent = `Error: ${err.message}`;
-    }
-}
-
-function setProbePath(path) {
-    document.getElementById('probe-path').value = path;
-    executeProbe();
-}
 
 
-function selectVM(vmId) {
-    const input = document.getElementById('vm-id-input');
-    if (input) {
-        input.value = vmId;
-        lookupVMDetails();
-    }
-}
 
-async function lookupVMDetails() {
-    const vmId = document.getElementById('vm-id-input').value.trim();
-    if (!vmId) return;
 
-    const details = document.getElementById('vm-details');
-    const emptyState = document.getElementById('vm-empty-state');
-    const tableBody = document.getElementById('firewall-table-body');
-    const idEl = document.getElementById('res-vm-id');
-    const ipEl = document.getElementById('res-ip');
-    const resResources = document.getElementById('res-resources');
-    const resSecurity = document.getElementById('res-security');
-    const dhcpHost = document.getElementById('dhcp-host');
-    const dhcpMac = document.getElementById('dhcp-mac');
-    const dhcpEnd = document.getElementById('dhcp-end');
 
-    if (emptyState) emptyState.classList.add('hidden');
-    if (details) details.classList.remove('hidden');
-    if (tableBody) tableBody.innerHTML = `<tr><td colspan="5" class="px-4 py-8 text-center text-slate-400 animate-pulse">Stitching VM data...</td></tr>`;
-
-    try {
-        const response = await fetch(`/vm/${vmId}/details`);
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(error.detail || 'Failed to fetch VM details');
-        }
-        const data = await response.json();
-
-        if (idEl) idEl.textContent = vmId;
-        if (ipEl) ipEl.textContent = data.ip || 'Unknown';
-
-        const res = data.proxmox || {};
-        if (resResources) resResources.textContent = `CPU: ${res.cpu || '-'}% | RAM: ${res.ram || '-'}MB | Disk: ${res.disk || '-'}%`;
-
-        const sec = data.cppm || {};
-        if (resSecurity) resSecurity.textContent = `Policy: ${sec.policy || '-'} | Posture: ${sec.posture || '-'}`;
-
-        const dhcp = data.opnsense?.dhcp || {};
-        if (dhcpHost) dhcpHost.textContent = dhcp.hostname || '-';
-        if (dhcpMac) dhcpMac.textContent = dhcp.mac || '-';
-        if (dhcpEnd) dhcpEnd.textContent = dhcp.lease_end || '-';
-
-        const rules = (data.opnsense && data.opnsense.rules) || [];
-        if (rules.length === 0) {
-            if (tableBody) tableBody.innerHTML = `<tr><td colspan="5" class="px-4 py-4 text-center text-slate-400 italic">No rules found for this VM.</td></tr>`;
-        } else {
-            if (tableBody) tableBody.innerHTML = rules.map(rule => `
-                <tr class="hover:bg-slate-50 transition-colors">
-                    <td class="px-4 py-3 font-mono text-xs text-slate-600">${escapeHtml(rule.source || 'any')}</td>
-                    <td class="px-4 py-3 text-slate-600">${escapeHtml(rule.destination || '-')}</td>
-                    <td class="px-4 py-3 text-slate-600">${escapeHtml(rule.protocol || 'TCP')}</td>
-                    <td class="px-4 py-3"><span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${rule.action === 'pass' ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}">${escapeHtml(rule.action)}</span></td>
-                    <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(rule.description || '-')}</td>
-                </tr>
-            `).join('');
-        }
-    } catch (err) {
-        if (tableBody) tableBody.innerHTML = `<tr><td colspan="5" class="px-4 py-8 text-center text-red-500 font-medium">${err.message}</td></tr>`;
-    }
-}
 
 async function loadOpnsenseManagement() {
     const container = document.getElementById('opn-table-container');
@@ -19584,53 +19241,7 @@ async function leRetryIssue(domain) {
     return _leRunIssue(st.params, { closeModalOnSuccess: false });
 }
 
-// Hurricane Electric account-login knob — stored once on the le spoke (0600) and
-// reused for every "Hurricane Electric (account login)" DNS-01 issue + renewal.
-async function showHeLoginModal() {
-    let cur = { configured: false, he_username: '' };
-    try {
-        const r = await _spokeFetch('/api/le/he-config', { method: 'GET' });
-        if (r.ok) cur = (r.data && r.data.data) ? r.data.data : (r.data || cur);
-    } catch (e) { /* spoke may be down; show empty form */ }
-    const modal = document.createElement('div');
-    modal.id = 'he-login-modal';
-    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
-    const status = cur.configured
-        ? `<span class="text-green-600">Currently configured${cur.he_username ? ' (' + escapeHtml(cur.he_username) + ')' : ''}.</span>`
-        : '<span class="text-slate-400">Not configured yet.</span>';
-    modal.innerHTML = `
-      <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
-        <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-          <h3 class="text-lg font-bold text-[#263040]">Hurricane Electric account</h3>
-          <button onclick="document.getElementById('he-login-modal').remove()" class="text-slate-400 hover:text-slate-600">✕</button>
-        </div>
-        <div class="p-6 space-y-3">
-          <p class="text-xs text-slate-500">Stored once and reused for every <b>Hurricane Electric (account login)</b> DNS-01 issue &amp; renewal — no per-record TSIG keys or IP. ${status}</p>
-          <div class="space-y-1"><label class="text-xs text-slate-500 uppercase font-bold">Account email</label><input id="he-cfg-user" type="text" value="${escapeHtml(cur.he_username || '')}" autocomplete="off" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-          <div class="space-y-1"><label class="text-xs text-slate-500 uppercase font-bold">Account password</label><input id="he-cfg-pass" type="password" placeholder="${cur.configured ? 're-enter to change' : ''}" autocomplete="new-password" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-        </div>
-        <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-          <button onclick="document.getElementById('he-login-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-          <button onclick="saveHeLogin()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Save</button>
-        </div>
-      </div>`;
-    document.body.appendChild(modal);
-}
 
-async function saveHeLogin() {
-    const u = document.getElementById('he-cfg-user')?.value?.trim() || '';
-    const p = document.getElementById('he-cfg-pass')?.value || '';
-    if (!u || !p) { showToast('Both account email and password are required.', 'error'); return; }
-    try {
-        const r = await _spokeFetch('/api/le/he-config', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ he_username: u, he_password: p }),
-        });
-        if (!r.ok) { showToast('Save failed: ' + (r.detail || ''), 'error'); return; }
-        showToast('Hurricane Electric login saved', 'success');
-        document.getElementById('he-login-modal')?.remove();
-    } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
-}
 
 // ── Per-tenant DNS-01 credential manager (settings screen) ───────────────────
 // Multi-tenant, multi-provider: each tenant keeps named credentials for
@@ -20369,49 +19980,6 @@ async function showMtlsDebug() {
     }
 }
 
-// clientAuth checkbox (inside the Manage modal). Re-issues the cert via the le
-// spoke with the ACME "classic" profile (serverAuth + clientAuth) so it can be
-// presented as an mTLS CLIENT cert (BugFixer / the mTLS wildcard). Server-only
-// certs don't need it. POST /api/le/certs/{domain}/clientauth {enabled} →
-// LE_SET_CLIENTAUTH; re-distributes on success. opts.skipConfirm is used when
-// leToggleBugfixerChk auto-enables it (a BugFixer cert MUST have clientAuth).
-async function leToggleClientAuthChk(cb, domain, opts) {
-    opts = opts || {};
-    const enable = cb ? cb.checked : true;
-    if (!opts.skipConfirm && !confirm(enable
-        ? `Re-issue ${domain} WITH the clientAuth EKU now?\n\ncertbot re-issues it (ACME "classic" profile) and re-distributes to its targets. Needed only for mTLS client certs.`
-        : `Re-issue ${domain} as a server-only cert (drop clientAuth)?`)) {
-        if (cb) cb.checked = !enable;   // revert on cancel
-        return false;
-    }
-    if (cb) cb.disabled = true;
-    showToast(enable ? `Re-issuing ${domain} with clientAuth…` : `Re-issuing ${domain} without clientAuth…`, 'info');
-    try {
-        const { ok, detail } = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/clientauth`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled: enable })
-        });
-        if (!ok) {
-            showToast('clientAuth change failed: ' + (detail || ''), 'error');
-            if (cb) { cb.checked = !enable; cb.disabled = false; }
-            return false;
-        }
-        if (Array.isArray(window._leCerts)) {
-            const c = window._leCerts.find(x => x.domain === domain);
-            if (c) c.client_auth = enable;
-        }
-        showToast(enable
-            ? `${domain} re-issued with clientAuth — deploy it (a target below) so the mTLS client picks it up`
-            : `${domain} re-issued server-only`, 'success');
-        if (!opts.noReload) { window._leLoading = false; await loadLEData(); }
-        if (cb) cb.disabled = false;
-        return true;
-    } catch (e) {
-        showToast('clientAuth change failed: ' + (e.message || e), 'error');
-        if (cb) { cb.checked = !enable; cb.disabled = false; }
-        return false;
-    }
-}
 
 // Per-cert "Renew now" — FORCES a re-issue (--force-renewal) so it works even when
 // the cert isn't near expiry (a plain `certbot renew` no-ops until ~30d out).
