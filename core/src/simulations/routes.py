@@ -3964,6 +3964,23 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                if isinstance(d, dict) and d.get("stopped")),
                 "servers": len(results)}
 
+    @app.post("/sim/api/{tenant}/fleet-reclone-clear")
+    async def cs_fleet_reclone_clear(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Clear a FINISHED fleet reclone's errors on every server.
+
+        The reclone state keeps its failed count + per-VM log after a batch ends
+        so the operator can read what happened, but nothing ever cleared it — a
+        batch that failed two VMs last week still renders as red errors under
+        Reclone All, and a later clean run gets read against stale failures.
+        Refused per-agent while a batch is RUNNING (stop it first), so this can
+        never blank a progress view someone is watching."""
+        payload = {"target": "proxmox", "action": "proxmox_reclone_clear",
+                   "type": "proxmox_reclone_clear", "args": {}}
+        results = await _cs_forward_all(tenant_id, "CS_QUEUE_COMMAND", payload, timeout=10.0)
+        cleared = sum(1 for _s, d in results if isinstance(d, dict) and d.get("cleared"))
+        return {"cleared": cleared, "servers": len(results),
+                "refused": len(results) - cleared}
+
     @app.post("/sim/api/{tenant}/update-all")
     async def cs_update_all(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         payload = {"target": "proxmox", "action": "proxmox_agent_update",

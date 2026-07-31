@@ -260,6 +260,7 @@ const SIM_ROUTES = {
     // ── Fleet (reclone / auto-provision toggle / update-all) ──
     csFleetReclone:              { m: 'POST',   p: '/{tenant}/fleet-reclone',                    api: 'cs_fleet_reclone' },
     csFleetRecloneStop:          { m: 'POST',   p: '/{tenant}/fleet-reclone-stop',               api: 'cs_fleet_reclone_stop' },
+    csFleetRecloneClear:         { m: 'POST',   p: '/{tenant}/fleet-reclone-clear',              api: 'cs_fleet_reclone_clear' },
     csToggleAutoProvision:       { m: 'POST',   p: '/{tenant}/toggle-auto-provision',            api: 'cs_toggle_auto_provision' },
     csUpdateAll:                 { m: 'POST',   p: '/{tenant}/update-all',                       api: 'cs_update_all' },
 
@@ -8091,6 +8092,7 @@ async function csRenderVmServer() {
         <div class="flex items-center gap-2">
           <button onclick="csFleetReclone()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold" title="Destroy and re-clone every VM in the fleet from its template — all in-VM state is lost">Reclone All</button>
           <button id="cs-fleet-reclone-stop" onclick="csFleetRecloneStop()" class="hidden bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-3 py-1.5 rounded-md text-xs font-bold" title="Stop the running fleet reclone — VMs already in progress finish, the rest are skipped">Stop</button>
+          <button id="cs-fleet-reclone-clear" onclick="csFleetRecloneClear()" class="hidden bg-white hover:bg-slate-50 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold" title="Clear the finished reclone's errors and per-VM log. Refused while a batch is running — stop it first.">Clear errors</button>
         </div>
         <div id="cs-fleet-reclone-progress" class="mt-2 text-[11px] text-slate-500 space-y-1">No reclone in progress.</div>
       </div>
@@ -8247,7 +8249,20 @@ function csFleetRecloneProgress() {
         .filter(x => x.rs.status === 'running' || (x.rs.status && x.rs.status !== 'idle' && Object.keys(x.rs).length));
     // Show the Stop button only while a batch is actually running on some server.
     const stopBtn = csEl('cs-fleet-reclone-stop');
-    if (stopBtn) stopBtn.classList.toggle('hidden', !active.some(x => x.rs.status === 'running'));
+    const running = active.some(x => x.rs.status === 'running');
+    if (stopBtn) stopBtn.classList.toggle('hidden', !running);
+    // "Clear errors" appears only when a FINISHED batch left something to clear —
+    // failures or a per-VM log. Hidden while running: clearing then would blank
+    // the progress view and lose the record of what just failed (the agent
+    // refuses it too, this just keeps the button honest).
+    const clearBtn = csEl('cs-fleet-reclone-clear');
+    if (clearBtn) {
+        const clearable = !running && (csVmHosts || []).some(h => {
+            const rs = h.reclone_state || {};
+            return Number(rs.failed || 0) > 0 || (rs.log || []).length > 0;
+        });
+        clearBtn.classList.toggle('hidden', !clearable);
+    }
     if (!active.length) { el.textContent = 'No reclone in progress.'; return; }
     el.innerHTML = active.map(({ h, rs }) => {
         const total = Number(rs.total || 0);
@@ -8489,6 +8504,20 @@ window.csFleetReclone = async function () {
         if (typeof showToast === 'function') showToast('Fleet reclone started.', 'success');
         csRenderVmServer();
     } catch (e) { console.error('csFleetReclone: fleet reclone failed', e); if (typeof showToast === 'function') showToast('Fleet reclone failed: ' + (e.message || e), 'error'); }
+};
+
+window.csFleetRecloneClear = async function () {
+    try {
+        const d = await csApi('csFleetRecloneClear');
+        const msg = (d && d.refused)
+            ? `Cleared ${d.cleared}/${d.servers} — ${d.refused} still running (stop first)`
+            : `Cleared reclone errors on ${(d && d.cleared) || 0} server(s)`;
+        if (typeof showToast === 'function') showToast(msg, d && d.refused ? 'error' : 'success');
+        if (typeof loadCSData === 'function') loadCSData(true);
+    } catch (e) {
+        console.error('csFleetRecloneClear: clear failed', e);
+        if (typeof showToast === 'function') showToast('Clear failed: ' + (e.message || e), 'error');
+    }
 };
 
 window.csFleetRecloneStop = async function () {
