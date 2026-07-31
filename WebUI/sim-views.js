@@ -316,12 +316,19 @@ function csEmpty(msg, hint) {
 // instead of claiming the change already landed.
 function csPushToast(r, verb) {
     verb = verb || 'Saved';
-    const n = (r && r.pushed_to_spokes != null) ? r.pushed_to_spokes : 0;
     if (r && r.queued) {
         showToast(`${verb} — spoke temporarily unreachable, queued for delivery on reconnect.`, 'info');
-    } else {
-        showToast(`${verb}. Pushed to ${n} spoke(s).`, 'success');
+        return;
     }
+    // Only claim a fan-out count when the endpoint actually reports one. The
+    // config-push routes return pushed_to_spokes; the per-command routes
+    // (/proxmx/command) enqueue to a SINGLE spoke and return the queue result
+    // instead — defaulting the missing field to 0 made every VM Server action
+    // announce "Pushed to 0 spoke(s)" and read as a silent failure when the
+    // command had in fact been queued (the route 503s when no spoke is
+    // connected, and 403s on a safeguard refusal, so a 200 here means accepted).
+    const n = (r && r.pushed_to_spokes != null) ? r.pushed_to_spokes : null;
+    showToast(n === null ? `${verb}.` : `${verb}. Pushed to ${n} spoke(s).`, 'success');
 }
 
 function csErrorBox(label, err) {
