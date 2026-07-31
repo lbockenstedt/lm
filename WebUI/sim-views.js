@@ -5555,6 +5555,7 @@ async function csRenderDhcpHealth() {
     if (!el) return;
     try {
         const d = await csFetch(`/${csTenant()}/dhcp-health?tenant_id=${csTenant()}`);
+        window._csDhcpLast = d;          // kept for the Copy button
         el.innerHTML = _csDhcpHealthHtml(d);
     } catch (e) {
         el.innerHTML = csErrorBox('Could not load sim DHCP health', e);
@@ -5566,6 +5567,45 @@ window.csRenderDhcpHealth = csRenderDhcpHealth;
 // (same shape as the hub's _spoke_label, e.g. "cs-svr-03 (59f79003)"). Spokes are
 // keyed by guid internally, but a wall of UUIDs is unreadable when the question
 // is "which box is broken". Falls back to the bare guid when no name is known.
+// Flatten the panel to plain text for the Copy button — the same facts in a
+// pasteable form (ticket, chat, email). Deliberately includes the notes and the
+// last-errors block: those are the lines that actually identify the fault.
+function _csDhcpHealthText(d) {
+    const spokes = [...((d && d.spokes) || [])].sort((a, b) =>
+        String(a.spoke_name || a.spoke_id || '').localeCompare(
+            String(b.spoke_name || b.spoke_id || ''), undefined, { numeric: true }));
+    const L = [`Sim DHCP (Kea) health — ${spokes.length} spoke(s)`, ''];
+    spokes.forEach(s => {
+        const who = `${s.spoke_name || '(unnamed)'} [${s.spoke_id || ''}]`;
+        if (s.unreachable) { L.push(`${who}: UNREACHABLE — ${s.error || ''}`, ''); return; }
+        const u4 = (s.units || {})['kea-dhcp4-sim'] || {};
+        const uca = (s.units || {})['kea-ctrl-agent-sim'] || {};
+        const lease = s.lease_db || {};
+        const leaseTxt = !lease.exists ? 'MISSING'
+            : (lease.leases === null || lease.readable === false) ? 'count unreadable'
+            : `${lease.leases} lease(s)`;
+        L.push(who);
+        L.push(`  dhcp4        : ${u4.ActiveState || '?'}/${u4.SubState || '?'}`
+               + (parseInt(u4.NRestarts || '0', 10) ? `  (${u4.NRestarts} restarts)` : ''));
+        L.push(`  ctrl-agent   : ${uca.ActiveState || '?'}/${uca.SubState || '?'}`);
+        L.push(`  subnet/pool  : ${s.subnet || '?'}  ${s.pool || '?'}`);
+        L.push(`  interface    : ${(s.interfaces_configured || []).join(',') || '?'}`
+               + ((s.interface_missing || []).length ? `  MISSING (present: ${Object.keys(s.interfaces_present || {}).join(',')})` : ''));
+        L.push(`  lease db     : ${leaseTxt}  ${s.lease_file || ''}`);
+        L.push(`  config test  : ${(s.config_test || {}).ok ? 'valid' : 'INVALID — ' + ((s.config_test || {}).detail || '')}`);
+        (s.apparmor_denials || []).forEach(x => L.push(`  apparmor     : ${x}`));
+        (s.last_errors || []).forEach(x => L.push(`  error        : ${x}`));
+        (s.notes || []).forEach(x => L.push(`  note         : ${x}`));
+        L.push('');
+    });
+    return L.join('\n');
+}
+
+function csCopyDhcpHealth(btn) {
+    csCopyText(_csDhcpHealthText(window._csDhcpLast || {}), btn);
+}
+window.csCopyDhcpHealth = csCopyDhcpHealth;
+
 function _csDhcpWho(s) {
     const id = String(s.spoke_id || '');
     const nm = String(s.spoke_name || '').trim();
@@ -5582,7 +5622,17 @@ function _csDhcpPill(txt, tone) {
 }
 
 function _csDhcpHealthHtml(d) {
-    const spokes = (d && d.spokes) || [];
+    // Sort by NAME so the fleet reads in a stable, predictable order
+    // (cs-svr-01..04) instead of whatever order the fan-out happened to
+    // complete in — which changes every refresh and makes it hard to see that
+    // the same box is still broken. Nameless spokes sort last, by guid.
+    const spokes = [...((d && d.spokes) || [])].sort((a, b) => {
+        const an = (a.spoke_name || '').trim(), bn = (b.spoke_name || '').trim();
+        if (an && bn) return an.localeCompare(bn, undefined, { numeric: true });
+        if (an) return -1;
+        if (bn) return 1;
+        return String(a.spoke_id || '').localeCompare(String(b.spoke_id || ''));
+    });
     if (!spokes.length) {
         return `<p class="text-xs text-slate-500 italic">${escapeHtml((d && d.warning) || 'No Client-Sim spoke reported.')}</p>`;
     }
@@ -10244,7 +10294,10 @@ async function csRenderSetupDiagnostics() {
       <div class="mt-6 pt-4 border-t border-slate-200">
         <div class="flex items-center justify-between mb-1">
           <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Sim DHCP (Kea) health — per cs spoke</p>
-          <button type="button" onclick="csRenderDhcpHealth()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
+          <div class="flex items-center gap-2">
+            <button type="button" onclick="csCopyDhcpHealth(this)" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50" title="Copy this panel as plain text — including the last errors and notes">⧉ Copy</button>
+            <button type="button" onclick="csRenderDhcpHealth()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
+          </div>
         </div>
         <p class="text-[11px] text-slate-400 mb-3">The cs-owned Kea instance (<code>kea-dhcp4-sim</code>) that serves the isolated sim-client network. <b>Serving</b> needs all of: the unit active, the configured NIC present, and a lease DB. A crash-looping Kea hands out nothing while the spoke itself looks perfectly healthy, so this is deliberately separate from spoke status.</p>
         <div id="cs-dhcp-health"><p class="text-slate-400 italic text-xs">Loading…</p></div>
