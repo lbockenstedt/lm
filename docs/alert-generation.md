@@ -48,7 +48,7 @@ clients in the right place for the controller to cross its alert threshold.
 | Central alert (example) | Sim id | How it breaks the system | Config it reads |
 |---|---|---|---|
 | **DNS Server Failed to Respond** | `dns_fail` | Fires background `dig`s at UNREACHABLE / bogus servers so lookups time out / fail | `[address]` `dns_bad_ip_1-3` (RFC1918 blackholes) + `dns_bad_record_1-3`; `[simulation]` `dns_fail_rate`, `dns_fail_duration`, `dns_max_inflight` |
-| **DNS latency / slow DNS** | `dns_latency` | Fires `dig`s at SLOW responders so lookups are delayed (distinct from *failure*) | `[address]` `dns_latency_1-3`; `[simulation]` `dns_latency_rate`, `dns_latency_duration`, `dns_max_inflight` |
+| **DNS latency / slow DNS** | `dns_latency` | Fires `dig`s at SLOW responders so lookups are delayed (distinct from *failure*) | `[address]` `dns_latency` (space-separated pool, unlimited); `[simulation]` `dns_latency_rate`, `dns_latency_duration`, `dns_max_inflight` |
 | **DHCP Discover Timeout / CLIENT_DHCP_FAILURE** | `dhcp_fail` | Fires crafted DHCPDISCOVERs (forged client-id) at a dead server so DISCOVER never completes; the client's real lease is untouched | dead-server target is in `dhcp_fail.sh` / `dhcp_fire.py` |
 | **DHCP Pool Exhausted** | `dhcp_fail` | Enough clients hammering DISCOVER exhausts the pool | quota **count** is the lever |
 | **WPA Passphrase is Incorrect** | `ssidpw_fail` | Repeatedly associates with a PSK one char off (`<ssidpw>_fail`); 1X clients corrupt `dot1x_password` | uses the bucket's real `ssidpw` / `dot1x_password`, corrupted at runtime |
