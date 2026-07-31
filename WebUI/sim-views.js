@@ -5589,7 +5589,10 @@ function csRenderPxmxSiteMapEditor() {
         const h = a.agent_id || a.hostname;
         if (!h || seen.has(h)) return;
         seen.add(h);
-        rows.push({ host: h, connected: true, last_seen: a.last_seen || 0 });
+        // status==='offline' = a host the spoke still knows from telemetry but
+        // whose agent is down (CS_GET_PXMX_SITE_MAP unions those in so it can be
+        // assigned a site while offline). Anything else is a live agent.
+        rows.push({ host: h, connected: a.status !== 'offline', last_seen: a.last_seen || 0 });
     });
     Object.keys(csPxmxSiteMap).forEach(h => {
         if (!seen.has(h)) rows.push({ host: h, connected: false, last_seen: 0 });
