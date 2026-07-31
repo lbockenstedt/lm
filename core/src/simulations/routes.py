@@ -4671,15 +4671,31 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         that cannot answer is reported as unreachable so the panel still renders
         the spokes that did.
         """
+        hub = app.state.hub
+
+        def _name(sid):
+            """Human name for the card header. Spokes are keyed by guid, but an
+            operator thinks in hostnames — a wall of UUIDs is unreadable when
+            the whole point of the panel is "which box is broken". Reuses the
+            hub's own labeller so this matches the alert log wording."""
+            try:
+                md = (hub.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
+            except Exception:  # noqa: BLE001 — a label must never break the panel
+                md = {}
+            return (md.get("display_name") or md.get("name")
+                    or md.get("hostname") or "").strip()
+
         results = await _cs_forward_all(tenant_id, "CS_GET_DHCP_HEALTH", {}, timeout=25.0)
         spokes = []
         for sid, data in results:
             if isinstance(data, dict) and data.get("status") == "SUCCESS":
                 row = dict(data)
                 row["spoke_id"] = sid
+                row["spoke_name"] = _name(sid)
                 spokes.append(row)
             else:
-                spokes.append({"spoke_id": sid, "unreachable": True,
+                spokes.append({"spoke_id": sid, "spoke_name": _name(sid),
+                               "unreachable": True,
                                "error": (data if isinstance(data, str)
                                          else (data or {}).get("message", "no response"))})
         return {"status": "SUCCESS", "spokes": spokes,

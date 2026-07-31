@@ -5562,6 +5562,19 @@ async function csRenderDhcpHealth() {
 }
 window.csRenderDhcpHealth = csRenderDhcpHealth;
 
+// Card header identity: the spoke NAME, with a short guid hint for correlation
+// (same shape as the hub's _spoke_label, e.g. "cs-svr-03 (59f79003)"). Spokes are
+// keyed by guid internally, but a wall of UUIDs is unreadable when the question
+// is "which box is broken". Falls back to the bare guid when no name is known.
+function _csDhcpWho(s) {
+    const id = String(s.spoke_id || '');
+    const nm = String(s.spoke_name || '').trim();
+    return nm
+        ? `<span class="text-xs font-bold text-slate-700">${escapeHtml(nm)}</span>`
+          + `<span class="text-[10px] font-mono text-slate-400 ml-1.5">${escapeHtml(id.slice(0, 8))}</span>`
+        : `<span class="font-mono text-xs text-slate-700">${escapeHtml(id)}</span>`;
+}
+
 function _csDhcpPill(txt, tone) {
     const map = { ok: 'bg-green-100 text-green-700', bad: 'bg-red-100 text-red-700',
                   warn: 'bg-amber-100 text-amber-700', dim: 'bg-slate-200 text-slate-600' };
@@ -5576,7 +5589,7 @@ function _csDhcpHealthHtml(d) {
     return spokes.map(s => {
         if (s.unreachable) {
             return `<div class="p-3 rounded border border-slate-200 bg-slate-50 mb-2">
-                <span class="font-mono text-xs text-slate-700">${escapeHtml(s.spoke_id)}</span>
+                ${_csDhcpWho(s)}
                 ${_csDhcpPill('unreachable', 'bad')}
                 <span class="text-xs text-slate-500"> ${escapeHtml(s.error || '')}</span></div>`;
         }
@@ -5635,7 +5648,7 @@ function _csDhcpHealthHtml(d) {
 
         return `<div class="p-3 rounded border ${tone === 'ok' ? 'border-slate-200' : 'border-red-200 bg-red-50/30'} mb-3">
             <div class="flex items-center justify-between mb-2">
-                <span class="font-mono text-xs text-slate-700">${escapeHtml(s.spoke_id)}</span>
+                ${_csDhcpWho(s)}
                 ${_csDhcpPill(verdict, tone)}
             </div>
             <table class="w-full text-xs"><tbody>${rows.map(r =>
