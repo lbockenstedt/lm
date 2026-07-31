@@ -7202,7 +7202,7 @@ function _renderSetupSimulationsTile(content) {
                     <input id="stack-cap" type="number" min="0" max="20" class="${inputCls} text-xs px-2 py-1 w-20"></label>
                   <label class="text-xs text-slate-600 flex items-center gap-2">Rotation (s)
                     <input id="stack-rotation-s" type="number" min="30" step="30" class="${inputCls} text-xs px-2 py-1 w-24"></label>
-                  <label class="text-xs text-slate-600 flex items-center gap-2" title="After a client is harvested for an alert sim it rests this long before it can be re-harvested — keeps Central data realistic (no flapping). 0 = off.">Harvest cooldown (h)
+                  <label class="text-xs text-slate-600 flex items-center gap-2" title="After a client is harvested for an alert sim it rests this long before it can be re-harvested — keeps Central data realistic (no flapping). 0 = off. T1 (PCI radio) clients are EXEMPT: they are the reliable clients the quota sims should run on, so a released T1 is immediately re-harvestable rather than resting while a T2 takes the slot.">Harvest cooldown (h)
                     <input id="harvest-cooldown-h" type="number" min="0" step="0.5" class="${inputCls} text-xs px-2 py-1 w-20"></label>
                 </div>
                 <div id="sim-stacking-rows" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
