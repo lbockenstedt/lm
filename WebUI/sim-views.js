@@ -10616,26 +10616,54 @@ async function csRenderVmServerApiServer() {
 // or is serving pre-split scripts.
 function _csRepoStatusSection(apiData) {
     const spokes = (apiData && apiData.spokes) || [];
+    const esc = csEscape;
+    // Compact row per spoke, matching the DHCP / sim-tag health panels: the
+    // 4-cell csStat grid this replaced was ~5x taller per spoke and pushed the
+    // rest of Diagnostics below the fold on a 4-spoke fleet. Same facts, two
+    // lines — headline on top, the forensic detail in a mono strip beneath.
     const cards = spokes.map(sp => {
         const rp = ((sp.api_server || {}).health || {}).repo;
         const name = sp.spoke_name || sp.display_name || sp.spoke_id;
-        if (!rp) return `<div class="hpe-card rounded-lg p-4 shadow-sm"><span class="font-bold text-slate-700">${csEscape(name)}</span> <span class="text-xs text-slate-400">— repo status unavailable (spoke offline or pre-update)</span></div>`;
+        const online = (typeof csOnlineBadge === 'function') ? csOnlineBadge(sp.spoke_online) : '';
+        if (!rp) {
+            return `<div class="border border-slate-200 rounded-md p-3 mb-2">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-xs font-bold text-slate-600">${esc(name)}</span>${online}
+                </div>
+                <div class="text-[11px] text-slate-400 italic mt-1">repo status unavailable — spoke offline or pre-update</div>
+              </div>`;
+        }
         const rs = rp.scripts || {};
         const warns = [];
-        if (rp.configured_branch && rp.configured_branch !== 'main') warns.push([`⚠️ tracks branch <b>${csEscape(rp.configured_branch)}</b>, not <b>main</b> — changes pushed to main won't reach this spoke.`, 'text-amber-600']);
-        if (!rp.dns_latency_present) warns.push(['⚠️ dns_latency.sh missing — serving pre-split client scripts.', 'text-red-500']);
-        return `<div class="hpe-card rounded-lg p-4 shadow-sm">
-          <div class="flex items-center justify-between"><span class="font-bold text-slate-700">${csEscape(name)}</span>${typeof csOnlineBadge === 'function' ? csOnlineBadge(sp.spoke_online) : ''}</div>
-          <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-3">
-            ${csStat('Branch', rp.configured_branch || '—')}${csStat('Deploy VERSION', rp.served_version || '—')}
-            ${csStat('simulation.sh', rs['simulation.sh'] || '—')}${csStat('dns_latency.sh', rp.dns_latency_present ? (rs['dns_latency.sh'] || 'yes') : 'MISSING')}
-          </div>
-          ${warns.map(([w, c]) => `<p class="text-xs ${c} mt-1">${w}</p>`).join('')}
-          <p class="text-[11px] text-slate-400 font-mono mt-1">head ${csEscape(rp.head || '?')} · checked-out ${csEscape(rp.checked_out_branch || '?')} · source ${csEscape(rp.source_of_truth || '?')} · dns_fail ${csEscape(rs['dns_fail.sh'] || '?')}</p>
-        </div>`;
+        if (rp.configured_branch && rp.configured_branch !== 'main') {
+            warns.push([`tracks branch <b>${esc(rp.configured_branch)}</b>, not <b>main</b> — pushes to main won't reach this spoke`, 'text-amber-600']);
+        }
+        if (!rp.dns_latency_present) {
+            warns.push(['dns_latency.sh missing — serving pre-split client scripts', 'text-red-500']);
+        }
+        // Branch + served VERSION are the two facts that answer "did my push
+        // land"; they ride the header so a healthy spoke is one glance.
+        const branchCls = (rp.configured_branch && rp.configured_branch !== 'main')
+            ? 'text-amber-700 bg-amber-50 border-amber-200' : 'text-slate-600 bg-white border-slate-200';
+        return `<div class="border border-slate-200 rounded-md p-3 mb-2">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <span class="text-xs font-bold text-slate-600">${esc(name)}</span>
+              <span class="flex flex-wrap items-center gap-2 justify-end">
+                ${online}
+                <span class="border rounded-full px-2 py-0.5 text-[10px] font-bold ${branchCls}">${esc(rp.configured_branch || 'branch ?')}</span>
+                <span class="text-[10px] text-slate-400">v${esc(rp.served_version || '?')}</span>
+              </span>
+            </div>
+            <div class="text-[11px] text-slate-400 font-mono mt-1 break-all">simulation.sh ${esc(rs['simulation.sh'] || '?')} · dns_latency.sh ${esc(rp.dns_latency_present ? (rs['dns_latency.sh'] || 'yes') : 'MISSING')} · dns_fail ${esc(rs['dns_fail.sh'] || '?')} · head ${esc(rp.head || '?')} · checked-out ${esc(rp.checked_out_branch || '?')} · source ${esc(rp.source_of_truth || '?')}</div>
+            ${warns.map(([w, c]) => `<div class="text-[11px] ${c} mt-1">⚠️ ${w}</div>`).join('')}
+          </div>`;
     }).join('');
-    return `<p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Spoke Repo / Update Status</p>
-      <div class="space-y-2 mb-6">${cards || '<p class="text-sm text-slate-500">No spokes reporting.</p>'}</div>`;
+    return `<div class="flex items-center justify-between mb-1">
+        <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Spoke repo / update status</p>
+        <button type="button" onclick="csRenderSetupDiagnostics()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
+      </div>
+      <p class="text-[11px] text-slate-400 mb-2">Which branch and build each spoke is actually serving to clients — the "did my push reach the spoke?" answer without the CLI.</p>
+      <div class="mb-6">${cards || '<p class="text-xs text-slate-400 italic">No spokes reporting.</p>'}</div>`;
 }
 
 async function csRenderSetupDiagnostics() {
