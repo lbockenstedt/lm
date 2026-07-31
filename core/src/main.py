@@ -1903,7 +1903,33 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                     self._schedule_vm_cache_refresh(tenant_id)
                 except Exception as e:  # noqa: BLE001
                     logger.debug("vm cache refresh schedule failed: %s", e)
-        cs_spoke = self.get_client_sim_spoke(tenant_id)
+        # Deliver to the spoke that OWNS this agent, not the tenant's first one.
+        #
+        # ``spoke_id`` is the spoke that relayed this event, i.e. the one the
+        # agent actually dials. In the one-spoke-per-server topology each pxmx
+        # host dials its OWN cs spoke, so that spoke is the right home for its
+        # telemetry. get_client_sim_spoke(tenant_id) returns a SINGLE spoke per
+        # tenant, so with four cs spokes on one tenant every agent's telemetry
+        # was funnelled into whichever one it happened to return.
+        #
+        # The damage was not just misfiling: sim-tag dispatch requires a DIRECT
+        # agent connection, so the receiving spoke held telemetry for hosts whose
+        # agents it could not command, while those agents' own spokes could
+        # command them but had no telemetry. Only the one host whose agent
+        # dialled the receiving spoke was ever tagged. It also cross-contaminated
+        # the VM lists — one host's VMs showed up under another's entry.
+        #
+        # A pxmx-DIALED agent (relayed by a pxmx spoke, which cannot ingest CS_*)
+        # still falls back to the tenant's cs spoke, which is the original
+        # behaviour for that path.
+        cs_spoke = None
+        try:
+            if spoke_id and self._is_client_sim_spoke(spoke_id):
+                cs_spoke = spoke_id
+        except Exception:  # noqa: BLE001 — fall back rather than drop the event
+            cs_spoke = None
+        if not cs_spoke:
+            cs_spoke = self.get_client_sim_spoke(tenant_id)
         if not cs_spoke:
             logger.debug("CS_* relay: no cs spoke for tenant=%s (agent=%s, %s) — dropping",
                          tenant_id, agent_id, cs_type)

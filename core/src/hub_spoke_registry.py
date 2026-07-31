@@ -414,6 +414,26 @@ class SpokeRegistryMixin:
             return [sid for sid in self.active_connections if prefix in sid]
         return []
 
+    def _is_client_sim_spoke(self, spoke_id: str) -> bool:
+        """True if ``spoke_id`` is an approved Client-Sim spoke.
+
+        Used to deliver a relayed CS_* event to the spoke the agent actually
+        dials rather than the tenant's first cs spoke. Accepts the legacy
+        "simulation" module type for older combined-spoke builds, matching
+        get_client_sim_spoke."""
+        if not spoke_id:
+            return False
+        try:
+            pk = self._primary_key(spoke_id)
+        except Exception:  # noqa: BLE001
+            pk = spoke_id
+        cands = set(self.get_all_spokes_by_type("Client-Sim") or []) | \
+            set(self.get_all_spokes_by_type("simulation") or [])
+        if not (spoke_id in cands or pk in cands):
+            return False
+        return bool(self.approved_modules.get(spoke_id)
+                    or self.approved_modules.get(pk))
+
     def get_client_sim_spoke(self, tenant_id: str = None) -> Optional[str]:
         """Return the approved, connected Client-Sim spoke for a tenant.
 
