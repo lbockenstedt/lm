@@ -1776,10 +1776,29 @@ function csHealthBadge(c) {
         no_driver:   ['no driver', 'text-red-600',    'USB dongle present but NO network driver loaded (netdev missing) — reboot / firmware'],
         not_visible: ['no USB',    'text-red-600',    'Guest cannot see the USB dongle (lsusb) — detached / wedged bus'],
         no_gateway:  ['no gw',     'text-orange-600', 'Associated but default gateway unreachable — likely infrastructure, NOT the dongle'],
-        no_assoc:    ['no assoc',  'text-amber-600',  'Driver loaded but not associated to Wi-Fi'],
+        no_scan:     ['no wifi',   'text-red-600',    'Driver loaded but the radio sees NO APs at all — dead dongle suspected (a working radio in the same room sees the lab SSIDs)'],
+        no_assoc:    ['no assoc',  'text-amber-600',  'Driver loaded and APs are visible, but it will not associate — check PSK / SSID / RF'],
     };
     const m = M[h] || [String(h), 'text-slate-500', 'In-guest health: ' + h];
-    return `<span class="ml-1 text-[10px] font-semibold ${m[1]}" title="${csEscape(m[2])}">${csEscape(m[0])}</span>`;
+    // What the radio can actually see, when the agent collected it. This is the
+    // difference between "dead dongle" and "the SSID we want is not on air" —
+    // an empty list here IS the evidence for no_scan, so render it explicitly
+    // rather than leaving the badge to be interpreted.
+    const sv = c && c.visible_ssids;
+    let seen = '';
+    if (Array.isArray(sv)) {
+        seen = sv.length
+            ? ` · sees ${sv.length}: ` + sv.slice(0, 4).map(x =>
+                  csEscape(String(x.ssid)) + (x.signal != null ? ` (${x.signal})` : '')).join(', ')
+                + (sv.length > 4 ? ` +${sv.length - 4}` : '')
+            : ' · sees NO SSIDs';
+    }
+    const seenTitle = Array.isArray(sv)
+        ? (sv.length ? 'Radio sees: ' + sv.map(x => String(x.ssid)).join(', ')
+                     : 'Radio sees NO SSIDs at all — compare with a working client on the same host')
+        : '';
+    return `<span class="ml-1 text-[10px] font-semibold ${m[1]}" title="${csEscape(m[2])}">${csEscape(m[0])}</span>`
+         + (seen ? `<span class="ml-1 text-[10px] text-slate-400" title="${csEscape(seenTitle)}">${seen}</span>` : '');
 }
 
 function csRenderClientRows(rows, targetId) {
