@@ -5807,7 +5807,9 @@ function _csDhcpHealthText(d) {
         const lease = s.lease_db || {};
         const leaseTxt = !lease.exists ? 'MISSING'
             : (lease.leases === null || lease.readable === false) ? 'count unreadable'
-            : `${lease.leases} lease(s)`;
+            : `${lease.leases} active lease(s)`  // rows/addresses expose a stalled kea-lfc: a healthy memfile has rows ~= addresses
+              + (lease.rows != null && lease.addresses != null && lease.rows > lease.addresses
+                 ? ` (${lease.addresses} address(es) across ${lease.rows} file rows)` : '');
         L.push(who);
         L.push(`  dhcp4        : ${u4.ActiveState || '?'}/${u4.SubState || '?'}`
                + (parseInt(u4.NRestarts || '0', 10) ? `  (${u4.NRestarts} restarts)` : ''));
