@@ -572,8 +572,27 @@ class SimulationsService:
                        or h.get("spoke_name") or h.get("spoke_id") or "").strip().lower()
 
         def _host_rank(h: dict):
-            return (1 if h.get("spoke_online") else 0,
-                    int(h.get("vm_count") or 0), int(h.get("usb_count") or 0))
+            # FRESHNESS decides, not size. Two cs spokes can both report the same
+            # Proxmox host — an agent that moved from one spoke to another leaves
+            # its old spoke re-publishing a frozen copy forever (relay_payload
+            # retains stale hosts on purpose, for the briefly-offline case).
+            #
+            # Ranking by vm_count made the LARGER copy win, which is exactly
+            # backwards for a delete: after a mass delete the live copy has FEWER
+            # VMs than the frozen one, so the stale row won and the UI kept
+            # showing VMs that no longer existed. (A clone hid the bug — there
+            # the live copy is bigger, so it happened to win.) Observed in the
+            # field: host pxmx-cs-svr-01 reported by two spokes, one advancing
+            # 13→17→21 while the other sat at 13.
+            #
+            # host_last_seen is agent→spoke→hub, so it tracks the ACTUAL data
+            # age. spoke_online stays as a tiebreaker (a live spoke beats a dead
+            # one at equal freshness); counts are data, never a recency signal.
+            try:
+                seen = float(h.get("host_last_seen") or 0)
+            except (TypeError, ValueError):
+                seen = 0.0
+            return (seen, 1 if h.get("spoke_online") else 0)
 
         best: Dict[str, dict] = {}
         order: List[str] = []
