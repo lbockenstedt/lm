@@ -10256,8 +10256,9 @@ function csFreshnessPanel(h) {
         ${tile('get_vm_list', ms(ph.vm_list_ms))}
         ${tile('get_node_stats', ms(ph.node_stats_ms))}
         ${tile('compute_tiers', ms(ph.tiers_ms))}
+        ${tile('loop body total', ms(ph.body_ms))}
       </div>
-      <div class="text-[10px] text-slate-400 mt-2">VMs ${csEscape(String(f.vm_count != null ? f.vm_count : '—'))} · nodes ${csEscape(String(f.node_count != null ? f.node_count : '—'))}. Big <b>agent-generated age</b> with small phase times ⇒ spoke/hub relay lag; big <b>get_vm_list</b>/<b>get_node_stats</b> ⇒ agent pvesh stall on a busy host.</div>
+      <div class="text-[10px] text-slate-400 mt-2">VMs ${csEscape(String(f.vm_count != null ? f.vm_count : '—'))} · nodes ${csEscape(String(f.node_count != null ? f.node_count : '—'))}. Read <b>loop body total</b> against the tick cadence first: a body far larger than the cadence means the AGENT is stuck, not the relay — and the individual phases only cover the bounded collects, so a stall in the PCI probe or a backpressured send shows up here and nowhere else. Big <b>agent-generated age</b> with a SMALL body ⇒ spoke/hub relay lag; big <b>get_vm_list</b>/<b>get_node_stats</b> ⇒ agent pvesh stall on a busy host.</div>
     </div>`;
 }
 
