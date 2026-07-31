@@ -5599,7 +5599,10 @@ function _csDhcpHealthText(d) {
                + ((s.interface_missing || []).length ? `  MISSING (present: ${Object.keys(s.interfaces_present || {}).join(',')})` : ''));
         L.push(`  lease db     : ${leaseTxt}  ${s.lease_file || ''}`);
         L.push(`  config test  : ${(s.config_test || {}).ok ? 'valid' : 'INVALID — ' + ((s.config_test || {}).detail || '')}`);
-        (s.apparmor_denials || []).forEach(x => L.push(`  apparmor     : ${x}`));
+        const _dr = s.apparmor_denial_rows
+            || (s.apparmor_denials || []).map(l => ({ line: l, age_s: null }));
+        _dr.forEach(r => L.push(`  apparmor     : ${r.age_s != null ? '(' + r.age_s + 's ago) ' : ''}${r.line}`));
+        if (_dr.length && !s.apparmor_recent) L.push('  apparmor     : ^ historical — none in the last 15 min');
         const _lbl = s.last_errors_are_fatal ? 'error' : 'log  ';
         (s.last_errors || []).forEach(x => L.push(`  ${_lbl}        : ${x}`));
         (s.notes || []).forEach(x => L.push(`  note         : ${x}`));
@@ -5695,10 +5698,16 @@ function _csDhcpHealthHtml(d) {
             ? _csDhcpPill('valid', 'ok')
             : `${_csDhcpPill('INVALID', 'bad')} <span class="text-[10px]">${escapeHtml(((s.config_test || {}).detail || '').slice(-300))}</span>`]);
 
-        const denials = (s.apparmor_denials || []).length
-            ? `<div class="mt-2"><p class="text-[10px] uppercase text-red-500 font-bold tracking-widest mb-1">AppArmor denials</p>
-                 <pre class="text-[10px] bg-red-50 border border-red-200 rounded p-2 overflow-x-auto whitespace-pre-wrap">${escapeHtml((s.apparmor_denials || []).join('\n'))}</pre>
-                 <p class="text-[10px] text-slate-500 mt-1">Kea names its runtime files after the config file, so the <span class="font-mono">-sim</span> instance falls outside Debian's stock profiles. Re-running the installer grants them.</p></div>` : '';
+        // dmesg is a ring buffer, so old denials persist and read as current.
+        // Show the age, and only colour the block red when something denied in
+        // the last 15 minutes — otherwise it is history from before the fix.
+        const _drows = s.apparmor_denial_rows
+            || (s.apparmor_denials || []).map(l => ({ line: l, age_s: null }));
+        const _age = a => a == null ? '' : (a < 90 ? `${a}s ago` : a < 5400 ? `${Math.round(a / 60)}m ago` : `${Math.round(a / 3600)}h ago`);
+        const denials = _drows.length
+            ? `<div class="mt-2"><p class="text-[10px] uppercase ${s.apparmor_recent ? 'text-red-500' : 'text-slate-400'} font-bold tracking-widest mb-1">AppArmor denials ${s.apparmor_recent ? '' : '<span class="normal-case font-normal">(historical — none in the last 15 min)</span>'}</p>
+                 <pre class="text-[10px] ${s.apparmor_recent ? 'bg-red-50 border-red-200' : 'bg-slate-50 border-slate-200'} border rounded p-2 overflow-x-auto whitespace-pre-wrap">${_drows.map(r => escapeHtml((_age(r.age_s) ? `(${_age(r.age_s)}) ` : '') + r.line)).join('\n')}</pre>
+                 <p class="text-[10px] text-slate-500 mt-1">Kea names its runtime files after the config file, so the <span class="font-mono">-sim</span> instance falls outside Debian's stock profiles. Re-running the installer grants them${s.apparmor_recent ? '' : ' — these are from before that was applied'}.</p></div>` : '';
         const errs = (s.last_errors || []).length
             ? `<div class="mt-2"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest mb-1">${s.last_errors_are_fatal ? 'Last errors' : 'Recent log'} <span class="normal-case font-normal text-slate-400">(may predate the current start — check the timestamps)</span></p>
                  <pre class="text-[10px] bg-slate-50 border border-slate-200 rounded p-2 overflow-x-auto whitespace-pre-wrap">${escapeHtml((s.last_errors || []).join('\n'))}</pre></div>` : '';
