@@ -840,43 +840,6 @@ function csCheckBuckets(st) {
     return 'unknown';
 }
 
-// ── Kill switch (global sim emergency stop) ─────────────────────────────────
-// Ports the legacy cs webui-spoke's prominent always-visible kill-switch
-// banner. The spoke's engine.set_kill_switch persists kill_switch.txt and
-// short-circuits every sim iteration to KILLED. Prepended to the Dashboard +
-// Clients views so the emergency stop is one click away wherever the operator
-// lands. Reads via GET /kill-switch; toggles via POST /kill-switch.
-async function csKillSwitchBanner() {
-    let ks = null, connected = false;
-    try {
-        const r = await csFetch(`/${csTenant()}/kill-switch?tenant_id=${csTenant()}`);
-        ks = r && r.kill_switch; connected = !!(r && r.spoke_connected);
-    } catch (e) { console.warn('csKillSwitchBanner: read failed', e); }
-    if (ks === true) {
-        return `<div class="rounded-lg border-2 border-red-500 bg-red-50 p-3 flex items-center justify-between">
-          <div class="flex items-center gap-3">
-            <span class="text-2xl">⛔</span>
-            <div><p class="text-sm font-bold text-red-700">SIMULATIONS HALTED — Kill switch active</p>
-            <p class="text-xs text-red-600">All sim iterations are short-circuited to KILLED on this tenant's cs spoke.</p></div>
-          </div>
-          <button onclick="csToggleKillSwitch(false)" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-md text-sm font-bold">▶ Resume Sims</button>
-        </div>`;
-    }
-    if (ks === false) {
-        return `<div class="rounded-lg border border-amber-300 bg-amber-50 p-3 flex items-center justify-between">
-          <div class="flex items-center gap-3">
-            <span class="text-xl">🟢</span>
-            <p class="text-sm font-bold text-amber-700">Kill switch: OFF — simulations running</p>
-          </div>
-          <button onclick="csToggleKillSwitch(true)" class="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-md text-sm font-bold">⛔ Emergency Stop</button>
-        </div>`;
-    }
-    return `<div class="rounded-lg border border-slate-200 bg-slate-50 p-3 flex items-center justify-between">
-      <div class="flex items-center gap-3"><span class="text-xl">⚪</span>
-      <p class="text-sm text-slate-500">Kill switch: ${connected ? 'unknown' : 'spoke offline'}</p></div>
-      <button disabled class="bg-slate-200 text-slate-400 px-4 py-2 rounded-md text-sm font-bold cursor-not-allowed">Emergency Stop</button>
-    </div>`;
-}
 
 window.csToggleKillSwitch = async function (on) {
     if (on && !confirm("EMERGENCY STOP: halt all simulations on this tenant's cs spoke?")) return;
@@ -1350,81 +1313,6 @@ function csSummaryRow(items) {
     </div>`;
 }
 
-function csSimSpokeCard(s) {
-    const cs = s.central_status || {};
-    const statusMap = cs.status || {};
-    const hwAlerts = cs.hardware_alerts || [];
-    const ccStatus = cs.client_count_status || {};
-    const name = s.spoke_name || s.spoke_id || 'spoke';
-
-    // Checks: site × check status table
-    const sites = Object.keys(statusMap);
-    let checksHtml;
-    if (sites.length === 0) {
-        checksHtml = `<p class="text-xs text-slate-400 italic">No check status reported.</p>`;
-    } else {
-        const allChecks = new Set();
-        sites.forEach(w => Object.keys(statusMap[w]).forEach(c => allChecks.add(c)));
-        const checkIds = Array.from(allChecks);
-        const header = ['Site', ...checkIds].map(h => `<th class="px-3 py-2 text-left">${csEscape(h)}</th>`).join('');
-        const rows = sites.map(w => {
-            const cells = checkIds.map(c => {
-                const st = statusMap[w][c];
-                return `<td class="px-3 py-2">${st ? csStatusBadge(st.status) : '<span class="text-slate-300">—</span>'}</td>`;
-            }).join('');
-            return `<tr><td class="px-3 py-2 font-mono text-xs text-slate-600">${csEscape(w)}</td>${cells}</tr>`;
-        }).join('');
-        checksHtml = csTable(['Site', ...checkIds], rows);
-    }
-
-    // Hardware alerts
-    let hwHtml;
-    if (hwAlerts.length === 0) {
-        hwHtml = `<p class="text-xs text-slate-400 italic">No hardware alerts.</p>`;
-    } else {
-        const rows = hwAlerts.map(a => `<tr>
-          <td class="px-3 py-2">${csEscape(a.name || a.id)}</td>
-          <td class="px-3 py-2">${csEscape(a.device_type || '—')}</td>
-          <td class="px-3 py-2 font-bold ${a.total > 0 ? 'text-amber-600' : 'text-slate-500'}">${csEscape(a.total || 0)}</td>
-        </tr>`).join('');
-        hwHtml = csTable(['Check', 'Type', 'Alerts'], rows);
-    }
-
-    // Client count
-    let ccHtml;
-    const ccSites = Object.keys(ccStatus);
-    if (ccSites.length === 0) {
-        ccHtml = `<p class="text-xs text-slate-400 italic">No client-count data.</p>`;
-    } else {
-        const rows = ccSites.map(w => {
-            const c = ccStatus[w] || {};
-            return `<tr>
-              <td class="px-3 py-2 font-mono text-xs text-slate-600">${csEscape(c.site_name || w)}</td>
-              <td class="px-3 py-2">${csStatusBadge(c.status)}</td>
-              <td class="px-3 py-2 font-bold text-slate-700">${csEscape(c.current || 0)}</td>
-              <td class="px-3 py-2 text-slate-500">${csEscape(c.wired != null ? c.wired : '—')}</td>
-              <td class="px-3 py-2 text-slate-500">${csEscape(c.wireless != null ? c.wireless : '—')}</td>
-              <td class="px-3 py-2 text-slate-500">${csEscape(c.hourly_avg != null ? c.hourly_avg : '—')}</td>
-              <td class="px-3 py-2 ${c.drop_pct > 0 ? 'text-amber-600' : 'text-slate-500'}">${csEscape(c.drop_pct != null ? c.drop_pct + '%' : '—')}</td>
-              <td class="px-3 py-2 text-slate-400">${csEscape(c.max_7day != null ? c.max_7day : '—')}</td>
-              <td class="px-3 py-2 text-slate-400">${csEscape(c.max_30day != null ? c.max_30day : '—')}</td>
-            </tr>`;
-        }).join('');
-        ccHtml = csTable(['Site', 'Status', 'Current', 'Wired', 'Wireless', 'Hourly Avg', 'Drop %', '7d Peak', '30d Peak'], rows);
-    }
-
-    return `<details class="hpe-card rounded-lg p-0 shadow-sm overflow-hidden" open>
-      <summary class="flex items-center justify-between px-5 py-3 cursor-pointer hover:bg-slate-50">
-        <span class="font-bold text-slate-700">${csEscape(name)}</span>
-        ${csOnlineBadge(s.spoke_online)}
-      </summary>
-      <div class="px-5 pb-5 space-y-4 border-t border-slate-100">
-        <div><p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Checks</p>${checksHtml}</div>
-        <div><p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Hardware Alerts</p>${hwHtml}</div>
-        <div><p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Client Count</p>${ccHtml}</div>
-      </div>
-    </details>`;
-}
 
 /* ===========================================================================
  * 2. Clients — filterable table
@@ -2143,108 +2031,10 @@ window.csDemoClear = async function (btn) {
 const CS_CONTROL_FLAGS = ['assoc_fail', 'auth_fail', 'dhcp_fail', 'dns_fail',
     'dns_latency', 'download', 'iperf', 'kill_switch', 'ping_test', 'port_flap',
     'ssidpw_fail', 'www_traffic'];
-const CS_CONTROL_COLS = 11;  // Clients-table column count (panel colspan)
 
-function csCtlId(host, flag) {
-    const h = String(host || '').replace(/[^a-zA-Z0-9_-]/g, '_');
-    return `cs-ctl-${h}-${flag}`;
-}
 
-function csControlCell(hostname) {
-    return `<td class="px-4 py-2 whitespace-nowrap">
-      <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlToggle(this)"
-        class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-2 py-1 rounded-md text-[11px] font-bold">⚙ Control</button>
-    </td>`;
-}
 
-// The flag toggles + action buttons. Selects default to 'off' and are re-seeded
-// from the spoke's current overrides when the panel is opened (csCtlToggle).
-function csControlPanel(hostname) {
-    const flags = CS_CONTROL_FLAGS.map(f => {
-        const id = csCtlId(hostname, f);
-        return `<label class="flex items-center gap-1 text-xs text-slate-600">
-          <span class="w-24 truncate" title="${csEscape(f)}">${csEscape(f)}</span>
-          <select id="${csEscape(id)}" data-cs-ctl-host="${csEscape(hostname)}" data-cs-ctl-flag="${csEscape(f)}"
-            class="border border-slate-200 rounded-md px-1 py-0.5 text-[11px]">
-            <option value="off">off</option><option value="on">on</option>
-          </select>
-        </label>`;
-    }).join('');
-    return `<div class="bg-slate-50 border border-slate-200 rounded-lg p-3">
-      <div class="flex items-center justify-between mb-2">
-        <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Live Overrides — ${csEscape(hostname)}</p>
-        <p class="text-[10px] text-slate-400">Persisted to the spoke registry (survives reconnect/reboot). Demo flags layer on top at delivery.</p>
-      </div>
-      <div class="grid grid-cols-4 gap-2 mb-3">${flags}</div>
-      <div class="flex flex-wrap gap-2">
-        <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlApply(this)"
-          class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold">Apply</button>
-        <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlClear(this)"
-          class="bg-red-100 hover:bg-red-200 text-red-700 px-3 py-1.5 rounded-md text-xs font-bold">Clear Overrides</button>
-        <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlAll(this)"
-          class="bg-amber-100 hover:bg-amber-200 text-amber-700 px-3 py-1.5 rounded-md text-xs font-bold">Apply to ALL</button>
-        <button data-cs-ctl-host="${csEscape(hostname)}" onclick="csCtlSaveUO(this)"
-          class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-3 py-1.5 rounded-md text-xs font-bold">Save to user-overrides</button>
-        <span id="${csEscape(csCtlId(hostname, 'msg'))}" class="text-xs text-slate-400 self-center"></span>
-      </div>
-    </div>`;
-}
 
-function csControlPanelRow(hostname) {
-    // Hidden by default; csCtlToggle shows it + seeds the toggles from the
-    // spoke's current overrides.
-    return `<tr id="${csEscape('cs-ctl-panel-' + String(hostname).replace(/[^a-zA-Z0-9_-]/g, '_'))}" style="display:none">
-      <td colspan="${CS_CONTROL_COLS}" class="px-4 py-2 bg-slate-50">${csControlPanel(hostname)}</td>
-    </tr>`;
-}
-
-// Read the 11 toggles for a host into {flag: on/off}.
-function csCtlCollect(hostname) {
-    const out = {};
-    for (const f of CS_CONTROL_FLAGS) {
-        const el = csEl(csCtlId(hostname, f));
-        out[f] = el ? el.value : 'off';
-    }
-    return out;
-}
-
-function csCtlMsg(hostname, text, ok) {
-    const m = csEl(csCtlId(hostname, 'msg'));
-    if (m) { m.textContent = text; m.className = 'text-xs ' + (ok ? 'text-green-600' : 'text-red-500'); }
-}
-
-window.csCtlToggle = async function (btn) {
-    const host = btn.dataset.csCtlHost;
-    if (!host) return;
-    const panel = csEl('cs-ctl-panel-' + String(host).replace(/[^a-zA-Z0-9_-]/g, '_'));
-    if (!panel) return;
-    if (panel.style.display !== 'none') { panel.style.display = 'none'; return; }
-    // Open: seed toggles from the spoke's current persisted overrides.
-    try {
-        const r = await csFetch(`/${csTenant()}/clients/${encodeURIComponent(host)}/control?tenant_id=${csTenant()}`);
-        const ov = (r && r.overrides) || {};
-        for (const f of CS_CONTROL_FLAGS) {
-            const el = csEl(csCtlId(host, f));
-            if (el) {
-                const v = String(ov[f] == null ? 'off' : ov[f]).toLowerCase();
-                el.value = (v === 'on' || v === 'true' || v === '1') ? 'on' : 'off';
-            }
-        }
-    } catch (e) { console.warn('csCtlToggle: override read failed, showing defaults', e); }
-    panel.style.display = '';
-};
-
-window.csCtlApply = async function (btn) {
-    const host = btn.dataset.csCtlHost;
-    const flags = csCtlCollect(host);
-    csCtlMsg(host, 'Applying…', true);
-    try {
-        await csFetch(`/${csTenant()}/clients/${encodeURIComponent(host)}/control?tenant_id=${csTenant()}`,
-            { method: 'POST', body: JSON.stringify({ overrides: flags }) });
-        csCtlMsg(host, 'Applied.', true);
-        if (typeof showToast === 'function') showToast(`Overrides applied to ${host}`, 'success');
-    } catch (e) { console.error('csCtlApply: apply failed', e); csCtlMsg(host, e.message || 'failed', false); }
-};
 
 window.csCtlClear = async function (btn) {
     const host = btn.dataset.csCtlHost;
@@ -2261,51 +2051,7 @@ window.csCtlClear = async function (btn) {
     } catch (e) { console.error('csCtlClear: clear failed', e); csCtlMsg(host, e.message || 'failed', false); }
 };
 
-window.csCtlAll = async function (btn) {
-    const host = btn.dataset.csCtlHost;
-    const flags = csCtlCollect(host);
-    csCtlMsg(host, 'Applying to ALL…', true);
-    try {
-        const r = await csFetch(`/${csTenant()}/clients/control-all?tenant_id=${csTenant()}`,
-            { method: 'POST', body: JSON.stringify({ overrides: flags }) });
-        const n = (r && r.applied != null) ? r.applied : '?';
-        csCtlMsg(host, `Applied to ${n} clients.`, true);
-        if (typeof showToast === 'function') showToast(`Overrides applied to ${n} clients`, 'success');
-    } catch (e) { console.error('csCtlAll: apply-all failed', e); csCtlMsg(host, e.message || 'failed', false); }
-};
 
-// Persist the current toggles into the [username] section of user-overrides.conf
-// (username = hostname prefix, mirroring sim_config.username_for). Merges with
-// any non-flag keys already pinned for that user; never drops other users.
-window.csCtlSaveUO = async function (btn) {
-    const host = btn.dataset.csCtlHost;
-    const flags = csCtlCollect(host);
-    const user = String(host || '').split('-')[0] || host;
-    if (!user) { csCtlMsg(host, 'no username', false); return; }
-    csCtlMsg(host, 'Saving to user-overrides…', true);
-    try {
-        const cur = await csFetch(`/${csTenant()}/config/user-overrides-conf`);
-        const state = csParseIni((cur && cur.content) || '');
-        const existing = state[user] || {};
-        // Merge: keep existing non-flag keys, overwrite the 11 control flags.
-        const merged = Object.assign({}, existing);
-        for (const f of CS_CONTROL_FLAGS) merged[f] = flags[f];
-        state[user] = merged;
-        let text = '';
-        for (const [u, kv] of Object.entries(state)) {
-            text += `[${u}]\n`;
-            for (const [k, v] of Object.entries(kv)) {
-                if (v === '' || v === null || v === undefined) continue;
-                text += `${k}=${v}\n`;
-            }
-            text += '\n';
-        }
-        await csFetch(`/${csTenant()}/config/user-overrides-conf`,
-            { method: 'PUT', body: JSON.stringify({ content: text.trim() }) });
-        csCtlMsg(host, `Saved to [${user}].`, true);
-        if (typeof showToast === 'function') showToast(`Saved to user-overrides [${user}]`, 'success');
-    } catch (e) { console.error('csCtlSaveUO: save failed', e); csCtlMsg(host, e.message || 'failed', false); }
-};
 
 // Back-compat alias — the faceted renderer is the single filter path now
 // (search + status + Simulation/Tier/Site facets). Any external caller still
@@ -2767,16 +2513,6 @@ async function csRenderCentralClients() {
 // available-checks catalog with a Monitor toggle -> central_sites_config
 // .hardware_checks (SEPARATE from monitored_checks). The poller consumes
 // hardware_checks to produce the dashboard Hardware alerts.
-let _csCentralAvailCache = null, _csCentralAvailAt = 0, _csCentralAvailTenant = null;
-async function csCentralAvailable() {
-    const t = csTenant();
-    if (_csCentralAvailCache && _csCentralAvailTenant === t && (Date.now() - _csCentralAvailAt) < 60000) return _csCentralAvailCache;
-    let cat;
-    try { cat = await csFetch(`/${t}/central/available?tenant_id=${t}`) || {}; }
-    catch (e) { console.error('csCentralAvailable: fetch failed', e); cat = { warning: String(e && e.message || e) }; }
-    _csCentralAvailCache = cat; _csCentralAvailAt = Date.now(); _csCentralAvailTenant = t;
-    return cat;
-}
 
 async function csRenderCentralHardware() {
     csSetToolbar('');
@@ -3818,16 +3554,6 @@ async function csRenderMistClients() {
 }
 
 // ── Mist → Hardware (device-down checks) ────────────────────────────────────
-let _csMistAvailCache = null, _csMistAvailAt = 0, _csMistAvailTenant = null;
-async function csMistAvailable() {
-    const t = csTenant();
-    if (_csMistAvailCache && _csMistAvailTenant === t && (Date.now() - _csMistAvailAt) < 60000) return _csMistAvailCache;
-    let cat;
-    try { cat = await csFetch(`/${t}/mist/available?tenant_id=${t}`) || {}; }
-    catch (e) { console.error('csMistAvailable: fetch failed', e); cat = { warning: String(e && e.message || e) }; }
-    _csMistAvailCache = cat; _csMistAvailAt = Date.now(); _csMistAvailTenant = t;
-    return cat;
-}
 
 async function csRenderMistHardware() {
     csSetToolbar('');
@@ -3946,21 +3672,6 @@ window.csSaveConfigPush = async function () {
     }
 };
 
-// ── Config → Simulation (structured INI editor + hub-config) ─────────────────
-function csIniSplit(content) {
-    // Split INI into [{section, body}] blocks. Lines before the first [section]
-    // form a preamble section named ''.
-    const lines = String(content || '').split('\n');
-    const blocks = [];
-    let cur = { section: '', body: [] };
-    blocks.push(cur);
-    for (const ln of lines) {
-        const m = /^\s*\[([^\]]*)\]\s*$/.exec(ln);
-        if (m) { cur = { section: m[1], body: [] }; blocks.push(cur); }
-        else cur.body.push(ln);
-    }
-    return blocks;
-}
 
 // ── Simulations Config tab (legacy solutions-hpe/client-sim port) ─────────────
 // Structured editor for configs/simulation.conf + configs/user-overrides.conf.
@@ -9145,11 +8856,6 @@ function csRebootBadge(v) {
         + `<span class="cs-reboot-countdown" data-reboot-at="${Number(v._reboot_at)}">${csFmtDuration(secs)}</span></span>`;
 }
 
-// Number of quarantined dongles on a host (px.quarantine list, dmesg-only).
-function csQtCount(h) {
-    const q = (h && h.proxmox && h.proxmox.quarantine) || [];
-    return Array.isArray(q) ? q.length : 0;
-}
 
 // Badge for a dongle quarantined by kernel USB (dmesg) errors — the ONLY
 // quarantine path. Shows the bus-id + reason + a live countdown to the 1h
@@ -10806,9 +10512,6 @@ window.csOpenVmConsole = async function (key) {
     // cs row (unique_id is display-only in the modal header).
     const vmForModal = { name: v.name || vmid, vmid: vmid, unique_id: `${v._host || 'cs'}/${vmid}` };
     pxmxShowVncModal(vmForModal, RFB, session);
-};
-window.csOpenSpokeShell = function (spokeId) {
-    if (typeof showToast === 'function') showToast(`Spoke shell for ${spokeId} is wired in Phase 5 (xterm.js over /sim/api/{tenant}/spokes/{spoke}/shell).`, 'info');
 };
 
 /* ===========================================================================
