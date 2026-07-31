@@ -4790,6 +4790,44 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # hostname) to a site; the spoke's SimQuotaEngine resolves a client's site
     # via its hosting server's entry. Forwarded to the cs spoke (which owns the
     # agents + the map); 503 when no spoke is connected so the UI can say so.
+    @app.get("/sim/api/{tenant}/sim-tag-health")
+    async def get_sim_tag_health(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Why a Proxmox host shows no / stale / wrong ``sim-`` tags.
+
+        Fans out to EVERY Client-Sim spoke: tagging is per-spoke (each dispatches
+        only to the agents connected to IT), so the spoke that is failing is
+        exactly the one an aggregate view would hide. Per host it reports whether
+        the agent resolved, and per VM the DESIRED vs ACTUAL tags with the reason
+        a VM was excluded — the three field faults (host never dispatched, tags
+        frozen at an old assignment, tags stripped from a still-producing client)
+        look identical in Proxmox and are only separable here.
+        """
+        hub = app.state.hub
+
+        def _name(sid):
+            try:
+                md = (hub.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
+            except Exception:  # noqa: BLE001
+                md = {}
+            return (md.get("display_name") or md.get("name")
+                    or md.get("hostname") or "").strip()
+
+        results = await _cs_forward_all(tenant_id, "CS_GET_SIM_TAG_HEALTH", {}, timeout=25.0)
+        spokes = []
+        for sid, data in results:
+            if isinstance(data, dict) and data.get("status") == "SUCCESS":
+                row = dict(data)
+                row["spoke_id"] = sid
+                row["spoke_name"] = _name(sid)
+                spokes.append(row)
+            else:
+                spokes.append({"spoke_id": sid, "spoke_name": _name(sid),
+                               "unreachable": True,
+                               "message": (data or {}).get("message")
+                               if isinstance(data, dict) else "spoke did not answer",
+                               "hosts": []})
+        return {"spokes": spokes}
+
     @app.get("/sim/api/{tenant}/dhcp-health")
     async def get_dhcp_health(tenant: str, tenant_id: str = Depends(get_tenant_id)):
         """Per-cs-spoke sim-DHCP (Kea) health for the Setup -> Diagnostics panel.

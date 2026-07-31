@@ -5667,6 +5667,86 @@ async function csRenderEngineDiag() {
 // denied Kea its runtime files so it crash-looped with no lease file — five
 // round trips, because each signal lived somewhere different (systemctl, the
 // journal, dmesg, the conf, ip addr). All of them are here, per cs spoke.
+// ── sim-tag health ───────────────────────────────────────────────────────────
+// "Why does this Proxmox server show no / stale / wrong sim- tags." Three field
+// faults look IDENTICAL in Proxmox and are only separable here: the host was
+// never dispatched to (its agent didn't resolve), the tags froze at an old
+// assignment, or a still-producing client had its tags stripped. Per VM it shows
+// DESIRED vs ACTUAL plus the exclusion reason.
+window.csRenderSimTagHealth = async function () {
+    const el = document.getElementById('cs-sim-tag-health');
+    if (!el) return;
+    el.innerHTML = '<p class="text-slate-400 italic text-xs">Loading…</p>';
+    let d;
+    try { d = await csFetch(`/${csTenant()}/sim-tag-health?tenant_id=${csTenant()}`); }
+    catch (e) { el.innerHTML = csErrorBox('Sim-tag health unavailable', e); return; }
+    const spokes = (d && d.spokes) || [];
+    if (!spokes.length) { el.innerHTML = '<p class="text-xs text-slate-400 italic">No Client-Sim spokes connected.</p>'; return; }
+    const esc = csEscape;
+    window._csSimTagHealth = d;
+    el.innerHTML = spokes.map(sp => {
+        const title = esc(sp.spoke_name || sp.spoke_id || 'spoke');
+        if (sp.unreachable) {
+            return `<div class="border border-slate-200 rounded-md p-3 mb-2">
+                <div class="text-xs font-bold text-slate-600">${title}</div>
+                <div class="text-xs text-red-600 mt-1">unreachable — ${esc(sp.message || 'no answer')}</div></div>`;
+        }
+        const hosts = sp.hosts || [];
+        if (!hosts.length) {
+            return `<div class="border border-slate-200 rounded-md p-3 mb-2">
+                <div class="text-xs font-bold text-slate-600">${title}</div>
+                <div class="text-xs text-slate-400 mt-1 italic">no Proxmox hosts reporting telemetry</div></div>`;
+        }
+        const rows = hosts.map(h => {
+            const bad = (h.vms || []).filter(v => !v.in_sync);
+            const agentBadge = h.agent_connected
+                ? '<span class="text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full text-[10px] font-bold">agent connected</span>'
+                : `<span class="text-red-700 bg-red-50 border border-red-200 px-2 py-0.5 rounded-full text-[10px] font-bold">NOT TAGGED — ${esc(h.skip_reason || 'agent not connected')}</span>`;
+            const detail = !bad.length
+                ? '<div class="text-[11px] text-emerald-700 mt-1">all VMs in sync</div>'
+                : `<div class="overflow-x-auto mt-2"><table class="w-full text-[11px]">
+                     <thead class="text-slate-400 uppercase tracking-wider"><tr>
+                       <th class="text-left py-1">VM</th><th class="text-left">Desired</th>
+                       <th class="text-left">Actual</th><th class="text-left">Why</th></tr></thead>
+                     <tbody class="divide-y divide-slate-100">${bad.map(v => `<tr>
+                       <td class="py-1">${esc(v.name || v.vmid)}</td>
+                       <td class="font-mono">${esc((v.desired || []).join(' ') || '—')}</td>
+                       <td class="font-mono">${esc((v.actual || []).join(' ') || '—')}</td>
+                       <td class="text-slate-500">${esc(v.excluded || 'tag not applied')}${
+                         v.client_last_seen_age_s != null ? ` · client seen ${Math.round(v.client_last_seen_age_s)}s ago` : ''}</td>
+                     </tr>`).join('')}</tbody></table></div>`;
+            return `<div class="border border-slate-200 rounded-md p-3 mb-2">
+                <div class="flex items-center justify-between gap-2">
+                  <span class="text-xs font-bold text-slate-600">${esc(h.hostname)}</span>
+                  <span class="flex items-center gap-2">${agentBadge}
+                    <span class="text-[10px] text-slate-400">${esc(String(h.drift_count))}/${esc(String(h.vm_count))} out of sync</span></span>
+                </div>${detail}</div>`;
+        }).join('');
+        return `<div class="mb-3"><div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">${title}</div>${rows}</div>`;
+    }).join('');
+};
+
+window.csCopySimTagHealth = function (btn) {
+    const d = window._csSimTagHealth;
+    if (!d) return;
+    const lines = [];
+    (d.spokes || []).forEach(sp => {
+        lines.push(`SPOKE ${sp.spoke_name || sp.spoke_id}${sp.unreachable ? ' — UNREACHABLE: ' + (sp.message || '') : ''}`);
+        (sp.hosts || []).forEach(h => {
+            lines.push(`  HOST ${h.hostname} agent_connected=${h.agent_connected}` +
+                       `${h.skip_reason ? ' skip=' + h.skip_reason : ''} drift=${h.drift_count}/${h.vm_count}`);
+            (h.vms || []).filter(v => !v.in_sync).forEach(v => {
+                lines.push(`    ${v.vmid} ${v.name}: desired=[${(v.desired || []).join(' ')}] ` +
+                           `actual=[${(v.actual || []).join(' ')}]${v.excluded ? ' why=' + v.excluded : ''}`);
+            });
+        });
+    });
+    const txt = lines.join('\n') || 'no data';
+    if (navigator.clipboard) navigator.clipboard.writeText(txt);
+    if (btn) { const o = btn.textContent; btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = o; }, 1500); }
+};
+
+
 async function csRenderDhcpHealth() {
     const el = document.getElementById('cs-dhcp-health');
     if (!el) return;
@@ -10599,6 +10679,18 @@ async function csRenderSetupDiagnostics() {
       ${_shown.length ? csTable(head, body) : '<p class="text-sm text-slate-500">No active agents seen yet.</p>'}
       <div class="mt-6 pt-4 border-t border-slate-200">
         <div class="flex items-center justify-between mb-1">
+          <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Sim label (tag) health — per cs spoke</p>
+          <div class="flex items-center gap-2">
+            <button type="button" onclick="csCopySimTagHealth(this)" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50" title="Copy this panel as plain text">⧉ Copy</button>
+            <button type="button" onclick="csRenderSimTagHealth()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
+          </div>
+        </div>
+        <p class="text-[11px] text-slate-400 mb-3">Why a host shows no / stale / wrong <code>sim-</code> tags. Tagging is <b>per spoke</b> — each dispatches only to the agents connected to it — so a host whose agent does not resolve is never tagged and its VMs keep whatever tags they already had. Per VM: <b>Desired</b> is what the engine says the client is running, <b>Actual</b> is what is on the box.</p>
+        <div id="cs-sim-tag-health"><p class="text-slate-400 italic text-xs">Loading…</p></div>
+      </div>
+
+      <div class="mt-6 pt-4 border-t border-slate-200">
+        <div class="flex items-center justify-between mb-1">
           <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Sim DHCP (Kea) health — per cs spoke</p>
           <div class="flex items-center gap-2">
             <button type="button" onclick="csCopyDhcpHealth(this)" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50" title="Copy this panel as plain text — including the last errors and notes">⧉ Copy</button>
@@ -10610,6 +10702,7 @@ async function csRenderSetupDiagnostics() {
       </div>
     </div>`);
     csRenderDhcpHealth();
+    csRenderSimTagHealth();
 }
 
 // ── Register all VM Server children ─────────────────────────────────────────
