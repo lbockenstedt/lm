@@ -10567,40 +10567,6 @@ async function csRenderVmServerCentral() {
     </div>`);
 }
 
-async function csRenderVmServerApiServer() {
-    csSetToolbar('');
-    try { await csVmLoad(); } catch (e) { console.error('csRenderVmServerApiServer: vm load failed', e); csSet(csErrorBox('Could not load', e)); return; }
-    const h = csVmSelectedHost();
-    const api = (h && h.api_server) || {};
-    const health = api.health || {};
-    const repo = health.repo || null;
-    // repo gets its own formatted block below — keep it out of the generic table.
-    const rows = Object.entries(health).filter(([k]) => k !== 'repo').map(([k, v]) => `<tr><td class="px-3 py-2 font-mono text-xs text-slate-500">${csEscape(k)}</td><td class="px-3 py-2 text-sm">${csEscape(typeof v === 'object' ? JSON.stringify(v) : v)}</td></tr>`).join('');
-    // Repo / update status: which branch + build this spoke's checkout is
-    // actually serving to clients — the "did my push reach the spoke?" answer
-    // without the CLI. Warns when the spoke tracks a non-main branch (pushes to
-    // main never arrive) or is serving pre-split scripts (no dns_latency.sh).
-    const _rs = (repo && repo.scripts) || {};
-    const repoBlock = repo ? `
-      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2 mt-5">Repo / Update Status</p>
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-        ${csStat('Branch', repo.configured_branch || '—')}
-        ${csStat('Deploy VERSION', repo.served_version || '—')}
-        ${csStat('simulation.sh', _rs['simulation.sh'] || '—')}
-        ${csStat('dns_latency.sh', repo.dns_latency_present ? (_rs['dns_latency.sh'] || 'yes') : 'MISSING')}
-      </div>
-      ${(repo.configured_branch && repo.configured_branch !== 'main') ? `<p class="text-xs text-amber-600 mt-2">⚠️ This spoke tracks branch <b>${csEscape(repo.configured_branch)}</b>, not <b>main</b> — changes pushed to main won't reach it until they're on that branch.</p>` : ''}
-      ${!repo.dns_latency_present ? `<p class="text-xs text-red-500 mt-1">⚠️ dns_latency.sh missing — this spoke is serving pre-split client scripts.</p>` : ''}
-      <p class="text-[11px] text-slate-400 mt-2 font-mono">head ${csEscape(repo.head || '?')} · checked-out ${csEscape(repo.checked_out_branch || '?')} · source ${csEscape(repo.source_of_truth || '?')} · dns_fail ${csEscape(_rs['dns_fail.sh'] || '?')}</p>
-    ` : '<p class="text-xs text-slate-400 mt-4">Repo status unavailable (spoke offline or pre-update).</p>';
-    csSet(`<div>${csVmHostBanner()}
-      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">API Server Health</p>
-      ${csTable(['Key', 'Value'], rows)}
-      ${repoBlock}
-      <details class="mt-4 text-xs"><summary class="cursor-pointer text-slate-400">Raw payload</summary>${csJsonDump(api)}</details>
-    </div>`);
-}
-
 // ── Setup → Diagnostics: CS Bridge Status (hub-side relay state per agent) ───
 // Lets an Azure-hub operator diagnose "why isn't svr-02 deleting?" without SSH:
 // per agent, the bridge decision (ACTIVE / SKIP not-enabled / SKIP no-cs-spoke)
