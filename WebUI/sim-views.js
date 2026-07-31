@@ -5587,7 +5587,9 @@ function _csDhcpHealthHtml(d) {
         const lease = s.lease_db || {};
         // The verdict line: what an operator needs before reading anything else.
         let verdict, tone;
-        if (active && lease.exists) { verdict = `serving — ${lease.leases} lease(s)`; tone = 'ok'; }
+        const leaseKnown = lease.exists && lease.leases !== null && lease.readable !== false;
+        if (active && leaseKnown) { verdict = `serving — ${lease.leases} lease(s)`; tone = 'ok'; }
+        else if (active && lease.exists) { verdict = 'serving — lease count unreadable'; tone = 'ok'; }
         else if (active && !lease.exists) { verdict = 'running, no leases yet'; tone = 'warn'; }
         else if ((s.interface_missing || []).length) { verdict = 'NOT serving — configured NIC is gone'; tone = 'bad'; }
         else if ((s.apparmor_denials || []).length) { verdict = 'NOT serving — blocked by AppArmor'; tone = 'bad'; }
@@ -5608,9 +5610,15 @@ function _csDhcpHealthHtml(d) {
             rows.push(['Interface', `${_csDhcpPill('ok', 'ok')} <span class="font-mono">${escapeHtml(ifWant)}</span>`
                 + ((s.interface_holding_gateway || []).length ? '' : ` ${_csDhcpPill('no server IP on it', 'warn')}`)]);
         }
-        rows.push(['Lease DB', lease.exists
-            ? `${lease.leases} lease(s) · ${escapeHtml(String(s.lease_file || ''))}`
-            : `${_csDhcpPill('missing', 'bad')} <span class="font-mono">${escapeHtml(String(s.lease_file || ''))}</span>`]);
+        // leases === null means the spoke could not READ the file — say so.
+        // Rendering 0 there reads as "running, nobody has leased yet", which is
+        // a much weaker claim than "I cannot tell".
+        const leaseTxt = !lease.exists
+            ? `${_csDhcpPill('missing', 'bad')} <span class="font-mono">${escapeHtml(String(s.lease_file || ''))}</span>`
+            : (lease.leases === null || lease.readable === false)
+                ? `${_csDhcpPill('count unreadable', 'warn')} <span class="font-mono">${escapeHtml(String(s.lease_file || ''))}</span>`
+                : `${lease.leases} lease(s) · ${escapeHtml(String(s.lease_file || ''))}`;
+        rows.push(['Lease DB', leaseTxt]);
         rows.push(['Config test', (s.config_test || {}).ok
             ? _csDhcpPill('valid', 'ok')
             : `${_csDhcpPill('INVALID', 'bad')} <span class="text-[10px]">${escapeHtml(((s.config_test || {}).detail || '').slice(-300))}</span>`]);
