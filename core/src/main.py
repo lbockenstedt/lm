@@ -5837,6 +5837,65 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
                        tenant or "ALL", files)
         return {"status": "ok", "scope": tenant or "all", "files_removed": files}
 
+    # A Proxmox host claimed by TWO cs spokes is normal-but-transient: an agent
+    # that re-dials a different spoke leaves its OLD spoke re-publishing a frozen
+    # copy, and relay_payload retains stale hosts on purpose (right for a briefly
+    # offline agent, wrong forever). The VM view already prefers the freshest
+    # copy, so this is not a correctness fix — it stops the duplicate existing at
+    # all, so every other consumer of the cache sees one owner per host.
+    _DUAL_HOME_STALE_S = 600.0     # loser must be this far behind the winner
+    _DUAL_HOME_INTERVAL_S = 300.0
+
+    async def run_dual_home_reconcile_loop(self):
+        """Evict a Proxmox host from the cs spoke that no longer owns it.
+
+        Fires ONLY on positive evidence: another spoke reports the same host with
+        a materially fresher ``last_seen``. Never evicts a host only one spoke
+        claims, and never on age alone -- an agent that is merely offline keeps
+        its row, which is the behaviour relay_payload deliberately protects.
+        Reuses CS_PURGE_HOST, the same command the operator's "remove host"
+        button sends, so there is one eviction path rather than two.
+        """
+        while True:
+            try:
+                await asyncio.sleep(self._DUAL_HOME_INTERVAL_S)
+                # hostname -> [(last_seen, spoke_id)]
+                claims: Dict[str, list] = {}
+                for sid, data in list((self.simulations_cache or {}).items()):
+                    for h in ((data or {}).get("proxmox_hosts") or []):
+                        hn = str((h or {}).get("hostname") or "").strip().lower()
+                        if not hn:
+                            continue
+                        try:
+                            seen = float(((h or {}).get("proxmox") or {}).get("last_seen") or 0)
+                        except (TypeError, ValueError):
+                            seen = 0.0
+                        claims.setdefault(hn, []).append((seen, sid))
+                for hn, rows in claims.items():
+                    if len(rows) < 2:
+                        continue                      # single owner — nothing to do
+                    rows.sort(reverse=True)
+                    win_seen, win_sid = rows[0]
+                    for lose_seen, lose_sid in rows[1:]:
+                        if win_seen - lose_seen < self._DUAL_HOME_STALE_S:
+                            continue                  # too close to call — leave both
+                        try:
+                            await self.request_response(
+                                lose_sid, "CS_PURGE_HOST", {"hostname": hn}, timeout=8.0)
+                            logger.warning(
+                                "[dual-home] host %s claimed by %s (last_seen %ds "
+                                "behind) and %s — evicted the stale claim from %s; "
+                                "an agent that moved spokes leaves the old one "
+                                "re-publishing a frozen copy.",
+                                hn, lose_sid, int(win_seen - lose_seen), win_sid, lose_sid)
+                        except Exception as e:  # noqa: BLE001 — never kill the loop
+                            logger.debug("[dual-home] purge %s from %s failed: %s",
+                                         hn, lose_sid, e)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001
+                logger.debug("dual-home reconcile loop error: %s", e)
+
     async def run_sim_cache_flush_loop(self):
         """Persist simulations_cache to disk when dirty, off the event loop.
         Decoupled from the ~10s-per-spoke telemetry rate → one bounded write per
@@ -7873,6 +7932,10 @@ class LabManagerHub(UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDisco
         # restart instead of blanking until every spoke reconnects. Parity with
         # nw_cache. See run_sim_cache_flush_loop.
         sim_cache_task = asyncio.create_task(self.run_sim_cache_flush_loop())
+        # Evict a Proxmox host from the cs spoke that no longer owns it (an agent
+        # that re-dialed a different spoke leaves the old one re-publishing a
+        # frozen copy). See run_dual_home_reconcile_loop.
+        dual_home_task = asyncio.create_task(self.run_dual_home_reconcile_loop())
         # Hub-side Aruba Central poll loop for CENTRALIZED processing mode: the
         # hub holds the creds and the cs spoke has no Aruba client, so this loop
         # produces the central_status the Checks/Hardware/Client-Count/Central
