@@ -6597,6 +6597,11 @@ const CS_AUTOPROV_FIELDS = [
     { key: 'usb_auto_provision',   label: 'Auto-Provision VMs',            type: 'onoff' },
     { key: 'usb_missing_timeout',  label: 'Destroy after missing (minutes)', type: 'number', ph: '60', min: 1 },
     { key: 'usb_max_slots',        label: 'Max VMs per host',              type: 'number', ph: '24', min: 1, max: 256 },
+    // Proxmox resource pool new sim clients are cloned into (qm clone --pool).
+    // Options come from the hosts themselves — a pool that doesn't exist makes
+    // every clone fail, so this is a dropdown, never free text. allowEmpty so
+    // "— none —" can actually CLEAR it (the save loop skips blank values).
+    { key: 'sim_pool',             label: 'Proxmox Pool (new sim clients)', type: 'pool', allowEmpty: true, full: true },
     // Resource thresholds act on the 1-hour rolling average (pxmx agent records
     // cpu_samples/mem_samples rings). Above the provision threshold → no new
     // VMs; above the delete threshold → newest sim VM is removed (one/cycle).
@@ -6698,6 +6703,7 @@ async function csSetupAutoProvConfigCard() {
         const label = `<label class="text-xs text-slate-500 ${col.full ? 'md:col-span-3' : ''}">${csEscape(col.label)}`;
         let input;
         if (col.type === 'onoff') input = _csHcOnOff('cs-ap-' + col.key, valRaw, 'csSaveAutoProvConfig');
+        else if (col.type === 'pool') { input = csPoolSelectHtml(valStr); csPoolOptionsAsync(valStr); }
         else if (col.type === 'number') input = `<input id="cs-ap-${col.key}" type="number" value="${csEscape(valStr)}" ${col.min != null ? `min="${col.min}"` : ''} ${col.max != null ? `max="${col.max}"` : ''} placeholder="${csEscape(col.ph || '')}" onblur="csSaveAutoProvConfig()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
         else input = `<input id="cs-ap-${col.key}" type="text" value="${csEscape(valStr)}" placeholder="${csEscape(col.ph || '')}" onblur="csSaveAutoProvConfig()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm mt-1">`;
         return `${label}${input}</label>`;
@@ -6711,6 +6717,71 @@ async function csSetupAutoProvConfigCard() {
     </div>`;
 }
 
+// ── Proxmox pool picker ──────────────────────────────────────────────────────
+// Options are pulled from the pxmx hosts (never free text): a pool that does not
+// exist on a host makes every clone there FAIL, so the operator picks from what
+// the fleet actually reports. A pool present on only SOME hosts is still offered
+// but flagged, because that is exactly the case that would half-work.
+function csPoolSelectHtml(selected) {
+    return `<div class="mt-1 flex flex-wrap items-center gap-2">
+        <select id="cs-ap-sim_pool" onchange="csSaveAutoProvConfig()"
+                class="bg-white border border-slate-300 rounded-md px-3 py-2 text-sm min-w-[16rem]">
+          <option value="">— none —</option>
+          ${selected ? `<option value="${csEscape(selected)}" selected>${csEscape(selected)}</option>` : ''}
+        </select>
+        <span id="cs-ap-pool-note" class="text-xs text-slate-400">loading pools…</span>
+        <button onclick="csPoolAddExisting()" title="Add sim VMs that were provisioned BEFORE a pool was set. New clones join automatically."
+                class="bg-white hover:bg-slate-50 text-slate-600 border border-slate-300 px-2.5 py-1 rounded-md text-xs font-bold">Add existing VMs</button>
+      </div>`;
+}
+
+async function csPoolOptionsAsync(selected) {
+    let d = {};
+    try { d = await csFetch(`/${csTenant()}/pools?tenant_id=${csTenant()}`) || {}; }
+    catch (e) {
+        const n = csEl('cs-ap-pool-note');
+        if (n) { n.textContent = 'could not load pools — keeping the current value'; n.className = 'text-xs text-amber-600'; }
+        return;
+    }
+    const sel = csEl('cs-ap-sim_pool'); if (!sel) return;
+    const pools = d.pools || [];
+    const byPool = d.by_pool || {};
+    const hosts = d.hosts || [];
+    sel.innerHTML = `<option value="">— none —</option>` + pools.map(p => {
+        const on = byPool[p] || [];
+        const partial = hosts.length && on.length && on.length < hosts.length;
+        const lbl = partial ? `${p} (only ${on.length}/${hosts.length} hosts)` : p;
+        return `<option value="${csEscape(p)}" ${p === selected ? 'selected' : ''}>${csEscape(lbl)}</option>`;
+    }).join('');
+    // A previously-saved pool that no host reports any more must stay selectable,
+    // otherwise re-rendering the card would silently clear a working config.
+    if (selected && pools.indexOf(selected) < 0) {
+        sel.insertAdjacentHTML('beforeend',
+            `<option value="${csEscape(selected)}" selected>${csEscape(selected)} (not found on any host)</option>`);
+    }
+    const note = csEl('cs-ap-pool-note');
+    if (note) {
+        const errs = Object.keys(d.errors || {});
+        if (!pools.length) { note.textContent = 'no pools defined on any host'; note.className = 'text-xs text-slate-400'; }
+        else if (errs.length) { note.textContent = `${pools.length} pool(s) · could not read: ${errs.join(', ')}`; note.className = 'text-xs text-amber-600'; }
+        else { note.textContent = `${pools.length} pool(s) across ${hosts.length} host(s)`; note.className = 'text-xs text-slate-400'; }
+    }
+}
+
+window.csPoolAddExisting = async function () {
+    const sel = csEl('cs-ap-sim_pool');
+    const pool = sel ? (sel.value || '').trim() : '';
+    if (!pool) { showToast('Pick a pool first.', 'info'); return; }
+    if (!confirm(`Add existing sim VMs to pool '${pool}'?\n\nOnly VMs in the sim VMID range are touched. A VM already in another pool is reported, not moved.`)) return;
+    try {
+        const r = await csFetch(`/${csTenant()}/pools/add-existing?tenant_id=${csTenant()}`, {
+            method: 'POST', body: JSON.stringify({ pool }) });
+        const errs = Object.entries((r && r.errors) || {});
+        if (errs.length) showToast(`Added ${r.added || 0} VM(s) to '${pool}' — failed: ${errs.map(([h, m]) => h + ': ' + m).join('; ')}`, 'error');
+        else showToast(`Added ${r.added || 0} VM(s) to pool '${pool}'.`, 'success');
+    } catch (e) { showToast('Add to pool failed: ' + ((e && e.message) || e), 'error'); }
+};
+
 window.csSaveAutoProvConfig = async function () {
     // Collect only this card's fields (cs-ap- prefix). Numbers/scalars are sent
     // as strings — the cs speak stores + normalizes them (usb_missing_timeout
@@ -6721,7 +6792,7 @@ window.csSaveAutoProvConfig = async function () {
         const el = csEl('cs-ap-' + col.key);
         if (!el) return;
         const v = (el.value || '').trim();
-        if (!v) return;
+        if (!v && !col.allowEmpty) return;
         config[col.key] = v;
     });
     // VM Images dynamic section: vm_image_count + per-image template_id/pct.

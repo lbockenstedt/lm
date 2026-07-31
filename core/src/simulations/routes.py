@@ -3679,6 +3679,61 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # CSBridgePoller (gateway/cs_bridge.py) polls the cs spoke's inbox and
     # relays each command to the unified pxmx agent as CS_COMMAND, then acks
     # the terminal result. Body: {action, args?|<inline vmid...>, target?, type?}.
+    @app.get("/sim/api/{tenant}/pools")
+    async def cs_list_pools(tenant: str, tenant_id: str = Depends(get_tenant_id)):
+        """Proxmox resource pools across every Client-Sim spoke, for the
+        sim-client Pool dropdown.
+
+        Unioned tenant-wide, but each pool also reports WHICH hosts have it:
+        pools are cluster-wide, yet a fleet of standalone nodes each has its own
+        set, and picking one that only exists on some hosts would make clones
+        fail on the rest. The UI flags a partial pool rather than hiding it."""
+        results = await _cs_forward_all(tenant_id, "CS_GET_POOLS", {}, timeout=20.0)
+        by_pool: dict = {}
+        hosts: set = set()
+        errors: dict = {}
+        selected = ""
+        for _sid, data in results:
+            if not isinstance(data, dict):
+                continue
+            for pid, hs in (data.get("by_pool") or {}).items():
+                by_pool.setdefault(str(pid), set()).update(hs or [])
+            hosts.update(data.get("hosts") or [])
+            errors.update(data.get("errors") or {})
+            selected = selected or str(data.get("selected") or "")
+        return {"pools": sorted(by_pool),
+                "by_pool": {k: sorted(v) for k, v in by_pool.items()},
+                "hosts": sorted(hosts), "errors": errors,
+                "selected": selected,
+                "spokes": len([1 for _s, d in results if isinstance(d, dict)])}
+
+    @app.post("/sim/api/{tenant}/pools/add-existing")
+    async def cs_pool_add_existing(request: Request, tenant: str,
+                                   tenant_id: str = Depends(get_tenant_id)):
+        """Retrofit already-provisioned sim VMs into the configured pool.
+
+        New clones join via ``qm clone --pool``; this exists for VMs created
+        before a pool was set. The agent guards to the sim VMID range, so it can
+        never sweep a non-sim VM in."""
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        pool = str((body or {}).get("pool") or "").strip()
+        results = await _cs_forward_all(tenant_id, "CS_POOL_ADD_EXISTING",
+                                        {"pool": pool}, timeout=90.0)
+        added, errors = 0, {}
+        for _sid, data in results:
+            if not isinstance(data, dict):
+                errors[str(_sid)] = "spoke unreachable"
+                continue
+            added += int(data.get("added") or 0)
+            errors.update(data.get("errors") or {})
+        if not results:
+            raise HTTPException(status_code=503, detail="Client-Sim spoke not connected")
+        return {"status": "SUCCESS" if not errors else "PARTIAL",
+                "added": added, "errors": errors}
+
     @app.post("/sim/api/{tenant}/proxmx/command")
     async def cs_enqueue_command(request: Request, tenant: str,
                                  tenant_id: str = Depends(get_tenant_id)):
