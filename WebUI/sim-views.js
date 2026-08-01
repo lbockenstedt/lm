@@ -3714,6 +3714,7 @@ const CS_SIM_SECTION_FIELDS = {
         ['dns_latency_rate', 'DNS Latency Rate (/min)'],
         ['dns_latency_duration', 'DNS Latency Duration (s)'],
         ['dns_latency_threshold_ms', 'DNS Latency Threshold (ms)'],
+        ['dns_latency_recheck_s', 'DNS Latency Recheck (s)'],
         ['dns_max_inflight', 'DNS Max In-Flight Digs'],
         ['gw_ping_timeout_s', 'Gateway Ping Timeout'],
     ],
