@@ -1026,6 +1026,57 @@ class UpdatePipelineMixin:
             logger.warning("reset --hard recovery errored: %s", e)
         return False
 
+    # Paths that, when changed by a pull, require the hub PROCESS to restart.
+    # Everything under these is either imported at startup or run as a service.
+    #
+    # The inverse matters more: WebUI/ is served by FileResponse straight off
+    # disk on every request, and index.html is no-store so it re-fetches and
+    # picks up the new ?v=<VERSION> asset URLs. A pulled JS/CSS change is
+    # therefore LIVE THE MOMENT IT LANDS -- restarting for it is pure downtime.
+    # That mattered in practice: restarts are gated to 2am / nobody-logged-in, so
+    # a WebUI-only fix sat on disk already working while the hub queued a bounce
+    # it never needed, and an operator clicking "Sync now" got the whole fleet
+    # dropped for a static asset.
+    #
+    # Deliberately a DENY-list of static dirs rather than an allow-list of code:
+    # anything unrecognised falls through to "restart", so a new top-level
+    # directory is treated as code until someone says otherwise.
+    _NO_RESTART_PREFIXES = ("WebUI/", "docs/", ".github/", "README", "LICENSE", "CHANGELOG")
+
+    @staticmethod
+    def _paths_need_restart(paths) -> bool:
+        """True when any changed path is something the running process loaded."""
+        for pth in paths or ():
+            pth = (pth or "").strip()
+            if not pth:
+                continue
+            if any(pth.startswith(x) for x in UpdatePipelineMixin._NO_RESTART_PREFIXES):
+                continue
+            return True
+        return False
+
+    async def _git_changed_paths(self, hub_root: str, since_commit: str):
+        """Repo-relative paths changed between *since_commit* and HEAD.
+
+        Returns None when it cannot be determined (unknown pre-commit, git
+        failure). Callers MUST treat None as "assume a restart is needed" --
+        skipping a restart after a real code change would leave the hub running
+        stale code indefinitely, which is far worse than an unnecessary bounce.
+        """
+        if not since_commit or since_commit == "unknown":
+            return None
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                f"cd {hub_root} && git diff --name-only {since_commit}..HEAD",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            out, _err = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+            if proc.returncode != 0:
+                return None
+            return [ln for ln in out.decode("utf-8", "replace").splitlines() if ln.strip()]
+        except Exception as _e:  # noqa: BLE001 — never fatal; caller assumes restart
+            logger.warning(f"_git_changed_paths failed ({_e}) — assuming a restart is needed")
+            return None
+
     async def _git_update(self, hub_root: str, hub_repo: str, branch: str) -> bool:
         """
         Performs a git-based update. Returns True only if the update actually
@@ -1271,6 +1322,10 @@ class UpdatePipelineMixin:
         self.state._mark_dirty()
 
         hub_updated = False
+        # Default to restarting: only a positive, verified 'nothing in-process
+        # changed' may skip it.
+        _hub_needs_restart = True
+        _dns_dhcp_changed = True
         stale_reload = False  # git current but the running process is older than on-disk
         update_failed = False  # update was available + attempted, but did NOT apply
         if update_available:
@@ -1323,7 +1378,24 @@ class UpdatePipelineMixin:
 
                     if is_git_repo:
                         logger.info(f"Hub installation is a git repo. Attempting git-based update...")
+                        _pre_head = await self.get_local_commit()
                         hub_updated = await self._git_update(hub_root, hub_repo, branch)
+                        if hub_updated:
+                            _changed = await self._git_changed_paths(hub_root, _pre_head)
+                            if _changed is None:
+                                # Could not tell what moved — restart rather than
+                                # risk running stale code.
+                                _hub_needs_restart = True
+                                logger.info("Hub update: changed paths unknown — will restart")
+                            else:
+                                _hub_needs_restart = self._paths_need_restart(_changed)
+                                _dns_dhcp_changed = any(
+                                    c.startswith(("dns/", "dhcp/")) for c in _changed)
+                                logger.info(
+                                    "Hub update: %d file(s) changed; restart %s (%s)",
+                                    len(_changed),
+                                    "REQUIRED" if _hub_needs_restart else "NOT needed",
+                                    ", ".join(_changed[:8]) + ("…" if len(_changed) > 8 else ""))
                     else:
                         logger.info(
                             f"Hub installation directory {hub_root} is NOT a git repo. "
@@ -1580,12 +1652,27 @@ class UpdatePipelineMixin:
             logger.info(f"Agent update results (separate from module spokes): "
                         f"{agent_results}")
 
+        # A pull that touched ONLY static assets (WebUI/, docs/) needs no restart:
+        # those are served from disk per request, so the change is already live.
+        # Returning here rather than falling into the restart path is the whole
+        # point — restarts are gated to 2am / nobody-logged-in, so queuing one
+        # for a static asset both delayed nothing and risked dropping the fleet
+        # when an operator hit "Sync now".
+        if hub_updated and not stale_reload and not _hub_needs_restart:
+            logger.info("Hub updated with no in-process code changes — "
+                        "skipping restart (WebUI assets are served from disk)")
+            return {"status": "success",
+                    "message": (f"Updated Hub to {remote_v}. No restart needed — "
+                                f"only static assets changed, already live. "
+                                f"Spoke updates triggered."),
+                    "spokes": update_results, "agents": agent_results}
+
         if hub_updated or stale_reload:
             # Restart local in-repo spokes (dns/dhcp live inside the lm repo; they
             # are already updated by the hub git pull above and just need a
             # restart). Only on a real git update — a stale-process reload didn't
-            # change their code.
-            if hub_updated:
+            # change their code — and only when their own code actually moved.
+            if hub_updated and _dns_dhcp_changed:
                 for local_svc in ("lm-dns", "lm-dhcp"):
                     try:
                         subprocess.Popen(["sudo", "systemctl", "restart", local_svc])
