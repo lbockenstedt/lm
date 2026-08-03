@@ -5564,12 +5564,20 @@ window.csRenderSimTagHealth = async function () {
     // Verdict: an unreachable spoke outranks tag drift — you can't trust a drift
     // count from a spoke that didn't answer.
     const _unreach = spokes.filter(s => s.unreachable).length;
-    const _drift = spokes.reduce((n, s) => n + (s.hosts || [])
-        .reduce((m, h) => m + Number(h.drift_count || 0), 0), 0);
+    const _sum = k => spokes.reduce((n, s) => n + (s.hosts || [])
+        .reduce((m, h) => m + Number(h[k] || 0), 0), 0);
+    const _drift = _sum('drift_count');
+    // UNLABELED is not drift: the VM matches no live client, so no tags were
+    // ever computed and desired==actual==[] reads as "in sync". Counting only
+    // drift reported a host full of untagged VMs as perfectly healthy.
+    const _unlab = _sum('unlabeled_count');
     csDiagSummary('cs-sim-tag-health',
-        _unreach ? 'bad' : (_drift ? 'warn' : 'ok'),
+        _unreach ? 'bad' : ((_drift || _unlab) ? 'warn' : 'ok'),
         (_unreach ? `${_unreach} spoke(s) unreachable · ` : '')
-        + (_drift ? `${_drift} VM(s) with tag drift` : 'all tags in sync')
+        + ((_drift || _unlab)
+            ? [_drift ? `${_drift} with tag drift` : '',
+               _unlab ? `${_unlab} unlabeled (no client match)` : ''].filter(Boolean).join(' · ')
+            : 'all tags in sync')
         + ` · ${spokes.length} spoke(s)`);
     el.innerHTML = spokes.map(sp => {
         const title = esc(sp.spoke_name || sp.spoke_id || 'spoke');
@@ -5644,11 +5652,17 @@ function _csSimTagHealthText(d) {
         (sp.hosts || []).forEach(h => {
             lines.push(`  HOST ${h.hostname} agent_connected=${h.agent_connected}` +
                        `${h.skip_reason ? ' skip=' + h.skip_reason : ''} drift=${h.drift_count}/${h.vm_count}` +
+                       `${h.unlabeled_count ? ' unlabeled=' + h.unlabeled_count : ''}` +
                        ` telemetry_age_s=${h.telemetry_age_s == null ? 'never' : Math.round(h.telemetry_age_s)}` +
                        `${h.stale ? ' STALE' : ''}${h.agent_points_at ? ' points_at=' + h.agent_points_at : ''}`);
-            (h.vms || []).filter(v => !v.in_sync).forEach(v => {
+            // Drift AND unlabeled: a VM with no client match gets desired=[]
+            // and, if it also carries no tags, desired==actual so in_sync is
+            // TRUE — it would silently vanish from a !in_sync filter, which is
+            // exactly the "no label in Proxmox" case this panel must explain.
+            (h.vms || []).filter(v => !v.in_sync || (v.excluded && !(v.actual || []).length)).forEach(v => {
                 lines.push(`    ${v.vmid} ${v.name}: desired=[${(v.desired || []).join(' ')}] ` +
-                           `actual=[${(v.actual || []).join(' ')}]${v.excluded ? ' why=' + v.excluded : ''}`);
+                           `actual=[${(v.actual || []).join(' ')}]${v.excluded ? ' why=' + v.excluded : ''}` +
+                           `${v.excluded && !(v.actual || []).length ? ' UNLABELED' : ''}`);
             });
         });
     });
