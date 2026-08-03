@@ -1273,6 +1273,82 @@ function csUnknownUsbCount(h) {
     return Array.isArray(px.unknown_usb) ? px.unknown_usb.length : 0;
 }
 
+// Dongle availability breakdown for one host — {inUse, avail, qt, excluded,
+// present}. Mirrors the agent's own provision-loop cull (usb_provision.py
+// _usb_provision_pass): a certified PRESENT dongle is eligible only if its bus
+// is not already assigned, not quarantined, and not excluded. Anything else is
+// spare capacity the loop can place a VM on right now.
+//
+// `inUse` counts assigned buses from usb_state (the same set the agent reports
+// as active_usb_vms), so it still counts a VM whose dongle has gone physically
+// missing — that slot is occupied, not free. `avail` deliberately starts from
+// present_usb so a missing dongle can never inflate it.
+//
+// Caveat: the agent ALSO culls dongles whose type doesn't match sim_phy, and
+// sim_phy isn't relayed, so `avail` is "free and not sidelined" — a nonzero
+// avail alongside a "no eligible dongles (type=…)" reason means the spares are
+// the wrong type (wireless vs ethernet) for the configured sim_phy.
+function csDongleCounts(h) {
+    const px = (h && h.proxmox) || {};
+    const present = Array.isArray(px.present_usb) ? px.present_usb : [];
+    const state = Array.isArray(px.usb_state) ? px.usb_state : [];
+    const assigned = new Set(state
+        .filter(e => e && e.bus_path && e.vmid != null && e.vmid !== '')
+        .map(e => e.bus_path));
+    const qtBuses = new Set((Array.isArray(px.quarantine) ? px.quarantine : [])
+        .filter(q => q && q.bus_path).map(q => q.bus_path));
+    const exBuses = new Set((Array.isArray(px.excluded) ? px.excluded : [])
+        .filter(x => x && x.bus_path).map(x => x.bus_path));
+    const avail = present.filter(u => u && u.bus_path
+        && !assigned.has(u.bus_path)
+        && !qtBuses.has(u.bus_path)
+        && !exBuses.has(u.bus_path)).length;
+    return { inUse: assigned.size, avail, qt: qtBuses.size,
+             excluded: exBuses.size, present: present.length };
+}
+
+// Shared tooltip for the dongle breakdown so the Overview column and the
+// Details tiles explain the numbers identically.
+function csDongleTitle(d) {
+    return `${d.inUse} dongle(s) in use (assigned to a VM) · ${d.avail} available `
+         + `(certified, present, not sidelined) · ${d.qt} quarantined (kernel USB errors)`
+         + (d.excluded ? ` · ${d.excluded} excluded (destroy-fail / anti-churn)` : '')
+         + `. ${d.present} certified dongle(s) present on this host. `
+         + `Available 0 with empty VM slots = out of working dongles.`;
+}
+
+// "in-use / available / QT" triplet, colour-coded: available in green when
+// there is spare capacity and amber at 0, QT red when nonzero. Rendered on the
+// Overview fleet table (Dongles column) and reused for the Details tiles.
+function csDongleTriplet(d) {
+    const availCls = d.avail > 0 ? 'text-[#01A982]' : 'text-amber-600';
+    const qtCls = d.qt > 0 ? 'text-red-600' : 'text-slate-400';
+    const exPart = d.excluded
+        ? ` <span class="text-slate-400">/</span> <span class="text-amber-600" title="excluded buses">${d.excluded}<span class="text-[9px] font-normal">x</span></span>`
+        : '';
+    return `<span class="font-mono text-xs font-bold" title="${csEscape(csDongleTitle(d))}">`
+         + `<span class="text-slate-700">${d.inUse}</span>`
+         + ` <span class="text-slate-300">/</span> <span class="${availCls}">${d.avail}</span>`
+         + ` <span class="text-slate-300">/</span> <span class="${qtCls}">${d.qt}</span>${exPart}</span>`;
+}
+
+// Per-host dongle tiles for the VM Server → Details stat grid. Same shape as
+// csStat but colour-coded (csStat escapes its value, so it can't carry markup):
+// Available amber at 0 (no spare capacity), QT red when nonzero. The Excluded
+// tile only appears when there are exclusions, so the common case stays 3 tiles.
+function csDongleStats(h) {
+    const d = csDongleCounts(h);
+    const t = csEscape(csDongleTitle(d));
+    const tile = (label, value, cls) => `<div class="bg-slate-50 rounded-lg p-3 text-center" title="${t}">
+      <p class="text-[10px] text-slate-400 uppercase font-bold tracking-widest">${csEscape(label)}</p>
+      <div class="text-xl font-bold ${cls} mt-1">${value}</div>
+    </div>`;
+    return tile('In use', d.inUse, 'text-slate-700')
+         + tile('Available', d.avail, d.avail > 0 ? 'text-[#01A982]' : 'text-amber-600')
+         + tile('Quarantined', d.qt, d.qt > 0 ? 'text-red-600' : 'text-slate-700')
+         + (d.excluded ? tile('Excluded', d.excluded, 'text-amber-600') : '');
+}
+
 // Trim a Proxmox version string to just the version number (e.g. "8.1.4"),
 // dropping the "pve-manager" prefix and the build id the cs spoke appends
 // (e.g. "pve-manager: 8.1.4/abc12345" → "8.1.4").
@@ -8134,6 +8210,7 @@ async function csRenderVmServer() {
           <td class="px-4 py-2 text-center">${csHostStateBadge(h)}</td>
           <td class="px-4 py-2 text-center">${vmN}</td>
           <td class="px-4 py-2 text-center">${usbN}${qtPill}</td>
+          <td class="px-4 py-2 text-center">${csDongleTriplet(csDongleCounts(h))}</td>
           <td class="px-4 py-2 text-center text-xs">${csPctCell(px.cpu_1h_avg)}</td>
           <td class="px-4 py-2 text-center text-xs">${csPctCell(px.mem_1h_avg)}</td>
           <td class="px-4 py-2 text-center">${csProvThrottleBadge(px)}</td>
@@ -8142,9 +8219,11 @@ async function csRenderVmServer() {
         </tr>`;
     }).join('');
     // Header alignment: center the numeric/badge columns (Online…Auto-Prov),
-    // left-align Host + the version columns.
-    const ths = ['Host', 'Online', 'VMs', 'USB', 'CPU 1h', 'Mem 1h', 'Auto-Prov', 'Agent', 'PVE']
-        .map((c, i) => `<th class="px-4 py-2 ${i >= 1 && i <= 6 ? 'text-center' : 'text-left'} font-medium">${c}</th>`).join('');
+    // left-align Host + the version columns. "Dongles" is the in-use/available/QT
+    // breakdown of the USB count to its left (csDongleTriplet); the centred span
+    // now runs Online…Auto-Prov = indices 1..7.
+    const ths = ['Host', 'Online', 'VMs', 'USB', 'Dongles', 'CPU 1h', 'Mem 1h', 'Auto-Prov', 'Agent', 'PVE']
+        .map((c, i) => `<th class="px-4 py-2 ${i >= 1 && i <= 7 ? 'text-center' : 'text-left'} font-medium"${c === 'Dongles' ? ' title="in use / available / quarantined (+ excluded when nonzero)"' : ''}>${c}</th>`).join('');
     const selTh = `<th class="px-4 py-2 text-center"><input type="checkbox" onclick="csFleetSelectAll(this)" title="Select all hosts"></th>`;
     const table = `<div class="overflow-x-auto"><table class="w-full text-sm">
       <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${selTh}${ths}</tr></thead>
@@ -10212,8 +10291,9 @@ async function csRenderVmServerDetails() {
           Delete host + clear cache
         </button>
       </div>
-      <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
         ${csStat('Node', node.hostname || '—')}${csStat('USB', csUsbCount(h))}
+        ${csDongleStats(h)}
         ${csStat('CPU 1h', px.cpu_1h_avg || '—')}${csStat('Mem 1h', px.mem_1h_avg || '—')}
         ${csStat('Agent', px.agent_version || '—')}
       </div>
