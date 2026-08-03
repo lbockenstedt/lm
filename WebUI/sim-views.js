@@ -1255,22 +1255,16 @@ function csProvisionCard(px) {
     const halt = (h && h.halted)
         ? `${csEscape(String(h.reason || 'load'))} — CPU ${h.cpu_pct}% ≥ ${h.cpu_threshold}%, Mem ${h.mem_pct}% ≥ ${h.mem_threshold}%`
         : '';
-    // Delete-gate decision trace + the 1h averages the gate actually acts on
-    // (distinct from the display CPU 1H) — so you can see WHAT auto-prov decides
-    // on and WHY it did/didn't shed a VM.
+    // Delete-gate decision trace — WHAT auto-prov decides on and WHY it did or
+    // did not shed a VM. Its `reason` already carries the 1h averages vs the
+    // thresholds, which is why the separate gate_averages line was removed.
     const dg = (px && px.delete_gate) || {};
-    const ga = (px && px.gate_averages) || {};
     let dgLine = '';
     if (dg && dg.reason) {
         const cd = dg.cooldown_remaining_s ? ` · cooldown ${dg.cooldown_remaining_s}s` : '';
         const cand = (dg.eligible_candidates != null) ? ` · ${dg.eligible_candidates} eligible` : '';
         const shed = (dg.last_torn_down && dg.last_torn_down.length);
         dgLine = `<div class="${shed ? 'text-emerald-700' : 'text-slate-700'}"><b>Delete gate:</b> ${csEscape(String(dg.reason))}${cand}${cd}</div>`;
-    }
-    let gaLine = '';
-    if (ga && (ga.cpu_1h_avg != null || ga.mem_1h_avg != null)) {
-        const f = v => (v != null ? v + '%' : '—');
-        gaLine = `<div class="text-[11px] text-slate-500"><b>Gate uses (1h avg):</b> CPU ${f(ga.cpu_1h_avg)} · Mem ${f(ga.mem_1h_avg)}</div>`;
     }
     // Status chips: CS-enabled, loop-running, auto-provision-on. Amber when a
     // gate is closed (the most common "enabled but nothing provisions" causes).
@@ -1284,7 +1278,7 @@ function csProvisionCard(px) {
         <div><b>Last pass:</b> ${reason}${loopOn ? '' : ' <span class="text-amber-600">(provision loop not running — check the pxmx agent log)</span>'}</div>
         ${halt ? `<div class="text-amber-600"><b>Halt:</b> ${halt}</div>` : ''}
         ${dgLine}
-        ${gaLine}
+        
         <div><b>Config:</b> dongle_vidpids=${vidpids} · image1=${img1} · image2=${img2} · max_slots=${maxSlots} · vmid_range=${vrStr} · active_usb_vms=${active}</div>
       </div>
     </div>`;
@@ -10204,7 +10198,7 @@ function csFreshnessPanel(h) {
 
 // ── VM Server → Details: human-readable telemetry helpers ────────────────────
 // The Details "Telemetry" grid renders h.proxmox fields. Scalars stay in compact
-// csKvTile boxes; nested objects (prov_run, delete_gate, gate_averages,
+// csKvTile boxes; nested objects (prov_run, delete_gate,
 // vmid_range, agent_telemetry, …) used to stringify to an unreadable raw-JSON
 // blob — these render them as readable key:value lines in a wider, column-
 // spanning tile. Every interpolated string passes through csEscape.
@@ -10303,10 +10297,6 @@ function csFmtKnownObj(k, v) {
               <div>eligible ${esc(o.eligible_candidates != null ? o.eligible_candidates : 0)}</div>
               <div>exceeded ${o.threshold_exceeded ? 'yes' : 'no'}</div>
             </div>`;
-    }
-    if (k === 'gate_averages') {
-        const f = x => (x != null ? esc(x) + '%' : '—');
-        return `<div class="font-mono text-slate-700">CPU 1h ${f(o.cpu_1h_avg)} · Mem 1h ${f(o.mem_1h_avg)}</div>`;
     }
     if (k === 'vmid_range') {
         if (o.start == null && o.end == null) return null;
@@ -10434,7 +10424,7 @@ async function csRenderVmServerDetails() {
     const entries = Object.entries(px).filter(([k]) => !skip.includes(k));
     // Human-readable tiles: scalars pretty-printed (pve_version → 9.2.3,
     // last_seen/ingested_at epoch → local datetime, bools → Yes/No, %/s units);
-    // nested objects (prov_run/delete_gate/gate_averages/vmid_range/
+    // nested objects (prov_run/delete_gate/vmid_range/
     // agent_telemetry) render as readable key:value lines in a wider column-
     // spanning tile instead of a raw JSON blob (csTelemetryTile).
     const tiles = entries.map(([k, v]) => csTelemetryTile(k, v)).join('');
