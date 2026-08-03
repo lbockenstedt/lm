@@ -206,9 +206,18 @@ class FleetHealthAlertMixin:
             except (TypeError, ValueError):
                 active, maxs = 0, 0
             reason = str(prov.get("reason") or "")
+            # The agent now reports the fully-deployed steady state as "all
+            # dongles deployed (N in use)" instead of "no eligible dongles",
+            # because running every dongle is the GOAL, not a fault. Both
+            # phrasings describe the same provisioning condition — the loop has
+            # nothing left to place a VM on — so this predicate matches BOTH.
+            # Matching only the old string would have silently retired this
+            # alert the moment the agents updated.
+            _no_capacity = (reason.startswith("no eligible dongles")
+                            or reason.startswith("all dongles deployed"))
             out_of_dongles = (bool(prov.get("auto_provision_on"))
                               and bool(prov.get("loop_running"))
-                              and reason.startswith("no eligible dongles")
+                              and _no_capacity
                               and maxs > 0 and active < maxs)
             if not out_of_dongles:
                 self._dongle_clear(key, host)

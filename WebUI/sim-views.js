@@ -10473,12 +10473,11 @@ function _csRepoStatusSection(apiData) {
             ${warns.map(([w, c]) => `<div class="text-[11px] ${c} mt-1">⚠️ ${w}</div>`).join('')}
           </div>`;
     }).join('');
-    return `<div class="flex items-center justify-between mb-1">
-        <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Spoke repo / update status</p>
-        <button type="button" onclick="csRenderSetupDiagnostics()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
-      </div>
-      <p class="text-[11px] text-slate-400 mb-2">Which branch and build each spoke is actually serving to clients — the "did my push reach the spoke?" answer without the CLI.</p>
-      <div class="mb-6">${cards || '<p class="text-xs text-slate-400 italic">No spokes reporting.</p>'}</div>`;
+    // Two-up on wide screens so a 4-spoke fleet fills the width instead of
+    // stacking four narrow full-width cards down the page.
+    return cards
+        ? `<div class="grid grid-cols-1 xl:grid-cols-2 gap-2">${cards}</div>`
+        : '<p class="text-xs text-slate-400 italic">No spokes reporting.</p>';
 }
 
 // ── Diagnostics page shell ───────────────────────────────────────────────────
@@ -10498,6 +10497,38 @@ const _CS_DIAG_TONE = {
 // Section data for the page-level Copy button. Each renderer stashes its payload
 // here as it loads; csCopyAllDiagnostics flattens whatever has arrived.
 window._csDiagData = window._csDiagData || {};
+
+// ── Tile primitives, matching the Telemetry Freshness panel ──────────────────
+// Same treatment as csFreshnessPanel: bordered white tile, micro-caps label,
+// mono value, optional hint — laid out on a responsive grid that FILLS the
+// width. The point is that the numbers you scan for sit in fixed-width tiles
+// across the screen instead of wrapping inside a paragraph.
+function csDiagTile(label, val, hint, tone) {
+    const v = tone === 'bad' ? 'text-red-600'
+        : tone === 'warn' ? 'text-amber-600'
+        : tone === 'good' ? 'text-[#01A982]' : 'text-slate-700';
+    return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2">
+        <div class="text-[10px] uppercase tracking-wider text-slate-400">${csEscape(label)}</div>
+        <div class="text-sm font-mono font-bold ${v} truncate" title="${csEscape(val)}">${csEscape(val)}</div>
+        ${hint ? `<div class="text-[10px] text-slate-400 truncate" title="${csEscape(hint)}">${csEscape(hint)}</div>` : ''}</div>`;
+}
+
+// Default 5-up on large screens, matching the freshness grid.
+function csDiagTiles(tiles, cols) {
+    return `<div class="grid grid-cols-2 sm:grid-cols-3 ${cols || 'lg:grid-cols-5'} gap-2 mb-3">${tiles.join('')}</div>`;
+}
+
+// Group label inside a section (freshness's "Agent collect phase — last tick").
+function csDiagSub(text, right) {
+    return `<div class="flex items-center justify-between mb-2 flex-wrap gap-2 mt-3">
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">${csEscape(text)}</p>
+      ${right ? `<span class="text-xs text-slate-500">${right}</span>` : ''}</div>`;
+}
+
+// Footer note, freshness's closing-paragraph treatment.
+function csDiagNote(html) {
+    return `<div class="text-[10px] text-slate-400 mt-2">${html}</div>`;
+}
 
 function csDiagSection(id, title, opts) {
     const o = opts || {};
@@ -10646,13 +10677,13 @@ async function csRenderSetupDiagnostics() {
     const _shown = agents.filter(a => !(a.decision || '').startsWith('SKIP not-enabled'));
     const _cfgFast = snap.configured_fast_s != null ? `${snap.configured_fast_s}s` : '15s (default)';
     const _cfgLong = snap.configured_long_s != null ? `${snap.configured_long_s}s` : '60s (default)';
-    const cfg = `<div class="hpe-card rounded-lg p-5 shadow-sm mb-3 text-xs text-slate-500 flex flex-wrap gap-x-4 gap-y-1">
-      <span><b class="text-slate-600">max retries:</b> ${csEscape(String(snap.max_retries ?? '—'))}</span>
-      <span><b class="text-slate-600">spoke→agent (configured):</b> fast ${csEscape(_cfgFast)} / long ${csEscape(_cfgLong)}</span>
-      <span><b class="text-slate-600">hub→spoke (actual):</b> fast ${csEscape(String(snap.relay_timeout_s ?? '—'))}s / long ${csEscape(String(snap.relay_timeout_long_s ?? '—'))}s</span>
-      <span><b class="text-slate-600">cycle:</b> ${csEscape(snap.cycle || '—')}</span>
-    </div>
-    <p class="text-[11px] text-slate-400 mb-3">Set the spoke→agent windows in <b>Setup → General → Agent Relay Timeouts</b>. The hub→spoke window tracks the configured long/fast value +5s (never below the env default) so the hub doesn't pre-empt the spoke's wait. If hub→spoke shows the env defaults (16s/65s) here after you saved General, the save didn't reach global_config — re-save.</p>`;
+    const cfg = csDiagSub('Relay configuration') + csDiagTiles([
+        csDiagTile('Cycle', snap.cycle || '—', 'bridge poll phase'),
+        csDiagTile('Max retries', String(snap.max_retries ?? '—'), 'before gave-up'),
+        csDiagTile('Spoke→agent fast', _cfgFast, 'configured'),
+        csDiagTile('Spoke→agent long', _cfgLong, 'configured'),
+        csDiagTile('Hub→spoke', `${snap.relay_timeout_s ?? '—'}s / ${snap.relay_timeout_long_s ?? '—'}s`, 'actual fast / long'),
+    ]) + csDiagNote('Set the spoke→agent windows in <b>Setup → General → Agent Relay Timeouts</b>. Hub→spoke tracks the configured value +5s (never below the env default) so the hub does not pre-empt the spoke\'s wait. If hub→spoke still shows the env defaults (16s/65s) after saving General, the save did not reach global_config — re-save.');
     // 11 columns forced a horizontal scroll on every screen width. The five
     // counters collapse into ONE mono "queue" cell (zeros greyed so a nonzero
     // number is what your eye lands on), and hostname rides under the agent id
@@ -10819,6 +10850,17 @@ function _csDongleDiagHost(h) {
         </div>`;
     }).join('');
 
+    // Guest-agent watchdog last sweep, as a tile: an automatic VM reset or power
+    // cycle should be attributable at a glance, not buried in raw telemetry.
+    const gw = px.guest_watchdog || {};
+    const gwActs = (gw.reset || []).length + (gw.power_cycled || []).length + (gw.started || []).length;
+    const gwTile = !gw.ran_at
+        ? { val: '—', hint: 'no sweep reported', tone: null }
+        : { val: `${gw.responding ?? '?'}/${gw.checked ?? '?'}`,
+            hint: gwActs ? `${(gw.reset || []).length} reset · ${(gw.power_cycled || []).length} cycled · ${(gw.started || []).length} started`
+                         : 'guests responding, no action taken',
+            tone: gwActs ? 'warn' : 'good' };
+
     const kTotals = Object.entries(kernel.totals || {});
     const kernelLine = !kernel.available
         ? '<span class="text-amber-600">kernel log unreadable — evidence could not be checked (not the same as a clean log)</span>'
@@ -10826,20 +10868,36 @@ function _csDongleDiagHost(h) {
             ? kTotals.map(([k, v]) => `<span class="mr-3"><b>${csEscape(k)}</b> ${csEscape(String(v))}</span>`).join('')
             : '<span class="text-slate-400">no USB errors logged in the window</span>';
 
-    return `<div class="border border-slate-200 rounded-lg p-3 mb-3">
-      <div class="flex flex-wrap items-center gap-2 mb-2">
-        <span class="font-mono text-xs font-bold text-slate-700">${name}</span>
-        ${missing.length
-            ? `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-700">${missing.length} missing</span>`
-            : '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-700">none missing</span>'}
-        <span class="text-[10px] text-slate-400">${csEscape(String(d.present_count ?? '—'))} present / ${csEscape(String(d.known_count ?? '—'))} ever seen</span>
-        ${csUhubctlBadge(d.uhubctl)}
-        <span class="text-[10px] text-slate-400 ml-auto">collected ${csEscape(age)}</span>
+    const u = d.uhubctl || {};
+    const kTotalN = kTotals.reduce((n, [, v]) => n + Number(v || 0), 0);
+    return `<div class="hpe-card rounded-lg p-4 shadow-sm mb-4">
+      <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">${name}</p>
+        <span class="text-xs text-slate-500">${missing.length
+            ? `<span class="text-red-600 font-bold">● ${missing.length} MISSING</span>`
+            : '<span class="text-green-600 font-bold">● NONE MISSING</span>'} · collected ${csEscape(age)}</span>
       </div>
-      ${missing.length ? `<div class="overflow-x-auto mb-2">${csTable(['Bus', 'Product', 'vid:pid', 'Last seen', 'Missing for'], missRows)}</div>` : ''}
-      ${causeCards || (missing.length ? '' : '<p class="text-[11px] text-slate-400 mb-1">No probable cause to report while nothing is missing.</p>')}
-      <p class="text-[10px] text-slate-500 mt-1">Kernel (${csEscape(csAgeShort(kernel.window_s || 0))} window): ${kernelLine}</p>
-      <p class="text-[10px] text-slate-500">Autosuspend: <b>${csEscape(String(autoN))}</b> of ${csEscape(String(power.length))} present device(s) set to <code>auto</code>${autoN ? ' — these may suspend and fail to resume' : ''}. Controllers: ${ctrls.map(c => `<code>${csEscape(c.pci_address)}</code> (${csEscape(String(c.device_count))} dev)`).join(', ') || '—'}</p>
+      ${csDiagTiles([
+        csDiagTile('Present', String(d.present_count ?? '—'), 'certified, on the bus'),
+        csDiagTile('Missing', String(missing.length), 'was seen, now gone', missing.length ? 'bad' : 'good'),
+        csDiagTile('Ever seen', String(d.known_count ?? '—'), 'persisted roster'),
+        csDiagTile('Autosuspend', `${autoN}/${power.length}`, "power/control=auto", autoN ? 'warn' : null),
+        csDiagTile('Kernel events', String(kTotalN), `${csAgeShort(kernel.window_s || 0)} window`,
+                   !kernel.available ? 'warn' : (kTotalN ? 'bad' : null)),
+        csDiagTile('uhubctl', u.supported ? 'PPPS ✓' : u.installed ? 'no PPPS hub' : 'not installed',
+                   u.supported ? `${(u.ppps_hubs || []).length} hub(s) — uhubctl -a cycle`
+                               : (u.error || 'port power cycling unavailable'),
+                   u.supported ? 'good' : 'warn'),
+        csDiagTile('Controllers', String(ctrls.length),
+                   ctrls.map(c => `${c.pci_address} (${c.device_count})`).join(' · ') || '—'),
+        csDiagTile('Guest watchdog', gwTile.val, gwTile.hint, gwTile.tone),
+      ], 'lg:grid-cols-4')}
+      ${missing.length ? csDiagSub('Missing dongles') +
+        `<div class="overflow-x-auto mb-2">${csTable(['Bus', 'Product', 'vid:pid', 'Last seen', 'Missing for'], missRows)}</div>` : ''}
+      ${causes.length ? csDiagSub('Probable cause — ranked') +
+        `<div class="grid grid-cols-1 xl:grid-cols-2 gap-2">${causeCards}</div>` : ''}
+      ${kernel.available && kTotals.length ? csDiagNote(`Kernel: ${kernelLine}`) : ''}
+      ${!kernel.available ? csDiagNote('<span class="text-amber-600">Kernel log unreadable — evidence could not be checked. This is <b>not</b> the same as a clean log.</span>') : ''}
     </div>`;
 }
 
