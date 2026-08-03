@@ -1077,6 +1077,30 @@ class UpdatePipelineMixin:
             logger.warning(f"_git_changed_paths failed ({_e}) — assuming a restart is needed")
             return None
 
+    async def _detect_stale_process(self) -> bool:
+        """True when the RUNNING process is older than the code on disk.
+
+        ``_startup_version`` is captured once at boot and only moves on a real
+        restart, so this is a disk-vs-MEMORY comparison — the authoritative
+        "am I serving stale code?" test. Deliberately NOT derived from the
+        changed-paths diff, which only describes the most recent pull and says
+        nothing about pulls that landed earlier and were never restarted into.
+
+        Never raises: an unreadable version reads as "not stale" so a probe
+        failure can't trigger a restart loop.
+        """
+        try:
+            disk_v = await self.get_local_version()
+            run_v = getattr(self, "_startup_version", None)
+            if run_v and disk_v and run_v not in ("unknown",) and run_v != disk_v:
+                logger.warning(
+                    "Hub PROCESS is STALE (running %s, on-disk %s) — will "
+                    "self-restart to load the on-disk code.", run_v, disk_v)
+                return True
+        except Exception as _e:  # noqa: BLE001
+            logger.debug("stale-process check skipped: %s", _e)
+        return False
+
     async def _git_update(self, hub_root: str, hub_repo: str, branch: str) -> bool:
         """
         Performs a git-based update. Returns True only if the update actually
@@ -1441,17 +1465,7 @@ class UpdatePipelineMixin:
             # code and the Update button reports success without ever reloading.
             # Detect it (startup VERSION != on-disk VERSION) and flag a self-
             # restart so the reload happens after the spoke fan-out below.
-            try:
-                _disk_v = await self.get_local_version()
-                _run_v = getattr(self, "_startup_version", None)
-                if _run_v and _disk_v and _run_v not in ("unknown",) and _run_v != _disk_v:
-                    logger.warning(
-                        "Hub git is current but the PROCESS is STALE (running %s, "
-                        "on-disk %s) — will self-restart to load the on-disk code.",
-                        _run_v, _disk_v)
-                    stale_reload = True
-            except Exception as _e:
-                logger.debug("stale-process check skipped: %s", _e)
+            stale_reload = await self._detect_stale_process()
 
         update_results = []
         config = self.state.get_global_config()
@@ -1658,6 +1672,30 @@ class UpdatePipelineMixin:
         # point — restarts are gated to 2am / nobody-logged-in, so queuing one
         # for a static asset both delayed nothing and risked dropping the fleet
         # when an operator hit "Sync now".
+        # Staleness is re-checked on EVERY path, not just the "already up to
+        # date" branch — this is the bug that made Update click after click and
+        # never restart:
+        #
+        #   a pull LANDS on disk but is judged not to need a restart (only WebUI/
+        #   changed, say). The process stays on the old version. The NEXT click
+        #   force-pulls, git is already at the remote tip, so the changed-paths
+        #   diff is EMPTY -> _paths_need_restart([]) is False -> hub_updated=True,
+        #   _hub_needs_restart=False, stale_reload=False -> the early return below
+        #   fires "no in-process code changes, skipping restart" and reports
+        #   SUCCESS. The running process is never reloaded, so every subsequent
+        #   click repeats it forever.
+        #
+        # The changed-paths diff answers "what moved in THIS pull", which is not
+        # the question once a previous pull was already skipped — the running
+        # process can be many versions behind an unchanged disk. Comparing the
+        # RUNNING version against disk is the question that actually matters, and
+        # it also restores the force sentinel: with stale_reload true the restart
+        # block below runs and, on a manual "Update now", writes a FORCE sentinel
+        # the watchdog acts on immediately instead of deferring while an operator
+        # is logged in.
+        if not stale_reload:
+            stale_reload = await self._detect_stale_process()
+
         if hub_updated and not stale_reload and not _hub_needs_restart:
             logger.info("Hub updated with no in-process code changes — "
                         "skipping restart (WebUI assets are served from disk)")
