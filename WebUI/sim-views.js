@@ -1193,10 +1193,14 @@ async function csRenderSimClientCount() {
     csSet(`<div class="space-y-4">${pills}${cards}</div>`);
 }
 
+// Headline stat tile. Chrome + label match the Telemetry Freshness panel
+// (csFreshnessPanel) so the Details page reads as ONE family instead of two —
+// its grey-filled tiles sat directly above Freshness's bordered white ones.
+// Keeps the larger centred value: this is the headline row, not a data grid.
 function csStat(label, value) {
-    return `<div class="bg-slate-50 rounded-lg p-3 text-center">
-      <p class="text-[10px] text-slate-400 uppercase font-bold tracking-widest">${csEscape(label)}</p>
-      <div class="text-xl font-bold text-slate-700 mt-1">${csEscape(value)}</div>
+    return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 text-center">
+      <p class="text-[10px] uppercase tracking-wider text-slate-400">${csEscape(label)}</p>
+      <div class="text-xl font-mono font-bold text-slate-700 mt-1">${csEscape(value)}</div>
     </div>`;
 }
 
@@ -1210,9 +1214,11 @@ function csStat(label, value) {
 function csKvTile(k, v) {
     const raw = (v !== null && typeof v === 'object') ? JSON.stringify(v) : String(v === null ? '' : v);
     const long = raw.length > 64;
-    return `<div class="bg-slate-50 rounded-lg p-3">
-      <p class="text-[10px] text-slate-400 uppercase font-bold tracking-widest break-all">${csEscape(k)}</p>
-      <div class="text-sm text-slate-700 mt-1 font-mono break-all${long ? ' max-h-28 overflow-auto' : ''}">${csEscape(raw)}</div>
+    // Freshness-panel treatment (see csStat). break-all + the max-h scroll are
+    // kept: this grid renders arbitrary telemetry values, some of them long.
+    return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2">
+      <p class="text-[10px] uppercase tracking-wider text-slate-400 break-all">${csEscape(k)}</p>
+      <div class="text-sm font-mono font-bold text-slate-700 break-all${long ? ' max-h-28 overflow-auto' : ''}">${csEscape(raw)}</div>
     </div>`;
 }
 
@@ -1226,8 +1232,8 @@ function csKvTile(k, v) {
 function csProvisionCard(px) {
     const prov = (px && px.provision) || {};
     if (!Object.keys(prov).length) {
-        return `<div class="bg-slate-50 rounded-lg p-3 col-span-1 sm:col-span-2 lg:col-span-3 xl:col-span-4">
-      <p class="text-[10px] text-slate-400 uppercase font-bold tracking-widest mb-1">Auto-Provisioning</p>
+        return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 col-span-1 sm:col-span-2 lg:col-span-3 xl:col-span-4">
+      <p class="text-[10px] uppercase tracking-wider text-slate-400 mb-1">Auto-Provisioning</p>
       <div class="text-sm text-slate-500">No provision diagnostic reported by this host's agent.</div>
     </div>`;
     }
@@ -1269,10 +1275,10 @@ function csProvisionCard(px) {
     // Status chips: CS-enabled, loop-running, auto-provision-on. Amber when a
     // gate is closed (the most common "enabled but nothing provisions" causes).
     const chip = (label, ok) => `<span class="inline-block rounded-full px-2 py-0.5 text-[10px] font-bold ${ok ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}">${csEscape(label)}</span>`;
-    let html = `<div class="bg-slate-50 rounded-lg p-3 col-span-1 sm:col-span-2 lg:col-span-3 xl:col-span-4">
+    let html = `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 col-span-1 sm:col-span-2 lg:col-span-3 xl:col-span-4">
       <div class="flex items-center gap-2 mb-2">
-        <p class="text-[10px] text-slate-400 uppercase font-bold tracking-widest">Auto-Provisioning</p>
-        ${chip('CS-enabled', csOn)}${chip('loop running', loopOn)}${chip('auto-provision on', autoOn)}
+        <p class="text-[10px] uppercase tracking-wider text-slate-400">Auto-Provisioning</p>
+        ${chip(csOn ? 'CS-enabled' : 'CS disabled', csOn)}${chip(loopOn ? 'loop running' : 'loop stopped', loopOn)}${chip(autoOn ? 'auto-provision on' : 'auto-provision off', autoOn)}
       </div>
       <div class="text-sm text-slate-700 space-y-1">
         <div><b>Last pass:</b> ${reason}${loopOn ? '' : ' <span class="text-amber-600">(provision loop not running — check the pxmx agent log)</span>'}</div>
@@ -1378,9 +1384,10 @@ function csDongleTriplet(d) {
 function csDongleStats(h) {
     const d = csDongleCounts(h);
     const t = csEscape(csDongleTitle(d));
-    const tile = (label, value, cls) => `<div class="bg-slate-50 rounded-lg p-3 text-center" title="${t}">
-      <p class="text-[10px] text-slate-400 uppercase font-bold tracking-widest">${csEscape(label)}</p>
-      <div class="text-xl font-bold ${cls} mt-1">${value}</div>
+    // Freshness-panel chrome, matching csStat / csKvTile.
+    const tile = (label, value, cls) => `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 text-center" title="${t}">
+      <p class="text-[10px] uppercase tracking-wider text-slate-400">${csEscape(label)}</p>
+      <div class="text-xl font-mono font-bold ${cls} mt-1">${value}</div>
     </div>`;
     return tile('In use', d.inUse, 'text-slate-700')
          + tile('Available', d.avail, d.avail > 0 ? 'text-[#01A982]' : 'text-amber-600')
@@ -10258,8 +10265,8 @@ function csTelemetryTile(k, v) {
     if (k === 'pve_version') return csKvTile(k, csPveVersion(v));
     if (v !== null && typeof v === 'object') {
         const inner = csFmtKnownObj(k, v) || csFmtObjRows(v);
-        return `<div class="bg-slate-50 rounded-lg p-3 sm:col-span-2 lg:col-span-2">
-          <p class="text-[10px] text-slate-400 uppercase font-bold tracking-widest break-all">${csEscape(k)}</p>
+        return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 sm:col-span-2 lg:col-span-2">
+          <p class="text-[10px] uppercase tracking-wider text-slate-400 break-all">${csEscape(k)}</p>
           <div class="text-xs text-slate-700 mt-1 space-y-0.5 max-h-48 overflow-auto">${inner}</div>
         </div>`;
     }
