@@ -312,6 +312,23 @@ class SpokeAlertMixin:
             leaked = self._selfheal_leaked_agents()
             if leaked:
                 approved -= leaked
+                # Clearing is NOT optional here. Dropping them from `approved`
+                # only stops FUTURE evaluation -- an alert already raised before
+                # the leak was healed can then never be re-evaluated, so it is
+                # pinned at "error" forever while the AGENTS view shows the same
+                # host Online and seen seconds ago. That is the precise symptom
+                # this skip was written to prevent, so the skip alone made it
+                # PERMANENT instead of transient. Mirrors the decommissioned
+                # branch below, which already clears for the same reason.
+                for sid in leaked:
+                    if sid in getattr(self, "_spoke_alerts", {}):
+                        logger.info("[spoke-alert] clearing stale out-of-contact "
+                                    "alert for relayed agent %s (tracked under a "
+                                    "composite heartbeat key; it is not a spoke)",
+                                    self._spoke_label(sid))
+                    self._spoke_alert_clear(sid)
+                    self._spoke_alert_tier.pop(sid, None)
+                    self._spoke_absent_since.pop(sid, None)
 
             # Decommissioned (retired) spokes are excluded from the alert loop
             # entirely — a retired-but-offline box must not keep firing
