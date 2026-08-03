@@ -1021,15 +1021,52 @@ function csPct(v) {
 // segment per day, colored by the WORST status seen that day; the per-day title
 // shows the green/yellow/red counts. Hovering a day pops the hourly breakdown
 // (lazy-fetched once per check). Data from GET /aggregate/central-health.
+// Share of FAILING probes in a bucket at or above which the segment goes red.
+// Below it a failure is a WARNING: one bad probe in a busy cycle is noise, and
+// painting the whole day red for it made the 30-day strip a wall of red that
+// stopped distinguishing "briefly flaky" from "actually down".
+const CS_HEALTH_RED_RATIO = 0.25;
+
+// Segment colour for one health bucket (a day on the strip, an hour in the
+// popup). Shared by BOTH so the two can't drift — they were separate copies of
+// the same `e > 0 ? red : …` rule.
+//   red    — failing probes are >= CS_HEALTH_RED_RATIO of the bucket
+//   amber  — some failing (but under the ratio), or any warning probes
+//   green  — probes ran, none failed or warned
+//   grey   — no probes in the bucket (n/a only, or nothing recorded)
+// `n` (n/a) is deliberately EXCLUDED from the denominator: a check that was not
+// applicable did not fail, and counting it would dilute the ratio and hide real
+// failures on a mostly-idle day.
+function csHealthSegColor(d) {
+    const o = Number((d && d.o) || 0), w = Number((d && d.w) || 0), e = Number((d && d.e) || 0);
+    const total = o + w + e;
+    if (!total) return '#cbd5e1';
+    if (e > 0 && (e / total) >= CS_HEALTH_RED_RATIO) return '#ef4444';
+    if (e > 0 || w > 0) return '#f59e0b';
+    return '#10b981';
+}
+
+// "3/40 failing (8%)" — so the colour is explainable on hover rather than
+// something the operator has to reverse-engineer from the counts.
+function csHealthRatioText(d) {
+    const o = Number((d && d.o) || 0), w = Number((d && d.w) || 0), e = Number((d && d.e) || 0);
+    const total = o + w + e;
+    if (!total) return 'no probes';
+    const pct = Math.round((e / total) * 100);
+    return `${e}/${total} failing (${pct}%)`
+         + (e > 0 && (e / total) < CS_HEALTH_RED_RATIO
+            ? ` — under ${Math.round(CS_HEALTH_RED_RATIO * 100)}%, shown as warning` : '');
+}
+
 function csHealthBar(daily, site, check) {
     if (!daily || !daily.length) return '';
-    const segColor = d => (d.e > 0) ? '#ef4444' : (d.w > 0) ? '#f59e0b' : (d.o > 0) ? '#10b981' : '#cbd5e1';
     const pad = Math.max(0, 30 - daily.length);
     const padHtml = `<div style="flex:1 1 0;background:#eef2f6"></div>`.repeat(pad);
     const segs = daily.map(d => {
         const date = new Date(d.d * 1000).toISOString().slice(0, 10);
-        const t = `${date}: ${d.o || 0} green / ${d.w || 0} yellow / ${d.e || 0} red${d.n ? ' / ' + d.n + ' n/a' : ''}`;
-        return `<div class="cs-hbar-seg" style="flex:1 1 0;background:${segColor(d)};cursor:pointer"
+        const t = `${date}: ${d.o || 0} green / ${d.w || 0} yellow / ${d.e || 0} red${d.n ? ' / ' + d.n + ' n/a' : ''}`
+                + ` · ${csHealthRatioText(d)}`;
+        return `<div class="cs-hbar-seg" style="flex:1 1 0;background:${csHealthSegColor(d)};cursor:pointer"
                      data-day="${d.d}" title="${csEscape(t)}"></div>`;
     }).join('');
     return `<div class="cs-hbar flex gap-px h-2 rounded overflow-hidden w-full"
@@ -1057,13 +1094,15 @@ window.csHealthHover = async function (ev) {
     const day = parseInt(seg.getAttribute('data-day'), 10);
     const rect = seg.getBoundingClientRect();
     const hourly = await csHealthLoadHourly(site, check);
-    const color = h => (h.e > 0) ? '#ef4444' : (h.w > 0) ? '#f59e0b' : (h.o > 0) ? '#10b981' : '#cbd5e1';
     const byHour = {};
     hourly.filter(h => h.h >= day && h.h < day + 86400).forEach(h => { byHour[Math.floor((h.h - day) / 3600)] = h; });
     const slots = Array.from({ length: 24 }, (_, i) => {
         const h = byHour[i];
-        const c = h ? color(h) : '#e2e8f0';
-        const t = h ? `${i}:00 — ${h.o || 0} green / ${h.w || 0} yellow / ${h.e || 0} red` : `${i}:00 — no data`;
+        // Same ratio rule as the day strip (csHealthSegColor) — an hour with one
+        // bad probe out of many is a warning, not an outage.
+        const c = h ? csHealthSegColor(h) : '#e2e8f0';
+        const t = h ? `${i}:00 — ${h.o || 0} green / ${h.w || 0} yellow / ${h.e || 0} red · ${csHealthRatioText(h)}`
+                    : `${i}:00 — no data`;
         return `<div style="width:6px;height:16px;background:${c}" title="${csEscape(t)}"></div>`;
     }).join('');
     let pop = document.getElementById('cs-hbar-pop');
