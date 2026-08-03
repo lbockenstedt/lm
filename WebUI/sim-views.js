@@ -1377,6 +1377,28 @@ function csDongleTriplet(d) {
          + ` <span class="text-slate-300">/</span> <span class="${qtCls}">${d.qt}</span>${exPart}</span>`;
 }
 
+// CPU + Mem 1h averages in ONE tile. They were two tiles showing one number
+// each — the same metric family, read together, taking twice the width. Each
+// value keeps its own colour against the csPctCell thresholds (>=90 red,
+// >=75 amber) so a hot CPU next to a cool memory figure is still obvious.
+function csResourceStat(px) {
+    const p = px || {};
+    const val = v => {
+        const n = Number(v);
+        if (v == null || v === '' || !isFinite(n)) return { txt: '—', cls: 'text-slate-400' };
+        return { txt: n.toFixed(1) + '%',
+                 cls: n >= 90 ? 'text-red-600' : n >= 75 ? 'text-amber-600' : 'text-slate-700' };
+    };
+    const c = val(p.cpu_1h_avg), m = val(p.mem_1h_avg);
+    return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 text-center"
+                 title="Rolling 1-hour averages the auto-provision delete gate acts on. Amber at 75%, red at 90%.">
+      <p class="text-[10px] uppercase tracking-wider text-slate-400">CPU / Mem 1h</p>
+      <div class="text-xl font-mono font-bold mt-1" style="font-variant-numeric:tabular-nums">
+        <span class="${c.cls}">${csEscape(c.txt)}</span><span class="text-slate-300 mx-1">/</span><span class="${m.cls}">${csEscape(m.txt)}</span>
+      </div>
+    </div>`;
+}
+
 // Per-host dongle tiles for the VM Server → Details stat grid. Same shape as
 // csStat but colour-coded (csStat escapes its value, so it can't carry markup):
 // Available amber at 0 (no spare capacity), QT red when nonzero. The Excluded
@@ -10432,7 +10454,7 @@ async function csRenderVmServerDetails() {
       <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
         ${csStat('Node', node.hostname || '—')}${csStat('USB', csUsbCount(h))}
         ${csDongleStats(h)}
-        ${csStat('CPU 1h', px.cpu_1h_avg || '—')}${csStat('Mem 1h', px.mem_1h_avg || '—')}
+        ${csResourceStat(px)}
         ${csStat('Agent', px.agent_version || '—')}
       </div>
       ${csLinkApprovalCard(h)}
