@@ -1,7 +1,73 @@
 """Dashboard summary/all-tenants + cross-system search routes."""
+import time
+
 from api import (
     HTTPException, Request, _unwrap_spoke, access, filter_items_by_prefixes, get_tenant_scoping, logger,
 )
+
+# GREEN/YELLOW/RED age bands for a relayed agent, matching HeartbeatManager.get_status
+# (and routes/pxmx.py:107-127) so one agent can't read "online" on the Spokes &
+# Agents page and "offline" on the dashboard tile.
+_AGENT_GREEN_S = 120
+_AGENT_RED_S = 300
+
+
+def relayed_agent_last_seen(hub) -> dict:
+    """``{agent_primary_key: last_seen_epoch}`` for every relayed node agent.
+
+    A node agent (pxmx / cs) NEVER appears in ``active_connections``: it dials
+    its PARENT SPOKE, which relays ``AGENT_RELAY_UP`` to the hub. Two signals
+    carry its liveness, and the freshest wins:
+
+    * ``agent_info[pk]["last_seen"]`` — stamped on EVERY relayed frame
+      (main.py ``_dispatch_relayed_agent_frame``); evicted when the parent
+      spoke disconnects and wiped on hub restart.
+    * the composite ``{spoke_pk}:{agent_pk}`` heartbeat key — persisted via
+      ``spoke_last_seen`` and re-seeded on boot, so it survives both.
+
+    Never raises: a malformed hub degrades to an empty index, which just means
+    the caller falls back to the spoke-only test (previous behaviour).
+    """
+    out: dict = {}
+    for pk, info in (getattr(hub, "agent_info", {}) or {}).items():
+        ls = (info or {}).get("last_seen")
+        if isinstance(ls, (int, float)):
+            out[pk] = max(out.get(pk, 0.0), float(ls))
+    hb = getattr(hub, "heartbeat", None)
+    for key, ts in (getattr(hb, "last_seen", {}) or {}).items():
+        k = str(key)
+        if ":" in k and isinstance(ts, (int, float)):
+            apk = k.split(":", 1)[1]
+            out[apk] = max(out.get(apk, 0.0), float(ts))
+    return out
+
+
+def infra_item_status(hub, sid, tier, connected, agent_last, now=None):
+    """``(online, status)`` for one Infrastructure Status row.
+
+    Spokes keep the original test — a live WebSocket in ``active_connections``.
+    Only when that says offline do we retry as a relayed AGENT, so a connected
+    spoke's verdict is never reinterpreted and a spoke id that happens to
+    collide with an agent key cannot be downgraded.
+
+    Without the agent branch a perfectly healthy pxmx agent read as permanently
+    "offline" here while Setup → Spokes & Agents showed it Online, seen seconds
+    ago — the same spoke-vs-agent confusion ``spoke_alert_sync`` already fixed
+    for the out-of-contact alerts.
+    """
+    now = time.time() if now is None else now
+    online = hub._primary_key(sid) in connected
+    agent_age = None
+    if not online:
+        last = (agent_last or {}).get(hub._agent_primary_key(sid))
+        if isinstance(last, (int, float)) and last > 0:
+            agent_age = max(0.0, now - last)
+            online = agent_age < _AGENT_RED_S
+    if not online or tier == "error":
+        return online, "red"
+    if tier == "warning" or (agent_age is not None and agent_age >= _AGENT_GREEN_S):
+        return online, "yellow"
+    return online, "green"
 
 
 def _spoke_rosters(hub) -> dict:
@@ -177,6 +243,12 @@ def register(app, hub, ctx):
             alerts = {a["spoke_id"]: a.get("tier") for a in hub.get_active_spoke_alerts()}
         except Exception:  # noqa: BLE001
             alerts = {}
+        # Relayed node agents never appear in active_connections (they dial their
+        # parent spoke); infra_item_status falls back to their heartbeat so a
+        # live agent stops reading "offline" here. See relayed_agent_last_seen.
+        agent_last = relayed_agent_last_seen(hub)
+        now = time.time()
+
         items = []
         for sid, meta in md.items():
             meta = meta or {}
@@ -184,9 +256,8 @@ def register(app, hub, ctx):
             if not want_all and tid and stid and stid != tid:
                 continue  # bound to another tenant (untagged = shared infra → shown)
             tier = alerts.get(sid, "none")
-            online = hub._primary_key(sid) in connected
-            status = ("red" if (not online or tier == "error")
-                      else "yellow" if tier == "warning" else "green")
+            online, status = infra_item_status(hub, sid, tier, connected,
+                                               agent_last, now)
             items.append({
                 "id": sid,
                 "name": meta.get("display_name") or meta.get("name") or sid,
