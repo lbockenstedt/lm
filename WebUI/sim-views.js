@@ -5659,7 +5659,8 @@ function _csSimTagHealthText(d) {
             // and, if it also carries no tags, desired==actual so in_sync is
             // TRUE — it would silently vanish from a !in_sync filter, which is
             // exactly the "no label in Proxmox" case this panel must explain.
-            (h.vms || []).filter(v => !v.in_sync || (v.excluded && !(v.actual || []).length)).forEach(v => {
+            const _isSim = v => Number(v.vmid) > 90000;   // matches the spoke's unlabeled filter
+            (h.vms || []).filter(v => !v.in_sync || (_isSim(v) && v.excluded && !(v.actual || []).length)).forEach(v => {
                 lines.push(`    ${v.vmid} ${v.name}: desired=[${(v.desired || []).join(' ')}] ` +
                            `actual=[${(v.actual || []).join(' ')}]${v.excluded ? ' why=' + v.excluded : ''}` +
                            `${v.excluded && !(v.actual || []).length ? ' UNLABELED' : ''}`);
@@ -10142,6 +10143,16 @@ async function _csUsbClearCmd(host, action, doneMsg, allSpokes) {
         else if (typeof showToast === 'function') showToast(doneMsg, 'success');
     } catch (e) { console.error(action + ' failed', e); if (typeof showToast === 'function') showToast(action + ' failed: ' + (e.message || e), 'error'); }
 }
+// Purge the missing-dongle HISTORY (presence roster + boot baseline) on every
+// spoke. For after a deliberate hardware change — dongles moved, ports rewired,
+// a controller card pulled — where the recorded history describes a machine
+// that no longer exists and would keep reporting phantom losses. Does NOT touch
+// quarantine or the exclusion list; it only forgets what USED to be attached.
+window.csClearUsbHistory = async function (host) {
+    if (!confirm('Purge dongle history across ALL spokes?\n\nForgets the presence roster and the boot baseline, so "missing" is recounted from what is actually attached. Use after moving dongles or pulling a card. Quarantine and exclusions are untouched.\n\nThe boot baseline will be re-captured mid-boot and marked untrusted until the next reboot.')) return;
+    _csUsbClearCmd(host, 'clear_usb_history', 'Dongle history purged on all spokes — missing counts rebuild from what is attached now', true);
+};
+
 window.csClearUsbQuarantine = async function (spokeId, host) {
     if (!confirm(`Clear USB quarantine across ALL spokes?\n\nClears the dmesg quarantine list (incl. the 5-strike permanent flag) and force-unbinds any driver-bound dongle from the host driver. Leaves the exclusion list intact.`)) return;
     _csUsbClearCmd(host, 'clear_usb_quarantine', 'Quarantine cleared on all spokes + driver-bound dongles released — available on the next provision pass', true);
@@ -10717,7 +10728,7 @@ function _csDiagRepoText(apiData) {
         const rp = ((sp.api_server || {}).health || {}).repo;
         const name = sp.spoke_name || sp.display_name || sp.spoke_id;
         if (!rp) { L.push(`  ${name}: repo status unavailable (offline or pre-update)`); return; }
-        L.push(`  ${name}: branch=${rp.configured_branch || '?'} version=${rp.version || '?'}` +
+        L.push(`  ${name}: branch=${rp.configured_branch || '?'} version=${rp.served_version || rp.version || '?'}` +
                `${rp.configured_branch && rp.configured_branch !== 'main' ? '  ** NOT main — pushes to main will not reach this spoke **' : ''}` +
                `${rp.dns_latency_present === false ? '  ** dns_latency.sh MISSING **' : ''}`);
     });
@@ -10733,7 +10744,12 @@ function _csDiagDongleText(hosts) {
         if (!d || !d.generated_at) { L.push(`  ${name}: no diagnostic reported (agent likely predates this feature)`); return; }
         any = true;
         const u = d.uhubctl || {};
-        L.push(`  ${name}: ${(d.missing || []).length} missing / ${(d.passed_through || []).length} passed-through / ${d.present_count ?? '?'} present / ${d.known_count ?? '?'} ever seen` +
+        const _bb = d.boot_baseline || {};
+        L.push(`  ${name}: ${(d.lost_since_boot || []).length} LOST since boot / ` +
+               `${((d.passed_through || []).length + (d.boot_passthrough || []).length)} passed-through / ` +
+               `${((d.lost_transient || []).length + (d.missing_transient || []).length)} transient / ` +
+               `${(d.missing || []).length} missing(roster) / ${d.present_count ?? '?'} present` +
+               `  boot_baseline=${_bb.count ?? '?'}${_bb.trusted === false ? ' (UNTRUSTED — taken mid-boot)' : ''}` +
                `  uhubctl=${u.supported ? 'SUPPORTED (' + (u.ppps_hubs || []).length + ' PPPS hub)' : u.installed ? 'installed, no PPPS hub' : 'not installed'}`);
         (d.missing || []).forEach(m => L.push(`    ${m.bus_path} ${m.vidpid} ${m.product} — missing ${m.missing_for_s != null ? m.missing_for_s + 's' : '?'}`));
         (d.causes || []).forEach(c => L.push(`    CAUSE [${c.confidence}] ${c.cause}: ${c.detail}` + (c.remedy ? ` | FIX: ${c.remedy}` : '')));
@@ -10883,7 +10899,9 @@ async function csRenderSetupDiagnostics() {
       })}
 
       ${csDiagSection('cs-dongle-diag', 'Missing dongles — probable cause', {
-        actions: _act('↻', 'csRenderDongleDiag()', 'Refresh this panel'),
+        actions: _act('⌫ Purge history', 'csClearUsbHistory(\'\')',
+                      'Forget the presence roster + boot baseline on every spoke. Use after moving dongles or pulling a controller card, so "missing" is recounted from what is actually attached. Quarantine and exclusions untouched.')
+               + _act('↻', 'csRenderDongleDiag()', 'Refresh this panel'),
         help: 'Where dongles went when a host\'s <code>lsusb</code> count decays over days. The agent keeps a persisted roster of every certified dongle it has ever seen, so a bus that stops appearing is reported as <b>missing</b> rather than silently vanishing from the totals. The provisioning health ladder cannot recover these: its <code>usb_reset</code> rung writes <code>/sys/bus/usb/devices/&lt;bus&gt;/authorized</code>, which stops existing the moment the device leaves the bus. Causes are ranked from kernel evidence tied to the missing bus; <b>uhubctl</b> reports whether per-port power cycling is possible on this host at all.',
       })}
 
@@ -10952,6 +10970,14 @@ function _csDongleDiagHost(h) {
     // passthrough), so the host correctly stops seeing them — ~4 per host. Kept
     // out of the "missing" count so that number only ever means "lost".
     const passed = Array.isArray(d.passed_through) ? d.passed_through : [];
+    // Boot-anchored losses: present at boot, gone now, excluding controllers
+    // handed to VMs and dongles too briefly attached to be inventory. This is
+    // the authoritative "what should be here and is not".
+    const lost = Array.isArray(d.lost_since_boot) ? d.lost_since_boot : [];
+    const bootPt = Array.isArray(d.boot_passthrough) ? d.boot_passthrough : [];
+    const transient = (Array.isArray(d.lost_transient) ? d.lost_transient : [])
+        .concat(Array.isArray(d.missing_transient) ? d.missing_transient : []);
+    const bb = d.boot_baseline || {};
     const causes = Array.isArray(d.causes) ? d.causes : [];
     const kernel = d.kernel || {};
     const power = Array.isArray(d.power) ? d.power : [];
@@ -11010,8 +11036,14 @@ function _csDongleDiagHost(h) {
       ${csDiagTiles([
         csDiagTile('Present', String(d.present_count ?? '—'), 'certified, on the bus'),
         csDiagTile('Missing', String(missing.length), 'was seen, now gone', missing.length ? 'bad' : 'good'),
-        csDiagTile('Passed through', String(passed.length),
-                   passed.length ? 'behind a VM-owned controller — expected' : 'no controller passed through'),
+        csDiagTile('Lost since boot', String(lost.length),
+                   bb.trusted === false ? 'baseline taken mid-boot — not authoritative'
+                                        : 'present at boot, gone now',
+                   lost.length ? 'bad' : 'good'),
+        csDiagTile('Passed through', String(passed.length + bootPt.length),
+                   (passed.length + bootPt.length) ? 'VM-owned controller — expected' : 'none'),
+        csDiagTile('Transient', String(transient.length),
+                   `seen < ${csAgeShort(d.inventory_min_age_s || 14400)} — not inventory`),
         csDiagTile('Ever seen', String(d.known_count ?? '—'), 'persisted roster'),
         csDiagTile('Autosuspend', `${autoN}/${power.length}`, "power/control=auto", autoN ? 'warn' : null),
         csDiagTile('Kernel events', String(kTotalN), `${csAgeShort(kernel.window_s || 0)} window`,
