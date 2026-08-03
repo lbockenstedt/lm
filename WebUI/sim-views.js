@@ -8252,15 +8252,13 @@ async function csRenderVmServer() {
           <td class="px-4 py-2 text-center text-xs">${csPctCell(px.cpu_1h_avg)}</td>
           <td class="px-4 py-2 text-center text-xs">${csPctCell(px.mem_1h_avg)}</td>
           <td class="px-4 py-2 text-center">${csProvThrottleBadge(px)}</td>
-          <td class="px-4 py-2 text-xs text-slate-600">${csEscape(px.agent_version || '—')}</td>
-          <td class="px-4 py-2 text-xs text-slate-600">${csEscape(csPveVersion(px.pve_version))}</td>
         </tr>`;
     }).join('');
-    // Header alignment: center the numeric/badge columns (Online…Auto-Prov),
-    // left-align Host + the version columns. "Dongles" is the in-use/available/QT
-    // breakdown of the USB count to its left (csDongleTriplet); the centred span
-    // now runs Online…Auto-Prov = indices 1..7.
-    const ths = ['Host', 'Online', 'VMs', 'USB', 'Dongles', 'CPU 1h', 'Mem 1h', 'Auto-Prov', 'Agent', 'PVE']
+    // Header alignment: Host is left-aligned, every remaining column (Online…
+    // Auto-Prov = indices 1..7) is centred. The Agent + PVE version columns were
+    // dropped from this table — both are per-host detail rather than fleet
+    // scanning signal, and they still show on VM Server → Details.
+    const ths = ['Host', 'Online', 'VMs', 'USB', 'Dongles', 'CPU 1h', 'Mem 1h', 'Auto-Prov']
         .map((c, i) => `<th class="px-4 py-2 ${i >= 1 && i <= 7 ? 'text-center' : 'text-left'} font-medium"${c === 'Dongles' ? ' title="in use / available / quarantined (+ excluded when nonzero)"' : ''}>${c}</th>`).join('');
     const selTh = `<th class="px-4 py-2 text-center"><input type="checkbox" onclick="csFleetSelectAll(this)" title="Select all hosts"></th>`;
     const table = `<div class="overflow-x-auto"><table class="w-full text-sm">
