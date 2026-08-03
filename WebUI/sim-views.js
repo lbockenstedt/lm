@@ -8074,22 +8074,36 @@ function csVmKey(v) { return (v._spoke || '') + '|' + (v._host || '') + '|' + v.
 /** Searchable multi-select host filter shown atop every VM Server child.
  * Replaces the old pill row (which didn't scale past ~15 hosts). Empty
  * selection = All hosts; pick one or many. Scales via search + scroll. */
-function csVmHostBanner() {
+function csVmHostBanner(opts) {
     if (!csVmHosts.length) return '';
+    // SINGLE mode: for children that render exactly ONE host (Details). There,
+    // multi-select is not just useless but actively wrong — csVmSelectedHost()
+    // resolves the sticky csVmSelectedHostId FIRST, so ticking a second host
+    // left the page still rendering the first one and the new pick appeared to
+    // do nothing. Single mode REPLACES the selection, so picking a host always
+    // switches to it.
+    const single = !!(opts && opts.single);
     const _hname = h => (h.spoke_name || h.spoke_hostname || h.spoke_id || '');
     const sorted = csVmHosts.slice().sort((a, b) =>
         _hname(a).localeCompare(_hname(b), undefined, { numeric: true, sensitivity: 'base' }));
     const sel = new Set(csVmSelectedHostIds);
     const nSel = csVmSelectedHostIds.length;
-    const summary = nSel === 0 ? `All hosts (${sorted.length})`
-                  : nSel === 1 ? (_hname(sorted.find(h => sel.has(csVmHostId(h))) || {}) || '1 host')
-                  : `${nSel} hosts selected`;
+    // In single mode the effective host is whatever csVmSelectedHost() resolves
+    // to (it falls back to the first online host), so the button reflects what
+    // is actually ON SCREEN rather than an empty selection.
+    const curId = single ? csVmHostId(csVmSelectedHost() || {}) : null;
+    const summary = single
+        ? (_hname(sorted.find(h => csVmHostId(h) === curId) || {}) || 'Select a host')
+        : nSel === 0 ? `All hosts (${sorted.length})`
+        : nSel === 1 ? (_hname(sorted.find(h => sel.has(csVmHostId(h))) || {}) || '1 host')
+        : `${nSel} hosts selected`;
     const rows = sorted.map(h => {
         const id = csVmHostId(h);
-        const on = sel.has(id);
+        const on = single ? (id === curId) : sel.has(id);
         return `<label data-cs-host-name="${csEscape(_hname(h).toLowerCase())}"
              class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-slate-50 ${on ? 'bg-green-50' : ''}">
-             <input type="checkbox" ${on ? 'checked' : ''} onchange="csVmHostToggle('${csEscape(id)}')"/>
+             <input type="${single ? 'radio" name="cs-host-pick' : 'checkbox'}" ${on ? 'checked' : ''}
+                    onchange="${single ? `csVmHostPick('${csEscape(id)}')` : `csVmHostToggle('${csEscape(id)}')`}"/>
              ${csOnlineDot(h.spoke_online)}<span class="flex-1">${csEscape(_hname(h))}</span>
              <span class="text-slate-400">${csHostVms(h).length} VM</span></label>`;
     }).join('');
@@ -8098,14 +8112,14 @@ function csVmHostBanner() {
         <span class="text-[10px] font-bold uppercase tracking-widest text-slate-400">Host</span>
         <button onclick="csVmHostPanelToggle()" class="flex-1 text-left px-3 py-1.5 rounded-md border border-slate-200 bg-white text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center justify-between">
           <span>${csEscape(summary)}</span><span class="text-slate-400">▾</span></button>
-        ${nSel ? `<button onclick="csVmHostAll()" class="text-[11px] text-slate-400 hover:text-slate-600 underline">clear</button>` : ''}
+        ${(!single && nSel) ? `<button onclick="csVmHostAll()" class="text-[11px] text-slate-400 hover:text-slate-600 underline">clear</button>` : ''}
       </div>
       <div id="cs-host-panel" class="${_csHostPanelOpen ? '' : 'hidden'} absolute z-20 mt-1 w-full bg-white border border-slate-200 rounded-md shadow-lg">
         <div class="p-2 border-b border-slate-100">
           <input id="cs-host-search" type="text" placeholder="Search hosts…" oninput="csVmHostSearch(this.value)"
                  class="w-full px-2 py-1 text-xs border border-slate-200 rounded"/></div>
-        <label class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-slate-50 border-b border-slate-100 font-semibold">
-          <input type="checkbox" ${nSel === 0 ? 'checked' : ''} onchange="csVmHostAll()"/>All hosts</label>
+        ${single ? '' : `<label class="flex items-center gap-2 px-3 py-1.5 text-xs cursor-pointer hover:bg-slate-50 border-b border-slate-100 font-semibold">
+          <input type="checkbox" ${nSel === 0 ? 'checked' : ''} onchange="csVmHostAll()"/>All hosts</label>`}
         <div class="max-h-64 overflow-y-auto">${rows}</div>
       </div>
     </div>`;
@@ -8131,6 +8145,19 @@ window.csVmHostToggle = function (id) {
     const i = csVmSelectedHostIds.indexOf(id);
     if (i >= 0) csVmSelectedHostIds.splice(i, 1); else csVmSelectedHostIds.push(id);
     _csHostPanelOpen = true;
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    loadCSData('VM Server', currentSubChild || 'VMs', true);
+};
+// Single-select pick (Details). REPLACES the selection and re-pins the sticky
+// csVmSelectedHostId — csVmSelectedHost() resolves that id first, so without
+// re-pinning it the page would keep rendering the previously-selected host.
+// Closes the panel: unlike the multi-select there is nothing more to tick.
+window.csVmHostPick = function (id) {
+    csVmSelectedHostIds = [id];
+    csVmSelectedHostId = id;
+    const h = csVmHosts.find(x => csVmHostId(x) === id);
+    if (h) csVmSelectedSpoke = h.spoke_id;
+    _csHostPanelOpen = false;
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
     loadCSData('VM Server', currentSubChild || 'VMs', true);
 };
@@ -10365,7 +10392,11 @@ async function csRenderVmServerDetails() {
     // spanning tile instead of a raw JSON blob (csTelemetryTile).
     const tiles = entries.map(([k, v]) => csTelemetryTile(k, v)).join('');
     const _delId = csVmHostId(h);
-    csSet(`<div>${csVmHostBanner()}
+    // Details renders exactly ONE host, so the picker is single-select here:
+    // picking a host SWITCHES to it. With the shared multi-select, ticking a
+    // second host left this page rendering the first (csVmSelectedHost resolves
+    // the sticky id first), so the new pick looked like it did nothing.
+    csSet(`<div>${csVmHostBanner({ single: true })}
       <div class="flex justify-end mb-3">
         <button onclick="csDeleteHost('${csEscape(String(_delId).replace(/'/g, "\\'"))}')"
           class="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-md text-xs font-bold"
