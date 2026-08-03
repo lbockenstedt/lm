@@ -6077,6 +6077,22 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             summary = {}
         bad = list(summary.get("bad_versions") or [])
         out["bad_versions"] = bad
+
+        # The hub's own update-path self-diagnosis (check_update_health, cached by
+        # repo_sync). Its `errors` list names precisely why an Update click can
+        # pull but never restart — a broken systemd unit, MainPID=0, a missing
+        # lm-update-restart helper, an unresolved git HEAD. It was log-only, so
+        # the UI could sit "updating" indefinitely while the answer sat in a log.
+        # A broken updater is a hard fault: it will not fix itself.
+        uh = getattr(self, "_update_health", None) or {}
+        uh_errors = [str(e) for e in (uh.get("errors") or [])]
+        out["update_health_errors"] = uh_errors
+        out["update_health_ok"] = bool(uh.get("ok", True)) and not uh_errors
+        if uh_errors:
+            out["update_failed"] = True
+            out["update_fault_reason"] = ("the update path itself is broken — "
+                                          + uh_errors[0])
+
         if summary.get("failed"):
             out["update_failed"] = True
             det = summary.get("failed_detail") or {}

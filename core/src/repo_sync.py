@@ -206,6 +206,12 @@ class RepoSyncMixin:
             update_health = await self.check_update_health()
         except Exception as e:  # noqa: BLE001 — never fatal to the loop
             update_health = {"ok": False, "checks": {}, "warnings": [f"health check crashed: {e}"]}
+        # Cache for /status. These errors name exactly WHY an Update click pulls
+        # but never restarts (bad unit Type, MainPID=0, no Restart=, missing
+        # lm-update-restart helper, unresolved HEAD). They were log-only, so the
+        # UI showed a hub "updating" forever with the diagnosis sitting in a file
+        # nobody was reading. The footer dot now turns red on them.
+        self._update_health = update_health
         for e in update_health.get("errors", []):
             # BROKEN update/self-heal infrastructure -> ERROR so it lands in the
             # hub error view (GET_ERROR_LOGS / bugfixer), not just a warning.

@@ -165,3 +165,39 @@ def test_read_update_failed_corrupt_is_none_not_an_exception(statedir):
     with open(update_recovery._failed_path(str(statedir)), "w") as f:
         f.write("{not json")
     assert update_recovery.read_update_failed(state_dir=str(statedir)) is None
+
+
+# ── broken update PATH (check_update_health errors) ──────────────────────────
+# The case behind "it says updating but the hub never updates": the pull works,
+# the restart never happens, and check_update_health already knew why — but its
+# errors were log-only, so the UI showed nothing.
+
+def test_update_health_errors_are_a_hard_fault(statedir):
+    hub = _Hub()
+    hub._update_health = {"ok": False, "errors": [
+        "lm.service Type=oneshot (expected 'exec') - ... leaves a STALE process",
+        "/usr/local/bin/lm-update-restart missing/not executable",
+    ], "warnings": [], "checks": {}}
+    out = _fault(hub, behind=True)
+    assert out["update_failed"] is True
+    assert out["update_health_ok"] is False
+    assert len(out["update_health_errors"]) == 2
+    assert "update path itself is broken" in out["update_fault_reason"]
+    assert "Type=oneshot" in out["update_fault_reason"]
+
+
+def test_healthy_update_path_is_not_a_fault(statedir):
+    hub = _Hub()
+    hub._update_health = {"ok": True, "errors": [], "warnings": ["behind by 2"],
+                          "checks": {}}
+    out = _fault(hub, behind=True)
+    assert out["update_failed"] is False and out["update_health_ok"] is True
+
+
+def test_missing_update_health_never_false_reds(statedir):
+    """Before the first repo-sync cycle there is no cached health — that must
+    read as 'no evidence', not 'broken'."""
+    out = _fault(_Hub(), behind=True)
+    assert out["update_failed"] is False
+    assert out["update_health_errors"] == []
+    assert out["update_health_ok"] is True
