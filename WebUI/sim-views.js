@@ -10148,8 +10148,10 @@ async function _csUsbClearCmd(host, action, doneMsg, allSpokes) {
 // a controller card pulled — where the recorded history describes a machine
 // that no longer exists and would keep reporting phantom losses. Does NOT touch
 // quarantine or the exclusion list; it only forgets what USED to be attached.
+// No confirm dialog: the action is cheap and self-repairing — both files rebuild
+// from what is actually attached on the next pass, so a mis-click costs a
+// baseline, not data. The button tooltip carries the explanation instead.
 window.csClearUsbHistory = async function (host) {
-    if (!confirm('Purge dongle history across ALL spokes?\n\nForgets the presence roster and the boot baseline, so "missing" is recounted from what is actually attached. Use after moving dongles or pulling a card. Quarantine and exclusions are untouched.\n\nThe boot baseline will be re-captured mid-boot and marked untrusted until the next reboot.')) return;
     _csUsbClearCmd(host, 'clear_usb_history', 'Dongle history purged on all spokes — missing counts rebuild from what is attached now', true);
 };
 
