@@ -144,6 +144,11 @@ except ImportError:
 configure_logging()
 logger = logging.getLogger("Hub")
 
+# How long version drift (pull available, or a restart pending) may persist
+# before the footer dot escalates from amber "pending" to red "stuck". Long
+# enough that a routine pull + watchdog restart never trips it.
+_UPDATE_STUCK_S = float(os.environ.get("LM_UPDATE_STUCK_S", "3600") or 3600)
+
 # Dedicated channel for generic-agent lifecycle diagnostics — the
 # connected-but-never-authenticated signature of a protocol-incompatible
 # legacy GenericLeafAgent or a crashed-on-startup agent-spoke (see
@@ -6039,9 +6044,75 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             base["running_version"] = running_ver
             base["behind"] = behind
             base["update_available"] = update_avail
+            base.update(self._update_fault_state(behind, update_avail))
         except Exception:  # noqa: BLE001 — never let the dot break /status
             pass
         return base
+
+    # An update that is merely PENDING and one that is STUCK or FAILED looked
+    # identical to the footer dot (both amber), so a hub wedged on an old version
+    # was indistinguishable from one waiting on a routine restart — the operator
+    # kept pressing Update and watching nothing happen. These are the signals
+    # that separate them.
+    def _update_fault_state(self, behind: bool, update_avail: bool) -> dict:
+        """``{update_failed, update_stuck, stuck_for_s, bad_versions, ...}``.
+
+        ``update_failed`` — the double-failure marker exists, or the version the
+        hub is trying to reach is on the bad-versions list (the auto loop skips
+        those, so clicking Update genuinely cannot help until it is cleared).
+        ``update_stuck``  — a pull has been available, or a restart pending, for
+        longer than ``LM_UPDATE_STUCK_S`` (default 1h). Nothing is provably
+        broken, but the update is not progressing on its own.
+
+        Never raises: a fault here must not take /status with it.
+        """
+        import time as _t
+        out: dict = {"update_failed": False, "update_stuck": False,
+                     "stuck_for_s": None, "bad_versions": [],
+                     "update_fault_reason": ""}
+        try:
+            import update_recovery
+            summary = update_recovery.update_health_summary()
+        except Exception:  # noqa: BLE001
+            summary = {}
+        bad = list(summary.get("bad_versions") or [])
+        out["bad_versions"] = bad
+        if summary.get("failed"):
+            out["update_failed"] = True
+            det = summary.get("failed_detail") or {}
+            out["update_fault_reason"] = (
+                f"update to {det.get('to_version') or '?'} failed AND the rollback "
+                f"failed to boot ({det.get('reason') or 'no reason recorded'}). "
+                f"Backup preserved at {det.get('backup_dir') or '?'}.")
+        elif bad:
+            # A bad version pins the hub: the auto loop refuses to re-pull it, so
+            # every Update click is a no-op until the entry is cleared.
+            out["update_failed"] = True
+            out["update_fault_reason"] = (
+                "version(s) " + ", ".join(bad) + " were rolled back after a failed "
+                "boot and are on the bad-versions list — the updater skips them, "
+                "so Update will not advance past this point until cleared.")
+
+        # Stuck: drift that has persisted. Tracked here (the single read point)
+        # rather than in the 20s loop so it is correct even if that loop dies.
+        now = _t.time()
+        drifting = bool(behind or update_avail)
+        if not drifting:
+            self._update_drift_since = None
+        elif getattr(self, "_update_drift_since", None) is None:
+            self._update_drift_since = now
+        since = getattr(self, "_update_drift_since", None)
+        if since:
+            held = max(0.0, now - float(since))
+            out["stuck_for_s"] = int(held)
+            if held >= _UPDATE_STUCK_S:
+                out["update_stuck"] = True
+                if not out["update_fault_reason"]:
+                    out["update_fault_reason"] = (
+                        f"an update has been pending for {int(held // 60)} min "
+                        "without completing — the pull or the restart is not "
+                        "progressing.")
+        return out
 
     async def run_watchdog_bridge_loop(self):
         """Bridge the ROOT lm-watchdog to the hub, every ~20s:

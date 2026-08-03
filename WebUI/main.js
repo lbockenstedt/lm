@@ -2421,25 +2421,50 @@ function _updateMetrics(statusData) {
         //                           hasn't restarted into it yet (disk != running)
         //   YELLOW (update_avail)  = a newer version is on the remote, not pulled
         // Rendered as "● Version | <running .nnn>".
+        //   RED (failed/stuck)     = the update is NOT going to complete on its
+        //                           own: a rollback failed, a version is on the
+        //                           bad-versions list (the updater skips it, so
+        //                           Update is a permanent no-op), or drift has
+        //                           persisted past LM_UPDATE_STUCK_S.
+        // Amber previously covered this case too, so a hub wedged on an old
+        // version looked identical to one waiting on a routine restart — you
+        // could press Update repeatedly and never learn it could not work.
         const wd = m.watchdog || {};
         const behind = !!wd.behind;
         const updateAvail = !!wd.update_available;
-        const dotTone = (behind || updateAvail) ? 'bg-amber-400' : 'bg-green-500';
+        const updFailed = !!wd.update_failed;
+        const updStuck = !!wd.update_stuck;
+        const bad = (updFailed || updStuck);
+        const dotTone = bad ? 'bg-red-500'
+            : (behind || updateAvail) ? 'bg-amber-400' : 'bg-green-500';
         // wd.running_version mirrors m.version (both the running process's boot
         // version); target_version is the on-disk VERSION. Surface the explicit
         // running/target pair in the tooltip so the drift is obvious.
         const running = wd.running_version || m.version;
         const target = wd.target_version || '';
-        const title = behind
-            ? `Behind — disk has ${target} but running ${running}; restart pending (watchdog will in-window)`
-            : updateAvail
-                ? `Update available — a newer version is on the remote (running ${running}); click Update to pull`
-                : `Up to date (running ${running})`;
+        // A red dot must say WHAT to do — an alarming dot with a vague tooltip is
+        // worse than no dot. The hub sends update_fault_reason already phrased
+        // for a human; fall back to a generic line only if it's missing.
+        const stuckMin = wd.stuck_for_s != null ? Math.round(wd.stuck_for_s / 60) : null;
+        const title = bad
+            ? `UPDATE NOT PROGRESSING — running ${running}${target && target !== running ? `, disk has ${target}` : ''}`
+              + (wd.update_fault_reason ? `. ${wd.update_fault_reason}` : '')
+              + ((wd.bad_versions || []).length ? ` Bad versions: ${(wd.bad_versions || []).join(', ')}.` : '')
+              + (stuckMin != null ? ` Pending ${stuckMin} min.` : '')
+              + ' Check Setup → Diagnostics and the hub log; this will not clear on its own.'
+            : behind
+                ? `Behind — disk has ${target} but running ${running}; restart pending (watchdog will in-window)`
+                : updateAvail
+                    ? `Update available — a newer version is on the remote (running ${running}); click Update to pull`
+                    : `Up to date (running ${running})`;
         // Match the green glow the hub/module online dots carry
         // (shadow-[0_0_6px_rgba(34,197,94,0.5)]) so the version dot reads as the
         // same shade of green, not a flatter one. Only green gets the halo; the
         // amber behind/update-available tone stays flat (matches the amber dots).
-        const dotGlow = (behind || updateAvail) ? '' : ' shadow-[0_0_6px_rgba(34,197,94,0.5)]';
+        // Red gets a halo too — a fault should be as visually loud as healthy is
+        // reassuring; only the amber "pending" tone stays flat.
+        const dotGlow = bad ? ' shadow-[0_0_6px_rgba(239,68,68,0.6)]'
+            : (behind || updateAvail) ? '' : ' shadow-[0_0_6px_rgba(34,197,94,0.5)]';
         versionEl.innerHTML = `<span class="inline-block w-2 h-2 rounded-full ${dotTone}${dotGlow} transition-all align-middle mr-1.5" title="${escapeHtml(title)}"></span>Version | ${escapeHtml(m.version)}`;
         window.__lmHubVersion = m.version;  // for File-a-Bug context (running version)
         window.__lmTargetVersion = target || null;  // on-disk VERSION, for the Update toast

@@ -391,6 +391,56 @@ def write_update_failed(to_version: str, backup_dir: str, reason: str,
     logger.error("update FAILED and rollback also failed: %s (backup at %s)", to_version, backup_dir)
 
 
+def read_update_failed(state_dir: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """The double-failure marker written by ``write_update_failed``, or None.
+
+    Its presence means an update failed AND the rollback also failed to boot —
+    the hub is running whatever survived and will NOT self-heal. This is the
+    single most important thing to surface in the UI: without it the footer dot
+    reads a stuck hub as merely "update available", indistinguishable from a
+    routine pending update.
+    """
+    try:
+        p = _failed_path(state_dir)
+        if os.path.exists(p) and os.path.getsize(p) > 0:
+            with open(p) as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else None
+    except (OSError, json.JSONDecodeError) as e:
+        logger.debug("read_update_failed: %s", e)
+    return None
+
+
+def update_health_summary(state_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Recovery-state snapshot for /status. Never raises.
+
+    ``failed``   — the double-failure marker is present (hard fault, manual fix).
+    ``bad_versions`` — versions rolled back after a failed boot; the auto loop
+                   SKIPS re-pulling these, so a version listed here is why an
+                   update "does nothing" every time it is clicked.
+    ``pending``  — an update is mid-flight (snapshot taken, not yet confirmed).
+                   Present for a long time = the restart never completed.
+    """
+    out: Dict[str, Any] = {"failed": False, "failed_detail": None,
+                           "bad_versions": [], "pending": None}
+    try:
+        f = read_update_failed(state_dir)
+        if f:
+            out["failed"] = True
+            out["failed_detail"] = f
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out["bad_versions"] = sorted(read_bad_versions(state_dir))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out["pending"] = read_pending(state_dir)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
 # ── Snapshot restore (rollback) ────────────────────────────────────────────
 def restore_snapshot(backup_dir: str, hub_root: str,
                      tree_list: Optional[List[str]] = None,
