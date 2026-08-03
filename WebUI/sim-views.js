@@ -10507,6 +10507,15 @@ async function csRenderSetupDiagnostics() {
       ${_shown.length ? csTable(head, body) : '<p class="text-sm text-slate-500">No active agents seen yet.</p>'}
       <div class="mt-6 pt-4 border-t border-slate-200">
         <div class="flex items-center justify-between mb-1">
+          <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Missing dongles — probable cause, per host</p>
+          <button type="button" onclick="csRenderDongleDiag()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
+        </div>
+        <p class="text-[11px] text-slate-400 mb-3">Where dongles went when the host's <code>lsusb</code> count decays over days. The agent keeps a persisted roster of every certified dongle it has ever seen, so a bus that stops appearing is reported as <b>missing</b> rather than silently vanishing from the totals. The provisioning health ladder cannot recover these: its <code>usb_reset</code> rung writes <code>/sys/bus/usb/devices/&lt;bus&gt;/authorized</code>, which stops existing the moment the device leaves the bus. Causes are ranked from kernel evidence tied to the missing bus, and <b>uhubctl</b> reports whether per-port power cycling is even possible on this host.</p>
+        <div id="cs-dongle-diag"><p class="text-slate-400 italic text-xs">Loading…</p></div>
+      </div>
+
+      <div class="mt-6 pt-4 border-t border-slate-200">
+        <div class="flex items-center justify-between mb-1">
           <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Sim label (tag) health — per cs spoke</p>
           <div class="flex items-center gap-2">
             <button type="button" onclick="csCopySimTagHealth(this)" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50" title="Copy this panel as plain text">⧉ Copy</button>
@@ -10531,7 +10540,133 @@ async function csRenderSetupDiagnostics() {
     </div>`);
     csRenderDhcpHealth();
     csRenderSimTagHealth();
+    csRenderDongleDiag();
 }
+
+// ── Missing-dongle diagnostics (Setup → Diagnostics) ────────────────────────
+// Renders the agent's usb_diagnostics snapshot per host: what's gone, the ranked
+// probable cause, and whether the uhubctl power-cycle path exists on that box.
+//
+// Deliberate distinction throughout: "no dongles missing" and "the agent hasn't
+// reported a diagnostic yet" render DIFFERENTLY. An empty panel that reads as
+// "all good" when the agent is simply too old to send the field would hide the
+// exact problem this panel was built to surface.
+const _CS_CAUSE_STYLE = {
+    high:    'border-red-200 bg-red-50 text-red-700',
+    medium:  'border-amber-200 bg-amber-50 text-amber-700',
+    low:     'border-slate-200 bg-slate-50 text-slate-600',
+    unknown: 'border-slate-200 bg-slate-50 text-slate-500',
+};
+
+// uhubctl verdict badge — the answer to "can we take the power-cycle path?".
+// Three distinct states: supported (PPPS hub present), installed-but-no-PPPS
+// (the common on-board-controller case), and not installed.
+function csUhubctlBadge(u) {
+    if (!u || typeof u !== 'object') return '<span class="text-[10px] text-slate-400">uhubctl: unknown</span>';
+    if (u.supported) {
+        const hubs = (u.ppps_hubs || []).map(h => h.hub).join(', ');
+        return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-700" title="${csEscape('PPPS-capable hub(s): ' + hubs + '. Power-cycle with: uhubctl -a cycle')}">uhubctl ✓ ${csEscape(String((u.ppps_hubs || []).length))} PPPS hub(s)</span>`;
+    }
+    if (u.installed) {
+        return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700" title="${csEscape(u.error || 'no per-port-power-switching hub found')}">uhubctl installed · no PPPS hub</span>`;
+    }
+    return `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500" title="${csEscape((u.error || 'not installed') + ' — install: ' + (u.install_hint || 'apt-get install -y uhubctl'))}">uhubctl not installed</span>`;
+}
+
+function _csDongleDiagHost(h) {
+    const px = h.proxmox || {};
+    const d = px.usb_diagnostics;
+    const name = csEscape(h.spoke_name || h.spoke_hostname || h.spoke_id || '?');
+    if (!d || !d.generated_at) {
+        return `<div class="border border-slate-200 rounded-lg p-3 mb-3">
+          <div class="flex items-center justify-between mb-1">
+            <span class="font-mono text-xs font-bold text-slate-600">${name}</span>
+            <span class="text-[10px] text-slate-400">no diagnostic reported</span>
+          </div>
+          <p class="text-[11px] text-slate-500">This host's agent has not sent a dongle diagnostic. That is <b>not</b> the same as "no dongles missing" — it usually means the agent predates this feature and needs an update.</p>
+        </div>`;
+    }
+    const missing = Array.isArray(d.missing) ? d.missing : [];
+    const causes = Array.isArray(d.causes) ? d.causes : [];
+    const kernel = d.kernel || {};
+    const power = Array.isArray(d.power) ? d.power : [];
+    const autoN = power.filter(p => p && p.autosuspend_enabled).length;
+    const ctrls = Array.isArray(d.controllers) ? d.controllers : [];
+    const nowS = Date.now() / 1000;
+    const age = d.generated_at ? csAgeShort(nowS - d.generated_at) + ' ago' : '—';
+
+    const missRows = missing.map(m => `<tr>
+      <td class="px-3 py-1.5 font-mono text-xs">${csEscape(m.bus_path || '—')}</td>
+      <td class="px-3 py-1.5 text-xs text-slate-600">${csEscape(m.product || '—')}</td>
+      <td class="px-3 py-1.5 font-mono text-[11px] text-slate-500">${csEscape(m.vidpid || '—')}</td>
+      <td class="px-3 py-1.5 text-xs text-slate-500">${csEscape(m.last_seen ? csAgeShort(nowS - m.last_seen) + ' ago' : '—')}</td>
+      <td class="px-3 py-1.5 text-xs ${m.missing_for_s > 86400 ? 'text-red-600 font-bold' : 'text-amber-600'}">${m.missing_for_s != null ? csEscape(csAgeShort(m.missing_for_s)) : '—'}</td>
+    </tr>`).join('');
+
+    const causeCards = causes.map(c => {
+        const cls = _CS_CAUSE_STYLE[c.confidence] || _CS_CAUSE_STYLE.low;
+        return `<div class="border rounded-md p-2 mb-1.5 ${cls}">
+          <div class="flex items-center gap-2 mb-0.5">
+            <span class="text-xs font-bold">${csEscape(c.cause || '—')}</span>
+            <span class="text-[9px] uppercase tracking-wider opacity-70">${csEscape(c.confidence || '')}</span>
+          </div>
+          <p class="text-[11px] opacity-90">${csEscape(c.detail || '')}</p>
+          ${c.remedy ? `<p class="text-[11px] mt-1"><b>Fix:</b> ${csEscape(c.remedy)}</p>` : ''}
+        </div>`;
+    }).join('');
+
+    const kTotals = Object.entries(kernel.totals || {});
+    const kernelLine = !kernel.available
+        ? '<span class="text-amber-600">kernel log unreadable — evidence could not be checked (not the same as a clean log)</span>'
+        : kTotals.length
+            ? kTotals.map(([k, v]) => `<span class="mr-3"><b>${csEscape(k)}</b> ${csEscape(String(v))}</span>`).join('')
+            : '<span class="text-slate-400">no USB errors logged in the window</span>';
+
+    return `<div class="border border-slate-200 rounded-lg p-3 mb-3">
+      <div class="flex flex-wrap items-center gap-2 mb-2">
+        <span class="font-mono text-xs font-bold text-slate-700">${name}</span>
+        ${missing.length
+            ? `<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-700">${missing.length} missing</span>`
+            : '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-700">none missing</span>'}
+        <span class="text-[10px] text-slate-400">${csEscape(String(d.present_count ?? '—'))} present / ${csEscape(String(d.known_count ?? '—'))} ever seen</span>
+        ${csUhubctlBadge(d.uhubctl)}
+        <span class="text-[10px] text-slate-400 ml-auto">collected ${csEscape(age)}</span>
+      </div>
+      ${missing.length ? `<div class="overflow-x-auto mb-2">${csTable(['Bus', 'Product', 'vid:pid', 'Last seen', 'Missing for'], missRows)}</div>` : ''}
+      ${causeCards || (missing.length ? '' : '<p class="text-[11px] text-slate-400 mb-1">No probable cause to report while nothing is missing.</p>')}
+      <p class="text-[10px] text-slate-500 mt-1">Kernel (${csEscape(csAgeShort(kernel.window_s || 0))} window): ${kernelLine}</p>
+      <p class="text-[10px] text-slate-500">Autosuspend: <b>${csEscape(String(autoN))}</b> of ${csEscape(String(power.length))} present device(s) set to <code>auto</code>${autoN ? ' — these may suspend and fail to resume' : ''}. Controllers: ${ctrls.map(c => `<code>${csEscape(c.pci_address)}</code> (${csEscape(String(c.device_count))} dev)`).join(', ') || '—'}</p>
+    </div>`;
+}
+
+async function csRenderDongleDiag() {
+    const el = document.getElementById('cs-dongle-diag');
+    if (!el) return;
+    let hosts = [];
+    try { hosts = await csVmLoad(); }
+    catch (e) {
+        console.error('csRenderDongleDiag: vm load failed', e);
+        el.innerHTML = '<p class="text-xs text-red-500">Could not load host data.</p>';
+        return;
+    }
+    const _hn = h => (h.spoke_name || h.spoke_hostname || h.spoke_id || '');
+    const sorted = (hosts || []).slice().sort((a, b) =>
+        _hn(a).localeCompare(_hn(b), undefined, { numeric: true, sensitivity: 'base' }));
+    if (!sorted.length) { el.innerHTML = '<p class="text-xs text-slate-400 italic">No hosts in scope.</p>'; return; }
+    const totalMissing = sorted.reduce((n, h) =>
+        n + (((h.proxmox || {}).usb_diagnostics || {}).missing || []).length, 0);
+    const anyPpps = sorted.some(h =>
+        ((((h.proxmox || {}).usb_diagnostics || {}).uhubctl) || {}).supported);
+    const summary = `<div class="flex flex-wrap items-center gap-2 mb-3 text-xs text-slate-500">
+      <span><b class="text-sm ${totalMissing ? 'text-red-600' : 'text-slate-700'}">${totalMissing}</b> dongle(s) missing fleet-wide</span>
+      <span class="text-[11px]">·</span>
+      <span class="text-[11px]">${anyPpps
+        ? 'at least one host can power-cycle ports with <code>uhubctl -a cycle</code>'
+        : 'no host has a PPPS-capable hub — the fallback is an xHCI unbind/rebind, which resets every device on that controller'}</span>
+    </div>`;
+    el.innerHTML = summary + sorted.map(_csDongleDiagHost).join('');
+}
+window.csRenderDongleDiag = csRenderDongleDiag;
 
 // ── Register all VM Server children ─────────────────────────────────────────
 window.CS_CHILD_RENDERERS['VM Server::Overview']     = csRenderVmServer;
