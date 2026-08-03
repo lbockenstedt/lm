@@ -10733,7 +10733,7 @@ function _csDiagDongleText(hosts) {
         if (!d || !d.generated_at) { L.push(`  ${name}: no diagnostic reported (agent likely predates this feature)`); return; }
         any = true;
         const u = d.uhubctl || {};
-        L.push(`  ${name}: ${(d.missing || []).length} missing / ${d.present_count ?? '?'} present / ${d.known_count ?? '?'} ever seen` +
+        L.push(`  ${name}: ${(d.missing || []).length} missing / ${(d.passed_through || []).length} passed-through / ${d.present_count ?? '?'} present / ${d.known_count ?? '?'} ever seen` +
                `  uhubctl=${u.supported ? 'SUPPORTED (' + (u.ppps_hubs || []).length + ' PPPS hub)' : u.installed ? 'installed, no PPPS hub' : 'not installed'}`);
         (d.missing || []).forEach(m => L.push(`    ${m.bus_path} ${m.vidpid} ${m.product} — missing ${m.missing_for_s != null ? m.missing_for_s + 's' : '?'}`));
         (d.causes || []).forEach(c => L.push(`    CAUSE [${c.confidence}] ${c.cause}: ${c.detail}` + (c.remedy ? ` | FIX: ${c.remedy}` : '')));
@@ -10948,6 +10948,10 @@ function _csDongleDiagHost(h) {
         </div>`;
     }
     const missing = Array.isArray(d.missing) ? d.missing : [];
+    // Absent BY DESIGN: their PCI controller was handed to a VM (T1/T3
+    // passthrough), so the host correctly stops seeing them — ~4 per host. Kept
+    // out of the "missing" count so that number only ever means "lost".
+    const passed = Array.isArray(d.passed_through) ? d.passed_through : [];
     const causes = Array.isArray(d.causes) ? d.causes : [];
     const kernel = d.kernel || {};
     const power = Array.isArray(d.power) ? d.power : [];
@@ -11006,6 +11010,8 @@ function _csDongleDiagHost(h) {
       ${csDiagTiles([
         csDiagTile('Present', String(d.present_count ?? '—'), 'certified, on the bus'),
         csDiagTile('Missing', String(missing.length), 'was seen, now gone', missing.length ? 'bad' : 'good'),
+        csDiagTile('Passed through', String(passed.length),
+                   passed.length ? 'behind a VM-owned controller — expected' : 'no controller passed through'),
         csDiagTile('Ever seen', String(d.known_count ?? '—'), 'persisted roster'),
         csDiagTile('Autosuspend', `${autoN}/${power.length}`, "power/control=auto", autoN ? 'warn' : null),
         csDiagTile('Kernel events', String(kTotalN), `${csAgeShort(kernel.window_s || 0)} window`,
