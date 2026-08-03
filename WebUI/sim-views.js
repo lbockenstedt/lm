@@ -5485,11 +5485,30 @@ window.csRenderSimTagHealth = async function () {
     el.innerHTML = '<p class="text-slate-400 italic text-xs">Loading…</p>';
     let d;
     try { d = await csFetch(`/${csTenant()}/sim-tag-health?tenant_id=${csTenant()}`); }
-    catch (e) { el.innerHTML = csErrorBox('Sim-tag health unavailable', e); return; }
+    catch (e) {
+        el.innerHTML = csErrorBox('Sim-tag health unavailable', e);
+        csDiagSummary('cs-sim-tag-health', 'bad', 'unavailable');
+        return;
+    }
     const spokes = (d && d.spokes) || [];
-    if (!spokes.length) { el.innerHTML = '<p class="text-xs text-slate-400 italic">No Client-Sim spokes connected.</p>'; return; }
+    if (!spokes.length) {
+        el.innerHTML = '<p class="text-xs text-slate-400 italic">No Client-Sim spokes connected.</p>';
+        csDiagSummary('cs-sim-tag-health', 'idle', 'no Client-Sim spokes connected');
+        return;
+    }
     const esc = csEscape;
     window._csSimTagHealth = d;
+    (window._csDiagData = window._csDiagData || {}).tagHealth = d;   // page-level Copy
+    // Verdict: an unreachable spoke outranks tag drift — you can't trust a drift
+    // count from a spoke that didn't answer.
+    const _unreach = spokes.filter(s => s.unreachable).length;
+    const _drift = spokes.reduce((n, s) => n + (s.hosts || [])
+        .reduce((m, h) => m + Number(h.drift_count || 0), 0), 0);
+    csDiagSummary('cs-sim-tag-health',
+        _unreach ? 'bad' : (_drift ? 'warn' : 'ok'),
+        (_unreach ? `${_unreach} spoke(s) unreachable · ` : '')
+        + (_drift ? `${_drift} VM(s) with tag drift` : 'all tags in sync')
+        + ` · ${spokes.length} spoke(s)`);
     el.innerHTML = spokes.map(sp => {
         const title = esc(sp.spoke_name || sp.spoke_id || 'spoke');
         if (sp.unreachable) {
@@ -5548,10 +5567,13 @@ window.csRenderSimTagHealth = async function () {
     }).join('');
 };
 
-window.csCopySimTagHealth = function (btn) {
-    const d = window._csSimTagHealth;
-    if (!d) return;
-    const lines = [];
+// Flatten the sim-tag panel to plain text. Extracted from csCopySimTagHealth so
+// the page-level "Copy all diagnostics" can reuse it verbatim rather than
+// duplicating the format (two formats drift, and the pasted report is the thing
+// people actually read).
+function _csSimTagHealthText(d) {
+    if (!d) return 'SIM LABEL (TAG) HEALTH: no data';
+    const lines = ['SIM LABEL (TAG) HEALTH'];
     (d.spokes || []).forEach(sp => {
         const _s = sp.spoke_self || {};
         lines.push(`SPOKE ${sp.spoke_name || sp.spoke_id}` +
@@ -5568,9 +5590,11 @@ window.csCopySimTagHealth = function (btn) {
             });
         });
     });
-    const txt = lines.join('\n') || 'no data';
-    if (navigator.clipboard) navigator.clipboard.writeText(txt);
-    if (btn) { const o = btn.textContent; btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = o; }, 1500); }
+    return lines.join('\n');
+}
+
+window.csCopySimTagHealth = function (btn) {
+    csCopyText(_csSimTagHealthText(window._csSimTagHealth), btn);
 };
 
 
@@ -5586,8 +5610,22 @@ async function csRenderDhcpHealth() {
         d._fetched_at = new Date().toLocaleTimeString();
         window._csDhcpLast = d;
         el.innerHTML = _csDhcpHealthHtml(d);
+        // Verdict for the collapsed header. "Serving" needs the unit active AND
+        // the NIC present AND a lease DB, so any of those failing is a fault —
+        // a crash-looping Kea must not read as healthy just because the spoke is.
+        const _sp = (d && d.spokes) || [];
+        const _bad = _sp.filter(s => s.unreachable
+            || String((((s.units || {})['kea-dhcp4-sim']) || {}).ActiveState || '') !== 'active'
+            || (s.interface_missing || []).length
+            || !((s.lease_db || {}).exists)
+            || ((s.config_test || {}).ok === false)).length;
+        csDiagSummary('cs-dhcp-health', _bad ? 'bad' : (_sp.length ? 'ok' : 'idle'),
+            _sp.length ? (_bad ? `${_bad} of ${_sp.length} spoke(s) not serving`
+                               : `${_sp.length} spoke(s) serving`)
+                       : 'no spokes reported');
     } catch (e) {
         el.innerHTML = csErrorBox('Could not load sim DHCP health', e);
+        csDiagSummary('cs-dhcp-health', 'bad', 'unavailable');
     }
 }
 window.csRenderDhcpHealth = csRenderDhcpHealth;
@@ -10443,18 +10481,154 @@ function _csRepoStatusSection(apiData) {
       <div class="mb-6">${cards || '<p class="text-xs text-slate-400 italic">No spokes reporting.</p>'}</div>`;
 }
 
+// ── Diagnostics page shell ───────────────────────────────────────────────────
+// Every panel used to render expanded, each under its own paragraph of prose, so
+// finding the one broken thing meant scrolling past everything healthy. Sections
+// are now collapsibles carrying a one-line verdict in the header: the page is
+// scannable at a glance, and anything with a problem auto-opens while healthy
+// sections stay shut. The prose moved into an "ℹ What this means" sub-collapsible
+// — still there when you need it, out of the way when you don't.
+const _CS_DIAG_TONE = {
+    ok:   { dot: 'bg-green-500', cls: 'text-slate-500' },
+    warn: { dot: 'bg-amber-400', cls: 'text-amber-700' },
+    bad:  { dot: 'bg-red-500',   cls: 'text-red-600' },
+    idle: { dot: 'bg-slate-300', cls: 'text-slate-400' },
+};
+
+// Section data for the page-level Copy button. Each renderer stashes its payload
+// here as it loads; csCopyAllDiagnostics flattens whatever has arrived.
+window._csDiagData = window._csDiagData || {};
+
+function csDiagSection(id, title, opts) {
+    const o = opts || {};
+    const tone = _CS_DIAG_TONE[o.tone || 'idle'] || _CS_DIAG_TONE.idle;
+    return `<details id="${id}-wrap" class="hpe-card rounded-lg shadow-sm p-0 mb-3"${o.open ? ' open' : ''}>
+      <summary class="cursor-pointer select-none px-5 py-3 flex items-center gap-3">
+        <span id="${id}-dot" class="inline-block w-2.5 h-2.5 rounded-full ${tone.dot} shrink-0"></span>
+        <span class="text-sm font-bold text-[#263040] shrink-0">${csEscape(title)}</span>
+        <span id="${id}-sum" class="text-xs ${tone.cls} truncate">${o.summary || ''}</span>
+        <span class="ml-auto flex items-center gap-2 shrink-0">${o.actions || ''}</span>
+      </summary>
+      <div class="px-5 pb-5">
+        ${o.help ? `<details class="mb-3"><summary class="cursor-pointer text-[11px] text-slate-400 hover:text-slate-600">ℹ What this means</summary>
+          <div class="text-[11px] text-slate-500 mt-1 leading-relaxed">${o.help}</div></details>` : ''}
+        <div id="${id}">${o.body || '<p class="text-slate-400 italic text-xs">Loading…</p>'}</div>
+      </div>
+    </details>`;
+}
+
+// Set a section's verdict once its data lands. A non-ok tone auto-opens the
+// section — a problem must never be hidden behind a collapsed header.
+function csDiagSummary(id, tone, text) {
+    const t = _CS_DIAG_TONE[tone] || _CS_DIAG_TONE.idle;
+    const dot = document.getElementById(`${id}-dot`);
+    const sum = document.getElementById(`${id}-sum`);
+    const wrap = document.getElementById(`${id}-wrap`);
+    if (dot) dot.className = `inline-block w-2.5 h-2.5 rounded-full ${t.dot} shrink-0`;
+    if (sum) { sum.className = `text-xs ${t.cls} truncate`; sum.textContent = text || ''; }
+    if (wrap && (tone === 'warn' || tone === 'bad')) wrap.open = true;
+}
+
+// Buttons live inside <summary>, where a click would toggle the collapsible.
+function csDiagStop(ev) { ev.preventDefault(); ev.stopPropagation(); }
+window.csDiagStop = csDiagStop;
+
+// ── Copy the whole page as plain text ────────────────────────────────────────
+// The single most useful thing when reporting an issue: one paste carrying every
+// section. Stamped with the fetch time and an explicit staleness warning —
+// pasting an unrefreshed panel into a ticket has already caused an
+// already-fixed spoke to be reported as still failing.
+function _csDiagBridgeText(snap) {
+    if (!snap || !snap.available) return 'CS BRIDGE: not available (bridge poller has not completed a cycle)';
+    const L = [`CS BRIDGE — ${(snap.agents || []).length} agent(s), cycle ${snap.cycle || '?'}`,
+               `  timeouts: spoke→agent fast ${snap.configured_fast_s ?? '?'}s / long ${snap.configured_long_s ?? '?'}s` +
+               `; hub→spoke ${snap.relay_timeout_s ?? '?'}s / ${snap.relay_timeout_long_s ?? '?'}s; max retries ${snap.max_retries ?? '?'}`];
+    (snap.agents || []).forEach(a => {
+        L.push(`  ${a.agent_id || '?'} (${a.hostname || '?'}) via ${a.host_spoke || '?'}`);
+        L.push(`    decision=${a.decision || '?'} inbox=${a.last_inbox_count ?? 0} accepted=${a.accepted || 0} ` +
+               `requeued=${a.requeued || 0} gave_up=${a.gave_up || 0} completed=${a.completed || 0} failed=${a.failed || 0}`);
+        if (a.last_outcome) L.push(`    last=${a.last_outcome} @ ${a.last_ts_iso || ''}`);
+    });
+    return L.join('\n');
+}
+
+function _csDiagRepoText(apiData) {
+    const spokes = (apiData && apiData.spokes) || [];
+    if (!spokes.length) return 'REPO STATUS: no spokes reported';
+    const L = [`REPO / UPDATE STATUS — ${spokes.length} spoke(s)`];
+    spokes.forEach(sp => {
+        const rp = ((sp.api_server || {}).health || {}).repo;
+        const name = sp.spoke_name || sp.display_name || sp.spoke_id;
+        if (!rp) { L.push(`  ${name}: repo status unavailable (offline or pre-update)`); return; }
+        L.push(`  ${name}: branch=${rp.configured_branch || '?'} version=${rp.version || '?'}` +
+               `${rp.configured_branch && rp.configured_branch !== 'main' ? '  ** NOT main — pushes to main will not reach this spoke **' : ''}` +
+               `${rp.dns_latency_present === false ? '  ** dns_latency.sh MISSING **' : ''}`);
+    });
+    return L.join('\n');
+}
+
+function _csDiagDongleText(hosts) {
+    const L = ['MISSING DONGLES'];
+    let any = false;
+    (hosts || []).forEach(h => {
+        const d = (h.proxmox || {}).usb_diagnostics;
+        const name = h.spoke_name || h.spoke_hostname || h.spoke_id || '?';
+        if (!d || !d.generated_at) { L.push(`  ${name}: no diagnostic reported (agent likely predates this feature)`); return; }
+        any = true;
+        const u = d.uhubctl || {};
+        L.push(`  ${name}: ${(d.missing || []).length} missing / ${d.present_count ?? '?'} present / ${d.known_count ?? '?'} ever seen` +
+               `  uhubctl=${u.supported ? 'SUPPORTED (' + (u.ppps_hubs || []).length + ' PPPS hub)' : u.installed ? 'installed, no PPPS hub' : 'not installed'}`);
+        (d.missing || []).forEach(m => L.push(`    ${m.bus_path} ${m.vidpid} ${m.product} — missing ${m.missing_for_s != null ? m.missing_for_s + 's' : '?'}`));
+        (d.causes || []).forEach(c => L.push(`    CAUSE [${c.confidence}] ${c.cause}: ${c.detail}` + (c.remedy ? ` | FIX: ${c.remedy}` : '')));
+        const k = d.kernel || {};
+        L.push(`    kernel(${k.window_s || 0}s): ` + (!k.available ? 'UNREADABLE (not the same as clean)'
+            : Object.entries(k.totals || {}).map(([a, b]) => `${a}=${b}`).join(' ') || 'no USB errors'));
+        (k.samples || []).slice(0, 8).forEach(s => L.push(`      ${s}`));
+        const autoN = (d.power || []).filter(p => p && p.autosuspend_enabled).length;
+        L.push(`    autosuspend: ${autoN}/${(d.power || []).length} devices on 'auto'` +
+               `   controllers: ${(d.controllers || []).map(c => c.pci_address + '(' + c.device_count + ')').join(' ') || '—'}`);
+        const gw = (h.proxmox || {}).guest_watchdog || {};
+        if (gw.ran_at) {
+            L.push(`    guest-watchdog: checked=${gw.checked} responding=${gw.responding} ` +
+                   `reset=[${(gw.reset || []).join(' ')}] cycled=[${(gw.power_cycled || []).join(' ')}] ` +
+                   `started=[${(gw.started || []).join(' ')}] skipped=${gw.skipped}`);
+        }
+    });
+    if (!any && L.length === 1) L.push('  (no host reported a dongle diagnostic)');
+    return L.join('\n');
+}
+
+function csCopyAllDiagnostics(btn) {
+    const D = window._csDiagData || {};
+    const stamp = D.fetched_at || new Date().toLocaleString();
+    const parts = [
+        `LM DIAGNOSTICS — tenant ${(typeof csTenant === 'function' ? csTenant() : '?')}`,
+        `captured ${stamp}  (this is the last FETCHED data — press Refresh for live values)`,
+        '', _csDiagRepoText(D.repo), '', _csDiagBridgeText(D.bridge),
+        '', _csDiagDongleText(D.hosts),
+        '', (typeof _csSimTagHealthText === 'function' ? _csSimTagHealthText(D.tagHealth) : ''),
+        '', (typeof _csDhcpHealthText === 'function' ? _csDhcpHealthText(window._csDhcpLast || {}) : ''),
+    ];
+    csCopyText(parts.join('\n'), btn);
+}
+window.csCopyAllDiagnostics = csCopyAllDiagnostics;
+
 async function csRenderSetupDiagnostics() {
     csSetToolbar('');
     // Repo/update status per spoke (best-effort; shown even if the CS bridge
     // isn't up yet — it's the "did my change reach the spoke?" panel).
     let repoSection = '';
+    window._csDiagData = window._csDiagData || {};
+    window._csDiagData.fetched_at = new Date().toLocaleString();
     try {
         const apiData = await csFetch(`/aggregate/api-server?tenant_id=${csTenant()}`);
+        window._csDiagData.repo = apiData;          // for the page-level Copy
         repoSection = _csRepoStatusSection(apiData);
     } catch (e) { console.error('csRenderSetupDiagnostics: api-server fetch failed', e); }
     let snap = null;
     try {
         snap = await csFetch(`/${csTenant()}/cs-bridge-status?tenant_id=${csTenant()}`);
+        window._csDiagData.bridge = snap;
     } catch (e) { console.error('csRenderSetupDiagnostics: load failed', e); csSet(`<div>${repoSection}${csErrorBox('Could not load CS bridge status', e)}</div>`); return; }
     if (!snap || !snap.available) {
         csSet(`<div>${repoSection}
@@ -10479,64 +10653,94 @@ async function csRenderSetupDiagnostics() {
       <span><b class="text-slate-600">cycle:</b> ${csEscape(snap.cycle || '—')}</span>
     </div>
     <p class="text-[11px] text-slate-400 mb-3">Set the spoke→agent windows in <b>Setup → General → Agent Relay Timeouts</b>. The hub→spoke window tracks the configured long/fast value +5s (never below the env default) so the hub doesn't pre-empt the spoke's wait. If hub→spoke shows the env defaults (16s/65s) here after you saved General, the save didn't reach global_config — re-save.</p>`;
-    const head = ['Agent', 'Hostname', 'Via (host spoke)', 'Decision', 'Inbox', 'Accepted', 'Re-queued', 'Gave up', 'Completed', 'Failed', 'Last outcome'];
+    // 11 columns forced a horizontal scroll on every screen width. The five
+    // counters collapse into ONE mono "queue" cell (zeros greyed so a nonzero
+    // number is what your eye lands on), and hostname rides under the agent id
+    // rather than owning a column. Five columns fit without scrolling.
+    const _n = (v, cls) => {
+        const num = Number(v || 0);
+        return `<span class="${num ? cls : 'text-slate-300'}">${csEscape(String(num))}</span>`;
+    };
+    const head = ['Agent', 'Via (host spoke)', 'Decision', 'Queue (in·ok·rq·gave·done·fail)', 'Last outcome'];
     const body = _shown.map(a => {
         const _decClass = (a.decision || '').startsWith('ACTIVE') ? 'text-emerald-600' :
                          (a.decision || '').startsWith('SKIP') ? 'text-amber-600' : 'text-slate-500';
-        return `<tr>
-      <td class="px-3 py-2 font-mono text-xs">${csEscape(a.agent_id || '—')}</td>
-      <td class="px-3 py-2 font-mono text-xs">${csEscape(a.hostname || '—')}</td>
-      <td class="px-3 py-2 font-mono text-xs text-slate-500">${csEscape(a.host_spoke || '—')}</td>
-      <td class="px-3 py-2 text-xs ${_decClass}">${csEscape(a.decision || '—')}</td>
-      <td class="px-3 py-2 text-xs text-slate-400">${csEscape(String(a.last_inbox_count ?? 0))}</td>
-      <td class="px-3 py-2 text-xs text-emerald-600">${csEscape(String(a.accepted || 0))}</td>
-      <td class="px-3 py-2 text-xs text-amber-600">${csEscape(String(a.requeued || 0))}</td>
-      <td class="px-3 py-2 text-xs text-red-600">${csEscape(String(a.gave_up || 0))}</td>
-      <td class="px-3 py-2 text-xs text-slate-600">${csEscape(String(a.completed || 0))}</td>
-      <td class="px-3 py-2 text-xs text-red-600">${csEscape(String(a.failed || 0))}</td>
-      <td class="px-3 py-2 text-xs text-slate-400">${csEscape(a.last_outcome ? (a.last_outcome + ' @ ' + (a.last_ts_iso || '')) : '—')}</td>
+        return `<tr class="border-b border-slate-100 hover:bg-slate-50 align-top">
+      <td class="px-4 py-2">
+        <div class="font-mono text-xs text-slate-700">${csEscape(a.agent_id || '—')}</div>
+        <div class="font-mono text-[10px] text-slate-400">${csEscape(a.hostname || '—')}</div>
+      </td>
+      <td class="px-4 py-2 font-mono text-xs text-slate-500">${csEscape(a.host_spoke || '—')}</td>
+      <td class="px-4 py-2 text-xs ${_decClass}">${csEscape(a.decision || '—')}</td>
+      <td class="px-4 py-2 font-mono text-xs whitespace-nowrap" title="inbox · accepted · re-queued · gave up · completed · failed">
+        ${_n(a.last_inbox_count, 'text-slate-600')}<span class="text-slate-300">·</span>${_n(a.accepted, 'text-emerald-600')}<span class="text-slate-300">·</span>${_n(a.requeued, 'text-amber-600')}<span class="text-slate-300">·</span>${_n(a.gave_up, 'text-red-600')}<span class="text-slate-300">·</span>${_n(a.completed, 'text-slate-600')}<span class="text-slate-300">·</span>${_n(a.failed, 'text-red-600')}
+      </td>
+      <td class="px-4 py-2 text-xs text-slate-400">${csEscape(a.last_outcome ? (a.last_outcome + ' @ ' + (a.last_ts_iso || '')) : '—')}</td>
     </tr>`;
     }).join('');
+    // Section verdicts, computed once so the collapsed headers are honest.
+    const _stuck = _shown.filter(a => Number(a.gave_up || 0) || Number(a.failed || 0)).length;
+    const _bridgeTone = _stuck ? 'bad' : (_shown.length ? 'ok' : 'warn');
+    const _bridgeSum = _shown.length
+        ? `${_shown.length} agent(s)` + (_stuck ? ` · ${_stuck} with gave-up/failed commands` : ' · no stuck commands')
+          + (_disabled.length ? ` · ${_disabled.length} hidden (CS disabled)` : '')
+        : 'no active agents seen';
+    const _repoSpokes = ((window._csDiagData || {}).repo || {}).spokes || [];
+    const _offBranch = _repoSpokes.filter(sp => {
+        const rp = ((sp.api_server || {}).health || {}).repo;
+        return rp && rp.configured_branch && rp.configured_branch !== 'main';
+    }).length;
+    const _repoTone = _offBranch ? 'warn' : (_repoSpokes.length ? 'ok' : 'idle');
+    const _repoSum = _repoSpokes.length
+        ? `${_repoSpokes.length} spoke(s)` + (_offBranch ? ` · ${_offBranch} tracking a non-main branch` : ' · all on main')
+        : 'no repo status reported';
     const _disabledLine = _disabled.length
       ? `<p class="text-[11px] text-amber-600 mb-2">${csEscape(String(_disabled.length))} agent(s) hidden (CS disabled) — enable in Agent Config to manage their VMs.</p>`
       : '';
-    csSet(`<div>${repoSection}${cfg}
-      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">CS Bridge — per-agent relay status (${_shown.length} shown${_disabled.length ? ', ' + _disabled.length + ' hidden' : ''})</p>
-      ${_disabledLine}
-      <p class="text-[11px] text-slate-400 mb-3">ACTIVE = the bridge is polling + relaying this agent's queue. <b>Via</b> = the spoke the agent is actually connected to (commands are delivered through it); <b>cs_spoke</b> in the Decision is the tenant's queue broker (one per tenant — every lrb agent shares it). <b>Inbox</b> = commands found in the agent's inbox on the cs spoke last poll (0 with 0 Accepted = nothing queued / hostname-key mismatch; &gt;0 with 0 Accepted = relay path issue). SKIP no-cs-spoke = no client-sim spoke bound to the tenant. Re-queued climbing = agent too busy to ACK (transient, retried up to max retries). Gave up / Failed = retries exhausted or a genuine rejection. The same data streams to <b>WebUI Logs → Simulations</b> as <code>[cs-bridge]</code> lines.</p>
-      ${_shown.length ? csTable(head, body) : '<p class="text-sm text-slate-500">No active agents seen yet.</p>'}
-      <div class="mt-6 pt-4 border-t border-slate-200">
-        <div class="flex items-center justify-between mb-1">
-          <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Missing dongles — probable cause, per host</p>
-          <button type="button" onclick="csRenderDongleDiag()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
+    const _btn = 'text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50';
+    const _act = (label, fn, title) =>
+        `<button type="button" onclick="csDiagStop(event); ${fn}" class="${_btn}" title="${csEscape(title || '')}">${label}</button>`;
+
+    csSet(`<div>
+      <div class="hpe-card rounded-lg shadow-sm p-5 mb-4 flex flex-wrap items-center gap-3">
+        <div>
+          <p class="text-lg font-bold text-[#263040]">Diagnostics</p>
+          <p class="text-[11px] text-slate-400">Captured ${csEscape(window._csDiagData.fetched_at)} — sections with a problem open automatically.</p>
         </div>
-        <p class="text-[11px] text-slate-400 mb-3">Where dongles went when the host's <code>lsusb</code> count decays over days. The agent keeps a persisted roster of every certified dongle it has ever seen, so a bus that stops appearing is reported as <b>missing</b> rather than silently vanishing from the totals. The provisioning health ladder cannot recover these: its <code>usb_reset</code> rung writes <code>/sys/bus/usb/devices/&lt;bus&gt;/authorized</code>, which stops existing the moment the device leaves the bus. Causes are ranked from kernel evidence tied to the missing bus, and <b>uhubctl</b> reports whether per-port power cycling is even possible on this host.</p>
-        <div id="cs-dongle-diag"><p class="text-slate-400 italic text-xs">Loading…</p></div>
+        <div class="ml-auto flex items-center gap-2">
+          <button type="button" onclick="csCopyAllDiagnostics(this)" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-xs font-bold" title="Copy EVERY section below as plain text — repo status, CS bridge, missing dongles, sim tags and sim DHCP. Paste straight into a ticket or chat.">⧉ Copy all diagnostics</button>
+          <button type="button" onclick="csRenderSetupDiagnostics()" class="${_btn}">↻ Refresh all</button>
+        </div>
       </div>
 
-      <div class="mt-6 pt-4 border-t border-slate-200">
-        <div class="flex items-center justify-between mb-1">
-          <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Sim label (tag) health — per cs spoke</p>
-          <div class="flex items-center gap-2">
-            <button type="button" onclick="csCopySimTagHealth(this)" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50" title="Copy this panel as plain text">⧉ Copy</button>
-            <button type="button" onclick="csRenderSimTagHealth()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
-          </div>
-        </div>
-        <p class="text-[11px] text-slate-400 mb-3">Why a host shows no / stale / wrong <code>sim-</code> tags. Tagging is <b>per spoke</b> — each dispatches only to the agents connected to it — so a host whose agent does not resolve is never tagged and its VMs keep whatever tags they already had. Per VM: <b>Desired</b> is what the engine says the client is running, <b>Actual</b> is what is on the box.</p>
-        <div id="cs-sim-tag-health"><p class="text-slate-400 italic text-xs">Loading…</p></div>
-      </div>
+      ${csDiagSection('cs-diag-repo', 'Repo & update status', {
+        tone: _repoTone, summary: _repoSum, open: _repoTone !== 'ok',
+        body: repoSection || '<p class="text-xs text-slate-400 italic">No repo status reported.</p>',
+        help: 'Did my push actually reach the spoke? <b>Branch</b> and the served <b>VERSION</b> are the two facts that answer it. A spoke tracking a non-main branch will never see pushes to main.',
+      })}
 
-      <div class="mt-6 pt-4 border-t border-slate-200">
-        <div class="flex items-center justify-between mb-1">
-          <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Sim DHCP (Kea) health — per cs spoke</p>
-          <div class="flex items-center gap-2">
-            <button type="button" onclick="csCopyDhcpHealth(this)" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50" title="Copy this panel as plain text — including the last errors and notes">⧉ Copy</button>
-            <button type="button" onclick="csRenderDhcpHealth()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
-          </div>
-        </div>
-        <p class="text-[11px] text-slate-400 mb-3">The cs-owned Kea instance (<code>kea-dhcp4-sim</code>) that serves the isolated sim-client network. <b>Serving</b> needs all of: the unit active, the configured NIC present, and a lease DB. A crash-looping Kea hands out nothing while the spoke itself looks perfectly healthy, so this is deliberately separate from spoke status.</p>
-        <div id="cs-dhcp-health"><p class="text-slate-400 italic text-xs">Loading…</p></div>
-      </div>
+      ${csDiagSection('cs-diag-bridge', 'CS bridge — per-agent relay', {
+        tone: _bridgeTone, summary: _bridgeSum, open: _bridgeTone !== 'ok',
+        body: `${_disabledLine}${_shown.length ? csTable(head, body) : '<p class="text-sm text-slate-500">No active agents seen yet.</p>'}${cfg}`,
+        help: `ACTIVE = the bridge is polling + relaying this agent's queue. <b>Via</b> = the spoke the agent is actually connected to; <b>cs_spoke</b> in the Decision is the tenant's queue broker (one per tenant). The <b>Queue</b> cell reads <code>in·ok·rq·gave·done·fail</code>: <b>in</b> = commands found in the agent's inbox last poll (0 with 0 accepted = nothing queued / hostname-key mismatch; &gt;0 with 0 accepted = relay path issue). <b>rq</b> climbing = agent too busy to ACK (transient, retried to max). <b>gave</b>/<b>fail</b> = retries exhausted or a genuine rejection. SKIP no-cs-spoke = no client-sim spoke bound to the tenant. Same data streams to <b>WebUI Logs → Simulations</b> as <code>[cs-bridge]</code> lines.`,
+      })}
+
+      ${csDiagSection('cs-dongle-diag', 'Missing dongles — probable cause', {
+        actions: _act('↻', 'csRenderDongleDiag()', 'Refresh this panel'),
+        help: 'Where dongles went when a host\'s <code>lsusb</code> count decays over days. The agent keeps a persisted roster of every certified dongle it has ever seen, so a bus that stops appearing is reported as <b>missing</b> rather than silently vanishing from the totals. The provisioning health ladder cannot recover these: its <code>usb_reset</code> rung writes <code>/sys/bus/usb/devices/&lt;bus&gt;/authorized</code>, which stops existing the moment the device leaves the bus. Causes are ranked from kernel evidence tied to the missing bus; <b>uhubctl</b> reports whether per-port power cycling is possible on this host at all.',
+      })}
+
+      ${csDiagSection('cs-sim-tag-health', 'Sim label (tag) health', {
+        actions: _act('⧉', 'csCopySimTagHealth(this)', 'Copy this panel as plain text')
+               + _act('↻', 'csRenderSimTagHealth()', 'Refresh this panel'),
+        help: 'Why a host shows no / stale / wrong <code>sim-</code> tags. Tagging is <b>per spoke</b> — each dispatches only to the agents connected to it — so a host whose agent does not resolve is never tagged and its VMs keep whatever tags they had. Per VM: <b>Desired</b> is what the engine says the client is running, <b>Actual</b> is what is on the box.',
+      })}
+
+      ${csDiagSection('cs-dhcp-health', 'Sim DHCP (Kea) health', {
+        actions: _act('⧉', 'csCopyDhcpHealth(this)', 'Copy this panel as plain text — including last errors and notes')
+               + _act('↻', 'csRenderDhcpHealth()', 'Refresh this panel'),
+        help: 'The cs-owned Kea instance (<code>kea-dhcp4-sim</code>) serving the isolated sim-client network. <b>Serving</b> needs all of: the unit active, the configured NIC present, and a lease DB. A crash-looping Kea hands out nothing while the spoke itself looks perfectly healthy, which is why this is separate from spoke status.',
+      })}
     </div>`);
     csRenderDhcpHealth();
     csRenderSimTagHealth();
@@ -10652,11 +10856,25 @@ async function csRenderDongleDiag() {
     const _hn = h => (h.spoke_name || h.spoke_hostname || h.spoke_id || '');
     const sorted = (hosts || []).slice().sort((a, b) =>
         _hn(a).localeCompare(_hn(b), undefined, { numeric: true, sensitivity: 'base' }));
-    if (!sorted.length) { el.innerHTML = '<p class="text-xs text-slate-400 italic">No hosts in scope.</p>'; return; }
+    (window._csDiagData = window._csDiagData || {}).hosts = sorted;   // page-level Copy
+    if (!sorted.length) {
+        el.innerHTML = '<p class="text-xs text-slate-400 italic">No hosts in scope.</p>';
+        csDiagSummary('cs-dongle-diag', 'idle', 'no hosts in scope');
+        return;
+    }
     const totalMissing = sorted.reduce((n, h) =>
         n + (((h.proxmox || {}).usb_diagnostics || {}).missing || []).length, 0);
     const anyPpps = sorted.some(h =>
         ((((h.proxmox || {}).usb_diagnostics || {}).uhubctl) || {}).supported);
+    const reported = sorted.filter(h => ((h.proxmox || {}).usb_diagnostics || {}).generated_at).length;
+    // "Nothing missing" and "no agent has reported yet" are different verdicts —
+    // the header must not read all-clear when the data simply hasn't arrived.
+    csDiagSummary('cs-dongle-diag',
+        totalMissing ? 'bad' : (reported ? 'ok' : 'warn'),
+        !reported ? `no diagnostic reported by ${sorted.length} host(s) — agents may predate this feature`
+                  : totalMissing ? `${totalMissing} missing across ${sorted.length} host(s)`
+                                 + (anyPpps ? ' · uhubctl available' : ' · no PPPS hub')
+                  : `none missing · ${reported}/${sorted.length} host(s) reporting`);
     const summary = `<div class="flex flex-wrap items-center gap-2 mb-3 text-xs text-slate-500">
       <span><b class="text-sm ${totalMissing ? 'text-red-600' : 'text-slate-700'}">${totalMissing}</b> dongle(s) missing fleet-wide</span>
       <span class="text-[11px]">·</span>
