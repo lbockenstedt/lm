@@ -10233,6 +10233,15 @@ function csFmtLeaf(k, v) {
 
 // Render an object/array's fields as stacked "key  value" rows (readable, never
 // JSON). Used for the wide telemetry tiles + as the fallback for unknown objects.
+// Nested telemetry objects that always get the full-width multi-column layout,
+// regardless of how many fields happen to be populated on a given frame —
+// agent_telemetry's field count varies (reconnect fields only appear after a
+// drop), and it should not flip between narrow and wide between refreshes.
+const _CS_WIDE_TELEMETRY_KEYS = new Set(['agent_telemetry']);
+// Anything else with at least this many keys is also too tall for the narrow
+// tile, so it gets the wide treatment too.
+const _CS_WIDE_TELEMETRY_MIN_KEYS = 8;
+
 function csFmtObjRows(obj) {
     if (Array.isArray(obj)) {
         if (!obj.length) return '<div class="text-slate-400">(none)</div>';
@@ -10291,7 +10300,23 @@ function csFmtKnownObj(k, v) {
 function csTelemetryTile(k, v) {
     if (k === 'pve_version') return csKvTile(k, csPveVersion(v));
     if (v !== null && typeof v === 'object') {
-        const inner = csFmtKnownObj(k, v) || csFmtObjRows(v);
+        const known = csFmtKnownObj(k, v);
+        // Field-heavy objects (agent_telemetry above all) were squeezed into a
+        // 2-column tile with a max-h-48 scroll, so reading a dozen fields meant
+        // scrolling inside a small box on an otherwise empty page. Those now
+        // span the FULL grid width and lay their rows out in columns, so every
+        // field is visible at once and the scroll cap comes off entirely.
+        // Known-shape objects keep their hand-built layout (they are already
+        // compact); only the generic key/value rendering gets the grid.
+        const nKeys = !known && !Array.isArray(v) ? Object.keys(v || {}).length : 0;
+        const wide = _CS_WIDE_TELEMETRY_KEYS.has(k) || nKeys >= _CS_WIDE_TELEMETRY_MIN_KEYS;
+        if (wide) {
+            return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 col-span-1 sm:col-span-2 lg:col-span-3 xl:col-span-4">
+              <p class="text-[10px] uppercase tracking-wider text-slate-400 break-all">${csEscape(k)}</p>
+              <div class="text-xs text-slate-700 mt-1 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-x-6">${csFmtObjRows(v)}</div>
+            </div>`;
+        }
+        const inner = known || csFmtObjRows(v);
         return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 sm:col-span-2 lg:col-span-2">
           <p class="text-[10px] uppercase tracking-wider text-slate-400 break-all">${csEscape(k)}</p>
           <div class="text-xs text-slate-700 mt-1 space-y-0.5 max-h-48 overflow-auto">${inner}</div>
