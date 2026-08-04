@@ -10598,7 +10598,9 @@ async function csRenderVmServerDetails() {
     // `provision` is pulled out of the generic grid and rendered LAST as its
     // own full-width card (csProvisionCard) — it's a nested object that wraps
     // badly as a raw csKvTile and deserves a readable layout.
-    const skip = ['vms','usb_state','present_usb','unknown_usb','node','usb_count','provision'];
+    // agent_version is already the headline "Agent" stat in the row above, so a
+    // second AGENT_VERSION tile in the grid just repeated it.
+    const skip = ['vms','usb_state','present_usb','unknown_usb','node','usb_count','provision','agent_version'];
     const entries = Object.entries(px).filter(([k]) => !skip.includes(k));
     // cpu_1h_avg + mem_1h_avg are ONE reading of the same thing (the rolling
     // averages the delete gate acts on), so they get one tile instead of two
