@@ -9905,7 +9905,17 @@ async function csRenderVmServerUsb() {
     // auto-recovery. Surfaced here (the dongle-management surface) so an admin
     // sees WHY a dongle is sidelined and that it self-clears.
     const qt = quarantine.filter(q => q && q.bus_path);
+    // Card-level correlation across EVERY sidelined dongle on this host --
+    // quarantined, excluded, and mid-recovery. Grouping only the quarantine
+    // list would miss a card whose ports are spread across the three states,
+    // which is exactly how a failing card looks while it is still degrading.
+    const _sidelined = qt
+        .concat((scopeHosts[0] && (scopeHosts[0].proxmox || {}).excluded) || [])
+        .concat(usbState.filter(e => e && e.recovery && e.bus_path));
+    const _cardBanner = csCardSuspicionBanner(
+        _sidelined, ((scopeHosts[0] && (scopeHosts[0].proxmox || {}).usb_diagnostics) || {}).controllers);
     const qtBox = qt.length ? `<div class="mb-4 border border-red-200 bg-red-50 rounded-lg p-3">
+      ${_cardBanner}
       <p class="text-[11px] font-bold text-red-700 uppercase tracking-wider mb-2">Quarantined dongles (${qt.length}) — sidelined by kernel USB errors</p>
       <div class="flex flex-wrap gap-2">${qt.map(csQtBadge).join('')}</div>
       <p class="text-[10px] text-red-600/80 mt-2">Each auto-recovers after 1h and gets retried; re-quarantines if the kernel errors persist. A failed clone never quarantines a dongle.</p>
@@ -10412,6 +10422,72 @@ function csFmtObjRows(obj) {
         <span class="text-slate-700 font-mono text-right break-all">${csEscape(csFmtLeaf(k, obj[k]))}</span>
       </div>`).join('');
 }
+// ── "is it the dongles, or is it the card?" ──────────────────────────────────
+// Three sidelined dongles on one controller is not three dongle faults. Seen
+// live: ports 2, 3 and 4 of one Renesas card all quarantined for "chronic
+// detach", 5 strikes, same vid:pid — replacing three sticks would have fixed
+// nothing.
+//
+// Groups sidelined dongles by their controller's PCI address (a display string
+// would collide across two identical cards; the address never does) and reports
+// any controller with 2+ distinct ports down. `total` is that controller's
+// device count when the diagnostic has it, so 3-of-4 reads differently from
+// 3-of-14.
+const _CS_CARD_MIN_PORTS = 2;
+function csCardSuspicion(entries, ctrls) {
+    const byCard = {};
+    (entries || []).forEach(e => {
+        if (!e) return;
+        // Fall back to the location minus its port when an older agent sends no
+        // pci_address — imperfect across identical cards, but better than blind.
+        const key = e.pci_address || String(e.location || '').replace(/\s*·\s*port\s.*$/, '');
+        if (!key) return;
+        const port = String(e.port || String(e.bus_path || '').split('-')[1] || e.bus_path || '');
+        const g = byCard[key] || (byCard[key] = { key: key, ports: {}, reasons: {}, label: '' });
+        g.ports[port] = true;
+        const r = String(e.reason || '').trim();
+        if (r) g.reasons[r] = (g.reasons[r] || 0) + 1;
+        if (!g.label) g.label = String(e.location || '').replace(/\s*·\s*port\s.*$/, '') || key;
+    });
+    const ctrlBy = {};
+    (ctrls || []).forEach(c => { if (c && c.pci_address) ctrlBy[c.pci_address] = c; });
+    return Object.values(byCard).map(g => {
+        const nPorts = Object.keys(g.ports).length;
+        const total = (ctrlBy[g.key] || {}).device_count || null;
+        // One reason shared by every port is a much stronger signal than a
+        // grab-bag: a common-mode fault points at the card, not the dongles.
+        const reasons = Object.entries(g.reasons).sort((a, b) => b[1] - a[1]);
+        const single = reasons.length === 1;
+        return {
+            key: g.key, label: g.label, ports: Object.keys(g.ports).sort(), nPorts: nPorts,
+            total: total, reason: reasons.length ? reasons[0][0] : '',
+            sameReason: single,
+            severity: (nPorts >= 3 || (total && nPorts / total >= 0.5)) ? 'high' : 'medium',
+        };
+    }).filter(g => g.nPorts >= _CS_CARD_MIN_PORTS)
+      .sort((a, b) => b.nPorts - a.nPorts);
+}
+
+// Banner naming the suspect card. Deliberately says what to DO -- the point is
+// to stop someone swapping three good dongles.
+function csCardSuspicionBanner(entries, ctrls) {
+    const sus = csCardSuspicion(entries, ctrls);
+    if (!sus.length) return '';
+    return sus.map(s => {
+        const hi = s.severity === 'high';
+        const of = s.total ? ` of ${s.total}` : '';
+        return `<div class="mb-2 rounded-md border px-3 py-2 ${hi ? 'border-red-300 bg-red-50' : 'border-amber-300 bg-amber-50'}">
+          <p class="text-[11px] font-bold ${hi ? 'text-red-700' : 'text-amber-700'}">
+            ⚠ Suspect controller — ${csEscape(s.label || s.key)}</p>
+          <p class="text-[11px] ${hi ? 'text-red-600/90' : 'text-amber-600/90'}">
+            ${s.nPorts}${of} port(s) sidelined on this one card (ports ${csEscape(s.ports.join(', '))})${s.sameReason && s.reason ? `, all with the same fault: <b>${csEscape(s.reason)}</b>` : ''}.
+            Dongles failing together on a single controller point at the <b>card, its slot or its power</b> — not at the dongles.
+            Reseat or replace the card, or move a dongle to a different controller to confirm, before swapping sticks.</p>
+        </div>`;
+    }).join('');
+}
+
+
 
 // Friendly inner HTML for the well-known nested telemetry objects. Returns null
 // to fall back to the generic csFmtObjRows layout for anything unrecognized (so
@@ -10449,7 +10525,10 @@ function csFmtKnownObj(k, v) {
         const list = Array.isArray(v) ? v : [];
         if (!list.length) return '<div class="text-slate-400">(none)</div>';
         const qt = k === 'quarantine';
-        return list.map(e => {
+        // Card-level correlation first: if the whole group is one bad card,
+        // that is the finding, and the per-dongle rows below are its evidence.
+        const banner = csCardSuspicionBanner(list, null);
+        return banner + list.map(e => {
             const o = e || {};
             // Location is omitted entirely when the agent could not determine
             // it -- an empty line beats "add-in card or onboard".
