@@ -19808,7 +19808,10 @@ function _spokeRegistryDiagHtml(d) {
     // accumulate: offline leftovers from a rebuild, and pre-rename '-spoke'
     // twins. Connected spokes are never selectable — a diagnostics page must
     // not be able to tear down a running spoke.
-    const nOffline = rows.filter(r => !r.connected).length;
+    // Must match the per-row selectable test below, or the button offers to
+    // select rows that have no checkbox. A relayed agent with liveness evidence
+    // is not a leftover registration — deleting it is a different operation.
+    const nOffline = rows.filter(r => !r.connected && !r.is_relayed_agent).length;
     const nTwins = rows.filter(r => r.legacy_twin_of).length;
     html += `<div class="flex flex-wrap items-center gap-2 mb-2 text-xs">
         <button type="button" onclick="srdSelect('offline')" class="px-2 py-1 rounded border border-slate-300 text-slate-600 hover:bg-slate-50">Select offline (${nOffline})</button>
@@ -19829,14 +19832,20 @@ function _spokeRegistryDiagHtml(d) {
         const badges = [];
         if (r.connected) badges.push('<span class="px-1.5 py-0.5 rounded bg-green-100 text-green-700 font-bold">connected</span>');
         else badges.push('<span class="px-1.5 py-0.5 rounded bg-red-100 text-red-700 font-bold">offline</span>');
-        if (!r.has_key) badges.push('<span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">no key</span>');
+        // Relayed node agent (pxmx/cs). It has no socket and no session key of
+        // its OWN — it dials its parent spoke, which holds both — so "no key"
+        // is normal here and must not read as a fault, and it is not a ghost
+        // registration to be deleted. Without this the four pxmx agents looked
+        // like leftovers an operator should clean up.
+        if (r.is_relayed_agent) badges.push('<span class="px-1.5 py-0.5 rounded bg-sky-100 text-sky-700" title="Relayed node agent — reaches the hub through its parent spoke, so it has no socket or session key of its own. Liveness comes from relay traffic. NOT a leftover registration.">relayed agent</span>');
+        if (!r.has_key && !r.is_relayed_agent) badges.push('<span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">no key</span>');
         if (!r.approved) badges.push('<span class="px-1.5 py-0.5 rounded bg-slate-200 text-slate-600">unapproved</span>');
         if (r.admin_only) badges.push('<span class="px-1.5 py-0.5 rounded bg-purple-100 text-purple-700" title="No tenant_id — hidden from a non-admin Spokes list, but still claimable as a tenant broker">hidden</span>');
         if (r.legacy_twin_of) badges.push('<span class="px-1.5 py-0.5 rounded bg-orange-100 text-orange-700" title="Same box as ' + escapeHtml(r.legacy_twin_of) + ' — registered under the pre-2026-07-20 &quot;-spoke&quot; id. Safe to delete once the twin is connected.">twin of ' + escapeHtml(r.legacy_twin_of) + '</span>');
-        const del = r.connected
-            ? `<span class="text-slate-300" title="Connected — this is a live spoke, not a leftover">live</span>`
+        const del = (r.connected || r.is_relayed_agent)
+            ? `<span class="text-slate-300" title="${r.is_relayed_agent ? 'Relayed agent reporting through its parent spoke — not a leftover' : 'Connected — this is a live spoke, not a leftover'}">live</span>`
             : `<button onclick="deleteSpokeRegistration('${escJsAttr(r.spoke_id)}')" class="px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50">Delete</button>`;
-        const sel = r.connected ? '' :
+        const sel = (r.connected || r.is_relayed_agent) ? '' :
             `<input type="checkbox" class="srd-sel" data-twin="${r.legacy_twin_of ? '1' : '0'}" ` +
             `value="${escapeHtml(r.spoke_id)}" onchange="srdSyncCount()">`;
         html += `<tr class="border-b border-slate-100 ${r.connected ? '' : 'bg-slate-50/60'}">
