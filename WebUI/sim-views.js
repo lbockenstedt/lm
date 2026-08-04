@@ -1338,22 +1338,52 @@ function csDongleCounts(h) {
         .filter(q => q && q.bus_path).map(q => q.bus_path));
     const exBuses = new Set((Array.isArray(px.excluded) ? px.excluded : [])
         .filter(x => x && x.bus_path).map(x => x.bus_path));
-    const avail = present.filter(u => u && u.bus_path
-        && !assigned.has(u.bus_path)
-        && !qtBuses.has(u.bus_path)
-        && !exBuses.has(u.bus_path)).length;
-    return { inUse: assigned.size, avail, qt: qtBuses.size,
-             excluded: exBuses.size, present: present.length };
+    const presentBuses = new Set(present.map(u => (u || {}).bus_path).filter(Boolean));
+
+    // Every PRESENT dongle lands in exactly ONE bucket, priority
+    // assigned > quarantined > excluded > available, so the four ALWAYS sum to
+    // `present`. Previously inUse was assigned.size — every assignment in
+    // usb_state, including buses whose dongle had vanished — while `present`
+    // counted only what is on the bus. That produced "USB 13 · IN USE 15",
+    // which reads as impossible even though both numbers were individually
+    // right. A dongle assigned to a VM but no longer enumerated is a REAL and
+    // actionable state (it is awaiting the missing-dongle teardown), so it gets
+    // its own count instead of being folded into in-use.
+    let inUse = 0, qt = 0, excluded = 0, avail = 0;
+    presentBuses.forEach(b => {
+        if (assigned.has(b)) inUse++;
+        else if (qtBuses.has(b)) qt++;
+        else if (exBuses.has(b)) excluded++;
+        else avail++;
+    });
+    let absentAssigned = 0;
+    assigned.forEach(b => { if (!presentBuses.has(b)) absentAssigned++; });
+    // Sidelined buses whose dongle is also gone — counted so the QT/excluded
+    // tiles still reflect fault state that a bare present-scan would hide.
+    let absentQt = 0, absentEx = 0;
+    qtBuses.forEach(b => { if (!presentBuses.has(b)) absentQt++; });
+    exBuses.forEach(b => { if (!presentBuses.has(b)) absentEx++; });
+
+    return { inUse, avail, qt, excluded, present: presentBuses.size,
+             absentAssigned, absentQt, absentEx,
+             qtTotal: qt + absentQt, excludedTotal: excluded + absentEx };
 }
 
 // Shared tooltip for the dongle breakdown so the Overview column and the
 // Details tiles explain the numbers identically.
 function csDongleTitle(d) {
-    return `${d.inUse} dongle(s) in use (assigned to a VM) · ${d.avail} available `
-         + `(certified, present, not sidelined) · ${d.qt} quarantined (kernel USB errors)`
-         + (d.excluded ? ` · ${d.excluded} excluded (destroy-fail / anti-churn)` : '')
-         + `. ${d.present} certified dongle(s) present on this host. `
-         + `Available 0 with empty VM slots = out of working dongles.`;
+    // Every present dongle is in exactly one bucket, so the four ALWAYS add up
+    // to `present` — state the arithmetic so the numbers are checkable at a
+    // glance rather than looking contradictory.
+    return `${d.present} certified dongle(s) present = ${d.inUse} in use + `
+         + `${d.avail} available + ${d.qt} quarantined + ${d.excluded} excluded.`
+         + (d.absentAssigned
+            ? ` PLUS ${d.absentAssigned} assigned to a VM but NO LONGER on the bus `
+              + `(awaiting missing-dongle teardown) — those are not counted above.`
+            : '')
+         + (d.absentQt || d.absentEx
+            ? ` ${d.absentQt + d.absentEx} sidelined bus(es) are also absent.` : '')
+         + ` Available 0 with empty VM slots = out of working dongles.`;
 }
 
 // "in-use / available / QT" triplet, colour-coded: available in green when
@@ -1361,14 +1391,19 @@ function csDongleTitle(d) {
 // Overview fleet table (Dongles column) and reused for the Details tiles.
 function csDongleTriplet(d) {
     const availCls = d.avail > 0 ? 'text-[#01A982]' : 'text-amber-600';
-    const qtCls = d.qt > 0 ? 'text-red-600' : 'text-slate-400';
-    const exPart = d.excluded
-        ? ` <span class="text-slate-400">/</span> <span class="text-amber-600" title="excluded buses">${d.excluded}<span class="text-[9px] font-normal">x</span></span>`
-        : '';
+    const qtCls = d.qtTotal > 0 ? 'text-red-600' : 'text-slate-400';
+    const exPart = (d.excludedTotal
+        ? ` <span class="text-slate-400">/</span> <span class="text-amber-600" title="excluded buses">${d.excludedTotal}<span class="text-[9px] font-normal">x</span></span>`
+        : '')
+        // Assigned but no longer on the bus — flagged separately so in-use can
+        // never exceed the present count.
+        + (d.absentAssigned
+            ? ` <span class="text-slate-400">/</span> <span class="text-red-600" title="assigned to a VM but no longer on the bus">${d.absentAssigned}<span class="text-[9px] font-normal">!</span></span>`
+            : '');
     return `<span class="font-mono text-xs font-bold" title="${csEscape(csDongleTitle(d))}">`
          + `<span class="text-slate-700">${d.inUse}</span>`
          + ` <span class="text-slate-300">/</span> <span class="${availCls}">${d.avail}</span>`
-         + ` <span class="text-slate-300">/</span> <span class="${qtCls}">${d.qt}</span>${exPart}</span>`;
+         + ` <span class="text-slate-300">/</span> <span class="${qtCls}">${d.qtTotal}</span>${exPart}</span>`;
 }
 
 // CPU + Mem 1h averages in ONE tile. They were two tiles showing one number
@@ -1407,8 +1442,12 @@ function csDongleStats(h) {
     </div>`;
     return tile('In use', d.inUse, 'text-slate-700')
          + tile('Available', d.avail, d.avail > 0 ? 'text-[#01A982]' : 'text-amber-600')
-         + tile('Quarantined', d.qt, d.qt > 0 ? 'text-red-600' : 'text-slate-700')
-         + (d.excluded ? tile('Excluded', d.excluded, 'text-amber-600') : '');
+         + tile('Quarantined', d.qtTotal, d.qtTotal > 0 ? 'text-red-600' : 'text-slate-700')
+         // Assigned to a VM but gone from the bus. Shown only when nonzero, and
+         // deliberately NOT folded into "In use" — that is what made USB 13 /
+         // IN USE 15 look impossible.
+         + (d.absentAssigned ? tile('Assigned, absent', d.absentAssigned, 'text-red-600') : '')
+         + (d.excludedTotal ? tile('Excluded', d.excludedTotal, 'text-amber-600') : '');
 }
 
 // Trim a Proxmox version string to just the version number (e.g. "8.1.4"),
