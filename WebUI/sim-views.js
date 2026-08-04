@@ -1369,6 +1369,46 @@ function csDongleCounts(h) {
              qtTotal: qt + absentQt, excludedTotal: excluded + absentEx };
 }
 
+// ── VM class (tier) breakdown ────────────────────────────────────────────────
+// Per-host T1/T2/T3 counts over the SIM VMs. The agent classifies each VM in
+// compute_vm_tiers — T1/T3 by PCI passthrough vidpid, T2 by holding a USB
+// dongle — and stamps it as v.tier. Counted over sim clients only: a template or
+// an infrastructure guest has no tier and would otherwise inflate "unclassified".
+function csTierCounts(h) {
+    const vms = (Array.isArray(h && h.proxmox_vms) ? csHostVms(h) : [])
+        .filter(v => csVmCategory(v) === 'Simulation Clients');
+    const out = { t1: 0, t2: 0, t3: 0, unknown: 0, total: vms.length };
+    vms.forEach(v => {
+        const t = String((v && v.tier) || '').toLowerCase();
+        if (t === 't1' || t === 't2' || t === 't3') out[t]++;
+        else out.unknown++;   // not yet classified — compute_vm_tiers is cached ~60s
+    });
+    return out;
+}
+
+function csTierTitle(d) {
+    return `${d.total} simulation VM(s) = ${d.t1} T1 + ${d.t2} T2 + ${d.t3} T3`
+         + (d.unknown ? ` + ${d.unknown} unclassified` : '')
+         + `. T1/T3 are PCI-passthrough tiers (protected — never torn down by the `
+         + `delete gate); T2 holds a USB dongle.`
+         + (d.unknown ? ` Unclassified usually means the agent has not run compute_vm_tiers `
+                        + `for them yet (cached ~60s) — persistent unclassified is worth a look.` : '');
+}
+
+// Same treatment as csDongleTriplet: one compact cell, zeros greyed so a nonzero
+// number is what the eye lands on.
+function csTierTriplet(d) {
+    const seg = (n, cls) => `<span class="${n ? cls : 'text-slate-300'}">${csEscape(String(n))}</span>`;
+    const unk = d.unknown
+        ? `<span class="text-slate-300">/</span><span class="text-amber-600" title="unclassified">${d.unknown}<span class="text-[9px] font-normal">?</span></span>`
+        : '';
+    return `<span class="font-mono text-xs font-bold" title="${csEscape(csTierTitle(d))}">`
+         + seg(d.t1, 'text-purple-700')
+         + `<span class="text-slate-300">/</span>` + seg(d.t2, 'text-slate-700')
+         + `<span class="text-slate-300">/</span>` + seg(d.t3, 'text-sky-700')
+         + `${unk}</span>`;
+}
+
 // Shared tooltip for the dongle breakdown so the Overview column and the
 // Details tiles explain the numbers identically.
 function csDongleTitle(d) {
@@ -1393,17 +1433,17 @@ function csDongleTriplet(d) {
     const availCls = d.avail > 0 ? 'text-[#01A982]' : 'text-amber-600';
     const qtCls = d.qtTotal > 0 ? 'text-red-600' : 'text-slate-400';
     const exPart = (d.excludedTotal
-        ? ` <span class="text-slate-400">/</span> <span class="text-amber-600" title="excluded buses">${d.excludedTotal}<span class="text-[9px] font-normal">x</span></span>`
+        ? `<span class="text-slate-400">/</span><span class="text-amber-600" title="excluded buses">${d.excludedTotal}<span class="text-[9px] font-normal">x</span></span>`
         : '')
         // Assigned but no longer on the bus — flagged separately so in-use can
         // never exceed the present count.
         + (d.absentAssigned
-            ? ` <span class="text-slate-400">/</span> <span class="text-red-600" title="assigned to a VM but no longer on the bus">${d.absentAssigned}<span class="text-[9px] font-normal">!</span></span>`
+            ? `<span class="text-slate-400">/</span><span class="text-red-600" title="assigned to a VM but no longer on the bus">${d.absentAssigned}<span class="text-[9px] font-normal">!</span></span>`
             : '');
     return `<span class="font-mono text-xs font-bold" title="${csEscape(csDongleTitle(d))}">`
          + `<span class="text-slate-700">${d.inUse}</span>`
-         + ` <span class="text-slate-300">/</span> <span class="${availCls}">${d.avail}</span>`
-         + ` <span class="text-slate-300">/</span> <span class="${qtCls}">${d.qtTotal}</span>${exPart}</span>`;
+         + `<span class="text-slate-300">/</span><span class="${availCls}">${d.avail}</span>`
+         + `<span class="text-slate-300">/</span><span class="${qtCls}">${d.qtTotal}</span>${exPart}</span>`;
 }
 
 // CPU + Mem 1h averages in ONE tile. They were two tiles showing one number
@@ -8399,6 +8439,7 @@ async function csRenderVmServer() {
           <td class="px-4 py-2 text-center">${vmN}</td>
           <td class="px-4 py-2 text-center">${usbN}${qtPill}</td>
           <td class="px-4 py-2 text-center">${csDongleTriplet(csDongleCounts(h))}</td>
+          <td class="px-4 py-2 text-center">${csTierTriplet(csTierCounts(h))}</td>
           <td class="px-4 py-2 text-center text-xs">${csPctCell(px.cpu_1h_avg)}</td>
           <td class="px-4 py-2 text-center text-xs">${csPctCell(px.mem_1h_avg)}</td>
           <td class="px-4 py-2 text-center">${csProvThrottleBadge(px)}</td>
@@ -8408,8 +8449,13 @@ async function csRenderVmServer() {
     // Auto-Prov = indices 1..7) is centred. The Agent + PVE version columns were
     // dropped from this table — both are per-host detail rather than fleet
     // scanning signal, and they still show on VM Server → Details.
-    const ths = ['Host', 'Online', 'VMs', 'USB', 'Dongles', 'CPU 1h', 'Mem 1h', 'Auto-Prov']
-        .map((c, i) => `<th class="px-4 py-2 ${i >= 1 && i <= 7 ? 'text-center' : 'text-left'} font-medium"${c === 'Dongles' ? ' title="in use / available / quarantined (+ excluded when nonzero)"' : ''}>${c}</th>`).join('');
+    // Class = T1 / T2 / T3 sim-VM counts, sat next to Dongles because the two
+    // answer adjacent questions (what hardware is deployed vs what class of
+    // client is running on it). Centred span now runs Online…Auto-Prov = 1..8.
+    const _thTitle = { 'Dongles': 'in use / available / quarantined (+ excluded when nonzero)',
+                       'Class': 'T1 / T2 / T3 simulation VMs (+ unclassified when nonzero)' };
+    const ths = ['Host', 'Online', 'VMs', 'USB', 'Dongles', 'Class', 'CPU 1h', 'Mem 1h', 'Auto-Prov']
+        .map((c, i) => `<th class="px-4 py-2 ${i >= 1 && i <= 8 ? 'text-center' : 'text-left'} font-medium"${_thTitle[c] ? ` title="${_thTitle[c]}"` : ''}>${c}</th>`).join('');
     const selTh = `<th class="px-4 py-2 text-center"><input type="checkbox" onclick="csFleetSelectAll(this)" title="Select all hosts"></th>`;
     const table = `<div class="overflow-x-auto"><table class="w-full text-sm">
       <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>${selTh}${ths}</tr></thead>
