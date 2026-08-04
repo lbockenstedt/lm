@@ -10245,7 +10245,23 @@ function csFreshnessPanel(h) {
         <div class="text-[10px] uppercase tracking-wider text-slate-400">${csEscape(label)}</div>
         <div class="text-sm font-mono font-bold text-slate-700">${csEscape(val)}</div>
         ${hint ? `<div class="text-[10px] text-slate-400">${csEscape(hint)}</div>` : ''}</div>`;
+    // A tick that never COMPLETES is a distinct, serious state: the agent stamps
+    // _last_tick_done_ts at the very end of the loop body, so a null here means
+    // every tick has raised before finishing (logged as "Telemetry push failed")
+    // or the process is being restarted mid-tick. It also starves the systemd
+    // watchdog, which feeds only on that stamp — so the agent gets killed once
+    // the 300s startup grace expires, and iter resets to 1 forever. Shown as a
+    // bare "—" this was invisible; it is the single most diagnostic field here.
+    const _neverDone = (f.last_tick_done_ts == null) && (f.iter != null);
+    const _stallBanner = _neverDone ? `<div class="mb-2 border border-red-200 bg-red-50 rounded-md px-3 py-2">
+        <p class="text-[11px] font-bold text-red-700">No telemetry tick has COMPLETED on this agent</p>
+        <p class="text-[10px] text-red-600/90">The agent stamps completion at the end of its loop body, so every tick is
+        either raising before it finishes (look for <code>Telemetry push failed</code> in the agent log) or the process is
+        being restarted mid-tick (<code>Watchdog timeout</code> in journalctl). This also starves the systemd watchdog,
+        which feeds only on that stamp — expect a kill once the 300s startup grace expires, and <b>tick #1</b> forever.</p>
+      </div>` : '';
     return `<div class="hpe-card rounded-lg p-4 shadow-sm mb-4">
+      ${_stallBanner}
       <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
         <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Telemetry Freshness</p>
         <span class="text-xs text-slate-500">${state} · agent v${csEscape(String(f.agent_version || '—'))} · tick #${csEscape(String(f.iter != null ? f.iter : '—'))}</span>
