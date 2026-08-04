@@ -11657,6 +11657,30 @@ function _csDongleDiagHost(h) {
 
     const u = d.uhubctl || {};
     const kTotalN = kTotals.reduce((n, [, v]) => n + Number(v || 0), 0);
+    // Hub tier. Renders NOTHING when there is no external hub -- which is the
+    // current fleet -- so this stays dark until one is fitted rather than
+    // showing an empty section forever. Root hubs are the controller itself and
+    // are only worth listing alongside a real hub, for contrast.
+    const hubs = Array.isArray(d.hubs) ? d.hubs : [];
+    const realHubs = hubs.filter(h => h && !h.is_root_hub);
+    const hubHtml = !realHubs.length ? '' : `
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-3 mb-1">USB hubs</p>
+      <div class="overflow-x-auto">${csTable(['Hub', 'Product', 'Ports', 'Attached', 'Power', 'Per-port power'],
+        realHubs.map(h => {
+            const over = Number(h.attached || 0) > Number(d.hub_dongle_ceiling || 7);
+            return `<tr>
+              <td class="px-3 py-1.5 font-mono text-xs">${csEscape(h.bus_path || '—')}</td>
+              <td class="px-3 py-1.5 text-xs text-slate-600">${csEscape(h.product || '—')}</td>
+              <td class="px-3 py-1.5 text-xs text-slate-500">${csEscape(String(h.ports != null ? h.ports : '—'))}</td>
+              <td class="px-3 py-1.5 text-xs ${over ? 'text-red-600 font-bold' : 'text-slate-700'}">${csEscape(String(h.attached != null ? h.attached : '—'))}${over ? ` / ${csEscape(String(d.hub_dongle_ceiling || 7))}` : ''}</td>
+              <td class="px-3 py-1.5 text-xs ${h.self_powered ? 'text-slate-600' : 'text-amber-600 font-bold'}">${h.self_powered ? 'self-powered' : 'bus-powered'}</td>
+              <td class="px-3 py-1.5 text-xs">${h.ppps
+                  ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-700" title="uhubctl can cut VBUS on an individual port — a far less destructive recovery rung than usb_reset, which yanks the device out from under a VM holding it.">✓ can power-cycle</span>'
+                  : '<span class="text-slate-400 text-[10px]">no PPPS</span>'}</td>
+            </tr>`;
+        }).join(''))}</div>
+      ${realHubs.flatMap(h => (h.warnings || []).map(w =>
+        `<div class="mt-1 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">⚠ ${csEscape(h.bus_path)}: ${csEscape(w)}</div>`)).join('')}`;
     return `<div class="hpe-card rounded-lg p-4 shadow-sm mb-4">
       <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
         <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">${name}</p>
@@ -11691,6 +11715,7 @@ function _csDongleDiagHost(h) {
         `<div class="overflow-x-auto mb-2">${csTable(['Bus', 'Location', 'Product', 'vid:pid', 'Last seen', 'Missing for'], missRows)}</div>` : ''}
       ${causes.length ? csDiagSub('Probable cause — ranked') +
         `<div class="grid grid-cols-1 xl:grid-cols-2 gap-2">${causeCards}</div>` : ''}
+      ${hubHtml}
       ${kernel.available && kTotals.length ? csDiagNote(`Kernel: ${kernelLine}`) : ''}
       ${!kernel.available ? csDiagNote('<span class="text-amber-600">Kernel log unreadable — evidence could not be checked. This is <b>not</b> the same as a clean log.</span>') : ''}
     </div>`;
