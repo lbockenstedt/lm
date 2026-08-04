@@ -10368,7 +10368,7 @@ function csFmtLeaf(k, v) {
     const kl = String(k).toLowerCase();
     if (typeof v === 'number' && v > 1e8 &&
         (kl === 'gen_ts' || kl === 'ingested_at' || kl === 'last_seen' ||
-         kl === 'started_at' || kl === 'completed_at' ||
+         kl === 'started_at' || kl === 'completed_at' || kl === 'since' ||
          kl.endsWith('_ts') || kl.endsWith('_at'))) {
         return csLastSeen(v);
     }
@@ -10439,6 +10439,48 @@ function csFmtKnownObj(k, v) {
               <div>eligible ${esc(o.eligible_candidates != null ? o.eligible_candidates : 0)}</div>
               <div>exceeded ${o.threshold_exceeded ? 'yes' : 'no'}</div>
             </div>`;
+    }
+    // quarantine / excluded arrive as ARRAYS of sidelined dongles. The generic
+    // renderer flattened each one to `bus_path=16-3 · since=1785811300 · ...`,
+    // which is a data structure, not an answer. What an operator needs, in
+    // order: which dongle, WHERE IT PHYSICALLY IS, why it is sidelined, and
+    // whether it will come back on its own.
+    if (k === 'quarantine' || k === 'excluded') {
+        const list = Array.isArray(v) ? v : [];
+        if (!list.length) return '<div class="text-slate-400">(none)</div>';
+        const qt = k === 'quarantine';
+        return list.map(e => {
+            const o = e || {};
+            // Location is omitted entirely when the agent could not determine
+            // it -- an empty line beats "add-in card or onboard".
+            const loc = o.location
+                ? `<span class="text-slate-700 font-semibold">${esc(o.location)}</span>`
+                : '<span class="text-slate-300">location unknown</span>';
+            const id = [o.name, o.vidpid].filter(Boolean).map(esc).join(' · ');
+            const since = o.since
+                ? `${esc(csLastSeen(o.since))} <span class="text-slate-400">(${esc(csAgeShort(Date.now() / 1000 - Number(o.since)))} ago)</span>`
+                : '—';
+            // The one thing that decides whether a human must intervene.
+            const back = o.permanent
+                ? '<span class="text-red-700 font-bold">PERMANENT — never auto-recovers</span>'
+                : o.recovers_in_s != null
+                    ? `returns in ${esc(csAgeShort(o.recovers_in_s))}`
+                    : (qt ? 'retried next pass' : 'clears when the bus goes absent');
+            const flags = [
+                o.strikes ? `strike ${esc(o.strikes)}/5` : '',
+                o.present === false ? '<span class="text-amber-600">absent from host</span>' : 'present',
+            ].filter(Boolean).join(' · ');
+            return `<div class="py-1.5 border-b border-slate-100 last:border-0">
+              <div class="flex items-baseline gap-2 flex-wrap">
+                <span class="font-mono font-bold text-slate-700">${esc(o.bus_path || '?')}</span>
+                <span class="text-slate-300">│</span>${loc}
+              </div>
+              ${id ? `<div class="text-slate-500">${id}</div>` : ''}
+              <div class="text-slate-600">${esc(o.reason || (qt ? 'quarantined' : 'excluded'))}</div>
+              <div class="text-[11px] text-slate-500">${back} · ${flags}</div>
+              <div class="text-[11px] text-slate-400">since ${since}</div>
+            </div>`;
+        }).join('');
     }
     if (k === 'vmid_range') {
         if (o.start == null && o.end == null) return null;
