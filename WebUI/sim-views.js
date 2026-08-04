@@ -10384,6 +10384,16 @@ function csFmtKnownObj(k, v) {
 // box instead of blowing out the row.
 function csTelemetryTile(k, v) {
     if (k === 'pve_version') return csKvTile(k, csPveVersion(v));
+    // Combined CPU/Mem 1h tile (see csRenderVmServerDetails). Rendered as a
+    // SCALAR tile — it is one reading, not a nested object, so it must not fall
+    // into the generic key:value object layout below.
+    if (k === 'cpu / mem 1h avg') {
+        const f = x => {
+            const n = Number(x);
+            return (x == null || x === '' || !isFinite(n)) ? '—' : n.toFixed(1) + '%';
+        };
+        return csKvTile(k, `${f((v || {}).cpu_1h_avg)} / ${f((v || {}).mem_1h_avg)}`);
+    }
     if (v !== null && typeof v === 'object') {
         const known = csFmtKnownObj(k, v);
         // Field-heavy objects (agent_telemetry above all) were squeezed into a
@@ -10495,6 +10505,19 @@ async function csRenderVmServerDetails() {
     // badly as a raw csKvTile and deserves a readable layout.
     const skip = ['vms','usb_state','present_usb','unknown_usb','node','usb_count','provision'];
     const entries = Object.entries(px).filter(([k]) => !skip.includes(k));
+    // cpu_1h_avg + mem_1h_avg are ONE reading of the same thing (the rolling
+    // averages the delete gate acts on), so they get one tile instead of two
+    // half-empty ones. Collapsed in place — the combined tile takes cpu's
+    // position and mem is dropped — so the surrounding field order is unchanged.
+    // Also normalises the formatting: the raw values arrive at different
+    // precisions (40.1 vs 71.31), which looked like two unrelated numbers.
+    const _cpuIdx = entries.findIndex(([k]) => k === 'cpu_1h_avg');
+    if (_cpuIdx >= 0) {
+        const _pair = { cpu_1h_avg: px.cpu_1h_avg, mem_1h_avg: px.mem_1h_avg };
+        entries.splice(_cpuIdx, 1, ['cpu / mem 1h avg', _pair]);
+    }
+    const _memIdx = entries.findIndex(([k]) => k === 'mem_1h_avg');
+    if (_memIdx >= 0) entries.splice(_memIdx, 1);
     // Human-readable tiles: scalars pretty-printed (pve_version → 9.2.3,
     // last_seen/ingested_at epoch → local datetime, bools → Yes/No, %/s units);
     // nested objects (prov_run/delete_gate/vmid_range/
