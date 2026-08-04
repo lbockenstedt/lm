@@ -10976,7 +10976,7 @@ function _csDiagDongleText(hosts) {
                `${(d.missing || []).length} missing(roster) / ${d.present_count ?? '?'} present` +
                `  boot_baseline=${_bb.count ?? '?'}${_bb.trusted === false ? ' (UNTRUSTED — taken mid-boot)' : ''}` +
                `  uhubctl=${u.supported ? 'SUPPORTED (' + (u.ppps_hubs || []).length + ' PPPS hub)' : u.installed ? 'installed, no PPPS hub' : 'not installed'}`);
-        (d.missing || []).forEach(m => L.push(`    ${m.bus_path} ${m.vidpid} ${m.product} — missing ${m.missing_for_s != null ? m.missing_for_s + 's' : '?'}`));
+        (d.missing || []).forEach(m => L.push(`    ${m.bus_path} [${m.location || 'location unknown'}] ${m.vidpid} ${m.product} — missing ${m.missing_for_s != null ? m.missing_for_s + 's' : '?'}`));
         (d.causes || []).forEach(c => L.push(`    CAUSE [${c.confidence}] ${c.cause}: ${c.detail}` + (c.remedy ? ` | FIX: ${c.remedy}` : '')));
         const k = d.kernel || {};
         L.push(`    kernel(${k.window_s || 0}s): ` + (!k.available ? 'UNREADABLE (not the same as clean)'
@@ -10984,7 +10984,7 @@ function _csDiagDongleText(hosts) {
         (k.samples || []).slice(0, 8).forEach(s => L.push(`      ${s}`));
         const autoN = (d.power || []).filter(p => p && p.autosuspend_enabled).length;
         L.push(`    autosuspend: ${autoN}/${(d.power || []).length} devices on 'auto'` +
-               `   controllers: ${(d.controllers || []).map(c => c.pci_address + '(' + c.device_count + ')').join(' ') || '—'}`);
+               `   controllers: ${(d.controllers || []).map(c => c.pci_address + ' [' + (c.loc_label || '?') + '] (' + c.device_count + ')').join(' ') || '—'}`);
         const gw = (h.proxmox || {}).guest_watchdog || {};
         if (gw.ran_at) {
             L.push(`    guest-watchdog: checked=${gw.checked} responding=${gw.responding} ` +
@@ -11211,8 +11211,12 @@ function _csDongleDiagHost(h) {
     const nowS = Date.now() / 1000;
     const age = d.generated_at ? csAgeShort(nowS - d.generated_at) + ' ago' : '—';
 
+    // Physical location, recorded by the agent while the dongle was still
+    // present. "0000:80:14.0" means nothing at the rack; "PCIe slot 1 · port 3"
+    // is the whole point of the field. Older agents don't send it -> em dash.
     const missRows = missing.map(m => `<tr>
       <td class="px-3 py-1.5 font-mono text-xs">${csEscape(m.bus_path || '—')}</td>
+      <td class="px-3 py-1.5 text-xs text-slate-600">${csEscape(m.location || '—')}</td>
       <td class="px-3 py-1.5 text-xs text-slate-600">${csEscape(m.product || '—')}</td>
       <td class="px-3 py-1.5 font-mono text-[11px] text-slate-500">${csEscape(m.vidpid || '—')}</td>
       <td class="px-3 py-1.5 text-xs text-slate-500">${csEscape(m.last_seen ? csAgeShort(nowS - m.last_seen) + ' ago' : '—')}</td>
@@ -11278,11 +11282,11 @@ function _csDongleDiagHost(h) {
                                : (u.error || 'port power cycling unavailable'),
                    u.supported ? 'good' : 'warn'),
         csDiagTile('Controllers', String(ctrls.length),
-                   ctrls.map(c => `${c.pci_address} (${c.device_count})`).join(' · ') || '—'),
+                   ctrls.map(c => `${c.loc_label || c.pci_address} (${c.device_count})`).join(' · ') || '—'),
         csDiagTile('Guest watchdog', gwTile.val, gwTile.hint, gwTile.tone),
       ], 'lg:grid-cols-4')}
       ${missing.length ? csDiagSub('Missing dongles') +
-        `<div class="overflow-x-auto mb-2">${csTable(['Bus', 'Product', 'vid:pid', 'Last seen', 'Missing for'], missRows)}</div>` : ''}
+        `<div class="overflow-x-auto mb-2">${csTable(['Bus', 'Location', 'Product', 'vid:pid', 'Last seen', 'Missing for'], missRows)}</div>` : ''}
       ${causes.length ? csDiagSub('Probable cause — ranked') +
         `<div class="grid grid-cols-1 xl:grid-cols-2 gap-2">${causeCards}</div>` : ''}
       ${kernel.available && kTotals.length ? csDiagNote(`Kernel: ${kernelLine}`) : ''}
