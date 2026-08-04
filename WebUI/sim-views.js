@@ -10511,13 +10511,27 @@ async function csRenderVmServerDetails() {
     // position and mem is dropped — so the surrounding field order is unchanged.
     // Also normalises the formatting: the raw values arrive at different
     // precisions (40.1 vs 71.31), which looked like two unrelated numbers.
-    const _cpuIdx = entries.findIndex(([k]) => k === 'cpu_1h_avg');
-    if (_cpuIdx >= 0) {
-        const _pair = { cpu_1h_avg: px.cpu_1h_avg, mem_1h_avg: px.mem_1h_avg };
-        entries.splice(_cpuIdx, 1, ['cpu / mem 1h avg', _pair]);
+    // Drop both raw fields, then RE-INSERT the combined tile high in the grid:
+    // immediately after t1_pci_devices. T1 spans two columns, so on the 4-col
+    // layout that lands this tile in the last column of that row — directly
+    // below running_count and to the right of T1. It is a headline number the
+    // delete gate acts on, so it belongs near the top rather than buried after
+    // delete_gate where the raw key order put it.
+    const _pair = { cpu_1h_avg: px.cpu_1h_avg, mem_1h_avg: px.mem_1h_avg };
+    for (const k of ['cpu_1h_avg', 'mem_1h_avg']) {
+        const i = entries.findIndex(([ek]) => ek === k);
+        if (i >= 0) entries.splice(i, 1);
     }
-    const _memIdx = entries.findIndex(([k]) => k === 'mem_1h_avg');
-    if (_memIdx >= 0) entries.splice(_memIdx, 1);
+    if (px.cpu_1h_avg != null || px.mem_1h_avg != null) {
+        // Anchor by preference; fall back down the list so a host missing the
+        // PCI fields still gets it high up rather than appended at the end.
+        let _at = -1;
+        for (const anchor of ['t1_pci_devices', 'running_count', 'vm_count']) {
+            const i = entries.findIndex(([ek]) => ek === anchor);
+            if (i >= 0) { _at = i + 1; break; }
+        }
+        entries.splice(_at >= 0 ? _at : entries.length, 0, ['cpu / mem 1h avg', _pair]);
+    }
     // Human-readable tiles: scalars pretty-printed (pve_version → 9.2.3,
     // last_seen/ingested_at epoch → local datetime, bools → Yes/No, %/s units);
     // nested objects (prov_run/delete_gate/vmid_range/
