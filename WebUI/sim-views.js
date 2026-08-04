@@ -9197,6 +9197,16 @@ function csRebootBadge(v) {
 // auto-recovery that clears it (a still-plugged dongle gets retried; if the
 // kernel errors persist it re-quarantines next pass). A failed clone NEVER
 // quarantines the dongle, so this is the sole "sidelined dongle" signal.
+// Physical location chip for a PROBLEM dongle (quarantined / recovering /
+// excluded). The agent stamps `location` only on those, falling back to the
+// position recorded while the dongle was still present -- a sidelined dongle is
+// often absent, which is exactly when you need to know which slot to go to.
+// Renders nothing for older agents that don't send the field.
+function _csLoc(x) {
+    const l = (x && x.location) || '';
+    return l ? ` · <span class="font-bold not-italic">${csEscape(l)}</span>` : '';
+}
+
 function csQtBadge(q) {
     if (!q || !q.bus_path) return '';
     const at = Number(q.recovers_at);
@@ -9208,7 +9218,7 @@ function csQtBadge(q) {
         ? `<span class="cs-qt-countdown" data-qt-at="${at}">${csFmtDuration(secs)}</span>`
         : 'now';
     return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-700" title="${csEscape(title)}">`
-        + `<span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>🚫 QT ${csEscape(q.bus_path)} · ${csEscape(reason)} · clears in ${cnt}</span>`;
+        + `<span class="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>🚫 QT ${csEscape(q.bus_path)}${_csLoc(q)} · ${csEscape(reason)} · clears in ${cnt}</span>`;
 }
 
 // Badge for a dongle the agent is actively RECOVERING (usb_state[].recovery) —
@@ -9226,7 +9236,7 @@ function csRecoveryBadge(e) {
     const title = `${String(r.reason || 'recovering')}. Ladder: ${ladder}.`;
     const vm = (e.vmid != null && e.vmid !== '') ? ` · VM ${csEscape(String(e.vmid))}` : '';
     return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800" title="${csEscape(title)}">`
-        + `<span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>🔧 ${csEscape(e.bus_path || '')} · ${csEscape(e.name || e.vidpid || '')}${vm}`
+        + `<span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>🔧 ${csEscape(e.bus_path || '')}${_csLoc(e)} · ${csEscape(e.name || e.vidpid || '')}${vm}`
         + ` · <span class="uppercase">${csEscape(stage)}</span> ${Number(r.attempts || 0)}/${Number(r.max || 0)}</span>`;
 }
 
