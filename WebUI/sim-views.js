@@ -8014,6 +8014,13 @@ window.CS_CHILD_RENDERERS['Setup::GitHub']         = csRenderSetupGithub;
 window.CS_CHILD_RENDERERS['Setup::Security']       = csRenderSetupSecurity;
 window.CS_CHILD_RENDERERS['Setup::Notifications']  = csRenderSetupNotifications;
 window.CS_CHILD_RENDERERS['Setup::Diagnostics']    = csRenderSetupDiagnostics;
+// Belt-and-braces global. The declaration is already top-level in a CLASSIC
+// script, so it is a global by language rule — but a reported
+// "Can't find variable: csRenderSetupDiagnostics" from the page's inline
+// "↻ Refresh all" onclick means something (a stale cached copy of this file, or
+// a load-order edge) broke that assumption in practice. The explicit assignment
+// costs nothing and matches how every other handler on this page is exported.
+window.csRenderSetupDiagnostics = csRenderSetupDiagnostics;
 
 /* ===========================================================================
  * 1. VM Server — fleet overview + per-spoke drill-in children
