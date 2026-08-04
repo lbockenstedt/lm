@@ -74,6 +74,14 @@ _UPDATE_SOURCE_PREFIX_MAP = {
 # _UPDATE_SOURCE_MODULE_KEY above and are unaffected.
 _IN_LM_REPO_MODULE_TYPES = {"agent", "dns", "dhcp", "console", "statuspage"}
 
+# Modules that update THEMSELVES and must not be fanned out a SPOKE_UPDATE.
+# bugfixer runs its own updater thread (bugfixer/main.py updater_worker, which
+# hard-resets its checkout to origin/main), so the hub has no repo mapping for
+# it — and without this it fell through to "unknown module type" in the Module
+# Updates list, which reads as a FAILURE for something that is working exactly
+# as designed. Reported honestly as self-updating instead.
+_SELF_UPDATING_MODULE_TYPES = {"bugfixer"}
+
 # Canonical default for the hub's own repo. Used to fall back when
 # ``global_config["update_sources"]["hub"]`` is absent OR an empty string. An
 # empty-string value MUST behave like absent, not like a real URL: ``git
@@ -1523,6 +1531,9 @@ class UpdatePipelineMixin:
                 logger.debug("[update] skipping non-registered approved_modules id %r "
                               "(relayed/orphan agent — no module_metadata)", spoke_id)
                 continue
+            if mtype in _SELF_UPDATING_MODULE_TYPES:
+                update_results.append(f"{spoke_id}: self-updates (no push needed)")
+                continue
             module_key = self._resolve_module_key(spoke_id, mtype, _UPDATE_SOURCE_PREFIX_MAP)
             if not module_key:
                 update_results.append(f"{spoke_id}: unknown module type")
@@ -1842,6 +1853,9 @@ class UpdatePipelineMixin:
             if not approved:
                 continue
             mtype = self._effective_module_type(spoke_id)
+            if mtype in _SELF_UPDATING_MODULE_TYPES:
+                skipped.append(f"{spoke_id}: self-updates (no push needed)")
+                continue
             module_key = self._resolve_module_key(spoke_id, mtype, _upd_prefix_map)
             if not module_key:
                 skipped.append(f"{spoke_id}: unknown module type")
