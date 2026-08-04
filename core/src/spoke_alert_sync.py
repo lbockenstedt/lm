@@ -174,6 +174,92 @@ class SpokeAlertMixin:
                     "leaked into approved_modules: %s", sorted(leaked))
         return leaked
 
+    # ── relayed-agent out-of-contact ────────────────────────────────────────
+    # THE GAP this closes: the footer MODULE STATUS dot reddens only on
+    # spoke_out_of_contact alerts, and relayed node agents are DELIBERATELY
+    # excluded from that sweep (_selfheal_leaked_agents pops them, because they
+    # live under composite heartbeat keys rather than as module spokes). So when
+    # every pxmx agent on the fleet went down, NOTHING raised an alert: all four
+    # parent cs spokes stayed connected and the tray stayed green while four
+    # hosts were dark. A healthy spoke is not evidence that the agents it
+    # carries are healthy.
+    _AGENT_ALERT_MAX_AGE_S = 30 * 86400   # older than this = retired, not "down"
+
+    def _relayed_agent_last_seen(self) -> Dict[str, float]:
+        """``{agent_primary_key: last_seen_epoch}`` for every relayed node agent.
+
+        Two signals, freshest wins: ``agent_info[pk]["last_seen"]`` (stamped on
+        every relayed frame, evicted when the parent spoke drops) and the
+        composite ``{spoke_pk}:{agent_pk}`` heartbeat key (persisted via
+        spoke_last_seen, so it SURVIVES a hub restart — which is what makes a
+        dead agent still detectable after the hub bounces).
+        """
+        out: Dict[str, float] = {}
+        for pk, info in (getattr(self, "agent_info", {}) or {}).items():
+            ls = (info or {}).get("last_seen")
+            if isinstance(ls, (int, float)):
+                out[pk] = max(out.get(pk, 0.0), float(ls))
+        hb = getattr(self, "heartbeat", None)
+        for key, ts in (getattr(hb, "last_seen", {}) or {}).items():
+            k = str(key)
+            if ":" in k and isinstance(ts, (int, float)):
+                apk = k.split(":", 1)[1]
+                out[apk] = max(out.get(apk, 0.0), float(ts))
+        return out
+
+    def get_agent_alerts(self) -> List[Dict[str, Any]]:
+        """Active out-of-contact alerts for RELAYED node agents (pxmx / cs).
+
+        Same warn/error thresholds as the spoke sweep. Stateless by design: the
+        out-of-contact duration IS ``now - last_seen``, so there is no absence
+        bookkeeping to drift and the alert clears itself the moment the agent
+        reports again.
+
+        Never alerts on an agent that has never been seen (nothing to be out of
+        contact FROM), on a decommissioned one, or on a record older than
+        ``_AGENT_ALERT_MAX_AGE_S`` — a long-gone agent is retired, not down.
+        """
+        try:
+            warn_s, error_s = self._spoke_alert_thresholds()
+        except Exception:  # noqa: BLE001
+            warn_s, error_s = 300, 1800
+        now = time.time()
+        out: List[Dict[str, Any]] = []
+        try:
+            seen = self._relayed_agent_last_seen()
+        except Exception as e:  # noqa: BLE001 — must never break /status
+            logger.debug("[agent-alert] last-seen scan failed: %s", e)
+            return out
+        for apk, last in sorted(seen.items()):
+            if not isinstance(last, (int, float)) or last <= 0:
+                continue
+            age = now - float(last)
+            if age < warn_s or age > self._AGENT_ALERT_MAX_AGE_S:
+                continue
+            try:
+                if self.state.is_agent_decommissioned(apk):
+                    continue
+            except Exception:  # noqa: BLE001
+                pass
+            name = apk
+            try:
+                name = (getattr(self, "agent_info", {}).get(apk) or {}).get("agent_id") or apk
+            except Exception:  # noqa: BLE001
+                pass
+            out.append({
+                "spoke_id": f"agent:{apk}",
+                "name": name,
+                "tier": _TIER_ERROR if age >= error_s else _TIER_WARN,
+                "since_ts": float(last),
+                "duration_s": int(age),
+                "detail": (f"agent out of contact {int(age)}s (warn {warn_s}s / "
+                           f"error {error_s}s) — its parent spoke may still be "
+                           f"healthy, so nothing else reports this"),
+            })
+        order = {_TIER_ERROR: 0, _TIER_WARN: 1}
+        out.sort(key=lambda e: (order.get(e["tier"], 9), e.get("since_ts") or 0))
+        return out
+
     # ── active-alert store (surfaced via the API) ───────────────────────────
 
     def get_active_spoke_alerts(self) -> List[Dict[str, Any]]:

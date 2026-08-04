@@ -242,7 +242,12 @@ async def _aggregate_status(hub):
         + _tag(hub.get_fleet_alerts() if hasattr(hub, "get_fleet_alerts") else [],
                "fleet_availability")
         + _tag(hub.get_dongle_alerts() if hasattr(hub, "get_dongle_alerts") else [],
-               "dongle_exhaustion"))
+               "dongle_exhaustion")
+        # Relayed node agents (pxmx/cs). Their own producer, because the
+        # spoke_out_of_contact sweep deliberately skips them — without this a
+        # whole fleet of dead agents raised NO alert and the tray stayed green.
+        + _tag(hub.get_agent_alerts() if hasattr(hub, "get_agent_alerts") else [],
+               "agent_out_of_contact"))
     return {
         "ready": True,
         "active_connections": list(hub.active_connections.keys()),

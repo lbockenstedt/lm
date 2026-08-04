@@ -3128,7 +3128,12 @@ function renderSpokeIndicators() {
         // working dongles left); neither is a module that can be up or down, so a
         // dongle shortage turning this dot red made every spoke look unhealthy.
         // They stay listed below for visibility, under their own headings.
-        const isSpokeAlert = a => (a.source || 'spoke_out_of_contact') === 'spoke_out_of_contact';
+        // Agent out-of-contact counts too. A relayed pxmx/cs agent IS a module
+        // that can be up or down — and it is the one the spoke sweep cannot
+        // see, so excluding it is exactly how four dead agents kept the dot
+        // green while their (healthy) parent spokes reported in.
+        const _MODULE_SOURCES = new Set(['spoke_out_of_contact', 'agent_out_of_contact']);
+        const isSpokeAlert = a => _MODULE_SOURCES.has(a.source || 'spoke_out_of_contact');
         const hasErr = alerts.some(a => isSpokeAlert(a) && String(a.tier) === 'error');
         if (hasErr) overallColor = 'bg-red-500';
         moduleDot.className = `w-2 h-2 rounded-full ${overallColor} transition-all`;
@@ -3142,6 +3147,7 @@ function renderSpokeIndicators() {
         // untagged entry (older hub) falls back to out-of-contact = old behaviour.
         const GROUPS = [
             ['spoke_out_of_contact', 'Out-of-contact alerts'],
+            ['agent_out_of_contact',  'Agents out of contact'],
             ['fleet_availability',   'Fleet availability'],
             ['dongle_exhaustion',    'Dongle exhaustion'],
         ];
