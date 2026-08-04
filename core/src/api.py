@@ -974,24 +974,63 @@ def require_spoke(module_type: str, label: str):
 _WEBUI_VER_CACHE: Dict[str, Any] = {}
 
 
+def _webui_asset_fingerprint(ui_path: str):
+    """``(name, size, mtime_ns)`` for every top-level WebUI ``.js``, sorted.
+    A handful of stat() calls; no file is read."""
+    out = []
+    try:
+        for name in sorted(os.listdir(ui_path)):
+            if not name.endswith(".js"):
+                continue
+            try:
+                st = os.stat(os.path.join(ui_path, name))
+            except OSError:
+                continue
+            out.append((name, st.st_size, st.st_mtime_ns))
+    except OSError:
+        pass
+    return tuple(out)
+
+
 def _webui_version(ui_path: str) -> str:
-    """Return the stripped ``WebUI/VERSION`` content (mtime-cached so a
-    deploy/bump is picked up without a restart). Falls back to ``"0"``."""
+    """Cache-bust token for index.html's ``?v=``: ``<VERSION>.<asset-hash>``.
+
+    VERSION ALONE IS NOT SAFE as a cache key, because it is not monotonic. It
+    has been reset backwards deliberately (the fleet cutover to 0.01, and again
+    to stay under 1.00), and version-bump.yml then walks the same minors upward
+    a second time -- so ``?v=0.42`` can name two completely different bundles
+    months apart, and a browser holding the older one never refetches. Observed
+    exactly that: the reset to 0.01 made browsers serve JS cached back in July,
+    and separately a version FROZEN by the bump parity bug froze this token so
+    no browser picked up new JS at all (docs/version-scheme-migration.md).
+
+    Hashing the JS files' (name, size, mtime) makes the token track the BYTES
+    actually served: any deploy changes it, and a version rollback can never
+    collide with a previously-cached bundle. Cached on that same fingerprint, so
+    steady state is a few stat() calls per index.html request.
+    """
     ver_path = os.path.join(ui_path, "VERSION")
+    fp = _webui_asset_fingerprint(ui_path)
     try:
         mtime = os.path.getmtime(ver_path)
     except OSError:
-        return "0"
+        mtime = None
+    key = (mtime, fp)
     cached = _WEBUI_VER_CACHE.get(ver_path)
-    if cached and cached[0] == mtime:
+    if cached and cached[0] == key:
         return cached[1]
-    try:
-        with open(ver_path, "r", encoding="utf-8") as f:
-            ver = f.read().strip() or "0"
-    except OSError:
-        ver = "0"
-    _WEBUI_VER_CACHE[ver_path] = (mtime, ver)
-    return ver
+    ver = "0"
+    if mtime is not None:
+        try:
+            with open(ver_path, "r", encoding="utf-8") as f:
+                ver = f.read().strip() or "0"
+        except OSError:
+            ver = "0"
+    # No JS found (unexpected layout) -> fall back to the bare version rather
+    # than emitting a constant, which would pin caches forever.
+    token = f"{ver}.{hashlib.sha256(repr(fp).encode()).hexdigest()[:8]}" if fp else ver
+    _WEBUI_VER_CACHE[ver_path] = (key, token)
+    return token
 
 
 def create_app(hub):
