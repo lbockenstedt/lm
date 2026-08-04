@@ -10334,15 +10334,7 @@ function csFreshnessPanel(h) {
         ${tile('Hub cached', secs(f.hub_cache_age_s) + ' ago', 'hub received frame')}
         ${tile('Tick cadence', f.interval_s != null ? f.interval_s + 's' : '—', 'agent loop interval')}
       </div>
-      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Agent collect phase — last tick</p>
-      <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
-        ${tile('metrics', ms(ph.metrics_ms))}
-        ${tile('get_vm_list', ms(ph.vm_list_ms))}
-        ${tile('get_node_stats', ms(ph.node_stats_ms))}
-        ${tile('compute_tiers', ms(ph.tiers_ms))}
-        ${tile('loop body total', ms(ph.body_ms))}
-      </div>
-      <div class="text-[10px] text-slate-400 mt-2">VMs ${csEscape(String(f.vm_count != null ? f.vm_count : '—'))} · nodes ${csEscape(String(f.node_count != null ? f.node_count : '—'))}. Read <b>loop body total</b> against the tick cadence first: a body far larger than the cadence means the AGENT is stuck, not the relay — and the individual phases only cover the bounded collects, so a stall in the PCI probe or a backpressured send shows up here and nowhere else. Big <b>agent-generated age</b> with a SMALL body ⇒ spoke/hub relay lag; big <b>get_vm_list</b>/<b>get_node_stats</b> ⇒ agent pvesh stall on a busy host.</div>
+      <div class="text-[10px] text-slate-400 mt-2">VMs ${csEscape(String(f.vm_count != null ? f.vm_count : '—'))} · nodes ${csEscape(String(f.node_count != null ? f.node_count : '—'))} · loop body ${ms(ph.body_ms)}. Read <b>loop body</b> against the tick cadence first: a body far larger than the cadence means the AGENT is stuck, not the relay. Per-phase timings (metrics / get_vm_list / get_node_stats / compute_tiers) are in the <b>Show Tech</b> download.</div>
     </div>`;
 }
 
@@ -10708,7 +10700,12 @@ async function csRenderVmServerDetails() {
     // badly as a raw csKvTile and deserves a readable layout.
     // agent_version is already the headline "Agent" stat in the row above, so a
     // second AGENT_VERSION tile in the grid just repeated it.
-    const skip = ['vms','usb_state','present_usb','unknown_usb','node','usb_count','provision','agent_version','usb_diagnostics'];
+    // Trimmed hard now that Show Tech exists: agent_version duplicates the
+    // headline stat, usb_diagnostics has its own panel, and agent_telemetry /
+    // ingested_at are agent internals nobody reads off a tile. All of them are
+    // still in the Show Tech download -- it is built from the raw record, not
+    // from this list.
+    const skip = ['vms','usb_state','present_usb','unknown_usb','node','usb_count','provision','agent_version','usb_diagnostics','agent_telemetry','ingested_at'];
     const entries = Object.entries(px).filter(([k]) => !skip.includes(k));
     // cpu_1h_avg + mem_1h_avg are ONE reading of the same thing (the rolling
     // averages the delete gate acts on), so they get one tile instead of two
