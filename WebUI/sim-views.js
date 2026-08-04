@@ -1397,16 +1397,18 @@ function csTierTitle(d) {
 
 // Same treatment as csDongleTriplet: one compact cell, zeros greyed so a nonzero
 // number is what the eye lands on.
+// ALWAYS four segments: T1 / T2 / T3 / unclassified, same reasoning as
+// csDongleTriplet -- a column that sometimes shows three numbers and sometimes
+// four cannot be scanned vertically.
 function csTierTriplet(d) {
-    const seg = (n, cls) => `<span class="${n ? cls : 'text-slate-300'}">${csEscape(String(n))}</span>`;
-    const unk = d.unknown
-        ? `<span class="text-slate-300">/</span><span class="text-amber-600" title="unclassified">${d.unknown}<span class="text-[9px] font-normal">?</span></span>`
-        : '';
+    const sep = '<span class="text-slate-300">/</span>';
+    const seg = (n, cls) => `<span class="${n ? cls : 'text-slate-300'}">${csEscape(String(n || 0))}</span>`;
     return `<span class="font-mono text-xs font-bold" title="${csEscape(csTierTitle(d))}">`
          + seg(d.t1, 'text-purple-700')
-         + `<span class="text-slate-300">/</span>` + seg(d.t2, 'text-slate-700')
-         + `<span class="text-slate-300">/</span>` + seg(d.t3, 'text-sky-700')
-         + `${unk}</span>`;
+         + sep + seg(d.t2, 'text-slate-700')
+         + sep + seg(d.t3, 'text-sky-700')
+         + sep + seg(d.unknown, 'text-amber-600')
+         + `</span>`;
 }
 
 // Shared tooltip for the dongle breakdown so the Overview column and the
@@ -1429,21 +1431,27 @@ function csDongleTitle(d) {
 // "in-use / available / QT" triplet, colour-coded: available in green when
 // there is spare capacity and amber at 0, QT red when nonzero. Rendered on the
 // Overview fleet table (Dongles column) and reused for the Details tiles.
+// ALWAYS four segments: in-use / available / quarantined / excluded, zeros
+// included. Optional segments made the column ragged -- one host showing three
+// numbers next to another showing five, so nothing lined up down the column and
+// the figures could not be compared by eye, which is the entire point of a
+// fixed-width mono triplet.
+//
+// absent-assigned (a dongle assigned to a VM but no longer on the bus) does NOT
+// get a fifth segment. It is flagged by colouring the in-use figure red, since
+// that is the number it makes untrustworthy, and spelled out in the tooltip.
 function csDongleTriplet(d) {
-    const availCls = d.avail > 0 ? 'text-[#01A982]' : 'text-amber-600';
-    const qtCls = d.qtTotal > 0 ? 'text-red-600' : 'text-slate-400';
-    const exPart = (d.excludedTotal
-        ? `<span class="text-slate-400">/</span><span class="text-amber-600" title="excluded buses">${d.excludedTotal}<span class="text-[9px] font-normal">x</span></span>`
-        : '')
-        // Assigned but no longer on the bus — flagged separately so in-use can
-        // never exceed the present count.
-        + (d.absentAssigned
-            ? `<span class="text-slate-400">/</span><span class="text-red-600" title="assigned to a VM but no longer on the bus">${d.absentAssigned}<span class="text-[9px] font-normal">!</span></span>`
-            : '');
+    const sep = '<span class="text-slate-300">/</span>';
+    // Zero is grey everywhere: a nonzero figure should be what catches the eye.
+    const seg = (n, cls, title) =>
+        `<span class="${n ? cls : 'text-slate-300'}"${title ? ` title="${csEscape(title)}"` : ''}>${csEscape(String(n || 0))}</span>`;
+    const inUseCls = d.absentAssigned ? 'text-red-600' : 'text-slate-700';
     return `<span class="font-mono text-xs font-bold" title="${csEscape(csDongleTitle(d))}">`
-         + `<span class="text-slate-700">${d.inUse}</span>`
-         + `<span class="text-slate-300">/</span><span class="${availCls}">${d.avail}</span>`
-         + `<span class="text-slate-300">/</span><span class="${qtCls}">${d.qtTotal}</span>${exPart}</span>`;
+         + `<span class="${inUseCls}">${csEscape(String(d.inUse || 0))}</span>`
+         + sep + seg(d.avail, d.avail > 0 ? 'text-[#01A982]' : 'text-amber-600')
+         + sep + seg(d.qtTotal, 'text-red-600')
+         + sep + seg(d.excludedTotal, 'text-amber-600')
+         + `</span>`;
 }
 
 // CPU + Mem 1h averages in ONE tile. They were two tiles showing one number
