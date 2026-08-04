@@ -1402,6 +1402,16 @@ def register(app, hub, ctx):
         ids = set(md) | set(approved) | set(conns) | set(types)
 
         rows = []
+        # Liveness for RELAYED node agents, keyed by agent primary key. Same
+        # source the alert producer uses, so the two can never disagree.
+        import time as _t
+        _now = _t.time()
+        _RELAY_LIVE_S = 300          # matches the spoke alert warn threshold
+        try:
+            _relayed_last = hub._relayed_agent_last_seen()
+        except Exception:            # noqa: BLE001 — never break the page
+            _relayed_last = {}
+
         for sid in sorted(ids):
             meta = md.get(sid) or {}
             tenant = meta.get("tenant_id") or ""
@@ -1411,11 +1421,29 @@ def register(app, hub, ctx):
                 pk = sid
             seen = last_seen.get(pk) or last_seen.get(sid)
             connected = sid in conns
+            # RELAYED node agents (pxmx/cs) are never in active_connections and
+            # never carry a bare heartbeat key — they dial their PARENT SPOKE and
+            # are tracked under the composite {spoke_pk}:{agent_pk} key. Testing
+            # them with the spoke-only lookups above reported four agents that
+            # were Online and seen 36s ago as "offline · no session key · never",
+            # directly contradicting Spokes & Agents on the same screen.
+            # Same blind spot already fixed on the agent card, the out-of-contact
+            # alerts and the dashboard tile; this is the fourth surface.
+            _agent_last = _relayed_last.get(pk) or _relayed_last.get(sid)
+            is_relayed_agent = bool(_agent_last)
+            if is_relayed_agent:
+                if not seen or _agent_last > seen:
+                    seen = _agent_last
+                # Fresh relay traffic IS the agent's liveness — it has no socket
+                # of its own to be "connected" on.
+                connected = connected or (_now - _agent_last) < _RELAY_LIVE_S
             has_key = sid in keys or pk in keys
             reasons = []
             if not connected:
                 reasons.append("not connected")
-            if not has_key:
+            elif is_relayed_agent:
+                reasons.append("relayed agent (no own socket — liveness via parent spoke)")
+            if not has_key and not is_relayed_agent:
                 reasons.append("no session key")
             if not approved.get(sid, False):
                 reasons.append("not approved")
@@ -1427,6 +1455,10 @@ def register(app, hub, ctx):
                 "hostname": meta.get("hostname") or "",
                 "approved": bool(approved.get(sid, False)),
                 "connected": connected,
+                # A relayed agent has no session key of its own (its parent
+                # spoke holds it), so "no key" is normal for these and must not
+                # read as a fault.
+                "is_relayed_agent": is_relayed_agent,
                 "has_key": has_key,
                 "last_seen": seen,
                 "last_seen_age_s": int(now - seen) if seen else None,
