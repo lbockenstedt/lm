@@ -1644,6 +1644,10 @@ def register(app, hub, ctx):
         # Every active alert, tagged with the module that produced it.
         alerts = []
         for src, getter in (("spoke_out_of_contact", "get_active_spoke_alerts"),
+                            # Relayed node agents — the producer the spoke sweep
+                            # cannot see. Without it this forensics view showed
+                            # "no alerts" during a total agent outage.
+                            ("agent_out_of_contact", "get_agent_alerts"),
                             ("fleet_availability", "get_fleet_alerts"),
                             ("dongle_exhaustion", "get_dongle_alerts")):
             fn = getattr(hub, getter, None)

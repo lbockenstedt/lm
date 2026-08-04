@@ -1405,7 +1405,7 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons'],
+    settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'Diagnostics', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs', 'logs-features'],
     setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'OS Updates'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
@@ -3071,6 +3071,19 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
 function renderSpokeIndicators() {
     const hubDot = document.getElementById('hub-status-dot');
     const moduleDot = document.getElementById('module-status-dot');
+    // The dot is the entry point to the diagnostics view — it merges four
+    // producers, so "what is red?" is only answerable there. Bound once.
+    const _mdWrap = document.getElementById('module-status-container');
+    if (_mdWrap && !_mdWrap._diagBound) {
+        _mdWrap._diagBound = true;
+        _mdWrap.title = 'Open Module Diagnostics — every producer behind this dot';
+        _mdWrap.addEventListener('click', () => {
+            try {
+                setView('settings');
+                setSubView('Diagnostics');
+            } catch (e) { console.error('module-status → Diagnostics failed', e); }
+        });
+    }
     const tooltipEl = document.getElementById('system-status-tooltip');
     if (!hubDot || !moduleDot || !tooltipEl || !window.spokeHealth) return;
 
@@ -4781,6 +4794,32 @@ function _renderSettingsSection(subMenu) {
     // passwords. Admin-only (/setup/notifications is admin-gated server-side).
     if (subMenu === 'Notifications') {
         _renderSettingsNotificationsTile(content);
+        return;
+    }
+
+    // ── System → Diagnostics ────────────────────────────────────────────────
+    // The single place the footer MODULE STATUS dot points at. That dot merges
+    // FOUR producers (spoke out-of-contact, agent out-of-contact, fleet
+    // availability, dongle exhaustion) and Spokes & Agents rendered only some
+    // of them — so clicking through from a red dot could show a page of green
+    // spokes and no explanation. Everything the dot can represent is here, with
+    // the per-alert forensics that say whether it is real.
+    if (subMenu === 'Diagnostics') {
+        content.innerHTML = `
+            <div class="space-y-4">
+                <div class="${card} p-5 flex flex-wrap items-center gap-3">
+                    <div>
+                        <p class="text-lg font-bold text-[#263040]">Module Diagnostics</p>
+                        <p class="text-[11px] text-slate-400">Every producer behind the footer MODULE STATUS dot, with the evidence for each alert.</p>
+                    </div>
+                    <div class="ml-auto flex items-center gap-2">
+                        <button onclick="copyModuleDiagnostics(this)" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-xs font-bold" title="Copy every alert + finding as plain text for a ticket or chat">⧉ Copy all</button>
+                        <button onclick="loadModuleDiagnostics()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
+                    </div>
+                </div>
+                <div id="module-diag-body"><p class="text-slate-400 italic text-xs">Loading…</p></div>
+            </div>`;
+        loadModuleDiagnostics();
         return;
     }
 
@@ -19941,6 +19980,151 @@ async function deleteSpokeRegistration(spokeId) {
     loadSpokeRegistryDiag();
 }
 window.deleteSpokeRegistration = deleteSpokeRegistration;
+
+// ── System → Diagnostics: the consolidated module view ───────────────────────
+// Renders /setup/alert-diagnostics in full: alerts GROUPED BY PRODUCER, the
+// per-alert forensics (approved? relayed agent? heartbeat? connected?), and the
+// endpoint's own verdicts. This is what the footer dot links to.
+window._moduleDiagLast = null;
+
+const _MD_SOURCE_LABEL = {
+    spoke_out_of_contact: 'Spokes out of contact',
+    agent_out_of_contact: 'Agents out of contact',
+    fleet_availability:   'Fleet availability',
+    dongle_exhaustion:    'Dongle exhaustion',
+};
+const _MD_SOURCE_NOTE = {
+    spoke_out_of_contact: 'A module spoke stopped talking to the hub.',
+    agent_out_of_contact: 'A RELAYED node agent (pxmx/cs) went silent. Its parent spoke can still be perfectly healthy — nothing else reports this.',
+    fleet_availability:   'Lab capacity: a degraded client fleet. Not a module being down.',
+    dongle_exhaustion:    'Lab capacity: a host with no working dongles left. Not a module being down.',
+};
+
+async function loadModuleDiagnostics() {
+    const el = document.getElementById('module-diag-body');
+    if (!el) return;
+    let d;
+    try { d = await apiJson('/setup/alert-diagnostics'); }
+    catch (e) {
+        el.innerHTML = `<div class="hpe-card rounded-lg p-5 shadow-sm"><p class="text-sm text-red-500">Diagnostics unavailable: ${escapeHtml(e.message || String(e))}</p></div>`;
+        return;
+    }
+    d._fetched_at = new Date().toLocaleString();
+    window._moduleDiagLast = d;
+
+    const alerts = Array.isArray(d.alerts) ? d.alerts : [];
+    const rows = Array.isArray(d.rows) ? d.rows : [];
+    const findings = Array.isArray(d.findings) ? d.findings : [];
+    const rowBy = {};
+    rows.forEach(r => { rowBy[r.spoke_id] = r; });
+
+    const pill = (label, n, cls) =>
+        `<span class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full ${cls} text-xs font-bold">${label} ${n}</span>`;
+    const nErr = alerts.filter(a => a.tier === 'error').length;
+    const nWarn = alerts.filter(a => a.tier === 'warning').length;
+
+    // Alerts grouped by PRODUCER — the grouping is the point: "every spoke is
+    // green but the dot is red" is only explicable once you can see which
+    // producer fired.
+    const groups = Object.keys(_MD_SOURCE_LABEL).map(src => {
+        const mine = alerts.filter(a => (a.source || 'spoke_out_of_contact') === src);
+        if (!mine.length) return '';
+        const body = mine.map(a => {
+            const r = rowBy[a.spoke_id] || {};
+            const tone = a.tier === 'error' ? 'text-red-600' : 'text-amber-600';
+            const forensics = [];
+            if (r.is_relayed_agent) forensics.push('relayed agent');
+            if (r.is_approved === false) forensics.push('NOT approved');
+            if (r.is_connected) forensics.push('socket connected — alert may be stale');
+            if (r.heartbeat_bare == null && (r.heartbeat_composite || []).length)
+                forensics.push('heartbeat is composite-keyed only');
+            return `<tr class="border-b border-slate-100 last:border-0">
+                <td class="px-4 py-2 font-mono text-xs text-slate-700">${escapeHtml(a.name || a.spoke_id || '—')}</td>
+                <td class="px-4 py-2 text-xs font-bold ${tone}">${escapeHtml(a.tier || '')}</td>
+                <td class="px-4 py-2 text-xs text-slate-500">${escapeHtml(_durStr(a.duration_s))}</td>
+                <td class="px-4 py-2 text-xs text-slate-600">${escapeHtml(a.detail || '')}</td>
+                <td class="px-4 py-2 text-[11px] text-amber-700">${escapeHtml(forensics.join(' · '))}</td>
+            </tr>`;
+        }).join('');
+        return `<div class="hpe-card rounded-lg p-5 shadow-sm">
+            <p class="text-sm font-bold text-slate-500 uppercase tracking-wider">${escapeHtml(_MD_SOURCE_LABEL[src])} <span class="text-slate-400 normal-case font-normal">(${mine.length})</span></p>
+            <p class="text-[11px] text-slate-400 mb-3">${escapeHtml(_MD_SOURCE_NOTE[src] || '')}</p>
+            <div class="overflow-x-auto"><table class="w-full text-sm">
+              <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>
+                <th class="px-4 py-2 text-left font-medium">Module</th>
+                <th class="px-4 py-2 text-left font-medium">Tier</th>
+                <th class="px-4 py-2 text-left font-medium">For</th>
+                <th class="px-4 py-2 text-left font-medium">Detail</th>
+                <th class="px-4 py-2 text-left font-medium">Forensics</th>
+              </tr></thead><tbody>${body}</tbody></table></div>
+          </div>`;
+    }).filter(Boolean).join('');
+
+    const findingHtml = findings.length ? `<div class="hpe-card rounded-lg p-5 shadow-sm">
+        <p class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Verdicts</p>
+        ${findings.map(f => {
+            const cls = f.severity === 'error' ? 'border-red-200 bg-red-50 text-red-700'
+                      : f.severity === 'warning' ? 'border-amber-200 bg-amber-50 text-amber-700'
+                      : 'border-slate-200 bg-slate-50 text-slate-600';
+            return `<div class="border rounded-md p-2 mb-1.5 ${cls}">
+                <div class="text-xs font-bold">${escapeHtml(f.code || '')}</div>
+                <p class="text-[11px] opacity-90">${escapeHtml(f.detail || '')}</p>
+                ${(f.ids || []).length ? `<p class="text-[10px] font-mono mt-1 break-all">${escapeHtml((f.ids || []).join(', '))}</p>` : ''}
+            </div>`;
+        }).join('')}
+      </div>` : '';
+
+    el.innerHTML = `
+      <div class="hpe-card rounded-lg p-5 shadow-sm flex flex-wrap items-center gap-2">
+        ${pill('Errors', nErr, nErr ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-500')}
+        ${pill('Warnings', nWarn, nWarn ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-500')}
+        <span class="text-[11px] text-slate-400 ml-auto">as of ${escapeHtml(d._fetched_at)}</span>
+      </div>
+      ${alerts.length ? groups : `<div class="hpe-card rounded-lg p-5 shadow-sm"><p class="text-sm text-slate-500">No active alerts from any producer — the MODULE STATUS dot should be green.</p></div>`}
+      ${findingHtml}`;
+}
+window.loadModuleDiagnostics = loadModuleDiagnostics;
+
+function _durStr(s) {
+    const n = Number(s || 0);
+    if (!isFinite(n) || n <= 0) return '—';
+    if (n < 60) return `${Math.round(n)}s`;
+    if (n < 3600) return `${Math.floor(n / 60)}m`;
+    if (n < 86400) return `${Math.floor(n / 3600)}h ${Math.floor((n % 3600) / 60)}m`;
+    return `${Math.floor(n / 86400)}d ${Math.floor((n % 86400) / 3600)}h`;
+}
+
+function copyModuleDiagnostics(btn) {
+    const d = window._moduleDiagLast;
+    if (!d) return;
+    const L = [`LM MODULE DIAGNOSTICS — captured ${d._fetched_at}`,
+               '(last FETCHED data — press Refresh for live values)', ''];
+    const rowBy = {};
+    (d.rows || []).forEach(r => { rowBy[r.spoke_id] = r; });
+    Object.keys(_MD_SOURCE_LABEL).forEach(src => {
+        const mine = (d.alerts || []).filter(a => (a.source || 'spoke_out_of_contact') === src);
+        if (!mine.length) return;
+        L.push(`${_MD_SOURCE_LABEL[src].toUpperCase()} (${mine.length})`);
+        mine.forEach(a => {
+            const r = rowBy[a.spoke_id] || {};
+            L.push(`  [${a.tier}] ${a.name || a.spoke_id} — ${_durStr(a.duration_s)} — ${a.detail || ''}`);
+            const f = [];
+            if (r.is_relayed_agent) f.push('relayed agent');
+            if (r.is_approved === false) f.push('NOT approved');
+            if (r.is_connected) f.push('socket connected (alert may be stale)');
+            if (f.length) L.push(`      forensics: ${f.join(' · ')}`);
+        });
+        L.push('');
+    });
+    if (!(d.alerts || []).length) L.push('No active alerts from any producer.', '');
+    (d.findings || []).forEach(f =>
+        L.push(`VERDICT [${f.severity}] ${f.code}: ${f.detail}` +
+               ((f.ids || []).length ? `  ids=${(f.ids || []).join(',')}` : '')));
+    const txt = L.join('\n');
+    if (navigator.clipboard) navigator.clipboard.writeText(txt);
+    if (btn) { const o = btn.textContent; btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = o; }, 1500); }
+}
+window.copyModuleDiagnostics = copyModuleDiagnostics;
 
 // Alert Diagnostics — inline card on System → Hub Status. Explains the footer
 // MODULE STATUS dot: which of the THREE producers raised each active alert
