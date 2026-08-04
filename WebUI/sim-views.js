@@ -10440,15 +10440,48 @@ function csFmtKnownObj(k, v) {
     return null;  // agent_telemetry + unknowns → generic csFmtObjRows
 }
 
+// Sentinel key for the t1_pci_devices + prov_run paired row.
+const _CS_PAIR_T1_PROV = '__cs_pair_t1_prov';
+
 // One telemetry tile. Scalars → compact csKvTile with pretty formatting; objects/
 // arrays → a wider, column-spanning tile whose body is readable key:value lines
 // (friendly for well-known keys, generic rows otherwise) that scroll inside the
 // box instead of blowing out the row.
-function csTelemetryTile(k, v) {
+// `spanCls` overrides the object-tile grid span. Default is the standalone
+// placement; the paired row (below) passes 'col-span-1' so each half sits in one
+// cell of its own 2-col wrapper instead of trying to span 2 of 2 and stacking.
+function csTelemetryTile(k, v, spanCls) {
+    // t1_pci_devices + prov_run side by side. Both are 2-col tiles, so in the
+    // 3-col lg grid they can NEVER share a row by adjacency alone (2+2 > 3).
+    // Wrapping them in a full-width row with its own 2-col grid puts them on one
+    // line at every breakpoint from sm up, instead of only at xl.
+    if (k === _CS_PAIR_T1_PROV) {
+        const [a, b] = v || [];
+        if (!a || !b) return '';
+        return `<div class="col-span-1 sm:col-span-2 lg:col-span-3 xl:col-span-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+          ${csTelemetryTile(a[0], a[1], 'col-span-1')}
+          ${csTelemetryTile(b[0], b[1], 'col-span-1')}
+        </div>`;
+    }
     if (k === 'pve_version') return csKvTile(k, csPveVersion(v));
     // Combined CPU/Mem 1h tile (see csRenderVmServerDetails). Rendered as a
     // SCALAR tile — it is one reading, not a nested object, so it must not fall
     // into the generic key:value object layout below.
+    // Combined VM-set / provisioning tile (see csRenderVmServerDetails).
+    if (k === 'vm set / provisioning') {
+        const o = v || {};
+        const set = (o.effective_vm_set == null || o.effective_vm_set === '')
+            ? '—' : `set ${o.effective_vm_set}`;
+        // 0 means "no override" — the agent derives the set from the hostname
+        // suffix. Saying "auto" is the operator-meaningful reading of that 0.
+        const ov = Number(o.vm_set_override || 0);
+        const src = ov > 0 ? `override ${ov}` : 'auto';
+        // provision_halt is None/false when running, or {halted, reason}.
+        const h = o.provision_halt;
+        const halted = !!(h && (h === true || h.halted));
+        const why = (h && h.reason) ? ` (${h.reason})` : '';
+        return csKvTile(k, `${set} · ${src} · ${halted ? 'HALTED' + why : 'provisioning'}`);
+    }
     if (k === 'cpu / mem 1h avg') {
         const f = x => {
             const n = Number(x);
@@ -10468,13 +10501,13 @@ function csTelemetryTile(k, v) {
         const nKeys = !known && !Array.isArray(v) ? Object.keys(v || {}).length : 0;
         const wide = _CS_WIDE_TELEMETRY_KEYS.has(k) || nKeys >= _CS_WIDE_TELEMETRY_MIN_KEYS;
         if (wide) {
-            return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 col-span-1 sm:col-span-2 lg:col-span-3 xl:col-span-4">
+            return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 ${spanCls || 'col-span-1 sm:col-span-2 lg:col-span-3 xl:col-span-4'}">
               <p class="text-[10px] uppercase tracking-wider text-slate-400 break-all">${csEscape(k)}</p>
               <div class="text-xs text-slate-700 mt-1 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-x-6">${csFmtObjRows(v)}</div>
             </div>`;
         }
         const inner = known || csFmtObjRows(v);
-        return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 sm:col-span-2 lg:col-span-2">
+        return `<div class="rounded-md border border-slate-200 bg-white px-3 py-2 ${spanCls || 'sm:col-span-2 lg:col-span-2'}">
           <p class="text-[10px] uppercase tracking-wider text-slate-400 break-all">${csEscape(k)}</p>
           <div class="text-xs text-slate-700 mt-1 space-y-0.5 max-h-48 overflow-auto">${inner}</div>
         </div>`;
@@ -10593,6 +10626,42 @@ async function csRenderVmServerDetails() {
             if (i >= 0) { _at = i + 1; break; }
         }
         entries.splice(_at >= 0 ? _at : entries.length, 0, ['cpu / mem 1h avg', _pair]);
+    }
+    // effective_vm_set + vm_set_override + provision_halt are one question:
+    // which VM set is in force, was it forced by an override, and is
+    // provisioning actually running. Three tiles each holding one token read as
+    // unrelated knobs. Collapsed at the position of whichever appears FIRST, so
+    // the group stays where the operator already looks for it.
+    const _setKeys = ['vm_set_override', 'effective_vm_set', 'provision_halt'];
+    let _setAt = -1;
+    _setKeys.forEach(k => {
+        const i = entries.findIndex(([ek]) => ek === k);
+        if (i >= 0 && (_setAt < 0 || i < _setAt)) _setAt = i;
+    });
+    if (_setAt >= 0) {
+        const _set = { effective_vm_set: px.effective_vm_set,
+                       vm_set_override: px.vm_set_override,
+                       provision_halt: px.provision_halt };
+        for (const k of _setKeys) {
+            const i = entries.findIndex(([ek]) => ek === k);
+            if (i >= 0) { entries.splice(i, 1); if (i < _setAt) _setAt--; }
+        }
+        entries.splice(_setAt, 0, ['vm set / provisioning', _set]);
+    }
+    // t1_pci_devices and prov_run answer "what T1 hardware is here" and "what is
+    // being built on it" — read together in practice. Pair them into one
+    // full-width row anchored at t1's position. Done LAST so the cpu/mem and
+    // vm-set collapses above still resolve their anchors against the raw keys.
+    // Consequence: the pair consumes the whole row, so the cpu/mem tile that
+    // followed t1 now starts the next row rather than sitting beside it.
+    const _t1i = entries.findIndex(([k]) => k === 't1_pci_devices');
+    const _pri = entries.findIndex(([k]) => k === 'prov_run');
+    if (_t1i >= 0 && _pri >= 0) {
+        const _t1e = entries[_t1i], _pre = entries[_pri];
+        // Splice the later index first so the earlier one stays valid.
+        const [hi, lo] = _t1i > _pri ? [_t1i, _pri] : [_pri, _t1i];
+        entries.splice(hi, 1); entries.splice(lo, 1);
+        entries.splice(Math.min(_t1i, entries.length), 0, [_CS_PAIR_T1_PROV, [_t1e, _pre]]);
     }
     // Human-readable tiles: scalars pretty-printed (pve_version → 9.2.3,
     // last_seen/ingested_at epoch → local datetime, bools → Yes/No, %/s units);
