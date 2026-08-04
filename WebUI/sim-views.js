@@ -10550,20 +10550,29 @@ async function _csWatchTick() {
     const ident = k => String(p[k] || '');
     if (!w.baseline && p.present) {
         w.baseline = { vidpid: ident('vidpid'), serial: ident('serial'),
-                       product: ident('product'), location: ident('location'),
-                       card: ident('pci_address') };
+                       mac: ident('mac'), product: ident('product'),
+                       location: ident('location'), card: ident('pci_address') };
     }
     w.last = p;
     if (!p.present) {
         w.seenGone = true;
         w.state = 'removed';
     } else if (w.seenGone) {
-        // Back on the same port. Same serial = the one just pulled went back in;
-        // different = a genuine replacement.
+        // Back on the same port. Which dongle?
+        //
+        // These adapters are NOT serialized and the whole fleet is one model,
+        // so serial and vid:pid are identical across every stick and can
+        // distinguish nothing. The MAC is burned per device and is the only
+        // usable identity -- but it is readable only while the dongle is bound
+        // HOST-side; once passed through to a VM the host has no netdev and the
+        // probe returns ''. So identity is often genuinely UNKNOWABLE here, and
+        // the honest state is "returned", not a coin-flip between reseated and
+        // replaced. Claiming "reseated" for a new dongle would be worse than
+        // saying nothing: it reads as "your swap didn't take".
         const b = w.baseline || {};
-        const same = b.serial ? (ident('serial') === b.serial)
-                              : (ident('vidpid') === b.vidpid);
-        w.state = same ? 'reseated' : 'replaced';
+        const before = String(b.mac || ''), after = ident('mac');
+        if (!before || !after) w.state = 'returned';
+        else w.state = (before === after) ? 'reseated' : 'replaced';
     } else {
         w.state = 'present';
     }
@@ -10594,15 +10603,18 @@ function _csRenderWatch() {
                     body: 'A DIFFERENT dongle is now on this port.' },
         reseated: { cls: 'border-amber-400', dot: 'bg-amber-500',
                     head: '⚠ Same dongle went back in',
-                    body: 'The dongle on this port has the same serial as the one removed — this is the original, reseated, not a replacement.' },
+                    body: 'Same MAC as the one removed — this is the original, reseated, not a replacement.' },
+        returned: { cls: 'border-green-400', dot: 'bg-green-500',
+                    head: '✓ A dongle is on this port again',
+                    body: 'The removal was confirmed. Which dongle this is cannot be determined: these adapters carry no serial and the whole fleet is one model, so the only per-device identity is the MAC — and that is readable only while the dongle is bound host-side, not once it is passed through to a VM.' },
         error:    { cls: 'border-amber-400', dot: 'bg-amber-500',
                     head: 'Probe failed — cannot confirm',
                     body: 'Not the same as "removed". Treat the port as unknown until this clears: ' + csEscape(w.error || '') },
         timeout:  { cls: 'border-slate-300', dot: 'bg-slate-400',
                     head: 'Stopped watching', body: 'No change for 10 minutes.' },
     }[w.state] || { cls: 'border-slate-300', dot: 'bg-slate-400', head: w.state, body: '' };
-    const was = b.vidpid ? `<div class="text-[10px] text-slate-500 mt-1">was ${csEscape(b.product || '')} <span class="font-mono">${csEscape(b.vidpid)}</span>${b.serial ? ' · sn ' + csEscape(b.serial) : ''}</div>` : '';
-    const now = (p.present && w.state !== 'present') ? `<div class="text-[10px] text-slate-500">now <span class="font-mono">${csEscape(p.vidpid || '?')}</span>${p.serial ? ' · sn ' + csEscape(p.serial) : ''}</div>` : '';
+    const was = b.vidpid ? `<div class="text-[10px] text-slate-500 mt-1">was ${csEscape(b.product || '')} <span class="font-mono">${csEscape(b.vidpid)}</span>${b.mac ? ' · mac ' + csEscape(b.mac) : ''}</div>` : '';
+    const now = (p.present && w.state !== 'present') ? `<div class="text-[10px] text-slate-500">now <span class="font-mono">${csEscape(p.vidpid || '?')}</span>${p.mac ? ' · mac ' + csEscape(p.mac) : ''}${p.devnum ? ' · dev ' + csEscape(p.devnum) : ''}</div>` : '';
     // Neighbours make "did I grab the one next to it?" answerable at a glance.
     const sibs = Array.isArray(p.siblings) ? p.siblings.filter(x => x && x.bus_path !== w.bus) : [];
     const sibHtml = sibs.length ? `<div class="mt-2 pt-2 border-t border-slate-100">
