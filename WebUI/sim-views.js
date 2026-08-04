@@ -10460,6 +10460,7 @@ function csCardSuspicion(entries, ctrls) {
         if (r) g.reasons[r] = (g.reasons[r] || 0) + 1;
         if (!g.label) g.label = String(e.location || '').replace(/\s*·\s*port\s.*$/, '') || key;
         if (!g.card) g.card = e.card_vidpid || '';
+        if (!g.cardPorts) g.cardPorts = Number(e.card_ports || 0);
         if (!g.role) { g.role = e.card_role || ''; g.roleInferred = String(e.card_role_source || '') === 'inferred'; }
     });
     const ctrlBy = {};
@@ -10473,7 +10474,7 @@ function csCardSuspicion(entries, ctrls) {
         const single = reasons.length === 1;
         return {
             key: g.key, label: g.label, card: g.card || '', role: g.role || '',
-            roleInferred: !!g.roleInferred,
+            cardPorts: g.cardPorts || 0, roleInferred: !!g.roleInferred,
             ports: Object.keys(g.ports).sort(), nPorts: nPorts,
             total: total, reason: reasons.length ? reasons[0][0] : '',
             sameReason: single,
@@ -10490,10 +10491,13 @@ function csCardSuspicionBanner(entries, ctrls) {
     if (!sus.length) return '';
     return sus.map(s => {
         const hi = s.severity === 'high';
-        const of = s.total ? ` of ${s.total}` : '';
+        // Denominator is dongles PRESENT on the card, not physical ports: a
+        // 7-port card running 6 dongles has one empty port by choice, and
+        // "3 of 7" would imply a missing device that was never there.
+        const of = s.total ? ` of ${s.total} populated` : '';
         return `<div class="mb-2 rounded-md border px-3 py-2 ${hi ? 'border-red-300 bg-red-50' : 'border-amber-300 bg-amber-50'}">
           <p class="text-[11px] font-bold ${hi ? 'text-red-700' : 'text-amber-700'}">
-            ⚠ Suspect controller — ${csEscape(s.label || s.key)}${(s.card && String(s.label || '').indexOf(s.card) < 0) ? ` <span class="font-mono">${csEscape(s.card)}</span>` : ''}${s.role ? ` [${csEscape(String(s.role).toUpperCase())}]` : ''}</p>
+            ⚠ Suspect controller — ${csEscape(s.label || s.key)}${(s.card && String(s.label || '').indexOf(s.card) < 0) ? ` <span class="font-mono">${csEscape(s.card)}</span>` : ''}${s.cardPorts ? ` <span class="font-normal">(${csEscape(String(s.cardPorts))}-port)</span>` : ''}${s.role ? ` [${csEscape(String(s.role).toUpperCase())}]` : ''}</p>
           <p class="text-[11px] ${hi ? 'text-red-600/90' : 'text-amber-600/90'}">
             ${s.nPorts}${of} port(s) sidelined on this one card (ports ${csEscape(s.ports.join(', '))})${s.sameReason && s.reason ? `, all with the same fault: <b>${csEscape(s.reason)}</b>` : ''}.
             Dongles failing together on a single controller point at the <b>card, its slot or its power</b> — not at the dongles.
@@ -10713,8 +10717,20 @@ function csFmtKnownObj(k, v) {
             const roleTip = String(o.card_role_source || '') === 'inferred'
                 ? 'Derived: this card is on no configured PCI allow-list, and a card holding dongles is the T2 path. Add its vid:pid to t2_pci_vidpids to pin it explicitly.'
                 : 'Matched against the configured PCI allow-list.';
+            // Port count sits next to the vid:pid because it is the only thing
+            // that DISTINGUISHES the card models here: the 4-port and 7-port
+            // cards ship the same vid:pid, so the id alone cannot tell you
+            // which one you are looking at. maxchild can.
+            const cardPorts = Number(o.card_ports || 0);
+            const cardDevs = Number(o.card_devices || 0);
+            // maxchild identifies the card MODEL (the 4- and 7-port cards here
+            // share a vid:pid); device_count says how loaded it is. Shown as
+            // "6/7 ports" so both numbers are present without a second lookup.
+            const cardLoad = cardPorts
+                ? `<span class="text-slate-500" title="${esc(cardDevs + ' device(s) present on a ' + cardPorts + '-port card')}">${esc(cardDevs || '?')}/${esc(cardPorts)} ports</span>`
+                : '';
             const card = o.card_vidpid
-                ? `<span class="text-slate-600">card <span class="font-mono">${esc(o.card_vidpid)}</span>${role ? ` <span title="${esc(roleTip)}" class="px-1 rounded bg-slate-200 text-slate-700 font-bold text-[10px]">${esc(role)}</span>` : ''}</span>`
+                ? `<span class="text-slate-600">card <span class="font-mono">${esc(o.card_vidpid)}</span>${cardLoad ? ' · ' + cardLoad : ''}${role ? ` <span title="${esc(roleTip)}" class="px-1 rounded bg-slate-200 text-slate-700 font-bold text-[10px]">${esc(role)}</span>` : ''}</span>`
                 : '';
             const id = [o.name ? esc(o.name) : '', card].filter(Boolean).join(' · ');
             const since = o.since
