@@ -90,6 +90,29 @@ _CC_MAX_MIN_PEAK = 5
 _CC_DAILY_SEVERITY = "error"
 _CC_WEEKLY_SEVERITY = "error"
 _CC_MONTHLY_SEVERITY = "warning"
+# ── trend rules ─────────────────────────────────────────────────────────────
+# A steady-state metric is judged three ways, because each is blind to what the
+# others catch:
+#   FLOOR   — an absolute, CONFIGURED expected level. Never decays, so a site
+#             that has been dark for weeks stays red instead of the baseline
+#             quietly normalising to the outage. This is the only rule that
+#             encodes INTENT ("this site should run 100 clients"); no statistic
+#             can infer it from history.
+#   PERIOD  — this day/week vs the one before. Catches a SLOW BLEED. A rate rule
+#             over a few samples cannot: 20% lost over a week is ~0.6% per
+#             5-hour window, so it never crosses any threshold worth setting
+#             (measured: a 50% loss over 7d was NEVER flagged by the short rule).
+#   RATE    — a short-window drop. Catches a FAST collapse, ~7h behind onset,
+#             which the period rules would not surface until the next day rolls.
+# Worst wins. The rolling PEAK is reported as a WATERMARK only -- anchoring a
+# threshold to it pinned sites red for 26.5 days after a single 4h spike.
+_CC_PERIOD_DROP_PCT = 20.0     # day-over-day / week-over-week drop -> ERROR
+_CC_RATE_SAMPLES = 5           # short-window size, in polls
+_CC_RATE_DROP_PCT = 5.0        # short-window drop -> WARNING
+# False-yellow rate at this threshold depends entirely on the site's natural
+# jitter (5-sample window, modelled on a healthy steady site):
+#     jitter 2% -> 0.0% | 3% -> 2.9% | 5% -> 10.3% | 8% -> 22.1%
+# Raise _CC_RATE_DROP_PCT to 10 if a fleet turns out noisier than ~5%.
 _CC_KEYSEP = "\x1f"        # composite (tenant, wsite) key separator
 
 
@@ -121,15 +144,66 @@ def _cc_thresholds(central_config):
     # Steady-state fractions, defaulting to the existing die_off_pct so an
     # already-tuned tenant keeps its number instead of being silently reset.
     # 0 disables that window.
+    # Trend thresholds. period/rate are PERCENT drops, not fractions.
+    period = _num(t.get("period_drop_pct"), _CC_PERIOD_DROP_PCT, 0.0, 100.0)
+    rate = _num(t.get("rate_drop_pct"), _CC_RATE_DROP_PCT, 0.0, 100.0)
+    rate_n = int(_num(t.get("rate_samples"), _CC_RATE_SAMPLES, 2, 100))
     daily = _num(t.get("daily_pct"), die * 100.0, 0.0, 100.0) / 100.0
     weekly = _num(t.get("weekly_pct"), die * 100.0, 0.0, 100.0) / 100.0
     monthly = _num(t.get("monthly_pct"), die * 100.0, 0.0, 100.0) / 100.0
     return {"warn_pct": warn, "error_pct": err, "die_off_frac": die,
             "min_peak": peak, "daily_frac": daily,
-            "weekly_frac": weekly, "monthly_frac": monthly}
+            "weekly_frac": weekly, "monthly_frac": monthly,
+            "period_drop_pct": period, "rate_drop_pct": rate,
+            "rate_samples": rate_n}
 
 
 _CC_SEVERITY = {"error": 3, "warning": 2, "ok": 1}  # else (no_data/pending/…) -> 0
+
+
+def _cc_period_drop(hist, now, window_s):
+    """Drop % of THIS period's average vs the PREVIOUS period's.
+
+    Returns None when either period lacks data, so a fresh site cannot alarm on
+    an empty comparison. Drop only -- growth is not a fault.
+    """
+    cur = [v for ts, v in hist if ts >= now - window_s]
+    prev = [v for ts, v in hist if now - 2 * window_s <= ts < now - window_s]
+    if not cur or not prev:
+        return None
+    a = sum(prev) / len(prev)
+    if a <= 0:
+        return None
+    return max(0.0, (a - (sum(cur) / len(cur))) / a * 100.0)
+
+
+def _cc_rate_drop(samples, n):
+    """Drop % of the last *n* samples' average vs the *n* before them."""
+    if len(samples) < 2 * n:
+        return None
+    vals = [s[1] for s in samples]
+    prev = sum(vals[-2 * n:-n]) / n
+    if prev <= 0:
+        return None
+    return max(0.0, (prev - sum(vals[-n:]) / n) / prev * 100.0)
+
+
+def _cc_site_floor(central_config, site_name):
+    """Configured minimum for ONE site, from ``central_config['cc_floors']``.
+
+    Per-site by design: MIA and DFW do not share an expected level. Missing or
+    unparseable disables the floor rule for that site ONLY -- never inferred
+    from history, or it becomes the peak problem again.
+    """
+    try:
+        floors = (central_config or {}).get("cc_floors") or {}
+        raw = floors.get(site_name)
+        if raw in (None, ""):
+            return None
+        v = float(raw)
+        return v if v > 0 else None
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 def _cc_worst(*statuses):
@@ -237,6 +311,10 @@ class ClientCountTracker:
         min_peak = _t.get("min_peak", _CC_MAX_MIN_PEAK)
         daily_frac = _t.get("daily_frac", die_off_frac)
         weekly_frac = _t.get("weekly_frac", die_off_frac)
+        period_drop_pct = _t.get("period_drop_pct", _CC_PERIOD_DROP_PCT)
+        rate_drop_thresh = _t.get("rate_drop_pct", _CC_RATE_DROP_PCT)
+        rate_samples = int(_t.get("rate_samples", _CC_RATE_SAMPLES))
+        floor = _t.get("floor")
         monthly_frac = _t.get("monthly_frac", die_off_frac)
         now = time.time()
         key = self._key(scope, wsite, kind)
@@ -267,6 +345,11 @@ class ClientCountTracker:
         avg_7day = round(sum(vals_7d) / len(vals_7d), 1) if vals_7d else 0.0
         avg_30day = round(sum(vals_30d) / len(vals_30d), 1) if vals_30d else 0.0
         die_off_peak = 0.0  # the peak the current avg fell below, if die-off tripped
+        # Trend inputs. Each returns None when it lacks the history to judge,
+        # so a fresh site never alarms on an empty comparison.
+        day_drop_pct = _cc_period_drop(hist, now, _CC_1DAY_WINDOW)
+        week_drop_pct = _cc_period_drop(hist, now, _CC_7DAY_WINDOW)
+        rate_drop_pct = _cc_rate_drop(samples, rate_samples)
         if len(samples) < _CC_MIN_SAMPLES:
             drop_pct, status = 0.0, "no_data"
         else:
@@ -300,18 +383,30 @@ class ClientCountTracker:
             # and splitting the windows is what exposes it.
             #
             # min_peak gates both so a genuinely quiet site cannot alarm on noise.
-            # (baseline value, fraction, severity). Table-driven so the mapping
-            # is a data change, not a logic change.
-            for _base, _frac, _sev in ((avg_1day, daily_frac, _CC_DAILY_SEVERITY),
-                                       (avg_7day, weekly_frac, _CC_WEEKLY_SEVERITY),
-                                       (avg_30day, monthly_frac, _CC_MONTHLY_SEVERITY)):
-                if _frac > 0 and _base >= min_peak and hourly_avg < _frac * _base:
-                    status = _cc_worst(status, _sev)
-                    die_off_peak = die_off_peak or _base
+            # ---- trend rules (worst-wins with the within-hour drop above) ----
+            # FLOOR: absolute and configured. The only rule that survives a site
+            # being dark for weeks -- every statistical baseline normalises to
+            # an outage given long enough, which is exactly the blind spot the
+            # averages alone could not cover.
+            if floor is not None and hourly_avg < floor:
+                status = _cc_worst(status, "error")
+            # PERIOD: this day/week vs the one before -> catches a slow bleed
+            # that no short-window rate rule can see.
+            for _drop in (day_drop_pct, week_drop_pct):
+                if _drop is not None and _drop > period_drop_pct:
+                    status = _cc_worst(status, "error")
+            # RATE: short-window fall -> catches a fast collapse hours before
+            # the day boundary would show it.
+            if rate_drop_pct is not None and rate_drop_pct > rate_drop_thresh:
+                status = _cc_worst(status, "warning")
         return {"site_name": central_site, "current": current,
                 "hourly_avg": round(hourly_avg, 1), "drop_pct": round(drop_pct, 1),
                 "max_7day": max_7day, "max_30day": max_30day,
                 "avg_1day": avg_1day, "avg_7day": avg_7day, "avg_30day": avg_30day,
+                "floor": floor,
+                "day_drop_pct": None if day_drop_pct is None else round(day_drop_pct, 1),
+                "week_drop_pct": None if week_drop_pct is None else round(week_drop_pct, 1),
+                "rate_drop_pct": None if rate_drop_pct is None else round(rate_drop_pct, 1),
                 "die_off": die_off_peak, "die_off_frac": die_off_frac,
                 "status": status, "ts": samples[-1][0]}
 
@@ -938,6 +1033,10 @@ class CentralHubPoller:
             self._cc.record(tenant_id, wireless_site, current)
             self._cc.record(tenant_id, wireless_site, wired, kind="wired")
             self._cc.record(tenant_id, wireless_site, wireless, kind="wireless")
+            # Per-site FLOOR, resolved here because entry() only sees thresholds.
+            # Absent/0 disables the floor rule for THIS site alone.
+            cc_thresh = dict(cc_thresh or {})
+            cc_thresh["floor"] = _cc_site_floor(central_config, central_site)
             cc_entry = self._cc.entry(tenant_id, wireless_site, central_site, cc_thresh)
             w_entry = self._cc.entry(tenant_id, wireless_site, central_site, cc_thresh, kind="wired")
             wl_entry = self._cc.entry(tenant_id, wireless_site, central_site, cc_thresh, kind="wireless")
