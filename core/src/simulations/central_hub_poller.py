@@ -76,6 +76,7 @@ _CC_WINDOW = 3600          # seconds of raw samples kept (the "current hourly")
 _CC_MIN_SAMPLES = 3        # minimum live samples before flagging
 _CC_WARN_PCT = 20.0        # >20% below the hour average -> WARNING
 _CC_ERROR_PCT = 50.0       # >50% below -> ERROR        # percent drop below baseline that flags DEGRADED
+_CC_1DAY_WINDOW = 86400
 _CC_7DAY_WINDOW = 7 * 86400
 _CC_30DAY_WINDOW = 30 * 86400   # long-run history retention (the 7-day is a subset)
 _CC_SNAPSHOT_INTERVAL = 3600  # append one hourly snapshot to the history / hr
@@ -84,6 +85,11 @@ _CC_SNAPSHOT_INTERVAL = 3600  # append one hourly snapshot to the history / hr
 # quiet/low-traffic site can't error on noise.
 _CC_MAX_FRACTION = 0.20
 _CC_MAX_MIN_PEAK = 5
+# Which colour each baseline breach produces. Separated from the rule so the
+# mapping can be retuned without touching the logic.
+_CC_DAILY_SEVERITY = "error"
+_CC_WEEKLY_SEVERITY = "error"
+_CC_MONTHLY_SEVERITY = "warning"
 _CC_KEYSEP = "\x1f"        # composite (tenant, wsite) key separator
 
 
@@ -112,7 +118,15 @@ def _cc_thresholds(central_config):
         err = warn
     die = _num(t.get("die_off_pct"), _CC_MAX_FRACTION * 100.0, 0.0, 100.0) / 100.0
     peak = int(_num(t.get("min_peak"), _CC_MAX_MIN_PEAK, 1, 1_000_000))
-    return {"warn_pct": warn, "error_pct": err, "die_off_frac": die, "min_peak": peak}
+    # Steady-state fractions, defaulting to the existing die_off_pct so an
+    # already-tuned tenant keeps its number instead of being silently reset.
+    # 0 disables that window.
+    daily = _num(t.get("daily_pct"), die * 100.0, 0.0, 100.0) / 100.0
+    weekly = _num(t.get("weekly_pct"), die * 100.0, 0.0, 100.0) / 100.0
+    monthly = _num(t.get("monthly_pct"), die * 100.0, 0.0, 100.0) / 100.0
+    return {"warn_pct": warn, "error_pct": err, "die_off_frac": die,
+            "min_peak": peak, "daily_frac": daily,
+            "weekly_frac": weekly, "monthly_frac": monthly}
 
 
 _CC_SEVERITY = {"error": 3, "warning": 2, "ok": 1}  # else (no_data/pending/…) -> 0
@@ -221,22 +235,37 @@ class ClientCountTracker:
         error_pct = _t.get("error_pct", _CC_ERROR_PCT)
         die_off_frac = _t.get("die_off_frac", _CC_MAX_FRACTION)
         min_peak = _t.get("min_peak", _CC_MAX_MIN_PEAK)
+        daily_frac = _t.get("daily_frac", die_off_frac)
+        weekly_frac = _t.get("weekly_frac", die_off_frac)
+        monthly_frac = _t.get("monthly_frac", die_off_frac)
         now = time.time()
         key = self._key(scope, wsite, kind)
         samples = self._samples.get(key, [])
         hist = self._hourly.get(key, [])
         # Rolling peaks over each window (include the live hour so a fresh spike counts).
+        vals_1d = [v for ts, v in hist if ts >= now - _CC_1DAY_WINDOW]
         vals_7d = [v for ts, v in hist if ts >= now - _CC_7DAY_WINDOW]
         vals_30d = [v for ts, v in hist if ts >= now - _CC_30DAY_WINDOW]
         if not samples:
             return {"site_name": central_site, "current": 0, "hourly_avg": 0,
                     "drop_pct": 0.0, "max_7day": round(max(vals_7d or [0]), 1),
                     "max_30day": round(max(vals_30d or [0]), 1),
+                    "avg_1day": round(sum(vals_1d) / len(vals_1d), 1) if vals_1d else 0.0,
+                    "avg_7day": round(sum(vals_7d) / len(vals_7d), 1) if vals_7d else 0.0,
+                    "avg_30day": round(sum(vals_30d) / len(vals_30d), 1) if vals_30d else 0.0,
                     "status": "no_data", "ts": now}
         current = samples[-1][1]
         hourly_avg = sum(s[1] for s in samples) / len(samples)
         max_7day = round(max(vals_7d + [hourly_avg]), 1)
         max_30day = round(max(vals_30d + [hourly_avg]), 1)
+        # Steady-state baselines. The old rule compared against the rolling PEAK,
+        # which is a single best-ever hour and makes the check hair-trigger: any
+        # site that was once busy stays "dying" forever. An AVERAGE is what a
+        # steady-state metric should hold, so that is what we measure against.
+        # Peaks are still reported, as context rather than as the threshold.
+        avg_1day = round(sum(vals_1d) / len(vals_1d), 1) if vals_1d else 0.0
+        avg_7day = round(sum(vals_7d) / len(vals_7d), 1) if vals_7d else 0.0
+        avg_30day = round(sum(vals_30d) / len(vals_30d), 1) if vals_30d else 0.0
         die_off_peak = 0.0  # the peak the current avg fell below, if die-off tripped
         if len(samples) < _CC_MIN_SAMPLES:
             drop_pct, status = 0.0, "no_data"
@@ -257,16 +286,32 @@ class ClientCountTracker:
             # the dashboard message can explain an error the within-hour drop
             # (often 0%) does not account for — otherwise the site reads "down 0%"
             # yet still shows ERROR with no visible reason.
-            if die_off_frac > 0:
-                if max_7day >= min_peak and hourly_avg < die_off_frac * max_7day:
-                    die_off_peak = max_7day
-                elif max_30day >= min_peak and hourly_avg < die_off_frac * max_30day:
-                    die_off_peak = max_30day
-                if die_off_peak:
-                    status = "error"
+            # Steady-state rules, worst-wins against the within-hour drop above.
+            #
+            #   below weekly_frac of the 7-DAY AVERAGE   -> ERROR  (red)
+            #   below monthly_frac of the 30-DAY AVERAGE -> WARNING (yellow)
+            #
+            # The week is the tighter, more current baseline, so falling through
+            # it is an ACUTE collapse and reds. The month is the slower one: a
+            # site already degraded for days has a sagging weekly average it can
+            # still clear, but it will not clear the monthly one -- so a CHRONIC
+            # decline surfaces as amber instead of hiding behind its own decay.
+            # That is the failure mode a self-referencing baseline always has,
+            # and splitting the windows is what exposes it.
+            #
+            # min_peak gates both so a genuinely quiet site cannot alarm on noise.
+            # (baseline value, fraction, severity). Table-driven so the mapping
+            # is a data change, not a logic change.
+            for _base, _frac, _sev in ((avg_1day, daily_frac, _CC_DAILY_SEVERITY),
+                                       (avg_7day, weekly_frac, _CC_WEEKLY_SEVERITY),
+                                       (avg_30day, monthly_frac, _CC_MONTHLY_SEVERITY)):
+                if _frac > 0 and _base >= min_peak and hourly_avg < _frac * _base:
+                    status = _cc_worst(status, _sev)
+                    die_off_peak = die_off_peak or _base
         return {"site_name": central_site, "current": current,
                 "hourly_avg": round(hourly_avg, 1), "drop_pct": round(drop_pct, 1),
                 "max_7day": max_7day, "max_30day": max_30day,
+                "avg_1day": avg_1day, "avg_7day": avg_7day, "avg_30day": avg_30day,
                 "die_off": die_off_peak, "die_off_frac": die_off_frac,
                 "status": status, "ts": samples[-1][0]}
 
