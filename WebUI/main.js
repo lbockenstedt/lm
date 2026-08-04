@@ -5307,14 +5307,14 @@ function _renderSetupOsUpdatesTile(content) {
 }
 
 async function osuLoad() {
-    try { _osuRender(await apiFetch('/api/os-updates')); }
+    try { _osuRender(await apiJson('/api/os-updates')); }
     catch (e) { const b = document.getElementById('osu-body'); if (b) b.innerHTML = `<p class="text-xs text-red-500">${escapeHtml(String(e.message || e))}</p>`; }
 }
 
 window.osuCheck = async function () {
     const st = document.getElementById('osu-status');
     if (st) st.textContent = 'checking every node…';
-    try { _osuRender(await apiFetch('/api/os-updates/check', { method: 'POST', body: JSON.stringify({ refresh: true }) })); showToast('Update check complete.', 'success'); }
+    try { _osuRender(await apiJson('/api/os-updates/check', { method: 'POST', body: JSON.stringify({ refresh: true }) })); showToast('Update check complete.', 'success'); }
     catch (e) { showToast('Check failed: ' + (e.message || e), 'error'); }
     finally { if (st) st.textContent = ''; }
 };
@@ -5329,7 +5329,7 @@ window.osuApply = async function () {
                  `• one node at a time, hub last\n` +
                  `• nothing is rebooted automatically — you'll get a badge instead`)) return;
     try {
-        const r = await apiFetch('/api/os-updates/apply', { method: 'POST', body: JSON.stringify({}) });
+        const r = await apiJson('/api/os-updates/apply', { method: 'POST', body: JSON.stringify({}) });
         showToast(`Deploying to ${r.queued} node(s) — one at a time.`, 'success');
         _osuStartPoll();
     } catch (e) { showToast('Apply failed: ' + (e.message || e), 'error'); }
@@ -5341,7 +5341,7 @@ function _osuStartPoll() {
     // visible without the operator refreshing.
     _osuPoll = setInterval(async () => {
         try {
-            const d = await apiFetch('/api/os-updates');
+            const d = await apiJson('/api/os-updates');
             _osuRender(d);
             if (!d.run || d.run.status !== 'running') { clearInterval(_osuPoll); _osuPoll = null; }
         } catch (e) { clearInterval(_osuPoll); _osuPoll = null; }
