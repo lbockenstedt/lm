@@ -11657,6 +11657,22 @@ function _csDongleDiagHost(h) {
             tone: gwActs ? 'warn' : 'good' };
 
     const kTotals = Object.entries(kernel.totals || {});
+    // Who caused these? The recovery ladder's usb_reset writes authorized 0/1,
+    // which the kernel logs as a disconnect -- a category counted as evidence.
+    // Without the split, the agent's own recovery attempts read back as proof
+    // the dongle is failing. Only SPONTANEOUS events are evidence of hardware.
+    const attr = kernel.attribution || null;
+    const attrLine = (attr && (attr.self_inflicted || attr.spontaneous))
+        ? `<div class="mt-1 text-[11px] ${attr.spontaneous ? 'text-slate-600' : 'text-slate-500'}">`
+          + `<b>${csEscape(String(attr.spontaneous))}</b> spontaneous`
+          + (attr.self_inflicted
+              ? ` · <span class="text-slate-400">${csEscape(String(attr.self_inflicted))} self-inflicted (agent usb_reset — not hardware evidence)</span>`
+              : '')
+          + (attr.spontaneous === 0 && attr.self_inflicted
+              ? ` — <span class="text-[#01A982] font-bold">every logged event was ours; no hardware fault evidenced</span>`
+              : '')
+          + `</div>`
+        : '';
     const kernelLine = !kernel.available
         ? '<span class="text-amber-600">kernel log unreadable — evidence could not be checked (not the same as a clean log)</span>'
         : kTotals.length
@@ -11724,7 +11740,7 @@ function _csDongleDiagHost(h) {
       ${causes.length ? csDiagSub('Probable cause — ranked') +
         `<div class="grid grid-cols-1 xl:grid-cols-2 gap-2">${causeCards}</div>` : ''}
       ${hubHtml}
-      ${kernel.available && kTotals.length ? csDiagNote(`Kernel: ${kernelLine}`) : ''}
+      ${kernel.available && kTotals.length ? csDiagNote(`Kernel: ${kernelLine}${attrLine}`) : ''}
       ${!kernel.available ? csDiagNote('<span class="text-amber-600">Kernel log unreadable — evidence could not be checked. This is <b>not</b> the same as a clean log.</span>') : ''}
     </div>`;
 }
