@@ -188,23 +188,33 @@ def _cc_rate_drop(samples, n):
     return max(0.0, (prev - sum(vals[-n:]) / n) / prev * 100.0)
 
 
-def _cc_site_floor(central_config, site_name):
-    """Configured minimum for ONE site, from ``central_config['cc_floors']``.
+def _cc_site_floor(sites_cfg, *site_names):
+    """Configured minimum client count for a site, from the EXISTING
+    ``site_min_clients`` map that Central/Mist -> Sites -> Monitor already
+    writes. Not a new config surface -- the operator has been setting this
+    per site all along; the trend check simply had no idea it existed.
 
-    Per-site by design: MIA and DFW do not share an expected level. Missing or
-    unparseable disables the floor rule for that site ONLY -- never inferred
-    from history, or it becomes the peak problem again.
+    Tries each name in turn because the map may be keyed by either the
+    WIRELESS site or the Central/Mist site name, mirroring the lookup the
+    Minimum Client Threshold check already does.
+
+    Returns None when unset, zero or unparseable, which disables the floor rule
+    for that site ONLY. Never inferred from history -- that is the peak problem.
     """
     try:
-        floors = (central_config or {}).get("cc_floors") or {}
-        raw = floors.get(site_name)
-        if raw in (None, ""):
-            return None
-        v = float(raw)
-        return v if v > 0 else None
-    except (TypeError, ValueError, AttributeError):
+        floors = (sites_cfg or {}).get("site_min_clients") or {}
+    except AttributeError:
         return None
-
+    for name in site_names:
+        if name in (None, ""):
+            continue
+        raw = floors.get(name) or floors.get(str(name))
+        try:
+            if raw not in (None, "") and float(raw) > 0:
+                return float(raw)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 def _cc_worst(*statuses):
     """Worst (most severe) of a set of client-count statuses — for the overall
@@ -1036,7 +1046,7 @@ class CentralHubPoller:
             # Per-site FLOOR, resolved here because entry() only sees thresholds.
             # Absent/0 disables the floor rule for THIS site alone.
             cc_thresh = dict(cc_thresh or {})
-            cc_thresh["floor"] = _cc_site_floor(central_config, central_site)
+            cc_thresh["floor"] = _cc_site_floor(sites_cfg, wireless_site, central_site)
             cc_entry = self._cc.entry(tenant_id, wireless_site, central_site, cc_thresh)
             w_entry = self._cc.entry(tenant_id, wireless_site, central_site, cc_thresh, kind="wired")
             wl_entry = self._cc.entry(tenant_id, wireless_site, central_site, cc_thresh, kind="wireless")
