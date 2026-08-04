@@ -10272,12 +10272,15 @@ window.csClearUsbHistory = async function (host) {
     _csUsbClearCmd(host, 'clear_usb_history', 'Dongle history purged on all spokes — missing counts rebuild from what is attached now', true);
 };
 
+// No confirm dialog: the action is cheap and self-repairing — a dongle that is
+// still genuinely faulty re-quarantines on the next pass, so a mis-click costs
+// one provision cycle, not data. The button tooltip carries the explanation and
+// the toast confirms what happened. Matches csClearUsbHistory.
 window.csClearUsbQuarantine = async function (spokeId, host) {
-    if (!confirm(`Clear USB quarantine across ALL spokes?\n\nClears the dmesg quarantine list (incl. the 5-strike permanent flag) and force-unbinds any driver-bound dongle from the host driver. Leaves the exclusion list intact.`)) return;
     _csUsbClearCmd(host, 'clear_usb_quarantine', 'Quarantine cleared on all spokes + driver-bound dongles released — available on the next provision pass', true);
 };
+// Same reasoning as csClearUsbQuarantine: self-repairing, so no confirm.
 window.csClearUsbExclusions = async function (spokeId, host) {
-    if (!confirm(`Clear USB exclusion list across ALL spokes?\n\nClears the destroy-fail bus exclusions (what repeated spin-up/down trips) and force-unbinds any driver-bound dongle from the host driver. Leaves the quarantine list intact.`)) return;
     _csUsbClearCmd(host, 'clear_usb_exclusions', 'Exclusion list cleared on all spokes + driver-bound dongles released — available on the next provision pass', true);
 };
 
