@@ -9817,9 +9817,14 @@ async function csRenderVmServerUsb() {
         if (typeof _raw === 'string' && _raw.trim()) { try { _raw = JSON.parse(_raw); } catch (_) { _raw = _raw.split(/[,\s]+/); } }
         tenantIgnored = (Array.isArray(_raw) ? _raw : []).map(x => String(x || '').trim().toLowerCase()).filter(Boolean);
     } catch (_) { /* non-fatal — just omit the ignored section */ }
-    const scopeHosts = csVmSelectedHosts();
-    if (!scopeHosts.length) { csSet(csEmpty('No host selected.')); return; }
+    // Single-host view, same treatment as Details: the Host dropdown REPLACES
+    // the selection rather than accumulating one. Scope to the host the banner
+    // actually names -- csVmSelectedHosts() returns ALL hosts when the selection
+    // is empty (the initial state), which would have shown four hosts' devices
+    // under a picker reading "svr-01".
     const h = csVmSelectedHost();   // banner + single-host affordances
+    const scopeHosts = h ? [h] : [];
+    if (!scopeHosts.length) { csSet(csEmpty('No host selected.')); return; }
     // Aggregate USB across ALL selected hosts — the Host dropdown is multi-select,
     // and each host's proxmox block carries its OWN present_usb / unknown_usb /
     // usb_state / quarantine. Previously only the FIRST selected host's px was
@@ -10003,7 +10008,7 @@ async function csRenderVmServerUsb() {
     const _btnCls = 'text-[11px] font-bold px-3 py-1.5 rounded-md border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 whitespace-nowrap';
     const _clearQtBtn = `<button onclick="csClearUsbQuarantine('${_usbSid}','${_usbHost}')" title="Clear the dmesg quarantine list (incl. the 5-strike permanent flag) + force-release driver-bound dongles on this host. Leaves the exclusion list intact." class="${_btnCls}">Clear Quarantine</button>`;
     const _clearExclBtn = `<button onclick="csClearUsbExclusions('${_usbSid}','${_usbHost}')" title="Clear the destroy-fail bus exclusions (repeated spin-up/down trips these) + force-release driver-bound dongles on this host. Leaves the quarantine list intact." class="${_btnCls}">Clear Exclusion List</button>`;
-    csSet(`<div>${csVmHostBanner()}
+    csSet(`<div>${csVmHostBanner({ single: true })}
       ${dbgBox}
       <div class="flex items-center justify-between gap-3 mb-4">
         <p class="text-[11px] text-slate-400 min-w-0">Release sidelined dongles. Both actions also force-unbind a driver-bound dongle from the host (no reboot); they differ only in which state store they clear.</p>
@@ -10057,7 +10062,7 @@ function csRenderVmServerIot() {
     const h = csVmSelectedHost() || (csVmHosts.length ? csVmHosts[0] : null);
     const px = (h && h.proxmox) || {};
     const t3 = px.t3_pci_devices || [];
-    csSet(`<div>${csVmHostBanner()}
+    csSet(`<div>${csVmHostBanner({ single: true })}
       <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">IoT / T3 PCI Devices (${t3.length})</p>
       ${t3.length ? csTable(['Device', 'Address', 'Driver'], t3.map(d => `<tr>
         <td class="px-3 py-2 text-sm">${csEscape(d.name || d.device || '—')}</td>
@@ -10096,7 +10101,7 @@ async function csRenderVmServerPci() {
             <td class="px-3 py-2 font-mono text-xs">${csEscape(d.address || '—')}</td>
             <td class="px-3 py-2 text-slate-500">${csEscape(d.driver || '—')}</td></tr>`).join(''))
         : csEmpty('No present ' + label + ' PCI devices reported.', 'Present PCI devices surface once the spoke relays them.');
-    csSet(`<div>${csVmHostBanner()}
+    csSet(`<div>${csVmHostBanner({ single: true })}
       <div class="grid grid-cols-2 gap-3 mb-4">
         ${csStat('T1 allow-listed', t1.length)}${csStat('T3 allow-listed', t3.length)}
       </div>
