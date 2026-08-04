@@ -10598,6 +10598,99 @@ async function csFillLinkApproval(h) {
     const el = document.getElementById('cs-link-agent');
     if (el) el.innerHTML = `<span class="text-slate-400">Agent link:</span> ` + html;
 }
+// ── Show Tech ────────────────────────────────────────────────────────────────
+// "show tech-support" for one host: dump EVERYTHING the hub holds, as JSON.
+//
+// Built from the RAW host record, deliberately NOT from the rendered tiles.
+// The Details grid is curated -- fields get skipped (agent_version,
+// usb_state, present_usb, vms, usb_diagnostics, node...) and tiles get merged
+// or removed as the page is tidied. If this dump were assembled from what is
+// on screen, tidying the UI would silently delete diagnostic evidence. It is
+// assembled from `h` instead, so removing something from the page never
+// removes it from the download. That inversion is the whole point.
+//
+// Nothing is filtered, truncated or prettified: USB dongle state, PCI
+// slots/ports, quarantine, exclusions, per-VM records, boot baseline, kernel
+// evidence and agent internals all land verbatim.
+function csShowTechPayload(h) {
+    const px = (h && h.proxmox) || {};
+    const seen = new WeakSet();
+    // Cycle-safe deep clone. A host record is plain relayed JSON, but a stray
+    // back-reference must not turn the whole download into an exception.
+    const safe = v => JSON.parse(JSON.stringify(v, (k, val) => {
+        if (val && typeof val === 'object') {
+            if (seen.has(val)) return '[circular]';
+            seen.add(val);
+        }
+        return val;
+    }));
+    let host;
+    try { host = safe(h); } catch (e) { host = { _error: String(e) }; }
+    return {
+        _meta: {
+            kind: 'lm-show-tech',
+            host: h && (h.spoke_name || h.spoke_hostname || h.spoke_id) || 'unknown',
+            spoke_id: (h && h.spoke_id) || '',
+            node: (px.node && px.node.hostname) || '',
+            agent_version: px.agent_version || '',
+            pve_version: px.pve_version || '',
+            tenant: (typeof csTenant === 'function' ? csTenant() : ''),
+            generated_at: new Date().toISOString(),
+            generated_at_local: new Date().toLocaleString(),
+            source: 'raw host telemetry record (NOT the rendered page)',
+            note: 'Fields hidden from the Details UI are intentionally present here.',
+        },
+        // Explicit index of the things the UI does not show, so whoever reads
+        // the file knows to look for them rather than assuming they are absent.
+        _contents: {
+            usb_diagnostics: !!px.usb_diagnostics && !!px.usb_diagnostics.generated_at,
+            usb_dongles_present: (px.present_usb || []).length,
+            usb_dongles_unknown: (px.unknown_usb || []).length,
+            usb_assigned_state: (px.usb_state || []).length,
+            usb_quarantined: (px.quarantine || []).length,
+            usb_excluded: (px.excluded || []).length,
+            usb_controllers: (((px.usb_diagnostics || {}).controllers) || []).length,
+            pci_t1_devices: (px.t1_pci_devices || []).length,
+            pci_t3_devices: (px.t3_pci_devices || []).length,
+            vms: (px.vms || []).length,
+        },
+        host: host,
+    };
+}
+
+window.csShowTech = function (btn) {
+    const h = (typeof csVmSelectedHost === 'function' && csVmSelectedHost()) || null;
+    if (!h) { if (btn) { btn.textContent = 'No host'; setTimeout(() => { btn.textContent = '⤓ Show Tech'; }, 1500); } return; }
+    let text;
+    try {
+        text = JSON.stringify(csShowTechPayload(h), null, 2);
+    } catch (e) {
+        console.error('csShowTech: payload build failed', e);
+        if (btn) { btn.textContent = 'Failed'; setTimeout(() => { btn.textContent = '⤓ Show Tech'; }, 2000); }
+        return;
+    }
+    const name = String(h.spoke_name || h.spoke_hostname || h.spoke_id || 'host').replace(/[^\w.-]+/g, '_');
+    // Local date in the filename — a support bundle is read by a human who
+    // thinks in their own timezone, not in UTC.
+    const d = new Date();
+    const p2 = n => String(n).padStart(2, '0');
+    const stamp = `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}`;
+    try {
+        const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+        const a = document.createElement('a');
+        a.href = url; a.download = `showtech-${name}-${stamp}.json`;
+        document.body.appendChild(a); a.click(); a.remove();
+        // Revoke on the next tick — revoking synchronously can cancel the
+        // download in some browsers before it has read the blob.
+        setTimeout(() => URL.revokeObjectURL(url), 30000);
+        if (btn) { btn.textContent = '✓ Downloaded'; setTimeout(() => { btn.textContent = '⤓ Show Tech'; }, 2000); }
+    } catch (e) {
+        console.error('csShowTech: download failed, falling back to clipboard', e);
+        if (typeof csCopyText === 'function') csCopyText(text, btn);
+    }
+};
+
+
 
 async function csRenderVmServerDetails() {
     csSetToolbar('');
@@ -10692,7 +10785,12 @@ async function csRenderVmServerDetails() {
     // second host left this page rendering the first (csVmSelectedHost resolves
     // the sticky id first), so the new pick looked like it did nothing.
     csSet(`<div>${csVmHostBanner({ single: true })}
-      <div class="flex justify-end mb-3">
+      <div class="flex justify-end gap-2 mb-3">
+        <button onclick="csShowTech(this)"
+          class="bg-slate-700 hover:bg-slate-800 text-white px-3 py-1.5 rounded-md text-xs font-bold"
+          title="Download EVERYTHING the hub holds for this host as JSON — the complete raw telemetry record, including USB dongle state, PCI slots/ports, VM list and agent internals that are deliberately NOT rendered on screen. Built from the source record, so anything removed from this page is still in the download.">
+          ⤓ Show Tech
+        </button>
         <button onclick="csDeleteHost('${csEscape(String(_delId).replace(/'/g, "\\'"))}')"
           class="bg-red-600 hover:bg-red-700 text-white px-3 py-1.5 rounded-md text-xs font-bold"
           title="Remove this host from the VM Server view and clear its cached/stored data. Use for a host that has been intentionally shut down. If the host comes back online it will re-appear.">
