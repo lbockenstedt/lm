@@ -10448,6 +10448,8 @@ function csCardSuspicion(entries, ctrls) {
         const r = String(e.reason || '').trim();
         if (r) g.reasons[r] = (g.reasons[r] || 0) + 1;
         if (!g.label) g.label = String(e.location || '').replace(/\s*·\s*port\s.*$/, '') || key;
+        if (!g.card) g.card = e.card_vidpid || '';
+        if (!g.role) { g.role = e.card_role || ''; g.roleInferred = String(e.card_role_source || '') === 'inferred'; }
     });
     const ctrlBy = {};
     (ctrls || []).forEach(c => { if (c && c.pci_address) ctrlBy[c.pci_address] = c; });
@@ -10459,7 +10461,9 @@ function csCardSuspicion(entries, ctrls) {
         const reasons = Object.entries(g.reasons).sort((a, b) => b[1] - a[1]);
         const single = reasons.length === 1;
         return {
-            key: g.key, label: g.label, ports: Object.keys(g.ports).sort(), nPorts: nPorts,
+            key: g.key, label: g.label, card: g.card || '', role: g.role || '',
+            roleInferred: !!g.roleInferred,
+            ports: Object.keys(g.ports).sort(), nPorts: nPorts,
             total: total, reason: reasons.length ? reasons[0][0] : '',
             sameReason: single,
             severity: (nPorts >= 3 || (total && nPorts / total >= 0.5)) ? 'high' : 'medium',
@@ -10478,13 +10482,146 @@ function csCardSuspicionBanner(entries, ctrls) {
         const of = s.total ? ` of ${s.total}` : '';
         return `<div class="mb-2 rounded-md border px-3 py-2 ${hi ? 'border-red-300 bg-red-50' : 'border-amber-300 bg-amber-50'}">
           <p class="text-[11px] font-bold ${hi ? 'text-red-700' : 'text-amber-700'}">
-            ⚠ Suspect controller — ${csEscape(s.label || s.key)}</p>
+            ⚠ Suspect controller — ${csEscape(s.label || s.key)}${(s.card && String(s.label || '').indexOf(s.card) < 0) ? ` <span class="font-mono">${csEscape(s.card)}</span>` : ''}${s.role ? ` [${csEscape(String(s.role).toUpperCase())}]` : ''}</p>
           <p class="text-[11px] ${hi ? 'text-red-600/90' : 'text-amber-600/90'}">
             ${s.nPorts}${of} port(s) sidelined on this one card (ports ${csEscape(s.ports.join(', '))})${s.sameReason && s.reason ? `, all with the same fault: <b>${csEscape(s.reason)}</b>` : ''}.
             Dongles failing together on a single controller point at the <b>card, its slot or its power</b> — not at the dongles.
             Reseat or replace the card, or move a dongle to a different controller to confirm, before swapping sticks.</p>
         </div>`;
     }).join('');
+}
+
+
+// ── "Replace Dongle" live watcher ────────────────────────────────────────────
+// The job this replaces: SSH to the host and poll
+// `ls /sys/bus/usb/devices/16-3` while pulling a stick. The whole point is that
+// nobody should need the CLI to answer "did I just pull the RIGHT one?".
+//
+// Polls the agent's usb_probe on demand rather than reading telemetry: telemetry
+// idles at 60s and is capped at 15s under load, so a hand in the chassis would
+// be waiting on a frame. Probe is a handful of sysfs reads.
+//
+// Identity, not just presence, decides the verdict. A dongle REMOVED and one
+// RESEATED both show present=true a second apart, and two dongles of a model
+// share a vid:pid -- so the baseline is (vidpid, serial) and a changed serial
+// on the same port is a REPLACEMENT, not a flap.
+let _csDongleWatch = null;   // {bus, host, timer, baseline, state, seenGone}
+const _CS_WATCH_POLL_MS = 2000;
+const _CS_WATCH_MAX_MS = 10 * 60 * 1000;   // stop watching if walked away from
+
+window.csReplaceDongle = function (bus) {
+    const h = (typeof csVmSelectedHost === 'function' && csVmSelectedHost()) || null;
+    const host = h ? (h.spoke_hostname || h.spoke_name || h.spoke_id) : '';
+    csStopDongleWatch();
+    _csDongleWatch = { bus: bus, host: host, baseline: null, state: 'starting',
+                       started: Date.now(), seenGone: false };
+    _csRenderWatch();
+    _csWatchTick();
+    _csDongleWatch.timer = setInterval(_csWatchTick, _CS_WATCH_POLL_MS);
+};
+
+window.csStopDongleWatch = function () {
+    if (_csDongleWatch && _csDongleWatch.timer) clearInterval(_csDongleWatch.timer);
+    _csDongleWatch = null;
+    const el = document.getElementById('cs-dongle-watch');
+    if (el) el.remove();
+};
+
+async function _csWatchTick() {
+    const w = _csDongleWatch;
+    if (!w) return;
+    if (Date.now() - w.started > _CS_WATCH_MAX_MS) {
+        w.state = 'timeout'; _csRenderWatch(); clearInterval(w.timer); w.timer = null; return;
+    }
+    let r;
+    try {
+        r = await csFetch(`/${csTenant()}/proxmx/command?tenant_id=${csTenant()}`, {
+            method: 'POST',
+            body: JSON.stringify({ action: 'usb_probe', target: w.host || 'proxmox',
+                                   type: 'usb_probe', args: { bus_path: w.bus },
+                                   bus_path: w.bus }) });
+    } catch (e) {
+        // A failed probe is NOT evidence the dongle went away -- saying
+        // "removed" because the network blipped would send someone to pull the
+        // wrong stick next.
+        w.state = 'error'; w.error = String((e && e.message) || e); _csRenderWatch(); return;
+    }
+    const p = (r && (r.result || r.data || r)) || {};
+    const ident = k => String(p[k] || '');
+    if (!w.baseline && p.present) {
+        w.baseline = { vidpid: ident('vidpid'), serial: ident('serial'),
+                       product: ident('product'), location: ident('location'),
+                       card: ident('pci_address') };
+    }
+    w.last = p;
+    if (!p.present) {
+        w.seenGone = true;
+        w.state = 'removed';
+    } else if (w.seenGone) {
+        // Back on the same port. Same serial = the one just pulled went back in;
+        // different = a genuine replacement.
+        const b = w.baseline || {};
+        const same = b.serial ? (ident('serial') === b.serial)
+                              : (ident('vidpid') === b.vidpid);
+        w.state = same ? 'reseated' : 'replaced';
+    } else {
+        w.state = 'present';
+    }
+    _csRenderWatch();
+}
+
+function _csRenderWatch() {
+    const w = _csDongleWatch;
+    if (!w) return;
+    let el = document.getElementById('cs-dongle-watch');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'cs-dongle-watch';
+        el.className = 'fixed bottom-4 right-4 z-50 w-96 rounded-lg shadow-xl border bg-white';
+        document.body.appendChild(el);
+    }
+    const p = w.last || {}, b = w.baseline || {};
+    const S = {
+        starting: { cls: 'border-slate-300', dot: 'bg-slate-400',  head: 'Checking port…',        body: '' },
+        present:  { cls: 'border-blue-300',  dot: 'bg-blue-500 animate-pulse',
+                    head: 'Still plugged in — pull it now',
+                    body: 'Watching this port. It will turn green the moment the dongle leaves the bus.' },
+        removed:  { cls: 'border-green-400', dot: 'bg-green-500',
+                    head: '✓ Removed — that was the right one',
+                    body: 'This port is now empty. Insert the replacement and this panel will confirm it.' },
+        replaced: { cls: 'border-green-500', dot: 'bg-green-600',
+                    head: '✓ Replacement detected',
+                    body: 'A DIFFERENT dongle is now on this port.' },
+        reseated: { cls: 'border-amber-400', dot: 'bg-amber-500',
+                    head: '⚠ Same dongle went back in',
+                    body: 'The dongle on this port has the same serial as the one removed — this is the original, reseated, not a replacement.' },
+        error:    { cls: 'border-amber-400', dot: 'bg-amber-500',
+                    head: 'Probe failed — cannot confirm',
+                    body: 'Not the same as "removed". Treat the port as unknown until this clears: ' + csEscape(w.error || '') },
+        timeout:  { cls: 'border-slate-300', dot: 'bg-slate-400',
+                    head: 'Stopped watching', body: 'No change for 10 minutes.' },
+    }[w.state] || { cls: 'border-slate-300', dot: 'bg-slate-400', head: w.state, body: '' };
+    const was = b.vidpid ? `<div class="text-[10px] text-slate-500 mt-1">was ${csEscape(b.product || '')} <span class="font-mono">${csEscape(b.vidpid)}</span>${b.serial ? ' · sn ' + csEscape(b.serial) : ''}</div>` : '';
+    const now = (p.present && w.state !== 'present') ? `<div class="text-[10px] text-slate-500">now <span class="font-mono">${csEscape(p.vidpid || '?')}</span>${p.serial ? ' · sn ' + csEscape(p.serial) : ''}</div>` : '';
+    // Neighbours make "did I grab the one next to it?" answerable at a glance.
+    const sibs = Array.isArray(p.siblings) ? p.siblings.filter(x => x && x.bus_path !== w.bus) : [];
+    const sibHtml = sibs.length ? `<div class="mt-2 pt-2 border-t border-slate-100">
+        <p class="text-[10px] uppercase tracking-wider text-slate-400 mb-0.5">Others on this card</p>
+        ${sibs.map(x => `<div class="text-[10px] text-slate-500 font-mono">${csEscape(x.bus_path)} · ${csEscape(x.vidpid || '—')}</div>`).join('')}
+      </div>` : '';
+    el.className = `fixed bottom-4 right-4 z-50 w-96 rounded-lg shadow-xl border-2 bg-white ${S.cls}`;
+    el.innerHTML = `<div class="p-3">
+        <div class="flex items-start justify-between gap-2">
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full ${S.dot}"></span>
+            <span class="text-xs font-bold text-slate-700">${csEscape(S.head)}</span>
+          </div>
+          <button onclick="csStopDongleWatch()" class="text-slate-400 hover:text-slate-600 text-xs font-bold">✕</button>
+        </div>
+        <div class="text-[11px] text-slate-600 mt-1">${S.body}</div>
+        <div class="text-[10px] text-slate-500 mt-2 font-mono">${csEscape(w.bus)}${b.location ? ' · ' + csEscape(b.location) : ''}</div>
+        ${was}${now}${sibHtml}
+      </div>`;
 }
 
 
@@ -10535,7 +10672,28 @@ function csFmtKnownObj(k, v) {
             const loc = o.location
                 ? `<span class="text-slate-700 font-semibold">${esc(o.location)}</span>`
                 : '<span class="text-slate-300">location unknown</span>';
-            const id = [o.name, o.vidpid].filter(Boolean).map(esc).join(' · ');
+            // The DONGLE's vid:pid is deliberately not shown: every dongle in
+            // the fleet is the same model, so it identifies nothing. The CARD's
+            // does identify something -- there are several controller models in
+            // these hosts -- and card_role says which tier the config assigns
+            // it, which is the actual question ("is that the T1 card or a T2
+            // card?"). Both still ship in Show Tech.
+            const role = String(o.card_role || '').toUpperCase();
+            // A role matched against a configured allow-list is a FACT; one
+            // derived from "it holds dongles, so it must be T2" is a guess.
+            // Showing them identically would let an unpopulated t2_pci_vidpids
+            // masquerade as a configured answer.
+            // Inference is fine here and reads the same as a configured match:
+            // a card holding dongles IS the T2 path, so hedging in the badge
+            // would be noise of exactly the kind "add-in card or onboard" was.
+            // Provenance stays in the tooltip and in the Show Tech dump.
+            const roleTip = String(o.card_role_source || '') === 'inferred'
+                ? 'Derived: this card is on no configured PCI allow-list, and a card holding dongles is the T2 path. Add its vid:pid to t2_pci_vidpids to pin it explicitly.'
+                : 'Matched against the configured PCI allow-list.';
+            const card = o.card_vidpid
+                ? `<span class="text-slate-600">card <span class="font-mono">${esc(o.card_vidpid)}</span>${role ? ` <span title="${esc(roleTip)}" class="px-1 rounded bg-slate-200 text-slate-700 font-bold text-[10px]">${esc(role)}</span>` : ''}</span>`
+                : '';
+            const id = [o.name ? esc(o.name) : '', card].filter(Boolean).join(' · ');
             const since = o.since
                 ? `${esc(csLastSeen(o.since))} <span class="text-slate-400">(${esc(csAgeShort(Date.now() / 1000 - Number(o.since)))} ago)</span>`
                 : '—';
@@ -10558,6 +10716,9 @@ function csFmtKnownObj(k, v) {
               <div class="text-slate-600">${esc(o.reason || (qt ? 'quarantined' : 'excluded'))}</div>
               <div class="text-[11px] text-slate-500">${back} · ${flags}</div>
               <div class="text-[11px] text-slate-400">since ${since}</div>
+              ${o.bus_path ? `<button onclick="csReplaceDongle('${esc(o.bus_path)}')"
+                class="mt-1 px-2 py-0.5 rounded border border-slate-300 bg-white hover:bg-slate-50 text-[10px] font-bold text-slate-600"
+                title="Watch this port live while you pull the dongle — confirms you removed the RIGHT one without touching the CLI.">⟳ Replace Dongle</button>` : ''}
             </div>`;
         }).join('');
     }
