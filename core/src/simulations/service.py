@@ -253,6 +253,17 @@ class SimulationsService:
                     "has_usb": c.get("has_usb"),
                     "vmid": c.get("vmid"),
                     "tier": c.get("tier"),
+                    # tier_stale marks an ASSUMED tier: the spoke could not do a
+                    # live join (VM aged out of proxmox_states, or the host is
+                    # offline) and fell back to the last tier persisted while the
+                    # client WAS reporting. The spoke computes it precisely for
+                    # this reason and this rebuild was dropping it, so nothing
+                    # downstream could tell a live-classified client from a
+                    # remembered one -- which is exactly how a destroyed VM keeps
+                    # being counted in the T1/T2/T3 tallies forever. Same defect
+                    # class the comment above warns about.
+                    "tier_stale": c.get("tier_stale"),
+                    "tier_as_of": c.get("tier_as_of"),
                     # In-guest dongle health (agent QGA probe, relayed by the
                     # spoke): healthy / no_driver / no_assoc / no_gateway /
                     # not_visible. Cherry-picked like tier — this row rebuild MUST
