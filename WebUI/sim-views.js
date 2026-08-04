@@ -10600,7 +10600,7 @@ async function csRenderVmServerDetails() {
     // badly as a raw csKvTile and deserves a readable layout.
     // agent_version is already the headline "Agent" stat in the row above, so a
     // second AGENT_VERSION tile in the grid just repeated it.
-    const skip = ['vms','usb_state','present_usb','unknown_usb','node','usb_count','provision','agent_version'];
+    const skip = ['vms','usb_state','present_usb','unknown_usb','node','usb_count','provision','agent_version','usb_diagnostics'];
     const entries = Object.entries(px).filter(([k]) => !skip.includes(k));
     // cpu_1h_avg + mem_1h_avg are ONE reading of the same thing (the rolling
     // averages the delete gate acts on), so they get one tile instead of two
@@ -10692,6 +10692,8 @@ async function csRenderVmServerDetails() {
       </div>
       ${csLinkApprovalCard(h)}
       ${csFreshnessPanel(h)}
+      <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mt-4 mb-2">USB Diagnostics</p>
+      ${_csDongleDiagHost(h)}
       <div class="flex items-center justify-between mb-2">
         <p class="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Telemetry</p>
         <span class="text-[10px] text-slate-400">${entries.length} field${entries.length === 1 ? '' : 's'}</span>
