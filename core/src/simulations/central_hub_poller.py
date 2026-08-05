@@ -409,6 +409,27 @@ class ClientCountTracker:
             # the day boundary would show it.
             if rate_drop_pct is not None and rate_drop_pct > rate_drop_thresh:
                 status = _cc_worst(status, "warning")
+            # STEADY-STATE DIE-OFF: current hourly average vs the 7d/30d AVERAGE
+            # baseline (not peak -- see the class docstring on why). Gated on
+            # min_peak (checked against the site's own recorded PEAK, not its
+            # average) so a genuinely quiet site cannot alarm on ordinary noise
+            # in a tiny number. die_off_frac<=0 disables the whole rule.
+            #
+            # This was previously dead: weekly_frac/monthly_frac/min_peak were
+            # computed from config and described in the comments above but never
+            # actually compared against anything, so this rule could never fire
+            # and die_off_peak stayed 0.0 forever -- silently disabling both the
+            # rule itself AND the "sustained die-off vs peak" explanation text
+            # below (which only renders when die_off_peak is truthy).
+            if die_off_frac > 0 and max_7day >= min_peak and avg_7day > 0:
+                if hourly_avg < avg_7day * weekly_frac:
+                    status = _cc_worst(status, "error")
+                    die_off_peak = avg_7day
+            if die_off_frac > 0 and max_30day >= min_peak and avg_30day > 0:
+                if hourly_avg < avg_30day * monthly_frac:
+                    status = _cc_worst(status, "warning")
+                    if not die_off_peak:
+                        die_off_peak = avg_30day
         return {"site_name": central_site, "current": current,
                 "hourly_avg": round(hourly_avg, 1), "drop_pct": round(drop_pct, 1),
                 "max_7day": max_7day, "max_30day": max_30day,
@@ -1065,6 +1086,24 @@ class CentralHubPoller:
             _cc_msg = (f"{cc_entry['current']} clients vs {cc_entry['hourly_avg']} hr-avg "
                        f"(down {cc_entry['drop_pct']}%) · wired {wired} (down {w_entry['drop_pct']}%) "
                        f"· wireless {wireless} (down {wl_entry['drop_pct']}%)")
+            # PERIOD (day/week vs the prior period) and RATE (short-window) are
+            # LIVE rules that can force a non-ok status on their own even while
+            # the within-hour drop above reads 0% — that mismatch (a red site
+            # whose every visible number says 0%) is exactly the confusing case
+            # that prompted this: show whichever trend figures are non-trivial so
+            # the message explains itself instead of leaving "0% drop, still red"
+            # with no visible cause. Reporting thresholds here are just "worth
+            # mentioning" — lower than the period/rate rule's own trigger
+            # thresholds, so a rising-but-not-yet-firing trend is visible too.
+            _trend_bits = []
+            if cc_entry.get("day_drop_pct") is not None and cc_entry["day_drop_pct"] >= 5:
+                _trend_bits.append(f"day {cc_entry['day_drop_pct']}%")
+            if cc_entry.get("week_drop_pct") is not None and cc_entry["week_drop_pct"] >= 5:
+                _trend_bits.append(f"week {cc_entry['week_drop_pct']}%")
+            if cc_entry.get("rate_drop_pct") is not None and cc_entry["rate_drop_pct"] >= 2:
+                _trend_bits.append(f"rate {cc_entry['rate_drop_pct']}%")
+            if _trend_bits:
+                _cc_msg += " · trend down " + ", ".join(_trend_bits) + " vs prior period"
             # When the ERROR is the sustained die-off-vs-peak rule (not the within-
             # hour drop, which is often 0%), name it + show the peak that tripped
             # it. A peak wildly above the site's live count is the fingerprint of a
