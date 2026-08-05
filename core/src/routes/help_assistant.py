@@ -204,11 +204,25 @@ def register(app, hub, ctx):
                                 "without a final answer.")
 
         def _degenerate(a):
-            # Some local models (e.g. glm via ollama) emit a broken/empty function
-            # call — the literal token "tool_calls" leaks through as content instead
-            # of a real tool call or a text answer. Treat those as "no answer".
-            s = (a or "").strip().lower().strip("`*[]{}\"' ")
-            return (not s) or s.startswith("tool_call")
+            # Some local models emit a broken/empty function call instead of a real
+            # tool call or a text answer — the literal token leaks through as
+            # content. Two known shapes:
+            #   1) glm-style: bare "tool_calls" (optionally wrapped in `*[]{}"'`).
+            #   2) Qwen2.5(-coder)-style: XML tags, e.g. "<tool_call>\n{...}\n
+            #      </tool_call>" — its NATIVE function-call format when Ollama's
+            #      structured tool_calls parsing doesn't fully capture the turn.
+            #      `<`/`>` aren't in the strip() charset, so shape 1's prefix check
+            #      never matched this and it leaked straight to the user as the
+            #      literal answer text.
+            # Treat both as "no answer": strict prefix match after stripping
+            # common wrapper punctuation (angle brackets included), PLUS a bounded
+            # substring check for a short response — a genuine long answer is very
+            # unlikely to contain this token at all, so the substring check can't
+            # reasonably false-positive on real prose.
+            s = (a or "").strip().lower().strip("`*[]{}<>\"' ")
+            if not s or s.startswith("tool_call"):
+                return True
+            return len(s) < 80 and "tool_call" in s
 
         if _degenerate(answer):
             # Fall back to ONE plain-text turn with tools DISABLED so the user still
