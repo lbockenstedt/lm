@@ -1069,8 +1069,20 @@ class CentralHubPoller:
             cc_thresh = dict(cc_thresh or {})
             cc_thresh["floor"] = _cc_site_floor(sites_cfg, wireless_site, central_site)
             cc_entry = self._cc.entry(tenant_id, wireless_site, central_site, cc_thresh)
-            w_entry = self._cc.entry(tenant_id, wireless_site, central_site, cc_thresh, kind="wired")
-            wl_entry = self._cc.entry(tenant_id, wireless_site, central_site, cc_thresh, kind="wireless")
+            # FLOOR is an ABSOLUTE client-count threshold — unlike the percentage
+            # rules above it (drop%, die-off frac, period/rate %), which are
+            # legitimately scale-invariant and correct to share across series,
+            # the same literal count cannot sensibly apply to wired/wireless
+            # sub-series that are naturally much smaller than the total. A floor
+            # meant for "this site needs >=20 clients" does not mean "wired
+            # alone needs >=20" — confirmed live: floor=20 on a healthy 54-total
+            # site (6 wired / 48 wireless) pinned it permanently ERROR because
+            # 6 < 20 on the wired-only series, despite 54 >> 20 on the total the
+            # floor was actually configured for. Only the TOTAL call gets it.
+            _sub_thresh = dict(cc_thresh)
+            _sub_thresh["floor"] = None
+            w_entry = self._cc.entry(tenant_id, wireless_site, central_site, _sub_thresh, kind="wired")
+            wl_entry = self._cc.entry(tenant_id, wireless_site, central_site, _sub_thresh, kind="wireless")
             cc_entry["wired"] = wired
             cc_entry["wireless"] = wireless
             cc_entry["wired_status"] = w_entry["status"]
@@ -1104,6 +1116,14 @@ class CentralHubPoller:
                 _trend_bits.append(f"rate {cc_entry['rate_drop_pct']}%")
             if _trend_bits:
                 _cc_msg += " · trend down " + ", ".join(_trend_bits) + " vs prior period"
+            # FLOOR (an absolute, operator-configured minimum — see the note above
+            # cc_thresh["floor"]) forces ERROR independent of every percentage rule
+            # above, which is exactly why a site with a healthy 0% within-hour drop
+            # can still read red with no explanation. Only the total series can
+            # carry a floor now (see the _sub_thresh note above), so this is
+            # unambiguous when it fires.
+            if cc_entry.get("floor") is not None and cc_entry["hourly_avg"] < cc_entry["floor"]:
+                _cc_msg += f" · ⚠ below configured floor ({cc_entry['hourly_avg']} < {cc_entry['floor']})"
             # When the ERROR is the sustained die-off-vs-peak rule (not the within-
             # hour drop, which is often 0%), name it + show the peak that tripped
             # it. A peak wildly above the site's live count is the fingerprint of a
