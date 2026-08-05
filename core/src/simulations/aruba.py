@@ -1322,11 +1322,12 @@ async def browse_all_from_config(cfg: Dict[str, Any], spoke_id: str = "hub") -> 
     if not client.is_configured():
         return {"status": "SUCCESS", "sites": [], "alerts": [], "insights": [],
                 "clients": [], "devices_by_site": {}, "clients_by_site": {},
-                "warning": "Central not configured."}
+                "warning": "Central not configured.", "fetched_at": time.time()}
     try:
         data = await client.browse_all()
-        return {"status": "SUCCESS", **data}
+        return {"status": "SUCCESS", **data, "fetched_at": time.time()}
     except Exception as exc:  # noqa: BLE001
         logger.warning("browse_all [hub/%s] FAILED: %r", spoke_id, exc)
         return {"status": "ERROR", "message": str(exc), "sites": [], "alerts": [],
-                "insights": [], "clients": [], "devices_by_site": {}, "clients_by_site": {}}
+                "insights": [], "clients": [], "devices_by_site": {}, "clients_by_site": {},
+                "fetched_at": time.time()}

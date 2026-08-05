@@ -21,6 +21,7 @@ import inspect
 import json
 import logging
 import re
+import time
 from .service import SimulationsService, _PASS, _FAIL
 from .aruba import test_central_from_config, get_central_available_from_config, browse_all_from_config
 from .mist import (
@@ -2239,9 +2240,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             try:
                 result = await _cs_forward(tenant_id, "CS_CENTRAL_BROWSE", {}, timeout=30.0)
             except HTTPException as exc:
-                return {"status": "SUCCESS", "sites": [], "alerts": [], "insights": [],
+                return {"status": "ERROR", "sites": [], "alerts": [], "insights": [],
                         "clients": [], "devices_by_site": {}, "clients_by_site": {},
-                        "warning": f"Central browse unavailable: {exc.detail}"}
+                        "warning": f"Central browse unavailable: {exc.detail}",
+                        "fetched_at": time.time()}
         # Record every alert/insight name we just saw into the SHARED (all-tenant +
         # system-defaults) history so the Sim-Quota ID picker can offer it later,
         # even after it clears. Best-effort — never let it break the browse.

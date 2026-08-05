@@ -2385,6 +2385,57 @@ function _csCentralWarn(data) {
     return data && data.warning ? `<div class="text-xs text-amber-600 mb-3">${csEscape(data.warning)}</div>` : '';
 }
 
+// ── Central raw-query freshness ──────────────────────────────────────────────
+// The Alerts/Insights/Clients tabs render straight from the last raw
+// /aggregate/central-browse response — every row IS "in the last query" by
+// construction. What's NOT visible without this is whether that raw query to
+// Central actually SUCCEEDED just now, vs. this render reusing held-over/cached
+// data because the last attempt failed. That's the realtime signal this gives:
+// distinct from the dashboard's Checks tab, which is a derived, over-time,
+// hysteresis-smoothed status — this is "did the live API call to Central work,
+// right now." A missing fetched_at (older spoke build) degrades gracefully to
+// no age shown, not a false failure.
+function _csCentralOk(data) {
+    return !!(data && data.status !== 'ERROR' && !data.warning);
+}
+function csAgeShort(epochSeconds) {
+    if (epochSeconds == null || epochSeconds === '') return null;
+    let ms = Number(epochSeconds);
+    if (isNaN(ms)) return null;
+    if (ms < 1e11) ms *= 1000;   // epoch seconds -> ms
+    const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+    if (s < 60) return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    return `${Math.floor(m / 60)}h ago`;
+}
+function csCentralFreshnessBadge(data) {
+    const ok = _csCentralOk(data);
+    const age = csAgeShort(data && data.fetched_at);
+    const label = ok
+        ? `✓ Last query to Central succeeded${age ? ' · ' + age : ''}`
+        : `✗ Last query to Central failed${age ? ' · ' + age : ''} — showing held-over data`;
+    const cls = ok ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200';
+    const title = data && data.fetched_at
+        ? `Raw Central API query attempted at ${csLastSeen(data.fetched_at)}. This is the live call to Central, not the dashboard's over-time derived status.`
+        : `Query timestamp unavailable (older spoke build). This is the live call to Central, not the dashboard's over-time derived status.`;
+    return `<div class="mb-3"><span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border ${cls}" title="${csEscape(title)}">${csEscape(label)}</span></div>`;
+}
+// Per-row "Live" flag for the Central tables — every row shares the same
+// query outcome (the browse call succeeds/fails as a whole), but repeating it
+// per row means a scanned/sorted/filtered/exported view never loses the
+// context that this data is (or isn't) from a query that just succeeded.
+function csCentralLiveCol(data) {
+    const ok = _csCentralOk(data);
+    return {
+        label: 'Live',
+        render: () => ok
+            ? `<span class="inline-flex items-center gap-1 text-emerald-600 text-[11px] font-bold" title="From the last successful raw Central query">● Live</span>`
+            : `<span class="inline-flex items-center gap-1 text-amber-600 text-[11px] font-bold" title="Last raw Central query failed — this row is held-over/cached data">● Stale</span>`,
+        sort: () => ok ? 1 : 0,
+    };
+}
+
 // ── Central shared table: clickable column sort + Monitored on/off filter ────
 // The five Central tabs (Sites/Alerts/Insights/Clients/Hardware) each render a
 // table with a per-row Monitor toggle. This wrapper gives them click-to-sort on
@@ -2646,10 +2697,11 @@ async function csRenderCentralAlerts() {
             : `<span class="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">Active</span>`,
           sort: r => r.status === 'cleared' ? 0 : 1 },
         { label: 'Category', render: r => `<span class="text-slate-500 text-xs">${csEscape(r.category)}</span>`, sort: r => r.category },
+        csCentralLiveCol(data),
         { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
     const _active = rows.filter(r => r.status !== 'cleared').length;
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} alert(s) — ${_active} active, ${alerts.length - _active} closed` })}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralFreshnessBadge(data)}${csCentralTable('central-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} alert(s) — ${_active} active, ${alerts.length - _active} closed` })}</div></div>`);
 }
 
 // ── Central → Insights (live AI insights, with Monitor toggle) ───────────────
@@ -2684,9 +2736,10 @@ async function csRenderCentralInsights() {
         { label: 'Insight',  render: r => `<span class="text-sm">${csEscape(r.name)}</span>`, sort: r => r.name },
         { label: 'Category', render: r => `<span class="text-slate-500">${csEscape(r.category)}</span>`, sort: r => r.category },
         { label: 'Site',     render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        csCentralLiveCol(data),
         { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-insights', insightCols, rows, { monitorOf: r => r.monitored, caption: `${insights.length} insight(s)` })}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralFreshnessBadge(data)}${csCentralTable('central-insights', insightCols, rows, { monitorOf: r => r.monitored, caption: `${insights.length} insight(s)` })}</div></div>`);
 }
 
 // Toggle an insight (or alert) TYPE in central_sites_config.monitored_checks
@@ -2744,9 +2797,11 @@ async function csRenderCentralClients() {
         { label: 'Site',    render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
         { label: 'OS',      render: r => `<span class="text-slate-500">${csEscape(r.os)}</span>`, sort: r => String(r.os || '') },
         { label: 'Status',  render: r => csStatusBadge(r.status), sort: r => String(r.status || '') },
+        csCentralLiveCol(data),
         { label: 'Monitor', render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
     csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">
+        ${csCentralFreshnessBadge(data)}
         <div class="mb-3">${csOsChipsHtml(data)}</div>
         ${csCentralTable('central-clients', clientCols, rows, { monitorOf: r => r.monitored, caption: `${clients.length} client(s)` })}</div></div>`);
 }
