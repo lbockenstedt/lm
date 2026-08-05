@@ -2682,35 +2682,59 @@ async function csRenderCentralAlerts() {
     ]);
     const alerts = (data && data.alerts) || [];
     const warn = _csCentralWarn(data);
-    if (!alerts.length) { csSet(`${csCentralFreshnessBadge(data)}${warn}${csEmpty('No Central alerts.', 'Alerts come from Central /network-notifications/v1/alerts (active + recently closed).')}`); return; }
-    const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
-        .filter(c => c && c.type === 'alert').map(c => `${c.id}::${c.site || ''}`));
+    const monChecks = (Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
+        .filter(c => c && c.type === 'alert');
+    const monSet = new Set(monChecks.map(c => `${c.id}::${c.site || ''}`));
     const _sevRank = { critical: 4, error: 3, fail: 3, failed: 3, warning: 2, degraded: 2, info: 1, unknown: 0 };
+    const seen = new Set();   // id::site keys already represented by a live row
     const rows = alerts.map(a => {
         const id = String((a.name || a.category) || '').trim();
         const name = a.name || a.category || id;
         const site = (a.site && a.site !== '—') ? a.site : '';
         const isMon = id && monSet.has(`${id}::${site}`);
+        if (id) seen.add(`${id}::${site}`);
         const btn = !id ? '—' : (isMon
             ? `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
             : `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this alert at ${csEscape(site || 'all sites')}">Monitor</button>`);
         return { name: a.name || '—', site: a.site || '—', severity: a.severity || 'warning',
                  category: a.category || '—', status: a.status || 'active', monitored: !!isMon, btn };
     });
+    // Monitored alerts NOT present in the live browse response at all — Central
+    // has nothing to report for them right now (distinct from "cleared", which
+    // still shows up in the browse window as a closed alert). Without this, a
+    // monitored alert that stops firing just silently vanishes from the list
+    // instead of showing the operator it's watched-but-quiet.
+    monChecks.forEach(c => {
+        const id = String(c.id || '').trim();
+        const site = c.site || '';
+        const key = `${id}::${site}`;
+        if (!id || seen.has(key)) return;
+        seen.add(key);
+        rows.push({
+            name: c.name || id, site: site || '—', severity: 'unknown', category: '—',
+            status: 'not_firing', monitored: true,
+            btn: `<button onclick="csToggleMonitorCheck('alert', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(c.name || id))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this alert at ${csEscape(site || 'all sites')}">✓ Monitored</button>`,
+        });
+    });
+    if (!rows.length) { csSet(`${csCentralFreshnessBadge(data)}${warn}${csEmpty('No Central alerts.', 'Alerts come from Central /network-notifications/v1/alerts (active + recently closed).')}`); return; }
     const alertCols = [
         { label: 'Alert',    render: r => `<span class="text-sm">${csEscape(r.name)}</span>`, sort: r => r.name },
         { label: 'Site',     render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
-        { label: 'Severity', render: r => csStatusBadge(r.severity), sort: r => _sevRank[String(r.severity).toLowerCase()] || 0 },
-        { label: 'State',    render: r => r.status === 'cleared'
+        { label: 'Severity', render: r => r.status === 'not_firing' ? '<span class="text-slate-300">—</span>' : csStatusBadge(r.severity),
+          sort: r => _sevRank[String(r.severity).toLowerCase()] || 0 },
+        { label: 'State',    render: r => r.status === 'not_firing'
+            ? `<span class="text-[11px] font-semibold text-slate-400 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full" title="Monitored, but Central isn't reporting it right now">Not Firing</span>`
+            : r.status === 'cleared'
             ? `<span class="text-[11px] font-semibold text-slate-500 bg-slate-100 border border-slate-200 px-2 py-0.5 rounded-full">Closed</span>`
             : `<span class="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">Active</span>`,
-          sort: r => r.status === 'cleared' ? 0 : 1 },
+          sort: r => r.status === 'not_firing' ? -1 : r.status === 'cleared' ? 0 : 1 },
         { label: 'Category', render: r => `<span class="text-slate-500 text-xs">${csEscape(r.category)}</span>`, sort: r => r.category },
         csCentralLiveCol(data),
         { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
-    const _active = rows.filter(r => r.status !== 'cleared').length;
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralFreshnessBadge(data)}${csCentralTable('central-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} alert(s) — ${_active} active, ${alerts.length - _active} closed` })}</div></div>`);
+    const _active = rows.filter(r => r.status === 'active').length;
+    const _notFiring = rows.filter(r => r.status === 'not_firing').length;
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralFreshnessBadge(data)}${csCentralTable('central-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} alert(s) from Central — ${_active} active, ${alerts.length - _active} closed${_notFiring ? ` · ${_notFiring} monitored but not firing` : ''}` })}</div></div>`);
 }
 
 // ── Central → Insights (live AI insights, with Monitor toggle) ───────────────
@@ -2727,28 +2751,50 @@ async function csRenderCentralInsights() {
     ]);
     const insights = (data && data.insights) || [];
     const warn = _csCentralWarn(data);
-    if (!insights.length) { csSet(`${csCentralFreshnessBadge(data)}${warn}${csEmpty('No Central insights.', 'AI insights come from Central /network-notifications/v1/insights.')}`); return; }
-    const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
-        .filter(c => c && c.type === 'insight').map(c => `${c.id}::${c.site || ''}`));
+    const monChecks = (Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
+        .filter(c => c && c.type === 'insight');
+    const monSet = new Set(monChecks.map(c => `${c.id}::${c.site || ''}`));
+    const seen = new Set();   // id::site keys already represented by a live row
     const rows = insights.map(i => {
         const id = String((i.name || i.category) || '').trim();
         const name = i.name || i.category || id;
         const site = i.site || '';
         const isMon = id && monSet.has(`${id}::${site}`);
+        if (id) seen.add(`${id}::${site}`);
         const btn = !id ? '—' : (isMon
             ? `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight at ${csEscape(site || 'all sites')}">✓ Monitored</button>`
             : `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(name))}, true, ${csEscape(JSON.stringify(site))})" class="bg-slate-100 text-slate-700 border border-slate-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-slate-200" title="Monitor this insight at ${csEscape(site || 'all sites')}">Monitor</button>`);
         return { name: i.name || '—', category: i.category || '—', site: i.site || '—',
-                 monitored: !!isMon, btn };
+                 firing: true, monitored: !!isMon, btn };
     });
+    // Same treatment as Alerts: a monitored insight NOT present in the live
+    // browse response gets a synthesized "Not Firing" row instead of silently
+    // vanishing from the list once it stops firing.
+    monChecks.forEach(c => {
+        const id = String(c.id || '').trim();
+        const site = c.site || '';
+        const key = `${id}::${site}`;
+        if (!id || seen.has(key)) return;
+        seen.add(key);
+        rows.push({
+            name: c.name || id, category: '—', site: site || '—', firing: false, monitored: true,
+            btn: `<button onclick="csToggleMonitorCheck('insight', ${csEscape(JSON.stringify(id))}, ${csEscape(JSON.stringify(c.name || id))}, false, ${csEscape(JSON.stringify(site))})" class="bg-emerald-50 text-emerald-700 border border-emerald-200 px-2.5 py-1 rounded-md text-xs font-bold hover:bg-emerald-100" title="Stop monitoring this insight at ${csEscape(site || 'all sites')}">✓ Monitored</button>`,
+        });
+    });
+    if (!rows.length) { csSet(`${csCentralFreshnessBadge(data)}${warn}${csEmpty('No Central insights.', 'AI insights come from Central /network-notifications/v1/insights.')}`); return; }
     const insightCols = [
         { label: 'Insight',  render: r => `<span class="text-sm">${csEscape(r.name)}</span>`, sort: r => r.name },
         { label: 'Category', render: r => `<span class="text-slate-500">${csEscape(r.category)}</span>`, sort: r => r.category },
         { label: 'Site',     render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        { label: 'Firing',   render: r => r.firing
+            ? `<span class="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">Firing</span>`
+            : `<span class="text-[11px] font-semibold text-slate-400 bg-slate-50 border border-slate-200 px-2 py-0.5 rounded-full" title="Monitored, but Central isn't reporting it right now">Not Firing</span>`,
+          sort: r => r.firing ? 1 : 0 },
         csCentralLiveCol(data),
         { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralFreshnessBadge(data)}${csCentralTable('central-insights', insightCols, rows, { monitorOf: r => r.monitored, caption: `${insights.length} insight(s)` })}</div></div>`);
+    const _notFiring = rows.filter(r => !r.firing).length;
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralFreshnessBadge(data)}${csCentralTable('central-insights', insightCols, rows, { monitorOf: r => r.monitored, caption: `${insights.length} insight(s) from Central${_notFiring ? ` · ${_notFiring} monitored but not firing` : ''}` })}</div></div>`);
 }
 
 // Toggle an insight (or alert) TYPE in central_sites_config.monitored_checks
