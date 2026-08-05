@@ -2385,6 +2385,66 @@ function _csCentralWarn(data) {
     return data && data.warning ? `<div class="text-xs text-amber-600 mb-3">${csEscape(data.warning)}</div>` : '';
 }
 
+// ── Central raw-query freshness ──────────────────────────────────────────────
+// The Alerts/Insights/Clients tabs render straight from the last raw
+// /aggregate/central-browse response — every row IS "in the last query" by
+// construction. What's NOT visible without this is whether that raw query to
+// Central actually SUCCEEDED just now. That's the realtime signal this gives:
+// distinct from the dashboard's Checks tab, which is a derived, over-time,
+// hysteresis-smoothed status — this is "did the live API call to Central work,
+// right now." A missing fetched_at (older spoke build) degrades gracefully to
+// no age shown, not a false failure.
+//
+// ok = status !== 'ERROR' — a `warning` alone (e.g. "Central not configured
+// for this tenant") does NOT count as failed: that's a normal, successful
+// response describing an empty/unconfigured account, already surfaced by its
+// own _csCentralWarn banner. Conflating "warning" with "failed" here produced
+// a false "query failed" alarm for every not-yet-configured tenant.
+function _csCentralOk(data) {
+    return !!(data && data.status !== 'ERROR');
+}
+function csAgeShort(epochSeconds) {
+    if (epochSeconds == null || epochSeconds === '') return null;
+    let ms = Number(epochSeconds);
+    if (isNaN(ms)) return null;
+    if (ms < 1e11) ms *= 1000;   // epoch seconds -> ms
+    const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
+    if (s < 60) return `${s}s ago`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m ago`;
+    return `${Math.floor(m / 60)}h ago`;
+}
+// Renders unconditionally — including when the tab has no rows to show, which
+// is exactly when this matters most (empty tab because Central genuinely has
+// nothing, vs. empty tab because the last query failed). Callers put this
+// ABOVE any empty-state early-return, not after it.
+function csCentralFreshnessBadge(data) {
+    const ok = _csCentralOk(data);
+    const age = csAgeShort(data && data.fetched_at);
+    const label = ok
+        ? `✓ Last query to Central succeeded${age ? ' · ' + age : ''}`
+        : `✗ Last query to Central failed${age ? ' · ' + age : ''}`;
+    const cls = ok ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-amber-50 text-amber-700 border-amber-200';
+    const title = data && data.fetched_at
+        ? `Raw Central API query attempted at ${csLastSeen(data.fetched_at)}. This is the live call to Central, not the dashboard's over-time derived status.`
+        : `Query timestamp unavailable (older spoke build). This is the live call to Central, not the dashboard's over-time derived status.`;
+    return `<div class="mb-3"><span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border ${cls}" title="${csEscape(title)}">${csEscape(label)}</span></div>`;
+}
+// Per-row "Live" flag for the Central tables — every row shares the same
+// query outcome (the browse call succeeds/fails as a whole), but repeating it
+// per row means a scanned/sorted/filtered/exported view never loses the
+// context that this data is (or isn't) from a query that just succeeded.
+function csCentralLiveCol(data) {
+    const ok = _csCentralOk(data);
+    return {
+        label: 'Live',
+        render: (r) => ok
+            ? `<span class="inline-flex items-center gap-1 text-emerald-600 text-[11px] font-bold" title="From the last successful raw Central query">● Live</span>`
+            : `<span class="inline-flex items-center gap-1 text-amber-600 text-[11px] font-bold" title="Last raw Central query failed">● Stale</span>`,
+        sort: (r) => ok ? 1 : 0,
+    };
+}
+
 // ── Central shared table: clickable column sort + Monitored on/off filter ────
 // The five Central tabs (Sites/Alerts/Insights/Clients/Hardware) each render a
 // table with a per-row Monitor toggle. This wrapper gives them click-to-sort on
@@ -2622,7 +2682,7 @@ async function csRenderCentralAlerts() {
     ]);
     const alerts = (data && data.alerts) || [];
     const warn = _csCentralWarn(data);
-    if (!alerts.length) { csSet(`${warn}${csEmpty('No Central alerts.', 'Alerts come from Central /network-notifications/v1/alerts (active + recently closed).')}`); return; }
+    if (!alerts.length) { csSet(`${csCentralFreshnessBadge(data)}${warn}${csEmpty('No Central alerts.', 'Alerts come from Central /network-notifications/v1/alerts (active + recently closed).')}`); return; }
     const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
         .filter(c => c && c.type === 'alert').map(c => `${c.id}::${c.site || ''}`));
     const _sevRank = { critical: 4, error: 3, fail: 3, failed: 3, warning: 2, degraded: 2, info: 1, unknown: 0 };
@@ -2646,10 +2706,11 @@ async function csRenderCentralAlerts() {
             : `<span class="text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-full">Active</span>`,
           sort: r => r.status === 'cleared' ? 0 : 1 },
         { label: 'Category', render: r => `<span class="text-slate-500 text-xs">${csEscape(r.category)}</span>`, sort: r => r.category },
+        csCentralLiveCol(data),
         { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
     const _active = rows.filter(r => r.status !== 'cleared').length;
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} alert(s) — ${_active} active, ${alerts.length - _active} closed` })}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralFreshnessBadge(data)}${csCentralTable('central-alerts', alertCols, rows, { monitorOf: r => r.monitored, caption: `${alerts.length} alert(s) — ${_active} active, ${alerts.length - _active} closed` })}</div></div>`);
 }
 
 // ── Central → Insights (live AI insights, with Monitor toggle) ───────────────
@@ -2666,7 +2727,7 @@ async function csRenderCentralInsights() {
     ]);
     const insights = (data && data.insights) || [];
     const warn = _csCentralWarn(data);
-    if (!insights.length) { csSet(`${warn}${csEmpty('No Central insights.', 'AI insights come from Central /network-notifications/v1/insights.')}`); return; }
+    if (!insights.length) { csSet(`${csCentralFreshnessBadge(data)}${warn}${csEmpty('No Central insights.', 'AI insights come from Central /network-notifications/v1/insights.')}`); return; }
     const monSet = new Set((Array.isArray(sitesCfg && sitesCfg.monitored_checks) ? sitesCfg.monitored_checks : [])
         .filter(c => c && c.type === 'insight').map(c => `${c.id}::${c.site || ''}`));
     const rows = insights.map(i => {
@@ -2684,9 +2745,10 @@ async function csRenderCentralInsights() {
         { label: 'Insight',  render: r => `<span class="text-sm">${csEscape(r.name)}</span>`, sort: r => r.name },
         { label: 'Category', render: r => `<span class="text-slate-500">${csEscape(r.category)}</span>`, sort: r => r.category },
         { label: 'Site',     render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
+        csCentralLiveCol(data),
         { label: 'Monitor',  render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
-    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralTable('central-insights', insightCols, rows, { monitorOf: r => r.monitored, caption: `${insights.length} insight(s)` })}</div></div>`);
+    csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">${csCentralFreshnessBadge(data)}${csCentralTable('central-insights', insightCols, rows, { monitorOf: r => r.monitored, caption: `${insights.length} insight(s)` })}</div></div>`);
 }
 
 // Toggle an insight (or alert) TYPE in central_sites_config.monitored_checks
@@ -2722,7 +2784,7 @@ async function csRenderCentralClients() {
     ]);
     const clients = (data && data.clients) || [];
     const warn = _csCentralWarn(data);
-    if (!clients.length) { csSet(`${warn}${csEmpty('No Central clients returned.')}`); return; }
+    if (!clients.length) { csSet(`${csCentralFreshnessBadge(data)}${warn}${csEmpty('No Central clients returned.')}`); return; }
     const sm = (sitesCfg && sitesCfg.site_mappings && typeof sitesCfg.site_mappings === 'object') ? sitesCfg.site_mappings : {};
     const monitored = new Set(Object.values(sm).map(v => String(v)));
     const minBySite = (sitesCfg && sitesCfg.site_min_clients && typeof sitesCfg.site_min_clients === 'object') ? sitesCfg.site_min_clients : {};
@@ -2744,9 +2806,11 @@ async function csRenderCentralClients() {
         { label: 'Site',    render: r => `<span class="text-slate-500">${csEscape(r.site)}</span>`, sort: r => r.site },
         { label: 'OS',      render: r => `<span class="text-slate-500">${csEscape(r.os)}</span>`, sort: r => String(r.os || '') },
         { label: 'Status',  render: r => csStatusBadge(r.status), sort: r => String(r.status || '') },
+        csCentralLiveCol(data),
         { label: 'Monitor', render: r => r.btn, sort: r => r.monitored ? 1 : 0 },
     ];
     csSet(`<div class="space-y-4">${warn}<div class="hpe-card rounded-lg p-5 shadow-sm">
+        ${csCentralFreshnessBadge(data)}
         <div class="mb-3">${csOsChipsHtml(data)}</div>
         ${csCentralTable('central-clients', clientCols, rows, { monitorOf: r => r.monitored, caption: `${clients.length} client(s)` })}</div></div>`);
 }
