@@ -3459,13 +3459,33 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.delete("/sim/api/{tenant}/clients/{hostname}")
     async def cs_delete_client(tenant: str, hostname: str,
                                tenant_id: str = Depends(get_tenant_id)):
-        result = await _cs_forward(tenant_id, "CS_DELETE_CLIENT", {"hostname": hostname})
+        # Fan out to EVERY client-sim spoke bound to the tenant, not just the
+        # "primary" one _cs_forward targets. A client's registry entry can
+        # live on whichever spoke it's actually connected to — or, per
+        # _build_clients_data's dedup comment, a phantom override-stub can
+        # exist on the primary spoke while the real entry sits on another.
+        # Deleting only the primary spoke's copy left the OTHER spoke's entry
+        # rendering forever (dedup-merged into the same row) while reporting
+        # "removed: false" — the primary genuinely never had it.
+        results = await _cs_forward_all(tenant_id, "CS_DELETE_CLIENT", {"hostname": hostname})
+        # Distinguish "every spoke answered and none had it" (genuine
+        # not-found) from "no spoke could even be asked" (empty results / no
+        # spoke bound / transport failure on all of them, non-dict replies).
+        # Collapsing both into removed=False + a hardcoded SUCCESS meant a
+        # total forwarding failure silently masqueraded as "already gone" —
+        # the same misleading-message failure mode this endpoint exists to
+        # fix, just moved from the single-spoke path to the all-failed path.
+        replied = [d for _sid, d in results if isinstance(d, dict)]
+        if not replied:
+            raise HTTPException(status_code=502,
+                                detail="no client-sim spoke responded to the delete request")
+        removed = any(d.get("removed") for d in replied)
         # Mirror the removal into the hub cache so the row disappears before
         # the next ~10s telemetry frame (same pattern as Purge Clients).
         try:
             for _sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
                 try:
-                    if hub.state.get_spoke_tenant(sid) != tenant_id:
+                    if hub.state.get_spoke_tenant(_sid) != tenant_id:
                         continue
                 except Exception:  # noqa: BLE001
                     continue
@@ -3475,7 +3495,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                        if not (isinstance(c, dict) and c.get("hostname") == hostname)]
         except Exception:  # noqa: BLE001
             pass
-        return result
+        return {"status": "SUCCESS", "hostname": hostname, "removed": removed}
 
     @app.get("/sim/api/{tenant}/clients/{hostname}/control")
     async def cs_get_client_control(tenant: str, hostname: str,
