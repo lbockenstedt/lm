@@ -3428,7 +3428,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         try:
             for _sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
                 try:
-                    if hub.state.get_spoke_tenant(sid) != tenant_id:
+                    if hub.state.get_spoke_tenant(_sid) != tenant_id:
                         continue
                 except Exception:  # noqa: BLE001
                     continue
