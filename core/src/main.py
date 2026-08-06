@@ -7129,7 +7129,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         if not errs or self._log_sentinel_sig.get(module) == sig:
                             continue
                         self._log_sentinel_sig[module] = sig
-                        title = ("Lab Manager (hub) logs" if module == "hub" else f"{module} logs")
+                        if module == "hub":
+                            running_ver = getattr(self, "_startup_version", "") or "unknown"
+                            sha = (await self.get_local_commit())[:8] or "unknown"
+                            title = f"Lab Manager (hub) logs — v{running_ver} @ {sha}"
+                        else:
+                            title = f"{module} logs"
                         res = await self.analyze_logs_via_bugfixer(module, "\n".join(lines), title)
                         if res.get("duration_s"):
                             durations.append(res["duration_s"])
