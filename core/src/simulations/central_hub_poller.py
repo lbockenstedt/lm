@@ -355,6 +355,10 @@ class ClientCountTracker:
         avg_7day = round(sum(vals_7d) / len(vals_7d), 1) if vals_7d else 0.0
         avg_30day = round(sum(vals_30d) / len(vals_30d), 1) if vals_30d else 0.0
         die_off_peak = 0.0  # the peak the current avg fell below, if die-off tripped
+        # WHICH rule(s) actually fired this cycle — debug-only, returned + surfaced
+        # in the Central Diagnostic tab so "why is this red" is answered from the
+        # numbers directly instead of re-deriving them by hand against the source.
+        triggered = []
         # Trend inputs. Each returns None when it lacks the history to judge,
         # so a fresh site never alarms on an empty comparison.
         day_drop_pct = _cc_period_drop(hist, now, _CC_1DAY_WINDOW)
@@ -400,15 +404,18 @@ class ClientCountTracker:
             # averages alone could not cover.
             if floor is not None and hourly_avg < floor:
                 status = _cc_worst(status, "error")
+                triggered.append("floor(%s<%s)" % (hourly_avg, floor))
             # PERIOD: this day/week vs the one before -> catches a slow bleed
             # that no short-window rate rule can see.
-            for _drop in (day_drop_pct, week_drop_pct):
+            for _label, _drop in (("day", day_drop_pct), ("week", week_drop_pct)):
                 if _drop is not None and _drop > period_drop_pct:
                     status = _cc_worst(status, "error")
+                    triggered.append("period_%s(%s%%>%s%%)" % (_label, _drop, period_drop_pct))
             # RATE: short-window fall -> catches a fast collapse hours before
             # the day boundary would show it.
             if rate_drop_pct is not None and rate_drop_pct > rate_drop_thresh:
                 status = _cc_worst(status, "warning")
+                triggered.append("rate(%s%%>%s%%)" % (rate_drop_pct, rate_drop_thresh))
             # STEADY-STATE DIE-OFF: current hourly average vs the 7d/30d AVERAGE
             # baseline (not peak -- see the class docstring on why). Gated on
             # min_peak (checked against the site's own recorded PEAK, not its
@@ -425,11 +432,15 @@ class ClientCountTracker:
                 if hourly_avg < avg_7day * weekly_frac:
                     status = _cc_worst(status, "error")
                     die_off_peak = avg_7day
+                    triggered.append("die_off_weekly(%s<%s*%s=%s)" %
+                                     (hourly_avg, avg_7day, weekly_frac, round(avg_7day * weekly_frac, 1)))
             if die_off_frac > 0 and max_30day >= min_peak and avg_30day > 0:
                 if hourly_avg < avg_30day * monthly_frac:
                     status = _cc_worst(status, "warning")
                     if not die_off_peak:
                         die_off_peak = avg_30day
+                    triggered.append("die_off_monthly(%s<%s*%s=%s)" %
+                                     (hourly_avg, avg_30day, monthly_frac, round(avg_30day * monthly_frac, 1)))
         return {"site_name": central_site, "current": current,
                 "hourly_avg": round(hourly_avg, 1), "drop_pct": round(drop_pct, 1),
                 "max_7day": max_7day, "max_30day": max_30day,
@@ -439,7 +450,17 @@ class ClientCountTracker:
                 "week_drop_pct": None if week_drop_pct is None else round(week_drop_pct, 1),
                 "rate_drop_pct": None if rate_drop_pct is None else round(rate_drop_pct, 1),
                 "die_off": die_off_peak, "die_off_frac": die_off_frac,
-                "status": status, "ts": samples[-1][0]}
+                "status": status, "ts": samples[-1][0],
+                # Debug-only fields (Central Diagnostic tab): the exact thresholds
+                # this cycle evaluated against, and which rule(s) actually fired —
+                # so "why is this red" reads off the numbers instead of requiring
+                # someone to reproduce the arithmetic by hand against the config.
+                "sample_count": len(samples), "min_samples": _CC_MIN_SAMPLES,
+                "warn_pct": warn_pct, "error_pct": error_pct,
+                "weekly_frac": weekly_frac, "monthly_frac": monthly_frac,
+                "min_peak": min_peak, "period_drop_pct": period_drop_pct,
+                "rate_drop_thresh": rate_drop_thresh, "rate_samples": rate_samples,
+                "triggered": triggered}
 
     def maybe_snapshot(self) -> None:
         """Once per hour: append each site's current hourly average to the 7-day
@@ -1136,8 +1157,26 @@ class CentralHubPoller:
                 _do_txt = ", ".join(f"{lbl} {e['hourly_avg']} < {_frac}% of peak {e['die_off']}"
                                     for lbl, e in _do)
                 _cc_msg += f" · ⚠ sustained die-off vs peak ({_do_txt})"
+            # Debug breakdown per series, for the Central Diagnostic tab — the exact
+            # thresholds/averages/peaks each of total/wired/wireless was evaluated
+            # against THIS cycle, and which rule(s) fired on each, independently.
+            # Added because the compact message/summary table couldn't distinguish
+            # "which series, which rule, against what baseline" without reproducing
+            # the arithmetic by hand — see the live case that prompted this: a
+            # site read healthy on every visible number yet stayed ERROR.
+            _cc_debug_fields = ("current", "hourly_avg", "drop_pct", "avg_1day", "avg_7day",
+                                "avg_30day", "max_7day", "max_30day", "floor", "day_drop_pct",
+                                "week_drop_pct", "rate_drop_pct", "die_off", "die_off_frac",
+                                "sample_count", "min_samples", "warn_pct", "error_pct",
+                                "weekly_frac", "monthly_frac", "min_peak", "period_drop_pct",
+                                "rate_drop_thresh", "rate_samples", "triggered", "status")
             checks["Steady Client Count 1hr Average"] = {
                 "status": cc_entry["status"], "message": _cc_msg,
+                "debug": {
+                    "total": {k: cc_entry.get(k) for k in _cc_debug_fields},
+                    "wired": {k: w_entry.get(k) for k in _cc_debug_fields},
+                    "wireless": {k: wl_entry.get(k) for k in _cc_debug_fields},
+                },
             }
             # Per-site minimum client floor. Direct semantics: current below the
             # configured min = error (clients died below an absolute floor, not
@@ -1218,8 +1257,18 @@ class CentralHubPoller:
                 self._cpw.record(tenant_id, wsite, cid, is_pass)
                 verdict = self._cpw.verdict(tenant_id, wsite, cid)
                 if verdict is not None:
-                    info["status"] = verdict
                     passes, total = self._cpw.counts(tenant_id, wsite, cid)
+                    # Debug: the LIVE per-cycle status (st, computed above from THIS
+                    # poll's numbers alone) vs the STICKY verdict about to override
+                    # it — so a check reading red purely from stale poll-window
+                    # history (verdict != st) is distinguishable at a glance from
+                    # one that's genuinely still failing every cycle (verdict == st).
+                    if isinstance(info.get("debug"), dict):
+                        info["debug"]["poll_window"] = {
+                            "live_status": st, "sticky_verdict": verdict,
+                            "passes": passes, "total": total,
+                        }
+                    info["status"] = verdict
                     info["message"] = f"{info.get('message', '')} · {passes}/{total} polls OK in last 1h"
 
     async def _poll_once(self) -> None:
