@@ -4666,15 +4666,23 @@ function _csKnobFloorFromLearned(v) {
     return Math.min(Math.ceil(n * 1.2), n * 2);
 }
 
-// Consumer-row (Adaptive, not Learning) knob block: an "Inherit learned
-// values" checkbox (default ON) plus one row per declared knob. Inheriting
-// shows the computed floor read-only; unchecking exposes an editable
-// override per knob — filled in RED when it actually diverges from the
-// computed floor (the visual "you're overriding the recommendation" flag the
-// operator asked for), grey/placeholder when left blank (falls back to the
-// computed floor for that one key even in override mode — see
-// _knob_overrides_for_tenant's per-key fallback).
-function _csKnobInheritBlock(r, cat) {
+// Consumer-row (Adaptive, not Learning) knob "Inherit learned values"
+// checkbox — sits in the shared Adaptive/Learning/Re-home/Enabled row.
+// Default ON. Split from the per-knob value rows (_csKnobInheritRows) below
+// so the checkbox can live inline with the row's other toggles while the
+// values stay in their own block.
+function _csKnobInheritCheckbox(r) {
+    const inherit = r.inherit_learned_knobs !== false;   // default ON
+    return `<span class="flex items-center gap-1" title="Learned + 20%, capped at double. Uncheck to pin your own value per knob below."><input data-cs-sq="inherit_learned_knobs" type="checkbox" onchange="csSimQuotaOnInheritKnobsChange(this)" ${inherit ? 'checked' : ''}> Inherit learned values (config)</span>`;
+}
+
+// One row per declared knob. Inheriting shows the computed floor read-only;
+// unchecking exposes an editable override per knob — filled in RED when it
+// actually diverges from the computed floor (the visual "you're overriding
+// the recommendation" flag the operator asked for), grey/placeholder when
+// left blank (falls back to the computed floor for that one key even in
+// override mode — see _knob_overrides_for_tenant's per-key fallback).
+function _csKnobInheritRows(r, cat) {
     const lv = _csLearnedForRow(r);
     const knobNames = ((cat.meta[r.sim_id] || {}).knobs || []);
     if (!knobNames.length) return '';
@@ -4702,12 +4710,18 @@ function _csKnobInheritBlock(r, cat) {
         </div>`;
     }).join('');
     return `<div class="md:col-span-6 mt-1 border-t border-slate-100 pt-1">
-        <label class="flex items-center gap-1 cursor-pointer text-[11px] text-slate-600 font-semibold">
-            <input data-cs-sq="inherit_learned_knobs" type="checkbox" onchange="csSimQuotaOnInheritKnobsChange(this)" ${inherit ? 'checked' : ''}>
-            Inherit learned values <span class="text-slate-400 font-normal">(learned + 20%, capped at double)</span>
-        </label>
-        <div class="mt-1 space-y-0.5 pl-1">${rowsHtml}</div>
+        <div class="space-y-0.5 pl-1">${rowsHtml}</div>
     </div>`;
+}
+
+// Consumer-row (Adaptive, not Learning) count "Inherit learned values"
+// checkbox (Min/Max) — same shared-row placement as the knob checkbox above.
+// Default ON. The Min/Max VALUES themselves render in their own cell (see
+// csRenderSimQuotaEditor's Min/Max block) since that's a distinct grid cell,
+// not a block that can move into the flex-wrap toggle row.
+function _csCountInheritCheckbox(r) {
+    const inherit = r.inherit_learned_count !== false;   // default ON
+    return `<span class="flex items-center gap-1" title="Min = learned+20%, Max = double the learned floor, both computed fresh each tick. Uncheck to pin your own Min/Max."><input data-cs-sq="inherit_learned_count" type="checkbox" onchange="csSimQuotaOnInheritCountChange(this)" ${inherit ? 'checked' : ''}> Inherit learned values (count)</span>`;
 }
 
 function csRenderSimQuotaEditor() {
@@ -4725,6 +4739,12 @@ function csRenderSimQuotaEditor() {
         // then no alert ID is needed — it just keeps N clients on the sim at the
         // site, like a presence row. tied defaults on for backward compat.
         const tied = !isPresence && r.tied !== false;
+        // Learned operating point (floor +20%) the platform has learned for
+        // this alert — computed once here so both the Min/Max cell and the
+        // shared checkbox row below can reference it without recomputing.
+        const _lop = _csLearnedOpForRow(r);
+        const _lv = _csLearnedForRow(r);
+        const _consumerLearnedCount = r.adaptive && !r.learning && _lv && _lv.floor != null;
         const simOpts = csSimQuotaSimOptions(r.sim_id, simIds);
         const siteOpts = csSsidCellOptions(r.site, '— all sites —');
         const idOpts = csSimQuotaAlertIdOptions(r.alert_type, r.alert_id);
@@ -4744,7 +4764,6 @@ function csRenderSimQuotaEditor() {
               </label>`
             : `<div class="text-xs text-slate-500">
                 <div class="mb-1">${_srcBadge}</div>
-                <label class="flex items-center gap-1 cursor-pointer font-semibold text-slate-600"><input data-cs-sq="tied" type="checkbox" onchange="csSimQuotaOnTiedChange(this)" ${tied ? 'checked' : ''}> Tied to alert/insight</label>
                 ${tied
                   ? `<select data-cs-sq="alert_type" onchange="csSimQuotaOnTypeChange(this)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
                        <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
@@ -4771,29 +4790,20 @@ function csRenderSimQuotaEditor() {
           </label>
           ${(tied && (r.adaptive || r.learning))
             ? (() => {
-                // Learned operating point (floor +20%) the platform has learned
-                // for this alert.
-                const _lop = _csLearnedOpForRow(r);
-                const _lv = _csLearnedForRow(r);
                 // Consumer row (Adaptive, not Learning) with a published floor:
                 // BEHAVIOR CHANGE — min/max are DYNAMICALLY derived from the
                 // learned value each controller tick (see adaptive_step's
                 // docstring), not the stored min/max, when inherit_learned_count
-                // is ON (default). Give it the SAME inherit-checkbox +
-                // red-override treatment as the knob floor above, instead of the
-                // old always-editable Min/Max inputs.
-                const _consumerLearned = r.adaptive && !r.learning && _lv && _lv.floor != null;
-                if (_consumerLearned) {
+                // is ON (default). The checkbox itself lives in the shared
+                // Adaptive/Learning/Re-home/Enabled row below; this cell just
+                // renders the resulting Min/Max values.
+                if (_consumerLearnedCount) {
                     const _inheritCount = r.inherit_learned_count !== false;   // default ON
                     const _floorVal = Number(_lv.floor);
                     const _computedMax = _floorVal * 2;
                     const _minVal = _inheritCount ? _lop : (r.min != null ? r.min : (r.count || 1));
                     const _maxVal = _inheritCount ? _computedMax : (r.max != null ? r.max : (r.count || 1));
                     return `<label class="text-xs text-slate-500" title="Min = keep-alive floor; Max = the hard cap. Inheriting derives both from the learned value each tick (min = learned+20%, max = double the learned floor) instead of a fixed stored number.">Min / Max
-            <label class="flex items-center gap-1 cursor-pointer text-[11px] text-slate-600 font-semibold mt-1">
-                <input data-cs-sq="inherit_learned_count" type="checkbox" onchange="csSimQuotaOnInheritCountChange(this)" ${_inheritCount ? 'checked' : ''}>
-                Inherit learned values
-            </label>
             <div class="flex gap-1 mt-1">
               <input data-cs-sq="min" type="number" min="1" value="${csEscape(String(_minVal))}" ${_inheritCount ? 'readonly' : ''}
                      class="w-full border rounded-md px-2 py-1.5 text-sm ${_inheritCount ? 'bg-slate-50 text-slate-500 border-slate-200' : 'bg-white border-red-400 text-red-600 font-semibold'}">
@@ -4832,13 +4842,16 @@ function csRenderSimQuotaEditor() {
           </label>
           <button onclick="csSimQuotaDel(${i})" class="text-red-600 hover:text-red-800 text-xs font-bold py-1">Remove</button>
           <label class="text-xs text-slate-500 md:col-span-6 flex flex-wrap gap-x-3 gap-y-1">
+            ${!isPresence ? `<span class="flex items-center gap-1 font-semibold text-slate-600"><input data-cs-sq="tied" type="checkbox" onchange="csSimQuotaOnTiedChange(this)" ${tied ? 'checked' : ''}> Tied to alert/insight</span>` : ''}
             ${(!isPresence && tied) ? `<span class="flex items-center gap-1" title="Production consumer: ramps clients UP to trigger + keep the alert alive, seeded from the learned base + config, CAPPED at Max. Hits Max and still not firing → max-hit alert (lab/prod divergence). Mutually exclusive with Learning."><input data-cs-sq="adaptive" type="checkbox" onchange="csSimQuotaOnAdaptiveChange(this)" ${r.adaptive ? 'checked' : ''}> Adaptive (keep firing)</span>` : ''}
             ${(!isPresence && tied) ? `<span class="flex items-center gap-1" title="The lab: ramps up AND down continuously to re-evaluate the floor (what it takes), tunes the sim's config knobs (e.g. dns_fail_rate/duration), and publishes the learned count + knobs so production goes straight to learned + 20%. Mutually exclusive with Adaptive."><input data-cs-sq="learning" type="checkbox" onchange="csSimQuotaOnLearningChange(this)" ${r.learning ? 'checked' : ''}> Learning</span>` : ''}
             ${(r.learning && knobSims.has(r.sim_id)) ? `<span class="text-slate-400 italic" title="The lab ratchets these [simulation] knobs down to the floor that still fires the alert.">tunes ${csEscape(((cat.meta[r.sim_id] || {}).knobs || []).join(', '))}</span>` : ''}
             <span class="flex items-center gap-1"><input data-cs-sq="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</span>
             <span class="flex items-center gap-1"><input data-cs-sq="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
+            ${(!isPresence && tied && r.adaptive && !r.learning && knobSims.has(r.sim_id)) ? _csKnobInheritCheckbox(r) : ''}
+            ${(!isPresence && tied && _consumerLearnedCount) ? _csCountInheritCheckbox(r) : ''}
           </label>
-          ${(!isPresence && tied && r.adaptive && !r.learning && knobSims.has(r.sim_id)) ? _csKnobInheritBlock(r, cat) : ''}
+          ${(!isPresence && tied && r.adaptive && !r.learning && knobSims.has(r.sim_id)) ? _csKnobInheritRows(r, cat) : ''}
         </div>`;
     }).join('');
     const suggestHtml = Object.keys(suggested).length ? `
