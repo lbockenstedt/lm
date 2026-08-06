@@ -67,7 +67,7 @@ class StatusPageMixin:
     # cs/lm-spoke demo_scenarios.build_scenarios). Used so the push loop doesn't
     # do an extra spoke round-trip just to populate the demo dropdown.
     _STATUS_DEMO_FLAGS = ("dns_fail", "dhcp_fail", "assoc_fail", "auth_fail",
-                          "ssidpw_fail", "port_flap")
+                          "ssidpw_fail", "mac_auth_fail", "port_flap")
 
     def _status_scenarios(self) -> Dict[str, Any]:
         canon = {"normal": {f: "off" for f in self._STATUS_DEMO_FLAGS}}

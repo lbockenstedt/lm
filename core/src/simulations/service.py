@@ -365,13 +365,14 @@ class SimulationsService:
         count matches the engine's harvestable-pool number.
 
         working = clients that are online AND gateway_reachable. Clients running a
-        CONNECTIVITY-BREAKING sim (ssidpw_fail/auth_fail/assoc_fail/port_flap — they
-        can't associate/auth by design) are EXCLUDED from both sides. NOTE:
+        CONNECTIVITY-BREAKING sim (ssidpw_fail/auth_fail/mac_auth_fail/assoc_fail/
+        port_flap — they can't associate/auth by design) are EXCLUDED from both
+        sides. NOTE:
         dns_fail/dns_latency/dhcp_fail stay CONNECTED (they flood over a live link)
         so they COUNT as working — do NOT use SIM_META multi_capable here.
         eligible = registered - excluded; pct = working / eligible (working <=
         eligible, so it can never exceed 100%)."""
-        exclusive = {"ssidpw_fail", "auth_fail", "assoc_fail", "port_flap"}
+        exclusive = {"ssidpw_fail", "auth_fail", "mac_auth_fail", "assoc_fail", "port_flap"}
         excl = working = 0
         for c in clients:
             if any(s in exclusive for s in (c.get("active_simulations") or [])):

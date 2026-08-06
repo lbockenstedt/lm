@@ -2180,7 +2180,7 @@ async function csDemoLoad() {
 
 function csDemoOptions(activeScenario) {
     const names = Object.keys(window._csDemoScenarios || {});
-    if (!names.length) names.push('normal', 'dns_fail', 'dns_latency', 'dhcp_fail', 'assoc_fail', 'auth_fail', 'ssidpw_fail', 'port_flap');
+    if (!names.length) names.push('normal', 'dns_fail', 'dns_latency', 'dhcp_fail', 'assoc_fail', 'auth_fail', 'ssidpw_fail', 'mac_auth_fail', 'port_flap');
     return names.map(n => `<option value="${csEscape(n)}" ${n === activeScenario ? 'selected' : ''}>${csEscape(n)}</option>`).join('');
 }
 
@@ -2272,7 +2272,7 @@ window.csDemoClear = async function (btn) {
 // current overrides and seeds the toggles.
 // Alphabetical so the sim knobs + the Simulation facet dropdown list in order.
 const CS_CONTROL_FLAGS = ['assoc_fail', 'auth_fail', 'dhcp_fail', 'dns_fail',
-    'dns_latency', 'download', 'iperf', 'kill_switch', 'ping_test', 'port_flap',
+    'dns_latency', 'download', 'iperf', 'kill_switch', 'mac_auth_fail', 'ping_test', 'port_flap',
     'ssidpw_fail', 'www_traffic'];
 
 
@@ -4041,7 +4041,7 @@ window.csSaveConfigPush = async function () {
 // exact value is preserved losslessly.)
 const CS_ONOFF_KEYS = new Set([
     'kill_switch', 'rapid_update', 'github_repo', 'smb_repo', 'site_based_ssid',
-    'ssidpw_fail', 'auth_fail', 'syslog', 'web_server',
+    'ssidpw_fail', 'auth_fail', 'mac_auth_fail', 'syslog', 'web_server',
     'dhcp_fail', 'dns_fail', 'dns_latency', 'assoc_fail', 'port_flap', 'ping_test',
     'download', 'www_traffic', 'iperf',
 ]);
@@ -4060,7 +4060,7 @@ const CS_SIM_SECTION_FIELDS = {
         ['rapid_update', 'Rapid Update'], ['github_repo', 'Github Repo'],
         ['smb_repo', 'Smb Repo'], ['site_based_ssid', 'Site Based Ssid'],
         ['allow_offline', 'Allow Offline'], ['ssidpw_fail', 'Ssidpw Fail'],
-        ['auth_fail', 'Auth Fail'], ['syslog', 'Syslog'],
+        ['auth_fail', 'Auth Fail'], ['mac_auth_fail', 'Mac Auth Fail'], ['syslog', 'Syslog'],
         ['web_server', 'Web Server'],
         ['dns_fail_rate', 'DNS Fail Rate (/min)'],
         ['dns_fail_duration', 'DNS Fail Duration (s)'],
@@ -4080,6 +4080,7 @@ const CS_SIM_SECTION_FIELDS = {
         ['dns_bad_record_1', 'Dns Bad Record 1'], ['dns_bad_record_2', 'Dns Bad Record 2'],
         ['dns_bad_record_3', 'Dns Bad Record 3'],
         ['iperf_server', 'Iperf Server'], ['syslog_server', 'Syslog Server'],
+        ['mac_auth_fail_mac', 'Mac Auth Fail Mac (deny-listed MAC — pre-configure this exact MAC as a RADIUS/ClearPass MAC-Auth deny entry)'],
     ],
 };
 // Per-bucket [s0]–[s9] field schema (identical for each bucket).
