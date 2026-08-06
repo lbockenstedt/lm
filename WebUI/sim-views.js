@@ -4682,6 +4682,9 @@ function _csKnobInheritCheckbox(r) {
 // the recommendation" flag the operator asked for), grey/placeholder when
 // left blank (falls back to the computed floor for that one key even in
 // override mode — see _knob_overrides_for_tenant's per-key fallback).
+// Returns just the per-knob rows (no wrapper) — the caller groups this with
+// the learned-op footer line into one bottom-of-tile block (see
+// csRenderSimQuotaEditor).
 function _csKnobInheritRows(r, cat) {
     const lv = _csLearnedForRow(r);
     const knobNames = ((cat.meta[r.sim_id] || {}).knobs || []);
@@ -4709,9 +4712,7 @@ function _csKnobInheritRows(r, cat) {
             <span class="text-slate-400">${floorVal != null ? `default ${floorVal}` : 'not yet learned'}</span>
         </div>`;
     }).join('');
-    return `<div class="md:col-span-6 mt-1 border-t border-slate-100 pt-1">
-        <div class="space-y-0.5 pl-1">${rowsHtml}</div>
-    </div>`;
+    return rowsHtml;
 }
 
 // Consumer-row (Adaptive, not Learning) count "Inherit learned values"
@@ -4745,6 +4746,10 @@ function csRenderSimQuotaEditor() {
         const _lop = _csLearnedOpForRow(r);
         const _lv = _csLearnedForRow(r);
         const _consumerLearnedCount = r.adaptive && !r.learning && _lv && _lv.floor != null;
+        // Learned-op footer line, formerly rendered inline under Min/Max —
+        // now grouped with the per-knob fail-rate rows at the bottom of the
+        // tile (see the knob-rows block below). Set inside the Min/Max IIFE.
+        let _learnedOpFooter = '';
         const simOpts = csSimQuotaSimOptions(r.sim_id, simIds);
         const siteOpts = csSsidCellOptions(r.site, '— all sites —');
         const idOpts = csSimQuotaAlertIdOptions(r.alert_type, r.alert_id);
@@ -4803,6 +4808,7 @@ function csRenderSimQuotaEditor() {
                     const _computedMax = _floorVal * 2;
                     const _minVal = _inheritCount ? _lop : (r.min != null ? r.min : (r.count || 1));
                     const _maxVal = _inheritCount ? _computedMax : (r.max != null ? r.max : (r.count || 1));
+                    _learnedOpFooter = `<div class="text-[11px] text-slate-400">Learned op ${_lop} (floor ${_lv.floor}${_lv.source === 'global' ? ' · global' : ''})${_inheritCount ? ` — max auto = floor×2 = ${_computedMax}` : ' — overridden (not inherited)'}</div>`;
                     return `<label class="text-xs text-slate-500" title="Min = keep-alive floor; Max = the hard cap. Inheriting derives both from the learned value each tick (min = learned+20%, max = double the learned floor) instead of a fixed stored number.">Min / Max
             <div class="flex gap-1 mt-1">
               <input data-cs-sq="min" type="number" min="1" value="${csEscape(String(_minVal))}" ${_inheritCount ? 'readonly' : ''}
@@ -4810,7 +4816,6 @@ function csRenderSimQuotaEditor() {
               <input data-cs-sq="max" type="number" min="1" value="${csEscape(String(_maxVal))}" ${_inheritCount ? 'readonly' : ''}
                      class="w-full border rounded-md px-2 py-1.5 text-sm ${_inheritCount ? 'bg-slate-50 text-slate-500 border-slate-200' : 'bg-white border-red-400 text-red-600 font-semibold'}">
             </div>
-            <div class="text-[11px] mt-1 text-slate-400">Learned op ${_lop} (floor ${_lv.floor}${_lv.source === 'global' ? ' · global' : ''})${_inheritCount ? ` — max auto = floor×2 = ${_computedMax}` : ' — overridden (not inherited)'}</div>
           </label>`;
                 }
                 // Lab row, or a consumer with nothing learned yet: unchanged —
@@ -4819,12 +4824,14 @@ function csRenderSimQuotaEditor() {
                 const _minVal = r.min != null ? r.min : (_lop != null ? _lop : (r.count || 1));
                 const _maxVal = r.max != null ? r.max : (r.count || 1);
                 const _maxUnder = _lop != null && Number(_maxVal) < _lop;
+                if (_lop != null) {
+                    _learnedOpFooter = `<div class="text-[11px] ${_maxUnder ? 'text-amber-700 font-semibold' : 'text-slate-400'}">Learned: ${_lop}${_lv && _lv.floor != null ? ` <span class="text-slate-400 font-normal">(floor ${_lv.floor})</span>` : ''}${_lv && _lv.source === 'global' ? ' <span class="text-slate-400 font-normal">· global</span>' : ''}${_maxUnder ? ` — ⚠️ Max is below the learned value (${_lop})` : ''}</div>`;
+                }
                 return `<label class="text-xs text-slate-500" title="Min = keep-alive floor; Max = the hard cap for lab + production (one alert can't exhaust the client pool). Adaptive ramps clients UP to keep the alert firing, capped at Max; Learning ramps up AND down to find the floor.">Min / Max
             <div class="flex gap-1 mt-1">
               <input data-cs-sq="min" type="number" min="1" value="${csEscape(String(_minVal))}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm">
               <input data-cs-sq="max" type="number" min="1" value="${csEscape(String(_maxVal))}" class="w-full bg-white border ${_maxUnder ? 'border-amber-400' : 'border-slate-300'} rounded-md px-2 py-1.5 text-sm">
             </div>
-            ${_lop != null ? `<div class="text-[11px] mt-1 ${_maxUnder ? 'text-amber-700 font-semibold' : 'text-slate-400'}">Learned: ${_lop}${_lv && _lv.floor != null ? ` <span class="text-slate-400 font-normal">(floor ${_lv.floor})</span>` : ''}${_lv && _lv.source === 'global' ? ' <span class="text-slate-400 font-normal">· global</span>' : ''}${_maxUnder ? ` — ⚠️ Max is below the learned value (${_lop})` : ''}</div>` : ''}
           </label>`;
               })()
             : `<label class="text-xs text-slate-500">${isPresence ? 'Min (floor)' : 'Clients'}
@@ -4851,7 +4858,16 @@ function csRenderSimQuotaEditor() {
             ${(!isPresence && tied && r.adaptive && !r.learning && knobSims.has(r.sim_id)) ? _csKnobInheritCheckbox(r) : ''}
             ${(!isPresence && tied && _consumerLearnedCount) ? _csCountInheritCheckbox(r) : ''}
           </label>
-          ${(!isPresence && tied && r.adaptive && !r.learning && knobSims.has(r.sim_id)) ? _csKnobInheritRows(r, cat) : ''}
+          ${(() => {
+              // Bottom-of-tile block: the learned-op line (moved off Min/Max)
+              // grouped with the per-knob fail-rate rows, when either exists.
+              const _knobRows = (!isPresence && tied && r.adaptive && !r.learning && knobSims.has(r.sim_id))
+                  ? _csKnobInheritRows(r, cat) : '';
+              if (!_learnedOpFooter && !_knobRows) return '';
+              return `<div class="md:col-span-6 mt-1 border-t border-slate-100 pt-1">
+        <div class="space-y-0.5 pl-1">${_learnedOpFooter}${_knobRows}</div>
+    </div>`;
+          })()}
         </div>`;
     }).join('');
     const suggestHtml = Object.keys(suggested).length ? `
