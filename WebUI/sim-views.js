@@ -4772,11 +4772,40 @@ function csRenderSimQuotaEditor() {
           ${(tied && (r.adaptive || r.learning))
             ? (() => {
                 // Learned operating point (floor +20%) the platform has learned
-                // for this alert. Default Min to it when the user hasn't set one,
-                // and warn when Max sits below it (the cap would starve the
-                // learned operating count).
+                // for this alert.
                 const _lop = _csLearnedOpForRow(r);
                 const _lv = _csLearnedForRow(r);
+                // Consumer row (Adaptive, not Learning) with a published floor:
+                // BEHAVIOR CHANGE — min/max are DYNAMICALLY derived from the
+                // learned value each controller tick (see adaptive_step's
+                // docstring), not the stored min/max, when inherit_learned_count
+                // is ON (default). Give it the SAME inherit-checkbox +
+                // red-override treatment as the knob floor above, instead of the
+                // old always-editable Min/Max inputs.
+                const _consumerLearned = r.adaptive && !r.learning && _lv && _lv.floor != null;
+                if (_consumerLearned) {
+                    const _inheritCount = r.inherit_learned_count !== false;   // default ON
+                    const _floorVal = Number(_lv.floor);
+                    const _computedMax = _floorVal * 2;
+                    const _minVal = _inheritCount ? _lop : (r.min != null ? r.min : (r.count || 1));
+                    const _maxVal = _inheritCount ? _computedMax : (r.max != null ? r.max : (r.count || 1));
+                    return `<label class="text-xs text-slate-500" title="Min = keep-alive floor; Max = the hard cap. Inheriting derives both from the learned value each tick (min = learned+20%, max = double the learned floor) instead of a fixed stored number.">Min / Max
+            <label class="flex items-center gap-1 cursor-pointer text-[11px] text-slate-600 font-semibold mt-1">
+                <input data-cs-sq="inherit_learned_count" type="checkbox" onchange="csSimQuotaOnInheritCountChange(this)" ${_inheritCount ? 'checked' : ''}>
+                Inherit learned values
+            </label>
+            <div class="flex gap-1 mt-1">
+              <input data-cs-sq="min" type="number" min="1" value="${csEscape(String(_minVal))}" ${_inheritCount ? 'readonly' : ''}
+                     class="w-full border rounded-md px-2 py-1.5 text-sm ${_inheritCount ? 'bg-slate-50 text-slate-500 border-slate-200' : 'bg-white border-red-400 text-red-600 font-semibold'}">
+              <input data-cs-sq="max" type="number" min="1" value="${csEscape(String(_maxVal))}" ${_inheritCount ? 'readonly' : ''}
+                     class="w-full border rounded-md px-2 py-1.5 text-sm ${_inheritCount ? 'bg-slate-50 text-slate-500 border-slate-200' : 'bg-white border-red-400 text-red-600 font-semibold'}">
+            </div>
+            <div class="text-[11px] mt-1 text-slate-400">Learned op ${_lop} (floor ${_lv.floor}${_lv.source === 'global' ? ' · global' : ''})${_inheritCount ? ` — max auto = floor×2 = ${_computedMax}` : ' — overridden (not inherited)'}</div>
+          </label>`;
+                }
+                // Lab row, or a consumer with nothing learned yet: unchanged —
+                // plain editable Min/Max, defaulting Min to the learned op when
+                // one exists, warning when Max sits below it.
                 const _minVal = r.min != null ? r.min : (_lop != null ? _lop : (r.count || 1));
                 const _maxVal = r.max != null ? r.max : (r.count || 1);
                 const _maxUnder = _lop != null && Number(_maxVal) < _lop;
@@ -5168,6 +5197,9 @@ function csSimQuotaSyncFromDom() {
             if (v !== '') knobOverrides[inp.getAttribute('data-cs-sq-knob')] = v;
         });
         row.knob_overrides = knobOverrides;
+        // Consumer-row count inherit (Min/Max) — same absent-elsewhere default.
+        const inheritCountEl = g('inherit_learned_count');
+        row.inherit_learned_count = inheritCountEl ? !!inheritCountEl.checked : true;
         if (adaptive || learning) {
             // Adaptive/Learning rows use Min/Max; count is the floor the controller
             // ramps from. ONLY read min/max when the fields are actually rendered —
@@ -5269,6 +5301,19 @@ window.csSimQuotaOnInheritKnobsChange = function (cb) {
         const idx = parseInt(row.getAttribute('data-cs-sqrow'), 10);
         const r = csSimQuotaRows[idx];
         if (r) r.inherit_learned_knobs = !!cb.checked;
+    }
+    csRenderSimQuotaEditor();
+};
+
+// Toggling "Inherit learned values" (consumer-row count Min/Max). Sync first
+// so the OTHER rows' in-progress edits aren't lost by the re-render.
+window.csSimQuotaOnInheritCountChange = function (cb) {
+    csSimQuotaSyncFromDom();
+    const row = cb && cb.closest('[data-cs-sqrow]');
+    if (row) {
+        const idx = parseInt(row.getAttribute('data-cs-sqrow'), 10);
+        const r = csSimQuotaRows[idx];
+        if (r) r.inherit_learned_count = !!cb.checked;
     }
     csRenderSimQuotaEditor();
 };
