@@ -84,7 +84,10 @@ ALERT_KEY = "alert:CLIENT_DNS_FAILURE"
 
 def test_pure_consumer_gets_approved_global_knobs():
     # A tenant with only a consumer (Adaptive) dns_fail quota — no own lab. The
-    # approved global learned knobs flow to its clients (not the base defaults).
+    # approved global learned knobs flow to its clients, bumped by the default
+    # inherit-learned-values floor (learned + 20%, capped at double) rather than
+    # the bare approved value — production runs comfortably past the bare
+    # minimum that fires, not right at the edge of it.
     store = _Store(
         {"t1": {"sim_quotas": [_cons()]}},
         global_lv={ALERT_KEY: {"op": 8, "knobs": {"dns_fail_rate": 600,
@@ -92,7 +95,24 @@ def test_pure_consumer_gets_approved_global_knobs():
     )
     hub = _build(store)
     out = _run(hub._knob_overrides_for_tenant("t1"))
-    assert out == {"dns_fail_rate": 600, "dns_fail_duration": 300}
+    assert out == {"dns_fail_rate": 720, "dns_fail_duration": 360}
+
+
+def test_consumer_override_wins_for_its_key_floor_fills_the_rest():
+    # inherit_learned_knobs OFF with a partial override: the overridden key
+    # uses the operator's exact value (even though it's below the computed
+    # floor — an explicit override always wins over the recommendation), any
+    # OTHER declared knob for the sim still falls back to the computed floor
+    # (turning inherit off is a per-knob opt-out, not all-or-nothing).
+    store = _Store(
+        {"t1": {"sim_quotas": [{**_cons(), "inherit_learned_knobs": False,
+                                "knob_overrides": {"dns_fail_rate": 50}}]}},
+        global_lv={ALERT_KEY: {"op": 8, "knobs": {"dns_fail_rate": 600,
+                                                  "dns_fail_duration": 300}}},
+    )
+    hub = _build(store)
+    out = _run(hub._knob_overrides_for_tenant("t1"))
+    assert out == {"dns_fail_rate": 50, "dns_fail_duration": 360}
 
 
 def test_consumer_with_no_approved_knobs_gets_empty():
@@ -125,12 +145,14 @@ def test_lab_live_values_win_for_keys_it_tunes():
 
 def test_consumer_and_lab_merge_precedence():
     # A tenant with BOTH a consumer (MIA) and a lab (DFW) for dns_fail on the
-    # same spoke. The consumer loads the approved baseline; the lab's live values
-    # WIN for the keys it's tuning. Here the lab is mid-sweep on dns_fail_rate
-    # (1200) and hasn't touched dns_fail_duration this tick — the approved
-    # baseline (300) fills duration, the lab's 1200 wins for rate. (In practice a
-    # lab's live state cold-starts every knob, so the "fill" only shows for a key
-    # the lab hasn't recorded yet.)
+    # same spoke. The consumer loads the approved baseline (bumped by the
+    # default inherit-learned-values floor, learned + 20%); the lab's live
+    # values WIN UNCHANGED for the keys it's tuning (its own in-flight ratchet
+    # search, not a "consumer floor" scenario). Here the lab is mid-sweep on
+    # dns_fail_rate (1200) and hasn't touched dns_fail_duration this tick — the
+    # approved baseline (300, bumped to 360) fills duration, the lab's 1200
+    # wins as-is for rate. (In practice a lab's live state cold-starts every
+    # knob, so the "fill" only shows for a key the lab hasn't recorded yet.)
     lab_key = "alert:CLIENT_DNS_FAILURE:DFW"
     store = _Store(
         {"t1": {"sim_quotas": [_cons(), _lab()]}},
@@ -140,7 +162,7 @@ def test_consumer_and_lab_merge_precedence():
     )
     hub = _build(store)
     out = _run(hub._knob_overrides_for_tenant("t1"))
-    assert out == {"dns_fail_rate": 1200, "dns_fail_duration": 300}
+    assert out == {"dns_fail_rate": 1200, "dns_fail_duration": 360}
 
 
 def test_no_knob_quotas_returns_empty():

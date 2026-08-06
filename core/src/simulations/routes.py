@@ -1780,7 +1780,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         Empty when nothing applies. NOTE: the override is spoke-WIDE (one value
         per knob key), not per-site — the spoke overlays it onto every client's
         ``[simulation]`` section."""
-        from .sim_quota import normalize_quota, knobs_for_sim, adaptive_is_on, _alert_key
+        from .sim_quota import normalize_quota, knobs_for_sim, adaptive_is_on, _alert_key, _learned_knob_floor
         try:
             csc = await store.get_central_sites_config(tenant_id) or {}
             quotas = [normalize_quota(r) for r in (csc.get("sim_quotas") or [])]
@@ -1809,9 +1809,31 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # (1) CONSUMER rows: the approved lab's tuned knobs (production runs the
         # lab's config, not the base simulation.conf defaults). A pure-consumer
         # tenant gets its knobs entirely from here.
+        #
+        # BEHAVIOR CHANGE: a consumer no longer runs the BARE learned value — it
+        # gets learned + 20% (capped at double), via _learned_knob_floor, unless
+        # the row's inherit_learned_knobs is explicitly OFF, in which case the
+        # operator's own knob_overrides value wins for the keys they set (shown
+        # in red in the WebUI editor as the override signal), and any other
+        # declared knob for the sim still falls back to the computed floor —
+        # turning inherit off is a per-knob opt-out, not an all-or-nothing one.
         for q in consumers:
             gv = global_lv.get(_alert_key(q)) or {}
-            out.update(_ints(gv.get("knobs") or {}))
+            learned_knobs = _ints(gv.get("knobs") or {})
+            inherit = q.get("inherit_learned_knobs", True)
+            overrides = _ints(q.get("knob_overrides") or {}) if not inherit else {}
+            for kk, vv in learned_knobs.items():
+                if kk in overrides:
+                    out[kk] = overrides[kk]
+                    continue
+                floored = _learned_knob_floor(vv)
+                out[kk] = floored if floored is not None else vv
+            # An override for a knob key the lab hasn't published a learned
+            # value for yet still applies as-is — the operator's explicit
+            # number wins even with nothing to compute a floor against.
+            for kk, vv in overrides.items():
+                if kk not in learned_knobs:
+                    out[kk] = vv
         # (2) LAB rows: the lab's OWN live tuned values WIN for the keys it's
         # actively testing (more current than the approved snapshot), MIN across
         # this tenant's lab quotas for the same key. Approved knobs fill the rest

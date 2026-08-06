@@ -25,7 +25,15 @@ SIM_QUOTA_KEYS = ("alert_id", "alert_type", "sim_id", "count", "site",
                   "multi_capable", "rehome", "enabled", "learning", "tier",
                   # Device quota kind (T3 IoT fleet): kind=device + a catalog
                   # device_id, count of that device profile, at a site. No sim/alert.
-                  "kind", "device_id")
+                  "kind", "device_id",
+                  # Consumer-row (Adaptive, not Learning) knob floor. Default ON:
+                  # the delivered [simulation] knob values are learned + 20%
+                  # (capped at double), not the bare learned value — see
+                  # _learned_knob_floor / _knob_overrides_for_tenant. OFF lets the
+                  # operator pin their own per-knob value in knob_overrides; any
+                  # knob key NOT present there still falls back to the computed
+                  # floor for that key.
+                  "inherit_learned_knobs", "knob_overrides")
 ALERT_TYPES = ("alert", "insight")
 # Per-quota client-tier policy (twin of cs sim_quota.QUOTA_TIERS). "best"
 # (default) = prefer T1 (dedicated PCI, most reliable) then fall back to T2 (USB
@@ -266,6 +274,15 @@ def normalize_quota(raw: Any) -> Dict[str, Any]:
         # Client-tier policy (see QUOTA_TIERS). "best" prefers T1 then T2.
         "tier": (lambda t: t if t in QUOTA_TIERS else "best")(
             str(raw.get("tier") or "best").strip().lower()),
+        # Consumer-row knob floor (see SIM_QUOTA_KEYS comment above / the
+        # WebUI's "Inherit learned values" checkbox). Default ON: delivered
+        # knobs are the published learned value bumped by _learned_knob_floor,
+        # not the bare value. knob_overrides is only consulted when OFF, and
+        # only for the specific keys it names — any other declared knob for
+        # the sim still falls back to the computed floor.
+        "inherit_learned_knobs": _as_bool(raw.get("inherit_learned_knobs"), True),
+        "knob_overrides": ({str(k): v for k, v in raw["knob_overrides"].items()}
+                           if isinstance(raw.get("knob_overrides"), dict) else {}),
     }
     # Adaptive-controller fields (design doc §9) — carried through only when the
     # quota declares them, so a fixed-count quota stays exactly as before. The
@@ -274,6 +291,24 @@ def normalize_quota(raw: Any) -> Dict[str, Any]:
         if raw.get(k) is not None:
             q[k] = raw.get(k)
     return q
+
+
+def _learned_knob_floor(learned_value: Any) -> Optional[int]:
+    """Published-knob floor for a consumer row that inherits the learned
+    value: learned + 20% margin, capped at DOUBLE the learned value (a safety
+    rail against a disproportionate jump on small integer knobs — e.g.
+    learned=1 -> ceil(1*1.2)=2, which already IS the double-cap; the cap
+    guards the general case). Mirrors _csKnobFloorFromLearned in sim-views.js
+    — keep both in sync if this formula changes. Returns None on a
+    non-numeric/non-positive input (caller should then skip the key)."""
+    import math
+    try:
+        n = float(learned_value)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    return min(math.ceil(n * 1.2), math.ceil(n * 2))
 
 
 def quota_dedup_key(q: Dict[str, Any]) -> str:

@@ -4653,6 +4653,63 @@ function _csLearnedOpForRow(r) {
     return v ? Number(v.op) : null;
 }
 
+// Published-knob floor for a consumer row that inherits the learned value:
+// learned + 20% margin (production runs comfortably past the bare minimum
+// that fires), capped at DOUBLE the learned value as a safety rail against a
+// disproportionate jump on small integer knobs (e.g. learned=1 -> 1*1.2 ceils
+// to 2, which IS already the double-cap; the cap protects the general case,
+// not just that edge). Mirrors _learned_knob_floor in sim_quota.py — keep
+// both in sync if this formula changes.
+function _csKnobFloorFromLearned(v) {
+    const n = Number(v);
+    if (!isFinite(n) || n <= 0) return n;
+    return Math.min(Math.ceil(n * 1.2), n * 2);
+}
+
+// Consumer-row (Adaptive, not Learning) knob block: an "Inherit learned
+// values" checkbox (default ON) plus one row per declared knob. Inheriting
+// shows the computed floor read-only; unchecking exposes an editable
+// override per knob — filled in RED when it actually diverges from the
+// computed floor (the visual "you're overriding the recommendation" flag the
+// operator asked for), grey/placeholder when left blank (falls back to the
+// computed floor for that one key even in override mode — see
+// _knob_overrides_for_tenant's per-key fallback).
+function _csKnobInheritBlock(r, cat) {
+    const lv = _csLearnedForRow(r);
+    const knobNames = ((cat.meta[r.sim_id] || {}).knobs || []);
+    if (!knobNames.length) return '';
+    const learnedKnobs = (lv && lv.knobs) || {};
+    const inherit = r.inherit_learned_knobs !== false;   // default ON
+    const overrides = r.knob_overrides || {};
+    const rowsHtml = knobNames.map(k => {
+        const learnedVal = learnedKnobs[k];
+        const floorVal = learnedVal != null ? _csKnobFloorFromLearned(learnedVal) : null;
+        if (inherit) {
+            return `<div class="flex items-center gap-1 text-[11px]">
+                <span class="font-mono text-slate-500 w-32 truncate" title="${csEscape(k)}">${csEscape(k)}</span>
+                <span class="text-slate-500">${floorVal != null ? floorVal : '—'}</span>
+                ${learnedVal != null ? `<span class="text-slate-400">(learned ${learnedVal} +20%, cap ${learnedVal * 2})</span>` : `<span class="text-slate-400 italic">not yet learned</span>`}
+            </div>`;
+        }
+        const ov = overrides[k];
+        const isOverridden = ov != null && String(ov).trim() !== '';
+        return `<div class="flex items-center gap-1 text-[11px]">
+            <span class="font-mono text-slate-500 w-32 truncate" title="${csEscape(k)}">${csEscape(k)}</span>
+            <input data-cs-sq-knob="${csEscape(k)}" type="number" placeholder="${floorVal != null ? floorVal : 'inherit'}"
+                   value="${ov != null ? csEscape(String(ov)) : ''}"
+                   class="w-20 border rounded px-1.5 py-0.5 text-[11px] ${isOverridden ? 'border-red-400 text-red-600 font-semibold' : 'border-slate-300 text-slate-500'}">
+            <span class="text-slate-400">${floorVal != null ? `default ${floorVal}` : 'not yet learned'}</span>
+        </div>`;
+    }).join('');
+    return `<div class="md:col-span-6 mt-1 border-t border-slate-100 pt-1">
+        <label class="flex items-center gap-1 cursor-pointer text-[11px] text-slate-600 font-semibold">
+            <input data-cs-sq="inherit_learned_knobs" type="checkbox" onchange="csSimQuotaOnInheritKnobsChange(this)" ${inherit ? 'checked' : ''}>
+            Inherit learned values <span class="text-slate-400 font-normal">(learned + 20%, capped at double)</span>
+        </label>
+        <div class="mt-1 space-y-0.5 pl-1">${rowsHtml}</div>
+    </div>`;
+}
+
 function csRenderSimQuotaEditor() {
     const cat = csSimQuotaCatalog || { sims: [], sites: [], suggested: {}, meta: {} };
     const simIds = (cat.sims || []).map(s => s.sim_id);
@@ -4752,6 +4809,7 @@ function csRenderSimQuotaEditor() {
             <span class="flex items-center gap-1"><input data-cs-sq="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</span>
             <span class="flex items-center gap-1"><input data-cs-sq="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
           </label>
+          ${(!isPresence && tied && r.adaptive && !r.learning && knobSims.has(r.sim_id)) ? _csKnobInheritBlock(r, cat) : ''}
         </div>`;
     }).join('');
     const suggestHtml = Object.keys(suggested).length ? `
@@ -5099,6 +5157,17 @@ function csSimQuotaSyncFromDom() {
             adaptive,
             learning,
         };
+        // Consumer-row knob inherit/override (only rendered for adaptive, non-
+        // learning, knob-bearing rows — absent elsewhere, so default ON and an
+        // empty override dict there, same as a row that never touched this).
+        const inheritEl = g('inherit_learned_knobs');
+        row.inherit_learned_knobs = inheritEl ? !!inheritEl.checked : true;
+        const knobOverrides = {};
+        el.querySelectorAll('[data-cs-sq-knob]').forEach(inp => {
+            const v = (inp.value || '').trim();
+            if (v !== '') knobOverrides[inp.getAttribute('data-cs-sq-knob')] = v;
+        });
+        row.knob_overrides = knobOverrides;
         if (adaptive || learning) {
             // Adaptive/Learning rows use Min/Max; count is the floor the controller
             // ramps from. ONLY read min/max when the fields are actually rendered —
@@ -5187,6 +5256,19 @@ window.csSimQuotaOnLearningChange = function (cb) {
                 if (r.max == null || r.max <= r.min) r.max = Math.max(r.min + 1, (r.count || 1) * 2);
             }
         }
+    }
+    csRenderSimQuotaEditor();
+};
+
+// Toggling "Inherit learned values" (consumer-row knob floor). Sync first so
+// the OTHER rows' in-progress edits aren't lost by the re-render.
+window.csSimQuotaOnInheritKnobsChange = function (cb) {
+    csSimQuotaSyncFromDom();
+    const row = cb && cb.closest('[data-cs-sqrow]');
+    if (row) {
+        const idx = parseInt(row.getAttribute('data-cs-sqrow'), 10);
+        const r = csSimQuotaRows[idx];
+        if (r) r.inherit_learned_knobs = !!cb.checked;
     }
     csRenderSimQuotaEditor();
 };
