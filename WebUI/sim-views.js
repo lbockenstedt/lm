@@ -1855,6 +1855,31 @@ window.csPurgeClients = async function (btn) {
     }
 };
 
+// Surgical counterpart to Purge Clients — removes ONE client's registry
+// record instead of wiping the entire fleet's history. For a stale/
+// unrecognized entry (a renamed/recloned VM's old hostname left behind, a
+// one-off manual test client) that never ages out on its own within the
+// hourly stale-prune sweep's window. Hits DELETE /{tenant}/clients/{hostname}.
+window.csRemoveClient = async function (hostname, btn) {
+    if (!confirm(`Remove client record "${hostname}"? This only removes its registry entry (last-seen, config, overrides) — it does NOT affect any actual VM. A client that's still alive just re-registers on its next check-in.`))
+        return;
+    const orig = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳';
+    try {
+        const r = await csFetch(`/${csTenant()}/clients/${encodeURIComponent(hostname)}`, { method: 'DELETE' });
+        if (typeof showToast === 'function') showToast(
+            (r && r.removed) ? `Removed ${hostname}` : `${hostname} was already gone`,
+            (r && r.removed) ? 'success' : 'warn');
+        await csRenderClients(csClientTier);
+    } catch (e) {
+        console.error('csRemoveClient: remove failed', e);
+        if (typeof showToast === 'function') showToast('Remove failed: ' + (e.message || e), 'error');
+        btn.disabled = false;
+        btn.textContent = orig;
+    }
+};
+
 // Bulk-clear the legacy per-client REGISTRY override layer (the hidden
 // [username] sim-flag source /api/config bakes in) for every registered client.
 // Model A moved the editor to user-overrides.conf, but stale registry overrides
@@ -1971,7 +1996,12 @@ function csRenderClientRows(rows, targetId) {
           ${host ? csDemoCell(host) : '<td class="px-4 py-2 text-slate-300">—</td>'}
         </tr>`;
         const line2 = host ? `<tr>
-          <td colspan="${CS_CLIENT_COLS}" class="px-4 pb-3 pt-0">${csClientSimBar(c, host)}</td>
+          <td colspan="${CS_CLIENT_COLS}" class="px-4 pb-3 pt-0">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              ${csClientSimBar(c, host)}
+              <button onclick="csRemoveClient('${csEscape(host)}', this)" class="text-[10px] px-2 py-0.5 rounded font-bold whitespace-nowrap bg-white hover:bg-red-50 text-red-500 border border-red-200 flex-shrink-0" title="Remove this client's registry record — for a stale/unrecognized entry (a renamed VM's old hostname, a one-off test client). Does NOT affect any actual VM; a client that's still alive just re-registers on its next check-in.">🗑 Remove</button>
+            </div>
+          </td>
         </tr>` : '';
         return line1 + line2;
     }).join('');

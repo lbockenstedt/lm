@@ -3411,6 +3411,35 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             pass
         return result
 
+    # Remove ONE client's registry record — the surgical counterpart to
+    # "Purge Clients" (which wipes the entire fleet's history). For a single
+    # stale/unrecognized entry (a renamed/recloned VM's old hostname left
+    # behind, a one-off manual test client, etc.) that never ages out on its
+    # own. Registered here (after /clients/overrides, before
+    # /clients/{hostname}/control) so it can't shadow the more specific
+    # /overrides route — both are 5-segment paths and Starlette matches in
+    # registration order.
+    @app.delete("/sim/api/{tenant}/clients/{hostname}")
+    async def cs_delete_client(tenant: str, hostname: str,
+                               tenant_id: str = Depends(get_tenant_id)):
+        result = await _cs_forward(tenant_id, "CS_DELETE_CLIENT", {"hostname": hostname})
+        # Mirror the removal into the hub cache so the row disappears before
+        # the next ~10s telemetry frame (same pattern as Purge Clients).
+        try:
+            for _sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
+                try:
+                    if hub.state.get_spoke_tenant(sid) != tenant_id:
+                        continue
+                except Exception:  # noqa: BLE001
+                    continue
+                clients = data.get("clients")
+                if isinstance(clients, list):
+                    data["clients"] = [c for c in clients
+                                       if not (isinstance(c, dict) and c.get("hostname") == hostname)]
+        except Exception:  # noqa: BLE001
+            pass
+        return result
+
     @app.get("/sim/api/{tenant}/clients/{hostname}/control")
     async def cs_get_client_control(tenant: str, hostname: str,
                                     tenant_id: str = Depends(get_tenant_id)):
