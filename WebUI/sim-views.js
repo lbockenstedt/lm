@@ -4770,7 +4770,7 @@ function csRenderSimQuotaEditor() {
             : `<div class="text-xs text-slate-500">
                 <div class="mb-1">${_srcBadge}</div>
                 ${tied
-                  ? `<select data-cs-sq="alert_type" onchange="csSimQuotaOnTypeChange(this)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
+                  ? `<select data-cs-sq="alert_type" onchange="csSimQuotaOnTypeChange(this)" class="w-full h-9 appearance-none bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
                        <option value="alert" ${r.alert_type === 'alert' ? 'selected' : ''}>Alert</option>
                        <option value="insight" ${r.alert_type === 'insight' ? 'selected' : ''}>Insight</option>
                      </select>`
@@ -4785,13 +4785,13 @@ function csRenderSimQuotaEditor() {
                 <div class="text-[11px] text-slate-400 italic mt-1 leading-tight">— not required —</div>
               </label>`
               : `<label class="text-xs text-slate-500">Alert / Insight ID
-                <select data-cs-sq="alert_id" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${idOpts}</select>
+                <select data-cs-sq="alert_id" class="w-full h-9 appearance-none bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${idOpts}</select>
               </label>`);
         return `<div class="grid grid-cols-1 md:grid-cols-6 gap-2 items-end bg-white border border-slate-200 rounded-md p-2" data-cs-sqrow="${i}">
           ${alertCell}
           ${idCell}
           <label class="text-xs text-slate-500">Simulation
-            <select data-cs-sq="sim_id" onchange="csSimQuotaOnSimChange(this)" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${simOpts}</select>
+            <select data-cs-sq="sim_id" onchange="csSimQuotaOnSimChange(this)" class="w-full h-9 appearance-none bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${simOpts}</select>
           </label>
           ${(tied && (r.adaptive || r.learning))
             ? (() => {
@@ -4812,9 +4812,9 @@ function csRenderSimQuotaEditor() {
                     return `<label class="text-xs text-slate-500" title="Min = keep-alive floor; Max = the hard cap. Inheriting derives both from the learned value each tick (min = learned+20%, max = double the learned floor) instead of a fixed stored number.">Min / Max
             <div class="flex gap-1 mt-1">
               <input data-cs-sq="min" type="number" min="1" value="${csEscape(String(_minVal))}" ${_inheritCount ? 'readonly' : ''}
-                     class="w-full border rounded-md px-2 py-1.5 text-sm ${_inheritCount ? 'bg-slate-50 text-slate-500 border-slate-200' : 'bg-white border-red-400 text-red-600 font-semibold'}">
+                     class="w-full h-9 border rounded-md px-2 py-1.5 text-sm ${_inheritCount ? 'bg-slate-50 text-slate-500 border-slate-200' : 'bg-white border-red-400 text-red-600 font-semibold'}">
               <input data-cs-sq="max" type="number" min="1" value="${csEscape(String(_maxVal))}" ${_inheritCount ? 'readonly' : ''}
-                     class="w-full border rounded-md px-2 py-1.5 text-sm ${_inheritCount ? 'bg-slate-50 text-slate-500 border-slate-200' : 'bg-white border-red-400 text-red-600 font-semibold'}">
+                     class="w-full h-9 border rounded-md px-2 py-1.5 text-sm ${_inheritCount ? 'bg-slate-50 text-slate-500 border-slate-200' : 'bg-white border-red-400 text-red-600 font-semibold'}">
             </div>
           </label>`;
                 }
@@ -4829,19 +4829,19 @@ function csRenderSimQuotaEditor() {
                 }
                 return `<label class="text-xs text-slate-500" title="Min = keep-alive floor; Max = the hard cap for lab + production (one alert can't exhaust the client pool). Adaptive ramps clients UP to keep the alert firing, capped at Max; Learning ramps up AND down to find the floor.">Min / Max
             <div class="flex gap-1 mt-1">
-              <input data-cs-sq="min" type="number" min="1" value="${csEscape(String(_minVal))}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm">
-              <input data-cs-sq="max" type="number" min="1" value="${csEscape(String(_maxVal))}" class="w-full bg-white border ${_maxUnder ? 'border-amber-400' : 'border-slate-300'} rounded-md px-2 py-1.5 text-sm">
+              <input data-cs-sq="min" type="number" min="1" value="${csEscape(String(_minVal))}" class="w-full h-9 bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm">
+              <input data-cs-sq="max" type="number" min="1" value="${csEscape(String(_maxVal))}" class="w-full h-9 bg-white border ${_maxUnder ? 'border-amber-400' : 'border-slate-300'} rounded-md px-2 py-1.5 text-sm">
             </div>
           </label>`;
               })()
             : `<label class="text-xs text-slate-500">${isPresence ? 'Min (floor)' : 'Clients'}
-            <input data-cs-sq="count" type="number" min="1" value="${csEscape(String(r.count))}" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
+            <input data-cs-sq="count" type="number" min="1" value="${csEscape(String(r.count))}" class="w-full h-9 bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
           </label>`}
           <label class="text-xs text-slate-500">Site
-            <select data-cs-sq="site" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${siteOpts}</select>
+            <select data-cs-sq="site" class="w-full h-9 appearance-none bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">${siteOpts}</select>
           </label>
           <label class="text-xs text-slate-500" title="Client tier to harvest: Best = prefer T1 (dedicated PCI, most reliable) then fall back to T2 (USB dongle); T1/T2 = that tier only (underfill rather than degrade).">Tier
-            <select data-cs-sq="tier" class="w-full bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
+            <select data-cs-sq="tier" class="w-full h-9 appearance-none bg-white border border-slate-300 rounded-md px-2 py-1.5 text-sm mt-1">
               <option value="best" ${(r.tier || 'best') === 'best' ? 'selected' : ''}>Best (T1→T2)</option>
               <option value="t1" ${r.tier === 't1' ? 'selected' : ''}>T1 only</option>
               <option value="t2" ${r.tier === 't2' ? 'selected' : ''}>T2 only</option>
