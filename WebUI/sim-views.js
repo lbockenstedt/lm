@@ -3463,6 +3463,61 @@ async function csRenderCentralOnPremDiagnostic() { return _csRenderDiag('central
 // derived dashboard status + firing, per monitored check + site. `source` =
 // 'central' | 'central_on_prem' | 'mist' — each routes to its OWN browse + its
 // OWN monitored_checks (filtered by source) so the three tabs never collide.
+// Steady Client Count debug breakdown (per-series thresholds/averages/peaks +
+// which rule fired, this cycle) — added so "why is this check red" reads off
+// the numbers directly instead of someone reproducing the arithmetic by hand
+// against the config. See central_hub_poller.py ClientCountTracker.entry's
+// `triggered` field for what populates this.
+function _csFormatCcDebug(debug) {
+    if (!debug || typeof debug !== 'object') return '';
+    const series = ['total', 'wired', 'wireless'].filter(k => debug[k]);
+    if (!series.length) return '';
+    const fmt = v => (v === null || v === undefined) ? '—' : v;
+    const rows = series.map(k => {
+        const e = debug[k] || {};
+        const trig = Array.isArray(e.triggered) && e.triggered.length
+            ? `<span class="text-red-600">${e.triggered.map(csEscape).join(', ')}</span>`
+            : '<span class="text-slate-400">none</span>';
+        return `<tr>
+            <td class="pr-3 font-semibold">${csEscape(k)}</td>
+            <td class="pr-3">${fmt(e.status)}</td>
+            <td class="pr-3">${fmt(e.current)}</td>
+            <td class="pr-3">${fmt(e.hourly_avg)}</td>
+            <td class="pr-3">${fmt(e.avg_7day)}</td>
+            <td class="pr-3">${fmt(e.avg_30day)}</td>
+            <td class="pr-3">${fmt(e.max_7day)}</td>
+            <td class="pr-3">${fmt(e.max_30day)}</td>
+            <td class="pr-3">${fmt(e.day_drop_pct)}</td>
+            <td class="pr-3">${fmt(e.week_drop_pct)}</td>
+            <td class="pr-3">${fmt(e.rate_drop_pct)}</td>
+            <td class="pr-3">${trig}</td>
+        </tr>`;
+    }).join('');
+    const t0 = debug.total || {};
+    const thresh = `floor=${fmt(t0.floor)} warn%=${fmt(t0.warn_pct)} error%=${fmt(t0.error_pct)} `
+        + `weekly_frac=${fmt(t0.weekly_frac)} monthly_frac=${fmt(t0.monthly_frac)} min_peak=${fmt(t0.min_peak)} `
+        + `period_drop%=${fmt(t0.period_drop_pct)} rate_drop%=${fmt(t0.rate_drop_thresh)} `
+        + `samples=${fmt(t0.sample_count)}/${fmt(t0.min_samples)}`;
+    const pw = debug.poll_window;
+    const pwLine = pw
+        ? `<div class="mt-1">Sticky 1h window: live this cycle = <b>${csEscape(fmt(pw.live_status))}</b>, `
+          + `overridden to <b>${csEscape(fmt(pw.sticky_verdict))}</b> (${fmt(pw.passes)}/${fmt(pw.total)} polls OK in last 1h)`
+          + (pw.live_status !== pw.sticky_verdict
+              ? ' <span class="text-amber-600">— displayed status is STALE-WINDOW driven, not this cycle\'s own numbers</span>'
+              : ' <span class="text-slate-400">— displayed status matches this cycle\'s own numbers</span>')
+          + `</div>`
+        : '';
+    return `<details class="mt-1"><summary class="text-[10px] text-indigo-600 cursor-pointer select-none">🔍 debug breakdown</summary>
+        <div class="mt-1 text-[10px] text-slate-500 font-mono">${csEscape(thresh)}</div>
+        <div class="mt-1 overflow-x-auto"><table class="text-[10px] font-mono">
+        <thead class="text-slate-400"><tr><td class="pr-3">series</td><td class="pr-3">status</td><td class="pr-3">current</td>
+        <td class="pr-3">hr_avg</td><td class="pr-3">avg_7d</td><td class="pr-3">avg_30d</td><td class="pr-3">max_7d</td>
+        <td class="pr-3">max_30d</td><td class="pr-3">day%</td><td class="pr-3">week%</td><td class="pr-3">rate%</td>
+        <td class="pr-3">triggered</td></tr></thead><tbody>${rows}</tbody></table></div>
+        <div class="text-[10px] text-slate-500">${pwLine}</div>
+    </details>`;
+}
+
 async function _csRenderDiag(source) {
     csSetToolbar('');
     const prod = source === 'mist' ? 'Mist' : source === 'central_on_prem' ? 'Central On-Prem' : 'Central';
@@ -3515,6 +3570,7 @@ async function _csRenderDiag(source) {
         const info = (checkStatus[site] || {})[id];
         const derived = info != null ? (typeof info === 'object' ? info.status : info) : null;
         const dmsg = (info && typeof info === 'object') ? (info.message || '') : '';
+        const debug = (info && typeof info === 'object') ? info.debug : null;
         const matches = (rawById[norm(id)] || []).filter(f => !nsite(site) || !nsite(f.site) || nsite(f.site) === nsite(site));
         const rawN = matches.length;
         const rawSev = [...new Set(matches.map(m => m.severity).filter(Boolean))].join(', ');
@@ -3531,7 +3587,7 @@ async function _csRenderDiag(source) {
         else if (rawN > 0 && firing === 'not_firing') { diag = `⚠️ Logic — ${prod} reports it, but the check reads absent (count / id mismatch)`; dcls = 'amber'; }
         else if (rawN === 0 && firing === 'firing') { diag = `⚠️ Logic — check reads firing, but ${prod} reports nothing`; dcls = 'amber'; }
         else { diag = '—'; dcls = 'slate'; }
-        return { site: site || '(all)', name, id, type, rawN, rawSev, derived, dmsg, firing, diag, dcls };
+        return { site: site || '(all)', name, id, type, rawN, rawSev, derived, dmsg, debug, firing, diag, dcls };
     }).sort((a, b) => ({ amber: 0, slate: 2, green: 1 }[a.dcls] - { amber: 0, slate: 2, green: 1 }[b.dcls]) || a.name.localeCompare(b.name));
 
     const dc = { green: 'text-emerald-700', amber: 'text-amber-700', slate: 'text-slate-500' };
@@ -3548,7 +3604,7 @@ async function _csRenderDiag(source) {
             ? `<span class="text-emerald-700 font-semibold">${r.rawN} present</span>${r.rawSev ? `<span class="text-[10px] text-slate-400"> · ${csEscape(r.rawSev)}</span>` : ''}`
             : `<span class="text-slate-400">none</span>`, sort: r => r.rawN },
         { label: 'Dashboard (derived)', render: r => r.derived != null
-            ? `${csStatusBadge(r.derived)}${r.dmsg ? `<div class="text-[10px] text-slate-400 mt-0.5">${csEscape(r.dmsg)}</div>` : ''}`
+            ? `${csStatusBadge(r.derived)}${r.dmsg ? `<div class="text-[10px] text-slate-400 mt-0.5">${csEscape(r.dmsg)}</div>` : ''}${_csFormatCcDebug(r.debug)}`
             : `<span class="text-slate-400">—</span>`, sort: r => String(r.derived || '~') },
         { label: 'Firing', render: r => r.derived != null ? csAlertBadge(r.derived) : `<span class="text-[10px] text-slate-400 italic">unresolved</span>`, sort: r => r.firing },
         { label: 'Diagnosis', render: r => chip(r.diag, dc[r.dcls] || dc.slate), sort: r => r.dcls },
