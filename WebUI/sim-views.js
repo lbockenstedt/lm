@@ -4865,7 +4865,10 @@ function csRenderSimQuotaEditor() {
                   ? _csKnobInheritRows(r, cat) : '';
               if (!_learnedOpFooter && !_knobRows) return '';
               return `<div class="md:col-span-6 mt-1 border-t border-slate-100 pt-1">
-        <div class="space-y-0.5 pl-1">${_learnedOpFooter}${_knobRows}</div>
+        <div class="flex items-start justify-between gap-6 pl-1">
+          <div>${_learnedOpFooter}</div>
+          <div class="space-y-0.5">${_knobRows}</div>
+        </div>
     </div>`;
           })()}
         </div>`;
