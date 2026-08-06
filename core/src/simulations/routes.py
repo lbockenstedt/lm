@@ -3468,7 +3468,18 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # rendering forever (dedup-merged into the same row) while reporting
         # "removed: false" — the primary genuinely never had it.
         results = await _cs_forward_all(tenant_id, "CS_DELETE_CLIENT", {"hostname": hostname})
-        removed = any(isinstance(d, dict) and d.get("removed") for _sid, d in results)
+        # Distinguish "every spoke answered and none had it" (genuine
+        # not-found) from "no spoke could even be asked" (empty results / no
+        # spoke bound / transport failure on all of them, non-dict replies).
+        # Collapsing both into removed=False + a hardcoded SUCCESS meant a
+        # total forwarding failure silently masqueraded as "already gone" —
+        # the same misleading-message failure mode this endpoint exists to
+        # fix, just moved from the single-spoke path to the all-failed path.
+        replied = [d for _sid, d in results if isinstance(d, dict)]
+        if not replied:
+            raise HTTPException(status_code=502,
+                                detail="no client-sim spoke responded to the delete request")
+        removed = any(d.get("removed") for d in replied)
         # Mirror the removal into the hub cache so the row disappears before
         # the next ~10s telemetry frame (same pattern as Purge Clients).
         try:
