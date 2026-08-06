@@ -33,7 +33,14 @@ SIM_QUOTA_KEYS = ("alert_id", "alert_type", "sim_id", "count", "site",
                   # operator pin their own per-knob value in knob_overrides; any
                   # knob key NOT present there still falls back to the computed
                   # floor for that key.
-                  "inherit_learned_knobs", "knob_overrides")
+                  "inherit_learned_knobs", "knob_overrides",
+                  # Consumer-row (Adaptive, not Learning) count floor. Default ON:
+                  # min/max are dynamically DERIVED each controller tick from the
+                  # learned operating point/floor (min = op = floor+20%, max =
+                  # double the raw floor) instead of the stored min/max — see
+                  # adaptive_step's docstring. OFF (or nothing learned yet) falls
+                  # back to the stored min/max exactly as before.
+                  "inherit_learned_count")
 ALERT_TYPES = ("alert", "insight")
 # Per-quota client-tier policy (twin of cs sim_quota.QUOTA_TIERS). "best"
 # (default) = prefer T1 (dedicated PCI, most reliable) then fall back to T2 (USB
@@ -283,6 +290,9 @@ def normalize_quota(raw: Any) -> Dict[str, Any]:
         "inherit_learned_knobs": _as_bool(raw.get("inherit_learned_knobs"), True),
         "knob_overrides": ({str(k): v for k, v in raw["knob_overrides"].items()}
                            if isinstance(raw.get("knob_overrides"), dict) else {}),
+        # Consumer-row count floor (see SIM_QUOTA_KEYS comment above / the
+        # WebUI's "Inherit learned values" checkbox on Min/Max). Default ON.
+        "inherit_learned_count": _as_bool(raw.get("inherit_learned_count"), True),
     }
     # Adaptive-controller fields (design doc §9) — carried through only when the
     # quota declares them, so a fixed-count quota stays exactly as before. The
@@ -533,12 +543,16 @@ def _derived_mode(phase: str) -> str:
 
 
 def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
-                  applied_op: int | None = None) -> Dict[str, Any]:
+                  applied_op: int | None = None,
+                  applied_floor: int | None = None) -> Dict[str, Any]:
     """Advance one controller tick (design §9). ``firing`` is True/False/None
     (None = unknown → hold). ``applied_op`` is the effective learned operating
     point for this alert (max of this tenant's learning-ON stable learned_op and
     the global published value) — used to SEED a cold start so a consumer/lab
     begins near the known-good count instead of ramping from min.
+    ``applied_floor`` is the same max-across-sources treatment for the raw
+    learned floor (pre-buffer) — used, alongside applied_op, to derive a
+    CONSUMER row's effective min/max when it inherits (see below).
 
     Two behaviors, gated by ``q["learning"]``:
 
@@ -554,11 +568,31 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
       firing → +step until firing; firing → HOLD (never down-ratchet, never risk
       stopping the alert). Produces no ``learned_op``.
 
+    BEHAVIOR CHANGE: a consumer row with ``inherit_learned_count`` (default ON)
+    no longer clamps to its own stored min/max once a value has been learned +
+    published — min/max are DYNAMICALLY derived each tick from applied_op /
+    applied_floor (min = applied_op, the existing floor+20% operating point;
+    max = double the raw floor, so production has headroom above the bare
+    operating point without an operator manually retuning Max as the learned
+    value moves). This was the actual "not inherited" gap: applied_op already
+    lifted the running TARGET up-only, but a stale stored max still silently
+    capped it below what the learned value called for. Turning inherit OFF (or
+    no learned value published yet) falls back to the stored min/max exactly
+    as before — an explicit, unambiguous escape hatch. Lab rows are never
+    affected — they always run their own thermostat's min/max.
+
     A settle window (≥30 min, floored for Central's reporting latency) gates
     every change. Returns the next state dict
     ``{target, floor, phase, learned_op, mode, last_change}``."""
-    mn = int(q.get("min") or 1)
-    mx = max(mn, int(q.get("max") or mn))
+    learning = _as_bool(q.get("learning"), False)
+    inherit_count = _as_bool(q.get("inherit_learned_count"), True)
+    if not learning and inherit_count and applied_op is not None:
+        mn = int(applied_op)
+        mx = max(mn, int(applied_floor) * 2) if applied_floor is not None \
+            else max(mn, int(q.get("max") or mn))
+    else:
+        mn = int(q.get("min") or 1)
+        mx = max(mn, int(q.get("max") or mn))
     step = max(1, int(q.get("step") or 1))
     # Central reports alerts with LATENCY — often 30+ min. The controller must
     # not change the target (up OR down) faster than that, or it ramps to max
@@ -566,7 +600,6 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
     # alarm). Floor the settle window at 30 min regardless of the config.
     settle = max(1800.0, float(q.get("settle") or 1800.0))
     buffer = float(q.get("buffer") if q.get("buffer") is not None else 0.20)
-    learning = _as_bool(q.get("learning"), False)
 
     target = st.get("target")
     floor = st.get("floor")
@@ -801,6 +834,7 @@ def apply_adaptive_targets(quotas: List[Dict[str, Any]],
     ``applied_op[alert]`` = max of this tenant's learning-ON stable rows'
     ``learned_op`` for that alert and the global published value
     (``global_learned[alert_key].op``). Highest wins across multiple learners.
+    ``applied_floor[alert]`` mirrors this for the raw learned floor (pre-buffer).
 
     * learning-ON row: ``count`` = its own thermostat ``target`` (the probe).
     * learning-OFF row: ``count`` = ``max(its target, applied_op)`` — seeds/lifts
@@ -808,14 +842,24 @@ def apply_adaptive_targets(quotas: List[Dict[str, Any]],
       drops it, so a firing site stays firing). Cold start (no state) seeds from
       ``applied_op`` (or ``min`` when none exists yet).
 
+    BEHAVIOR CHANGE: a consumer row's effective MAX is no longer just its own
+    stored ``max`` when ``inherit_learned_count`` (default ON) and a floor has
+    been published — it's ``max(base, applied_floor*2)``, so a stale/low stored
+    max can't silently cap the running count below what the learned value
+    calls for. See adaptive_step's docstring for the matching min-side change
+    (min = applied_op there). OFF, or nothing published yet, keeps today's
+    exact behavior (stored max is the hard cap).
+
     Non-adaptive quotas are left untouched."""
     global_learned = global_learned or {}
     adaptive = [q for q in quotas if adaptive_is_on(q)]
     if not adaptive:
         return quotas
 
-    # applied_op per alert = max(own learning-ON stable learned_op, global op)
+    # applied_op / applied_floor per alert = max(own learning-ON stable value,
+    # global published value). Highest wins across multiple learners.
     applied_op: Dict[str, int] = {}
+    applied_floor: Dict[str, int] = {}
     for q in adaptive:
         if not _as_bool(q.get("learning"), False):
             continue
@@ -826,19 +870,34 @@ def apply_adaptive_targets(quotas: List[Dict[str, Any]],
             val = int(st["learned_op"])
             if cur is None or val > cur:
                 applied_op[ak] = val
+            if st.get("floor") is not None:
+                curf = applied_floor.get(ak)
+                valf = int(st["floor"])
+                if curf is None or valf > curf:
+                    applied_floor[ak] = valf
     for ak, gv in global_learned.items():
         if not isinstance(gv, dict):
             continue
         gop = gv.get("op")
-        if gop is None:
-            continue
-        try:
-            gval = int(gop)
-        except (TypeError, ValueError):
-            continue
-        cur = applied_op.get(ak)
-        if cur is None or gval > cur:
-            applied_op[ak] = gval
+        if gop is not None:
+            try:
+                gval = int(gop)
+            except (TypeError, ValueError):
+                gval = None
+            if gval is not None:
+                cur = applied_op.get(ak)
+                if cur is None or gval > cur:
+                    applied_op[ak] = gval
+        gfloor = gv.get("floor")
+        if gfloor is not None:
+            try:
+                gfval = int(gfloor)
+            except (TypeError, ValueError):
+                gfval = None
+            if gfval is not None:
+                curf = applied_floor.get(ak)
+                if curf is None or gfval > curf:
+                    applied_floor[ak] = gfval
 
     for q in adaptive:
         st = state.get(adaptive_key(q)) or {}
@@ -865,7 +924,12 @@ def apply_adaptive_targets(quotas: List[Dict[str, Any]],
                 base = int(op) if op is not None else int(q.get("min") or 1)
             else:
                 base = max(int(tgt), int(op)) if op is not None else int(tgt)
-            mx = int(q.get("max") or base)
+            fl = applied_floor.get(ak)
+            inherit_count = _as_bool(q.get("inherit_learned_count"), True)
+            if inherit_count and fl is not None:
+                mx = max(base, int(fl) * 2)
+            else:
+                mx = int(q.get("max") or base)
             q["count"] = min(mx, base)
     return quotas
 

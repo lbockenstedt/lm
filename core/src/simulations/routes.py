@@ -1226,8 +1226,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return sim_quota.ceil_to_int(x)
 
     def _adaptive_step(st: dict, q: dict, firing, now: float,
-                       applied_op: Optional[int] = None) -> dict:
-        return sim_quota.adaptive_step(st, q, firing, now, applied_op)
+                       applied_op: Optional[int] = None,
+                       applied_floor: Optional[int] = None) -> dict:
+        return sim_quota.adaptive_step(st, q, firing, now, applied_op, applied_floor)
 
     def _alias_groups_from_csc(csc: dict) -> list:
         """Build the "groups" of co-referring site identifiers from a tenant's
@@ -1580,8 +1581,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 if not adaptive:
                     continue
                 state = await store.get_adaptive_state(tid)
-                # applied_op per alert = max(own learning-ON stable learned_op, global op)
+                # applied_op / applied_floor per alert = max(own learning-ON
+                # stable value, global published value).
                 applied_op: dict = {}
+                applied_floor: dict = {}
                 for q in adaptive:
                     if not q.get("learning"):
                         continue
@@ -1591,18 +1594,29 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                         val = int(st["learned_op"])
                         if ak not in applied_op or val > applied_op[ak]:
                             applied_op[ak] = val
+                        if st.get("floor") is not None:
+                            valf = int(st["floor"])
+                            if ak not in applied_floor or valf > applied_floor[ak]:
+                                applied_floor[ak] = valf
                 for ak, gv in (global_lv or {}).items():
                     if not isinstance(gv, dict):
                         continue
                     gop = gv.get("op")
-                    if gop is None:
-                        continue
-                    try:
-                        gval = int(gop)
-                    except (TypeError, ValueError):
-                        continue
-                    if ak not in applied_op or gval > applied_op[ak]:
-                        applied_op[ak] = gval
+                    if gop is not None:
+                        try:
+                            gval = int(gop)
+                        except (TypeError, ValueError):
+                            gval = None
+                        if gval is not None and (ak not in applied_op or gval > applied_op[ak]):
+                            applied_op[ak] = gval
+                    gfloor = gv.get("floor")
+                    if gfloor is not None:
+                        try:
+                            gfval = int(gfloor)
+                        except (TypeError, ValueError):
+                            gfval = None
+                        if gfval is not None and (ak not in applied_floor or gfval > applied_floor[ak]):
+                            applied_floor[ak] = gfval
                 changed = False
                 live = set()
                 # Known-good capture: the learned simulation.conf knobs live in
@@ -1619,7 +1633,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     firing = await _alert_firing(tid, q, alias_groups)
                     before = dict(state.get(k) or {})
                     after = _adaptive_step(before, q, firing, now,
-                                            applied_op.get(_alert_key(q)))
+                                            applied_op.get(_alert_key(q)),
+                                            applied_floor.get(_alert_key(q)))
                     if after != before:
                         state[k] = after; changed = True
                     # Record the known-good when a learning-ON quota is stable —

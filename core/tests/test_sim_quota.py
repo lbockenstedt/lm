@@ -290,6 +290,28 @@ def test_adaptive_is_on_requires_max_above_min():
     assert sim_quota.adaptive_is_on({"count": 10}) is False        # plain quota
 
 
+# ── adaptive_step: consumer min/max inheritance (default ON) ───────────────
+def test_adaptive_step_consumer_cold_start_uses_inherited_bounds():
+    """A consumer row's cold-start clamp uses the DYNAMIC bounds (min=applied_op,
+    max=applied_floor*2) when inherit_learned_count is ON (default), not its own
+    stale stored min/max. Configured min=1/max=10; applied_op=11, applied_floor=9
+    -> dynamic bounds [11, 18] -> the seed (applied_op=11) survives the clamp
+    instead of being pulled down to the stored max=10."""
+    cons = _aq(site="MIA-PSK", learning=False, min=1, max=10)
+    st = sim_quota.adaptive_step({}, cons, firing=None, now=1000.0,
+                                 applied_op=11, applied_floor=9)
+    assert st["target"] == 11
+
+
+def test_adaptive_step_consumer_override_uses_stored_bounds():
+    """inherit_learned_count OFF: cold-start clamp uses the row's own stored
+    min/max exactly as before this feature existed, ignoring applied_floor."""
+    cons = _aq(site="MIA-PSK", learning=False, min=1, max=10, inherit_learned_count=False)
+    st = sim_quota.adaptive_step({}, cons, firing=None, now=1000.0,
+                                 applied_op=11, applied_floor=9)
+    assert st["target"] == 10   # clamped to the stored max, not lifted
+
+
 # ── apply_adaptive_targets: learning-ON probe vs consumer seed/lift ─────────
 def test_apply_learning_row_runs_own_probe_target_not_lifted():
     """A learning-ON lab row runs its OWN thermostat target as count — it is the
@@ -305,12 +327,16 @@ def test_apply_learning_row_runs_own_probe_target_not_lifted():
 
 def test_apply_consumer_adopts_max_of_target_and_applied_op():
     """A learning-OFF consumer takes max(its target, applied_op) — lifted up to
-    the learned op but never dropped below its working count — then CAPPED at
-    Max (the hard ceiling for lab + production so one alert can't exhaust the
-    client pool). The learning-ON lab runs at its FLOOR (target), never the +20%
-    op; the consumer is the one that adopts the op (floor+20%) once it's learned
-    + approved, but clamps it to its own Max. Here the lab (max 15) learns
-    floor 9 → op 11; the consumer (max 10) lifts 5 → 11 but is clamped to 10."""
+    the learned op but never dropped below its working count. The learning-ON
+    lab runs at its FLOOR (target), never the +20% op; the consumer is the one
+    that adopts the op (floor+20%) once it's learned + approved. Here the lab
+    (max 15) learns floor 9 -> op 11; the consumer (max 10, inherit_learned_count
+    default ON) lifts 5 -> op 11, and its effective max is ALSO lifted to
+    max(11, floor*2=18)=18 (see test_apply_consumer_inherits_double_floor_max
+    below for the isolated max-lift case) -- so it runs the full op, 11, not
+    clamped to the stale configured max 10. See
+    test_apply_consumer_max_override_disables_inherited_lift for the escape
+    hatch that preserves the old clamped-to-configured-max behavior."""
     lab = _aq(site="DFW", learning=True, min=1, max=15)
     cons = _aq(site="MIA-PSK", learning=False, min=1, max=10)
     state = {
@@ -322,7 +348,24 @@ def test_apply_consumer_adopts_max_of_target_and_applied_op():
     out = sim_quota.apply_adaptive_targets([dict(lab), dict(cons)], state)
     by_site = {q["site"]: q for q in out}
     assert by_site["DFW"]["count"] == 9        # lab runs at the FLOOR, not the +20%
-    assert by_site["MIA-PSK"]["count"] == 10   # consumer lifted 5 → op 11, clamped to Max 10
+    assert by_site["MIA-PSK"]["count"] == 11   # consumer lifted 5 → op 11, max inherited to 18 (not clamped to stale 10)
+
+
+def test_apply_consumer_max_override_disables_inherited_lift():
+    """inherit_learned_count OFF is the escape hatch back to today's exact
+    behavior: a published op/floor above the consumer's configured Max still
+    clamps to that Max, exactly like before this feature existed."""
+    lab = _aq(site="DFW", learning=True, min=1, max=15)
+    cons = _aq(site="MIA-PSK", learning=False, min=1, max=10, inherit_learned_count=False)
+    state = {
+        sim_quota.adaptive_key(lab): {"target": 9, "floor": 9, "phase": "stable",
+                                      "learned_op": 11, "last_change": 0},
+        sim_quota.adaptive_key(cons): {"target": 5, "phase": "up_find",
+                                       "last_change": 0},
+    }
+    out = sim_quota.apply_adaptive_targets([dict(lab), dict(cons)], state)
+    by_site = {q["site"]: q for q in out}
+    assert by_site["MIA-PSK"]["count"] == 10   # override: clamped to the stored Max, as before
 
 
 def test_apply_consumer_clamped_to_max_even_when_learned_op_exceeds_it():
