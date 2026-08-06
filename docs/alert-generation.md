@@ -54,6 +54,7 @@ clients in the right place for the controller to cross its alert threshold.
 | **WPA Passphrase is Incorrect** | `ssidpw_fail` | Repeatedly associates with a PSK one char off (`<ssidpw>_fail`); 1X clients corrupt `dot1x_password` | uses the bucket's real `ssidpw` / `dot1x_password`, corrupted at runtime |
 | **Client Association Failure / Client Disconnected / Wireless Client Roam** | `assoc_fail` | Cycles the WLAN interface up/down repeatedly so association keeps failing | — (nmcli/radio) |
 | **Auth Failure (blocked MAC / invalid creds)** | `auth_fail` | Flaps the WLAN with a blocked MAC / invalid creds; toggles the radio | — (nmcli/radio) |
+| **Auth Failure (MAC Authentication Bypass deny)** | `mac_auth_fail` | Associates with a fixed, PREDICTABLE spoofed MAC (nmcli `802-11-wireless.cloned-mac-address`, pinned on the connection PROFILE via `connection modify` + `connection up` — never `device wifi connect`, which silently resets it) so a pre-configured RADIUS/ClearPass MAC-Auth deny rule rejects it repeatedly | `[address]` `mac_auth_fail_mac` — set this to the EXACT MAC you've pre-configured as the ClearPass deny entry (default `02:BA:D0:00:00:01`, a locally-administered/synthetic MAC) |
 | **Maximum Associations** | *count-driven* (pair with `assoc_fail`/presence) | Enough clients associated to one AP/cell crosses the max-assoc threshold | quota **count** on the SSID cell is the lever |
 | **Port Flap (wired)** | `port_flap` | Bounces the wired interface up/down (`ip link`); mgmt interface is guarded/skipped | — |
 

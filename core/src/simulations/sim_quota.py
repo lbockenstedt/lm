@@ -92,6 +92,7 @@ SIM_META: Dict[str, Dict[str, object]] = {
     "assoc_fail":  {"category": "failure", "multi_capable": False},
     "auth_fail":   {"category": "failure", "multi_capable": False},
     "ssidpw_fail": {"category": "failure", "multi_capable": False},
+    "mac_auth_fail": {"category": "failure", "multi_capable": False},
     "port_flap":   {"category": "failure", "multi_capable": False},
     "ping_test":   {"category": "traffic", "multi_capable": True},
     "download":    {"category": "traffic", "multi_capable": True},

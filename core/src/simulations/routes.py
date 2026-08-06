@@ -863,7 +863,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     # committed+pushed to GitHub when a token is configured, 403 in GitHub
     # read-only. Replaces the hidden per-client registry layer; the legacy
     # registry override is cleared on write so nothing double-applies.
-    _CS_SIM_FLAGS = {'assoc_fail', 'auth_fail', 'dhcp_fail', 'dns_fail', 'download',
+    _CS_SIM_FLAGS = {'assoc_fail', 'auth_fail', 'mac_auth_fail', 'dhcp_fail', 'dns_fail', 'download',
                      'iperf', 'kill_switch', 'ping_test', 'port_flap', 'ssidpw_fail',
                      'www_traffic'}
 
@@ -3270,7 +3270,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         # offline so the UI's dropdown still populates. (Mirrors
         # cs/lm-spoke/src/demo_scenarios.build_scenarios — kept in sync.)
         _flags = ("dns_fail", "dhcp_fail", "assoc_fail", "auth_fail",
-                  "ssidpw_fail", "port_flap")
+                  "ssidpw_fail", "mac_auth_fail", "port_flap")
         _canon = {"normal": {f: "off" for f in _flags}}
         for f in _flags:
             _canon[f] = {x: ("on" if x == f else "off") for x in _flags}
