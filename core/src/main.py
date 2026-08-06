@@ -377,6 +377,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
         # { spoke_id: str } tracking spoke versions
         self.spoke_versions: Dict[str, str] = {}
+        # { spoke_id: str } opportunistic commit-SHA capture, same site as
+        # spoke_versions — see the log sentinel's use in run_log_health_loop.
+        self.spoke_commits: Dict[str, str] = {}
         # { spoke_id: module_type } — e.g. {"pxmx-spoke-1": "hypervisor"}
         self.spoke_module_types: Dict[str, str] = {}
         # { spoke_id: parent_spoke_id } — for multi-role generic agents: each
@@ -4673,6 +4676,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         data = payload.get("data", {})
                         if isinstance(data, dict) and "version" in data:
                             self.spoke_versions[pk] = data["version"]
+                        if isinstance(data, dict) and data.get("commit_sha"):
+                            self.spoke_commits[pk] = data["commit_sha"]
 
                     # Store in response cache for API request bridging — but
                     # only if a waiter is still outstanding for this msg_id, so
@@ -7066,6 +7071,30 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 mods.append(name)
         return mods
 
+    def _sentinel_module_sids(self, module):
+        """Spoke id(s) that back a sentinel module (same matching rule as
+        _gather_module_log_lines): every spoke advertising the module's type,
+        plus any spoke id matching `module` or `module-*` (multi-role agents)."""
+        mtype = self._SENTINEL_MODULE_TYPES.get(module)
+        sids = set()
+        if mtype:
+            sids.update(sid for sid, mt in self.spoke_module_types.items() if mt == mtype)
+        sids.update(sid for sid in getattr(self, "agent_logs", {})
+                    if sid == module or sid.startswith(module + "-"))
+        return sids
+
+    def _sentinel_module_commit(self, module):
+        """Best-effort short commit SHA for a sentinel module's spoke, from the
+        opportunistic self.spoke_commits capture (populated whenever a spoke's
+        COMMAND_RESULT happens to carry a commit_sha field — see the
+        version-capture site in the frame-dispatch loop). '' if not yet known
+        (older spokes that don't report commit_sha, or none connected)."""
+        for sid in self._sentinel_module_sids(module):
+            sha = self.spoke_commits.get(self._primary_key(sid))
+            if sha:
+                return sha[:8]
+        return ""
+
     @staticmethod
     def _error_lines(lines):
         """Error-level lines only — the cheap pre-gate before spending an LLM call."""
@@ -7134,7 +7163,34 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             sha = (await self.get_local_commit())[:8] or "unknown"
                             title = f"Lab Manager (hub) logs — v{running_ver} @ {sha}"
                         else:
-                            title = f"{module} logs"
+                            # Actively ask the module's spoke for version +
+                            # commit — nothing else in the hub calls
+                            # GET_VERSION today, so the opportunistic
+                            # spoke_versions/spoke_commits capture would
+                            # otherwise sit empty forever. Best-effort: a spoke
+                            # that doesn't implement GET_VERSION yet, or is
+                            # slow/offline, just degrades to a bare title.
+                            ver = sha = ""
+                            sids = self._sentinel_module_sids(module)
+                            if sids:
+                                sid0 = next(iter(sids))
+                                spk = self._primary_key(sid0)
+                                try:
+                                    vresp = await self.request_response(sid0, "GET_VERSION", {}, timeout=10.0)
+                                    vinner = (vresp.get("payload", {}).get("data", vresp)
+                                              if isinstance(vresp, dict) else {}) or {}
+                                    ver = vinner.get("version") or ""
+                                    sha = vinner.get("commit_sha") or ""
+                                    if ver:
+                                        self.spoke_versions[spk] = ver
+                                    if sha:
+                                        self.spoke_commits[spk] = sha
+                                except Exception as ve:  # noqa: BLE001
+                                    logger.debug(f"[log-sentinel] GET_VERSION for {module} failed: {ve}")
+                                ver = ver or self.spoke_versions.get(spk, "")
+                                sha = sha or self.spoke_commits.get(spk, "")
+                            tag = (f" — v{ver}" if ver else "") + (f" @ {sha[:8]}" if sha else "")
+                            title = f"{module} logs{tag}"
                         res = await self.analyze_logs_via_bugfixer(module, "\n".join(lines), title)
                         if res.get("duration_s"):
                             durations.append(res["duration_s"])
