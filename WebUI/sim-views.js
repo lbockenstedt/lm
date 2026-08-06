@@ -997,7 +997,7 @@ window.csSimChecksFilter = function () {
       <td class="px-3 pt-2 pb-1 text-right">${csPct(sx.h24)}</td>
       <td class="px-3 pt-2 pb-1 text-right">${csPct(sx.d7)}</td>
       <td class="px-3 pt-2 pb-1 text-right">${csPct(sx.w4)}</td>
-      <td class="px-3 pt-2 pb-1 text-xs text-slate-400">${csEscape((r.detail && (r.detail.message || r.detail.last_error)) || '—')}</td>
+      <td class="px-3 pt-2 pb-1 text-xs text-slate-400">${csEscape((r.detail && (r.detail.message || r.detail.last_error)) || '—')}${_csFormatCcDebug(r.detail && r.detail.debug)}</td>
     </tr>${bar ? `<tr><td colspan="7" class="px-3 pb-2 pt-0">${bar}</td></tr>` : ''}`;
     }).join('');
     body.innerHTML = csTable(['Site', 'Check', 'Status', '24h', '7d', '4w', 'Detail'], rh);
