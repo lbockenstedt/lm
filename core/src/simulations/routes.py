@@ -12,7 +12,7 @@ section). This is the LM-side port of the legacy solutions-hpe Client-Sim UI.
 
 from fastapi import WebSocket, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 import asyncio
 import configparser
 from datetime import datetime, timezone
@@ -3484,6 +3484,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
     @app.delete("/sim/api/{tenant}/clients/{hostname}")
     async def cs_delete_client(tenant: str, hostname: str,
                                tenant_id: str = Depends(get_tenant_id)):
+        removed = await _delete_client_everywhere(tenant_id, hostname)
+        return {"status": "SUCCESS", "hostname": hostname, "removed": removed}
+
+    async def _delete_client_everywhere(tenant_id: str, hostname: str) -> bool:
+        """Remove ONE client's registry record from EVERY client-sim spoke
+        bound to the tenant, then mirror the removal into the hub cache.
+        Shared by cs_delete_client (single, human-clicked) and the fleet
+        scrub below (many, machine-driven). Raises 502 if no spoke could
+        even be asked (none bound, or every forward errored) — never
+        silently reports removed=False for a transport failure."""
         # Fan out to EVERY client-sim spoke bound to the tenant, not just the
         # "primary" one _cs_forward targets. A client's registry entry can
         # live on whichever spoke it's actually connected to — or, per
@@ -3520,7 +3530,109 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                        if not (isinstance(c, dict) and c.get("hostname") == hostname)]
         except Exception:  # noqa: BLE001
             pass
-        return {"status": "SUCCESS", "hostname": hostname, "removed": removed}
+        return removed
+
+    # Real batches finish fast; a freshly-provisioned VM's telemetry can lag
+    # a tick behind its client's first check-in. Require a client to have been
+    # quiet for this long, on TOP of matching no VM, before the automatic
+    # sweep touches it — the existence check is the primary signal, this is
+    # just a race-condition buffer so a VM that was created seconds ago can't
+    # get its brand-new client scrubbed before proxmox_vms catches up.
+    _SCRUB_GRACE_S = 600
+
+    def _stale_clients_no_vm(tenant_id: str) -> List[str]:
+        """Registered clients whose hostname matches NO currently-known VM
+        anywhere in the tenant's fleet, AND have been quiet for at least
+        _SCRUB_GRACE_S. VM teardown (manual delete, fleet reclone,
+        quarantine-destroy, hostname-audit reclone, ...) never notifies the
+        client registry — none of those pxmx-side code paths call
+        CS_DELETE_CLIENT — so a torn-down VM's client record only ever went
+        away via a full Purge Clients or the 48h age-based prune_stale sweep.
+        A recently-active client whose VM was destroyed minutes ago still
+        reads as fresh to that age check, so it can linger for up to ~48h; at
+        fleet-reclone/quota-churn scale that's how a Clients tab ends up
+        showing far more rows than could possibly be real. This is the
+        immediate, existence-based signal instead: not "have we heard from
+        you lately" but "does a VM with your name exist at all right now".
+        VM names are read from the hub's cached proxmox_vms (last-known state
+        survives a host going merely offline, so a host that's simply
+        unreachable right now doesn't cause its VMs' clients to be wrongly
+        flagged — only a VM that's genuinely gone from the inventory does).
+
+        Returns [] (skips the tenant entirely) when the fleet has no VM
+        inventory data at all — a telemetry outage that emptied proxmox_vms
+        fleet-wide must never read as "every VM is gone", which would scrub
+        the whole registry."""
+        vm_names = set()
+        saw_any_host = False
+        for _sid, data in service._spokes_for_tenant(tenant_id):
+            for h in (data.get("proxmox_hosts") or []):
+                saw_any_host = True
+                for v in (h.get("proxmox_vms") or []):
+                    n = str((v or {}).get("name") or "").strip()
+                    if n:
+                        vm_names.add(n)
+            if data.get("proxmox_vms"):  # legacy single-host shape
+                saw_any_host = True
+                for v in data["proxmox_vms"]:
+                    n = str((v or {}).get("name") or "").strip()
+                    if n:
+                        vm_names.add(n)
+        if not saw_any_host:
+            return []
+        now = time.time()
+        stale = []
+        for _sid, data in service._spokes_for_tenant(tenant_id):
+            for c in (data.get("clients") or []):
+                c = c or {}
+                h = str(c.get("hostname") or "").strip()
+                if not h or h in vm_names or h in stale:
+                    continue
+                try:
+                    ls = float(c.get("last_seen") or 0)
+                except (TypeError, ValueError):
+                    ls = 0.0
+                if ls and (now - ls) < _SCRUB_GRACE_S:
+                    continue
+                stale.append(h)
+        return stale
+
+    async def _clients_scrub_loop() -> None:
+        """Automatic fleet-vs-registry reconciliation — the same underlying
+        delete _delete_client_everywhere uses for the human-clicked Remove
+        button, just self-triggered per tenant instead of one hostname at a
+        time on demand. See _stale_clients_no_vm for why this exists (VM
+        teardown never notifies the client registry, so nothing else catches
+        this on a useful timescale). Runs alongside the 15-min reconcile-push
+        backstop; deliberately not gated on that loop's cadence or errors.
+        Started from main.py."""
+        while True:
+            try:
+                for tid in _all_tenant_ids():
+                    try:
+                        stale = _stale_clients_no_vm(tid)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(f"clients scrub: {tid} stale-check failed: {exc}")
+                        continue
+                    if not stale:
+                        continue
+                    results = await asyncio.gather(
+                        *[_delete_client_everywhere(tid, h) for h in stale],
+                        return_exceptions=True)
+                    removed = [h for h, r in zip(stale, results) if r is True]
+                    if removed:
+                        logger.info("clients scrub (%s): removed %d client(s) with no matching VM: %s",
+                                   tid, len(removed), removed)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — a sweep must not kill the loop
+                logger.warning(f"clients scrub loop: {exc}")
+            await asyncio.sleep(900)
+
+    try:
+        hub._clients_scrub_loop = _clients_scrub_loop
+    except Exception:  # noqa: BLE001
+        pass
 
     @app.get("/sim/api/{tenant}/clients/{hostname}/control")
     async def cs_get_client_control(tenant: str, hostname: str,

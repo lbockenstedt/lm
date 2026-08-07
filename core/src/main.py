@@ -8139,6 +8139,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         _reconcile_loop = getattr(self, "_reconcile_push_loop", None)
         if _reconcile_loop is not None:
             asyncio.create_task(_reconcile_loop())
+        # Client-fleet scrub: every 15m, remove any registered client whose
+        # hostname matches no VM anywhere in the tenant's fleet. VM teardown
+        # (delete, fleet reclone, quarantine-destroy, ...) never notifies the
+        # client registry, so nothing else catches this on a useful
+        # timescale short of the 48h age-based prune_stale sweep. Registered
+        # by register_simulations_routes.
+        _scrub_loop = getattr(self, "_clients_scrub_loop", None)
+        if _scrub_loop is not None:
+            asyncio.create_task(_scrub_loop())
         # Hub-as-sole-GitHub-client: ONE central puller that syncs each
         # github-managed tenant's simulation.conf / user-overrides.conf from its
         # repo and pushes changes down to that tenant's spokes (replaces the
