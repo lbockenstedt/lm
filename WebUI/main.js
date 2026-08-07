@@ -1433,7 +1433,7 @@ const VIEW_SUBMENUS = {
 const VIEW_CHILDREN = {
     cs: {
         'Dashboard': ['Checks', 'Hardware', 'Client Count'],
-        'Clients':     ['All', 'T1', 'T2', 'T3'],
+        'Clients':     ['All', 'T1', 'T2', 'T3', 'Offline'],
         'Central':         ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware', 'Diagnostic'],
         'Central On-Prem': ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware', 'Diagnostic'],
         'Mist':            ['Sites', 'Alerts', 'Insights', 'Clients', 'Hardware', 'Diagnostic'],
