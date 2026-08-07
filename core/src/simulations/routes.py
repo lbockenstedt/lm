@@ -1720,7 +1720,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 if kg_changed:
                     await store.set_known_good(tid, known_good)
                 if pending_changed:
-                    await store.set_global_learned_pending(pending)
+                    await store.set_global_learned_values(published)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("adaptive controller (%s): %s", tid, exc)
 
@@ -5526,7 +5526,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if not approved:
             raise HTTPException(status_code=404, detail="no matching pending entries")
         await store.set_global_learned_values(published)
-        await store.set_global_learned_pending(pending)
+        await store.set_global_learned_values(published)
         pushed = await _push_sim_quotas_all_tenants()
         return {"status": "approved", "approved": approved, "pushed_to_spokes": pushed}
 
@@ -5544,7 +5544,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         pending = await store.get_global_learned_pending()
         existed = pending.pop(ak, None) is not None
         if existed:
-            await store.set_global_learned_pending(pending)
+            await store.set_global_learned_values(published)
         return {"status": "rejected" if existed else "not_found", "alert_key": ak}
 
     @app.get("/sim/api/{tenant}/central/available")
