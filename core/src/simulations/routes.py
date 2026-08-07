@@ -1674,6 +1674,15 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 try:
                     _atmax = {kk for kk in live if (state.get(kk) or {}).get("phase") == "at_max"}
                     _filled: dict = {}
+                    # Default so `_confirmable` below has something to read when
+                    # nothing is at_max (the common case — most sweeps skip the
+                    # fetch entirely). Previously only assigned inside `if
+                    # _atmax:`, so an empty _atmax raised "cannot access local
+                    # variable '_res'" on EVERY such sweep — caught by the outer
+                    # except, which silently skipped the whole evaluate() loop
+                    # below, including the recovery edge-trigger for an alert
+                    # that had previously fired and was no longer maxed.
+                    _res = []
                     if _atmax:
                         try:
                             _res = await _cs_forward_all(tid, "CS_GET_SIM_QUOTA_STATE", {}, timeout=10.0)
