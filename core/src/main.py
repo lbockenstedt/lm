@@ -1676,6 +1676,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # `target` scoping this needs (cs_spoke.py's CS_CLEAR_COMMANDS
         # handler).
         "CS_EXPIRE_PENDING_COMMANDS": "CS_CLEAR_COMMANDS",
+        # Teardown notify: the agent fires this the moment a VM is (or already
+        # was) actually gone — destroy_vm/reclone/quarantine-destroy/missing-
+        # dongle-shed all funnel through cs_sim.destroy_vm, which is the one
+        # place this is emitted, so one hook covers every teardown path.
+        # Reuses CS_DELETE_CLIENT (the same handler the human-clicked Remove
+        # button hits) instead of a bespoke handler. This is the PRIMARY path
+        # for keeping the client registry honest; _clients_scrub_loop is the
+        # periodic backstop for whatever this misses (an agent that was
+        # offline when it fired, a relay drop, ...), not the other way round.
+        "CS_TEARDOWN_CLIENT": "CS_DELETE_CLIENT",
     }
 
     # Agent CS_COMMAND_RESULT actions that mutate a tenant's Proxmox VM set and
