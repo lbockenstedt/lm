@@ -3336,23 +3336,39 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         return await _cs_forward(tenant_id, "CS_SET_ALL_CLIENT_OVERRIDES",
                                  {"overrides": overrides})
 
-    # "Purge Clients" — drop every registered client on the tenant's cs spoke
-    # (memory + clients.json on disk). Registered BEFORE the {hostname}/control
-    # routes so Starlette doesn't capture a bare collection DELETE as a
-    # hostname. After the spoke confirms, clear the hub's cached `clients` for
-    # that spoke so the next /aggregate/clients renders empty immediately
-    # (the next CS_TELEMETRY at ~10s repopulates it if clients beacon back).
+    # "Purge Clients" — drop every registered client on EVERY cs spoke bound
+    # to the tenant (memory + clients.json on disk). Registered BEFORE the
+    # {hostname}/control routes so Starlette doesn't capture a bare collection
+    # DELETE as a hostname. After the spokes confirm, clear the hub's cached
+    # `clients` for each of them so the next /aggregate/clients renders empty
+    # immediately (the next CS_TELEMETRY at ~10s repopulates it if clients
+    # beacon back).
     @app.delete("/sim/api/{tenant}/clients")
     async def cs_purge_clients(tenant: str, tenant_id: str = Depends(get_tenant_id)):
-        result = await _cs_forward(tenant_id, "CS_PURGE_CLIENTS", {})
+        # Same multi-spoke bug as cs_delete_client (fixed in #146): _cs_forward
+        # only hits the tenant's "primary" cs spoke. A multi-spoke tenant (e.g.
+        # cs-svr-01..04) has clients registered across ALL of them, so purging
+        # only the primary left the others' clients behind — "Purge Clients"
+        # reported success while the untouched spokes' clients reappeared on
+        # the next ~10s telemetry frame, looking like the purge never worked.
+        results = await _cs_forward_all(tenant_id, "CS_PURGE_CLIENTS", {})
+        replied = [d for _sid, d in results if isinstance(d, dict)]
+        if not replied:
+            raise HTTPException(status_code=502,
+                                detail="no client-sim spoke responded to the purge request")
+        purged = sum(int(d.get("purged") or 0) for d in replied)
         try:
-            sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
-            cache = getattr(hub, "simulations_cache", None)
-            if sid and isinstance(cache, dict) and isinstance(cache.get(sid), dict):
-                cache[sid].pop("clients", None)
-        except Exception:
+            for _sid, data in (getattr(hub, "simulations_cache", {}) or {}).items():
+                try:
+                    if hub.state.get_spoke_tenant(_sid) != tenant_id:
+                        continue
+                except Exception:  # noqa: BLE001
+                    continue
+                if isinstance(data, dict):
+                    data.pop("clients", None)
+        except Exception:  # noqa: BLE001
             pass
-        return result
+        return {"status": "SUCCESS", "purged": purged}
 
     @app.delete("/sim/api/proxmox/host/{hostname}")
     async def cs_delete_proxmox_host(hostname: str, request: Request,
