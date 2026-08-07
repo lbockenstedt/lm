@@ -3559,43 +3559,77 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         unreachable right now doesn't cause its VMs' clients to be wrongly
         flagged — only a VM that's genuinely gone from the inventory does).
 
-        Returns [] (skips the tenant entirely) when the fleet has no VM
-        inventory data at all — a telemetry outage that emptied proxmox_vms
-        fleet-wide must never read as "every VM is gone", which would scrub
-        the whole registry."""
+        Returns [] (skips the tenant entirely) when the fleet reports NO VM
+        anywhere — not just "no host entries". A telemetry glitch that keeps
+        host dicts around but reports an empty proxmox_vms list for each
+        (list cleared, host entry retained — a real partial-outage shape,
+        not merely a hypothetical) must never read as "every VM is gone",
+        which would scrub the whole registry. Keying the guard on host
+        presence instead of VM presence doesn't actually catch that case —
+        it has to be vm_names itself that's checked."""
         vm_names = set()
-        saw_any_host = False
         for _sid, data in service._spokes_for_tenant(tenant_id):
             for h in (data.get("proxmox_hosts") or []):
-                saw_any_host = True
                 for v in (h.get("proxmox_vms") or []):
                     n = str((v or {}).get("name") or "").strip()
                     if n:
                         vm_names.add(n)
-            if data.get("proxmox_vms"):  # legacy single-host shape
-                saw_any_host = True
-                for v in data["proxmox_vms"]:
-                    n = str((v or {}).get("name") or "").strip()
-                    if n:
-                        vm_names.add(n)
-        if not saw_any_host:
+            for v in (data.get("proxmox_vms") or []):  # legacy single-host shape
+                n = str((v or {}).get("name") or "").strip()
+                if n:
+                    vm_names.add(n)
+        if not vm_names:
             return []
-        now = time.time()
-        stale = []
+        # Take the FRESHEST last_seen for a given hostname across every spoke
+        # that reports it, not whichever spoke happens to be iterated first —
+        # a phantom override-stub on one spoke (no last_seen) alongside the
+        # real, actively-reporting client on another must not let iteration
+        # order decide whether the grace period actually protects it.
+        last_seen_by_host: Dict[str, float] = {}
         for _sid, data in service._spokes_for_tenant(tenant_id):
             for c in (data.get("clients") or []):
                 c = c or {}
                 h = str(c.get("hostname") or "").strip()
-                if not h or h in vm_names or h in stale:
+                if not h or h in vm_names:
                     continue
                 try:
                     ls = float(c.get("last_seen") or 0)
                 except (TypeError, ValueError):
                     ls = 0.0
-                if ls and (now - ls) < _SCRUB_GRACE_S:
-                    continue
-                stale.append(h)
-        return stale
+                # Unconditional assignment (not "only if higher") — a
+                # hostname whose ONLY occurrence has ls=0 (a phantom stub
+                # with no last_seen anywhere) must still get a dict entry,
+                # or it's silently absent from the result entirely.
+                last_seen_by_host[h] = max(ls, last_seen_by_host.get(h, 0.0))
+        now = time.time()
+        return [h for h, ls in last_seen_by_host.items()
+                if not ls or (now - ls) >= _SCRUB_GRACE_S]
+
+    # Bounds concurrent deletes within one tenant's scrub sweep. Each delete
+    # itself fans out to every bound spoke (_cs_forward_all), so an unbounded
+    # gather over e.g. 95 stale hostnames could burst ~hundreds of concurrent
+    # request_response calls at once — the same class of event-loop-starving
+    # thundering herd the pxmx agent's _LONG_OP_SEM guards against for bulk
+    # VM ops. This is a periodic background sweep, not a human waiting on a
+    # button; there is no reason for it to race.
+    #
+    # Lazily constructed on first use, INSIDE the running loop that actually
+    # awaits it — not at route-registration time. asyncio.Semaphore() built
+    # outside a running loop binds to whatever loop get_event_loop() returns
+    # at that instant (Python 3.9 semantics); register_simulations_routes()
+    # runs synchronously at app-startup/test-fixture time, not inside the
+    # loop that later runs this coroutine, so an eagerly-built semaphore came
+    # loop-bound to the wrong loop — harmless standalone, but it silently
+    # jerked the thread's default event loop out from under whatever
+    # unrelated async test ran next in the same process.
+    _scrub_sem_holder: Dict[str, asyncio.Semaphore] = {}
+
+    async def _scrub_delete_one(tenant_id: str, hostname: str) -> bool:
+        sem = _scrub_sem_holder.get("sem")
+        if sem is None:
+            sem = _scrub_sem_holder["sem"] = asyncio.Semaphore(5)
+        async with sem:
+            return await _delete_client_everywhere(tenant_id, hostname)
 
     async def _clients_scrub_loop() -> None:
         """Automatic fleet-vs-registry reconciliation — the same underlying
@@ -3617,7 +3651,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     if not stale:
                         continue
                     results = await asyncio.gather(
-                        *[_delete_client_everywhere(tid, h) for h in stale],
+                        *[_scrub_delete_one(tid, h) for h in stale],
                         return_exceptions=True)
                     removed = [h for h, r in zip(stale, results) if r is True]
                     if removed:
@@ -3631,6 +3665,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
     try:
         hub._clients_scrub_loop = _clients_scrub_loop
+        # Exposed for direct unit testing of the safety-rail logic (no HTTP
+        # route — this is an internal, unattended sweep, not an endpoint)
+        # the same way the loop itself is exposed for main.py to schedule it.
+        hub._stale_clients_no_vm = _stale_clients_no_vm
     except Exception:  # noqa: BLE001
         pass
 
