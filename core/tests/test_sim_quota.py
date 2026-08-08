@@ -534,3 +534,71 @@ def test_adaptive_step_holds_within_settle_window():
     st = {"target": 5, "phase": "up_find", "last_change": 9_900}
     after = sim_quota.adaptive_step(st, q, firing=False, now=10_000)  # 100s < 1800
     assert after["target"] == 5  # unchanged
+
+
+# ── Learning floor clamped to ACTUAL producing count, not the raw target ────
+# The spoke reports how many of the assigned clients are functionally working
+# (see sim_quota_engine._is_harvestable / gateway-confirmed-down in the cs
+# repo) — a quota that requested 10 but only had 8 working clients still fired
+# at 8 real signals, so the learned floor must record 8, not 10.
+
+def test_learning_floor_clamped_to_producing_when_lower():
+    """up_find fires at target=9 but the spoke only actually had 7 producing
+    (2 of the 9 assigned were gateway-down) — floor must record 7, not 9."""
+    q = _aq(learning=True, min=1, max=15, step=1, buffer=0.2)
+    start = {"target": 9, "phase": "up_find", "last_change": 0}
+    after = sim_quota.adaptive_step(start, q, firing=True, now=10_000, producing=7)
+    assert after["phase"] == "down_floor"
+    assert after["floor"] == 7
+
+
+def test_learning_floor_not_inflated_above_target_by_producing():
+    """producing >= target (shouldn't normally happen, but defensively) never
+    records a floor ABOVE what was actually requested/probed."""
+    q = _aq(learning=True, min=1, max=15, step=1, buffer=0.2)
+    start = {"target": 9, "phase": "up_find", "last_change": 0}
+    after = sim_quota.adaptive_step(start, q, firing=True, now=10_000, producing=99)
+    assert after["floor"] == 9
+
+
+def test_learning_floor_unaffected_when_producing_not_reported():
+    """producing=None (spoke didn't report / not yet wired) falls back to
+    trusting target outright — unchanged prior behavior."""
+    q = _aq(learning=True, min=1, max=15, step=1, buffer=0.2)
+    start = {"target": 9, "phase": "up_find", "last_change": 0}
+    after = sim_quota.adaptive_step(start, q, firing=True, now=10_000, producing=None)
+    assert after["floor"] == 9
+
+
+def test_learning_up_confirm_stable_floor_clamped_to_producing():
+    """The up_confirm→stable re-fire path (a different code path than up_find/
+    down_floor) also clamps floor+learned_op to producing."""
+    q = _aq(learning=True, min=1, max=15, step=1, buffer=0.2)
+    start = {"target": 9, "floor": 8, "phase": "up_confirm", "last_change": 0}
+    after = sim_quota.adaptive_step(start, q, firing=True, now=10_000, producing=6)
+    assert after["phase"] == "stable"
+    assert after["floor"] == 6
+    assert after["learned_op"] == 8   # ceil(6 * 1.2)
+
+
+def test_learning_min_floor_not_clamped_by_producing():
+    """Hitting the configured min while still firing records floor=min exactly
+    — min is an admin-set hard boundary, not an observed count, so producing
+    must never push it below min (which would immediately trip the stale-
+    floor-outside-range guard and thrash)."""
+    q = _aq(learning=True, min=3, max=15, step=1, buffer=0.2)
+    start = {"target": 3, "phase": "down_floor", "last_change": 0}
+    after = sim_quota.adaptive_step(start, q, firing=True, now=10_000, producing=1)
+    assert after["phase"] == "stable"
+    assert after["floor"] == 3
+
+
+def test_consumer_target_never_reduced_by_producing():
+    """A consumer (learning OFF) never down-ratchets its target on firing —
+    producing must not change that: it only clamps a LEARNING row's recorded
+    floor, and consumers never record one."""
+    q = _aq(learning=False, min=1, max=15, step=1)
+    st = {"target": 10, "phase": "up_find", "last_change": 0}
+    after = sim_quota.adaptive_step(st, q, firing=True, now=10_000, producing=6)
+    assert after["target"] == 10
+    assert after.get("floor") is None
