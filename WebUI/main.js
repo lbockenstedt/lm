@@ -3568,6 +3568,7 @@ function _viewTemplate(viewId) {
         case 'dns':
             return `<div class="space-y-6">
   <div class="flex justify-end gap-2">
+    ${addServerButtonHtml('dns', 'DNS')}
     ${(isAdmin() || isTenantAdmin()) ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" class="${btn}">+ Add Record</button>` : ''}
   </div>
   <div id="dns-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
@@ -17970,11 +17971,16 @@ async function loadDNSData(subMenu) {
         // (type PTR) are derived from A/AAAA values and not directly editable.
         const records = (d.records || []).filter(r => r.type !== 'PTR');
         window._dnsRecords = records;
-        const cols = ['Name', 'Type', 'Value', 'TTL', ''];
+        // Admin combined view (2+ dns spokes, one per tenant): each record is
+        // tagged _tenant by the merge fanout (see net_services.py's
+        // _dns_merge_fanout) — show a Tenant column then.
+        const showTenantCol = records.some(r => r && r._tenant);
+        const cols = (showTenantCol ? ['Tenant'] : []).concat(['Name', 'Type', 'Value', 'TTL', '']);
         const rows = records.map(r => {
             const eName = String(r.name).replace(/'/g, "\\'");
             const eType = String(r.type).replace(/'/g, "\\'");
             return `<tr class="border-b border-slate-100 hover:bg-slate-50">
+                ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(r._tenant || '—')}</td>` : ''}
                 <td class="px-4 py-2 font-mono font-medium">${escapeHtml(r.name)}</td>
                 <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">${escapeHtml(r.type)}</span></td>
                 <td class="px-4 py-2 font-mono text-xs">${escapeHtml(r.value)}</td>

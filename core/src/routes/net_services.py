@@ -3,7 +3,7 @@ import asyncio
 import time
 from api import (
     HTTPException, Request, _spoke_payload_or_raise, access, get_spoke_or_503,
-    logger,
+    logger, spoke_or_503,
 )
 from cert_distribution import build_available_targets
 
@@ -38,6 +38,69 @@ def register(app, hub, ctx):
 
     def _get_dns_spoke(hub):
         return get_spoke_or_503(hub, "dns", "DNS")
+
+    # ── tenant-aware DNS spoke resolution ───────────────────────────────────
+    # Multiple ``dns`` spokes may be connected, each bound to a different
+    # tenant (a tenant runs their own Unbound server). Every DNS route below
+    # used to resolve via ``_get_dns_spoke`` — the first connected dns spoke,
+    # full stop — so with more than one dns spoke connected, EVERY tenant's
+    # request silently hit whichever spoke connected first. DNS is commonly
+    # deployed as ONE shared Unbound server (see the record-level subnet
+    # filtering below, which stays the primary isolation for that case) —
+    # this resolver only changes behavior once a SECOND dns spoke connects.
+    def _dns_spoke_for_request(request: Request, tenant: str = None):
+        """The dns spoke that should answer THIS request, or a 503 (matches
+        the ``get_spoke_or_503``/``_get_dns_spoke`` contract every caller here
+        already relies on — ``_relay_spoke`` itself does NOT check for a
+        falsy spoke_id, it trusts the resolver already raised). Prefers the
+        caller's effective tenant's own ``dns_instances`` record (a tenant-
+        admin's self-configured DNS connection via
+        ``/tenant/devices/dns-instances``), falling back to a spoke bound to
+        that tenant by module_type, then the shared-tenant spoke. Admin with
+        no tenant selected keeps the legacy global-first-connected-spoke
+        behavior — see ``_dns_merge_fanout`` for the admin combined view."""
+        hub = app.state.hub
+        tid = _effective_tenant(request, tenant)
+        if not tid:
+            return spoke_or_503(hub.get_spoke_by_type("dns"), "DNS")
+        instances = (hub.state.system_state.get("global_config", {}) or {}).get("dns_instances", []) or []
+        inst = next((i for i in instances if isinstance(i, dict) and i.get("tenant_id") == tid), None)
+        spoke_id = (inst or {}).get("spoke_id") or ""
+        if spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
+            return spoke_id
+        resolved = (hub.get_dns_spoke_for_shared()
+                   if access.tenant_is_shared(tid)
+                   else hub.get_dns_spoke_for_tenant(tid))
+        return spoke_or_503(resolved, "DNS")
+
+    async def _dns_merge_fanout(cmd: str, payload: dict, list_key: str):
+        """Admin, no tenant selected: fan ``cmd`` out to EVERY connected,
+        approved dns spoke, tag each returned record with its spoke's owning
+        tenant (``_tenant``), and merge — 'combine the data at the hub'
+        instead of only ever seeing whichever spoke happened to connect
+        first. Mirrors cppm.py's ``_nac_merge_fanout``."""
+        hub = app.state.hub
+        spokes = [s for s in (hub.get_all_spokes_by_type("dns") or [])
+                  if s in hub.active_connections and hub.approved_modules.get(s, False)]
+        if not spokes:
+            raise HTTPException(status_code=503, detail="No DNS spoke connected")
+
+        async def _one(sid):
+            try:
+                result = await hub.request_response(sid, cmd, payload or {})
+                data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+                data = _spoke_payload_or_raise(data)
+            except Exception as e:  # noqa: BLE001 — one bad/offline spoke must not fail the merge
+                logger.debug("dns merge fanout: %s failed: %s", sid, e)
+                return []
+            recs = data.get(list_key) if isinstance(data, dict) else None
+            if not isinstance(recs, list):
+                return []
+            tid = hub.state.get_spoke_tenant(sid) or ""
+            return [{**r, "_tenant": tid} if isinstance(r, dict) else r for r in recs]
+
+        merged = [r for recs in await asyncio.gather(*[_one(s) for s in spokes]) for r in recs]
+        return {list_key: merged, "total": len(merged)}
 
     def _get_le_spoke(hub):
         return get_spoke_or_503(hub, "certificates", "Certificate")
@@ -84,47 +147,56 @@ def register(app, hub, ctx):
         A multi-tenant deployment enables the ``dns`` subnet-filter toggle so a
         non-admin sees only A/PTR records whose value (IP) is in their own
         tenant's NetBox prefixes (mirrors /api/dhcp/leases). Admins always see
-        all records."""
-        logger.debug("relay GET /api/dns/records")
-        data = await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_LIST", log_name="dns_list_records")
+        all records.
+
+        Admin with no tenant selected AND 2+ dns spokes connected: records
+        are combined across every spoke (tagged _tenant) rather than only
+        ever the first-connected one — see _dns_merge_fanout."""
+        logger.debug("relay GET /api/dns/records tenant=%s", tenant)
+        sess = _session_user(request)
+        tid = _effective_tenant(request, tenant)
+        if not tid and sess and _is_admin(sess) and len(hub.get_all_spokes_by_type("dns") or []) > 1:
+            data = await _dns_merge_fanout("DNS_LIST", {}, "records")
+        else:
+            data = await _relay_spoke(_dns_spoke_for_request(request, tenant), "DNS_LIST", log_name="dns_list_records")
         return await _filter_tenant(request, data, "dns", ["value", "ip"], tenant)
 
     @app.post("/api/dns/record")
-    async def dns_add_record(request: Request):
+    async def dns_add_record(request: Request, tenant: str = None):
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "value"], "DNS record")
-        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_ADD", body, log_name="dns_add_record")
+        return await _relay_spoke(_dns_spoke_for_request(request, tenant), "DNS_ADD", body, log_name="dns_add_record")
 
     @app.delete("/api/dns/record")
-    async def dns_delete_record(request: Request):
+    async def dns_delete_record(request: Request, tenant: str = None):
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "value"], "DNS record")
-        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_DELETE", body, log_name="dns_delete_record")
+        return await _relay_spoke(_dns_spoke_for_request(request, tenant), "DNS_DELETE", body, log_name="dns_delete_record")
 
     @app.put("/api/dns/record")
-    async def dns_update_record(request: Request):
+    async def dns_update_record(request: Request, tenant: str = None):
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "value"], "DNS record")
-        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_UPDATE", body, log_name="dns_update_record")
+        return await _relay_spoke(_dns_spoke_for_request(request, tenant), "DNS_UPDATE", body, log_name="dns_update_record")
 
     @app.get("/api/dns/status")
-    async def dns_status():
+    async def dns_status(request: Request, tenant: str = None):
         """Unbound service status / health from the DNS spoke."""
         logger.debug("relay GET /api/dns/status")
-        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_STATUS", log_name="dns_status")
+        return await _relay_spoke(_dns_spoke_for_request(request, tenant), "DNS_STATUS", log_name="dns_status")
 
     @app.get("/api/dns/stats")
-    async def dns_stats():
+    async def dns_stats(request: Request, tenant: str = None):
         """Unbound query statistics (total/cache-hit/recursion + per-type) for
         the DNS analytics panel."""
         logger.debug("relay GET /api/dns/stats")
-        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_STATS", log_name="dns_stats")
+        return await _relay_spoke(_dns_spoke_for_request(request, tenant), "DNS_STATS", log_name="dns_stats")
 
     @app.get("/api/dns/forwarders")
-    async def dns_forwarders():
+    async def dns_forwarders(request: Request, tenant: str = None):
         """Configured upstream forwarders (per-zone upstream servers)."""
         logger.debug("relay GET /api/dns/forwarders")
-        return await _relay_spoke(_get_dns_spoke(app.state.hub), "DNS_FORWARDERS", log_name="dns_forwarders")
+        return await _relay_spoke(_dns_spoke_for_request(request, tenant), "DNS_FORWARDERS", log_name="dns_forwarders")
 
     @app.post("/api/dns/sync")
     async def dns_sync_from_netbox():
@@ -280,6 +352,10 @@ def register(app, hub, ctx):
                     hosts.add(name)
 
         try:
+            # Certificate-issuance hostname enumeration (le module) — out of
+            # scope for the DNS tenant-routing fix above; certificates aren't
+            # tenant-scoped yet either (see the multi-tenant-spoke scan).
+            # Left on the legacy first-connected-spoke resolver.
             dns_data = await _relay_spoke(_get_dns_spoke(hub), "DNS_LIST", log_name="le_dns_hosts")
             any_source = True
             _collect((dns_data or {}).get("records") or [], ("name",), ("value", "ip"))
