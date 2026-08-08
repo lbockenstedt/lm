@@ -392,9 +392,14 @@ def tenant_slug_matches(a, b) -> bool:
     return str(a or "").strip().casefold() == str(b or "").strip().casefold()
 
 
-def resolve_directory_tenant(is_admin_flag, acting_tenants, requested):
-    """Decide which LM tenant a Directory request acts on AND enforce the
-    cross-tenant boundary. Pure (no hub / no HTTP) so it is unit-testable.
+def resolve_module_tenant(is_admin_flag, acting_tenants, requested, label="module"):
+    """Decide which LM tenant a per-tenant-spoke module request acts on AND
+    enforce the cross-tenant boundary. Pure (no hub / no HTTP) so it is
+    unit-testable. Generalized from the Directory module's original
+    ``resolve_directory_tenant`` (kept below as a thin wrapper for backward
+    compat) — any module that can have ONE spoke per tenant (directory, nac,
+    dns, dhcp, certificates, ...) resolves its acting tenant the same way, so
+    this is the one place that logic lives.
 
     Returns ``(tenant_id, status, detail)``: on success ``(tenant_id, None,
     None)``; on failure ``(None, http_status, message)``. All tenant matching is
@@ -402,28 +407,38 @@ def resolve_directory_tenant(is_admin_flag, acting_tenants, requested):
     guard nor produce a spurious mismatch.
 
     * Global admin — may act on any ``requested`` tenant, but must name one.
-    * Everyone else (tenant-admin / directory viewer) — may act ONLY on a tenant
+    * Everyone else (tenant-admin / module viewer) — may act ONLY on a tenant
       in ``acting_tenants``. A ``requested`` outside that set (in ANY case) is
       rejected 403 (the cross-tenant guard). With no ``requested`` and exactly
       one owned tenant, that tenant is used; with several, a 400 asks the caller
       to select one; with none, 403. The returned tenant_id is the caller's OWN
-      stored form (canonical case), never the client-supplied casing."""
+      stored form (canonical case), never the client-supplied casing.
+
+    ``label`` customizes the human-facing error messages only (e.g. "NAC",
+    "DNS") — it never affects the resolution logic."""
     req = str(requested or "").strip()
     acting = [str(t).strip() for t in (acting_tenants or []) if str(t).strip()]
     if is_admin_flag:
         if not req:
-            return None, 400, "Select a tenant to manage its directory"
+            return None, 400, f"Select a tenant to manage its {label}"
         return req, None, None
     if req:
         for t in acting:
             if tenant_slug_matches(t, req):
                 return t, None, None  # own stored case wins over client casing
-        return None, 403, "You may only manage your own tenant's directory"
+        return None, 403, f"You may only manage your own tenant's {label}"
     if len(acting) == 1:
         return acting[0], None, None
     if not acting:
         return None, 403, "No tenant is assigned to your account"
     return None, 400, "Select one of your tenants"
+
+
+def resolve_directory_tenant(is_admin_flag, acting_tenants, requested):
+    """Directory-module wrapper over :func:`resolve_module_tenant` — kept for
+    backward compat with existing call sites/imports. See that function for
+    the actual logic; this only fixes ``label="directory"``."""
+    return resolve_module_tenant(is_admin_flag, acting_tenants, requested, label="directory")
 
 
 # ── Session / auth helpers ───────────────────────────────────────────────────
