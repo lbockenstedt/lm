@@ -7928,10 +7928,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 raise
             del _ctx
         listen_port = self.tls_port  # single unified port (443 w/ TLS, 443 plain)
-        self._api_server = build_server(
-            self, host=self.host, port=listen_port,
-            tls_cert=self.tls_cert_path, tls_key=self.tls_key_path)
-        self._api_task = asyncio.create_task(self._api_server.serve())
+            self._api_server = build_server(
+                self, host='0.0.0.0', port=listen_port,
+                tls_cert=self.tls_cert_path, tls_key=self.tls_key_path)
+            await self._api_server.serve()
         _scheme = "wss" if self.tls_enabled else "ws"
         logger.info(f"Hub {version} unified surface on {_scheme}://{self.host}:{listen_port} "
                     f"(/ws/spoke, /ws/agent, /ws/console + WebUI/REST)")
