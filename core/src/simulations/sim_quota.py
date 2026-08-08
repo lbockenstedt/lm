@@ -802,7 +802,7 @@ def known_good_from_state(q: Dict[str, Any], st: Dict[str, Any],
         if (st or {}).get("phase") != "stable":
             return None
         op = (st or {}).get("learned_op")
-        if op is None:
+        if op is None or st['phase'] != 'stable':
             return None
         return {
             "alert":        _alert_key(q),

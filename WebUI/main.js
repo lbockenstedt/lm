@@ -3834,7 +3834,7 @@ async function deleteReport(id) {
 async function testReport(id) {
     showToast('Sending test…', 'info');
     try {
-        const r = await setupFetch('/api/reports/' + id + '/test', { method: 'POST' });
+        const r = await setupFetch('/api/reports/' + id + '/test', { method: 'POST', headers: {'Content-Type': 'application/json'} });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
         showToast('Test sent to ' + ((d.to || []).join(', ') || 'recipients'), 'success');
