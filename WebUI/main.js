@@ -14673,8 +14673,10 @@ async function loadNwData(subMenu) {
             }
             const data = await r.json();
             const items = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
+            const addServerRow = `<div class="flex justify-end mb-2">${addServerButtonHtml('nw', 'Network Devices')}</div>`;
             if (!items.length) {
-                container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No network devices configured. Add one in Setup → Network Devices.</div>`;
+                container.innerHTML = addServerRow +
+                    `<div class="py-12 text-center text-slate-400 italic">No network devices configured. Add one in Setup → Network Devices.</div>`;
                 return;
             }
             const keys = ['device', 'object_type', 'transport', 'address', 'reachable'];
@@ -14701,7 +14703,7 @@ async function loadNwData(subMenu) {
                     <td class="px-4 py-3 text-right">${cfg}</td>
                 </tr>`;
             }).join('');
-            container.innerHTML = `
+            container.innerHTML = addServerRow + `
                 <div class="space-y-4">
                     <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
                         <table class="w-full text-left text-sm">
