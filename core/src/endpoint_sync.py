@@ -149,7 +149,11 @@ class EndpointSyncMixin:
         tenant_name = (self.state.get_tenant(tenant_id) or {}).get("name") or tenant_id
         se = self._endpoint_sync_source()
         ipam = self.get_spoke_by_type(se.get("module_type", "ipam"))
-        nac = self.get_spoke_by_type("nac")
+        # Tenant-aware: with more than one nac spoke connected (each tenant's
+        # own ClearPass appliance), this must push to THIS tenant's spoke, not
+        # whichever nac spoke happened to connect first — see
+        # get_cppm_spoke_for_tenant's docstring.
+        nac = self.get_cppm_spoke_for_tenant(tenant_id) or self.get_cppm_spoke_for_shared()
         if not ipam or not nac or nac in self._nac_unconfigured_spokes:
             logger.info("endpoint sync tenant=%s(%s) SKIP tenant: %s or CPPM spoke not connected "
                         "(ipam=%r nac=%r)", tenant_id, tenant_name, se.get('label', 'IPAM'),
