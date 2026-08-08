@@ -3576,6 +3576,7 @@ function _viewTemplate(viewId) {
         case 'dhcp':
             return `<div class="space-y-6">
   <div class="flex justify-end gap-2">
+    ${addServerButtonHtml('dhcp', 'DHCP')}
     ${(isAdmin() || isTenantAdmin()) ? `<button id="dhcp-add-btn" onclick="showDhcpReservationModal()" class="${btn}">+ Add Reservation</button>` : ''}
   </div>
   <div id="dhcp-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
@@ -20513,10 +20514,14 @@ async function loadDHCPData(subMenu) {
             const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/subnets?tenant=' + encodeURIComponent(currentTenant));
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); return; }
             const subnets = d.subnets || [];
-            const cols = ['ID', 'Subnet', 'Pools'];
+            // Admin combined view (2+ dhcp spokes): tagged _tenant by the merge
+            // fanout — see net_services.py's _dhcp_merge_fanout.
+            const showTenantCol = subnets.some(s => s && s._tenant);
+            const cols = (showTenantCol ? ['Tenant'] : []).concat(['ID', 'Subnet', 'Pools']);
             const rows = subnets.map(s => {
                 const pools = (s.pools || []).map(p => p.pool || p).join(', ');
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
+                    ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(s._tenant || '—')}</td>` : ''}
                     <td class="px-4 py-2 text-center text-xs">${escapeHtml(String(s.id))}</td>
                     <td class="px-4 py-2 font-mono font-medium">${escapeHtml(s.subnet)}</td>
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(pools || '—')}</td>
@@ -20530,8 +20535,10 @@ async function loadDHCPData(subMenu) {
             const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/leases?tenant=' + encodeURIComponent(currentTenant));
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); return; }
             const leases = d.leases || [];
-            const cols = ['IP Address', 'MAC', 'Hostname', 'State', 'Valid Until'];
+            const showTenantCol = leases.some(l => l && l._tenant);
+            const cols = (showTenantCol ? ['Tenant'] : []).concat(['IP Address', 'MAC', 'Hostname', 'State', 'Valid Until']);
             const rows = leases.map(l => `<tr class="border-b border-slate-100 hover:bg-slate-50">
+                ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(l._tenant || '—')}</td>` : ''}
                 <td class="px-4 py-2 font-mono font-medium">${escapeHtml(l['ip-address'] || l.ip || '—')}</td>
                 <td class="px-4 py-2 font-mono text-xs">${escapeHtml(l['hw-address'] || l.mac || '—')}</td>
                 <td class="px-4 py-2 text-xs">${escapeHtml(l.hostname || '—')}</td>
@@ -20547,10 +20554,12 @@ async function loadDHCPData(subMenu) {
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); if (addBtn) addBtn.classList.add('hidden'); return; }
             const res = d.reservations || [];
             window._dhcpReservations = res;
-            const cols = ['IP Address', 'MAC', 'Hostname', 'Subnet', ''];
+            const showTenantCol = res.some(r => r && r._tenant);
+            const cols = (showTenantCol ? ['Tenant'] : []).concat(['IP Address', 'MAC', 'Hostname', 'Subnet', '']);
             const rows = res.map(r => {
                 const eIp = escJsAttr(r.ip);
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
+                    ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(r._tenant || '—')}</td>` : ''}
                     <td class="px-4 py-2 font-mono font-medium">${escapeHtml(r.ip)}</td>
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(r.mac)}</td>
                     <td class="px-4 py-2 text-xs">${escapeHtml(r.hostname || '—')}</td>
