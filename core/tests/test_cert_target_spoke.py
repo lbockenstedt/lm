@@ -98,14 +98,51 @@ def test_simulation_target_routes_to_the_agent_owning_spoke():
     assert LabManagerHub._cert_target_spoke(hub, "simulation", "pxmx-agent-7") == "cs-spoke-1"
 
 
-def test_non_agent_hosting_type_resolves_by_module_type_unchanged():
-    """firewall/ipam/directory/nac/nw ignore the identifier and resolve by
-    module_type exactly as before — no behavior change for the fast targets."""
+def test_non_agent_hosting_type_with_no_matching_identifier_falls_back_by_module_type():
+    """An identifier that ISN'T a connected spoke of the right type (bogus
+    string, or a target added before the spoke_id-as-identifier fix shipped)
+    falls back to the module_type resolution — pre-fix behavior preserved."""
     hub = _FakeHub(
         module_types={"fw-1": "firewall"},
         active={"fw-1"},
         agent_info={})
     assert LabManagerHub._cert_target_spoke(hub, "firewall", "anything") == "fw-1"
+
+
+def test_non_agent_hosting_type_with_matching_identifier_routes_directly():
+    """The fix: with 2 connected firewall spokes, a target whose identifier IS
+    one of their spoke_ids (build_available_targets now sets identifier =
+    spoke_id for these types) routes to THAT spoke — not first-connected-wins.
+    Before this, identifier was always "" for these types and every firewall
+    cert target silently fell back to get_spoke_by_type (whichever firewall
+    connected first), even when the operator picked a specific one."""
+    hub = _FakeHub(
+        module_types={"fw-1": "firewall", "fw-2": "firewall"},
+        active={"fw-1", "fw-2"},
+        agent_info={})
+    assert LabManagerHub._cert_target_spoke(hub, "firewall", "fw-2") == "fw-2"
+    assert LabManagerHub._cert_target_spoke(hub, "firewall", "fw-1") == "fw-1"
+
+
+def test_non_agent_hosting_type_identifier_of_wrong_module_type_falls_back():
+    """An identifier that IS a connected spoke, but of a DIFFERENT module_type
+    (e.g. a stale target after a spoke was repurposed), must not be trusted —
+    falls back to the module_type resolution rather than cross-wiring types."""
+    hub = _FakeHub(
+        module_types={"fw-1": "firewall", "ipam-1": "ipam"},
+        active={"fw-1", "ipam-1"},
+        agent_info={})
+    assert LabManagerHub._cert_target_spoke(hub, "firewall", "ipam-1") == "fw-1"
+
+
+def test_non_agent_hosting_type_identifier_disconnected_falls_back():
+    """An identifier for a spoke that's no longer connected falls back to the
+    module_type resolution (another connected spoke of that type, or None)."""
+    hub = _FakeHub(
+        module_types={"fw-1": "firewall", "fw-2": "firewall"},
+        active={"fw-1"},   # fw-2 is registered but not connected
+        agent_info={})
+    assert LabManagerHub._cert_target_spoke(hub, "firewall", "fw-2") == "fw-1"
 
 
 def test_unknown_agent_identifier_falls_back_to_all_nodes_resolution():
