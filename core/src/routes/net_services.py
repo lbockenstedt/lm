@@ -3,7 +3,7 @@ import asyncio
 import time
 from api import (
     HTTPException, Request, _spoke_payload_or_raise, access, get_spoke_or_503,
-    logger,
+    logger, spoke_or_503,
 )
 from cert_distribution import build_available_targets
 
@@ -1124,6 +1124,78 @@ def register(app, hub, ctx):
     def _get_dhcp_spoke(hub):
         return get_spoke_or_503(hub, "dhcp", "DHCP")
 
+    # ── tenant-aware DHCP spoke resolution ──────────────────────────────────
+    # Mirrors the DNS resolver above / cppm.py's _nac_spoke_for_request:
+    # multiple ``dhcp`` spokes may be connected, each bound to a different
+    # tenant (a tenant runs their own Kea server). Every DHCP route below used
+    # to resolve via ``_get_dhcp_spoke`` — the first connected dhcp spoke, full
+    # stop — so with more than one dhcp spoke connected, EVERY tenant's
+    # request silently hit whichever one connected first.
+    def _dhcp_spoke_for_request(request: Request, tenant: str = None):
+        """The dhcp spoke that should answer THIS request, or a 503 (matches
+        the ``get_spoke_or_503``/``_get_dhcp_spoke`` contract every caller
+        here already relies on — ``_relay_spoke`` itself does NOT check for a
+        falsy spoke_id, it trusts the resolver already raised). Prefers the
+        caller's effective tenant's own ``dhcp_instances`` record (a tenant-
+        admin's self-configured DHCP connection via
+        ``/tenant/devices/dhcp-instances``), falling back to a spoke bound to
+        that tenant by module_type, then the shared-tenant spoke. Admin with
+        no tenant selected keeps the legacy global-first-connected-spoke
+        behavior — see ``_dhcp_merge_fanout`` for the admin combined view."""
+        hub = app.state.hub
+        tid = _effective_tenant(request, tenant)
+        if not tid:
+            return spoke_or_503(hub.get_spoke_by_type("dhcp"), "DHCP")
+        instances = (hub.state.system_state.get("global_config", {}) or {}).get("dhcp_instances", []) or []
+        inst = next((i for i in instances if isinstance(i, dict) and i.get("tenant_id") == tid), None)
+        spoke_id = (inst or {}).get("spoke_id") or ""
+        if spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
+            return spoke_id
+        resolved = (hub.get_dhcp_spoke_for_shared()
+                   if access.tenant_is_shared(tid)
+                   else hub.get_dhcp_spoke_for_tenant(tid))
+        return spoke_or_503(resolved, "DHCP")
+
+    async def _dhcp_merge_fanout(cmd: str, payload: dict, list_key: str):
+        """Admin, no tenant selected, 2+ dhcp spokes connected: fan ``cmd``
+        out to EVERY connected, approved dhcp spoke, tag each returned record
+        with its spoke's owning tenant (``_tenant``), and merge. Mirrors
+        cppm.py's ``_nac_merge_fanout`` / the DNS resolver above."""
+        hub = app.state.hub
+        spokes = [s for s in (hub.get_all_spokes_by_type("dhcp") or [])
+                  if s in hub.active_connections and hub.approved_modules.get(s, False)]
+        if not spokes:
+            raise HTTPException(status_code=503, detail="No DHCP spoke connected")
+
+        async def _one(sid):
+            try:
+                result = await hub.request_response(sid, cmd, payload or {})
+                data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+                data = _spoke_payload_or_raise(data)
+            except Exception as e:  # noqa: BLE001 — one bad/offline spoke must not fail the merge
+                logger.debug("dhcp merge fanout: %s failed: %s", sid, e)
+                return []
+            recs = data.get(list_key) if isinstance(data, dict) else None
+            if not isinstance(recs, list):
+                return []
+            tid = hub.state.get_spoke_tenant(sid) or ""
+            return [{**r, "_tenant": tid} if isinstance(r, dict) else r for r in recs]
+
+        merged = [r for recs in await asyncio.gather(*[_one(s) for s in spokes]) for r in recs]
+        return {list_key: merged, "total": len(merged)}
+
+    async def _dhcp_list_or_merge(request: Request, tenant: str, cmd: str,
+                                  payload: dict, list_key: str, log_name: str):
+        """Shared GET-list preamble for subnets/leases/reservations: admin
+        with no tenant selected AND 2+ dhcp spokes connected combines every
+        spoke (see _dhcp_merge_fanout); otherwise the normal single-spoke
+        tenant-resolved relay."""
+        sess = _session_user(request)
+        tid = _effective_tenant(request, tenant)
+        if not tid and sess and _is_admin(sess) and len(hub.get_all_spokes_by_type("dhcp") or []) > 1:
+            return await _dhcp_merge_fanout(cmd, payload, list_key)
+        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), cmd, payload, log_name=log_name)
+
     @app.get("/api/dhcp/subnets")
     async def dhcp_list_subnets(request: Request, tenant: str = None):
         """List DHCP subnets configured on the Kea spoke, subnet-filtered per
@@ -1131,23 +1203,28 @@ def register(app, hub, ctx):
         (mirrors /api/dhcp/leases). The subnet's ``subnet`` field is a CIDR; the
         filter matches it against the tenant's NetBox prefixes by overlap, so a
         non-admin sees only their own tenant's subnets. Admins always see all.
-        Unfiltered when the subnet-filter toggle is off (shared single-view Kea)."""
+        Unfiltered when the subnet-filter toggle is off (shared single-view Kea).
+
+        Admin with no tenant selected AND 2+ dhcp spokes connected: subnets
+        are combined across every spoke (tagged _tenant)."""
         logger.debug("relay GET /api/dhcp/subnets")
-        data = await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_SUBNETS", log_name="dhcp_list_subnets")
+        data = await _dhcp_list_or_merge(request, tenant, "DHCP_LIST_SUBNETS", {}, "subnets", "dhcp_list_subnets")
         return await _filter_tenant(request, data, "dhcp", ["subnet"], tenant)
 
     @app.get("/api/dhcp/leases")
     async def dhcp_list_leases(request: Request, subnet: str = None, tenant: str = None):
-        """List DHCP leases (optionally per-subnet); subnet-filtered before return."""
+        """List DHCP leases (optionally per-subnet); subnet-filtered before
+        return. Admin with no tenant selected AND 2+ dhcp spokes connected:
+        leases are combined across every spoke (tagged _tenant)."""
         logger.debug("relay %s %s subnet=%s", request.method, request.url.path, subnet)
-        data = await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_LEASES", {"subnet": subnet}, log_name="dhcp_list_leases")
+        data = await _dhcp_list_or_merge(request, tenant, "DHCP_LIST_LEASES", {"subnet": subnet}, "leases", "dhcp_list_leases")
         return await _filter_tenant(request, data, "dhcp", ["ip", "address"], tenant)
 
     @app.post("/api/dhcp/reservation")
-    async def dhcp_add_reservation(request: Request):
+    async def dhcp_add_reservation(request: Request, tenant: str = None):
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address"], "DHCP reservation")
-        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_ADD_RES", body, log_name="dhcp_add_reservation")
+        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_ADD_RES", body, log_name="dhcp_add_reservation")
 
     @app.get("/api/dhcp/reservations")
     async def dhcp_list_reservations(request: Request, tenant: str = None):
@@ -1156,35 +1233,38 @@ def register(app, hub, ctx):
         (mirrors /api/dhcp/leases). A reservation's ``ip`` is matched against
         the tenant's NetBox prefixes, so a non-admin sees only their own
         tenant's reservations (hostname/MAC/client-id are tenant-identifying).
-        Admins always see all. Unfiltered when the toggle is off."""
+        Admins always see all. Unfiltered when the toggle is off.
+
+        Admin with no tenant selected AND 2+ dhcp spokes connected:
+        reservations are combined across every spoke (tagged _tenant)."""
         logger.debug("relay GET /api/dhcp/reservations")
-        data = await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_LIST_RES", log_name="dhcp_list_reservations")
+        data = await _dhcp_list_or_merge(request, tenant, "DHCP_LIST_RES", {}, "reservations", "dhcp_list_reservations")
         return await _filter_tenant(request, data, "dhcp", ["ip"], tenant)
 
     @app.put("/api/dhcp/reservation")
-    async def dhcp_update_reservation(request: Request):
+    async def dhcp_update_reservation(request: Request, tenant: str = None):
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address"], "DHCP reservation")
-        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_UPDATE_RES", body, log_name="dhcp_update_reservation")
+        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_UPDATE_RES", body, log_name="dhcp_update_reservation")
 
     @app.delete("/api/dhcp/reservation")
-    async def dhcp_delete_reservation(request: Request):
+    async def dhcp_delete_reservation(request: Request, tenant: str = None):
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address"], "DHCP reservation")
-        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_DEL_RES", body, log_name="dhcp_delete_reservation")
+        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_DEL_RES", body, log_name="dhcp_delete_reservation")
 
     @app.get("/api/dhcp/status")
-    async def dhcp_status():
+    async def dhcp_status(request: Request, tenant: str = None):
         """Kea DHCP4 service status / health from the DHCP spoke."""
         logger.debug("relay GET /api/dhcp/status")
-        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_STATUS", log_name="dhcp_status")
+        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_STATUS", log_name="dhcp_status")
 
     @app.get("/api/dhcp/stats")
-    async def dhcp_stats():
+    async def dhcp_stats(request: Request, tenant: str = None):
         """Kea DHCP4 statistics — global + per-subnet pool utilization and the
         headline packet counters for the DHCP analytics panel."""
         logger.debug("relay GET /api/dhcp/stats")
-        return await _relay_spoke(_get_dhcp_spoke(app.state.hub), "DHCP_STATS", log_name="dhcp_stats")
+        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_STATS", log_name="dhcp_stats")
 
     @app.post("/api/dhcp/sync")
     async def dhcp_sync_from_netbox():

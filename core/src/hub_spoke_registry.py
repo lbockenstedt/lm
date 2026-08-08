@@ -392,6 +392,39 @@ class SpokeRegistryMixin:
         return (self.get_truenas_spoke_for_tenant(sid)
                 if sid else self.get_spoke_by_type("storage"))
 
+    def get_dhcp_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
+        """Tenant-aware DHCP (Kea) spoke — mirrors ``get_nw_spoke_for_tenant``.
+        With a real ``tenant_id``, return ONLY a connected, approved ``dhcp``
+        spoke BOUND to that tenant — NEVER one bound to a different tenant.
+        No unassigned fallback here — see ``get_dhcp_spoke_for_shared`` for the
+        explicit shared-tenant path a caller falls back to when the tenant has
+        no dedicated DHCP spoke of its own. DHCP is commonly deployed as ONE
+        shared Kea server for the whole hub (see net_services.py's record-level
+        subnet filtering, which stays the primary tenant isolation for that
+        common case) — this resolver only matters once a SECOND dhcp spoke is
+        connected. With ``tenant_id`` None / ``"default"`` (admin unscoped /
+        global view), fall back to ``get_spoke_by_type("dhcp")`` so the admin's
+        DHCP page still shows a spoke (unchanged legacy behavior)."""
+        if not tenant_id or tenant_id == "default":
+            return self.get_spoke_by_type("dhcp")
+        cands = [sid for sid in (self.get_all_spokes_by_type("dhcp") or [])
+                 if sid in self.active_connections
+                 and self.approved_modules.get(sid, False)]
+        if not cands:
+            return None
+        md = self.state.system_state.get("module_metadata", {})
+        bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
+        return bound[0] if bound else None
+
+    def get_dhcp_spoke_for_shared(self) -> Optional[str]:
+        """The DHCP spoke that owns the SHARED-tenant Kea server — the
+        fallback a tenant with no dedicated DHCP spoke of its own resolves to.
+        Mirrors ``get_nw_spoke_for_shared``."""
+        from access import shared_tenant_id
+        sid = shared_tenant_id()
+        return (self.get_dhcp_spoke_for_tenant(sid)
+                if sid else self.get_spoke_by_type("dhcp"))
+
     def get_all_spokes_by_type(self, module_type: str):
         """Return all connected spoke IDs that advertised the given module_type."""
         # netbox-server is a capability (advertised in the auth frame), not a
