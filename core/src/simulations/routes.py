@@ -114,6 +114,28 @@ def _reduce_spoke_effective_counts(results) -> dict:
     return counts
 
 
+def _reduce_spoke_producing_counts(results) -> dict:
+    """Tenant-total per-quota ACTUAL producing count, SUMMED across the cs
+    spokes that replied — ``{dedup_key: producing}``. Same shape/summing
+    rationale as ``_reduce_spoke_effective_counts`` (each spoke apportions a
+    SHARE of the tenant total, so only the sum reconstructs it), but reduces
+    ``diagnostics[].producing`` — the count of ledger clients each spoke's
+    reconcile kept as functionally working (see
+    sim_quota_engine._is_harvestable / gateway-confirmed-down) — instead of
+    the requested ``effective[].count``. ``diagnostics[].key`` is the spoke's
+    ``_quota_key``, which mirrors ``quota_dedup_key`` (see its docstring), so
+    it directly keys against a quota's ``quota_dedup_key(q)``. Pure so the
+    unit test can drive it without a hub/spoke."""
+    counts: dict = {}
+    for _sid, data in results or []:
+        if not isinstance(data, dict):
+            continue
+        for d in (data.get("diagnostics") or []):
+            if isinstance(d, dict) and d.get("key"):
+                counts[d["key"]] = counts.get(d["key"], 0) + int(d.get("producing") or 0)
+    return counts
+
+
 def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                                   is_admin_fn, check_tenant_access_fn=None, sessions=None,
                                   has_cs_access_fn=None, is_tenant_admin_fn=None):
@@ -1222,13 +1244,31 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             return {}
         return _reduce_spoke_effective_counts(results)
 
+    async def _spoke_producing_counts(tenant_id: str) -> dict:
+        """Per-quota ACTUAL producing count the cs spokes report this tick —
+        see ``_reduce_spoke_producing_counts`` for the reduction. This is what
+        the adaptive controller judges a firing observation against: a quota
+        with 10 slots where 2 are gateway-down (e.g. a detached dongle) only
+        ever really produced 8, and recording 10 as a learned floor would
+        overstate what's actually needed. Empty when no spokes reply —
+        adaptive_step then falls back to trusting the requested target,
+        unchanged prior behavior."""
+        try:
+            results = await _cs_forward_all(tenant_id, "CS_GET_SIM_QUOTA_STATE",
+                                            {}, timeout=10.0)
+        except Exception:  # noqa: BLE001
+            return {}
+        return _reduce_spoke_producing_counts(results)
+
     def _ceil(x: float) -> int:
         return sim_quota.ceil_to_int(x)
 
     def _adaptive_step(st: dict, q: dict, firing, now: float,
                        applied_op: Optional[int] = None,
-                       applied_floor: Optional[int] = None) -> dict:
-        return sim_quota.adaptive_step(st, q, firing, now, applied_op, applied_floor)
+                       applied_floor: Optional[int] = None,
+                       producing: Optional[int] = None) -> dict:
+        return sim_quota.adaptive_step(st, q, firing, now, applied_op,
+                                       applied_floor, producing)
 
     def _alias_groups_from_csc(csc: dict) -> list:
         """Build the "groups" of co-referring site identifiers from a tenant's
@@ -1580,6 +1620,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                              f"max={q.get('max')} learn={q.get('learning')}" for q in adaptive])
                 if not adaptive:
                     continue
+                # Only fetched when there's adaptive work this tenant this tick
+                # — an extra CS_GET_SIM_QUOTA_STATE round-trip skipped for every
+                # tenant with no adaptive/learning quotas at all.
+                producing_counts = await _spoke_producing_counts(tid)
                 state = await store.get_adaptive_state(tid)
                 # applied_op / applied_floor per alert = max(own learning-ON
                 # stable value, global published value).
@@ -1634,7 +1678,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                     before = dict(state.get(k) or {})
                     after = _adaptive_step(before, q, firing, now,
                                             applied_op.get(_alert_key(q)),
-                                            applied_floor.get(_alert_key(q)))
+                                            applied_floor.get(_alert_key(q)),
+                                            producing_counts.get(sim_quota.quota_dedup_key(q)))
                     if after != before:
                         state[k] = after; changed = True
                     # Record the known-good when a learning-ON quota is stable —
