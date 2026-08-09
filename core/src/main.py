@@ -7915,6 +7915,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # that the old daemon-thread uvicorn + main-loop websockets.serve split
         # had). Mirrors the cs spoke's in-loop uvicorn pattern.
         if self.tls_enabled:
+            try:
+                _ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                _ctx.load_cert_chain(self.tls_cert_path, self.tls_key_path)
+            except Exception as e:
+                logger.error("TLS cert load failed: %s (cert=%s key=%s) — hub NOT starting; fix the cert or unset LM_TLS_CERT/LM_TLS_KEY to fall back to plaintext.", e, self.tls_cert_path, self.tls_key_path)
+                raise
             # Fail fast + loud on a broken cert so systemd surfaces a crash-loop
             # instead of silently serving plaintext on 0.0.0.0:443.
             _ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
