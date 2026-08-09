@@ -5944,7 +5944,7 @@ async function csRenderEngineDiag() {
         }
         const pool = (st.pool && typeof st.pool === 'object') ? st.pool : {};
         const diag = Array.isArray(st.diagnostics) ? st.diagnostics : [];
-        const LBL = window.CS_ENGINE_DIAG_REASONS;
+        const LBL = window.CS_ENGINE_DIAG_REASONS || {};
         const bySite = (pool.by_site && typeof pool.by_site === 'object') ? pool.by_site : {};
         const siteChips = Object.keys(bySite).sort().map(s =>
             `<span class="inline-block bg-slate-100 text-slate-700 rounded px-2 py-0.5 mr-1 text-[11px]">${csEscape(s)}: <b>${bySite[s]}</b></span>`).join('')
