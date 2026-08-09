@@ -7921,6 +7921,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             try:
                 _ctx.load_cert_chain(self.tls_cert_path, self.tls_key_path)
             except Exception as e:
+                logger.error("TLS cert load failed: %s (cert=%s key=%s) — 
+                             hub NOT starting; fix the cert or unset 
+                             LM_TLS_CERT/LM_TLS_KEY to fall back to plaintext.",
+                             e, self.tls_cert_path, self.tls_key_path)
+                raise
+            del _ctx
+            _ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            try:
+                _ctx.load_cert_chain(self.tls_cert_path, self.tls_key_path)
+            except Exception as e:
                 logger.error("TLS cert load failed: %s (cert=%s key=%s) — "
                              "hub NOT starting; fix the cert or unset "
                              "LM_TLS_CERT/LM_TLS_KEY to fall back to plaintext.",
