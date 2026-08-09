@@ -3823,6 +3823,7 @@ async function saveReport(id) {
     } catch (e) { if (resEl) resEl.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`; }
 }
 async function deleteReport(id) {
+        if (!confirm('Delete this report?')) return;
     if (!confirm('Delete this report?')) return;
     try {
         const r = await setupFetch('/api/reports/' + id, { method: 'DELETE' });
