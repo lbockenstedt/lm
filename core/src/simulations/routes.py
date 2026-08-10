@@ -5721,7 +5721,10 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         modes = await store.get_processing_modes(tenant_id)
         if store.central_api_is_centralized(modes):  # unset defaults to centralized
             cc = await store.get_central_config(tenant_id)
-            return await get_central_available_from_config(cc or {})
+            if cc:
+                return await get_central_available_from_config(cc)
+            else:
+                return {"alerts": [], "insights": [], "warning": "Central configuration is missing."}
         try:
             return await _cs_forward(tenant_id, "CS_GET_CENTRAL_AVAILABLE", {}, timeout=15.0)
         except HTTPException:
