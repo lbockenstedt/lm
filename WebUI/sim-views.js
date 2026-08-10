@@ -5874,7 +5874,7 @@ async function csRenderSimQuotaState() {
             ${_adEntries.length
               ? `<p class="text-xs text-slate-500 mb-2">Each adaptive quota ramps its runner count to keep its alert firing, then settles at the learned floor + 20%. 🧪 Lab rows run the full thermostat and record a publishable learned value; 📥 Consumer rows seed/lift from it (up-only, never down-ratchet). 🔄 learning · ✅ stable · ⚠️ at max / underfilled.</p>
                  <div class="space-y-0.5">${_adEntries.map(_adRow).join('')}</div>`
-              : `<p class="text-xs text-slate-400 italic">No adaptive quotas yet. In <span class="font-semibold">Config → Engine</span>, tie a quota to an alert/insight and check <span class="font-semibold">Adaptive (keep firing)</span> — its Clients field becomes Min/Max and the learning state shows here.</p>`}
+              : `<p class="text-xs text-slate-400 italic">No adaptive quotas yet. Check <span class="font-semibold">Config → Engine</span> to tie a quota to an alert/insight and enable <span class="font-semibold">Adaptive (keep firing)</span> — its Clients field becomes Min/Max and the learning state will be displayed here.</p>`}
           </div>`;
         // Cheap pool count (no accounting): total harvestable clients, tenant-pool
         // assignable, and per physical site — so you can see the pool size at a glance.
