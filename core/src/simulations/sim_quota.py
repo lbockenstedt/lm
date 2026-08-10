@@ -685,9 +685,9 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
         last = now
         # Only stamp time-to-stable on the FIRST entry into stable this run (not
         # on later re-probes that briefly leave + re-enter stable during drift).
-        if not stable_since:
-            stable_since = now
-            time_to_stable_s = int(max(0.0, now - learning_started_at))
+if not stable_since:
+    stable_since = now
+    time_to_stable_s = max(0, int(now - learning_started_at))
 
     def _ret() -> Dict[str, Any]:
         return {"target": max(mn, min(mx, int(target))), "floor": floor,
