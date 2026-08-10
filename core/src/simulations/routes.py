@@ -5680,8 +5680,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             }
             pending.pop(ak, None)
             approved.append(ak)
-        if not approved:
-            raise HTTPException(status_code=404, detail="no matching pending entries")
+if not approved:
+        logger.warning("No matching pending entries found.")
         await store.set_global_learned_values(published)
         await store.set_global_learned_pending(pending)
         pushed = await _push_sim_quotas_all_tenants()
