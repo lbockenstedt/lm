@@ -13554,6 +13554,65 @@ function openModal(id, bodyHtml, opts = {}) {
     return modal;
 }
 
+// ── Self-service spoke onboarding ("Add Server") ────────────────────────────
+// A tenant-admin (who has no access to the Global-Admin-only Setup → Spokes
+// approval screen) generates a one-time onboarding key for their OWN tenant
+// and gets an install command for a brand-new spoke of a given role — the new
+// box self-registers and auto-binds to that tenant the moment it connects
+// with the key (main.py._try_psk_self_provision), no admin click required.
+// Reusable across every per-tenant-spoke module (nac/dns/dhcp/nw/...) —
+// parameterized by role. Backend: routes/onboarding.py, mounted at
+// /tenant/{tenant}/onboarding-psk — a GENERIC, module-agnostic twin of the
+// Simulations-specific card in sim-views.js (csSpokeMgmtPskCard), which
+// manages the same underlying PSK but ALSO pushes it to the tenant's cs
+// spoke for a different (sub-agent relay) mechanism this does not use.
+function addServerButtonHtml(role, label) {
+    if (!isTenantAdmin() && !isAdmin()) return '';
+    return `<button onclick="openAddServerModal('${escapeHtml(role)}', '${escapeHtml(label)}')"
+        class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold shadow-sm"
+        title="Self-service: onboard a new ${escapeHtml(label)} server for your tenant">+ Add Server</button>`;
+}
+
+function openAddServerModal(role, label) {
+    const tenant = currentTenant && currentTenant !== 'default' ? currentTenant : null;
+    if (!tenant) {
+        if (typeof showToast === 'function') showToast('Select a tenant first', 'error');
+        return;
+    }
+    const body = `
+        <h3 class="text-lg font-bold text-[#263040]">Add ${escapeHtml(label)} Server</h3>
+        <p class="text-sm text-slate-500">Generate a one-time onboarding key, then run the install command below on the new server. It registers and binds to <b>${escapeHtml(tenant)}</b> automatically — no admin approval needed.</p>
+        <div id="add-server-psk-area" class="text-xs text-slate-400 italic">No key generated yet.</div>
+        <div class="flex justify-end gap-2 pt-2">
+            <button onclick="document.getElementById('add-server-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Close</button>
+            <button onclick="_addServerGenPsk('${escapeHtml(role)}', '${escapeHtml(tenant)}')" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Generate Key</button>
+        </div>`;
+    openModal('add-server-modal', body, { backdropClose: true });
+}
+
+async function _addServerGenPsk(role, tenant) {
+    const area = document.getElementById('add-server-psk-area');
+    try {
+        const r = await apiJson(`/tenant/${encodeURIComponent(tenant)}/onboarding-psk`, { method: 'POST', body: '{}' });
+        if (!area) return;
+        const cmd = `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \\\n  | sudo bash -s -- --roles ${role} --onboarding-psk ${r.psk} --tenant-hint ${tenant}`;
+        area.innerHTML = `<p class="text-xs font-bold text-slate-600 mb-1">Run this on the new server:</p>
+            <pre id="add-server-cmd" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">${escapeHtml(cmd)}</pre>
+            <button onclick="_addServerCopyCmd()" class="mt-2 text-xs text-[#01A982] hover:underline">Copy command</button>
+            <p class="mt-2 text-[11px] text-slate-400">This key is single-use for onboarding — it does not expire on its own. Revoke it from the tenant's onboarding key list once the server has connected.</p>`;
+    } catch (e) {
+        console.error('_addServerGenPsk: generate failed', e);
+        if (typeof showToast === 'function') showToast(e.message, 'error');
+    }
+}
+
+function _addServerCopyCmd() {
+    const el = document.getElementById('add-server-cmd');
+    if (!el) return;
+    navigator.clipboard.writeText(el.textContent || '');
+    if (typeof showToast === 'function') showToast('Copied', 'success');
+}
+
 // Watchdog recovery badge for a spoke. The hub's run_spoke_recovery_loop
 // restarts stranded units (reset-failed + restart, backoff 60/120/180s) and
 // exposes per-spoke state via GET_SPOKE_STATUS + /setup/diagnostics. This maps
@@ -14615,8 +14674,10 @@ async function loadNwData(subMenu) {
             }
             const data = await r.json();
             const items = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
+            const addServerRow = `<div class="flex justify-end mb-2">${addServerButtonHtml('nw', 'Network Devices')}</div>`;
             if (!items.length) {
-                container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No network devices configured. Add one in Setup → Network Devices.</div>`;
+                container.innerHTML = addServerRow +
+                    `<div class="py-12 text-center text-slate-400 italic">No network devices configured. Add one in Setup → Network Devices.</div>`;
                 return;
             }
             const keys = ['device', 'object_type', 'transport', 'address', 'reachable'];
@@ -14643,7 +14704,7 @@ async function loadNwData(subMenu) {
                     <td class="px-4 py-3 text-right">${cfg}</td>
                 </tr>`;
             }).join('');
-            container.innerHTML = `
+            container.innerHTML = addServerRow + `
                 <div class="space-y-4">
                     <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
                         <table class="w-full text-left text-sm">
@@ -20716,8 +20777,13 @@ async function _renderCppmSessions(container, subMenu, th, tableWrap) {
     // client re-filter (its session-tenant prefixes are wrong once a
     // tenant is switched).
     const sessions = d.sessions || [];
-    const cols = ['Username', 'MAC / Station', 'IP', 'Role', 'NAS', 'Port', 'Service', 'Start Time', 'State'];
+    // Admin combined view (2+ nac spokes): sessions are tagged _tenant by the
+    // merge fanout — see the matching comment in _renderCppmDevices.
+    const showSessTenantCol = sessions.some(s => s && s._tenant);
+    const cols = (showSessTenantCol ? ['Tenant'] : []).concat(
+        ['Username', 'MAC / Station', 'IP', 'Role', 'NAS', 'Port', 'Service', 'Start Time', 'State']);
     const rows = sessions.map(s => `<tr class="border-b border-slate-100 hover:bg-slate-50">
+        ${showSessTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(s._tenant || '—')}</td>` : ''}
         <td class="px-4 py-2 font-medium">${s.username || '—'}</td>
         <td class="px-4 py-2 font-mono text-xs">${s.calling_station || s.mac || '—'}</td>
         <td class="px-4 py-2 font-mono text-xs">${s.ip || '—'}</td>
@@ -20738,8 +20804,8 @@ async function _renderCppmSessions(container, subMenu, th, tableWrap) {
     </select>`;
     container.innerHTML = `<div class="flex justify-between items-center mb-1 px-1">
         <h3 class="text-base font-semibold text-[#263040]">Access Tracker <span class="text-xs text-slate-400 font-normal">(${sessions.length} of ${d.total ?? sessions.length})</span> ${helpIcon('cppm', null, 'NAC help')}</h3>
-        <div class="flex items-center gap-2">${limitSel}${sessRefreshBtn}</div>
-    </div>` + tableWrap(th(cols) + `<tbody>${rows || '<tr><td colspan="9" class="px-4 py-6 text-center text-slate-400">No active sessions</td></tr>'}</tbody>`);
+        <div class="flex items-center gap-2">${addServerButtonHtml('cppm', 'ClearPass')}${limitSel}${sessRefreshBtn}</div>
+    </div>` + tableWrap(th(cols) + `<tbody>${rows || `<tr><td colspan="${cols.length}" class="px-4 py-6 text-center text-slate-400">No active sessions</td></tr>`}</tbody>`);
 }
 
 // _renderCppmDevices() — the My Devices / Unknown Devices branch of
@@ -20765,7 +20831,16 @@ async function _renderCppmDevices(container, subMenu, th, tableWrap) {
     // is switched. 'Unknown Devices' are untagged endpoints (assigned to
     // no tenant), subnet-scoped to the selected tenant's network.
     const devices = allDevices;
-    const cols = ['MAC Address', 'Status', 'Hostname', 'IP', 'Vendor', 'OS', 'Type', 'Attributes'];
+    // Admin combined view (2+ nac spokes, one per tenant): each device is
+    // tagged _tenant by the merge fanout (see cppm.py::_nac_merge_fanout).
+    // Show a Tenant column then — otherwise (the normal single-tenant case,
+    // server-side filtered to the caller's own tenant) it would be either
+    // always-the-same-value noise for a user or an unwanted label for an
+    // admin who selected one specific tenant.
+    const showTenantCol = devices.some(d => d && d._tenant);
+    const cols = showTenantCol
+        ? ['Tenant', 'MAC Address', 'Status', 'Hostname', 'IP', 'Vendor', 'OS', 'Type', 'Attributes']
+        : ['MAC Address', 'Status', 'Hostname', 'IP', 'Vendor', 'OS', 'Type', 'Attributes'];
     const statusBadge = s => {
         const cls = s === 'Known' ? 'bg-green-100 text-green-700' : s === 'Unknown' ? 'bg-amber-100 text-amber-700' : 'bg-red-100 text-red-700';
         return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${cls}">${s || '—'}</span>`;
@@ -20792,6 +20867,7 @@ async function _renderCppmDevices(container, subMenu, th, tableWrap) {
     };
     window._cppmDeviceMap = Object.fromEntries(devices.map(d => [d.mac, d]));
     const rows = devices.map(d => `<tr class="border-b border-slate-100 hover:bg-slate-50 cursor-pointer cppm-dev-row" data-mac="${d.mac || ''}">
+        ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(d._tenant || '—')}</td>` : ''}
         <td class="px-4 py-2 font-mono text-xs text-[#01A982] hover:underline">${d.mac || '—'}</td>
         <td class="px-4 py-2">${statusBadge(d.status)}</td>
         <td class="px-4 py-2 text-xs">${d.hostname || '—'}</td>
@@ -20808,8 +20884,8 @@ async function _renderCppmDevices(container, subMenu, th, tableWrap) {
     const devTitle = isUnknown ? 'Unknown Devices' : 'My Devices';
     container.innerHTML = `<div class="flex justify-between items-center mb-1 px-1">
         <h3 class="text-base font-semibold text-[#263040]">${devTitle} <span class="text-xs text-slate-400 font-normal">(${devices.length} devices)</span> ${helpIcon('cppm', null, 'NAC help')}</h3>
-        ${devRefreshBtn}
-    </div>` + tableWrap(th(cols) + `<tbody>${rows || '<tr><td colspan="8" class="px-4 py-6 text-center text-slate-400">No devices found</td></tr>'}</tbody>`);
+        <div class="flex items-center gap-2">${addServerButtonHtml('cppm', 'ClearPass')}${devRefreshBtn}</div>
+    </div>` + tableWrap(th(cols) + `<tbody>${rows || `<tr><td colspan="${cols.length}" class="px-4 py-6 text-center text-slate-400">No devices found</td></tr>`}</tbody>`);
     document.getElementById('cppm-dev-refresh')?.addEventListener('click', () => refreshModuleCache('cppm_devices').then(() => loadCPPMData(subMenu)));
     container.querySelectorAll('.cppm-dev-row').forEach(tr => {
         tr.addEventListener('click', () => showCPPMDeviceDetail(tr.dataset.mac));

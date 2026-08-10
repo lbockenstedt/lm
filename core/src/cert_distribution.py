@@ -798,7 +798,15 @@ def build_available_targets(spoke_module_types: Dict[str, str],
                      else f"{_friendly[mt]} — {name}")
         else:
             label = f"{mt} — {name}"
-        targets.append({"module_type": mt, "identifier": "",
+        # identifier = the spoke_id itself. Non-agent-hosting types are
+        # already one distinct target PER connected spoke of that type (no
+        # "any firewall" broadcast target exists), so the spoke_id IS the
+        # natural disambiguator — leaving this "" (as before) meant a stored
+        # target for e.g. "firewall" carried no way to tell WHICH of two
+        # connected firewall spokes it meant, so distribution always fell
+        # back to _cert_target_spoke's first-connected-wins catch-all. See
+        # _cert_target_spoke's identifier handling in hub_spoke_registry.py.
+        targets.append({"module_type": mt, "identifier": sid,
                         "label": label, "spoke_id": sid})
     # Agent-hosting: each connected pxmx agent = a per-node target.
     for a in agents or []:

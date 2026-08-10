@@ -544,7 +544,8 @@ def _derived_mode(phase: str) -> str:
 
 def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
                   applied_op: int | None = None,
-                  applied_floor: int | None = None) -> Dict[str, Any]:
+                  applied_floor: int | None = None,
+                  producing: int | None = None) -> Dict[str, Any]:
     """Advance one controller tick (design §9). ``firing`` is True/False/None
     (None = unknown → hold). ``applied_op`` is the effective learned operating
     point for this alert (max of this tenant's learning-ON stable learned_op and
@@ -553,6 +554,18 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
     ``applied_floor`` is the same max-across-sources treatment for the raw
     learned floor (pre-buffer) — used, alongside applied_op, to derive a
     CONSUMER row's effective min/max when it inherits (see below).
+
+    ``producing`` is the cs spoke(s)' ACTUAL functionally-working client count
+    for this quota this tick (summed across spokes; see routes.py's
+    ``_spoke_producing_counts`` / sim_quota_engine's gateway-confirmed-down
+    exclusion) — NOT the requested ``target``. A quota asked for 10 clients
+    where 2 are gateway-down (e.g. a detached dongle) only ever really had 8
+    producing; if Central still fired, 8 — not 10 — is the true confirmed
+    count. Every place below that records a firing observation as ``floor``
+    clamps to ``min(target, producing)`` via ``_confirmed()`` so a learned
+    floor (and the operating point derived from it) never overstates what
+    actually ran. ``None`` (spoke didn't report / not yet wired) falls back to
+    trusting ``target`` outright — unchanged prior behavior.
 
     Two behaviors, gated by ``q["learning"]``:
 
@@ -644,6 +657,16 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
         target = max(mn, min(mx, int(target)))
         last = now
 
+    def _confirmed(count: int) -> int:
+        """The count actually confirmed by THIS firing observation — clamped
+        to what the spoke(s) report as genuinely producing, not the raw
+        requested count. ``producing`` reflects reality at the moment of the
+        tick that called this, so it's only applied at a firing==True
+        recording point (see adaptive_step's docstring)."""
+        if producing is None:
+            return int(count)
+        return max(1, min(int(count), int(producing)))
+
     def _stable_at(fl: int) -> None:
         """Enter `stable`: record learned_op + the time-to-stable. The internal
         probe ``target`` parks at the FLOOR (the re-probe baseline, <= max). The
@@ -698,21 +721,21 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
             if firing is True:
                 if phase == "up_find":
                     # found firing from below — start ratcheting down
-                    floor = target
+                    floor = _confirmed(target)
                     target = max(mn, target - step)
                     phase = "down_floor"; last = now
                 elif phase == "down_floor":
                     if target <= mn:
                         _stable_at(mn)  # still firing at min → floor is min
                     else:
-                        floor = target          # lower count still fires
+                        floor = _confirmed(target)          # lower count still fires
                         target = max(mn, target - step)
                         last = now
                 elif phase == "up_confirm":
-                    _stable_at(target)  # re-fired → floor confirmed
+                    _stable_at(_confirmed(target))  # re-fired → floor confirmed
                 elif phase == "stable":
                     # continuous re-learning: re-probe DOWN to track drift
-                    floor = target
+                    floor = _confirmed(target)
                     target = max(mn, target - step)
                     phase = "down_floor"; last = now
                 elif phase == "at_max":
@@ -723,7 +746,7 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
                     # never came back down once firing was detected again — it sat
                     # underfilled at max. There was no at_max→stable path despite
                     # the old comment claiming one.)
-                    floor = target
+                    floor = _confirmed(target)
                     target = max(mn, target - step)
                     phase = "down_floor"; last = now
             else:  # firing is False

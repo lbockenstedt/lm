@@ -655,7 +655,13 @@ def test_available_targets_lists_cert_capable_connected_spokes():
     active = {"opn-1", "netbox-1", "ldap-1", "nw-1", "nac-1"}  # dns-1 + pxmx-1 offline
     names = {"opn-1": "edge-fw", "netbox-1": "netbox", "nac-1": "clearpass"}
     out = cd.build_available_targets(smt, active, names, cd.CERT_CAPABLE_MODULES, [])
-    by_mt = {t["module_type"]: t for t in out if not t["identifier"]}
+    # Spoke-level (non-agent-node) entries: no agent_id key. identifier =
+    # that spoke's own id for these types (the fix so _cert_target_spoke can
+    # route a stored target to the SPECIFIC spoke it was added for, instead
+    # of always the first-connected spoke of that module_type — see
+    # test_cert_target_spoke.py). The hub self-install entry keeps identifier
+    # "" (there is no hub "spoke" to disambiguate).
+    by_mt = {t["module_type"]: t for t in out if "agent_id" not in t}
     # cert-capable + connected: firewall, ipam, directory, nw, nac — PLUS the
     # always-present hub self-install entry.
     assert set(by_mt) == {"firewall", "ipam", "directory", "nw", "nac", "hub"}
@@ -668,8 +674,14 @@ def test_available_targets_lists_cert_capable_connected_spokes():
     assert by_mt["directory"]["label"] == "directory — ldap-1"
     # nw reads "Network Devices" (not the spoke's raw display name).
     assert by_mt["nw"]["label"] == "Network Devices"
-    # identifier empty for spoke-level targets.
-    assert all(t["identifier"] == "" for t in by_mt.values())
+    # identifier = own spoke_id for every spoke-level target except hub
+    # (which has none to disambiguate).
+    assert by_mt["firewall"]["identifier"] == "opn-1"
+    assert by_mt["ipam"]["identifier"] == "netbox-1"
+    assert by_mt["directory"]["identifier"] == "ldap-1"
+    assert by_mt["nw"]["identifier"] == "nw-1"
+    assert by_mt["nac"]["identifier"] == "nac-1"
+    assert by_mt["hub"]["identifier"] == ""
 
 
 def test_available_targets_nw_friendly_label_disambiguates_multi_spoke():
@@ -679,9 +691,12 @@ def test_available_targets_nw_friendly_label_disambiguates_multi_spoke():
     active = {"nw-1", "nw-2"}
     names = {"nw-1": "site-a-fleet", "nw-2": "site-b-fleet"}
     out = cd.build_available_targets(smt, active, names, cd.CERT_CAPABLE_MODULES, [])
-    nw = [t for t in out if t["module_type"] == "nw" and not t["identifier"]]
+    nw = [t for t in out if t["module_type"] == "nw" and "agent_id" not in t]
     labels = sorted(t["label"] for t in nw)
     assert labels == ["Network Devices — site-a-fleet", "Network Devices — site-b-fleet"]
+    # Each spoke's target identifier is its OWN spoke_id (not shared/empty),
+    # so the two rows are individually selectable/distinguishable.
+    assert {t["identifier"] for t in nw} == {"nw-1", "nw-2"}
     # Single spoke → bare friendly label.
     single = cd.build_available_targets({"nw-1": "nw"}, {"nw-1"},
                                         {"nw-1": "All Devices"},

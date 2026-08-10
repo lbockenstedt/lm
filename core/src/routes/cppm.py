@@ -1,6 +1,8 @@
 """ClearPass (CPPM/NAC) device/session/enrichment routes."""
+import asyncio
+
 from api import (
-    HTTPException, Request, _cache_entry, _unwrap_spoke, get_tenant_scoping, logger,
+    HTTPException, Request, _cache_entry, _unwrap_spoke, access, get_tenant_scoping, logger,
 )
 
 
@@ -14,35 +16,104 @@ def register(app, hub, ctx):
     _filter_tenant = ctx._filter_tenant
     _gate_record_tenant = ctx._gate_record_tenant
 
-    async def _cppm_warm(cmd, warm_key, payload=None):
+    # ── tenant-aware spoke resolution ───────────────────────────────────────
+    # Multiple ``nac`` spokes may be connected, each bound to a different
+    # tenant (a tenant runs their own ClearPass appliance). Every route below
+    # used to call ``hub.get_spoke_by_type("nac")`` — the first connected nac
+    # spoke, full stop — so with more than one nac spoke connected, EVERY
+    # tenant's query silently hit whichever spoke connected first, regardless
+    # of who was asking. ``_nac_spoke_for_request`` replaces that with the
+    # SAME tenant-scoping this file already uses for downstream data
+    # filtering (``_effective_tenant``): admin sees the global spoke unless
+    # they pick a tenant; everyone else is scoped to their own tenant(s), so
+    # a crafted ``?tenant=`` can never reach another tenant's ClearPass data.
+    def _nac_spoke_for_request(request: Request, tenant: str = None):
+        """The nac spoke that should answer THIS request. Prefers the
+        caller's effective tenant's own ``nac_instances`` record (the
+        ClearPass connection a tenant-admin self-configured via
+        ``/tenant/devices/nac-instances`` — host/client_id/secret bound to a
+        specific spoke_id), falling back to a spoke bound to that tenant by
+        module_type, then the shared-tenant spoke. Admin with no tenant
+        selected keeps the legacy global-first-connected-spoke behavior
+        (unchanged) — see ``_nac_merge_fanout`` for the admin combined view."""
+        tid = _effective_tenant(request, tenant)
+        if not tid:
+            return hub.get_spoke_by_type("nac")
+        instances = (hub.state.system_state.get("global_config", {}) or {}).get("nac_instances", []) or []
+        inst = next((i for i in instances if isinstance(i, dict) and i.get("tenant_id") == tid), None)
+        spoke_id = (inst or {}).get("spoke_id") or ""
+        if spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
+            return spoke_id
+        return (hub.get_cppm_spoke_for_shared()
+                if access.tenant_is_shared(tid)
+                else hub.get_cppm_spoke_for_tenant(tid))
+
+    async def _nac_merge_fanout(cmd: str, payload: dict, list_key: str, request: Request):
+        """Admin, no tenant selected: fan ``cmd`` out to EVERY connected,
+        approved nac spoke, tag each returned record with its spoke's owning
+        tenant (``_tenant``), and merge into one combined list — 'combine the
+        data at the hub' instead of only ever seeing whichever spoke happened
+        to connect first. ``list_key`` is the response dict key holding the
+        record list (e.g. "devices", "sessions"). A tenant-scoped caller
+        never reaches this — see the ``tid`` check at each call site."""
+        spokes = [s for s in (hub.get_all_spokes_by_type("nac") or [])
+                  if s in hub.active_connections and hub.approved_modules.get(s, False)]
+        if not spokes:
+            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+
+        async def _one(sid):
+            try:
+                result = await hub.request_response(sid, cmd, payload or {}, timeout=20.0)
+                data = _cppm_unwrap(result)
+            except Exception as e:  # noqa: BLE001 — one bad/offline spoke must not fail the merge
+                logger.debug("nac merge fanout: %s failed: %s", sid, e)
+                return []
+            recs = data.get(list_key) if isinstance(data, dict) else None
+            if not isinstance(recs, list):
+                return []
+            tid = hub.state.get_spoke_tenant(sid) or ""
+            return [{**r, "_tenant": tid} if isinstance(r, dict) else r for r in recs]
+
+        merged = [r for recs in await asyncio.gather(*[_one(s) for s in spokes]) for r in recs]
+        return {list_key: merged, "total": len(merged)}
+
+    async def _cppm_warm(cmd, warm_key, payload=None, request: Request = None, tenant: str = None):
         """Run a CPPM read with warm cache: cache the raw (scope-independent)
         result and serve last-known (stale) on spoke-down / error / overrun so
         the NAC page renders instantly instead of blocking/503-ing. Tenant/subnet
-        filtering is applied by the caller after — never cache post-filter data."""
-        cppm_spoke = hub.get_spoke_by_type("nac")
+        filtering is applied by the caller after — never cache post-filter data.
+
+        ``warm_key`` is suffixed with the resolved tenant (or "_global_" when
+        none) so two tenants' nac spokes never share a cache slot — without
+        this, once spoke resolution became tenant-aware, a single shared
+        "_all_" cache key would still let tenant B's request be served
+        tenant A's cached devices/sessions from a moment earlier."""
+        tid = _effective_tenant(request, tenant) if request is not None else None
+        cppm_spoke = _nac_spoke_for_request(request, tenant) if request is not None else hub.get_spoke_by_type("nac")
+        scoped_key = f"{warm_key}:{tid or '_global_'}"
         if not cppm_spoke:
-            cached = hub.warm_get(cmd.lower(), warm_key)
+            cached = hub.warm_get(cmd.lower(), scoped_key)
             if cached is not None:
                 return cached
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, cmd, payload or {}, timeout=20.0)
             data = _cppm_unwrap(result)
-            await hub.warm_set(cmd.lower(), warm_key, data)
+            await hub.warm_set(cmd.lower(), scoped_key, data)
             return data
         except HTTPException:
             raise
         except Exception:
-            cached = hub.warm_get(cmd.lower(), warm_key)
+            cached = hub.warm_get(cmd.lower(), scoped_key)
             if cached is not None:
                 return cached
             raise
 
     @app.get("/cppm/refresh")
-    async def refresh_cppm_cache():
+    async def refresh_cppm_cache(request: Request, tenant: str = None):
         hub = app.state.hub
         logger.info("API: Triggering CPPM cache refresh")
-        cppm_spoke = hub.get_spoke_by_type("nac")
+        cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
             logger.error("API: No CPPM spoke connected for refresh")
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
@@ -54,9 +125,9 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/cppm/test-auth")
-    async def test_cppm_auth():
+    async def test_cppm_auth(request: Request, tenant: str = None):
         hub = app.state.hub
-        cppm_spoke = hub.get_spoke_by_type("nac")
+        cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
         try:
@@ -68,9 +139,9 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/cppm/probe")
-    async def probe_cppm(path: str, method: str = "GET"):
+    async def probe_cppm(request: Request, path: str, method: str = "GET", tenant: str = None):
         hub = app.state.hub
-        cppm_spoke = hub.get_spoke_by_type("nac")
+        cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
         try:
@@ -82,10 +153,10 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/cppm/health")
-    async def get_cppm_health():
+    async def get_cppm_health(request: Request, tenant: str = None):
         hub = app.state.hub
         logger.info("API: Requesting CPPM health")
-        cppm_spoke = hub.get_spoke_by_type("nac")
+        cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
             logger.error("API: No CPPM spoke connected")
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
@@ -156,7 +227,7 @@ def register(app, hub, ctx):
         tf = lambda d: _filter_devices_by_tenant(d, scope)
 
         if tenant and _effective_tenant(request, tenant):
-            data = await _cppm_warm("LIST_ENDPOINTS", "_all_")
+            data = await _cppm_warm("LIST_ENDPOINTS", "_all_", request=request, tenant=tenant)
             return await _filter_tenant(request, tf(data), "nac", ["ip"], tenant)
         if sess and not _is_admin(sess):
             tenant_id = sess.get("user", {}).get("tenant_id")
@@ -164,9 +235,15 @@ def register(app, hub, ctx):
                 cached = _cache_entry(tenant_id, "cppm_devices")
                 if cached:
                     return await _filter_session(request, tf(cached["data"]), "nac", ["ip"])
-        # Live (admin/no-selection) path — warm-cached so a slow/offline CPPM
-        # still renders last-known endpoints instead of 503-ing.
-        data = await _cppm_warm("LIST_ENDPOINTS", "_all_")
+        # Admin, no tenant selected: combine every connected nac spoke's
+        # devices into one list (tagged _tenant) instead of only ever seeing
+        # whichever spoke happened to connect first.
+        if sess and _is_admin(sess):
+            data = await _nac_merge_fanout("LIST_ENDPOINTS", {}, "devices", request)
+            return await _filter_session(request, tf(data), "nac", ["ip"])
+        # Live (own-tenant) path — warm-cached so a slow/offline CPPM still
+        # renders last-known endpoints instead of 503-ing.
+        data = await _cppm_warm("LIST_ENDPOINTS", "_all_", request=request, tenant=tenant)
         return await _filter_session(request, tf(data), "nac", ["ip"])
 
     @app.get("/api/cppm/unknown-devices")
@@ -176,8 +253,14 @@ def register(app, hub, ctx):
         selected tenant so a tenant sees untagged devices on their own network;
         an admin with no tenant selected sees every untagged endpoint."""
         hub = app.state.hub
-        # Warm-cached LIST_ENDPOINTS (shared with the devices page).
-        data = await _cppm_warm("LIST_ENDPOINTS", "_all_")
+        sess = _session_user(request)
+        # Admin, no tenant selected: combine every connected nac spoke's
+        # endpoints before filtering to untagged ones.
+        if sess and _is_admin(sess) and not (tenant and _effective_tenant(request, tenant)):
+            data = await _nac_merge_fanout("LIST_ENDPOINTS", {}, "devices", request)
+        else:
+            # Warm-cached LIST_ENDPOINTS (shared with the devices page).
+            data = await _cppm_warm("LIST_ENDPOINTS", "_all_", request=request, tenant=tenant)
         # Keep only untagged endpoints (assigned to no tenant).
         if isinstance(data, dict) and isinstance(data.get("devices"), list):
             untagged = [d for d in data["devices"] if isinstance(d, dict) and not _device_tenant_slug(d)]
@@ -241,6 +324,12 @@ def register(app, hub, ctx):
             d = _unwrap_spoke(r)
             return d
 
+        # Admin-only cross-system search (gated above) — deliberately NOT
+        # tenant-scoped like the tenant-facing NAC routes below: an admin
+        # searching by MAC/IP/hostname here is looking across the WHOLE
+        # fleet, so the first-connected nac spoke is left as the legacy
+        # single-spoke behavior rather than fanning this search out across
+        # every tenant's ClearPass appliance too (a bigger, separate change).
         spoke_nac  = hub.get_spoke_by_type("nac")
         fw_spokes  = hub.get_all_spokes_by_type("firewall") or []
         spoke_ipam = hub.get_spoke_by_type("ipam")
@@ -317,7 +406,7 @@ def register(app, hub, ctx):
     async def get_cppm_device_enrich(request: Request, mac: str, tenant: str = None):
         """Fetch CPPM endpoint detail and enrich missing fields from DHCP leases."""
         hub = app.state.hub
-        cppm_spoke = hub.get_spoke_by_type("nac")
+        cppm_spoke = _nac_spoke_for_request(request, tenant)
         fw_spokes = hub.get_all_spokes_by_type("firewall") or []
 
         ep: dict = {}
@@ -363,7 +452,7 @@ def register(app, hub, ctx):
     @app.get("/api/cppm/device-sessions")
     async def get_cppm_device_sessions(request: Request, mac: str, tenant: str = None):
         hub = app.state.hub
-        cppm_spoke = hub.get_spoke_by_type("nac")
+        cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
         try:
@@ -376,12 +465,12 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/cppm/roles")
-    async def get_cppm_roles():
+    async def get_cppm_roles(request: Request, tenant: str = None):
         """List ClearPass roles from the NAC spoke (unfiltered relay)."""
         hub = app.state.hub
         logger.debug("relay GET /api/cppm/roles")
         logger.info("API: Requesting CPPM roles")
-        cppm_spoke = hub.get_spoke_by_type("nac")
+        cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
             logger.error("API: No CPPM spoke connected")
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
@@ -399,7 +488,7 @@ def register(app, hub, ctx):
         hub = app.state.hub
         logger.debug("relay %s %s tenant=%s", request.method, request.url.path, tenant)
         logger.info(f"API: Requesting CPPM logs from {start} to {end}")
-        cppm_spoke = hub.get_spoke_by_type("nac")
+        cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
             logger.error("API: No CPPM spoke connected")
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
@@ -432,7 +521,7 @@ def register(app, hub, ctx):
         # (explicit_tenant). Without a selection, non-admins keep session-tenant
         # scoping via the cache path below.
         if tenant and _effective_tenant(request, tenant):
-            cppm_spoke = hub.get_spoke_by_type("nac")
+            cppm_spoke = _nac_spoke_for_request(request, tenant)
             if not cppm_spoke:
                 raise HTTPException(status_code=503, detail="No CPPM spoke connected")
             try:
@@ -449,7 +538,19 @@ def register(app, hub, ctx):
                 cached = _cache_entry(tenant_id, "cppm_sessions")
                 if cached:
                     return await _filter_session(request, cached["data"], "nac", ["ip"])
-        cppm_spoke = hub.get_spoke_by_type("nac")
+        # Admin, no tenant selected: combine every connected nac spoke's
+        # sessions into one list (tagged _tenant).
+        if sess and _is_admin(sess):
+            try:
+                data = await _nac_merge_fanout(
+                    "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset}, "sessions", request)
+                return await _filter_session(request, data, "nac", ["ip"])
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.exception("get_cppm_sessions failed")
+                raise HTTPException(status_code=500, detail=str(e))
+        cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
             if sess:
                 tenant_id = sess.get("user", {}).get("tenant_id")
@@ -467,9 +568,9 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.get("/api/cppm/nac-status")
-    async def get_cppm_nac_status():
+    async def get_cppm_nac_status(request: Request, tenant: str = None):
         hub = app.state.hub
-        cppm_spoke = hub.get_spoke_by_type("nac")
+        cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
             raise HTTPException(status_code=503, detail="No CPPM spoke connected")
         try:

@@ -39,6 +39,7 @@ class _SyncHub(EndpointSyncMixin):
         self._nac_spoke = nac_spoke
         self._responses = responses or {}
         self.request_log = []
+        self._nac_unconfigured_spokes = set()
 
     def get_spoke_by_type(self, module_type: str):
         if module_type == "ipam":
@@ -46,6 +47,12 @@ class _SyncHub(EndpointSyncMixin):
         if module_type == "nac":
             return self._nac_spoke
         return None
+
+    def get_cppm_spoke_for_tenant(self, tenant_id=None):
+        return self._nac_spoke
+
+    def get_cppm_spoke_for_shared(self):
+        return self._nac_spoke
 
     async def request_response(self, spoke_id, command, payload, timeout=30.0):
         self.request_log.append((spoke_id, command, payload))

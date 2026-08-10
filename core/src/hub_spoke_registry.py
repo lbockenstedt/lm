@@ -198,8 +198,22 @@ class SpokeRegistryMixin:
         connected agent-hosting spoke that has an indexed agent. The
         ``agent_info`` index lags connect by ~30s, so the final fallback
         prefers ``simulation`` (where split-topology agents live) over a bare
-        pxmx spoke that may have none. Non-agent-hosting types resolve by
-        ``module_type`` exactly as before."""
+        pxmx spoke that may have none.
+
+        Non-agent-hosting types (firewall, ipam, directory, statuspage, ...)
+        are one distinct target PER connected spoke of that type —
+        ``build_available_targets`` sets ``identifier`` to that spoke's own
+        id (there is no "any <type>" broadcast target to fall back to). A
+        specific identifier that's a currently-connected spoke of the right
+        type is used directly. Before this, a stored 'firewall' target
+        carried no way to tell WHICH of two connected firewall spokes it
+        meant, so distribution always fell back to ``get_spoke_by_type``
+        (first-connected-wins), silently pushing a tenant's cert to the
+        WRONG firewall in a multi-spoke deployment. No identifier (a target
+        added before this fix shipped, or targeting a module_type with no
+        such concept) or a stale/disconnected identifier falls back to
+        ``get_spoke_by_type`` unchanged — the pre-fix behavior, for
+        backward compat."""
         if module_type in ("hypervisor", "simulation"):
             if identifier:
                 sid = self.get_spoke_for_agent(identifier, fallback_hypervisor=False)
@@ -231,6 +245,9 @@ class SpokeRegistryMixin:
                 return identifier
             return next((sid for sid in self.ldap_server_agents
                          if sid in self.active_connections), None)
+        if (identifier and self._primary_key(identifier) in self.active_connections
+                and self.spoke_module_types.get(self._primary_key(identifier)) == module_type):
+            return identifier
         return self.get_spoke_by_type(module_type)
 
     def get_hypervisor_spoke(self) -> Optional[str]:
@@ -392,6 +409,31 @@ class SpokeRegistryMixin:
         return (self.get_truenas_spoke_for_tenant(sid)
                 if sid else self.get_spoke_by_type("storage"))
 
+    def get_cppm_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
+        """Tenant-aware NAC (ClearPass/cppm) spoke — mirrors
+        ``get_nw_spoke_for_tenant``. With a real ``tenant_id``, return ONLY a
+        connected, approved ``nac`` spoke BOUND to that tenant — NEVER one
+        bound to a different tenant (that would answer a tenant's NAC
+        sessions/devices/logs query from ANOTHER tenant's ClearPass
+        appliance). No unassigned fallback here — see
+        ``get_cppm_spoke_for_shared`` for the explicit shared-tenant path a
+        caller falls back to when the tenant has no dedicated spoke of its
+        own. With ``tenant_id`` None / ``"default"`` (admin unscoped / global
+        view), fall back to ``get_spoke_by_type("nac")`` so the admin's NAC
+        page still shows a spoke (unchanged legacy behavior; the admin merge
+        view fans out to every tenant-bound spoke separately — see
+        routes/cppm.py)."""
+        if not tenant_id or tenant_id == "default":
+            return self.get_spoke_by_type("nac")
+        cands = [sid for sid in (self.get_all_spokes_by_type("nac") or [])
+                 if sid in self.active_connections
+                 and self.approved_modules.get(sid, False)]
+        if not cands:
+            return None
+        md = self.state.system_state.get("module_metadata", {})
+        bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
+        return bound[0] if bound else None
+
     def get_dhcp_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
         """Tenant-aware DHCP (Kea) spoke — mirrors ``get_nw_spoke_for_tenant``.
         With a real ``tenant_id``, return ONLY a connected, approved ``dhcp``
@@ -415,6 +457,15 @@ class SpokeRegistryMixin:
         md = self.state.system_state.get("module_metadata", {})
         bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
         return bound[0] if bound else None
+
+    def get_cppm_spoke_for_shared(self) -> Optional[str]:
+        """The NAC spoke that owns the SHARED-tenant ClearPass appliance — the
+        fallback a tenant with no dedicated NAC spoke of its own resolves to.
+        Mirrors ``get_nw_spoke_for_shared``."""
+        from access import shared_tenant_id
+        sid = shared_tenant_id()
+        return (self.get_cppm_spoke_for_tenant(sid)
+                if sid else self.get_spoke_by_type("nac"))
 
     def get_dhcp_spoke_for_shared(self) -> Optional[str]:
         """The DHCP spoke that owns the SHARED-tenant Kea server — the
