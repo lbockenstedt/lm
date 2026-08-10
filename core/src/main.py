@@ -7883,7 +7883,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # error log (sync excepthook installed in __init__). See req 4.
         try:
             _loop = asyncio.get_running_loop()
-            _loop.set_exception_handler(self._asyncio_exception_relay)
+            _loop.set_exception_handler(lambda _loop, context: self._asyncio_exception_relay(_loop, context))
             # Opt-in deep diagnosis: asyncio debug mode captures a source_traceback
             # for every task, so a "Task was destroyed but it is pending!" names the
             # CREATION site (the relay handler surfaces it). OFF by default — it

@@ -3825,7 +3825,7 @@ async function saveReport(id) {
 async function deleteReport(id) {
     if (!confirm('Delete this report?')) return;
     try {
-        const r = await setupFetch('/api/reports/' + id, { method: 'DELETE' });
+        const r = await setupFetch('/api/reports/' + id, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }});
         if (!r.ok) throw new Error('HTTP ' + r.status);
         showToast('Report deleted.', 'success');
         loadReportsData();
