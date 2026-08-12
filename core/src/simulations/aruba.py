@@ -34,7 +34,7 @@ from access import safe_external_url
 logger = logging.getLogger(__name__)
 
 _NEW_CENTRAL_TOKEN_URL = "https://sso.common.cloud.hpe.com/as/token.oauth2"
-_GLP_TOKEN_URL_TEMPLATE = "https://global.api.greenlake.hpe.com/authorization/v2/oauth2/{workspace_id}/token"
+_GLP_TOKEN_URL_TEMPLATE = "https://global.api.common.cloud.hpe.com/authorization/v2/oauth2/{workspace_id}/token"
 
 # Check catalogs mirrored from the cs spoke's aruba.py so the hub can serve the
 # Central API editor's monitored-check picker directly in centralized mode.
