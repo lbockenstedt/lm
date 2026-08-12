@@ -480,6 +480,15 @@ class SimulationsService:
                 "interval_s":       at.get("interval_s"),
                 "phase_ms":         at.get("phase_ms") or {},
                 "iter":             at.get("iter"),
+                # Hand-enumerated like every other field here, this one was simply
+                # never added — the WebUI's "no tick has ever completed" banner
+                # (csFreshnessPanel, _neverDone) reads last_tick_done_ts directly,
+                # so its permanent absence here made EVERY host show that banner
+                # unconditionally, regardless of actual agent health (bugfixer
+                # investigation confirmed via live agent logs: the agent side was
+                # ticking normally the whole time — only this hub-side field was
+                # ever missing).
+                "last_tick_done_ts": at.get("last_tick_done_ts"),
                 "vm_count":         at.get("vm_count"),
                 "node_count":       at.get("node_count"),
                 "agent_version":    at.get("agent_version"),
