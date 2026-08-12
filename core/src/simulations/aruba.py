@@ -74,6 +74,7 @@ _INSIGHTS_CACHE_TTL = 900  # 15 minutes
 
 _alerts_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _ALERTS_CACHE_TTL = 300   # 5 minutes
+_ALERTS_CACHE_TTL = 900   # 15 minutes
 
 _sites_health_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _devices_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
