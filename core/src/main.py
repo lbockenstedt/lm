@@ -7933,9 +7933,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 _ctx.load_cert_chain(self.tls_cert_path, self.tls_key_path)
             except Exception as e:
                 logger.error("TLS cert load failed: %s (cert=%s key=%s) — "
-                             "hub NOT starting; fix the cert or unset "
+                             "hub will start without TLS; fix the cert or unset "
                              "LM_TLS_CERT/LM_TLS_KEY to fall back to plaintext.",
                              e, self.tls_cert_path, self.tls_key_path)
+                # Fallback to plaintext if TLS setup fails
+                self.tls_enabled = False
                 raise
             del _ctx
         listen_port = self.tls_port  # single unified port (443 w/ TLS, 443 plain)
