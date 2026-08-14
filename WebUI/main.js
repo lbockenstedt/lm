@@ -4505,8 +4505,11 @@ async function loadBugReports(typeFilter) {
             // may file the GitHub issue and work it. Bugs skip the gate.
             const _st = (r.status || (r.filed ? 'filed' : '')).toLowerCase();
             let status;
-            if (_st === 'fixed' || _st === 'closed') {
+            if (_st === 'fixed') {
                 status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-green-600 font-semibold hover:underline" title="Closed on GitHub — fixed by BugFixer">✓ Fixed ↗</a>`;
+            } else if (_st === 'closed') {
+                // Closed WITHOUT a fix — must NOT look like "Fixed".
+                status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-slate-500 font-semibold hover:underline" title="Issue closed on GitHub without a fix — reopen if still broken">⊘ Closed (not fixed) ↗</a>`;
             } else if (_st === 'duplicate') {
                 // Recurrence: bugfixer matched this to an existing issue instead of
                 // filing a new one — link the SAME issue (must win over r.filed).
@@ -4676,7 +4679,9 @@ async function showBugReport(rid) {
         if (titleEl) titleEl.innerHTML = `${isFeat ? '💡 Feature Request' : '🐛 Bug Report'} <span class="font-mono text-slate-400">${escapeHtml(rid)}</span>`;
         const _dst = (r.status || (r.filed ? 'filed' : '')).toLowerCase();
         let status;
-        if (_dst === 'fixed' || _dst === 'closed') {
+        if (_dst === 'closed') {
+            status = `<span class="text-slate-500 font-semibold">⊘ Closed (not fixed) — the issue was closed on GitHub without a fix</span> — <a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline break-all">${escapeHtml(r.issue_url || 'GitHub issue')}</a>`;
+        } else if (_dst === 'fixed') {
             status = `<span class="text-green-600 font-semibold">✓ Fixed (issue closed on GitHub)</span> — <a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline break-all">${escapeHtml(r.issue_url || 'GitHub issue')}</a>`;
         } else if (_dst === 'duplicate') {
             status = `<span class="text-slate-500 font-semibold">⧉ Duplicate</span> — same issue: <a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline break-all">${escapeHtml(r.issue_url || 'GitHub issue')}</a>`;
