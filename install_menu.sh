@@ -96,8 +96,16 @@ locate_clone() {
     clone_dir="$(mktemp -d)"
     CLONE_DIR="$clone_dir"
     echo "${C_DIM}Cloning lm (branch ${BRANCH}) to ${clone_dir}...${C_RESET}"
-    if ! git clone --depth 1 -b "$BRANCH" "$REPO_URL" "$clone_dir" >/dev/null 2>&1; then
-        git clone "$REPO_URL" "$clone_dir" >/dev/null 2>&1 || { echo "install_menu: failed to clone $REPO_URL" >&2; exit 1; }
+    local clone_err
+    if ! clone_err="$(git clone --depth 1 -b "$BRANCH" "$REPO_URL" "$clone_dir" 2>&1)"; then
+        # Some servers/mirrors reject shallow branch clones — retry full.
+        if ! clone_err="$(git clone "$REPO_URL" "$clone_dir" 2>&1)"; then
+            echo "install_menu: failed to clone $REPO_URL (branch $BRANCH)" >&2
+            echo "  git said: ${clone_err:-<no output>}" >&2
+            echo "  Common causes: no network/DNS to github.com, a proxy that blocks git" >&2
+            echo "  (set it via: git config --global http.proxy http://host:port), or a stale CA bundle." >&2
+            exit 1
+        fi
         git -C "$clone_dir" checkout "$BRANCH" >/dev/null 2>&1 || true
     fi
     CLONE_ROOT="$clone_dir"
@@ -336,8 +344,68 @@ reexec_root() {
 }
 
 #======================================================================
+# Ensure the tools THIS bootstrap needs before it can do anything: git (to
+# clone lm) and curl (to re-fetch this script under `curl | bash`). The FULL
+# dependency set is installed by install_all.sh / install_agent.sh — but those
+# live INSIDE the repo we must `git clone` first, so on a bare box without git
+# the clone just failed with the unhelpful "failed to clone" and the operator
+# never reached the real prerequisite installer. Install the minimum here so
+# the bootstrap is self-sufficient on a fresh VM.
+#======================================================================
+ensure_bootstrap_deps() {
+    local missing=()
+    command -v git  >/dev/null 2>&1 || missing+=(git)
+    command -v curl >/dev/null 2>&1 || missing+=(curl)
+    [ ${#missing[@]} -eq 0 ] && return 0
+
+    echo "${C_DIM}Installing bootstrap prerequisites: ${missing[*]}...${C_RESET}"
+    local SUDO=""
+    if [ "$(id -u)" -ne 0 ]; then
+        if command -v sudo >/dev/null 2>&1; then
+            SUDO="sudo"
+        else
+            echo "${C_RED}install_menu: need to install ${missing[*]} but this box has neither root nor sudo." >&2
+            echo "  Install them manually and re-run, e.g.: apt-get install -y ${missing[*]}${C_RESET}" >&2
+            exit 1
+        fi
+    fi
+
+    # `|| true` so a package-manager hiccup doesn't trip `set -e` before the
+    # verify block below prints one clear, actionable message.
+    if command -v apt-get >/dev/null 2>&1; then
+        $SUDO apt-get update -y || true
+        $SUDO apt-get install -y "${missing[@]}" || true
+    elif command -v dnf >/dev/null 2>&1; then
+        $SUDO dnf install -y "${missing[@]}" || true
+    elif command -v yum >/dev/null 2>&1; then
+        $SUDO yum install -y "${missing[@]}" || true
+    elif command -v zypper >/dev/null 2>&1; then
+        $SUDO zypper --non-interactive install "${missing[@]}" || true
+    elif command -v apk >/dev/null 2>&1; then
+        $SUDO apk add "${missing[@]}" || true
+    elif command -v pacman >/dev/null 2>&1; then
+        $SUDO pacman -Sy --noconfirm "${missing[@]}" || true
+    else
+        echo "${C_RED}install_menu: no supported package manager (apt/dnf/yum/zypper/apk/pacman) found." >&2
+        echo "  Install ${missing[*]} manually and re-run.${C_RESET}" >&2
+        exit 1
+    fi
+
+    # Verify the tools are actually present now — the single source of truth.
+    local still=()
+    for t in "${missing[@]}"; do
+        command -v "$t" >/dev/null 2>&1 || still+=("$t")
+    done
+    if [ ${#still[@]} -ne 0 ]; then
+        echo "${C_RED}install_menu: failed to install ${still[*]}. Install manually and re-run.${C_RESET}" >&2
+        exit 1
+    fi
+}
+
+#======================================================================
 trap '[ -n "${CLONE_DIR:-}" ] && rm -rf "$CLONE_DIR"' EXIT
 
+ensure_bootstrap_deps
 locate_clone
 top_menu
 case "$MODE" in
