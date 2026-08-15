@@ -1743,13 +1743,21 @@ async function csRenderClients(tier) {
     // tier may come in as a boolean `force` arg from the legacy primary-switch
     // fallback; only accept real tier strings. The Clients::T1/T2/T3 sub-nav tabs
     // pre-seed the Tier facet (drill still goes Simulation → Tier → Site).
-    if (tier === 't1' || tier === 't2' || tier === 't3' || tier === 'all') {
+    // Clients::Offline is a status view, not a tier view: it clears the tier
+    // facet and pre-seeds the status dropdown to 'offline' so the list shows
+    // exactly the "not working" set Fleet Health counts against.
+    let csClientStatusSeed = '';
+    if (tier === 'offline') {
+        csClientTier = 'offline';
+        csFacet.tier = null;
+        csClientStatusSeed = 'offline';
+    } else if (tier === 't1' || tier === 't2' || tier === 't3' || tier === 'all') {
         csClientTier = tier;
         csFacet.tier = (tier === 'all') ? null : tier;
     }
     csSetToolbar(`<input id="cs-client-search" oninput="csClientFilterKey()" placeholder="Search name / IP / MAC…" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500 w-64">
       <select id="cs-client-status" onchange="csClientResetPage()" class="bg-white border border-slate-300 rounded-md px-3 py-1.5 text-sm outline-none focus:ring-2 focus:ring-green-500">
-        <option value="">All</option><option value="online">Online</option><option value="offline">Offline</option>
+        <option value=""${csClientStatusSeed === '' ? ' selected' : ''}>All</option><option value="online">Online</option><option value="offline"${csClientStatusSeed === 'offline' ? ' selected' : ''}>Offline</option>
       </select>
       <button id="cs-clear-all-overrides-btn" onclick="csClearAllOverrides(this)" title="Clear EVERY override layer /api/config bakes into [username] — the per-client registry overrides AND any active demo scenarios (the failure-flag source that survives a registry-only clear) — for every client, then re-fetch each client's local simulation.conf" class="ml-auto bg-white border border-amber-300 text-amber-700 hover:bg-amber-50 rounded-md px-3 py-1.5 text-sm font-semibold">✕ Clear All Overrides</button>`);
     // Initial load: fan out the clients fetch and the demo card together.
