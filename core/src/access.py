@@ -59,10 +59,10 @@ _PREFIX_CACHE_TTL = 300  # seconds — session-prefix cache TTL (was a create_ap
 # (Certificates) has no IP column — it attributes a cert to a tenant by resolving
 # its SANs through the internal DNS A-records (see net_services._filter_le_certs) —
 # so it defaults OFF (best-effort, opt-in).
-_FILTER_MODULES = ("nac", "firewall", "netbox", "dhcp", "dns", "cs", "hypervisor", "nw", "le")
+_FILTER_MODULES = ("nac", "firewall", "netbox", "dhcp", "dns", "cs", "hypervisor", "nw", "le", "console")
 _FILTER_DEFAULTS = {"nac": True, "firewall": True, "netbox": True,
                             "dhcp": True, "dns": False, "cs": False, "hypervisor": True,
-                            "nw": True, "le": False}
+                            "nw": True, "le": False, "console": True}
 
 # Firewall endpoint → filter spec. "rules" uses the strict source/destination
 # check (with OPNsense alias expansion); the field-based endpoints filter on
