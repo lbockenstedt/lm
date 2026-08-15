@@ -603,6 +603,8 @@ def adaptive_step(st: Dict[str, Any], q: Dict[str, Any], firing, now: float,
 
     target = st.get("target")
     floor = st.get("floor")
+    if learning and floor is not None and st.get("producing") is not None:
+        floor = min(int(floor), int(st.get("producing")))
     phase = st.get("phase") or "up_find"
     learned_op = st.get("learned_op")
     last = float(st.get("last_change") or 0)
