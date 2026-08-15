@@ -9832,6 +9832,7 @@ const _SUBNET_FILTER_MODULES = [
     { key: 'hypervisor', label: 'Hypervisor' },
     { key: 'cs',         label: 'Simulations (tenant-ID scoped)' },
     { key: 'le',         label: 'Certificates (SAN → DNS → IP)' },
+    { key: 'console',    label: 'Console (shared-tenant device IP)' },
 ];
 let _subnetFilterState = {};
 
@@ -16050,7 +16051,7 @@ async function loadConsoleData() {
     const el = document.getElementById('console-container');
     if (!el) return;
     try {
-        const res = await fetch('/api/console/ports', { credentials: 'same-origin' });
+        const res = await fetch(`/api/console/ports?tenant=${encodeURIComponent(currentTenant || 'default')}`, { credentials: 'same-origin' });
         if (!res.ok) {
             el.innerHTML = `<div class="py-12 text-center text-red-400 italic">${res.status === 403 ? 'Console module access required.' : 'Failed to load console ports (' + res.status + ').'}</div>`;
             return;
