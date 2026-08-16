@@ -468,6 +468,34 @@ def register(app, hub, ctx):
             except Exception:  # noqa: BLE001
                 pass
 
+    async def _console_profile_one(hub, sid, port_id):
+        """Profile one port, fingerprint-first: run the deterministic built-in
+        fingerprint (spoke login-identify) and, only when it can't recognize the
+        device, fall back to the AI (scrubbed output → BugFixer). Returns an
+        identify-shaped result dict (adds ``source='fingerprint'`` on a DB hit).
+
+        This is the explicit, on-demand profiling path — nothing calls it
+        automatically, so passive capture stays passive unless an operator asks."""
+        from routes import console_llm_identify as llm  # local import (optional feature)
+        await _console_seed_credentials(hub, [sid])
+        # 1. Known fingerprint in the DB → no AI needed.
+        try:
+            r = _console_unwrap(await hub.request_response(
+                sid, "CONSOLE_AUTOPROBE", {"port_id": port_id}, timeout=90.0))
+        except Exception:  # noqa: BLE001
+            r = {}
+        if r and (r.get("vendor") or r.get("identity")):
+            return {"status": "OK", "identified": True, "source": "fingerprint",
+                    "vendor": r.get("vendor"), "identity": r.get("identity") or {},
+                    "logged_in": bool(r.get("logged_in"))}
+        # 2. Unknown device → ask the AI (requires the BugFixer relay).
+        agent = llm.find_bugfixer(hub)
+        if not agent:
+            return {"status": "ERROR", "identified": False, "need_agent": True,
+                    "message": "Device not in the fingerprint DB and the BugFixer LLM agent is not connected."}
+        await _console_push_llm_flag(hub, [sid], True)  # permit the spoke's LLM collect
+        return await llm.orchestrate(hub, agent, sid, port_id)
+
     async def _list_visible_console_ports(request: Request):
         """Serial ports across every connected Console spoke, each tagged with its
         spoke_id and EFFECTIVE tenant (per-port override, else the agent's tenant).
@@ -611,22 +639,15 @@ def register(app, hub, ctx):
 
     @app.post("/api/console/identify-llm")
     async def console_identify_llm(request: Request):
-        """LLM-driven identify for a device the built-in fingerprint profiles
-        don't recognize: relay its console output to the LLM, run any read-only
-        commands it asks for (spoke-validated), and extract the identity. Admin
-        only; gated off by default (LM_CONSOLE_LLM_IDENTIFY + spoke config)."""
-        from routes import console_llm_identify as llm  # local import (optional feature)
+        """Profile ONE device (admin, on-demand). Fingerprint-first: a device the
+        built-in/learned fingerprint DB already recognizes is resolved WITHOUT the
+        AI; only an unknown device is relayed (scrubbed) to the LLM, which may run
+        spoke-validated read-only commands to identify it. Clicking this button is
+        the explicit opt-in, so no global toggle gates it."""
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
-        if not llm.hub_llm_identify_enabled(hub):
-            raise HTTPException(status_code=409,
-                                detail="LLM-assisted identify is disabled — enable it in the Console tools.")
-        agent = llm.find_bugfixer(hub)
-        if not agent:
-            raise HTTPException(status_code=409,
-                                detail="LLM identify unavailable — the BugFixer LLM agent is not connected.")
         try:
             body = await request.json()
         except Exception:
@@ -636,33 +657,25 @@ def register(app, hub, ctx):
         if not sid or not port_id:
             raise HTTPException(status_code=400, detail="spoke_id/port_id required")
         await _assert_port_tenant(request, sid, port_id)
-        await _console_seed_credentials(hub, [sid])  # so the generic login can succeed
-        await _console_push_llm_flag(hub, [sid], True)  # ensure the spoke gate is on
         try:
-            return await llm.orchestrate(hub, agent, sid, port_id)
+            res = await _console_profile_one(hub, sid, port_id)
         except Exception as e:  # noqa: BLE001
-            raise HTTPException(status_code=502, detail=f"LLM identify error: {e}")
+            raise HTTPException(status_code=502, detail=f"profiling error: {e}")
+        if res.get("need_agent"):
+            raise HTTPException(status_code=409, detail=res.get("message"))
+        return res
 
     @app.post("/api/console/identify-llm-all")
     async def console_identify_llm_all(request: Request):
-        """Bulk 'scrape all devices' trigger: kick off LLM-driven identify for
-        EVERY visible console port at once. Runs in the background (bounded
-        concurrency, so the single BugFixer agent isn't swamped) and returns
-        immediately — results stream back through the normal probe/port refresh.
-        Ports a user currently has open are skipped so a live session isn't
-        disrupted. Admin only; same gating as the per-port identify."""
-        from routes import console_llm_identify as llm  # local import (optional feature)
+        """Profile EVERY visible console port at once (admin, on-demand). Each port
+        is fingerprint-first (known devices resolve without the AI); only unknown
+        ones are relayed (scrubbed) to the LLM. Runs in the background with bounded
+        concurrency and returns immediately — results stream back through the
+        normal probe/port refresh. Ports a user currently has open are skipped."""
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
-        if not llm.hub_llm_identify_enabled(hub):
-            raise HTTPException(status_code=409,
-                                detail="LLM-assisted identify is disabled — enable it in the Console tools.")
-        agent = llm.find_bugfixer(hub)
-        if not agent:
-            raise HTTPException(status_code=409,
-                                detail="LLM identify unavailable — the BugFixer LLM agent is not connected.")
         data = await _list_visible_console_ports(request)  # tenant-scoped like the list view
         all_ports = data.get("ports") or []
         targets = [(p.get("spoke_id"), p.get("port_id")) for p in all_ports
@@ -670,19 +683,18 @@ def register(app, hub, ctx):
         skipped_in_use = sum(1 for p in all_ports if p.get("in_use"))
         if not targets:
             return {"queued": 0, "skipped_in_use": skipped_in_use}
-        # Prep every involved spoke once (seed creds + runtime gate) up front.
+        # Prep every involved spoke once (seed creds) up front.
         spokes = sorted({sid for sid, _ in targets})
         await _console_seed_credentials(hub, spokes)
-        await _console_push_llm_flag(hub, spokes, True)
 
         sem = asyncio.Semaphore(2)  # single BugFixer agent → keep it gentle
 
         async def _run_one(sid, pid):
             async with sem:
                 try:
-                    await llm.orchestrate(hub, agent, sid, pid)
+                    await _console_profile_one(hub, sid, pid)
                 except Exception as e:  # noqa: BLE001 - one bad port can't stop the batch
-                    logger.warning("bulk AI identify failed for %s/%s: %s", sid, pid, e)
+                    logger.warning("bulk profiling failed for %s/%s: %s", sid, pid, e)
 
         async def _run_all():
             await asyncio.gather(*[_run_one(sid, pid) for sid, pid in targets])
