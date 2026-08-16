@@ -51,6 +51,22 @@ _RE_PROMPT_HOST = re.compile(r"(?m)^([A-Za-z0-9][\w.\-]{0,63})(\([^)]*\))?\s*([>
 
 _PLACEHOLDERS = ("[IP]", "[IPV6]", "[MAC]", "[HOST]", "[EMAIL]", "[REDACTED")
 
+# Terminal escape sequences (VT100/ANSI CSI cursor moves, OSC, scroll-region,
+# show/hide-cursor) that pollute raw serial captures from full-screen menu CLIs
+# (e.g. ArubaOS-Switch). Stripped before scrubbing so the LLM sees clean text.
+_RE_ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_RE_ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_RE_ANSI_MISC = re.compile(r"\x1b[()#][0-9A-Za-z]|\x1b[=>78McDEHF]")
+_RE_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def _strip_ansi(text: str) -> str:
+    s = _RE_ANSI_OSC.sub("", text)
+    s = _RE_ANSI_CSI.sub("", s)
+    s = _RE_ANSI_MISC.sub("", s)
+    s = _RE_CTRL.sub("", s)
+    return s.replace("\r\n", "\n").replace("\r", "\n")
+
 
 def scrub_for_llm(text: Optional[str]) -> str:
     """Redact site-sensitive data (IPv4/IPv6, MACs, password/secret/community
@@ -59,7 +75,7 @@ def scrub_for_llm(text: Optional[str]) -> str:
     IPv4/IPv6 passes so their colon groups aren't mistaken for addresses."""
     if not text:
         return ""
-    s = str(text)
+    s = _strip_ansi(str(text))
     s = _RE_HASH.sub("[REDACTED-HASH]", s)
     s = _RE_MAC.sub("[MAC]", s)
     s = _RE_IPV4.sub("[IP]", s)
