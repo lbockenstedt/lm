@@ -498,7 +498,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     """
     result: Dict[str, Any] = {"banner": "", "vendor": None, "logged_in": False,
                               "credential_index": None, "identity": {}, "outputs": {},
-                              "diag": {}}
+                              "hostname_source": "", "diag": {}}
     # 1. Vendor-agnostic login FIRST. A device at a bare login prompt shows no
     #    banner/system info until authenticated, so we must log in before we can
     #    detect the vendor (and even unknown vendors get a captured post-login
@@ -546,12 +546,15 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         outputs[cmd] = _read_command_output(read_fn, write_fn, [profile["prompt"]], cmd_secs)
     result["outputs"] = outputs
     result["identity"] = parse_identity(profile, outputs)
-    if not result["identity"].get("hostname"):
+    if result["identity"].get("hostname"):
+        result["hostname_source"] = "command"  # parsed from a show/display output
+    else:
         # No hostname from the identity commands (e.g. an ArubaOS-Switch that
         # rejects them) — fall back to the device's own CLI prompt name.
         hn = prompt_hostname(transcript)
         if hn:
             result["identity"]["hostname"] = hn
+            result["hostname_source"] = "prompt"  # gleaned from the CLI prompt
     return result
 
 
