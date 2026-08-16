@@ -253,6 +253,21 @@ class PortChannel:
     lock; others are read-only observers.
     """
 
+    # Rolling passive-capture buffer size (bytes). The reader always records the
+    # tail of everything the device emits — even with NO attached user — so the
+    # port section can surface identity/banner and a user connecting later can be
+    # replayed recent context (the "we never know when a device will talk" case).
+    CAPTURE_MAX = 65536
+    # Outbound write-pacing defaults. A 1000-line paste must stream WITHOUT
+    # overrunning a slow console-server/device UART (which silently drops chars).
+    # We drain a per-channel outbound buffer in small chunks, pausing after each
+    # newline (and optionally between chars). Single-key typing is unaffected —
+    # the line-delay only fires on newlines. Overridable via port settings.
+    PACE_CHUNK = 64          # bytes written per drain slice
+    PACE_LINE_DELAY = 0.015  # seconds paused after a newline (device digests it)
+    PACE_CHAR_DELAY = 0.0    # seconds paused per chunk (usually unneeded)
+    OUTBUF_MAX = 1 << 20     # 1 MiB safety cap on the pending paste buffer
+
     def __init__(self, port_id: str, dev: str, settings: Dict[str, Any],
                  on_data: Callable[[str, bytes], None]):
         if serial is None:
@@ -262,8 +277,22 @@ class PortChannel:
         self.on_data = on_data
         self.sessions: set = set()
         self.writer: Optional[str] = None
+        self.monitored: bool = False  # kept open for passive capture w/o a user
         self._stop = threading.Event()
         self._reader: Optional[threading.Thread] = None
+        self._reader_alive: bool = True  # cleared when the read loop exits (device pulled/error)
+        # Passive-capture state (updated by the reader thread).
+        self.capture = bytearray()
+        self.last_activity: float = 0.0
+        self.bytes_seen: int = 0
+        # Outbound write-pacing state (drained by the writer thread).
+        self._outbuf = bytearray()
+        self._outlock = threading.Lock()
+        self._outwake = threading.Event()
+        self._writer_thread: Optional[threading.Thread] = None
+        self._pace_chunk = max(1, int(settings.get("paste_chunk", self.PACE_CHUNK)))
+        self._pace_line = max(0.0, float(settings.get("paste_line_delay_ms", self.PACE_LINE_DELAY * 1000)) / 1000.0)
+        self._pace_char = max(0.0, float(settings.get("paste_char_delay_ms", self.PACE_CHAR_DELAY * 1000)) / 1000.0)
         parity = {"N": serial.PARITY_NONE, "E": serial.PARITY_EVEN, "O": serial.PARITY_ODD}
         self.ser = serial.Serial(
             port=dev,
@@ -279,6 +308,16 @@ class PortChannel:
     def start(self) -> None:
         self._reader = threading.Thread(target=self._read_loop, name=f"console-{self.port_id}", daemon=True)
         self._reader.start()
+        self._writer_thread = threading.Thread(target=self._write_loop, name=f"console-tx-{self.port_id}", daemon=True)
+        self._writer_thread.start()
+
+    def _record(self, data: bytes) -> None:
+        """Append to the rolling capture tail + update liveness telemetry."""
+        self.capture += data
+        if len(self.capture) > self.CAPTURE_MAX:
+            del self.capture[:-self.CAPTURE_MAX]
+        self.bytes_seen += len(data)
+        self.last_activity = time.time()
 
     def _read_loop(self) -> None:
         while not self._stop.is_set():
@@ -286,12 +325,54 @@ class PortChannel:
                 data = self.ser.read(1024)
             except Exception as e:  # noqa: BLE001 - device pulled / error
                 logger.info("read loop ended for %s: %s", self.port_id, e)
+                self._reader_alive = False
                 for sid in list(self.sessions):
                     self.on_data(sid, b"")  # empty → caller may emit CONSOLE_ERROR
                 return
             if data:
+                self._record(data)  # always capture, even with no attached user
                 for sid in list(self.sessions):
                     self.on_data(sid, data)
+        self._reader_alive = False
+
+    def reader_alive(self) -> bool:
+        """False once the read loop has exited (serial handle died)."""
+        return self._reader_alive
+
+    def _write_loop(self) -> None:
+        """Drain the outbound buffer with pacing so large pastes don't overrun a
+        slow device/console-server UART. Writes up to ``_pace_chunk`` bytes at a
+        time, breaking each slice at the next newline, then pauses ``_pace_line``
+        after a line (or ``_pace_char`` per chunk). Blocks on ``_outwake`` when
+        idle so interactive typing incurs no extra latency."""
+        while not self._stop.is_set():
+            self._outwake.wait(timeout=0.5)
+            if self._stop.is_set():
+                return
+            while True:
+                with self._outlock:
+                    if not self._outbuf:
+                        self._outwake.clear()
+                        break
+                    nl = self._outbuf.find(b"\n")
+                    if nl != -1 and nl + 1 <= self._pace_chunk:
+                        cut = nl + 1
+                    else:
+                        cut = min(self._pace_chunk, len(self._outbuf))
+                    chunk = bytes(self._outbuf[:cut])
+                    del self._outbuf[:cut]
+                try:
+                    self.ser.write(chunk)
+                    self.ser.flush()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("paced write to %s failed: %s", self.port_id, e)
+                    with self._outlock:
+                        self._outbuf.clear()
+                    break
+                if chunk.endswith(b"\n") and self._pace_line:
+                    time.sleep(self._pace_line)
+                elif self._pace_char:
+                    time.sleep(self._pace_char)
 
     def attach(self, session_id: str, writable: bool) -> bool:
         """Attach a session. Returns True if it got the writer lock."""
@@ -309,14 +390,41 @@ class PortChannel:
         return not self.sessions
 
     def write(self, session_id: str, data: bytes) -> bool:
+        """Enqueue writer bytes for paced draining. Non-blocking: a big paste is
+        buffered and streamed out by ``_write_loop`` at a device-safe rate."""
         if self.writer != session_id:
             return False
-        try:
-            self.ser.write(data)
+        if not data:
             return True
-        except Exception as e:  # noqa: BLE001
-            logger.warning("write to %s failed: %s", self.port_id, e)
-            return False
+        with self._outlock:
+            if len(self._outbuf) + len(data) > self.OUTBUF_MAX:
+                logger.warning("outbound buffer full on %s; dropping %d bytes",
+                               self.port_id, len(data))
+                return False
+            self._outbuf += data
+        self._outwake.set()
+        return True
+
+    def pending_out(self) -> int:
+        """Bytes still queued to be paced out (how far behind a big paste is)."""
+        with self._outlock:
+            return len(self._outbuf)
+
+    def capture_tail(self, n: Optional[int] = None) -> bytes:
+        """Last ``n`` bytes of everything the device has emitted (all if None)."""
+        buf = bytes(self.capture)
+        return buf[-n:] if n else buf
+
+    def snapshot(self) -> Dict[str, Any]:
+        """Live telemetry for the port listing."""
+        return {
+            "monitoring": self.monitored,
+            "last_activity": self.last_activity,
+            "capture_bytes": self.bytes_seen,
+            "pending_out": self.pending_out(),
+            "has_user": bool(self.sessions),
+            "writer": self.writer,
+        }
 
     def send_break(self, session_id: str) -> bool:
         if self.writer != session_id or serial is None:
@@ -330,6 +438,7 @@ class PortChannel:
 
     def close(self) -> None:
         self._stop.set()
+        self._outwake.set()  # wake the writer thread so it can exit
         try:
             self.ser.close()
         except Exception:  # noqa: BLE001
@@ -344,6 +453,7 @@ class SessionManager:
         self._on_data = on_data
         self._channels: Dict[str, PortChannel] = {}
         self._session_port: Dict[str, str] = {}
+        self._monitor_errors: Dict[str, str] = {}  # port_id → last open failure reason
 
     def open(self, session_id: str, port_id: str, dev: str,
              settings: Dict[str, Any], writable: bool) -> Dict[str, Any]:
@@ -356,8 +466,12 @@ class SessionManager:
             created = True
         got_writer = chan.attach(session_id, writable)
         self._session_port[session_id] = port_id
+        # A user attaching to a channel a passive monitor already holds = the
+        # "stream the existing session to the user" handoff (they share the one
+        # OS handle and the monitor's live output); the caller replays the tail.
         return {"writer": got_writer, "busy": (writable and not got_writer),
-                "created": created, "settings": settings}
+                "created": created, "settings": settings,
+                "had_capture": bool(chan.capture)}
 
     def write(self, session_id: str, data: bytes) -> bool:
         port_id = self._session_port.get(session_id)
@@ -373,8 +487,68 @@ class SessionManager:
         port_id = self._session_port.pop(session_id, None)
         chan = self._channels.get(port_id) if port_id else None
         if chan and chan.detach(session_id):
+            # Empty of users — but keep the handle open if a passive monitor
+            # still wants it (so capture continues after the user leaves).
+            if chan.monitored:
+                return
             chan.close()
             self._channels.pop(port_id, None)
+
+    # ── passive monitor (keep-alive capture with no attached user) ────────────
+    def ensure_monitor(self, port_id: str, dev: str,
+                       settings: Dict[str, Any]) -> Optional[PortChannel]:
+        """Keep a channel open purely to capture whatever the device emits, even
+        with no user connected. Idempotent; returns the channel, or None if the
+        port can't be opened right now (faulty/absent — see :meth:`monitor_error`).
+        A channel whose reader has died (device pulled) is torn down and reopened
+        so a port that starts working again recovers on its own."""
+        chan = self._channels.get(port_id)
+        if chan is not None and not chan.sessions and not chan.reader_alive():
+            chan.close()
+            self._channels.pop(port_id, None)
+            chan = None
+        if chan is None:
+            try:
+                chan = PortChannel(port_id, dev, settings, self._on_data)
+                chan.start()
+            except Exception as e:  # noqa: BLE001 - port busy/absent/faulty; retry later
+                self._monitor_errors[port_id] = str(e)
+                logger.debug("monitor open %s failed: %s", port_id, e)
+                return None
+            self._channels[port_id] = chan
+        self._monitor_errors.pop(port_id, None)  # opened cleanly → healthy
+        chan.monitored = True
+        return chan
+
+    def monitor_error(self, port_id: str) -> Optional[str]:
+        """Last passive-open failure for a port (None once it opens cleanly)."""
+        return self._monitor_errors.get(port_id)
+
+    def stop_monitor(self, port_id: str) -> None:
+        """Release the passive hold. Closes the OS handle unless a user is on it
+        (used to hand the exclusive handle to an active probe/detect/config op)."""
+        chan = self._channels.get(port_id)
+        if not chan:
+            return
+        chan.monitored = False
+        if not chan.sessions:
+            chan.close()
+            self._channels.pop(port_id, None)
+
+    def channel(self, port_id: str) -> Optional[PortChannel]:
+        return self._channels.get(port_id)
+
+    def has_user_sessions(self, port_id: str) -> bool:
+        """A human/relay session is attached (as opposed to only the monitor)."""
+        chan = self._channels.get(port_id)
+        return bool(chan and chan.sessions)
+
+    def snapshot(self, port_id: str) -> Dict[str, Any]:
+        chan = self._channels.get(port_id)
+        if not chan:
+            return {"monitoring": False, "last_activity": 0.0,
+                    "capture_bytes": 0, "pending_out": 0, "has_user": False, "writer": None}
+        return chan.snapshot()
 
     def writer_of(self, port_id: str) -> Optional[str]:
         chan = self._channels.get(port_id)

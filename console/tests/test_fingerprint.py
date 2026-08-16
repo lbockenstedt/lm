@@ -148,3 +148,41 @@ def test_run_identify_login_then_harvest():
     assert res["logged_in"] is True
     assert res["credential_index"] == 0
     assert res["identity"]["serial"] == "ABC123"
+
+
+# ── passive_identify: glean identity from PASSIVELY captured text (no login) ──
+def test_passive_identify_cisco_show_version_scrolled_by():
+    text = (
+        "Cisco IOS Software, C2960 Software\r\n"
+        "cisco WS-C2960-24TT-L (PowerPC405) processor\r\n"
+        "Processor board ID FOC1234X56Y\r\n"
+        "Base ethernet MAC Address       : 00:1a:2b:3c:4d:5e\r\n"
+        "Switch#"
+    )
+    res = fp.passive_identify(text)
+    assert res["vendor"] == "cisco-ios"
+    assert res["identity"]["serial"] == "FOC1234X56Y"
+    assert res["identity"]["model"] == "WS-C2960-24TT-L"
+    assert res["identity"]["mac"] == "00:1a:2b:3c:4d:5e"
+    assert res["identity"]["hostname"] == "Switch"  # from the prompt
+
+
+def test_passive_identify_bare_prompt_gives_hostname_only():
+    res = fp.passive_identify("\r\nBranch-RTR> ")
+    assert res["vendor"] is None
+    assert res["identity"] == {"hostname": "Branch-RTR"}
+
+
+def test_passive_identify_linux_prompt_no_false_serial():
+    # The linux profile's bare ^(\S+)$ field regexes must NOT be applied to
+    # arbitrary scrollback (that produced a bogus serial). Only a hostname from
+    # the shell prompt is safe.
+    res = fp.passive_identify("\r\nubuntu-box login: \r\nadmin@ubuntu-box:~$ ")
+    assert res["vendor"] == "linux"
+    assert "serial" not in res["identity"]
+    assert res["identity"].get("hostname") == "ubuntu-box"
+
+
+def test_passive_identify_empty_and_noise():
+    assert fp.passive_identify("") == {"vendor": None, "identity": {}}
+    assert fp.passive_identify("random syslog line, nothing useful\r\n") == {"vendor": None, "identity": {}}
