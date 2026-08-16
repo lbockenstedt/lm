@@ -89,10 +89,14 @@ def scrub_for_llm(text: Optional[str]) -> str:
 _SYS_IDENTIFY = (
     "You are a network-device identification assistant. You are given raw console "
     "output captured from an UNKNOWN device on a serial line (boot log, banner, "
-    "prompt, or partial text). Identify the vendor, model, and OS.\n"
+    "prompt, or partial text). Identify the vendor, model, OS, and device type.\n"
     "Respond with ONLY a single JSON object and no other text.\n"
     "- If you can already identify it, respond: {\"identified\": true, \"vendor\": "
-    "\"...\", \"model\": \"...\", \"os\": \"...\", \"confidence\": 0.0-1.0}.\n"
+    "\"...\", \"model\": \"...\", \"os\": \"...\", \"type\": \"...\", \"confidence\": "
+    "0.0-1.0}. \"model\" should be the specific product (e.g. \"Aruba CX 6300M\", "
+    "\"Aruba 2930F-24G\", \"Juniper SRX340\", \"Cisco Catalyst 9300\"); \"type\" is "
+    "the role: one of Switch, Router, Firewall, Access Point, Gateway, Server, Load "
+    "Balancer, or Other.\n"
     "- If you need more information, respond: {\"identified\": false, \"commands\": "
     "[\"show version\", ...]} listing up to 6 READ-ONLY commands (only show/"
     "display/get/cat style — NEVER configuration or state-changing commands) that "
@@ -102,8 +106,11 @@ _SYS_EXTRACT = (
     "You are a network-device identification assistant. Given the console output "
     "and the outputs of the read-only commands below, identify the device. Respond "
     "with ONLY a single JSON object and no other text: {\"identified\": bool, "
-    "\"vendor\": \"...\", \"model\": \"...\", \"os\": \"...\", \"serial\": \"...\", "
-    "\"hostname\": \"...\", \"confidence\": 0.0-1.0}. Use null for unknown fields."
+    "\"vendor\": \"...\", \"model\": \"...\", \"os\": \"...\", \"type\": \"...\", "
+    "\"serial\": \"...\", \"hostname\": \"...\", \"confidence\": 0.0-1.0}. \"model\" "
+    "is the specific product (e.g. \"Aruba CX 6300M\", \"Juniper SRX340\"); \"type\" "
+    "is the role: one of Switch, Router, Firewall, Access Point, Gateway, Server, "
+    "Load Balancer, or Other. Use null for unknown fields."
 )
 _SYS_CREDS = (
     "You are a network-device credential assistant. You are given raw console "
@@ -116,7 +123,7 @@ _SYS_CREDS = (
     "propose destructive actions or commentary."
 )
 
-_IDENTITY_FIELDS = ("model", "os", "serial", "hostname", "confidence")
+_IDENTITY_FIELDS = ("model", "os", "type", "serial", "hostname", "confidence")
 
 
 def hub_llm_identify_enabled(hub=None) -> bool:

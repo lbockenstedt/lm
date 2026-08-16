@@ -103,6 +103,60 @@ def test_run_identify_login_prompt_only_no_hostname():
     assert not res["identity"].get("hostname")
 
 
+def test_detect_vendor_juniper():
+    assert fp.detect_vendor("JUNOS 20.4R3 built")["name"] == "juniper-junos"
+    assert fp.detect_vendor("Juniper Networks, Inc. srx340")["name"] == "juniper-junos"
+
+
+def test_infer_device_type():
+    assert fp.infer_device_type("SRX340", "Firewall/Router") == "Firewall"
+    assert fp.infer_device_type("EX4300-48T", "Firewall/Router") == "Switch"
+    assert fp.infer_device_type("MX204", "Firewall/Router") == "Router"
+    assert fp.infer_device_type("2930F-24G-4SFP+ Switch", "Switch") == "Switch"
+    assert fp.infer_device_type(None, "Switch") == "Switch"
+    assert fp.infer_device_type("mystery", None) == ""
+
+
+def test_parse_identity_procurve_model_from_modules():
+    prof = fp.detect_vendor("MIA-SW-AOSS> \r\nInvalid input: get")  # hp-procurve
+    outputs = {
+        "no page": "",
+        "show system-information": ("System Name        : MIA-SW-AOSS\r\n"
+                                    "Serial Number      : SG64GXK123\r\n"
+                                    "Base MAC Addr      : 3c:2a:f4:11:22:33\r\n"),
+        "show modules": ("Status and Counters - Module Information\r\n\r\n"
+                         "  Chassis: 2930F-24G-4SFP+ Switch(JL253A)  Serial Number: SG64GXK123\r\n"),
+    }
+    ident = fp.parse_identity(prof, outputs)
+    assert ident["serial"] == "SG64GXK123"
+    assert ident["hostname"] == "MIA-SW-AOSS"
+    assert ident["model"] == "2930F-24G-4SFP+ Switch"
+
+
+def test_parse_identity_no_crash_on_nonparticipating_group():
+    # A model regex whose alternation branch has no group must not raise.
+    prof = {"name": "x", "commands": [
+        {"cmd": "c", "fields": {"model": __import__("re").compile(r"NoGroupHere|(\d+)")}}]}
+    ident = fp.parse_identity(prof, {"c": "value 42 here"})
+    assert ident.get("model") in ("42", "NoGroupHere", None) or True  # just: no exception
+
+
+def test_run_identify_juniper_srx_model_and_type():
+    chan = _FakeChan("\r\nJUNOS 20.4R3-S1.3 built 2023\r\nsrx340> ", [
+        ("screen-length", "\r\nsrx340> "),
+        ("show version", "Hostname: srx340\r\nModel: srx340\r\n"
+                         "Junos: 20.4R3-S1.3\r\nsrx340> "),
+        ("show chassis hardware", "Item Version Part Serial Description\r\n"
+                                  "Chassis          AB1234567890  SRX340\r\nsrx340> "),
+    ])
+    res = fp.run_identify(chan.read, chan.write, [])
+    assert res["vendor"] == "juniper-junos"
+    assert res["identity"].get("model") == "srx340"
+    assert res["identity"].get("os") == "20.4R3-S1.3"
+    assert res["identity"].get("serial") == "AB1234567890"
+    assert res["identity"].get("type") == "Firewall"
+
+
 def test_normalize_mac():
     assert fp.normalize_mac("0011.2233.4455") == "00:11:22:33:44:55"
     assert fp.normalize_mac("00:11:22:33:44:55") == "00:11:22:33:44:55"

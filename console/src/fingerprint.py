@@ -12,7 +12,7 @@ there is no free-form command path here, and every command is a read-only
 import logging
 import re
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("ConsoleSpoke")
 
@@ -50,6 +50,7 @@ PROFILES: List[Dict[str, Any]] = [
     {
         "name": "cisco-ios",
         "match": re.compile(r"Cisco IOS|IOS Software|IOS-XE", re.I),
+        "family": "Switch/Router",
         "prompt": re.compile(r"[\w.\-]+[>#]\s*$"),
         "login_prompt": re.compile(r"[Uu]sername:\s*$"),
         "password_prompt": re.compile(r"[Pp]assword:\s*$"),
@@ -58,7 +59,10 @@ PROFILES: List[Dict[str, Any]] = [
             {"cmd": "terminal length 0"},
             {"cmd": "show version", "fields": {
                 "serial": re.compile(r"[Pp]rocessor board ID\s+(\S+)"),
-                "model": re.compile(r"[Cc]isco\s+(\S+).*(?:processor|chassis)", re.I),
+                # "Model number : WS-C2960X-24TS-L" or "cisco WS-C3560 ... processor".
+                # Require a digit in the token so the OS word ("IOS") isn't taken.
+                "model": re.compile(
+                    r"(?:[Mm]odel [Nn]umber\s*:?\s*|cisco\s+)([A-Za-z0-9][\w\-/+]*\d[\w\-/+]*)", re.I),
                 "mac": re.compile(r"[Bb]ase [Ee]thernet MAC Address\s*:?\s*([0-9A-Fa-f:.\-]{12,17})"),
                 "version": re.compile(r"Version\s+([\w.()\-]+)"),
                 "hostname": re.compile(r"^(\S+)\s+uptime is", re.M),
@@ -73,6 +77,7 @@ PROFILES: List[Dict[str, Any]] = [
     {
         "name": "aruba-cx",
         "match": re.compile(r"ArubaOS-CX|Aruba.*CX|AOS-CX", re.I),
+        "family": "Switch",
         "prompt": re.compile(r"[\w.\-]+[>#]\s*$"),
         "login_prompt": re.compile(r"login:\s*$|[Uu]sername:\s*$"),
         "password_prompt": re.compile(r"[Pp]assword:\s*$"),
@@ -81,7 +86,8 @@ PROFILES: List[Dict[str, Any]] = [
             {"cmd": "no page"},
             {"cmd": "show system", "fields": {
                 "serial": re.compile(r"Serial Number\s*:?\s*(\S+)", re.I),
-                "model": re.compile(r"Product Name\s*:?\s*(.+?)\s*$", re.I | re.M),
+                # "Product Name : 6300M 48-port ..." or "Chassis: JL658A 6300M".
+                "model": re.compile(r"(?:Product Name|Chassis)\s*:?\s*(.+?)\s*$", re.I | re.M),
                 "mac": re.compile(r"Base MAC Address\s*:?\s*([0-9A-Fa-f:.\-]{12,17})", re.I),
                 "hostname": re.compile(r"Hostname\s*:?\s*(\S+)", re.I),
             }},
@@ -98,6 +104,7 @@ PROFILES: List[Dict[str, Any]] = [
             r"ProCurve|HP.*Switch|Aruba.*(?:2530|2540|2930)|"
             r"AOS-?S\b|-AOSS[>#]|\bAOSS[>#]|Invalid input:",
             re.I),
+        "family": "Switch",
         "prompt": re.compile(r"[\w.\-]+[>#]\s*$"),
         "login_prompt": re.compile(r"[Uu]sername:\s*$|Login Name:\s*$"),
         "password_prompt": re.compile(r"[Pp]assword:\s*$"),
@@ -106,17 +113,44 @@ PROFILES: List[Dict[str, Any]] = [
             {"cmd": "no page"},
             {"cmd": "show system-information", "fields": {
                 "serial": re.compile(r"Serial Number\s*:?\s*(\S+)", re.I),
-                "model": re.compile(r"Base MAC.*|Product.*|^\s*(J\d{4}\w).*", re.I),
-                "mac": re.compile(r"Base MAC Addr\s*:?\s*([0-9A-Fa-f:.\-]{12,17})", re.I),
+                "mac": re.compile(r"Base MAC Addr\S*\s*:?\s*([0-9A-Fa-f:.\-]{12,17})", re.I),
                 "hostname": re.compile(r"System Name\s*:?\s*(\S+)", re.I),
+            }},
+            # The product/model lives in "show modules" (or "show system"), e.g.
+            # "Chassis: 2930F-24G-4SFP+ Switch(JL253A)" — not in system-information.
+            {"cmd": "show modules", "fields": {
+                "model": re.compile(r"Chassis\s*:?\s*(.+?)\s*(?:\(|Serial|$)", re.I | re.M),
             }},
         ],
         "config": {"enter": "configure", "exit": "exit", "save": "write memory",
                    "show_running": "show running-config"},
     },
     {
+        "name": "juniper-junos",
+        "match": re.compile(r"JUNOS|Junos:|Juniper Networks|juniper", re.I),
+        "family": "Firewall/Router",
+        "prompt": re.compile(r"[\w.\-]+[>#%]\s*$"),
+        "login_prompt": re.compile(r"login:\s*$"),
+        "password_prompt": re.compile(r"[Pp]assword:\s*$"),
+        "pager": b" ",
+        "commands": [
+            {"cmd": "set cli screen-length 0"},
+            {"cmd": "show version", "fields": {
+                "model": re.compile(r"Model\s*:?\s*(\S+)", re.I),
+                "os": re.compile(r"Junos:\s*(\S+)", re.I),
+                "hostname": re.compile(r"Hostname\s*:?\s*(\S+)", re.I),
+            }},
+            {"cmd": "show chassis hardware", "fields": {
+                "serial": re.compile(r"^Chassis\s+(\S+)", re.I | re.M),
+            }},
+        ],
+        "config": {"enter": "configure", "exit": "exit", "save": "commit",
+                   "show_running": "show configuration"},
+    },
+    {
         "name": "linux",
         "match": re.compile(r"login:\s*$|Linux \S+ \d|Ubuntu|Debian|CentOS|localhost", re.I),
+        "family": "Server",
         "prompt": re.compile(r"[\w.\-]+[@:][\w.\-/~]*[#$]\s*$"),
         "login_prompt": re.compile(r"login:\s*$"),
         "password_prompt": re.compile(r"[Pp]assword:\s*$"),
@@ -157,6 +191,30 @@ def detect_vendor(text: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+# Model-number prefixes → device role. Lets us report a concrete type ("Firewall",
+# "Access Point", …) rather than a vague family, once we know the model — most
+# useful for Juniper, whose one OS (JunOS) spans firewalls (SRX), switches
+# (EX/QFX) and routers (MX/PTX/ACX).
+_TYPE_BY_MODEL: List[Tuple[Any, str]] = [
+    (re.compile(r"\bSRX", re.I), "Firewall"),
+    (re.compile(r"\b(?:EX|QFX)\d", re.I), "Switch"),
+    (re.compile(r"\b(?:MX|PTX|ACX)\d", re.I), "Router"),
+    (re.compile(r"\b(?:IAP|AP-?\d|R\d{3}|MR\d)", re.I), "Access Point"),
+    (re.compile(r"\b(?:ISR|ASR|C89\d\d|C81\d\d)\b", re.I), "Router"),
+    (re.compile(r"\b(?:ASA|Palo Alto|PA-\d|FortiGate|FGT)\b", re.I), "Firewall"),
+]
+
+
+def infer_device_type(model: Optional[str], family_default: Optional[str]) -> str:
+    """Map a model string to a concrete device role (Switch/Router/Firewall/
+    Access Point/…), falling back to the profile's default family. '' if neither."""
+    if model:
+        for rx, kind in _TYPE_BY_MODEL:
+            if rx.search(model):
+                return kind
+    return family_default or ""
+
+
 def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str]) -> Dict[str, str]:
     """Apply a profile's per-command field regexes to captured command output.
     ``outputs`` maps command → its captured text. First non-empty match wins per
@@ -169,8 +227,14 @@ def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str]) -> Dict[str
             if key in identity:
                 continue
             m = rx.search(text)
-            if m and m.group(1).strip():
-                identity[key] = m.group(1).strip()
+            if not m:
+                continue
+            # Use the first capturing group, but tolerate alternation branches
+            # where group 1 didn't participate (returns None) — fall back to the
+            # whole match so a valid hit is never dropped (or worse, crashes).
+            val = ((m.group(1) if m.lastindex else None) or m.group(0) or "").strip()
+            if val:
+                identity[key] = val
     if identity.get("mac"):
         identity["mac"] = normalize_mac(identity["mac"]) or identity["mac"]
     return identity
@@ -337,8 +401,13 @@ def passive_identify(text: str) -> Dict[str, Any]:
                 if key in identity:
                     continue
                 m = rx.search(text)
-                if m and m.group(1).strip():
-                    identity[key] = m.group(1).strip()
+                if not m:
+                    continue
+                val = ((m.group(1) if m.lastindex else None) or m.group(0) or "").strip()
+                if val:
+                    identity[key] = val
+    if prof and prof.get("family") and prof["name"] != "linux":
+        identity["type"] = infer_device_type(identity.get("model"), prof["family"])
     if not identity.get("hostname"):
         # Glean a hostname from the last shell/CLI prompt we saw.
         hn = prompt_hostname(text)
@@ -541,6 +610,11 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
             result["hostname_source"] = "prompt"
         return result
     result["vendor"] = profile["name"]
+    if profile.get("family") and profile["name"] != "linux":
+        # A recognized network device can report its role (Switch/…) even while
+        # login-locked; refined to a concrete type once we read a model below.
+        # (linux matches a bare "login:" — too weak to claim "Server" unauth'd.)
+        result["identity"]["type"] = profile["family"]
 
     # If a login prompt is still showing (couldn't authenticate), stop here.
     tail = transcript[-200:]
@@ -555,6 +629,11 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         outputs[cmd] = _read_command_output(read_fn, write_fn, [profile["prompt"]], cmd_secs)
     result["outputs"] = outputs
     result["identity"] = parse_identity(profile, outputs)
+    if profile.get("family"):
+        # Concrete role from the model (e.g. Juniper SRX → Firewall), else the
+        # profile's default family.
+        result["identity"]["type"] = infer_device_type(
+            result["identity"].get("model"), profile["family"])
     if result["identity"].get("hostname"):
         result["hostname_source"] = "command"  # parsed from a show/display output
     else:
