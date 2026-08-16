@@ -24,7 +24,7 @@ VNC *relay pattern* (session registry, queue-consumer discipline, request/respon
 | Serial adapter auto-detect | scans ttyUSB/ttyACM/ttyAMA | pyserial `list_ports` + `/dev/serial/by-id` scan on the console sub-spoke | Yes |
 | Stable port naming | udev rules by serial#/vendor | software-derived stable `port_id` from USB serial#/`ID_PATH` + editable alias in role config; udev-writing later | Stable ID Yes; udev Defer |
 | Per-port baud/flow/parity | ser2net cfg, 9600 8N1 | per-port settings in role config, applied on open; editable in WebUI | Yes |
-| Telnet (ser2net) | 7000/8000/9000 | NOT adopted — access only via hub WebUI relay (no unauth bypass) | No |
+| Telnet (ser2net) | 7000/8000/9000 | Off by default. Opt-in **Direct Port Access** (`console_dpa_enabled`) per-port auto-assigned telnet from base 2200, localhost-bound; see §7 | Opt-in |
 | SSH menu | consolepi-menu TUI | replaced by hub WebUI terminal | No |
 | Web interface | Flask :5000, no auth | native lm WebUI + `/api/console/*`, gated by session auth + `console` right | Yes |
 | Remote/clustered | mDNS + gdrive CSV | hub already aggregates every console sub-spoke; native | Yes |
@@ -83,7 +83,8 @@ gate; `access.py:233`; new sibling repo; canonical `lm/docs/console.md` + `docs/
 Serial = root-on-device power. Auth every leg (session + `console` right + one-shot `ws_token`, 4401 on
 mismatch); tenant isolation stamped/checked end-to-end; **one writer per port**, others read-only; audit
 INFO log of every OPEN/CLOSE (user/tenant/port/mode) relayed to hub; optional opt-in session recording
-(secrets in scrollback — privacy-sensitive); run in `dialout` group not root; no telnet/ser2net bypass;
+(secrets in scrollback — privacy-sensitive); run in `dialout` group not root; Direct Port Access (§7) is
+OFF by default and localhost-bound (unauthenticated telnet — the bind + optional allow-list are the guard);
 BREAK + power actions admin-only.
 
 ## 6. Decisions (LOCKED 2026-07-05) — supersede §2 deferrals
@@ -191,3 +192,23 @@ Apply flow RESOLVED: transactional, no post-request approval, verify before+afte
 A serial layer + in-repo scaffold + baud-detect primitive → B hub relay → C REST+WS → D WebUI terminal +
 credential/settings UI + banner/vendor display → E in-repo role + permissions → **F auto-identify/fingerprint
 engine (banner, vendor profiles, encrypted creds, read-only harvest, NetBox match+create)** → G docs + tests.
+
+## 8. Direct Port Access (DPA) — reverse terminal-server (opt-in)
+A reverse Telnet listener per port (à la ser2net / a Cisco terminal server): enable
+`console_dpa_enabled` and each detected serial port gets an auto-assigned TCP port
+(stable, persisted as `dpa_port`, from base `console_dpa_base`=2200 within a
+`console_dpa_span`=200 window). Connecting a terminal to that port (e.g. `telnet
+host 2201`) attaches straight to the serial line — the connection is bridged onto
+the same one-writer/many-observer `SessionManager` (first DPA client writes, the
+rest are read-only), and the passive monitor/capture is unaffected. The endpoint is
+surfaced in the WebUI port list and the `CONSOLE_LIST_PORTS` snapshot (`dpa` field).
+
+Security: this reverses the original "hub WebUI relay only" decision, so it is
+**OFF by default** and binds **127.0.0.1** (`console_dpa_bind`). Telnet is
+unauthenticated/unencrypted — the localhost bind (or an explicit `console_dpa_allow`
+source-IP allow-list when widening the bind) is the guard. **Encrypted, authenticated
+SSH is the planned follow-up transport** (needs an `asyncssh` dependency + host-key
+generation + auth); it plugs into the same `DpaManager.bridge` and is the
+recommended path for remote access. Code: `console/src/dpa.py` (`allocate_port`,
+`strip_telnet`, `DpaManager`), wired in `console/src/console_spoke.py`
+(`_ensure_dpa_task`, local-sink interception in `_on_serial_data`).

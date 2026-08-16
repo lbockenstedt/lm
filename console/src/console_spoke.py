@@ -31,6 +31,7 @@ try:
                              passive_identify, run_commands, merge_credentials,
                              sanitize_console_text,
                              FACTORY_DEFAULT_CREDENTIALS)
+    from dpa import DpaManager
 except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .serial_manager import (  # type: ignore
         PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
@@ -39,6 +40,7 @@ except ImportError:  # loaded as a package (agent role loader) or from repo root
                               passive_identify, run_commands, merge_credentials,
                               sanitize_console_text,
                               FACTORY_DEFAULT_CREDENTIALS)
+    from .dpa import DpaManager  # type: ignore
 
 logger = logging.getLogger("ConsoleSpoke")
 
@@ -88,12 +90,27 @@ class ConsoleSpoke(BaseSpoke):
         # failures (faulty/non-real ports), reader deaths (device pulled), and
         # recovery cycles (flapping). In memory (since process start).
         self._health: Dict[str, Dict[str, Any]] = {}
+        # Direct Port Access (DPA): reverse Telnet terminal-server. OFF by
+        # default; when enabled, bytes for a DPA session are delivered to a local
+        # sink (the TCP client) instead of pushed to the hub. See dpa.py.
+        self._local_sinks: Dict[str, Any] = {}  # session_id → callable(bytes)
+        self._dpa: Optional[DpaManager] = None
+        self._dpa_task = None
 
     # ── reader-thread → hub bridge ────────────────────────────────────────────
     def _on_serial_data(self, session_id: str, data: bytes) -> None:
         """Called from a PortChannel reader THREAD. Schedule the unsolicited push
         back onto the event loop (send_to_hub is a coroutine)."""
         cp, loop = self.control_plane, self._loop
+        # DPA: a local TCP client owns this session — deliver bytes to its sink
+        # (empty read == serial EOF) and skip the hub push entirely.
+        sink = self._local_sinks.get(session_id)
+        if sink is not None:
+            try:
+                sink(data)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("DPA sink %s failed: %s", session_id, e)
+            return
         if cp is None or loop is None:
             return
         if data:
@@ -157,6 +174,7 @@ class ConsoleSpoke(BaseSpoke):
         cmd = command_type.upper()
         self._ensure_autoprobe_task()  # start the fully-automatic identify loop once
         self._ensure_monitor_task()    # start the passive keep-alive capture loop once
+        self._ensure_dpa_task()        # start the Direct Port Access listeners (if enabled)
 
         if cmd == "GET_VERSION":
             return {"status": "SUCCESS", "version": self.get_version()}
@@ -184,6 +202,7 @@ class ConsoleSpoke(BaseSpoke):
                     "last_activity": snap["last_activity"],  # epoch of last byte seen (0 = never)
                     "capture_bytes": snap["capture_bytes"],  # total bytes captured this channel life
                     "pending_out": snap["pending_out"],  # bytes of a paste still draining
+                    "dpa": self._dpa_info(pid),          # Direct Port Access endpoint (None if off)
                 })
             return {"status": "SUCCESS", "ports": ports}
 
@@ -704,6 +723,86 @@ class ConsoleSpoke(BaseSpoke):
             return
         self._loop = self._loop or loop
         self._monitor_task = loop.create_task(self._monitor_loop())
+
+    # ── Direct Port Access (reverse Telnet terminal-server) ───────────────────
+    def _register_local_sink(self, session_id: str, cb) -> None:
+        self._local_sinks[session_id] = cb
+
+    def _unregister_local_sink(self, session_id: str) -> None:
+        self._local_sinks.pop(session_id, None)
+
+    def _port_device(self, port_id: str):
+        for p in enumerate_ports():
+            if p["port_id"] == port_id:
+                return p["device"]
+        return None
+
+    def _port_name(self, port_id: str) -> str:
+        saved = self.store.get(port_id)
+        alias = saved.get("alias")
+        if alias:
+            return alias
+        ident = (saved.get("probe") or {}).get("identity") or {}
+        if ident.get("hostname"):
+            return ident["hostname"]
+        for p in enumerate_ports():
+            if p["port_id"] == port_id:
+                return p.get("product") or port_id
+        return port_id
+
+    def _dpa_info(self, port_id: str):
+        """DPA endpoint descriptor for the port list (None when DPA is off or the
+        listener isn't up yet)."""
+        if self._dpa is None:
+            return None
+        tcp = self._dpa.assignment(port_id)
+        if not tcp:
+            return None
+        return {"telnet_port": tcp, "bind": self._dpa.bind, "proto": "telnet"}
+
+    def _ensure_dpa_task(self) -> None:
+        """Start Direct Port Access once, if enabled (config console_dpa_enabled,
+        default OFF). Each detected port gets its own auto-assigned TCP listener
+        (Telnet) bound to console_dpa_bind (default 127.0.0.1) so connecting to
+        that port attaches straight to the serial line."""
+        if self._dpa_task is not None or not self.config.get("console_dpa_enabled", False):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._loop = self._loop or loop
+        allow = self.config.get("console_dpa_allow") or []
+        if isinstance(allow, str):
+            allow = [a for a in allow.replace(",", " ").split() if a]
+        self._dpa = DpaManager(
+            store=self.store,
+            enumerate_ports=enumerate_ports,
+            open_session=self.sessions.open,
+            write_session=self.sessions.write,
+            close_session=self.sessions.close,
+            register_sink=self._register_local_sink,
+            unregister_sink=self._unregister_local_sink,
+            port_device=self._port_device,
+            port_name=self._port_name,
+            bind=self.config.get("console_dpa_bind", "127.0.0.1"),
+            base=int(self.config.get("console_dpa_base", 2200)),
+            span=int(self.config.get("console_dpa_span", 200)),
+            allow=allow,
+            loop=loop,
+        )
+        self._dpa_task = loop.create_task(self._dpa_loop())
+        logger.info("console: Direct Port Access enabled (bind=%s, base=%d)",
+                    self._dpa.bind, self._dpa.base)
+
+    async def _dpa_loop(self) -> None:
+        await asyncio.sleep(5)
+        while True:
+            try:
+                await self._dpa.reconcile()  # start/stop listeners as ports appear/vanish
+            except Exception:  # noqa: BLE001
+                logger.exception("console DPA reconcile failed")
+            await asyncio.sleep(15)
 
     async def _monitor_loop(self) -> None:
         await asyncio.sleep(5)

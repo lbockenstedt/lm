@@ -229,6 +229,11 @@ class PortStore:
     def get(self, port_id: str) -> Dict[str, Any]:
         return self._data.get(port_id, {})
 
+    def all_items(self) -> Dict[str, Dict[str, Any]]:
+        """Shallow copy of every persisted port record (used to enumerate stable
+        assignments such as DPA TCP ports across all known ports)."""
+        return dict(self._data)
+
     def settings(self, port_id: str) -> Dict[str, Any]:
         return {**_DEFAULT_SETTINGS, **self._data.get(port_id, {}).get("settings", {})}
 

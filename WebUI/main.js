@@ -16121,9 +16121,12 @@ function _renderConsolePorts(el, data) {
         const configBtn = hasConsoleWrite() ? `<button onclick="openConsoleConfigModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-indigo-400 text-indigo-600 hover:bg-slate-50">Config</button>` : '';
         const captureBtn = (p.capture_bytes || p.monitoring || (p.probe && p.probe.banner))
             ? `<button onclick="openConsoleCaptureModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50" title="View recent console output captured from this port">Capture</button>` : '';
+        const dpaBadge = (p.dpa && p.dpa.telnet_port)
+            ? `<div class="text-[11px] mt-0.5"><span class="font-mono px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200" title="Direct Port Access — connect a terminal straight to this serial line (unencrypted telnet; bound to ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))})">🔌 ${escapeHtml(String(p.dpa.proto || 'telnet'))} ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))}:${escapeHtml(String(p.dpa.telnet_port))}</span></div>` : '';
         return `<tr class="hover:bg-slate-50">
             <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${monDot}</div>
               <div class="text-xs font-mono text-slate-400">${escapeHtml(p.device)} · ${escapeHtml(p.port_id)}</div>
+              ${dpaBadge}
               ${_consoleIdentityBlock(p)}</td>
             <td class="px-4 py-3 text-center text-sm">${baud}</td>
             <td class="px-4 py-3 text-xs font-mono text-slate-600" title="${escapeHtml(p.spoke_id || '')}">${escapeHtml(agentName)}</td>
