@@ -151,7 +151,7 @@ async function csFetch(path, opts = {}) {
     // NOT) to permanently read/write two different tenant buckets. Fixed
     // once here instead of auditing every call site: append tenant_id
     // unless the caller already put one in the query string.
-    let url = '/sim/api' + path;
+    let url = '/sim/api' + path.replace(/\{tenant\}/g, csTenant());
     if (!/[?&](tenant_id|tenant)=/.test(url)) {
         url += (url.includes('?') ? '&' : '?') + 'tenant_id=' + csTenant();
     }
