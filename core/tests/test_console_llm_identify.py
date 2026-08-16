@@ -219,3 +219,85 @@ def test_finalize_drops_placeholder_identity_values():
     assert result["vendor"] == "cisco-ios"
     assert "hostname" not in result["identity"]       # scrubbed placeholder dropped
     assert result["identity"]["serial"] == "FTX9"      # real value kept
+
+
+# ── Local self-building fingerprint DB (routes.console_learn) ──────────────────
+from routes import console_learn as cl  # noqa: E402
+
+
+class _DiskHub(_FakeHub):
+    """A FakeHub whose ``state.data_dir`` points at a real temp dir, so the
+    console_learn JSON database actually persists to disk."""
+    def __init__(self, data_dir, **kw):
+        super().__init__(**kw)
+
+        class _S:
+            pass
+        self.state = _S()
+        self.state.data_dir = str(data_dir)
+
+
+def test_signature_is_stable_and_scrubbed():
+    # Different hostnames / IPs / serials on the same class of device collapse to
+    # the same signature (scrubbed + digit-generalized).
+    a = cl.signature("Edge-01(config)#\r\nmgmt 10.0.0.5")
+    b = cl.signature("Core-99(config)#\r\nmgmt 172.16.4.9")
+    assert a == b
+    assert "10.0.0.5" not in a and "Edge-01" not in a
+
+
+def test_learn_persists_to_json_file(tmp_path):
+    cl._CACHE.clear()
+    hub = _DiskHub(tmp_path)
+    sig = cl.signature("Switch> ")
+    cl.learn_commands(hub, sig, ["show version"], sample="Switch> ")
+    cl.learn_identity(hub, sig, "cisco-ios", {"model": "C2960"})
+    path = tmp_path / "console_fingerprints.json"
+    assert path.exists()
+    import json as _json
+    data = _json.loads(path.read_text())
+    rec = data["entries"][sig]
+    assert rec["commands"] == ["show version"]
+    assert rec["vendor"] == "cisco-ios"
+    assert rec["identity"]["model"] == "C2960"
+    assert rec["seen"] == 2
+    # A fresh cache reload reads the same knowledge back off disk.
+    cl._CACHE.clear()
+    assert cl.lookup(hub, sig)["vendor"] == "cisco-ios"
+
+
+def test_orchestrate_reuses_learned_fingerprint_without_llm(tmp_path):
+    """First device teaches the DB; a second device with the same signature is
+    identified by replaying the learned commands — with NO first LLM round."""
+    import asyncio
+    cl._CACHE.clear()
+    capture = "\r\nlogin: "
+    # 1) Teach: full LLM path (identify -> commands -> extract).
+    hub1 = _DiskHub(
+        tmp_path,
+        capture=capture,
+        llm_replies=[
+            '{"identified": false, "commands": ["show version"]}',
+            '{"identified": true, "vendor": "juniper", "model": "EX4300"}',
+        ],
+        collect={"logged_in": True, "outputs": {"show version": "Junos EX4300"},
+                 "rejected": []},
+    )
+    res1 = asyncio.run(m.orchestrate(hub1, "bugfixer", "console-1", "portA"))
+    assert res1["vendor"] == "juniper"
+    assert res1["rounds"] == 2
+
+    # 2) Reuse: same signature on another port — no LLM replies queued at all.
+    hub2 = _DiskHub(
+        tmp_path,
+        capture=capture,
+        llm_replies=[],   # would blank if the LLM were consulted for identify
+        collect={"logged_in": True, "outputs": {"show version": "Junos EX4300"},
+                 "rejected": []},
+    )
+    res2 = asyncio.run(m.orchestrate(hub2, "bugfixer", "console-2", "portB"))
+    assert res2.get("learned") is True
+    assert res2["rounds"] == 0                 # zero LLM identify rounds
+    assert res2["vendor"] == "juniper"         # recalled from the local DB
+    assert res2["identified"] is True
+    assert hub2.commands_sent == ["show version"]

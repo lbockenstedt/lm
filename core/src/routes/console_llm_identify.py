@@ -18,6 +18,8 @@ import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import console_learn
+
 logger = logging.getLogger(__name__)
 
 # ── Privacy scrubber ───────────────────────────────────────────────────────────
@@ -232,9 +234,14 @@ async def _ask_llm_credentials(hub, agent, capture: str) -> List[Dict[str, str]]
 
 async def orchestrate(hub, agent: str, sid: str, port_id: str,
                       cmd_cap: int = 6) -> Dict[str, Any]:
-    """Run the two-round LLM identify for one port. Returns a result dict:
+    """Run the LLM-guided identify for one port. Returns a result dict:
     ``{status, identified, vendor, identity, commands_run, rejected, rounds}``.
-    ``status`` is OK / INCONCLUSIVE / ERROR."""
+    ``status`` is OK / INCONCLUSIVE / ERROR.
+
+    A locally-learned fingerprint DB (``console_learn``) is consulted first: if a
+    device with this prompt signature has been seen before we reuse its known
+    read-only commands (and vendor), skipping the first LLM round entirely. Every
+    successful round teaches the DB, so identification gets faster over time."""
     result: Dict[str, Any] = {"status": "OK", "identified": False, "vendor": None,
                               "identity": {}, "commands_run": [], "rejected": [],
                               "logged_in": False, "rounds": 0}
@@ -243,23 +250,39 @@ async def orchestrate(hub, agent: str, sid: str, port_id: str,
     cap_res = _unwrap(await hub.request_response(sid, "CONSOLE_GET_CAPTURE",
                                                  {"port_id": port_id}, timeout=15.0))
     capture = cap_res.get("capture") or ""
+    sig = console_learn.signature(capture)
+    learned = console_learn.lookup(hub, sig)
 
-    # 2. Round one: identify outright, or ask for read-only commands.
-    content = await _ask_llm(hub, agent, _SYS_IDENTIFY, _user_capture(capture))
-    result["rounds"] = 1
-    js = _extract_json(content) or {}
-    if js.get("identified") and (js.get("vendor") or js.get("model")):
-        _finalize(result, js)
-        await _persist(hub, sid, port_id, capture, result)
-        return result
+    # 2. Round one: reuse a learned fingerprint if we have one, otherwise ask the
+    #    LLM to identify outright or propose read-only commands.
+    cmds: List[str] = []
+    if learned and learned.get("commands"):
+        result["learned"] = True
+        result["rounds"] = 0
+        # A previously-resolved device with the same signature: short-circuit.
+        if learned.get("vendor") or learned.get("identity"):
+            result["vendor"] = learned.get("vendor")
+            result["identity"] = learned.get("identity") or {}
+            result["identified"] = True
+        cmds = [c for c in learned["commands"] if isinstance(c, str) and c.strip()][:cmd_cap]
+    else:
+        content = await _ask_llm(hub, agent, _SYS_IDENTIFY, _user_capture(capture))
+        result["rounds"] = 1
+        js = _extract_json(content) or {}
+        if js.get("identified") and (js.get("vendor") or js.get("model")):
+            _finalize(result, js)
+            console_learn.learn_identity(hub, sig, result.get("vendor"),
+                                         result.get("identity"))
+            await _persist(hub, sid, port_id, capture, result)
+            return result
+        cmds = [c.strip() for c in (js.get("commands") or [])
+                if isinstance(c, str) and c.strip()][:cmd_cap]
 
-    cmds: List[str] = [c.strip() for c in (js.get("commands") or [])
-                       if isinstance(c, str) and c.strip()][:cmd_cap]
     if not cmds:
         result["status"] = "INCONCLUSIVE"
         return result
 
-    # 3. Run the proposed commands (spoke re-validates each read-only).
+    # 3. Run the proposed/learned commands (spoke re-validates each read-only).
     coll = _unwrap(await hub.request_response(sid, "CONSOLE_LLM_COLLECT",
                                               {"port_id": port_id, "commands": cmds},
                                               timeout=120.0))
@@ -290,15 +313,27 @@ async def orchestrate(hub, agent: str, sid: str, port_id: str,
     result["logged_in"] = bool(coll.get("logged_in"))
     capture = coll.get("banner") or capture
 
-    # 4. Round two: extract the final identity from the command outputs.
+    # Learn: these commands drew output from a device with this signature.
+    if outputs:
+        console_learn.learn_commands(hub, sig, list(outputs.keys()), capture)
+
+    # A learned+already-resolved device that just re-ran its commands is done.
+    if result["identified"]:
+        await _persist(hub, sid, port_id, capture, result)
+        return result
+
+    # 4. Final round: extract the identity from the command outputs.
     content2 = await _ask_llm(hub, agent, _SYS_EXTRACT, _user_outputs(capture, outputs))
-    result["rounds"] = 2
+    result["rounds"] = (result.get("rounds") or 0) + 1
     _finalize(result, _extract_json(content2) or {})
     if not result["identified"]:
         result["status"] = "INCONCLUSIVE"
         return result
+    # Teach the DB the resolved identity so next time we skip straight to it.
+    console_learn.learn_identity(hub, sig, result.get("vendor"), result.get("identity"))
     await _persist(hub, sid, port_id, capture, result)
     return result
+
 
 
 async def _persist(hub, sid: str, port_id: str, banner: str, result: Dict[str, Any]) -> None:

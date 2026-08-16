@@ -166,6 +166,18 @@ _SHELL_PROMPT = re.compile(r"\S[>#$%]\s*$")
 _LOGIN_NUDGES = 4          # extra CRs after the initial CRLF banner read
 _NUDGE_SECS = 1.2          # per-nudge read window
 
+# Universal, READ-ONLY discovery commands used to coax an identifying banner out
+# of a device sitting at a LIVE console that presented no login prompt and no
+# recognizable vendor yet (direct-console gear, no auth). Broad vendor coverage;
+# harmless/ignored where unsupported. Tried in order, stopping as soon as the
+# vendor is recognized.
+_DISCOVERY_COMMANDS = ("show version", "display version", "show system",
+                       "get system status", "uname -a", "cat /etc/os-release")
+
+# Pager prompts ("--More--", "---(more)---", "<--- More --->") — advanced by
+# sending a space so we capture the full command output, not just one screen.
+_PAGER = re.compile(r"(?i)(--+\s*more\s*--+|-{2,}\(?\s*more[^)]*\)?-{2,}|<-+\s*more\s*-+>)")
+
 # Well-known factory-default credentials, tried (in order, once each) AFTER any
 # operator-supplied credentials when a device sits at a login prompt and the
 # stored credentials don't work. Deliberately short + conservative to avoid
@@ -314,6 +326,39 @@ def _read_until(read_fn: Callable[[], bytes], patterns: List[re.Pattern],
     return buf.decode("utf-8", "replace")
 
 
+def _read_command_output(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
+                         until: List[re.Pattern], cmd_secs: float, max_pages: int = 30) -> str:
+    """Read one command's output, auto-advancing pagers (``--More--``) by sending
+    a space so the full output is captured instead of a single screen."""
+    out = _read_until(read_fn, until, cmd_secs)
+    pages = 0
+    while pages < max_pages and _PAGER.search(out[-120:]):
+        write_fn(b" ")
+        out += _read_until(read_fn, until, cmd_secs)
+        pages += 1
+    return out
+
+
+def _elicit_identity_banner(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
+                            transcript: str, cmd_secs: float = 2.5):
+    """Responsive console, no vendor recognized yet and NO login prompt showing:
+    send a few universal read-only discovery commands to force out an identifying
+    banner. Stops as soon as :func:`detect_vendor` recognizes the device. Returns
+    ``(transcript, profile, outputs)`` — a direct-console device (no auth) can be
+    identified without ever seeing a login/password prompt."""
+    outputs: Dict[str, str] = {}
+    profile = None
+    for cmd in _DISCOVERY_COMMANDS:
+        write_fn((cmd + "\r").encode())
+        out = _read_command_output(read_fn, write_fn, [_SHELL_PROMPT], cmd_secs)
+        outputs[cmd] = out
+        transcript += "\n" + out
+        profile = detect_vendor(transcript)
+        if profile:
+            break
+    return transcript, profile, outputs
+
+
 def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
                    credentials: List[Dict[str, str]], banner_secs: float = 3.0,
                    step_secs: float = 4.0):
@@ -417,21 +462,39 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
 
     # 2. Detect the vendor from everything seen (pre- and post-login).
     profile = detect_vendor(transcript)
+    tail = transcript[-200:]
+    at_login_prompt = bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail))
+
+    # 2b. Direct-console gear shows no banner until prodded and may never present
+    #     a login prompt. If we're on a LIVE line (got output, not sitting at a
+    #     login/password prompt) but haven't recognized the vendor, actively run a
+    #     few universal read-only discovery commands to coax out an identifying
+    #     banner — i.e. try the show commands even without a username/password.
+    if not profile and not at_login_prompt and diag.get("any_output"):
+        transcript, profile, disc = _elicit_identity_banner(read_fn, write_fn, transcript)
+        result["banner"] = transcript[-4000:]
+        if any((v or "").strip() for v in disc.values()):
+            # The console answered our commands → it's usable without auth.
+            result["logged_in"] = True
+            diag["console_usable"] = True
+            diag["discovery_cmds"] = list(disc.keys())
+            result["diag"] = _login_diag(diag, transcript, credentials)
+
     if not profile:
         return result  # unknown vendor — the LLM-driven identify path takes over
     result["vendor"] = profile["name"]
 
     # If a login prompt is still showing (couldn't authenticate), stop here.
     tail = transcript[-200:]
-    if not logged_in and (_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)):
+    if not result["logged_in"] and (_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)):
         return result
 
-    # 3. Run the read-only identity commands + capture output.
+    # 3. Run the read-only identity commands + capture output (pager-aware).
     outputs: Dict[str, str] = {}
     for spec in profile["commands"]:
         cmd = spec["cmd"]
         write_fn((cmd + "\r").encode())
-        outputs[cmd] = _read_until(read_fn, [profile["prompt"]], cmd_secs)
+        outputs[cmd] = _read_command_output(read_fn, write_fn, [profile["prompt"]], cmd_secs)
     result["outputs"] = outputs
     result["identity"] = parse_identity(profile, outputs)
     return result
