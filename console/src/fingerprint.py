@@ -530,7 +530,16 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
             result["diag"] = _login_diag(diag, transcript, credentials)
 
     if not profile:
-        return result  # unknown vendor — the LLM-driven identify path takes over
+        # Unknown vendor, but if we reached a usable shell/CLI prompt (e.g. a
+        # logged-in device or an open console) its prompt still names the box —
+        # glean it so the port shows a real name instead of the USB adapter
+        # string. Login/password prompts don't match, so this stays empty when
+        # we never got in. The LLM-driven identify path can still add vendor/model.
+        hn = prompt_hostname(transcript)
+        if hn:
+            result["identity"]["hostname"] = hn
+            result["hostname_source"] = "prompt"
+        return result
     result["vendor"] = profile["name"]
 
     # If a login prompt is still showing (couldn't authenticate), stop here.

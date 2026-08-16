@@ -66,6 +66,43 @@ def test_run_identify_arubaos_switch_prompt_hostname():
     assert res["identity"].get("hostname") == "MIA-SW-AOSS"
 
 
+def test_run_identify_loggedin_unknown_vendor_gleans_prompt_hostname():
+    # Logged into a device whose vendor we don't recognize (no banner keyword,
+    # no matching profile). We still glean the box name from its shell prompt so
+    # the port shows a real name instead of the USB adapter string.
+    lines = iter([
+        b"\r\nedge-core> ",   # unknown vendor, live shell prompt
+        b"edge-core> ",       # answers discovery nudges with just the prompt
+        b"edge-core> ",
+    ])
+
+    def _read():
+        try:
+            return next(lines)
+        except StopIteration:
+            return b""
+
+    res = fp.run_identify(_read, lambda b: None, [])
+    assert res["vendor"] is None
+    assert res["identity"].get("hostname") == "edge-core"
+    assert res["hostname_source"] == "prompt"
+
+
+def test_run_identify_login_prompt_only_no_hostname():
+    # Sitting at a bare login prompt (never authenticated) → no shell prompt to
+    # glean, so no hostname is invented.
+    lines = iter([b"\r\nPassword: "])
+
+    def _read():
+        try:
+            return next(lines)
+        except StopIteration:
+            return b""
+
+    res = fp.run_identify(_read, lambda b: None, [])
+    assert not res["identity"].get("hostname")
+
+
 def test_normalize_mac():
     assert fp.normalize_mac("0011.2233.4455") == "00:11:22:33:44:55"
     assert fp.normalize_mac("00:11:22:33:44:55") == "00:11:22:33:44:55"

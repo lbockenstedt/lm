@@ -142,13 +142,13 @@ class HubVncConsoleMixin:
         vendor = str(data.get("vendor") or "").strip()
         real_host = str(identity.get("hostname") or "").strip()
         serial = str(identity.get("serial") or "").strip()
-        # Local fingerprint failed to recognize the device (no vendor and no
-        # harvested identity). If AI-assisted identify is enabled, auto-escalate
-        # to the LLM instead of syncing a placeholder device — the fingerprint DB
-        # (console_learn) then caches the result so repeat prompts stay static.
+        # The local fingerprint didn't recognize the device TYPE (no vendor). If
+        # AI-assisted identify is enabled, auto-escalate to the LLM to identify
+        # vendor/model — independent of whether we gleaned a hostname from the
+        # prompt (a name alone doesn't tell us what the box is). The fingerprint
+        # DB (console_learn) then caches the result so repeat prompts stay static.
         # Guard on method != "llm" so the LLM's own result can't re-trigger this.
-        if (not vendor and not (ip or mac or real_host or serial)
-                and str(data.get("method") or "").strip() != "llm"):
+        if not vendor and str(data.get("method") or "").strip() != "llm":
             if await self._auto_llm_console_identify(spoke_id, data):
                 return
         # Name preference: the device's real hostname (or serial), else the USB
