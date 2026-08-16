@@ -151,6 +151,41 @@ PROFILES: List[Dict[str, Any]] = [
                    "show_running": "show configuration"},
     },
     {
+        # ArubaOS 8 Mobility Controller / Gateway (and legacy controllers). These
+        # show NO vendor banner at rest — only their distinctive parenthesised
+        # prompt "(hostname) #" / "(hostname) *#" (the * = pending config) — so we
+        # recognise them by that prompt shape (a space before the #/> tells it
+        # apart from a Cisco "host(config)#", which has no space and a hostname
+        # glued to the paren). Once matched we pull model + serial so the box can
+        # be found in NetBox and physically in the rack.
+        "name": "aruba-os",
+        "match": re.compile(
+            r"ArubaOS(?!-?CX)|Aruba Operating System|"
+            r"(?:^|[\r\n\s])\([\w][\w.\-]{1,62}\)\s+\*?\s*[>#]", re.I),
+        "family": "Gateway/Controller",
+        "prompt": re.compile(r"\([\w.\-]+\)\s*(?:\([\w .\-]+\)\s*)?\*?\s*[>#]\s*$"),
+        "login_prompt": re.compile(r"[Uu]ser:\s*$|login:\s*$"),
+        "password_prompt": re.compile(r"[Pp]assword:\s*$"),
+        "pager": b" ",
+        "commands": [
+            {"cmd": "no paging"},
+            {"cmd": "show version", "fields": {
+                # "ArubaOS (MODEL: A7010), Version 8.6.0.7" — model + OS version.
+                "model": re.compile(r"MODEL:\s*([\w\-]+)", re.I),
+                "os": re.compile(r"ArubaOS[^\n]*?Version\s+([\w.\-]+)", re.I),
+            }},
+            {"cmd": "show inventory", "fields": {
+                # "System Serial#      : CV0001234" (chassis serial for NetBox).
+                "serial": re.compile(
+                    r"(?:System Serial#|Chassis Serial#|Serial Number)\s*:?\s*([A-Za-z0-9\-]+)", re.I),
+                # Fallback model if 'show version' didn't carry it: "SC Model# : A7010".
+                "model": re.compile(r"(?:SC |Card )?Model#\s*:?\s*([\w\-]+)", re.I),
+            }},
+        ],
+        "config": {"enter": "configure terminal", "exit": "exit", "save": "write memory",
+                   "show_running": "show running-config"},
+    },
+    {
         "name": "linux",
         "match": re.compile(r"login:\s*$|Linux \S+ \d|Ubuntu|Debian|CentOS|localhost", re.I),
         "family": "Server",
