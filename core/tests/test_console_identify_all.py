@@ -83,16 +83,22 @@ def test_identify_all_queues_idle_skips_in_use(monkeypatch):
     assert body["skipped_in_use"] == 1
 
 
-def test_identify_all_disabled_returns_409(monkeypatch):
+def test_identify_all_runs_without_global_toggle(monkeypatch):
+    # Profiling is now an explicit, on-demand action — clicking the button is the
+    # opt-in, so there is no separate global enable gate to trip a 409.
     c, _ = _build(monkeypatch, [{"port_id": "p1", "in_use": False}], enabled=False)
     r = c.post("/api/console/identify-llm-all?tenant=default", json={})
-    assert r.status_code == 409
+    assert r.status_code == 200
+    assert r.json()["queued"] == 1
 
 
-def test_identify_all_no_agent_returns_409(monkeypatch):
+def test_identify_all_queues_even_without_agent(monkeypatch):
+    # Fingerprint-first: known devices resolve without the AI, so a missing
+    # BugFixer agent no longer blocks the bulk profile — it still queues.
     c, _ = _build(monkeypatch, [{"port_id": "p1", "in_use": False}], agent=None)
     r = c.post("/api/console/identify-llm-all?tenant=default", json={})
-    assert r.status_code == 409
+    assert r.status_code == 200
+    assert r.json()["queued"] == 1
 
 
 def test_identify_all_no_idle_ports(monkeypatch):

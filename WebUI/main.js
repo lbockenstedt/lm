@@ -16127,20 +16127,20 @@ function _renderConsolePorts(el, data) {
         const eP = esc(p.port_id), eS = esc(p.spoke_id || ''), eT = esc(p.tenant_override || '');
         const tenantBtn = admin ? `<button onclick="openConsolePortTenantModal('${eS}','${eP}','${eT}')" class="text-[11px] px-2 py-1 rounded border border-[#01A982] text-[#01A982] hover:bg-slate-50">Tenant</button>` : '';
         const configBtn = hasConsoleWrite() ? `<button onclick="openConsoleConfigModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-indigo-400 text-indigo-600 hover:bg-slate-50">Config</button>` : '';
+        const profileBtn = admin ? `<button onclick="profileDevice('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile this device: use the known fingerprint if we have one, otherwise ask the AI to identify it from its (scrubbed) console output">🔎 Profile Device</button>` : '';
         const captureBtn = (p.capture_bytes || p.monitoring || (p.probe && p.probe.banner))
             ? `<button onclick="openConsoleCaptureModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50" title="View recent console output captured from this port">Capture</button>` : '';
         const dpaBadge = (p.dpa && p.dpa.telnet_port)
             ? `<div class="text-[11px] mt-0.5"><span class="font-mono px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200" title="Direct Port Access — connect a terminal straight to this serial line (unencrypted telnet; bound to ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))})">🔌 ${escapeHtml(String(p.dpa.proto || 'telnet'))} ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))}:${escapeHtml(String(p.dpa.telnet_port))}</span></div>` : '';
         return `<tr class="hover:bg-slate-50">
             <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${monDot}</div>
-              <div class="text-xs font-mono text-slate-400">${escapeHtml(p.device)}:${escapeHtml(String(baud))}</div>
+              <div class="text-xs font-mono text-slate-400" title="${escapeHtml(p.spoke_id || '')}">${escapeHtml(agentName)}:${escapeHtml(p.device)}:${escapeHtml(String(baud))}</div>
               ${dpaBadge}
               ${_consoleIdentityBlock(p)}</td>
-            <td class="px-4 py-3 text-center text-sm">${baud}</td>
-            <td class="px-4 py-3 text-xs font-mono text-slate-600" title="${escapeHtml(p.spoke_id || '')}">${escapeHtml(agentName)}</td>
             <td class="px-4 py-3">${tenant}</td>
             <td class="px-4 py-3 text-right whitespace-nowrap space-x-1">
               <button onclick="openConsoleTerminal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold">🖥 Open</button>
+              ${profileBtn}
               ${captureBtn}
               <button onclick="openConsoleSettingsModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Settings</button>
               ${configBtn}
@@ -16148,61 +16148,57 @@ function _renderConsolePorts(el, data) {
             </td></tr>`;
     }).join('');
     const tools = admin
-        ? `<div class="flex justify-end gap-2 p-2 border-b border-slate-100"><button id="console-llm-toggle" onclick="toggleConsoleLlmIdentify()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Enable/disable automatic LLM-driven device identification (runs continuously in the background)">🤖 AI Identify: …</button><button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button><button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button></div>`
+        ? `<div class="flex justify-end gap-2 p-2 border-b border-slate-100"><button onclick="profileAllDevices()" class="text-[11px] px-3 py-1.5 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile every listed device at once: known fingerprints are used as-is; unknown devices are sent (scrubbed) to the AI to identify. Ports open in a session are skipped.">🔎 Profile All Devices</button><button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button><button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button></div>`
         : '';
     el.innerHTML = `${tools}<div class="p-0 overflow-hidden"><table class="w-full text-left text-sm">
         <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>
-          <th class="px-4 py-3">Port</th><th class="px-4 py-3 text-center">Baud</th>
-          <th class="px-4 py-3">Console agent</th><th class="px-4 py-3">Tenant</th>
+          <th class="px-4 py-3">Port</th><th class="px-4 py-3">Tenant</th>
           <th class="px-4 py-3 text-right">Actions</th></tr></thead>
         <tbody class="divide-y divide-slate-200">${rows}</tbody></table></div>`;
-    if (admin) refreshConsoleLlmToggle();
 }
 
-// Reflect the current LLM-identify toggle state on the console tools button.
-async function refreshConsoleLlmToggle() {
-    const btn = document.getElementById('console-llm-toggle');
-    if (!btn) return;
+// Profile a single device (admin): use the built-in/learned fingerprint if we
+// already have one; only fall back to the AI (on scrubbed console output) when
+// the device is unrecognized. Passive capture continues regardless — this is the
+// explicit, on-demand profiling action.
+async function profileDevice(spokeId, portId) {
+    showToast('🔎 Profiling device (fingerprint first, AI only if unknown)…', 'info');
     try {
-        const res = await fetch('/api/console/llm-identify', { credentials: 'same-origin' });
-        const d = await res.json().catch(() => ({}));
-        if (!res.ok) { btn.textContent = '🤖 AI Identify: n/a'; return; }
-        _renderConsoleLlmToggle(btn, d);
-    } catch (e) { btn.textContent = '🤖 AI Identify: n/a'; }
-}
-
-function _renderConsoleLlmToggle(btn, d) {
-    const on = !!d.enabled;
-    btn.dataset.enabled = on ? '1' : '0';
-    btn.textContent = `🤖 AI Identify: ${on ? 'On' : 'Off'}`;
-    btn.className = 'text-[11px] px-3 py-1.5 rounded border ' + (on
-        ? 'border-violet-500 bg-violet-50 text-violet-700'
-        : 'border-slate-300 hover:bg-slate-50');
-    btn.title = on
-        ? (d.available ? 'LLM identify is ON (BugFixer agent connected). Click to disable.'
-                       : 'LLM identify is ON but the BugFixer LLM agent is NOT connected. Click to disable.')
-        : 'LLM identify is OFF. Click to enable 🤖 AI Identify.';
-}
-
-// Admin: flip the LLM-identify toggle (persists on the hub + pushes to spokes).
-async function toggleConsoleLlmIdentify() {
-    const btn = document.getElementById('console-llm-toggle');
-    if (!btn) return;
-    const next = btn.dataset.enabled !== '1';
-    try {
-        const res = await fetch('/api/console/llm-identify', {
+        const res = await fetch('/api/console/identify-llm', {
             method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ enabled: next }),
+            body: JSON.stringify({ spoke_id: spokeId, port_id: portId }),
         });
         const d = await res.json().catch(() => ({}));
-        if (!res.ok) { showToast(d.detail || 'Toggle failed', 'error'); return; }
-        _renderConsoleLlmToggle(btn, d);
-        if (next && !d.available) {
-            showToast('AI Identify enabled, but the BugFixer LLM agent is not connected yet.', 'info');
+        if (!res.ok) { showToast(d.detail || 'Profiling failed', 'error'); return; }
+        if (d.identified && d.vendor) {
+            const bits = [d.vendor, (d.identity || {}).type, (d.identity || {}).model, (d.identity || {}).serial].filter(Boolean).join(' · ');
+            const via = d.source === 'fingerprint' ? ' (known fingerprint)' : (d.learned ? ' (learned)' : ' (AI)');
+            showToast(`🔎 Profiled: ${bits}${via}`, 'success');
+            loadConsoleData();
         } else {
-            showToast(`🤖 AI Identify ${next ? 'enabled' : 'disabled'}`, next ? 'success' : 'info');
+            showToast(d.status === 'ERROR' ? (d.message || 'Profiling error') : '🔎 Could not profile this device yet', 'info');
         }
-    } catch (e) { showToast('Toggle failed: ' + e.message, 'error'); }
+    } catch (e) { showToast('Profiling failed: ' + e.message, 'error'); }
+}
+
+// Profile every listed device at once (admin). Known fingerprints resolve without
+// the AI; only unknown devices are sent (scrubbed) to the AI. Runs in the
+// background; ports open in a session are skipped.
+async function profileAllDevices() {
+    const n = (_consolePorts || []).filter(p => !p.in_use).length;
+    if (!n) { showToast('No idle ports to profile.', 'info'); return; }
+    if (!confirm(`Profile ${n} device(s)? Known devices use their fingerprint; unknown ones are sent (scrubbed) to the AI. Ports open in a session are skipped.`)) return;
+    showToast(`🔎 Profiling ${n} device(s) — this runs in the background…`, 'info');
+    try {
+        const res = await fetch(`/api/console/identify-llm-all?tenant=${encodeURIComponent(currentTenant || 'default')}`, {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(d.detail || 'Bulk profiling failed', 'error'); return; }
+        const skipped = d.skipped_in_use ? `, ${d.skipped_in_use} in-use skipped` : '';
+        showToast(`🔎 Queued ${d.queued || 0} device(s)${skipped}. Results will populate as they finish.`, 'success');
+        setTimeout(loadConsoleData, 8000);  // pull in early results
+    } catch (e) { showToast('Bulk profiling failed: ' + e.message, 'error'); }
 }
 
 // Relative "last seen" string from an epoch-seconds timestamp (0/absent → '').
