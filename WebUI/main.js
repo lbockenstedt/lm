@@ -16372,6 +16372,7 @@ async function refreshConsoleDiagnostics() {
         if (res.ok) data = await res.json();
         else { body.innerHTML = `<div class="text-red-500">Failed to load (${res.status})</div>`; return; }
     } catch (e) { body.innerHTML = `<div class="text-red-500">${escapeHtml(e.message)}</div>`; return; }
+    window._consoleDiagLast = { ...data, _fetched_at: new Date().toISOString() };
     const rows = data.diagnostics || [];
     const errs = Object.entries(data.errors || {});
     const summaryBanner = _consoleDiagSummaryBanner(data.summaries || {});
@@ -16444,8 +16445,110 @@ function _consoleDiagSummaryBanner(summaries) {
 // Footer buttons shared by the diagnostics modal states: purge all collected
 // telemetry (admin) + refresh.
 function _consoleDiagFooterBtns() {
-    return `<button onclick="purgeConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50" title="Delete all collected serial-health / identify telemetry across every console agent">🗑 Purge data</button>`
+    return `<button onclick="copyConsoleDiagnostics(this)" class="text-[11px] px-3 py-1.5 rounded border border-[#01A982] text-[#01A982] hover:bg-[#01A982]/10 font-bold" title="Copy the full diagnostics — every port's login/identify telemetry, prompts, creds tried, skip reason and the last raw device line — as plain text to paste into a ticket or chat">⧉ Copy debug</button>`
+         + `<button onclick="purgeConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50" title="Delete all collected serial-health / identify telemetry across every console agent">🗑 Purge data</button>`
          + `<button onclick="refreshConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">↻ Refresh</button>`;
+}
+
+// Serialize the last-fetched console diagnostics to plain text so an operator can
+// paste EVERYTHING (including the hover-only bits — the raw transcript tail, the
+// hostname history, the skip reason) into a ticket or a chat with support. No
+// secrets: credentials are only ever reported as counts, never values.
+function copyConsoleDiagnostics(btn) {
+    const d = window._consoleDiagLast;
+    if (!d) { showToast('Nothing to copy yet — open/refresh diagnostics first', 'error'); return; }
+    const L = [`LM CONSOLE DIAGNOSTICS — captured ${d._fetched_at}`,
+               '(last FETCHED data — press Refresh for live values)', ''];
+    const summaries = Object.entries(d.summaries || {});
+    L.push(`AGENTS (${summaries.length})`);
+    if (!summaries.length) L.push('  (no console agents reported a summary)');
+    summaries.forEach(([sid, s]) => {
+        L.push(`  ${s.agent_name || sid} [${sid}]`);
+        L.push(`    auto_identify=${s.auto_identify}  login_enabled=${s.login_enabled}` +
+               `  operator_creds=${s.credentials_loaded}  factory_defaults=${s.factory_default_creds}` +
+               `  monitor=${s.monitor}  ports=${s.port_count}`);
+        if (!s.auto_identify) L.push('    ⛔ auto-identify DISABLED — no login is attempted on any port.');
+        else if (!s.login_enabled) L.push('    ⛔ no credentials to try (operator list empty AND factory defaults off).');
+        else if (!s.credentials_loaded) L.push('    ⚠ 0 operator credentials — only factory-default logins are tried.');
+    });
+    L.push('');
+    const errs = Object.entries(d.errors || {});
+    if (errs.length) { L.push(`UNREACHABLE CONSOLES (${errs.length})`); errs.forEach(([s, e]) => L.push(`  ${s}: ${e}`)); L.push(''); }
+
+    const rows = d.diagnostics || [];
+    const failRows = rows.filter(r => r.open_failures || r.disconnects || r.currently_failing);
+    L.push(`SERIAL CONNECTION FAILURES (${failRows.length})`);
+    if (!failRows.length) L.push('  (none)');
+    failRows.forEach(r => {
+        const st = !r.present ? 'GONE' : r.currently_failing ? 'FAILING' : r.recoveries > 1 ? 'FLAPPING' : 'RECOVERED';
+        L.push(`  ${r.alias || r.device || r.port_id} [${r.agent_name || r.spoke_id || ''}] — ${st}`);
+        L.push(`    open_failures=${r.open_failures || 0} disconnects=${r.disconnects || 0} recoveries=${r.recoveries || 0}` +
+               ` present=${r.present} monitoring=${r.monitoring} in_use=${r.in_use}`);
+        if (r.last_error) L.push(`    last_error: ${r.last_error}`);
+    });
+    L.push('');
+
+    const identRows = rows.filter(r => (r.identify && r.identify.attempts) || (r.present && r.schedule));
+    L.push(`IDENTIFY / LOGIN TELEMETRY (${identRows.length})`);
+    if (!identRows.length) L.push('  (no ports)');
+    identRows.forEach(r => {
+        const t = r.identify || {};
+        const sc = r.schedule || {};
+        L.push(`  ${r.alias || r.device || r.port_id} [${r.agent_name || r.spoke_id || ''}]`);
+        L.push(`    port_id=${r.port_id} device=${r.device || ''} present=${r.present}` +
+               ` vendor=${r.vendor || t.vendor || '-'} identified=${r.identified}`);
+        if (!t.attempts) {
+            L.push(`    NO ATTEMPT YET — ${sc.skip_reason || 'pending'}` +
+                   (sc.next_attempt_in ? ` (next in ${_consoleFmtDur(sc.next_attempt_in)})` : ''));
+        } else {
+            const outcome = t.logged_in ? 'LOGGED IN'
+                : t.shell_prompt_seen ? 'shell, no id'
+                : t.password_prompt_seen ? 'auth rejected'
+                : t.login_prompt_seen ? 'login prompt (no login)'
+                : t.any_output ? 'output, no prompt' : 'silent';
+            L.push(`    via=${t.method === 'llm' ? 'AI (show commands)' : 'login'} outcome=${outcome}` +
+                   `  logged_in=${!!t.logged_in}`);
+            L.push(`    prompts: login=${!!t.login_prompt_seen} password=${!!t.password_prompt_seen} shell=${!!t.shell_prompt_seen}` +
+                   `  any_output=${!!t.any_output} bytes=${t.bytes || 0}`);
+            L.push(`    creds_tried=${t.creds_tried || 0}/${t.creds_available || 0}` +
+                   `  schedule=${sc.skip_reason || ''}${sc.next_attempt_in ? ` (next in ${_consoleFmtDur(sc.next_attempt_in)})` : ''}` +
+                   `  backoff=${sc.backoff_s || 0}s`);
+            if (t.method === 'llm') L.push(`    commands_run=${(t.commands_run || []).length} rejected=${(t.rejected || []).length}`);
+            if (t.reason) L.push(`    reason: ${t.reason}`);
+            if (t.error) L.push(`    error: ${t.error}`);
+            if (t.hostname) {
+                L.push(`    hostname=${t.hostname} source=${t.hostname_source || '?'}` +
+                       ` stable=${t.hostname_changes ? `NO (changed ${t.hostname_changes}x, ${t.hostname_distinct} distinct)` : 'yes'}`);
+                (t.hostname_history || []).forEach(h => L.push(`      seen "${h.host}" via ${h.source || '?'} @ ${_consoleRelTime(h.ts)}`));
+            }
+            if (t.tail) L.push('    last raw line(s) from device:\n' + t.tail.split('\n').map(x => '      | ' + x).join('\n'));
+        }
+        L.push('');
+    });
+
+    const txt = L.join('\n');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(txt).then(() => showToast('Diagnostics copied to clipboard', 'success'),
+            () => _consoleDiagFallbackCopy(txt));
+    } else { _consoleDiagFallbackCopy(txt); }
+    if (btn) { const o = btn.textContent; btn.textContent = '✓ Copied'; setTimeout(() => { btn.textContent = o; }, 1500); }
+}
+window.copyConsoleDiagnostics = copyConsoleDiagnostics;
+
+// Clipboard fallback (insecure context / permission denied): drop the text into
+// a modal textarea the operator can select-all + copy from manually.
+function _consoleDiagFallbackCopy(txt) {
+    const m = document.createElement('div');
+    m.className = 'fixed inset-0 z-[60] flex items-center justify-center bg-black bg-opacity-50';
+    m.innerHTML = `<div class="bg-white rounded-lg shadow-2xl w-full max-w-2xl p-4">
+        <div class="flex justify-between items-center mb-2"><b class="text-sm">Copy diagnostics</b>
+          <button onclick="this.closest('.fixed').remove()" class="text-slate-400 text-xl leading-none">&times;</button></div>
+        <textarea class="w-full h-80 border border-slate-300 rounded p-2 font-mono text-[11px]" readonly></textarea>
+        <div class="text-[11px] text-slate-400 mt-1">Select all (Ctrl/Cmd+A) and copy.</div></div>`;
+    m.querySelector('textarea').value = txt;
+    document.body.appendChild(m);
+    m.querySelector('textarea').focus();
+    m.querySelector('textarea').select();
 }
 
 
