@@ -16364,8 +16364,24 @@ async function refreshConsoleDiagnostics() {
 // Footer buttons shared by the diagnostics modal states: purge all collected
 // telemetry (admin) + refresh.
 function _consoleDiagFooterBtns() {
-    return `<button onclick="purgeConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50" title="Delete all collected serial-health / identify telemetry across every console agent">🗑 Purge data</button>`
+    return `<button onclick="restartConsoleHubService()" class="text-[11px] px-3 py-1.5 rounded border border-amber-300 text-amber-700 hover:bg-amber-50" title="Restart the hub service (lm.service) to load freshly-pulled code — fixes a 'Method Not Allowed' on new endpoints after an update">♻️ Restart hub service</button>`
+         + `<button onclick="purgeConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50" title="Delete all collected serial-health / identify telemetry across every console agent">🗑 Purge data</button>`
          + `<button onclick="refreshConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">↻ Refresh</button>`;
+}
+
+// Restart the hub service (admin) to load freshly-pulled code. Confirms first,
+// since the hub (and this WebUI session) briefly drops while lm.service cycles.
+async function restartConsoleHubService() {
+    if (!confirm('Restart the hub service (lm.service) now?\n\nThis loads the latest pulled code (e.g. to fix a "Method Not Allowed" on a new endpoint after an update). The hub and this page will be briefly unavailable for a few seconds while it restarts; console agents reconnect automatically.')) return;
+    try {
+        const res = await fetch('/api/console/diagnostics/restart-hub', {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(d.detail || `Restart failed (${res.status})`, 'error'); return; }
+        showToast(`${d.message || 'Hub restarting'} — reloading in ~8s…`, 'success');
+        setTimeout(() => location.reload(), 8000);
+    } catch (e) { showToast('Restart failed: ' + e.message, 'error'); }
 }
 
 // Purge all collected diagnostics/identify telemetry (admin). Confirms first,
