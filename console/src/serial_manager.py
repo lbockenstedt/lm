@@ -290,6 +290,7 @@ class PortChannel:
         self.port_id = port_id
         self.dev = dev
         self.on_data = on_data
+        self.baud = int(settings.get("baud", 9600) or 9600)
         self.sessions: set = set()
         self.writer: Optional[str] = None
         self.monitored: bool = False  # kept open for passive capture w/o a user
@@ -439,6 +440,7 @@ class PortChannel:
             "pending_out": self.pending_out(),
             "has_user": bool(self.sessions),
             "writer": self.writer,
+            "baud": self.baud,
         }
 
     def send_break(self, session_id: str) -> bool:
@@ -522,6 +524,18 @@ class SessionManager:
             chan.close()
             self._channels.pop(port_id, None)
             chan = None
+        # A newly auto-detected/locked baud must actually take effect: if no user
+        # holds the handle and the requested baud differs from the open one, tear
+        # down and reopen at the new rate (so a wrong-baud garbage capture becomes
+        # readable — critical for catching a device that just powered on).
+        if chan is not None and not chan.sessions:
+            want_baud = int(settings.get("baud", 9600) or 9600)
+            if want_baud != getattr(chan, "baud", want_baud):
+                logger.info("monitor %s: re-opening at baud %d (was %d)",
+                            port_id, want_baud, getattr(chan, "baud", 0))
+                chan.close()
+                self._channels.pop(port_id, None)
+                chan = None
         if chan is None:
             try:
                 chan = PortChannel(port_id, dev, settings, self._on_data)
@@ -562,7 +576,8 @@ class SessionManager:
         chan = self._channels.get(port_id)
         if not chan:
             return {"monitoring": False, "last_activity": 0.0,
-                    "capture_bytes": 0, "pending_out": 0, "has_user": False, "writer": None}
+                    "capture_bytes": 0, "pending_out": 0, "has_user": False,
+                    "writer": None, "baud": 0}
         return chan.snapshot()
 
     def writer_of(self, port_id: str) -> Optional[str]:

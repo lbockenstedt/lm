@@ -189,6 +189,33 @@ def test_session_manager_monitor_keepalive_and_handoff(monkeypatch):
     assert not sm.is_open("p1")
 
 
+def test_ensure_monitor_reopens_on_baud_change(monkeypatch):
+    """A newly auto-detected baud must actually take effect: ensure_monitor tears
+    down and reopens an idle (no-user) channel when the requested baud differs,
+    so a boot captured at the wrong rate becomes legible."""
+    _use_fake_serial(monkeypatch)
+    sm = m.SessionManager(on_data=lambda sid, d: None)
+    chan1 = sm.ensure_monitor("p1", "/dev/ttyUSB0", {"baud": 9600})
+    assert chan1 is not None and chan1.baud == 9600
+    # Same baud → same channel (idempotent, no reopen).
+    assert sm.ensure_monitor("p1", "/dev/ttyUSB0", {"baud": 9600}) is chan1
+    # New baud with no user attached → reopen at the new rate.
+    chan2 = sm.ensure_monitor("p1", "/dev/ttyUSB0", {"baud": 115200})
+    assert chan2 is not None and chan2 is not chan1
+    assert chan2.baud == 115200 and chan1.ser.closed is True
+    assert chan2.snapshot()["baud"] == 115200
+
+
+def test_ensure_monitor_no_reopen_while_user_attached(monkeypatch):
+    """A baud change must NOT yank the handle out from under a live user session."""
+    _use_fake_serial(monkeypatch)
+    sm = m.SessionManager(on_data=lambda sid, d: None)
+    chan1 = sm.ensure_monitor("p1", "/dev/ttyUSB0", {"baud": 9600})
+    sm.open("u1", "p1", "/dev/ttyUSB0", {"baud": 9600}, writable=True)
+    chan2 = sm.ensure_monitor("p1", "/dev/ttyUSB0", {"baud": 115200})
+    assert chan2 is chan1 and chan1.ser.closed is False  # user keeps their channel
+
+
 def test_session_manager_records_open_error_for_faulty_port(monkeypatch):
     _use_fake_serial(monkeypatch)
     sm = m.SessionManager(on_data=lambda sid, d: None)
