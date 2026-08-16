@@ -16184,7 +16184,6 @@ async function profileDevice(spokeId, portId) {
 async function profileAllDevices() {
     const n = (_consolePorts || []).filter(p => !p.in_use).length;
     if (!n) { showToast('No idle ports to profile.', 'info'); return; }
-    if (!confirm(`Profile ${n} device(s)? Known devices use their fingerprint; unknown ones are sent (scrubbed) to the AI. Ports open in a session are skipped.`)) return;
     showToast(`🔎 Profiling ${n} device(s) — this runs in the background…`, 'info');
     try {
         const res = await fetch(`/api/console/identify-llm-all?tenant=${encodeURIComponent(currentTenant || 'default')}`, {
