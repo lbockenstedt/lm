@@ -160,3 +160,62 @@ def test_orchestrate_asks_llm_for_credentials_when_login_stuck():
     assert res["vendor"] == "aruba"
     assert res["identity"]["serial"] == "AR9"
     assert res["status"] == "OK"
+
+
+def test_scrub_for_llm_redacts_sensitive_data():
+    s = m.scrub_for_llm
+    out = s("Mgmt 192.168.1.20/24 gw 10.0.0.1")
+    assert "192.168" not in out and out.count("[IP]") == 2
+    out = s("MAC 0011.2233.4455 / aa:bb:cc:dd:ee:ff")
+    assert "0011.2233" not in out and "aa:bb:cc" not in out and out.count("[MAC]") == 2
+    out = s("enable secret 5 $1$abcQ$defGHIjklMNOpqrs")
+    assert "$1$abcQ" not in out and "[REDACTED" in out
+    out = s("username admin password Sup3rSecret!")
+    assert "Sup3rSecret" not in out and "[REDACTED]" in out
+    out = s("snmp-server community PrivateStr RO")
+    assert "PrivateStr" not in out
+    out = s("hostname CoreSwitch-01")
+    assert "CoreSwitch-01" not in out and "[HOST]" in out
+    out = s("CoreSwitch-01(config)#")
+    assert out.strip() == "[HOST](config)#"
+    out = s("fe80::1 and 2001:db8:1234:5678::1")
+    assert "fe80" not in out and "2001:db8" not in out
+
+
+def test_scrub_for_llm_preserves_identification_cues():
+    s = m.scrub_for_llm
+    # vendor/model/OS strings and timestamps must survive (that's what identifies).
+    txt = "Cisco IOS Software, Version 15.2(4)E\r\nAug 15 12:34:56 uptime 1 day"
+    out = s(txt)
+    assert "Cisco IOS Software, Version 15.2(4)E" in out
+    assert "12:34:56" in out            # a clock time is not an IPv6/MAC
+
+
+def test_ask_llm_scrubs_before_sending(monkeypatch):
+    import asyncio
+
+    class _CapHub(_FakeHub):
+        def __init__(self):
+            super().__init__()
+            self.sent_user = None
+
+        async def request_response(self, target, cmd, payload, timeout=None):
+            if cmd == "HELP_ASK":
+                self.sent_user = payload["messages"][0]["content"]
+                return {"payload": {"data": {"status": "SUCCESS", "assistant": {"content": "{}"}}}}
+            return await super().request_response(target, cmd, payload, timeout)
+
+    hub = _CapHub()
+    asyncio.run(m._ask_llm(hub, "bugfixer", "sys", "device 10.1.2.3 hostname Edge-1 password hunter2"))
+    assert "10.1.2.3" not in hub.sent_user
+    assert "Edge-1" not in hub.sent_user
+    assert "hunter2" not in hub.sent_user
+
+
+def test_finalize_drops_placeholder_identity_values():
+    result = {"vendor": None, "identity": {}, "identified": False}
+    m._finalize(result, {"identified": True, "vendor": "cisco-ios",
+                         "hostname": "[HOST]", "serial": "FTX9"})
+    assert result["vendor"] == "cisco-ios"
+    assert "hostname" not in result["identity"]       # scrubbed placeholder dropped
+    assert result["identity"]["serial"] == "FTX9"      # real value kept

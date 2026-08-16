@@ -20,6 +20,54 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# ── Privacy scrubber ───────────────────────────────────────────────────────────
+# Everything sent to the (external) LLM for device identification passes through
+# _ask_llm, so we redact sensitive site data here — the LLM only needs vendor/
+# model/OS cues (banners, version strings, prompt shape), never the operator's
+# addressing, credentials, or hostnames. Local fingerprinting (detect_vendor) runs
+# on the RAW output on the spoke, so scrubbing never weakens built-in detection.
+_RE_HASH = re.compile(r"\$[0-9a-zA-Z]{1,3}\$[^\s'\"]{3,}")            # $1$/$5$/$6$/$2y$ …
+_RE_MAC = re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b"
+                     r"|\b(?:[0-9A-Fa-f]{4}\.){2}[0-9A-Fa-f]{4}\b")   # colon/dash or Cisco dotted
+_RE_IPV4 = re.compile(r"\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}"
+                      r"(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:/\d{1,2})?\b")
+# IPv6: ≥4 hextets (≥3 colons) or a ``::`` compressed form — avoids eating hh:mm:ss.
+_RE_IPV6 = re.compile(r"\b(?:[0-9A-Fa-f]{1,4}:){3,}[0-9A-Fa-f]{1,4}\b"
+                      r"|\b(?:[0-9A-Fa-f]{1,4})?::(?:[0-9A-Fa-f]{1,4}:?)+\b")
+_RE_EMAIL = re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b")
+# key/value secrets: redact the value after a secret-ish keyword.
+_RE_SECRET = re.compile(
+    r"(?i)\b(pass(?:word|wd|phrase)?|secret|pre-?shared-?key|psk|community|"
+    r"wpa-?psk|auth(?:entication)?-?key|priv(?:acy)?-?key|snmp\S*community)\b"
+    r"(\s*[:=]?\s*)(\S+)")
+# hostname references (config directive OR inline banner text like
+# "System hostname: edge-1") → redact the value, keep the keyword.
+_RE_HOSTNAME = re.compile(r"(?i)\b(host-?name|sysname|switchname)\b(\s*[:=]?\s*)(\S+)")
+# a bare device prompt line (``hostname#`` / ``hostname(config)#`` / ``hostname>``)
+# → redact the hostname but keep the mode/terminator (the vendor cue).
+_RE_PROMPT_HOST = re.compile(r"(?m)^([A-Za-z0-9][\w.\-]{0,63})(\([^)]*\))?\s*([>#])\s*$")
+
+_PLACEHOLDERS = ("[IP]", "[IPV6]", "[MAC]", "[HOST]", "[EMAIL]", "[REDACTED")
+
+
+def scrub_for_llm(text: Optional[str]) -> str:
+    """Redact site-sensitive data (IPv4/IPv6, MACs, password/secret/community
+    values, credential hashes, e-mail, and hostnames) from console output before
+    it is sent to the LLM. Order matters: hashes and MACs are removed before the
+    IPv4/IPv6 passes so their colon groups aren't mistaken for addresses."""
+    if not text:
+        return ""
+    s = str(text)
+    s = _RE_HASH.sub("[REDACTED-HASH]", s)
+    s = _RE_MAC.sub("[MAC]", s)
+    s = _RE_IPV4.sub("[IP]", s)
+    s = _RE_IPV6.sub("[IPV6]", s)
+    s = _RE_EMAIL.sub("[EMAIL]", s)
+    s = _RE_SECRET.sub(lambda m: f"{m.group(1)}{m.group(2) or ' '}[REDACTED]", s)
+    s = _RE_HOSTNAME.sub(lambda m: f"{m.group(1)}{m.group(2) or ' '}[HOST]", s)
+    s = _RE_PROMPT_HOST.sub(lambda m: f"[HOST]{m.group(2) or ''}{m.group(3)}", s)
+    return s
+
 _SYS_IDENTIFY = (
     "You are a network-device identification assistant. You are given raw console "
     "output captured from an UNKNOWN device on a serial line (boot log, banner, "
@@ -133,7 +181,9 @@ def _finalize(result: Dict[str, Any], js: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(js, dict):
         return result
     vendor = js.get("vendor")
-    identity = {k: js[k] for k in _IDENTITY_FIELDS if js.get(k) not in (None, "")}
+    identity = {k: js[k] for k in _IDENTITY_FIELDS
+                if js.get(k) not in (None, "")
+                and not any(ph in str(js[k]) for ph in _PLACEHOLDERS)}
     if vendor:
         result["vendor"] = vendor
     if identity:
@@ -150,10 +200,12 @@ def _unwrap(res) -> Dict[str, Any]:
 
 
 async def _ask_llm(hub, agent, system: str, user: str, timeout: float = 90.0) -> str:
-    """One tool-free LLM turn via the BugFixer HELP_ASK relay → assistant text."""
+    """One tool-free LLM turn via the BugFixer HELP_ASK relay → assistant text.
+    The user content is scrubbed of site-sensitive data before it leaves the hub."""
     res = await hub.request_response(
         agent, "HELP_ASK",
-        {"messages": [{"role": "user", "content": user}], "tools": None, "system": system},
+        {"messages": [{"role": "user", "content": scrub_for_llm(user)}],
+         "tools": None, "system": system},
         timeout=timeout)
     data = _unwrap(res)
     if not isinstance(data, dict) or data.get("status") != "SUCCESS":
