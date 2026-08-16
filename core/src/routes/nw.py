@@ -762,3 +762,5 @@ def register(app, hub, ctx):
     )
     _instance_crud("dns-instances", "dns_instances", None)
     _instance_crud("dhcp-instances", "dhcp_instances", None)
+    # Generic network server records ("+ Add Server" on the Setup/Network tab).
+    _instance_crud("server-instances", "server_instances", None)

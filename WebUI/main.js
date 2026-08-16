@@ -22472,6 +22472,18 @@ const INSTANCE_PRODUCTS = {
             { id: 'host', label: 'DNS Server Host / IP', placeholder: '10.0.0.1' },
         ],
     },
+    server: {
+        title: 'Network Server',
+        endpoint: '/setup/server-instances',
+        listId: 'server-instances-list',
+        moduleType: 'nw',
+        addLabel: '+ Add Server',
+        addTitle: 'Register a network server so its host is bound to a spoke and pushed to the Network Devices module',
+        rowSummary: inst => `${inst.host || '—'}`,
+        fields: [
+            { id: 'host', label: 'Server Host / IP', placeholder: '10.0.0.1' },
+        ],
+    },
     dhcp: {
         title: 'DHCP / Kea Instance',
         endpoint: '/setup/dhcp-instances',
