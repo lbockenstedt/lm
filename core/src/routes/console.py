@@ -694,6 +694,30 @@ def register(app, hub, ctx):
                 errors[sid] = str(e)
         return {"purged": purged, "errors": errors, "consoles": spokes}
 
+    @app.post("/api/console/diagnostics/restart-hub")
+    async def console_diagnostics_restart_hub(request: Request):
+        """Restart the hub service (lm.service) so freshly-pulled code is loaded —
+        e.g. after an update that added a route, curing a stale-process 405 on a
+        new endpoint. Uses the canonical ``lm-self-restart`` path (a transient
+        systemd unit restarts lm ~3s later, so this response returns first).
+        Admin-gated. Spokes re-attach automatically; runtime flags (AI Identify)
+        are re-pushed on reconnect, so only the hub needs restarting here."""
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        hub = app.state.hub
+        restart = getattr(hub, "_hub_self_restart", None)
+        if restart is None:
+            raise HTTPException(status_code=503,
+                                detail="hub self-restart is unavailable on this deployment")
+        try:
+            msg = await restart()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("console diagnostics: hub self-restart failed: %s", e)
+            raise HTTPException(status_code=502, detail=f"restart could not be scheduled: {e}")
+        return {"status": "scheduled",
+                "message": msg or "lm.service restarting to apply the latest code"}
+
     @app.get("/api/console/credentials")
     async def console_get_credentials(request: Request):
         """Return the global auto-identify credential list with passwords MASKED
