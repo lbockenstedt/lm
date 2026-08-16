@@ -114,6 +114,16 @@ PROFILES: List[Dict[str, Any]] = [
         "pager": b" ",
         "commands": [
             {"cmd": "no page"},
+            # AOS-S (2530/2540/2930/…) answers "show system"; classic ProCurve
+            # answers "show system-information". Both print "System Name : <host>"
+            # + serial/MAC, so we try both (first non-empty match per field wins)
+            # to cover the whole family — an AOS-S box rejects the latter with
+            # "Invalid input", which is why the hostname was previously missed.
+            {"cmd": "show system", "fields": {
+                "serial": re.compile(r"Serial Number\s*:?\s*(\S+)", re.I),
+                "mac": re.compile(r"Base MAC Addr\S*\s*:?\s*([0-9A-Fa-f:.\-]{12,17})", re.I),
+                "hostname": re.compile(r"System Name\s*:?\s*(\S+)", re.I),
+            }},
             {"cmd": "show system-information", "fields": {
                 "serial": re.compile(r"Serial Number\s*:?\s*(\S+)", re.I),
                 "mac": re.compile(r"Base MAC Addr\S*\s*:?\s*([0-9A-Fa-f:.\-]{12,17})", re.I),
@@ -251,6 +261,35 @@ def infer_device_type(model: Optional[str], family_default: Optional[str]) -> st
             if rx.search(model):
                 return kind
     return family_default or ""
+
+
+def _extract_profile_fields(profile: Dict[str, Any], text: str) -> Dict[str, str]:
+    """Apply a matched vendor profile's identity-field regexes across an arbitrary
+    text blob (a full identify transcript or a passive capture), returning the
+    fields found. The profile's regexes anchor on specific, low-ambiguity strings
+    ("Serial Number", "Base MAC Addr", "System Name", "Chassis", …), so matching
+    them anywhere in a capture is safe. This is what lets us recover identity when
+    the data appeared somewhere OTHER than the dedicated identity command — e.g.
+    an ArubaOS-Switch that answers ``show system`` during banner discovery but
+    rejects the profile's exact ``show system-information`` command. Skips the
+    ``linux`` profile, whose bare ``^(\\S+)$`` field regexes would match garbage
+    across arbitrary scrollback. MAC is normalized when present."""
+    found: Dict[str, str] = {}
+    if not profile or profile.get("name") == "linux":
+        return found
+    for spec in profile.get("commands", []):
+        for key, rx in (spec.get("fields") or {}).items():
+            if key in found:
+                continue
+            m = rx.search(text or "")
+            if not m:
+                continue
+            val = ((m.group(1) if m.lastindex else None) or m.group(0) or "").strip()
+            if val:
+                found[key] = val
+    if found.get("mac"):
+        found["mac"] = normalize_mac(found["mac"]) or found["mac"]
+    return found
 
 
 def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str]) -> Dict[str, str]:
@@ -531,16 +570,7 @@ def passive_identify(text: str) -> Dict[str, Any]:
     # to specific command outputs — matching those across arbitrary scrollback
     # yields garbage, so linux/unknown fall to the generic prompt pass below.
     if prof and prof["name"] != "linux":
-        for spec in prof.get("commands", []):
-            for key, rx in (spec.get("fields") or {}).items():
-                if key in identity:
-                    continue
-                m = rx.search(text)
-                if not m:
-                    continue
-                val = ((m.group(1) if m.lastindex else None) or m.group(0) or "").strip()
-                if val:
-                    identity[key] = val
+        identity.update(_extract_profile_fields(prof, text))
     if prof and prof.get("family") and prof["name"] != "linux":
         identity["type"] = infer_device_type(identity.get("model"), prof["family"])
     if not identity.get("hostname"):
@@ -803,6 +833,13 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         outputs[cmd] = _read_command_output(read_fn, write_fn, [profile["prompt"]], cmd_secs)
     result["outputs"] = outputs
     result["identity"] = parse_identity(profile, outputs)
+    # Backfill any fields the dedicated identity commands didn't yield from the
+    # FULL transcript: a device may answer an equivalent discovery command (e.g.
+    # an ArubaOS-Switch that returns "System Name : …" for the banner-discovery
+    # ``show system`` while rejecting the profile's ``show system-information``),
+    # so the data is already captured — just not in this command's own output.
+    for key, val in _extract_profile_fields(profile, transcript).items():
+        result["identity"].setdefault(key, val)
     if profile.get("family"):
         # Concrete role from the model (e.g. Juniper SRX → Firewall), else the
         # profile's default family.

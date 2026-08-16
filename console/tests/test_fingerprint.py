@@ -134,6 +134,41 @@ def test_run_identify_arubaos_switch_prompt_hostname():
     assert res["identity"].get("hostname") == "MIA-SW-AOSS"
 
 
+def test_run_identify_aoss_hostname_from_discovery_transcript():
+    # The real USB4/MIA-SW-AOSS case: vendor is recognized via banner DISCOVERY
+    # (the switch answers `show system` with "System Name : …"), but the CLI
+    # prompt is echoed with the typed command after it ("MIA-SW-AOSS> show system"),
+    # so prompt_hostname() can't anchor it AND the profile's own
+    # `show system-information` command yields nothing here. The hostname must be
+    # recovered by back-filling the matched profile's field regexes across the
+    # full transcript (which already holds the discovery `show system` output).
+    lines = iter([
+        b"\r\nwaking line\r\n",                 # login nudge: output, but no vendor/prompt
+        b"bad command\r\n",                      # discovery: show version (unrecognized)
+        b"bad command\r\n",                      # discovery: display version (unrecognized)
+        # discovery: show system — names the box (vendor matches on "-AOSS>"),
+        # but the prompt is followed by the echoed command so it is NOT line-final.
+        b"MIA-SW-AOSS> show system\r\n"
+        b"Status and Counters - General System Information\r\n"
+        b"System Name        : MIA-SW-AOSS\r\n"
+        b"Serial Number      : SG12ABC345\r\n",
+    ])
+
+    def _read():
+        try:
+            return next(lines)
+        except StopIteration:
+            return b""
+
+    # Guard: prompt_hostname alone can't get it (prompt not line-final) — proving
+    # the transcript back-fill is what recovers the name.
+    assert fp.prompt_hostname("MIA-SW-AOSS> show system\r\nSystem Name : MIA-SW-AOSS") == ""
+    res = fp.run_identify(_read, lambda b: None, [])
+    assert res["vendor"] == "hp-procurve"
+    assert res["identity"].get("hostname") == "MIA-SW-AOSS"
+    assert res["identity"].get("serial") == "SG12ABC345"
+
+
 def test_run_identify_loggedin_unknown_vendor_gleans_prompt_hostname():
     # Logged into a device whose vendor we don't recognize (no banner keyword,
     # no matching profile). We still glean the box name from its shell prompt so
