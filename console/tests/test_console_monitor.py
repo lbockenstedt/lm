@@ -108,6 +108,26 @@ def test_passive_glean_never_overwrites_active(spoke):
     assert probe["identity"]["serial"] == "REAL123"  # active value not clobbered
 
 
+def test_passive_glean_backfills_hostname_from_saved_banner(spoke):
+    # An already-identified but SILENT switch (identified before the hostname
+    # extraction shipped): active probe with a vendor + a saved banner that holds
+    # "System Name : …", but NO hostname parsed and no NEW live output. The
+    # hostname must be recovered from the saved banner without any re-probe.
+    spoke._monitor_scan()  # opens the 'good' passive channel (no live bytes)
+    spoke.store.update("good", probe={
+        "source": "active", "vendor": "hp-procurve",
+        "identity": {"type": "Switch"},
+        "banner": ("MIA-SW-AOSS> show system\r\n"
+                   "Status and Counters - General System Information\r\n"
+                   "System Name        : MIA-SW-AOSS\r\n"),
+    })
+    spoke._passive_glean("good")
+    probe = spoke.store.get("good")["probe"]
+    assert probe["source"] == "active"                 # authoritative source kept
+    assert probe["identity"]["hostname"] == "MIA-SW-AOSS"
+    assert probe["identity"]["type"] == "Switch"        # existing field untouched
+
+
 def test_capture_command_returns_recent_output(spoke):
     spoke._monitor_scan()
     spoke.sessions.channel("good")._record(b"boot banner line\r\nlogin: ")
