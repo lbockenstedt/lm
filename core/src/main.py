@@ -85,6 +85,7 @@ from le_cache import LeCacheMixin
 from warm_cache import WarmCacheMixin
 from dns_dhcp_sync import DnsDhcpSyncMixin
 from realtime_ipam_nac_sync import RealtimeIpamNacSyncMixin
+from search_index import SearchIndexMixin
 from staleness_sweep import StalenessSweepMixin
 from self_backup import SelfBackupMixin
 from key_vault import KeyVaultSchedulerMixin
@@ -283,7 +284,7 @@ def _mdns_hub_properties(version_str: str, agent_port: int,
     return props
 
 
-class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, RealtimeIpamNacSyncMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, FleetHealthAlertMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
+class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, RealtimeIpamNacSyncMixin, SearchIndexMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, FleetHealthAlertMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -882,6 +883,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # NAC/CPPM, Directory/LDAP) — same warm-start contract as nw/le.
         self.warm_cache_init()
         self.warm_cache_load()
+        # In-memory global-search index (SearchIndexMixin): keeps the full
+        # spoke-scoped result set per observed scope so /api/search serves from
+        # memory instead of a live 5-spoke fan-out (+ the 30s prefix pre-fetch).
+        self.search_index_init()
         # Warm-start the per-tenant module cache (pxmx_vms/netbox/cppm/firewall) so
         # the Hypervisors/NetBox/CPPM/Firewall dashboards seed on boot instead of
         # blanking until a login-triggered preload lands. Stale-while-revalidate.
@@ -8070,6 +8075,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # loop and the button can't diverge. See run_dns_dhcp_sync_loop
         # (DnsDhcpSyncMixin).
         dns_dhcp_sync_task = asyncio.create_task(self.run_dns_dhcp_sync_loop())
+        # Global-search index warm-up: keeps every observed (leg, scope) result
+        # set fresh in memory so interactive search serves from RAM with a live
+        # fan-out fallback. See run_search_index_refresh_loop (SearchIndexMixin).
+        search_index_task = asyncio.create_task(self.run_search_index_refresh_loop())
         # NetBox staleness sweep (cluster-wide): ages out sync-owned devices/VMs
         # not seen for stale_days → offline, and offline + decommissioned_at older
         # than delete_days → deleted (IPs free automatically). The lifecycle

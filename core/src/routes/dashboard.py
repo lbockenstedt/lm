@@ -4,6 +4,7 @@ import time
 from api import (
     HTTPException, Request, _unwrap_spoke, access, filter_items_by_prefixes, get_tenant_scoping, logger,
 )
+from search_index import search_scope_key, search_result_matches
 
 # GREEN/YELLOW/RED age bands for a relayed agent, matching HeartbeatManager.get_status
 # (and routes/pxmx.py:107-127) so one agent can't read "online" on the Spokes &
@@ -412,10 +413,23 @@ def register(app, hub, ctx):
         if is_admin and not tenant:
             nb_slug = ""
         proxmox_tag = scoping.get("proxmox_tag") or ""
+        # Scope key for the in-memory search index. Derived from the scope-
+        # identifying inputs ONLY (tenant slug + proxmox tag + admin flag) — a
+        # caller reads solely its own scope bucket, so a warmed index can never
+        # leak another tenant's rows. Prefixes are deliberately excluded: they
+        # are a deterministic function of the slug, so this key needs no prefix
+        # fetch (that cost moves to the background populate). See SearchIndexMixin.
+        scope_key = search_scope_key(nb_slug, proxmox_tag, is_admin)
+        idx_on = hub.search_index_enabled()
+        needle = q_search.lower()
         # Tenant prefixes (CIDRs) for DHCP lease filtering. Admin unscoped is
         # allowed; a non-admin with no prefixes gets no DHCP results (safe).
+        # Fetched ONLY when the DHCP leg actually goes live — when it is served
+        # from the warm index we skip the (uncached, ~30s) NetBox prefix
+        # round-trip entirely; the background refresher already applied prefix
+        # scoping when it populated that leg's cache.
         prefixes = []
-        if nb_slug:
+        if nb_slug and not (idx_on and hub.search_leg_is_warm("SEARCH_DHCP", scope_key)):
             try:
                 prefixes = await _resolve_prefixes_for_tenant(hub, resolved) or []
             except Exception as e:
@@ -445,6 +459,25 @@ def register(app, hub, ctx):
             except Exception as e:
                 return [{"source": cmd, "type": "error", "name": str(e)}]
 
+        # Index-first leg: when this (leg, scope) is warm in memory, match the
+        # query against the cached spoke-scoped result set with no network at
+        # all. Any miss / stale entry / error transparently falls back to the
+        # live spoke call (`_call`), so the warm path can only ever be faster,
+        # never wrong. Tracks whether ANY leg served from the index for the
+        # response's `cached` marker.
+        served_from_index = {"any": False}
+
+        async def _leg(spoke, cmd):
+            if idx_on:
+                try:
+                    cached = hub.search_index_leg_items(cmd, scope_key)
+                    if cached is not None:
+                        served_from_index["any"] = True
+                        return [r for r in cached if search_result_matches(r, needle)]
+                except Exception as e:
+                    logger.debug(f"search: index read {cmd} failed: {e}")
+            return await _call(spoke, cmd)
+
         spoke_ipam       = hub.get_spoke_by_type("ipam")
         # Tenant-bound hypervisor: a non-admin only reaches a hypervisor bound
         # to its tenant (None → no VM results, no leak). The admin's
@@ -470,14 +503,21 @@ def register(app, hub, ctx):
         # be admin-only because directory users weren't tenant-scoped; the OU
         # scoping closes that leak.
         tasks = [
-            _call(spoke_ipam,       "NETBOX_SEARCH"),
-            _call(spoke_hypervisor, "SEARCH_VMS"),
-            _call(spoke_nac,        "SEARCH_SESSIONS"),
-            _call(spoke_directory,  "SEARCH_USERS"),
-            _call(spoke_firewall,   "SEARCH_DHCP"),
+            _leg(spoke_ipam,       "NETBOX_SEARCH"),
+            _leg(spoke_hypervisor, "SEARCH_VMS"),
+            _leg(spoke_nac,        "SEARCH_SESSIONS"),
+            _leg(spoke_directory,  "SEARCH_USERS"),
+            _leg(spoke_firewall,   "SEARCH_DHCP"),
         ]
         all_results = await _asyncio.gather(*tasks)
         merged = [item for sublist in all_results for item in sublist]
+
+        # Remember this scope so the background loop keeps its leg caches warm
+        # (idempotent; refreshes the last-seen stamp). Best-effort.
+        if idx_on:
+            hub.search_register_scope(
+                scope_key, resolved=resolved, is_admin=is_admin,
+                nb_slug=nb_slug, proxmox_tag=proxmox_tag)
 
         # Console leg: surface serial-console ports whose identified device
         # (hostname / alias / vendor / model / device path / IP) matches the
@@ -505,6 +545,7 @@ def register(app, hub, ctx):
             "query_type":  "ip" if is_ip else ("mac" if is_mac else "name"),
             "total":       len(merged),
             "results":     merged,
+            "cached":      served_from_index["any"],
             "spokes_queried": {
                 "ipam":       spoke_ipam is not None,
                 "hypervisor": spoke_hypervisor is not None,
