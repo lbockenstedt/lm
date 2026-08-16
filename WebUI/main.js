@@ -1034,7 +1034,7 @@ function showPromptToast(message, opts = {}) {
 // [bug-report] marker and stores the full artifacts on disk; bugfixer then
 // files a (clean-body) GitHub issue and pulls the artifacts from the hub to use
 // as AI-fix context. See plan bright-launching-thompson.md.
-function fileBug() {
+async function fileBug() {
     // One modal at a time.
     const existing = document.getElementById('file-bug-modal');
     if (existing) { existing.remove(); return; }
