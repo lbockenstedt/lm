@@ -152,7 +152,14 @@ async function csFetch(path, opts = {}) {
     // once here instead of auditing every call site: append tenant_id
     // unless the caller already put one in the query string.
     let url = '/sim/api' + path;
-    if (!/[?&](tenant_id|tenant)=/.test(url)) {
+    // Only inspect the QUERY STRING for an existing tenant param — a path
+    // segment that merely contains 'tenant=' (e.g. per-host telemetry routes)
+    // must not suppress the query param, otherwise the backend's
+    // get_tenant_id() falls back to the session tenant and the request reads a
+    // different bucket than the one the tick was recorded under (which surfaced
+    // as "no telemetry tick has ever completed" on every VM Server host).
+    const _qs = url.includes('?') ? url.slice(url.indexOf('?')) : '';
+    if (!/[?&](tenant_id|tenant)=/.test(_qs)) {
         url += (url.includes('?') ? '&' : '?') + 'tenant_id=' + csTenant();
     }
     const res = await fetch(url, { ...opts, headers });
