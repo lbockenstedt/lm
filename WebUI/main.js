@@ -4287,7 +4287,8 @@ async function loadCredVault() {
 
 function _cvBucketLabel(b) {
     if (b.bucket === _cvAdminSlot) return 'Global Admin slot';
-    return b.bucket;
+    // Prefer the server-provided friendly tenant name; fall back to the id.
+    return b.name && b.name !== b.bucket ? `${b.name} (${b.bucket})` : b.bucket;
 }
 
 function _cvRenderShell() {
