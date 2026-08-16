@@ -16378,11 +16378,12 @@ async function refreshConsoleDiagnostics() {
     const identTbl = identRows.length ? `<div class="text-[11px] font-bold text-slate-500 uppercase mb-1">Identify / login telemetry</div><table class="w-full text-left">
         <thead class="text-slate-500 uppercase text-[10px] border-b border-slate-200"><tr>
           <th class="py-2 pr-3">Port</th><th class="py-2 pr-3">Via</th><th class="py-2 pr-3">Outcome</th>
+          <th class="py-2 pr-3" title="Identified hostname, its source, and whether it is stable or flapping">Hostname</th>
           <th class="py-2 pr-2 text-center" title="Login / Password / Shell prompt detected">L·P·S</th>
           <th class="py-2 pr-2 text-center" title="credentials tried / available">Creds</th>
           <th class="py-2 pr-2 text-center">Bytes</th><th class="py-2 pr-3">Why</th><th class="py-2 pr-3">Last</th>
         </tr></thead><tbody>${identRows.map(d => _consoleIdentDiagRow(d)).join('')}</tbody></table>
-        <div class="mt-2 text-[10px] text-slate-400">Tip: click a row's “Why” to see the last raw line the device emitted (control chars stripped).</div>` : '';
+        <div class="mt-2 text-[10px] text-slate-400">Tip: click a row's “Why” to see the last raw line the device emitted (control chars stripped). A <b>flapping</b> hostname changes across probes — hover it for the distinct values, their source (command output vs CLI prompt vs AI) and when each was seen.</div>` : '';
     const errHtml = errs.length
         ? `<div class="mt-3 text-[11px] text-amber-600">Unreachable consoles: ${errs.map(([s, e]) => escapeHtml(s)).join(', ')}</div>` : '';
     body.innerHTML = `<div class="text-[11px] text-slate-400 mb-2">${failRows.length} port(s) with a failure/disconnect history · ${identRows.length} with identify attempts (since each agent started).</div>${failTbl}${identTbl}${errHtml}
@@ -16434,12 +16435,33 @@ function _consoleIdentDiagRow(d) {
       <td class="py-2 pr-3 font-mono text-xs">${escapeHtml(d.alias || d.device || d.port_id)}${vend}</td>
       <td class="py-2 pr-3 text-xs">${via}${cmds}</td>
       <td class="py-2 pr-3">${pill}</td>
+      <td class="py-2 pr-3">${_consoleHostnameCell(t)}</td>
       <td class="py-2 pr-2 text-center text-xs whitespace-nowrap">${yn(t.login_prompt_seen)}·${yn(t.password_prompt_seen)}·${yn(t.shell_prompt_seen)}</td>
       <td class="py-2 pr-2 text-center text-xs">${t.creds_tried || 0}/${t.creds_available || 0}</td>
       <td class="py-2 pr-2 text-center text-xs">${t.bytes || 0}</td>
       <td class="py-2 pr-3 text-xs text-slate-500 max-w-[14rem]"><span class="cursor-help underline decoration-dotted" title="Last line seen from device:&#10;${tail}">${why}</span>${t.error ? `<div class="text-[10px] text-red-500">${escapeHtml(t.error)}</div>` : ''}</td>
       <td class="py-2 pr-3 text-xs text-slate-400">${_consoleRelTime(t.last_attempt || 0)}</td>
     </tr>`;
+}
+
+// Hostname cell for the identify telemetry table: the current identified name,
+// its source badge (command output / CLI prompt / AI), and a stability marker.
+// A "flapping" name (changed across probes) is the tell-tale for a noisy line,
+// an unreliable prompt-glean, or two devices sharing a cable — hover for the
+// distinct values seen, each with its source and age.
+function _consoleHostnameCell(t) {
+    const hn = t.hostname || '';
+    if (!hn) return '<span class="text-slate-300">—</span>';
+    const src = t.hostname_source || '';
+    const srcBadge = src ? ` <span class="text-[9px] px-1 rounded bg-slate-100 text-slate-500 uppercase" title="Where this name came from">${escapeHtml(src)}</span>` : '';
+    const changes = t.hostname_changes || 0;
+    const distinct = t.hostname_distinct || 1;
+    const hist = t.hostname_history || [];
+    const tip = hist.map(h => `${h.host}  —  ${h.source || '?'}, ${_consoleRelTime(h.ts)}`).join('&#10;');
+    const mark = changes > 0
+        ? `<span class="text-[10px] px-1.5 py-0.5 rounded-full bg-red-100 text-red-700 font-bold cursor-help" title="Changed ${changes}× across ${distinct} distinct value(s):&#10;${escapeHtml(tip)}">⚠ flapping ×${changes}</span>`
+        : `<span class="text-[10px] text-emerald-600" title="Same name on every probe">✓ stable</span>`;
+    return `<div class="font-mono text-xs">${escapeHtml(hn)}${srcBadge}</div><div class="mt-0.5">${mark}</div>`;
 }
 
 async function openConsoleCredentialsModal() {

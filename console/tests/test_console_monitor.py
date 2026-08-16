@@ -278,6 +278,34 @@ def test_identify_telemetry_surfaces_in_diagnostics(spoke):
     assert "rejected" in t["reason"] and t["tail"] == "dev login:"
 
 
+def test_hostname_stability_tracked_in_telemetry(spoke):
+    # A stable port: same hostname every probe → stable, no changes.
+    for _ in range(3):
+        spoke._record_identify_telemetry("good", {
+            "logged_in": True, "vendor": "cisco-ios",
+            "identity": {"hostname": "core-1"}, "hostname_source": "command",
+            "diag": {}}, method="login")
+    g = spoke._health["good"]["identify"]
+    assert g["hostname"] == "core-1" and g["hostname_source"] == "command"
+    assert g["hostname_changes"] == 0 and g["hostname_stable"] is True
+    assert g["hostname_distinct"] == 1
+
+    # A flapping port: name flips between two values → changes counted, history
+    # keeps the distinct observations with their source.
+    for hn, src in [("MIA-SW-AOSS", "prompt"), ("garbled", "prompt"),
+                    ("MIA-SW-AOSS", "prompt")]:
+        spoke._record_identify_telemetry("bad", {
+            "logged_in": True, "vendor": "hp-procurve",
+            "identity": {"hostname": hn}, "hostname_source": src,
+            "diag": {}}, method="login")
+    b = spoke._health["bad"]["identify"]
+    assert b["hostname"] == "MIA-SW-AOSS"
+    assert b["hostname_changes"] == 2 and b["hostname_stable"] is False
+    assert b["hostname_distinct"] == 2
+    assert {h["host"] for h in b["hostname_history"]} == {"MIA-SW-AOSS", "garbled"}
+    assert all(h["source"] == "prompt" for h in b["hostname_history"])
+
+
 def test_set_llm_identify_toggles_runtime_config(spoke):
     assert spoke.config.get("console_llm_identify") in (None, False)
     res = asyncio.run(spoke.handle_command("CONSOLE_SET_LLM_IDENTIFY", {"enabled": True}))

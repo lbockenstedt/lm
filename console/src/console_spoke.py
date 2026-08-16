@@ -806,9 +806,35 @@ class ConsoleSpoke(BaseSpoke):
         rec["creds_available"] = diag.get("creds_available", len(self._credentials))
         rec["reason"] = diag.get("reason", "")
         rec["tail"] = diag.get("tail", "")
+        self._track_hostname(rec, res, method)
         if method == "llm":
             rec["commands_run"] = res.get("commands_run") or list((res.get("outputs") or {}).keys())
             rec["rejected"] = res.get("rejected") or []
+
+    def _track_hostname(self, rec: Dict[str, Any], res: Dict[str, Any], method: str) -> None:
+        """Track the identified hostname over successive attempts so diagnostics
+        can show WHY a name is unstable: a rolling history of DISTINCT hostnames
+        (with when/how each was seen), a change counter, and the source (parsed
+        from a command output vs gleaned from the CLI prompt vs the LLM). A port
+        whose hostname flaps — e.g. a noisy line producing garbled prompts, or a
+        prompt-sourced name that differs from the command-sourced one — stands out
+        immediately, vs a stable single-value port."""
+        host = str((res.get("identity") or {}).get("hostname") or "").strip()
+        source = res.get("hostname_source") or ("llm" if method == "llm" else "")
+        hist = rec.setdefault("hostname_history", [])
+        if host:
+            prev = hist[-1]["host"] if hist else None
+            if host != prev:
+                if prev is not None:
+                    rec["hostname_changes"] = rec.get("hostname_changes", 0) + 1
+                hist.append({"host": host, "ts": time.time(),
+                             "method": method, "source": source})
+                del hist[:-10]  # keep the last 10 distinct observations
+            rec["hostname"] = host
+            rec["hostname_source"] = source
+        rec.setdefault("hostname_changes", 0)
+        rec["hostname_distinct"] = len({h["host"] for h in hist})
+        rec["hostname_stable"] = rec["hostname_changes"] == 0
 
     def _health_rec(self, pid: str) -> Dict[str, Any]:
         """Get-or-create the failure/disconnect history record for a port."""
