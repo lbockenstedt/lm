@@ -181,6 +181,23 @@ def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str]) -> Dict[str
 _GENERIC_PROMPT = re.compile(r"(?:^|\r|\n)\s*([\w][\w.\-]{1,62})[>#]\s*$")
 _GENERIC_LINUX_PROMPT = re.compile(r"(?:^|\r|\n)[\w.\-]+@([\w.\-]+):[\w.\-/~]*[#$]\s*$")
 _GENERIC_MAC = re.compile(r"\b([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\b")
+_PROMPT_HOST_SKIP = frozenset({"more", "username", "password", "login"})
+
+
+def prompt_hostname(text: str) -> str:
+    """Best-effort hostname from the LAST CLI/shell prompt in ``text`` (e.g. the
+    ``MIA-SW-AOSS>`` prompt of an ArubaOS-Switch, or ``user@host:~$`` on Linux).
+    Terminal escapes are stripped first. Returns '' if none or a placeholder."""
+    clean = sanitize_console_text(text or "")
+    for rx in (_GENERIC_LINUX_PROMPT, _GENERIC_PROMPT):
+        cand = ""
+        for m in rx.finditer(clean):
+            c = m.group(1).strip()
+            if c and c.lower() not in _PROMPT_HOST_SKIP:
+                cand = c  # keep the last (most recent) matching prompt
+        if cand:
+            return cand
+    return ""
 
 # Vendor-agnostic prompt shapes used to log in BEFORE we know the vendor. A device
 # sitting at a bare ``login:`` prompt reveals no banner/system info until you
@@ -324,11 +341,9 @@ def passive_identify(text: str) -> Dict[str, Any]:
                     identity[key] = m.group(1).strip()
     if not identity.get("hostname"):
         # Glean a hostname from the last shell/CLI prompt we saw.
-        for rx in (_GENERIC_LINUX_PROMPT, _GENERIC_PROMPT):
-            for m in rx.finditer(text):
-                cand = m.group(1).strip()
-                if cand and cand.lower() not in ("more", "username", "password", "login"):
-                    identity["hostname"] = cand
+        hn = prompt_hostname(text)
+        if hn:
+            identity["hostname"] = hn
     if not identity.get("mac"):
         mm = _GENERIC_MAC.search(text)
         if mm:
@@ -531,6 +546,12 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         outputs[cmd] = _read_command_output(read_fn, write_fn, [profile["prompt"]], cmd_secs)
     result["outputs"] = outputs
     result["identity"] = parse_identity(profile, outputs)
+    if not result["identity"].get("hostname"):
+        # No hostname from the identity commands (e.g. an ArubaOS-Switch that
+        # rejects them) — fall back to the device's own CLI prompt name.
+        hn = prompt_hostname(transcript)
+        if hn:
+            result["identity"]["hostname"] = hn
     return result
 
 
