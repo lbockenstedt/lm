@@ -39,6 +39,16 @@ _SYS_EXTRACT = (
     "\"vendor\": \"...\", \"model\": \"...\", \"os\": \"...\", \"serial\": \"...\", "
     "\"hostname\": \"...\", \"confidence\": 0.0-1.0}. Use null for unknown fields."
 )
+_SYS_CREDS = (
+    "You are a network-device credential assistant. You are given raw console "
+    "output from a device sitting at a login/password prompt whose stored "
+    "credentials did not work. Propose the most likely FACTORY-DEFAULT or "
+    "well-known login credentials for that device/vendor.\n"
+    "Respond with ONLY a single JSON object and no other text: {\"credentials\": "
+    "[{\"username\": \"...\", \"password\": \"...\"}, ...]} — up to 6 ordered "
+    "guesses, most likely first. Use an empty string for a blank password. Do not "
+    "propose destructive actions or commentary."
+)
 
 _IDENTITY_FIELDS = ("model", "os", "serial", "hostname", "confidence")
 
@@ -151,6 +161,23 @@ async def _ask_llm(hub, agent, system: str, user: str, timeout: float = 90.0) ->
     return (data.get("assistant") or {}).get("content") or ""
 
 
+async def _ask_llm_credentials(hub, agent, capture: str) -> List[Dict[str, str]]:
+    """Ask the LLM for likely factory-default credentials for a device stuck at a
+    login prompt. Returns an ordered list of ``{username, password}`` (best-effort;
+    empty on any failure). These are tried once each — never re-hammered."""
+    try:
+        content = await _ask_llm(hub, agent, _SYS_CREDS, _user_capture(capture))
+    except Exception:  # noqa: BLE001
+        return []
+    js = _extract_json(content) or {}
+    out: List[Dict[str, str]] = []
+    for c in (js.get("credentials") or [])[:6]:
+        if isinstance(c, dict) and c.get("username") is not None:
+            out.append({"username": str(c.get("username", "")),
+                        "password": str(c.get("password", ""))})
+    return out
+
+
 async def orchestrate(hub, agent: str, sid: str, port_id: str,
                       cmd_cap: int = 6) -> Dict[str, Any]:
     """Run the two-round LLM identify for one port. Returns a result dict:
@@ -188,6 +215,23 @@ async def orchestrate(hub, agent: str, sid: str, port_id: str,
         result["status"] = "ERROR"
         result["message"] = coll.get("message") or coll.get("error")
         return result
+
+    # 3b. Stuck at a login prompt? The stored + factory-default credentials all
+    #     failed, so ask the LLM for likely credentials and retry the collect once
+    #     with those guesses before we give up on logging in.
+    diag = coll.get("diag") or {}
+    if (not coll.get("logged_in")
+            and (diag.get("login_prompt_seen") or diag.get("password_prompt_seen"))):
+        guesses = await _ask_llm_credentials(hub, agent, coll.get("banner") or capture)
+        if guesses:
+            result["llm_credentials_tried"] = len(guesses)
+            retry = _unwrap(await hub.request_response(
+                sid, "CONSOLE_LLM_COLLECT",
+                {"port_id": port_id, "commands": cmds, "credentials": guesses},
+                timeout=120.0))
+            if retry.get("status") != "ERROR" and not retry.get("error"):
+                coll = retry
+
     outputs = coll.get("outputs") or {}
     result["commands_run"] = list(outputs.keys())
     result["rejected"] = coll.get("rejected") or []

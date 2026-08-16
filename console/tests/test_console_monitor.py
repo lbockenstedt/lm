@@ -285,3 +285,26 @@ def test_set_llm_identify_toggles_runtime_config(spoke):
     assert spoke.config["console_llm_identify"] is True
     res = asyncio.run(spoke.handle_command("CONSOLE_SET_LLM_IDENTIFY", {"enabled": False}))
     assert spoke.config["console_llm_identify"] is False
+
+
+def test_diagnostics_purge_clears_health(spoke):
+    spoke._record_identify_telemetry("good", {
+        "logged_in": False, "vendor": None, "identity": {},
+        "diag": {"any_output": True, "bytes": 5, "reason": "x", "tail": "y"}}, method="login")
+    assert spoke._health  # something collected
+    res = asyncio.run(spoke.handle_command("CONSOLE_DIAGNOSTICS_PURGE", {}))
+    assert res["status"] == "SUCCESS" and res["purged"] >= 1
+    assert spoke._health == {}
+
+
+def test_effective_credentials_appends_factory_defaults(spoke):
+    spoke._credentials = [{"username": "op", "password": "p"}]
+    eff = spoke._effective_credentials()
+    assert eff[0] == {"username": "op", "password": "p"}
+    assert {"username": "admin", "password": "admin"} in eff       # factory default appended
+    # extras (e.g. LLM guesses) land after operator creds, before dupes are dropped
+    eff2 = spoke._effective_credentials([{"username": "guess", "password": "g"}])
+    assert {"username": "guess", "password": "g"} in eff2
+    # disabling factory defaults keeps only operator (+ extras)
+    spoke.config["console_factory_default_creds"] = False
+    assert spoke._effective_credentials() == [{"username": "op", "password": "p"}]

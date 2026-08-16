@@ -339,3 +339,52 @@ def test_run_identify_diag_auth_rejected():
     assert d["creds_tried"] == 1
     assert "rejected" in d["reason"]
     assert d["tail"]  # a printable tail is captured for troubleshooting
+
+
+def test_generic_login_nudges_wake_silent_prompt():
+    """A device that stays silent until it receives a CR should be woken by the
+    Enter nudges and reveal its login prompt."""
+    class _NudgeWake:
+        def __init__(self): self.buf = bytearray(); self.crs = 0
+        def read(self):
+            out = bytes(self.buf[:256]); del self.buf[:256]; return out
+        def write(self, b):
+            if b"\r" in b:
+                self.crs += 1
+                if self.crs >= 2:              # silent on the first CRLF, wakes on the next CR
+                    self.buf += b"\r\nswitch login: "
+    ch = _NudgeWake()
+    res = fp.run_identify(ch.read, ch.write, [])
+    d = res["diag"]
+    assert d["nudges"] >= 1
+    assert d["login_prompt_seen"] is True
+
+
+def test_merge_credentials_dedupes_preserving_order():
+    a = [{"username": "op", "password": "p"}]
+    b = [{"username": "op", "password": "p"}, {"username": "admin", "password": "admin"}]
+    out = fp.merge_credentials(a, b)
+    assert out == [{"username": "op", "password": "p"},
+                   {"username": "admin", "password": "admin"}]
+
+
+def test_factory_default_login_when_no_stored_creds():
+    """With no operator creds, a factory-default pair (admin/admin) should log in
+    once callers append FACTORY_DEFAULT_CREDENTIALS."""
+    class _FactoryAuth:
+        def __init__(self): self.buf = bytearray(b"\r\ndev login: "); self.state = "login"
+        def read(self):
+            out = bytes(self.buf[:256]); del self.buf[:256]; return out
+        def write(self, b):
+            s = b.decode(errors="replace")
+            if self.state == "login" and s.strip():
+                self.user = s.strip(); self.state = "password"; self.buf += b"\r\nPassword: "
+            elif self.state == "password" and s.strip():
+                if getattr(self, "user", "") == "admin" and s.strip() == "admin":
+                    self.state = "done"; self.buf += b"\r\ndev> "
+                else:
+                    self.state = "login"; self.buf += b"\r\nLogin incorrect\r\ndev login: "
+    ch = _FactoryAuth()
+    creds = fp.merge_credentials([], fp.FACTORY_DEFAULT_CREDENTIALS)
+    res = fp.run_identify(ch.read, ch.write, creds)
+    assert res["logged_in"] is True

@@ -674,6 +674,26 @@ def register(app, hub, ctx):
                                  d.get("open_failures", 0) + d.get("disconnects", 0)), reverse=True)
         return {"diagnostics": rows, "errors": errors, "consoles": spokes}
 
+    @app.post("/api/console/diagnostics/purge")
+    async def console_diagnostics_purge(request: Request):
+        """Purge ALL collected serial-health / identify telemetry across every
+        Console spoke (failure/disconnect counts, identify attempts, transcript
+        tails). Live 'currently failing' state re-derives on the next probe cycle.
+        Admin-gated, like the diagnostics report itself."""
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        hub = app.state.hub
+        spokes = hub.get_all_spokes_by_type("console") or []
+        purged, errors = 0, {}
+        for sid in spokes:
+            try:
+                r = await hub.request_response(sid, "CONSOLE_DIAGNOSTICS_PURGE", {}, timeout=15.0)
+                purged += int(_console_unwrap(r).get("purged") or 0)
+            except Exception as e:  # noqa: BLE001 - one dead console shouldn't block the rest
+                errors[sid] = str(e)
+        return {"purged": purged, "errors": errors, "consoles": spokes}
+
     @app.get("/api/console/credentials")
     async def console_get_credentials(request: Request):
         """Return the global auto-identify credential list with passwords MASKED
