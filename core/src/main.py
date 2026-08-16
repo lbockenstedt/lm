@@ -5556,6 +5556,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 )
                 return {"status": "ok" if ok else "not_found"}
 
+            if req_type == "MARK_BUG_CLOSED":
+                # The issue was closed WITHOUT a fix → distinct "Closed (not fixed)".
+                rid = req.get("id", "")
+                issue_url = req.get("issue_url", "")
+                ok = await asyncio.to_thread(self._mark_bug_closed, rid, issue_url)
+                logger.info(
+                    f"[bug-report] MARK_BUG_CLOSED id={rid} url={issue_url} "
+                    f"from {spoke_id}: {'ok' if ok else 'not_found'}"
+                )
+                return {"status": "ok" if ok else "not_found"}
+
             if req_type == "MARK_BUG_DUPLICATE":
                 # bugfixer matched this report to an EXISTING issue (recurrence/same
                 # error) instead of filing a new one → the LM UI shows "Duplicate"
@@ -7922,9 +7933,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 _ctx.load_cert_chain(self.tls_cert_path, self.tls_key_path)
             except Exception as e:
                 logger.error("TLS cert load failed: %s (cert=%s key=%s) — "
-                             "hub NOT starting; fix the cert or unset "
+                             "hub will start without TLS; fix the cert or unset "
                              "LM_TLS_CERT/LM_TLS_KEY to fall back to plaintext.",
                              e, self.tls_cert_path, self.tls_key_path)
+                # Fallback to plaintext if TLS setup fails
+                self.tls_enabled = False
                 raise
             del _ctx
         listen_port = self.tls_port  # single unified port (443 w/ TLS, 443 plain)

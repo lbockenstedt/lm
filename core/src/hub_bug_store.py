@@ -190,6 +190,12 @@ class HubBugStoreMixin:
         bugs (they never need approval)."""
         return self._update_bug_status(rid, status="approved")
 
+    def _mark_bug_closed(self, rid: str, issue_url: str = "") -> bool:
+        """The GitHub issue was closed WITHOUT a fix → mark it 'closed' so the LM UI
+        shows a distinct "Closed (not fixed)" state instead of a misleading "Fixed"."""
+        return self._update_bug_status(rid, filed=True, issue_url=issue_url or None,
+                                       status="closed")
+
     def _mark_bug_fixed(self, rid: str, issue_url: str = "") -> bool:
         """bugfixer closed the GitHub issue for this report → mark it 'fixed' so the
         LM bug-reports UI shows Fixed + the issue link.
