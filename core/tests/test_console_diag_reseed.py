@@ -82,3 +82,24 @@ def test_diagnostics_endpoint_seeds_credentials():
     calls = {n.func.id for n in ast.walk(fn)
              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
     assert "_console_seed_credentials" in calls
+
+
+def test_diagnostics_endpoint_returns_debug_block():
+    """Guard: the diagnostics route must include a hub-side ``debug`` block so the
+    credential/seed state is visible even when a console agent's own summary is
+    missing (stale hub / agent not reporting)."""
+    src = open(_CONSOLE).read()
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "console_diagnostics")
+    # The final return is a dict literal; assert it carries a "debug" key.
+    returns = [n for n in ast.walk(fn) if isinstance(n, ast.Return)]
+    keys = set()
+    for r in returns:
+        if isinstance(r.value, ast.Dict):
+            keys |= {k.value for k in r.value.keys if isinstance(k, ast.Constant)}
+    assert "debug" in keys
+    # And the git-head helper the debug block awaits must exist.
+    names = {n.name for n in ast.walk(tree)
+             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert "_console_hub_git_head" in names
