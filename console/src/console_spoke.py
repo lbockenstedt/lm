@@ -67,6 +67,7 @@ class ConsoleSpoke(BaseSpoke):
         self._credentials: list = []
         self._autoprobe_task = None
         self._probe_attempts: Dict[str, float] = {}  # port_id → last attempt (monotonic)
+        self._probe_delay: Dict[str, float] = {}      # port_id → current login-retry backoff (s)
         self._probing: set = set()
         # Passive monitor: keep a read-only serial handle open per port so we
         # capture whatever a device emits even with NO user attached, and glean
@@ -503,9 +504,10 @@ class ConsoleSpoke(BaseSpoke):
             await asyncio.sleep(120)
 
     async def _autoprobe_scan(self) -> None:
-        """Probe each newly-seen port once. Guardrails: global toggle; skip ports
-        a human holds; probe once then cool down 1h on failure (no re-hammering
-        credentials)."""
+        """Probe each newly-seen port with the stored credentials. Guardrails:
+        global toggle; skip ports a human holds or already identified actively;
+        honour the shared login-retry backoff (:meth:`_identify_due`) so we keep
+        trying to learn from a device without hammering its credentials."""
         if not self.config.get("auto_identify", True):
             return
         for p in enumerate_ports():
@@ -513,29 +515,46 @@ class ConsoleSpoke(BaseSpoke):
             if self.sessions.has_user_sessions(pid) or pid in self._probing:
                 continue
             probe = self.store.get(pid).get("probe") or {}
-            last = self._probe_attempts.get(pid, 0.0)
             # An ACTIVE (logged-in) identity is authoritative — don't re-probe.
-            # A merely passive glean still warrants one active probe to harvest
-            # what login reveals (IP/serial), so it does NOT block here.
-            if (probe.get("identity") and probe.get("source") == "active") \
-                    or (last and (time.monotonic() - last) < 3600):
+            if probe.get("identity") and probe.get("source") == "active":
                 continue
-            self._probing.add(pid)
-            self.sessions.stop_monitor(pid)  # release the passive handle for the probe
-            try:
-                res = await asyncio.to_thread(self._identify_blocking, pid, p["device"])
-                # A bare "open failed" here (not a login/parse issue) means the
-                # port itself is unusable → hide it (still retried next cycle).
-                if str(res.get("error", "")).lower().startswith("open failed"):
-                    self._mark_unopenable(pid, res["error"])
-                else:
-                    self._clear_unopenable(pid)
-                await self._emit_probe_result(pid, res)
-            except Exception:  # noqa: BLE001
-                logger.exception("autoprobe %s failed", pid)
-                self._probe_attempts[pid] = time.monotonic()
-            finally:
-                self._probing.discard(pid)
+            if not self._identify_due(pid):
+                continue
+            await self._active_identify(pid, p["device"])
+
+    def _identify_due(self, pid: str) -> bool:
+        """True when the shared login-retry backoff has elapsed for ``pid`` (or it
+        has never been attempted), so an active identify may run again."""
+        last = self._probe_attempts.get(pid, 0.0)
+        if not last:
+            return True
+        return (time.monotonic() - last) >= self._probe_delay.get(pid, 3600.0)
+
+    async def _active_identify(self, pid: str, dev: str) -> Dict[str, Any]:
+        """Run the login-based identify on a port (releasing the passive monitor
+        handle for the exclusive op), persist/emit the result, and update the
+        shared retry backoff: a success (identity/login) backs off to an
+        occasional re-verify; a failure escalates 5m→…→1h so we keep trying to
+        learn what the stored credentials reveal without provoking a lockout."""
+        self._probe_attempts[pid] = time.monotonic()
+        try:
+            res = await self._exclusive_probe(pid, self._identify_blocking, pid, dev)
+        except Exception:  # noqa: BLE001
+            logger.exception("active identify %s failed", pid)
+            self._probe_delay[pid] = min(max(self._probe_delay.get(pid, 0.0) * 2, 300.0), 3600.0)
+            return {"error": "identify failed"}
+        # A bare "open failed" (not a login/parse issue) means the port itself is
+        # unusable → hide it (still retried next cycle); otherwise it's healthy.
+        if str(res.get("error", "")).lower().startswith("open failed"):
+            self._mark_unopenable(pid, res["error"])
+        else:
+            self._clear_unopenable(pid)
+        await self._emit_probe_result(pid, res)
+        if res.get("identity") or res.get("logged_in"):
+            self._probe_delay[pid] = 1800.0  # known → re-verify occasionally
+        else:
+            self._probe_delay[pid] = min(max(self._probe_delay.get(pid, 0.0) * 2, 300.0), 3600.0)
+        return res
 
     async def _exclusive_probe(self, pid, fn, *args):
         """Run a blocking op that needs the EXCLUSIVE serial handle (identify,
@@ -568,9 +587,31 @@ class ConsoleSpoke(BaseSpoke):
         while True:
             try:
                 await asyncio.to_thread(self._monitor_scan)
+                await self._monitor_login_scan()
             except Exception:  # noqa: BLE001
                 logger.exception("console monitor scan failed")
             await asyncio.sleep(15)
+
+    async def _monitor_login_scan(self) -> None:
+        """While monitoring, also try to LOG IN with the stored credentials and
+        learn what we can — a silent device reveals nothing to a passive listen,
+        so we actively drive an identify. Skips ports a user holds, ones mid-probe,
+        ones we can't even open, and any already identified authoritatively; the
+        shared backoff (:meth:`_identify_due`) keeps us from hammering creds."""
+        if not self.config.get("auto_identify", True) or not self._credentials:
+            return
+        for p in enumerate_ports():
+            pid = p["port_id"]
+            if self.sessions.has_user_sessions(pid) or pid in self._probing:
+                continue
+            if pid in self._unopenable:  # can't open at all — monitor_scan handles recovery
+                continue
+            probe = self.store.get(pid).get("probe") or {}
+            if probe.get("identity") and probe.get("source") == "active":
+                continue
+            if not self._identify_due(pid):
+                continue
+            await self._active_identify(pid, p["device"])
 
     def _monitor_scan(self) -> None:
         """Ensure a passive capture handle on each idle port and glean identity
