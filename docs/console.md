@@ -105,17 +105,27 @@ A deliberate, admin/`console_write`-gated write path, separate from the read-onl
   used for VM VNC consoles: the browser opens `/ws/console-serial/{session_id}` (gated by
   a one-shot `ws_token`), and device output is pushed up unsolicited as `CONSOLE_DATA_UP`.
 - **Auto-identify (fingerprint).** On every newly-seen port, a background loop
-  (`_autoprobe_loop` in `console/src/console_spoke.py`, every ~2 minutes, unless
+  (`_autoprobe_loop` in `console/src/console_spoke.py`, polling every ~30s — a newly
+  connected console cable is auto-profiled almost immediately — unless
   `auto_identify=false`) automatically — and read-only — wakes the line, captures the
   banner, matches it against a built-in vendor profile (Cisco IOS, Aruba AOS-CX, HP
   ProCurve, generic Linux — `console/src/fingerprint.py::PROFILES`), tries the
   hub-managed encrypted credential list once each at a login prompt (never re-hammering),
   and if it gets in, runs that profile's read-only identity commands (`show version`,
   `show system`, etc.) and regex-parses serial number, MAC, management IP, model, and
-  hostname. The result is pushed to the hub as `CONSOLE_PROBE_RESULT`, which upserts a
-  NetBox device (match by serial/MAC/hostname, or create). A port is skipped by
-  auto-probe while a human holds the writer lock, and a failed probe backs off for an
-  hour before retrying — no credential lockout hammering.
+  hostname. **When the identify used one of our credentials to log in, it then cleanly
+  logs out** (sends `exit`/`logout` and confirms a login prompt returns — `diag.logged_out`),
+  so profiling never leaves a privileged shell open on the shared line; an already-open
+  console we only read from is left untouched. The result is pushed to the hub as
+  `CONSOLE_PROBE_RESULT`, which upserts a NetBox device (match by serial/MAC/hostname, or
+  create). A port is skipped by auto-probe while a human holds the writer lock, and a
+  failed probe backs off (escalating) before retrying — no credential lockout hammering.
+  The retry policy is operator-tunable via role config: `console_identify_retry_secs`
+  (floor backoff, default 300), `console_identify_retry_max_secs` (cap, default 3600),
+  `console_identify_reverify_secs` (re-verify interval after success, default 1800),
+  `console_identify_max_attempts` (give up after N consecutive failures, `0`=never, the
+  default), and `console_autoprobe_interval` (poll/first-seen cadence, default 30s).
+  Unplugging a cable clears that port's retry state so re-plugging starts fresh.
 - **Two-level tenant binding.** The whole console agent can be bound to a tenant like any
   spoke; additionally, an individual port can carry its own tenant override
   (`CONSOLE_SET_TENANT`) so one console host can serve ports to different tenants. The

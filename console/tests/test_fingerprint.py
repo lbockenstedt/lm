@@ -325,7 +325,53 @@ def test_run_identify_login_then_harvest():
     assert res["identity"]["serial"] == "ABC123"
 
 
-def test_run_identify_bare_login_prompt_no_banner_until_authenticated():
+def test_run_identify_logs_out_after_authenticated_profiling():
+    """After we log in with a credential and finish profiling, we must cleanly
+    log out (send exit/logout) and confirm a login prompt reappears, so we don't
+    leave a privileged shell open on the shared console line."""
+    banner = "\r\nCisco IOS Software\r\nUsername: "
+    responses = [
+        ("admin", "\r\nPassword: "),
+        ("secret", "\r\nSwitch#"),
+        ("terminal length 0", "\r\nSwitch#"),
+        ("show version", "\r\nProcessor board ID ABC123\r\nSwitch uptime is 2 days\r\nSwitch#"),
+        ("show ip interface brief", "\r\nVlan1 10.0.0.9 YES up up\r\nSwitch#"),
+        ("exit", "\r\nSwitch con0 is now available\r\n\r\nSwitch login: "),
+    ]
+    chan = _FakeChan(banner, responses)
+    res = fp.run_identify(chan.read, chan.write, [{"username": "admin", "password": "secret"}])
+    assert res["logged_in"] is True
+    assert res["credential_index"] == 0
+    assert res["diag"]["logged_out"] is True
+
+
+def test_run_identify_no_logout_when_not_authenticated():
+    """An already-open console we merely read from (no credential used) must NOT
+    be logged out — we never opened that session, so 'logged_out' stays unset."""
+    banner = "\r\nCisco IOS Software, Version 15.2(4)E\r\nSwitch#"
+    responses = [
+        ("terminal length 0", "\r\nSwitch#"),
+        ("show version", "\r\nProcessor board ID FTX9XYZ\r\nSwitch uptime is 1 day\r\nSwitch#"),
+        ("show ip interface brief", "\r\nVlan1 10.0.0.5 YES up up\r\nSwitch#"),
+    ]
+    chan = _FakeChan(banner, responses)
+    res = fp.run_identify(chan.read, chan.write, [])
+    assert res["logged_in"] is True
+    assert res["credential_index"] is None
+    assert "logged_out" not in res["diag"]
+
+
+def test_logout_helper_returns_false_when_prompt_never_returns():
+    """If exit/logout produce no login prompt (dead/one-way line), _logout must
+    report False rather than falsely claim a clean logout."""
+    class _NoPrompt:
+        def read(self): return b""
+        def write(self, b): pass
+    ch = _NoPrompt()
+    assert fp._logout(ch.read, ch.write) is False
+
+
+
     """Device shows ONLY a login prompt (no vendor banner) until you log in — the
     generic login-first path must authenticate before vendor detection can work."""
     banner = "\r\nswitch login: "

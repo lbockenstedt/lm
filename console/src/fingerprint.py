@@ -654,6 +654,34 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
     return False, None, transcript, diag
 
 
+_LOGOUT_COMMANDS = ("exit", "logout")
+
+
+def _logout(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
+            profile: Optional[Dict[str, Any]] = None, cmd_secs: float = 2.0) -> bool:
+    """Cleanly end an authenticated session we opened: send ``exit``/``logout``
+    (or the profile's own ``logout`` override) and confirm a login/password
+    prompt reappears, so profiling never leaves a privileged shell open on the
+    shared console line. Read-only w.r.t. device config. Returns True once a
+    login prompt is back (i.e. we are confirmed logged out)."""
+    cmds = list((profile or {}).get("logout") or _LOGOUT_COMMANDS)
+    try:
+        write_fn(b"\r")
+    except Exception:  # noqa: BLE001 - a dead line just means we can't confirm
+        return False
+    _read_until(read_fn, [_SHELL_PROMPT, _LOGIN_PROMPT, _PASSWORD_PROMPT], 1.0)
+    for cmd in cmds:
+        try:
+            write_fn((cmd + "\r").encode())
+        except Exception:  # noqa: BLE001
+            break
+        out = _read_until(read_fn, [_LOGIN_PROMPT, _PASSWORD_PROMPT], cmd_secs)
+        tail = out[-200:]
+        if _LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail):
+            return True
+    return False
+
+
 def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
                  credentials: List[Dict[str, str]], banner_secs: float = 3.0,
                  cmd_secs: float = 4.0) -> Dict[str, Any]:
@@ -677,6 +705,17 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     result["logged_in"] = logged_in
     result["credential_index"] = cred_idx
     result["diag"] = _login_diag(diag, transcript, credentials)
+
+    def _finalize(res: Dict[str, Any], prof: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        # Cleanly log out of a session WE authenticated (cred_idx set). We never
+        # touch an already-open console we merely read from (console_usable path
+        # leaves credential_index None), so we don't close an operator's session.
+        if res.get("credential_index") is not None:
+            try:
+                res["diag"]["logged_out"] = _logout(read_fn, write_fn, prof)
+            except Exception:  # noqa: BLE001
+                res["diag"]["logged_out"] = False
+        return res
 
     # 2. Detect the vendor from everything seen (pre- and post-login).
     profile = detect_vendor(transcript)
@@ -708,7 +747,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         if hn:
             result["identity"]["hostname"] = hn
             result["hostname_source"] = "prompt"
-        return result
+        return _finalize(result, None)
     result["vendor"] = profile["name"]
     if profile.get("family") and profile["name"] != "linux":
         # A recognized network device can report its role (Switch/…) even while
@@ -719,7 +758,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     # If a login prompt is still showing (couldn't authenticate), stop here.
     tail = transcript[-200:]
     if not result["logged_in"] and (_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)):
-        return result
+        return _finalize(result, profile)
 
     # 3. Run the read-only identity commands + capture output (pager-aware).
     outputs: Dict[str, str] = {}
@@ -743,7 +782,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         if hn:
             result["identity"]["hostname"] = hn
             result["hostname_source"] = "prompt"  # gleaned from the CLI prompt
-    return result
+    return _finalize(result, profile)
 
 
 def _sanitize_tail(text: str, n: int = 240) -> str:

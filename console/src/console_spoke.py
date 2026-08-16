@@ -76,6 +76,8 @@ class ConsoleSpoke(BaseSpoke):
         self._autoprobe_task = None
         self._probe_attempts: Dict[str, float] = {}  # port_id → last attempt (monotonic)
         self._probe_delay: Dict[str, float] = {}      # port_id → current login-retry backoff (s)
+        self._probe_fails: Dict[str, int] = {}        # port_id → consecutive failed identify attempts
+        self._seen_ports: set = set()                 # port_ids seen last scan (for first-seen detection)
         self._probing: set = set()
         # Passive monitor: keep a read-only serial handle open per port so we
         # capture whatever a device emits even with NO user attached, and glean
@@ -643,17 +645,63 @@ class ConsoleSpoke(BaseSpoke):
                 await self._autoprobe_scan()
             except Exception:  # noqa: BLE001
                 logger.exception("console autoprobe scan failed")
-            await asyncio.sleep(120)
+            # Poll cadence (configurable). A short poll auto-profiles a newly
+            # connected console cable quickly; per-port retry backoff still gates
+            # how often a FAILED port is re-attempted, so this doesn't hammer.
+            await asyncio.sleep(self._identify_cfg()["scan_interval"])
+
+    def _identify_cfg(self) -> Dict[str, Any]:
+        """Operator-tunable auto-identify retry policy (all optional, safe
+        defaults preserve prior behaviour):
+          console_identify_retry_secs      floor backoff after a failed attempt (300)
+          console_identify_retry_max_secs  cap the escalating backoff (3600)
+          console_identify_reverify_secs   re-verify interval after success (1800)
+          console_identify_max_attempts    give up after N consecutive failures,
+                                            0 = never give up (0)
+          console_autoprobe_interval       scan/first-seen poll cadence secs (30)
+        """
+        c = self.config
+
+        def _pos(key: str, default: float) -> float:
+            try:
+                v = float(c.get(key, default))
+            except (TypeError, ValueError):
+                return default
+            return v if v > 0 else default
+
+        def _nonneg(key: str, default: int) -> int:
+            try:
+                v = int(c.get(key, default))
+            except (TypeError, ValueError):
+                return default
+            return v if v >= 0 else default
+
+        return {
+            "retry_min": _pos("console_identify_retry_secs", 300.0),
+            "retry_max": _pos("console_identify_retry_max_secs", 3600.0),
+            "reverify": _pos("console_identify_reverify_secs", 1800.0),
+            "max_attempts": _nonneg("console_identify_max_attempts", 0),
+            "scan_interval": _pos("console_autoprobe_interval", 30.0),
+        }
 
     async def _autoprobe_scan(self) -> None:
         """Probe each newly-seen port with the stored credentials. Guardrails:
         global toggle; skip ports a human holds or already identified actively;
         honour the shared login-retry backoff (:meth:`_identify_due`) so we keep
-        trying to learn from a device without hammering its credentials."""
+        trying to learn from a device without hammering its credentials. A port
+        that has just appeared (new console cable) is profiled immediately; a port
+        that has vanished has its retry state cleared so re-plugging starts fresh."""
         if not self.config.get("auto_identify", True):
             return
-        for p in enumerate_ports():
-            pid = p["port_id"]
+        live = {p["port_id"]: p for p in enumerate_ports()}
+        # First-seen / re-plug: reset retry state so a freshly connected cable is
+        # attempted right away instead of inheriting a stale backoff.
+        for pid in set(self._seen_ports) - set(live):
+            self._probe_attempts.pop(pid, None)
+            self._probe_delay.pop(pid, None)
+            self._probe_fails.pop(pid, None)
+        self._seen_ports = set(live)
+        for pid, p in live.items():
             if self.sessions.has_user_sessions(pid) or pid in self._probing:
                 continue
             probe = self.store.get(pid).get("probe") or {}
@@ -666,24 +714,39 @@ class ConsoleSpoke(BaseSpoke):
 
     def _identify_due(self, pid: str) -> bool:
         """True when the shared login-retry backoff has elapsed for ``pid`` (or it
-        has never been attempted), so an active identify may run again."""
+        has never been attempted), so an active identify may run again. Honours the
+        configurable max-attempts cap: once a port has failed that many times in a
+        row we stop retrying (until it is re-plugged or manually probed)."""
+        cfg = self._identify_cfg()
+        cap = cfg["max_attempts"]
+        if cap and self._probe_fails.get(pid, 0) >= cap:
+            return False
         last = self._probe_attempts.get(pid, 0.0)
         if not last:
             return True
-        return (time.monotonic() - last) >= self._probe_delay.get(pid, 3600.0)
+        return (time.monotonic() - last) >= self._probe_delay.get(pid, cfg["retry_max"])
 
     async def _active_identify(self, pid: str, dev: str) -> Dict[str, Any]:
         """Run the login-based identify on a port (releasing the passive monitor
         handle for the exclusive op), persist/emit the result, and update the
         shared retry backoff: a success (identity/login) backs off to an
-        occasional re-verify; a failure escalates 5m→…→1h so we keep trying to
-        learn what the stored credentials reveal without provoking a lockout."""
+        occasional re-verify; a failure escalates (retry_min→…→retry_max) so we
+        keep trying to learn what the stored credentials reveal without provoking
+        a lockout. Backoff bounds + the give-up cap are operator-configurable
+        (:meth:`_identify_cfg`)."""
+        cfg = self._identify_cfg()
         self._probe_attempts[pid] = time.monotonic()
+
+        def _fail_backoff() -> None:
+            self._probe_fails[pid] = self._probe_fails.get(pid, 0) + 1
+            self._probe_delay[pid] = min(
+                max(self._probe_delay.get(pid, 0.0) * 2, cfg["retry_min"]), cfg["retry_max"])
+
         try:
             res = await self._exclusive_probe(pid, self._identify_blocking, pid, dev)
         except Exception:  # noqa: BLE001
             logger.exception("active identify %s failed", pid)
-            self._probe_delay[pid] = min(max(self._probe_delay.get(pid, 0.0) * 2, 300.0), 3600.0)
+            _fail_backoff()
             return {"error": "identify failed"}
         # A bare "open failed" (not a login/parse issue) means the port itself is
         # unusable → hide it (still retried next cycle); otherwise it's healthy.
@@ -694,9 +757,10 @@ class ConsoleSpoke(BaseSpoke):
         self._record_identify_telemetry(pid, res, method="login")
         await self._emit_probe_result(pid, res)
         if res.get("identity") or res.get("logged_in"):
-            self._probe_delay[pid] = 1800.0  # known → re-verify occasionally
+            self._probe_fails[pid] = 0                 # success clears the give-up counter
+            self._probe_delay[pid] = cfg["reverify"]   # known → re-verify occasionally
         else:
-            self._probe_delay[pid] = min(max(self._probe_delay.get(pid, 0.0) * 2, 300.0), 3600.0)
+            _fail_backoff()
         return res
 
     async def _exclusive_probe(self, pid, fn, *args):
@@ -904,6 +968,11 @@ class ConsoleSpoke(BaseSpoke):
         rec["bytes"] = diag.get("bytes", 0)
         rec["creds_tried"] = diag.get("creds_tried", 0)
         rec["creds_available"] = diag.get("creds_available", len(self._credentials))
+        # Operator-supplied vs factory-default split: creds_tried==factory-only
+        # with operator_creds==0 is the tell-tale "operator credentials never
+        # reached this spoke" case (seed/deploy gap), not a wrong-password case.
+        rec["operator_creds"] = len(self._credentials)
+        rec["logged_out"] = bool(diag.get("logged_out"))
         rec["reason"] = diag.get("reason", "")
         rec["tail"] = diag.get("tail", "")
         self._track_hostname(rec, res, method)
@@ -995,6 +1064,10 @@ class ConsoleSpoke(BaseSpoke):
         trying to login' case, since a port that is never probed otherwise has no
         telemetry row at all."""
         now = time.monotonic()
+        cfg = self._identify_cfg()
+        cap = cfg["max_attempts"]
+        fails = self._probe_fails.get(pid, 0)
+        given_up = bool(cap) and fails >= cap
         last = self._probe_attempts.get(pid, 0.0)
         delay = self._probe_delay.get(pid, 0.0)
         attempted = bool(last)
@@ -1011,6 +1084,9 @@ class ConsoleSpoke(BaseSpoke):
             reason = "identify in progress"
         elif active_id:
             reason = "already identified via active login — re-verifies after backoff"
+        elif given_up:
+            reason = (f"gave up after {fails} consecutive failed attempts "
+                      f"(console_identify_max_attempts={cap}) — replug or probe manually")
         elif not attempted:
             reason = "not attempted yet — will try on the next scan"
         elif next_in > 0:
@@ -1019,6 +1095,7 @@ class ConsoleSpoke(BaseSpoke):
             reason = "due — will attempt on the next scan"
         return {"attempted": attempted, "backoff_s": round(delay),
                 "next_attempt_in": round(next_in), "skip_reason": reason,
+                "consecutive_fails": fails, "max_attempts": cap, "given_up": given_up,
                 "active_identity": active_id}
 
     def _diagnostics(self) -> List[Dict[str, Any]]:
