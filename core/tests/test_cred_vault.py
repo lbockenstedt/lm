@@ -1,0 +1,140 @@
+"""Unit tests for the per-tenant + admin-slot credential vault (``cred_vault``).
+
+The Key Vault broker is replaced by an in-memory dict so the crypto/metadata
+logic is exercised without any Azure calls.
+"""
+import asyncio
+
+import pytest
+
+import cred_vault as cv
+from _fakes import FakeHub, FakeState
+
+
+@pytest.fixture()
+def hub(monkeypatch):
+    state = FakeState(system_state={"global_config": {"key_vault": {"vault_url": "https://vault.example/"}}})
+    h = FakeHub(state=state)
+
+    store: dict[str, str] = {}
+
+    async def _set(cfg, url, name, value, http=None):
+        store[name] = value
+        return f"id/{name}"
+
+    async def _get(cfg, url, name, http=None):
+        return store.get(name)
+
+    async def _del(cfg, url, name, http=None):
+        store.pop(name, None)
+        return True
+
+    monkeypatch.setattr(cv._kv, "set_secret", _set)
+    monkeypatch.setattr(cv._kv, "get_secret", _get)
+    monkeypatch.setattr(cv._kv, "delete_secret", _del)
+    monkeypatch.setattr(cv, "get_oidc_config", lambda _h: object())
+    h._kv_store = store
+    return h
+
+
+def run(coro):
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def test_psk_set_and_verify(hub):
+    run(cv.set_bucket_psk(hub, "t1", "hunter2pass"))
+    assert cv.bucket_has_psk(hub, "t1")
+    assert cv.verify_psk(hub, "t1", "hunter2pass")
+    assert not cv.verify_psk(hub, "t1", "wrongpass")
+
+
+def test_psk_too_short_rejected(hub):
+    with pytest.raises(cv.CredVaultError):
+        run(cv.set_bucket_psk(hub, "t1", "short"))
+
+
+def test_put_requires_psk(hub):
+    with pytest.raises(cv.CredVaultError):
+        run(cv.put_secret(hub, "t1", "he", {"user": "a"}, psk="nope"))
+
+
+def test_psk_mode_roundtrip_and_wrong_psk(hub):
+    run(cv.set_bucket_psk(hub, "t1", "hunter2pass"))
+    run(cv.put_secret(hub, "t1", "he", {"username": "u", "password": "p"},
+                      mode="psk", sec_type="login", psk="hunter2pass", actor="admin"))
+    got = run(cv.reveal_secret(hub, "t1", "he", psk="hunter2pass"))
+    assert got == {"username": "u", "password": "p"}
+    # wrong PSK on reveal is rejected at the gate
+    with pytest.raises(cv.CredVaultError):
+        run(cv.reveal_secret(hub, "t1", "he", psk="wrongpass"))
+    # psk-mode secrets are NOT unattended-readable
+    with pytest.raises(cv.CredVaultError):
+        run(cv.automation_get(hub, "t1", "he"))
+
+
+def test_hub_mode_automation_readable(hub):
+    run(cv.set_bucket_psk(hub, cv.ADMIN_BUCKET, "adminpass1"))
+    run(cv.put_secret(hub, cv.ADMIN_BUCKET, "he-dns", {"username": "x", "password": "y"},
+                      mode="hub", psk="adminpass1", actor="admin"))
+    # tooling reads with no pass-phrase
+    assert run(cv.automation_get(hub, cv.ADMIN_BUCKET, "he-dns")) == {"username": "x", "password": "y"}
+    # interactive reveal still requires the PSK
+    assert run(cv.reveal_secret(hub, cv.ADMIN_BUCKET, "he-dns", psk="adminpass1")) == {"username": "x", "password": "y"}
+    with pytest.raises(cv.CredVaultError):
+        run(cv.reveal_secret(hub, cv.ADMIN_BUCKET, "he-dns", psk="wrongpass"))
+
+
+def test_ciphertext_never_plaintext_in_vault(hub):
+    run(cv.set_bucket_psk(hub, "t1", "hunter2pass"))
+    run(cv.put_secret(hub, "t1", "he", {"password": "s3cr3t-value"},
+                      mode="psk", psk="hunter2pass"))
+    assert all("s3cr3t-value" not in blob for blob in hub._kv_store.values())
+
+
+def test_list_hides_values(hub):
+    run(cv.set_bucket_psk(hub, "t1", "hunter2pass"))
+    run(cv.put_secret(hub, "t1", "he", {"password": "s3cr3t-secret-value"},
+                      mode="psk", sec_type="login", description="HE acct", psk="hunter2pass"))
+    listed = cv.list_secrets(hub, "t1")
+    assert listed[0]["name"] == "he"
+    # field NAMES are non-secret metadata; the VALUE must never appear
+    assert "s3cr3t-secret-value" not in str(listed)
+    assert listed[0]["fields"] == ["password"]
+
+
+def test_psk_rotation_rekeys_secrets(hub):
+    run(cv.set_bucket_psk(hub, "t1", "oldpassword"))
+    run(cv.put_secret(hub, "t1", "he", {"password": "keepme"}, mode="psk", psk="oldpassword"))
+    run(cv.set_bucket_psk(hub, "t1", "newpassword", old_psk="oldpassword"))
+    # old PSK no longer decrypts; new one does
+    with pytest.raises(cv.CredVaultError):
+        run(cv.reveal_secret(hub, "t1", "he", psk="oldpassword"))
+    assert run(cv.reveal_secret(hub, "t1", "he", psk="newpassword")) == {"password": "keepme"}
+
+
+def test_rotation_wrong_old_psk_rejected(hub):
+    run(cv.set_bucket_psk(hub, "t1", "oldpassword"))
+    with pytest.raises(cv.CredVaultError):
+        run(cv.set_bucket_psk(hub, "t1", "newpassword", old_psk="bogus"))
+
+
+def test_delete_removes_metadata_and_vault(hub):
+    run(cv.set_bucket_psk(hub, "t1", "hunter2pass"))
+    run(cv.put_secret(hub, "t1", "he", {"password": "x"}, mode="psk", psk="hunter2pass"))
+    run(cv.delete_secret(hub, "t1", "he", psk="hunter2pass"))
+    assert cv.list_secrets(hub, "t1") == []
+    assert hub._kv_store == {}
+
+
+def test_vault_not_configured_raises(monkeypatch):
+    state = FakeState(system_state={"global_config": {}})
+    h = FakeHub(state=state)
+    monkeypatch.setattr(cv, "get_oidc_config", lambda _h: object())
+    # setting a PSK is local metadata; STORING a secret needs the vault
+    run(cv.set_bucket_psk(h, "t1", "hunter2pass"))
+    with pytest.raises(cv.CredVaultError):
+        run(cv.put_secret(h, "t1", "he", {"password": "x"}, mode="psk", psk="hunter2pass"))

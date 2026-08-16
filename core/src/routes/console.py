@@ -419,6 +419,36 @@ def register(app, hub, ctx):
             hub_encryption.encrypt(json.dumps(creds)).decode()
         hub.state._mark_dirty()
 
+    # Name of the Credential Vault secret (in the Global Admin slot, __admin__)
+    # that holds the console auto-identify login list as a hub-mode
+    # (automation-readable) secret ``{"credentials": [{username,password}, …]}``.
+    _CONSOLE_VAULT_SECRET = "console-auto-credentials"
+
+    def _console_creds_from_cred_vault(creds_dict):
+        """Normalise a Credential Vault secret value into ``[{username,password}]``."""
+        out = []
+        for c in ((creds_dict or {}).get("credentials") or []):
+            if isinstance(c, dict) and c.get("username"):
+                out.append({"username": str(c.get("username", "")),
+                            "password": str(c.get("password", ""))})
+        return out
+
+    async def _console_load_credentials_resolved(hub):
+        """Async credential resolution used by the (async) seed path. Prefers the
+        central Credential Vault (``__admin__`` slot, automation-readable) so
+        console logins can be managed alongside every other secret; falls back to
+        the legacy ref / hub-state loader when the vault secret is absent or the
+        vault isn't configured. Purely additive — never worse than today."""
+        try:
+            import cred_vault as _cv
+            val = await _cv.automation_get(hub, _cv.ADMIN_BUCKET, _CONSOLE_VAULT_SECRET)
+            creds = _console_creds_from_cred_vault(val)
+            if creds:
+                return creds
+        except Exception:  # noqa: BLE001 — not configured / absent / unreadable
+            pass
+        return _console_load_credentials(hub)
+
     async def _console_hub_git_head():
         """Short git HEAD of the hub's own checkout, for the diagnostics debug
         block (tells an operator whether the HUB — where the console seed /
@@ -445,7 +475,7 @@ def register(app, hub, ctx):
         """Push the credential list to any console spoke not yet seeded this
         process (so a spoke that connects after credentials were set still gets
         them). Fire-and-forget + signed."""
-        creds = _console_load_credentials(hub)
+        creds = await _console_load_credentials_resolved(hub)
         if not creds:
             return
         seeded = getattr(hub, "_console_creds_seeded", None) or set()
@@ -976,6 +1006,37 @@ def register(app, hub, ctx):
             except Exception:  # noqa: BLE001
                 pass
         return {"status": "ok", "count": len(creds)}
+
+    @app.post("/api/console/credentials/to-vault")
+    async def console_creds_to_vault(request: Request):
+        """Migrate the current auto-identify credential list into the Credential
+        Vault (Global Admin slot ``__admin__``, automation-readable) so it's
+        managed alongside every other secret and pulled unattended by the seed
+        loop. Requires the admin-slot pass-phrase. Admin only."""
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        psk = str((body or {}).get("psk") or "")
+        creds = _console_load_credentials(hub)
+        if not creds:
+            raise HTTPException(status_code=400, detail="no console credentials to migrate")
+        import cred_vault as _cv
+        try:
+            await _cv.put_secret(hub, _cv.ADMIN_BUCKET, _CONSOLE_VAULT_SECRET,
+                                 {"credentials": creds}, mode="hub", sec_type="console",
+                                 description="Console auto-identify login list",
+                                 psk=psk, actor=(sess.get("user", {}) or {}).get("username", "?"))
+        except _cv.CredVaultError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        logger.info("console: %d credential(s) migrated into the Credential Vault by %s",
+                    len(creds), (sess.get("user", {}) or {}).get("username", "?"))
+        return {"status": "ok", "count": len(creds), "bucket": _cv.ADMIN_BUCKET,
+                "name": _CONSOLE_VAULT_SECRET}
 
     @app.post("/api/console/open")
     async def console_open(request: Request):
