@@ -2956,6 +2956,15 @@ function _rebuildMainNav(allSpokes, connections) {
             <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg></div>
             <span>Security</span>
         </div>`;
+    // Credential Vault — hub-side per-tenant secret locker (routes/cred_vault.py,
+    // /tenant/cred-vault/*). Reachable by a tenant-admin (own-tenant buckets) OR
+    // a Global Admin (any tenant + the __admin__ infrastructure slot); the
+    // server enforces reach + pass-phrase on every read/write. Padlock icon.
+    const _credVaultNavHtml = () => `
+        <div onclick="setView('credvault')" id="nav-credvault" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-xs font-medium">
+            <div><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"></path></svg></div>
+            <span>Credential Vault</span>
+        </div>`;
 
     mainNav.innerHTML = `
         ${dashboardNav}
@@ -2967,6 +2976,7 @@ function _rebuildMainNav(allSpokes, connections) {
         ${isAdmin() ? adminSettings : ''}
         ${isAdmin() ? adminLogs : ''}
         ${isAdmin() ? _securityNavHtml() : ''}
+        ${(isAdmin() || isTenantAdmin()) ? _credVaultNavHtml() : ''}
         ${isAdmin() ? _templateRepoNavHtml() : ''}
         ${isAdmin() ? _bugReportNavHtml() : ''}
         ${isAdmin() ? _featureRequestNavHtml() : ''}
@@ -3211,6 +3221,11 @@ async function setView(viewId) {
     // My Devices is the tenant-admin device surface — reachable only by a
     // tenant-admin (or a Global Admin); guards deep-links for everyone else.
     if (viewId === 'mydevices' && !(isTenantAdmin() || isAdmin())) {
+        return;
+    }
+    // Credential Vault — reachable by a tenant-admin (own-tenant buckets) or a
+    // Global Admin; the server enforces per-bucket reach + pass-phrase on top.
+    if (viewId === 'credvault' && !(isTenantAdmin() || isAdmin())) {
         return;
     }
     // Directory (LDAP) has no MODULE_CLASSES entry (standalone view), so gate its
@@ -3655,6 +3670,15 @@ function _viewTemplate(viewId) {
     <p class="text-sm text-slate-500">Detects brute-force / faked-credential attacks on the API, logs invalid attempts, and (opt-in) auto-blocks the source IP via an Azure NSG deny rule.</p>
   </div>
   <div id="security-content"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
+</div>`;
+
+        case 'credvault':
+            return `<div class="space-y-4">
+  <div>
+    <h2 class="text-xl font-bold text-slate-800">Credential Vault</h2>
+    <p class="text-sm text-slate-500">Per-tenant secret locker backed by Azure Key Vault. Each bucket is unlocked with its own pass-phrase — your role decides which buckets you can reach, the pass-phrase decrypts the values. Revealed secrets are shown once and never cached.</p>
+  </div>
+  <div id="credvault-content"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
 </div>`;
 
         default:
@@ -4147,6 +4171,9 @@ function initView(viewId, subView) {
         case 'reports':
             loadReportsData();
             break;
+        case 'credvault':
+            loadCredVault();
+            break;
     }
 }
 
@@ -4224,6 +4251,338 @@ async function apiJson(url, options = {}) {
     }
     const ct = res.headers.get('content-type') || '';
     return ct.includes('application/json') ? res.json() : res.text();
+}
+// ──────────────────────────────────────────────────────────────────
+
+// ── Credential Vault (left-nav 'credvault'; routes/cred_vault.py) ────────────
+// Hub-side per-tenant secret locker. A tenant-admin sees only their own tenant
+// buckets; a Global Admin additionally sees every tenant bucket plus the
+// non-tenant __admin__ slot and can load an arbitrary bucket + import the
+// console login list. Reach is decided by role (server-enforced); every
+// read/write also requires the bucket pass-phrase (PSK). Revealed plaintext is
+// shown once, copied via a self-clearing clipboard, and purged from the DOM.
+let _cvIsGlobalAdmin = false;
+let _cvAdminSlot = '__admin__';
+let _cvVaultAvailable = true;
+let _cvBuckets = [];
+let _cvCurrentBucket = '';
+
+async function loadCredVault() {
+    const host = document.getElementById('credvault-content');
+    if (!host) return;
+    try {
+        const d = await apiJson('/tenant/cred-vault/buckets');
+        _cvIsGlobalAdmin = !!d.is_global_admin;
+        _cvAdminSlot = d.admin_slot || '__admin__';
+        _cvVaultAvailable = d.vault_available !== false;
+        _cvBuckets = d.buckets || [];
+        if (!_cvBuckets.some(b => b.bucket === _cvCurrentBucket)) {
+            _cvCurrentBucket = _cvBuckets.length ? _cvBuckets[0].bucket : '';
+        }
+        _cvRenderShell();
+    } catch (e) {
+        host.innerHTML = `<div class="hpe-card rounded-lg p-5 shadow-sm"><p class="text-sm text-red-600">Failed to load: ${escapeHtml(e.message)}</p></div>`;
+    }
+}
+
+function _cvBucketLabel(b) {
+    if (b.bucket === _cvAdminSlot) return 'Global Admin slot';
+    return b.bucket;
+}
+
+function _cvRenderShell() {
+    const host = document.getElementById('credvault-content');
+    if (!host) return;
+    if (!_cvBuckets.length) {
+        host.innerHTML = `<div class="hpe-card rounded-lg p-5 shadow-sm"><p class="text-sm text-slate-500 italic">No buckets are reachable for your account.</p></div>`;
+        return;
+    }
+    const opts = _cvBuckets.map(b =>
+        `<option value="${escapeHtml(b.bucket)}"${b.bucket === _cvCurrentBucket ? ' selected' : ''}>${escapeHtml(_cvBucketLabel(b))}${b.has_psk ? '' : ' (no pass-phrase)'}</option>`).join('');
+    const adminTools = _cvIsGlobalAdmin ? `
+      <div class="flex items-center gap-2">
+        <input id="cv-other-bucket" type="text" placeholder="load tenant id…" autocomplete="off" class="px-2 py-1 text-sm border border-slate-300 rounded-md">
+        <button onclick="_cvLoadOther()" class="px-3 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Load</button>
+        <button onclick="_cvImportConsole()" title="Copy the console auto-identify login list into the Global Admin slot (automation-readable)" class="px-3 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Import console creds</button>
+      </div>` : '';
+    const storageHint = _cvVaultAvailable ? '' : `
+      <div class="text-xs px-3 py-2 rounded-md bg-amber-50 text-amber-700 border border-amber-200">Azure Key Vault is not configured — secrets are stored locally (encrypted in hub state). Configure a vault under Setup → Azure → Key Vault to store them there instead.</div>`;
+    host.innerHTML = `
+      <div class="hpe-card rounded-lg p-5 shadow-sm space-y-4">
+        ${storageHint}
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center gap-2">
+            <label class="text-xs font-bold text-slate-500 uppercase tracking-wider">Bucket</label>
+            <select id="cv-bucket-select" onchange="_cvSwitchBucket(this.value)" class="px-3 py-1.5 text-sm border border-slate-300 rounded-md bg-white">${opts}</select>
+          </div>
+          ${adminTools}
+        </div>
+        <div class="flex items-center gap-2">
+          <button onclick="_cvSetPskModal()" class="px-3 py-1.5 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Set / change pass-phrase</button>
+          <button onclick="_cvAddSecretModal()" class="px-3 py-1.5 text-xs rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">+ Add secret</button>
+        </div>
+        <div id="cv-secrets"><p class="text-sm text-slate-400 italic">Loading secrets…</p></div>
+      </div>`;
+    _cvRenderBucketBody();
+}
+
+function _cvSwitchBucket(v) { _cvCurrentBucket = v; _cvRenderBucketBody(); }
+
+async function _cvLoadOther() {
+    const v = (document.getElementById('cv-other-bucket')?.value || '').trim();
+    if (!v) return;
+    if (!_cvBuckets.some(b => b.bucket === v)) _cvBuckets.push({ bucket: v, has_psk: false, secret_count: 0 });
+    _cvCurrentBucket = v;
+    _cvRenderShell();
+}
+
+async function _cvRenderBucketBody() {
+    const el = document.getElementById('cv-secrets');
+    if (!el) return;
+    el.innerHTML = `<p class="text-sm text-slate-400 italic">Loading secrets…</p>`;
+    try {
+        const d = await apiJson('/tenant/cred-vault/secrets?bucket=' + encodeURIComponent(_cvCurrentBucket));
+        const secrets = d.secrets || [];
+        if (!d.has_psk) {
+            el.innerHTML = `<p class="text-sm text-amber-600">This bucket has no pass-phrase yet. Set one before adding secrets.</p>`;
+            return;
+        }
+        if (!secrets.length) {
+            el.innerHTML = `<p class="text-sm text-slate-400 italic">No secrets stored in this bucket.</p>`;
+            return;
+        }
+        el.innerHTML = `
+          <table class="w-full text-sm">
+            <thead><tr class="text-left text-xs text-slate-500 uppercase tracking-wider border-b border-slate-200">
+              <th class="py-2">Name</th><th>Type</th><th>Mode</th><th>Description</th><th class="text-right">Actions</th>
+            </tr></thead>
+            <tbody>${secrets.map(_cvRenderSecretRow).join('')}</tbody>
+          </table>`;
+    } catch (e) {
+        el.innerHTML = `<p class="text-sm text-red-600">Failed to load secrets: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+function _cvRenderSecretRow(s) {
+    const enc = encodeURIComponent(s.name);
+    const mode = s.mode === 'hub'
+        ? '<span class="text-xs px-2 py-0.5 rounded-full bg-sky-100 text-sky-700" title="Automation-readable (hub-mode)">automation</span>'
+        : '<span class="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600" title="Pass-phrase-only (psk-mode)">pass-phrase</span>';
+    return `<tr class="border-b border-slate-100">
+      <td class="py-2 font-mono text-slate-800">${escapeHtml(s.name)}</td>
+      <td class="text-slate-600">${escapeHtml(s.type || 'generic')}</td>
+      <td>${mode}</td>
+      <td class="text-slate-500">${escapeHtml(s.description || '')}</td>
+      <td class="text-right whitespace-nowrap">
+        <button onclick="_cvRevealModal('${enc}')" class="px-2 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Reveal</button>
+        <button onclick="_cvDeleteModal('${enc}')" class="px-2 py-1 text-xs rounded-md border border-red-200 text-red-600 hover:bg-red-50">Delete</button>
+      </td>
+    </tr>`;
+}
+
+const _CV_INP = 'w-full px-3 py-2 text-sm border border-slate-300 rounded-md';
+
+function _cvSetPskModal() {
+    const cur = _cvBuckets.find(b => b.bucket === _cvCurrentBucket);
+    const hasPsk = cur && cur.has_psk;
+    const body = `
+      <h3 class="text-lg font-bold text-[#263040]">${hasPsk ? 'Change' : 'Set'} pass-phrase — ${escapeHtml(_cvBucketLabel(cur || { bucket: _cvCurrentBucket }))}</h3>
+      <p class="text-sm text-slate-500">The pass-phrase decrypts this bucket's pass-phrase-mode secrets. Changing it re-encrypts them; the hub never stores it.</p>
+      ${hasPsk ? `<input id="cv-old-psk" type="password" autocomplete="off" placeholder="current pass-phrase" class="${_CV_INP}">` : ''}
+      <input id="cv-new-psk" type="password" autocomplete="off" placeholder="new pass-phrase (min 8 chars)" class="${_CV_INP}">
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="document.getElementById('cv-psk-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button onclick="_cvDoSetPsk()" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Save</button>
+      </div>`;
+    openModal('cv-psk-modal', body, { backdropClose: true });
+}
+
+async function _cvDoSetPsk() {
+    const newPsk = document.getElementById('cv-new-psk')?.value || '';
+    const oldPsk = document.getElementById('cv-old-psk')?.value;
+    try {
+        await apiJson('/tenant/cred-vault/psk', { method: 'POST', body: JSON.stringify({ bucket: _cvCurrentBucket, new_psk: newPsk, old_psk: oldPsk }) });
+        document.getElementById('cv-psk-modal')?.remove();
+        showToast('Pass-phrase saved', 'success');
+        loadCredVault();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+function _cvAddSecretModal() {
+    const body = `
+      <h3 class="text-lg font-bold text-[#263040]">Add secret — ${escapeHtml(_cvBucketLabel({ bucket: _cvCurrentBucket }))}</h3>
+      <input id="cv-add-name" type="text" autocomplete="off" placeholder="secret name (e.g. henet-dns)" class="${_CV_INP}">
+      <div class="flex gap-2">
+        <select id="cv-add-type" onchange="_cvRenderAddFields()" class="${_CV_INP}">
+          <option value="login">Login (username + password)</option>
+          <option value="apikey">API key</option>
+          <option value="token">Token</option>
+          <option value="generic">Generic (key + value)</option>
+        </select>
+        <select id="cv-add-mode" class="${_CV_INP}" title="pass-phrase = human-only; automation = hub can read it unattended for tooling">
+          <option value="psk">Pass-phrase only</option>
+          <option value="hub">Automation-readable</option>
+        </select>
+      </div>
+      <div id="cv-add-fields"></div>
+      <input id="cv-add-desc" type="text" autocomplete="off" placeholder="description (optional)" class="${_CV_INP}">
+      <input id="cv-add-psk" type="password" autocomplete="off" placeholder="bucket pass-phrase" class="${_CV_INP}">
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="document.getElementById('cv-add-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button onclick="_cvDoAddSecret()" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Save</button>
+      </div>`;
+    openModal('cv-add-modal', body, { backdropClose: true });
+    _cvRenderAddFields();
+}
+
+function _cvRenderAddFields() {
+    const t = document.getElementById('cv-add-type')?.value || 'login';
+    const el = document.getElementById('cv-add-fields');
+    if (!el) return;
+    const f = (id, ph, type = 'text') => `<input id="${id}" type="${type}" autocomplete="off" placeholder="${ph}" class="${_CV_INP}">`;
+    if (t === 'login') el.innerHTML = f('cv-f-username', 'username') + f('cv-f-password', 'password', 'password');
+    else if (t === 'apikey') el.innerHTML = f('cv-f-apikey', 'api key', 'password');
+    else if (t === 'token') el.innerHTML = f('cv-f-token', 'token', 'password');
+    else el.innerHTML = f('cv-f-key', 'key') + f('cv-f-value', 'value', 'password');
+}
+
+function _cvCollectAddValue() {
+    const t = document.getElementById('cv-add-type')?.value || 'login';
+    const v = id => (document.getElementById(id)?.value || '');
+    if (t === 'login') return { username: v('cv-f-username'), password: v('cv-f-password') };
+    if (t === 'apikey') return { apikey: v('cv-f-apikey') };
+    if (t === 'token') return { token: v('cv-f-token') };
+    const k = v('cv-f-key').trim();
+    return k ? { [k]: v('cv-f-value') } : {};
+}
+
+async function _cvDoAddSecret() {
+    const name = (document.getElementById('cv-add-name')?.value || '').trim();
+    const type = document.getElementById('cv-add-type')?.value || 'generic';
+    const mode = document.getElementById('cv-add-mode')?.value || 'psk';
+    const description = document.getElementById('cv-add-desc')?.value || '';
+    const psk = document.getElementById('cv-add-psk')?.value || '';
+    const value = _cvCollectAddValue();
+    if (!name) { showToast('Name is required', 'error'); return; }
+    if (!Object.keys(value).length || Object.values(value).every(x => !x)) { showToast('Enter a value', 'error'); return; }
+    try {
+        await apiJson('/tenant/cred-vault/secret', { method: 'POST', body: JSON.stringify({ bucket: _cvCurrentBucket, name, value, mode, type, description, psk }) });
+        document.getElementById('cv-add-modal')?.remove();
+        showToast('Secret saved', 'success');
+        loadCredVault();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+function _cvRevealModal(enc) {
+    const name = decodeURIComponent(enc);
+    const body = `
+      <h3 class="text-lg font-bold text-[#263040]">Reveal — ${escapeHtml(name)}</h3>
+      <p class="text-sm text-slate-500">The pass-phrase is required and the plaintext is shown once, never cached. It is cleared from this page the moment you close the dialog.</p>
+      <input id="cv-rev-psk" type="password" autocomplete="off" placeholder="bucket pass-phrase" class="${_CV_INP}">
+      <div id="cv-rev-out"></div>
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="_cvClearReveal()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Close</button>
+        <button id="cv-rev-btn" onclick="_cvDoReveal('${enc}')" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Reveal</button>
+      </div>`;
+    const m = openModal('cv-rev-modal', body, { backdropClose: true });
+    // Purge any revealed plaintext from the DOM if the dialog is dismissed.
+    m.addEventListener('click', e => { if (e.target === m) _cvClearReveal(); });
+}
+
+async function _cvDoReveal(enc) {
+    const name = decodeURIComponent(enc);
+    const psk = document.getElementById('cv-rev-psk')?.value || '';
+    try {
+        const d = await apiJson('/tenant/cred-vault/reveal', { method: 'POST', body: JSON.stringify({ bucket: _cvCurrentBucket, name, psk }) });
+        _cvShowRevealed(d.value || {});
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+function _cvShowRevealed(value) {
+    const out = document.getElementById('cv-rev-out');
+    if (!out) return;
+    const rows = Object.keys(value).map(k => {
+        const enc = encodeURIComponent(k);
+        return `<div class="flex items-center gap-2 py-1">
+          <span class="text-xs font-bold text-slate-500 w-24 shrink-0">${escapeHtml(k)}</span>
+          <code class="cv-rev-val flex-1 px-2 py-1 bg-slate-100 rounded text-sm break-all" data-k="${enc}">${escapeHtml(String(value[k]))}</code>
+          <button onclick="_cvCopy('${enc}')" class="px-2 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Copy</button>
+        </div>`;
+    }).join('');
+    out.innerHTML = `<div class="mt-2 border-t border-slate-200 pt-2">${rows}</div>`;
+    // Once revealed, hide the pass-phrase field + reveal button (single-shot).
+    document.getElementById('cv-rev-psk')?.remove();
+    document.getElementById('cv-rev-btn')?.remove();
+}
+
+function _cvCopy(enc) {
+    const el = document.querySelector(`#cv-rev-out .cv-rev-val[data-k="${enc}"]`);
+    if (!el) return;
+    const txt = el.textContent;
+    navigator.clipboard?.writeText(txt).then(() => {
+        showToast('Copied — clipboard auto-clears in 20s', 'success');
+        // Self-clearing clipboard so the secret can't be harvested later.
+        setTimeout(() => { navigator.clipboard?.writeText('').catch(() => {}); }, 20000);
+    }).catch(() => showToast('Copy failed', 'error'));
+}
+
+function _cvClearReveal() {
+    // Overwrite the revealed plaintext before removing the node, so it never
+    // lingers in a detached DOM node the GC hasn't reclaimed yet.
+    document.querySelectorAll('#cv-rev-out .cv-rev-val').forEach(el => { el.textContent = ''; });
+    const out = document.getElementById('cv-rev-out');
+    if (out) out.innerHTML = '';
+    document.getElementById('cv-rev-modal')?.remove();
+}
+
+function _cvDeleteModal(enc) {
+    const name = decodeURIComponent(enc);
+    const body = `
+      <h3 class="text-lg font-bold text-[#263040]">Delete — ${escapeHtml(name)}</h3>
+      <p class="text-sm text-slate-500">This permanently removes the secret from the vault. The bucket pass-phrase is required.</p>
+      <input id="cv-del-psk" type="password" autocomplete="off" placeholder="bucket pass-phrase" class="${_CV_INP}">
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="document.getElementById('cv-del-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button onclick="_cvDoDelete('${enc}')" class="px-4 py-1.5 text-sm rounded-md bg-red-600 text-white font-bold hover:bg-red-700">Delete</button>
+      </div>`;
+    openModal('cv-del-modal', body, { backdropClose: true });
+}
+
+async function _cvDoDelete(enc) {
+    const name = decodeURIComponent(enc);
+    const psk = document.getElementById('cv-del-psk')?.value || '';
+    try {
+        await apiJson('/tenant/cred-vault/delete', { method: 'POST', body: JSON.stringify({ bucket: _cvCurrentBucket, name, psk }) });
+        document.getElementById('cv-del-modal')?.remove();
+        showToast('Secret deleted', 'success');
+        loadCredVault();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+// Migrate the console auto-identify login list into the Global Admin slot as a
+// hub-mode (automation-readable) secret, so the console seed loop can pull it
+// unattended alongside every other credential. Requires the __admin__ PSK.
+function _cvImportConsole() {
+    const body = `
+      <h3 class="text-lg font-bold text-[#263040]">Import console credentials</h3>
+      <p class="text-sm text-slate-500">Copies the current console auto-identify login list into the <b>Global Admin slot</b> as an automation-readable secret (<code>console-auto-credentials</code>). The console seed loop then pulls it from the vault unattended. Set the Global Admin slot pass-phrase first if you haven't.</p>
+      <input id="cv-imp-psk" type="password" autocomplete="off" placeholder="Global Admin slot pass-phrase" class="${_CV_INP}">
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="document.getElementById('cv-imp-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button onclick="_cvDoImportConsole()" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Import</button>
+      </div>`;
+    openModal('cv-imp-modal', body, { backdropClose: true });
+}
+
+async function _cvDoImportConsole() {
+    const psk = document.getElementById('cv-imp-psk')?.value || '';
+    try {
+        const d = await apiJson('/api/console/credentials/to-vault', { method: 'POST', body: JSON.stringify({ psk }) });
+        document.getElementById('cv-imp-modal')?.remove();
+        showToast(`Imported ${d.count} console credential(s) into the Global Admin slot`, 'success');
+        _cvCurrentBucket = _cvAdminSlot;
+        loadCredVault();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
 // ──────────────────────────────────────────────────────────────────
 

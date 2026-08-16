@@ -18,7 +18,8 @@ import types
 import pytest
 
 _CONSOLE = os.path.join(os.path.dirname(__file__), "..", "src", "routes", "console.py")
-_WANTED = {"_console_seed_credentials", "_console_mark_seeded"}
+_WANTED = {"_console_seed_credentials", "_console_mark_seeded",
+           "_console_load_credentials_resolved", "_console_creds_from_cred_vault"}
 
 
 def _load_seed_helpers(creds):
