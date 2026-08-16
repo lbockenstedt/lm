@@ -112,3 +112,17 @@ def test_orchestrate_collect_error_surfaces():
     assert res["status"] == "ERROR"
     assert "in use" in res["message"]
     assert hub.stored is None
+
+
+def test_hub_setting_overrides_env(monkeypatch):
+    class _H:
+        class state:
+            system_state = {}
+    monkeypatch.setenv("LM_CONSOLE_LLM_IDENTIFY", "true")
+    h = _H()
+    assert m.hub_llm_identify_enabled(h) is True          # env default
+    h.state.system_state["console_llm_identify_enabled"] = False
+    assert m.hub_llm_identify_enabled(h) is False          # stored setting wins
+    h.state.system_state["console_llm_identify_enabled"] = True
+    monkeypatch.delenv("LM_CONSOLE_LLM_IDENTIFY", raising=False)
+    assert m.hub_llm_identify_enabled(h) is True

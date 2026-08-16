@@ -43,8 +43,17 @@ _SYS_EXTRACT = (
 _IDENTITY_FIELDS = ("model", "os", "serial", "hostname", "confidence")
 
 
-def hub_llm_identify_enabled() -> bool:
-    """Whether the hub side of LLM identify is switched on (env, default off)."""
+def hub_llm_identify_enabled(hub=None) -> bool:
+    """Whether the hub side of LLM identify is switched on. A persisted hub
+    setting (the admin UI toggle) is authoritative once set; otherwise fall back
+    to the LM_CONSOLE_LLM_IDENTIFY env default (both default off)."""
+    if hub is not None:
+        try:
+            v = hub.state.system_state.get("console_llm_identify_enabled")
+        except Exception:  # noqa: BLE001
+            v = None
+        if v is not None:
+            return bool(v)
     return str(os.getenv("LM_CONSOLE_LLM_IDENTIFY", "")).strip().lower() in (
         "1", "true", "yes", "on")
 

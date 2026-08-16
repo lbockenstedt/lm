@@ -16112,7 +16112,7 @@ function _renderConsolePorts(el, data) {
             </td></tr>`;
     }).join('');
     const tools = admin
-        ? `<div class="flex justify-end gap-2 p-2 border-b border-slate-100"><button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button><button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button></div>`
+        ? `<div class="flex justify-end gap-2 p-2 border-b border-slate-100"><button id="console-llm-toggle" onclick="toggleConsoleLlmIdentify()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Enable/disable LLM-driven device identification (🤖 AI Identify)">🤖 AI Identify: …</button><button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button><button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button></div>`
         : '';
     el.innerHTML = `${tools}<div class="p-0 overflow-hidden"><table class="w-full text-left text-sm">
         <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>
@@ -16120,6 +16120,53 @@ function _renderConsolePorts(el, data) {
           <th class="px-4 py-3">Console agent</th><th class="px-4 py-3">Tenant</th>
           <th class="px-4 py-3 text-right">Actions</th></tr></thead>
         <tbody class="divide-y divide-slate-200">${rows}</tbody></table></div>`;
+    if (admin) refreshConsoleLlmToggle();
+}
+
+// Reflect the current LLM-identify toggle state on the console tools button.
+async function refreshConsoleLlmToggle() {
+    const btn = document.getElementById('console-llm-toggle');
+    if (!btn) return;
+    try {
+        const res = await fetch('/api/console/llm-identify', { credentials: 'same-origin' });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) { btn.textContent = '🤖 AI Identify: n/a'; return; }
+        _renderConsoleLlmToggle(btn, d);
+    } catch (e) { btn.textContent = '🤖 AI Identify: n/a'; }
+}
+
+function _renderConsoleLlmToggle(btn, d) {
+    const on = !!d.enabled;
+    btn.dataset.enabled = on ? '1' : '0';
+    btn.textContent = `🤖 AI Identify: ${on ? 'On' : 'Off'}`;
+    btn.className = 'text-[11px] px-3 py-1.5 rounded border ' + (on
+        ? 'border-violet-500 bg-violet-50 text-violet-700'
+        : 'border-slate-300 hover:bg-slate-50');
+    btn.title = on
+        ? (d.available ? 'LLM identify is ON (BugFixer agent connected). Click to disable.'
+                       : 'LLM identify is ON but the BugFixer LLM agent is NOT connected. Click to disable.')
+        : 'LLM identify is OFF. Click to enable 🤖 AI Identify.';
+}
+
+// Admin: flip the LLM-identify toggle (persists on the hub + pushes to spokes).
+async function toggleConsoleLlmIdentify() {
+    const btn = document.getElementById('console-llm-toggle');
+    if (!btn) return;
+    const next = btn.dataset.enabled !== '1';
+    try {
+        const res = await fetch('/api/console/llm-identify', {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: next }),
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(d.detail || 'Toggle failed', 'error'); return; }
+        _renderConsoleLlmToggle(btn, d);
+        if (next && !d.available) {
+            showToast('AI Identify enabled, but the BugFixer LLM agent is not connected yet.', 'info');
+        } else {
+            showToast(`🤖 AI Identify ${next ? 'enabled' : 'disabled'}`, next ? 'success' : 'info');
+        }
+    } catch (e) { showToast('Toggle failed: ' + e.message, 'error'); }
 }
 
 // Relative "last seen" string from an epoch-seconds timestamp (0/absent → '').
@@ -16283,12 +16330,14 @@ async function refreshConsoleDiagnostics() {
         if (d.recoveries > 1) return '<span class="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold uppercase">flapping</span>';
         return '<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase">recovered</span>';
     };
-    const tbl = `<table class="w-full text-left">
+    const failRows = rows.filter(d => d.open_failures || d.disconnects || d.currently_failing);
+    const identRows = rows.filter(d => d.identify && d.identify.attempts);
+    const failTbl = failRows.length ? `<div class="text-[11px] font-bold text-slate-500 uppercase mb-1">Serial connection failures</div><table class="w-full text-left mb-5">
         <thead class="text-slate-500 uppercase text-[10px] border-b border-slate-200"><tr>
           <th class="py-2 pr-3">Port</th><th class="py-2 pr-3">Agent</th><th class="py-2 pr-3">Status</th>
           <th class="py-2 pr-3 text-center">Open fails</th><th class="py-2 pr-3 text-center">Disconnects</th>
           <th class="py-2 pr-3 text-center">Recoveries</th><th class="py-2 pr-3">Last error</th><th class="py-2 pr-3">Last event</th>
-        </tr></thead><tbody>${rows.map(d => `<tr class="border-b border-slate-50">
+        </tr></thead><tbody>${failRows.map(d => `<tr class="border-b border-slate-50">
           <td class="py-2 pr-3 font-mono text-xs">${escapeHtml(d.alias || d.device || d.port_id)}</td>
           <td class="py-2 pr-3 text-xs">${escapeHtml(d.agent_name || d.spoke_id || '')}</td>
           <td class="py-2 pr-3">${statusPill(d)}</td>
@@ -16297,11 +16346,49 @@ async function refreshConsoleDiagnostics() {
           <td class="py-2 pr-3 text-center">${d.recoveries || 0}</td>
           <td class="py-2 pr-3 text-xs text-red-500 max-w-[16rem] truncate" title="${escapeHtml(d.last_error || '')}">${escapeHtml(d.last_error || '')}</td>
           <td class="py-2 pr-3 text-xs text-slate-400">${_consoleRelTime(Math.max(d.last_failure || 0, d.last_disconnect || 0, d.last_recovery || 0))}</td>
-        </tr>`).join('')}</tbody></table>`;
+        </tr>`).join('')}</tbody></table>` : '';
+    const identTbl = identRows.length ? `<div class="text-[11px] font-bold text-slate-500 uppercase mb-1">Identify / login telemetry</div><table class="w-full text-left">
+        <thead class="text-slate-500 uppercase text-[10px] border-b border-slate-200"><tr>
+          <th class="py-2 pr-3">Port</th><th class="py-2 pr-3">Via</th><th class="py-2 pr-3">Outcome</th>
+          <th class="py-2 pr-2 text-center" title="Login / Password / Shell prompt detected">L·P·S</th>
+          <th class="py-2 pr-2 text-center" title="credentials tried / available">Creds</th>
+          <th class="py-2 pr-2 text-center">Bytes</th><th class="py-2 pr-3">Why</th><th class="py-2 pr-3">Last</th>
+        </tr></thead><tbody>${identRows.map(d => _consoleIdentDiagRow(d)).join('')}</tbody></table>
+        <div class="mt-2 text-[10px] text-slate-400">Tip: click a row's “Why” to see the last raw line the device emitted (control chars stripped).</div>` : '';
     const errHtml = errs.length
         ? `<div class="mt-3 text-[11px] text-amber-600">Unreachable consoles: ${errs.map(([s, e]) => escapeHtml(s)).join(', ')}</div>` : '';
-    body.innerHTML = `<div class="text-[11px] text-slate-400 mb-2">${rows.length} port(s) with a failure/disconnect history (since each agent started).</div>${tbl}${errHtml}
+    body.innerHTML = `<div class="text-[11px] text-slate-400 mb-2">${failRows.length} port(s) with a failure/disconnect history · ${identRows.length} with identify attempts (since each agent started).</div>${failTbl}${identTbl}${errHtml}
       <div class="pt-4 flex justify-end"><button onclick="refreshConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">↻ Refresh</button></div>`;
+}
+
+// One row of the identify/login telemetry table (explains why a device is / isn't
+// being identified: what prompts were seen, creds tried, and the last raw line).
+function _consoleIdentDiagRow(d) {
+    const t = d.identify || {};
+    const yn = (b) => b ? '<span class="text-emerald-600 font-bold">✓</span>' : '<span class="text-slate-300">·</span>';
+    let pill;
+    if (t.logged_in) pill = '<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase">logged in</span>';
+    else if (t.shell_prompt_seen) pill = '<span class="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-[10px] font-bold uppercase">shell, no id</span>';
+    else if (t.password_prompt_seen) pill = '<span class="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold uppercase">auth rejected</span>';
+    else if (t.login_prompt_seen) pill = '<span class="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold uppercase">login prompt</span>';
+    else if (t.any_output) pill = '<span class="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 text-[10px] font-bold uppercase">no prompt</span>';
+    else pill = '<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase">silent</span>';
+    const via = t.method === 'llm' ? '🤖 AI' : '🔑 login';
+    const cmds = (t.method === 'llm' && (t.commands_run || t.rejected))
+        ? `<div class="text-[10px] text-slate-400">ran ${(t.commands_run || []).length}${(t.rejected || []).length ? ` · ${t.rejected.length} rejected` : ''}</div>` : '';
+    const vend = t.vendor ? ` <span class="text-[10px] text-blue-600 font-bold uppercase">${escapeHtml(t.vendor)}</span>` : '';
+    const why = escapeHtml(t.reason || '');
+    const tail = escapeHtml(t.tail || '(no output)');
+    return `<tr class="border-b border-slate-50 align-top">
+      <td class="py-2 pr-3 font-mono text-xs">${escapeHtml(d.alias || d.device || d.port_id)}${vend}</td>
+      <td class="py-2 pr-3 text-xs">${via}${cmds}</td>
+      <td class="py-2 pr-3">${pill}</td>
+      <td class="py-2 pr-2 text-center text-xs whitespace-nowrap">${yn(t.login_prompt_seen)}·${yn(t.password_prompt_seen)}·${yn(t.shell_prompt_seen)}</td>
+      <td class="py-2 pr-2 text-center text-xs">${t.creds_tried || 0}/${t.creds_available || 0}</td>
+      <td class="py-2 pr-2 text-center text-xs">${t.bytes || 0}</td>
+      <td class="py-2 pr-3 text-xs text-slate-500 max-w-[14rem]"><span class="cursor-help underline decoration-dotted" title="Last line seen from device:&#10;${tail}">${why}</span>${t.error ? `<div class="text-[10px] text-red-500">${escapeHtml(t.error)}</div>` : ''}</td>
+      <td class="py-2 pr-3 text-xs text-slate-400">${_consoleRelTime(t.last_attempt || 0)}</td>
+    </tr>`;
 }
 
 async function openConsoleCredentialsModal() {

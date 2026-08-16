@@ -282,36 +282,57 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
     Nudges the line and inspects the tail: if a shell prompt is already showing we
     return logged-in with no auth; if a ``login:``/``password:`` prompt is showing
     we try each credential once (username then password) until a shell prompt
-    appears. Returns ``(logged_in, credential_index, transcript)``. This is what
-    lets a device sitting at a bare login prompt — which shows no banner/system
-    info until you authenticate — be identified at all.
+    appears. Returns ``(logged_in, credential_index, transcript, diag)`` where
+    ``diag`` reports what was observed (prompt detection, bytes, creds tried) for
+    troubleshooting. This is what lets a device sitting at a bare login prompt —
+    which shows no banner/system info until you authenticate — be identified.
     """
+    diag: Dict[str, Any] = {"login_prompt_seen": False, "password_prompt_seen": False,
+                            "shell_prompt_seen": False, "creds_tried": 0,
+                            "bytes": 0, "any_output": False}
+
+    def _observe(tail: str) -> None:
+        if _LOGIN_PROMPT.search(tail):
+            diag["login_prompt_seen"] = True
+        if _PASSWORD_PROMPT.search(tail):
+            diag["password_prompt_seen"] = True
+        if _SHELL_PROMPT.search(tail):
+            diag["shell_prompt_seen"] = True
+
     write_fn(b"\r\n")
     transcript = _read_until(read_fn, [_LOGIN_PROMPT, _PASSWORD_PROMPT, _SHELL_PROMPT], banner_secs)
+    diag["bytes"] = len(transcript)
+    diag["any_output"] = bool(transcript.strip())
     tail = transcript[-200:]
+    _observe(tail)
     at_login = bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail))
     if not at_login:
         # Already at a shell (no auth), or nothing recognizable on the line.
-        return bool(_SHELL_PROMPT.search(tail)), None, transcript
+        return bool(_SHELL_PROMPT.search(tail)), None, transcript, diag
     if not credentials:
-        return False, None, transcript
+        return False, None, transcript, diag
     for idx, cred in enumerate(credentials):
+        diag["creds_tried"] = idx + 1
         tail = transcript[-200:]
         if _LOGIN_PROMPT.search(tail):
             write_fn((cred.get("username", "") + "\r").encode())
             transcript += _read_until(read_fn, [_PASSWORD_PROMPT, _SHELL_PROMPT, _LOGIN_PROMPT], step_secs)
             tail = transcript[-200:]
+            _observe(tail)
         if _PASSWORD_PROMPT.search(tail):
             write_fn((cred.get("password", "") + "\r").encode())
             transcript += _read_until(read_fn, [_SHELL_PROMPT, _LOGIN_PROMPT, _PASSWORD_PROMPT], step_secs)
             tail = transcript[-200:]
+            _observe(tail)
         if _SHELL_PROMPT.search(tail) and not (_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)):
-            return True, idx, transcript
+            diag["bytes"] = len(transcript)
+            return True, idx, transcript, diag
         # Auth failed → the device re-shows a login prompt; nudge and let the loop
         # try the next credential (attempt cap = len(credentials), no re-hammering).
         write_fn(b"\r")
         transcript += _read_until(read_fn, [_LOGIN_PROMPT, _PASSWORD_PROMPT, _SHELL_PROMPT], 2.0)
-    return False, None, transcript
+    diag["bytes"] = len(transcript)
+    return False, None, transcript, diag
 
 
 def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
@@ -326,15 +347,17 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     Read-only: only the matched profile's commands are sent.
     """
     result: Dict[str, Any] = {"banner": "", "vendor": None, "logged_in": False,
-                              "credential_index": None, "identity": {}, "outputs": {}}
+                              "credential_index": None, "identity": {}, "outputs": {},
+                              "diag": {}}
     # 1. Vendor-agnostic login FIRST. A device at a bare login prompt shows no
     #    banner/system info until authenticated, so we must log in before we can
     #    detect the vendor (and even unknown vendors get a captured post-login
     #    banner for the passive-glean / LLM-identify paths to use).
-    logged_in, cred_idx, transcript = _generic_login(read_fn, write_fn, credentials, banner_secs)
+    logged_in, cred_idx, transcript, diag = _generic_login(read_fn, write_fn, credentials, banner_secs)
     result["banner"] = transcript[-4000:]
     result["logged_in"] = logged_in
     result["credential_index"] = cred_idx
+    result["diag"] = _login_diag(diag, transcript, credentials)
 
     # 2. Detect the vendor from everything seen (pre- and post-login).
     profile = detect_vendor(transcript)
@@ -358,6 +381,34 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     return result
 
 
+def _sanitize_tail(text: str, n: int = 240) -> str:
+    """A short, printable tail of a transcript for troubleshooting telemetry —
+    control bytes collapsed to spaces so it renders safely in the UI/logs."""
+    tail = (text or "")[-n:]
+    return re.sub(r"[^\x20-\x7e]+", " ", tail).strip()
+
+
+def _login_diag(diag: Dict[str, Any], transcript: str, credentials) -> Dict[str, Any]:
+    """Assemble the login telemetry block from a _generic_login diag + transcript.
+    Adds a printable tail and a human ``reason`` for why login didn't complete."""
+    d = dict(diag or {})
+    d["creds_available"] = len(credentials or [])
+    d["tail"] = _sanitize_tail(transcript)
+    if d.get("shell_prompt_seen"):
+        d["reason"] = "reached shell prompt"
+    elif not d.get("any_output"):
+        d["reason"] = "no output from device (silent line or wrong baud)"
+    elif not (d.get("login_prompt_seen") or d.get("password_prompt_seen")):
+        d["reason"] = "output seen but no recognizable login/password prompt"
+    elif not d.get("creds_available"):
+        d["reason"] = "login prompt seen but no stored credentials to try"
+    elif d.get("password_prompt_seen"):
+        d["reason"] = "credentials rejected (re-prompted for login/password)"
+    else:
+        d["reason"] = "sent username but no password prompt followed"
+    return d
+
+
 def run_commands(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
                  credentials: List[Dict[str, str]], commands: List[str],
                  banner_secs: float = 3.0, cmd_secs: float = 4.0) -> Dict[str, Any]:
@@ -369,14 +420,15 @@ def run_commands(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     anything that fails is skipped and reported in ``rejected`` (never written to
     the line). If we never authenticate (a login prompt is still showing), no
     commands are sent. Returns
-    ``{banner, logged_in, credential_index, outputs, rejected}``.
+    ``{banner, logged_in, credential_index, outputs, rejected, diag}``.
     """
     result: Dict[str, Any] = {"banner": "", "logged_in": False, "credential_index": None,
-                              "outputs": {}, "rejected": []}
-    logged_in, cred_idx, transcript = _generic_login(read_fn, write_fn, credentials, banner_secs)
+                              "outputs": {}, "rejected": [], "diag": {}}
+    logged_in, cred_idx, transcript, diag = _generic_login(read_fn, write_fn, credentials, banner_secs)
     result["banner"] = transcript[-4000:]
     result["logged_in"] = logged_in
     result["credential_index"] = cred_idx
+    result["diag"] = _login_diag(diag, transcript, credentials)
     tail = transcript[-200:]
     if not logged_in and (_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)):
         return result  # never authenticated — don't send commands into a login prompt
