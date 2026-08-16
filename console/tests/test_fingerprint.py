@@ -224,3 +224,76 @@ def test_passive_identify_linux_prompt_no_false_serial():
 def test_passive_identify_empty_and_noise():
     assert fp.passive_identify("") == {"vendor": None, "identity": {}}
     assert fp.passive_identify("random syslog line, nothing useful\r\n") == {"vendor": None, "identity": {}}
+
+
+# ── read-only command allowlist (safety gate for LLM-suggested commands) ─────
+def test_is_readonly_command_allows_read_verbs_and_pagers():
+    ok = [
+        "show version", "show running-config", "show configuration",
+        "display version", "get system status", "cat /proc/cpuinfo",
+        "uname -a", "hostname", "ls /etc", "terminal length 0",
+        "screen-length 0 temporary", "set cli screen-length 0", "no page",
+    ]
+    for c in ok:
+        assert fp.is_readonly_command(c) is True, c
+
+
+def test_is_readonly_command_rejects_mutations_and_chaining():
+    bad = [
+        "", "   ", "configure terminal", "conf t", "write memory",
+        "erase startup-config", "reload", "delete flash:", "clear counters",
+        "copy run start", "set hostname X", "no shutdown", "reboot",
+        "rm -rf /", "shutdown -h now", "request system reboot",
+        "show run; reload", "show run | delete", "show ver && reboot",
+        "cat x > y", "show run`reboot`", "ping 8.8.8.8", "ssh host",
+        "enable", "sudo cat /etc/shadow",
+    ]
+    for c in bad:
+        assert fp.is_readonly_command(c) is False, c
+
+
+class _CmdChan:
+    """Login-prompt device that answers a fixed set of commands post-login."""
+    def __init__(self):
+        self.buf = bytearray(b"\r\nbox login: ")
+        self.state = "login"
+    def read(self):
+        out = bytes(self.buf[:256]); del self.buf[:256]; return out
+    def write(self, b):
+        s = b.decode(errors="replace")
+        if self.state == "login" and s.strip():
+            self.state = "password"; self.buf += b"\r\nPassword: "
+        elif self.state == "password" and s.strip():
+            self.state = "shell"; self.buf += b"\r\nbox#"
+        elif "show version" in s:
+            self.buf += b"\r\nVendorOS v9.9 serial ZZ42\r\nbox#"
+        elif s.strip():
+            self.buf += b"\r\nbox#"
+
+
+def test_run_commands_logs_in_and_runs_only_allowlisted():
+    chan = _CmdChan()
+    res = fp.run_commands(chan.read, chan.write, [{"username": "a", "password": "b"}],
+                          ["show version", "reload", "configure terminal"])
+    assert res["logged_in"] is True
+    assert "show version" in res["outputs"]
+    assert "ZZ42" in res["outputs"]["show version"]
+    assert "reload" in res["rejected"] and "configure terminal" in res["rejected"]
+
+
+def test_run_commands_no_auth_sends_nothing():
+    class _StuckLogin:
+        def __init__(self): self.buf = bytearray(b"\r\nbox login: "); self.sent = []
+        def read(self):
+            out = bytes(self.buf[:256]); del self.buf[:256]; return out
+        def write(self, b):
+            s = b.decode(errors="replace")
+            self.sent.append(s)
+            if s.strip():
+                self.buf += b"\r\nLogin incorrect\r\nbox login: "
+    chan = _StuckLogin()
+    res = fp.run_commands(chan.read, chan.write, [{"username": "x", "password": "y"}],
+                          ["show version"])
+    assert res["logged_in"] is False
+    assert res["outputs"] == {}
+    assert "show version" not in " ".join(chan.sent)

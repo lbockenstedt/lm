@@ -157,6 +157,57 @@ _LOGIN_PROMPT = re.compile(r"(?:[Ll]ogin|[Uu]ser\s?name)\s*:\s*$")
 _PASSWORD_PROMPT = re.compile(r"[Pp]assword\s*:\s*$")
 _SHELL_PROMPT = re.compile(r"\S[>#$%]\s*$")
 
+# ── Read-only command allowlist (safety gate for LLM-suggested commands) ───────
+# When an LLM proposes commands to run on an unknown device, EVERY command must
+# pass this gate before it touches the serial line. The guarantee we preserve:
+# identify/collect only ever sends non-mutating, read-only commands.
+_READONLY_VERBS = frozenset({
+    # network-OS operational verbs
+    "show", "display", "get", "fetch", "list",
+    # unix read-only introspection
+    "cat", "head", "tail", "ls", "dir", "pwd", "more", "less", "uname",
+    "hostname", "id", "whoami", "uptime", "date", "env", "printenv",
+    "lscpu", "lsusb", "lspci", "lsblk", "dmesg", "df", "free", "arp",
+    "netstat", "version", "ver",
+})
+# Session-local pager/length controls — not persisted, safe to send verbatim.
+_SAFE_PAGER_CMDS = frozenset({
+    "terminal length 0", "terminal pager 0", "terminal pager off",
+    "set terminal length 0", "set cli screen-length 0", "set cli pager off",
+    "set length 0", "screen-length 0 temporary", "no page", "no paging",
+    "environment no more", "no more",
+})
+# Any of these appearing ANYWHERE in a command → hard reject (defence in depth,
+# even though chaining/redirection metacharacters are already blocked).
+_MUTATION_WORDS = frozenset({
+    "config", "configure", "conf", "set", "write", "wr", "erase", "delete",
+    "del", "remove", "rm", "reload", "reboot", "restart", "clear", "copy",
+    "cp", "mv", "format", "boot", "shutdown", "no", "commit", "rollback",
+    "request", "start", "stop", "sudo", "su", "dd", "mkfs", "kill", "halt",
+    "poweroff", "save", "factory-reset", "default", "add", "flush", "tftp",
+    "scp", "install", "upgrade", "downgrade", "load", "import", "export",
+    "tee", "renew", "release", "ping", "traceroute", "telnet", "ssh", "test",
+    "debug", "enable", "disable", "power",
+})
+_META_TOKENS = ("\n", "\r", ";", "|", "&", "`", "$(", ">", "<", "\\", "\x00")
+
+
+def is_readonly_command(cmd: str) -> bool:
+    """True only if ``cmd`` is a single, non-mutating, read-only command safe to
+    send to a device we're identifying. Rejects chaining/redirection/substitution
+    metacharacters, any mutation keyword, and any verb not on the allowlist.
+    Session-local pager controls are explicitly permitted."""
+    c = (cmd or "").strip()
+    if not c or any(t in c for t in _META_TOKENS):
+        return False
+    low = c.lower()
+    if low in _SAFE_PAGER_CMDS:
+        return True
+    words = low.split()
+    if words[0] not in _READONLY_VERBS:
+        return False
+    return not any(w in _MUTATION_WORDS for w in words)
+
 
 def passive_identify(text: str) -> Dict[str, Any]:
     """Best-effort identity from PASSIVELY captured console text — no login, no
@@ -304,6 +355,40 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         outputs[cmd] = _read_until(read_fn, [profile["prompt"]], cmd_secs)
     result["outputs"] = outputs
     result["identity"] = parse_identity(profile, outputs)
+    return result
+
+
+def run_commands(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
+                 credentials: List[Dict[str, str]], commands: List[str],
+                 banner_secs: float = 3.0, cmd_secs: float = 4.0) -> Dict[str, Any]:
+    """Log in generically, then run a caller-supplied list of READ-ONLY commands
+    and capture per-command output — the primitive behind LLM-driven identify on
+    devices the built-in profiles don't recognize.
+
+    Every command is validated by :func:`is_readonly_command` before it is sent;
+    anything that fails is skipped and reported in ``rejected`` (never written to
+    the line). If we never authenticate (a login prompt is still showing), no
+    commands are sent. Returns
+    ``{banner, logged_in, credential_index, outputs, rejected}``.
+    """
+    result: Dict[str, Any] = {"banner": "", "logged_in": False, "credential_index": None,
+                              "outputs": {}, "rejected": []}
+    logged_in, cred_idx, transcript = _generic_login(read_fn, write_fn, credentials, banner_secs)
+    result["banner"] = transcript[-4000:]
+    result["logged_in"] = logged_in
+    result["credential_index"] = cred_idx
+    tail = transcript[-200:]
+    if not logged_in and (_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)):
+        return result  # never authenticated — don't send commands into a login prompt
+    outputs: Dict[str, str] = {}
+    for raw in (commands or []):
+        cmd = str(raw).strip()
+        if not is_readonly_command(cmd):
+            result["rejected"].append(cmd)
+            continue
+        write_fn((cmd + "\r").encode())
+        outputs[cmd] = _read_until(read_fn, [_SHELL_PROMPT], cmd_secs)
+    result["outputs"] = outputs
     return result
 
 

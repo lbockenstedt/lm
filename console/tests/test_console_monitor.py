@@ -189,3 +189,50 @@ def test_diagnostics_counts_disconnect(spoke):
     assert good["disconnects"] == 1
 
 
+
+
+def test_llm_collect_disabled_by_default(spoke):
+    res = asyncio.run(spoke.handle_command(
+        "CONSOLE_LLM_COLLECT", {"port_id": "good", "commands": ["show version"]}))
+    assert res["status"] == "ERROR"
+    assert "disabled" in res["message"].lower()
+
+
+class _ScriptedLine:
+    """Login-prompt device answering one command, for the collect handler test."""
+    def __init__(self, *a, **k):
+        self.buf = bytearray(b"\r\ndev login: ")
+        self.state = "login"
+    def read(self, n=256):
+        out = bytes(self.buf[:n]); del self.buf[:n]; return out
+    def write(self, b):
+        s = b.decode(errors="replace")
+        if self.state == "login" and s.strip():
+            self.state = "password"; self.buf += b"\r\nPassword: "
+        elif self.state == "password" and s.strip():
+            self.state = "shell"; self.buf += b"\r\ndev#"
+        elif "show version" in s:
+            self.buf += b"\r\nAcme NOS 1.2 SN=QQ7\r\ndev#"
+        elif s.strip():
+            self.buf += b"\r\ndev#"
+    def close(self):
+        pass
+
+
+def test_llm_collect_runs_when_enabled(monkeypatch, tmp_path):
+    monkeypatch.setattr(sm, "serial", _FakeSerial)
+    monkeypatch.setattr(cs, "enumerate_ports",
+                        lambda: [{"port_id": "good", "device": "/dev/ttyUSB0", "product": "x"}])
+    monkeypatch.setattr(cs, "open_raw", lambda *a, **k: _ScriptedLine())
+    sp = cs.ConsoleSpoke("console-1", {"console_monitor": True, "auto_identify": False,
+                                       "console_llm_identify": True})
+    sp.store = sm.PortStore(path=tmp_path / "ports.json")
+    sp._monitor_task = object(); sp._autoprobe_task = object()
+    sp._credentials = [{"username": "a", "password": "b"}]
+    res = asyncio.run(sp.handle_command(
+        "CONSOLE_LLM_COLLECT",
+        {"port_id": "good", "commands": ["show version", "reload"]}))
+    assert res["status"] == "SUCCESS"
+    assert res["logged_in"] is True
+    assert "QQ7" in res["outputs"]["show version"]
+    assert "reload" in res["rejected"]
