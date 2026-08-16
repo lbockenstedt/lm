@@ -34,6 +34,38 @@ def test_sanitize_console_text_strips_vt100():
     assert fp.sanitize_console_text("") == ""
 
 
+def test_prompt_hostname():
+    # ArubaOS-Switch CLI prompt through VT100 noise → the switch hostname.
+    assert fp.prompt_hostname("\x1b[24;1HMIA-SW-AOSS> ") == "MIA-SW-AOSS"
+    assert fp.prompt_hostname("Switch1#\r\n") == "Switch1"
+    assert fp.prompt_hostname("admin@edge-1:~$ ") == "edge-1"
+    # last prompt wins when several are present
+    assert fp.prompt_hostname("old>\r\nnew> ") == "new"
+    # login/password prompts are not hostnames
+    assert fp.prompt_hostname("Switch login: ") == ""
+    assert fp.prompt_hostname("") == ""
+
+
+def test_run_identify_arubaos_switch_prompt_hostname():
+    # AOS-S rejects the profile's identity commands ("Invalid input"), so the
+    # hostname must come from the device's own CLI prompt.
+    lines = iter([
+        b"\r\nMIA-SW-AOSS> ",           # nudge → prompt (vendor detected here)
+        b"Invalid input: no page\r\nMIA-SW-AOSS> ",
+        b"Invalid input: show\r\nMIA-SW-AOSS> ",
+    ])
+
+    def _read():
+        try:
+            return next(lines)
+        except StopIteration:
+            return b""
+
+    res = fp.run_identify(_read, lambda b: None, [])
+    assert res["vendor"] == "hp-procurve"
+    assert res["identity"].get("hostname") == "MIA-SW-AOSS"
+
+
 def test_normalize_mac():
     assert fp.normalize_mac("0011.2233.4455") == "00:11:22:33:44:55"
     assert fp.normalize_mac("00:11:22:33:44:55") == "00:11:22:33:44:55"

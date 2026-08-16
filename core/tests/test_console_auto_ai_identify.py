@@ -42,7 +42,11 @@ class _Hub(HubVncConsoleMixin):
 
 def _run(coro):
     import asyncio
-    return asyncio.get_event_loop().run_until_complete(coro)
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 @pytest.fixture(autouse=True)
@@ -99,3 +103,26 @@ def test_no_escalation_when_ai_disabled(monkeypatch):
     assert hub.orchestrated == []
     # disabled → falls through to existing behavior (placeholder sync).
     assert hub.synced and hub.synced[0][0] == "NETBOX_SYNC_DEVICES"
+
+
+def test_product_string_used_as_name_over_port_id():
+    hub = _Hub()
+    _run(hub._handle_console_probe("console-1", {
+        "port_id": "usb-067b:2303@6-2.4", "vendor": "hp-procurve", "identity": {},
+        "banner": "MIA-SW-AOSS> ", "method": "login",
+        "product": "USB Serial Controller",
+    }))
+    dev = hub.synced[0][1]["devices"][0]
+    assert dev["hostname"] == "USB Serial Controller"  # not the cryptic port id
+
+
+def test_real_hostname_beats_product_string():
+    hub = _Hub()
+    _run(hub._handle_console_probe("console-1", {
+        "port_id": "usb-1", "vendor": "hp-procurve",
+        "identity": {"hostname": "MIA-SW-AOSS"},
+        "banner": "MIA-SW-AOSS> ", "method": "login",
+        "product": "USB Serial Controller",
+    }))
+    dev = hub.synced[0][1]["devices"][0]
+    assert dev["hostname"] == "MIA-SW-AOSS"  # real hostname wins

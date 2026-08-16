@@ -151,7 +151,11 @@ class HubVncConsoleMixin:
                 and str(data.get("method") or "").strip() != "llm"):
             if await self._auto_llm_console_identify(spoke_id, data):
                 return
-        hostname = str(real_host or serial or data.get("port_id") or "").strip()
+        # Name preference: the device's real hostname (or serial), else the USB
+        # adapter product string (e.g. "USB Serial Controller") — a friendlier
+        # name than the cryptic port id, which is the last resort.
+        product = str(data.get("product") or "").strip()
+        hostname = str(real_host or serial or product or data.get("port_id") or "").strip()
         if not (ip or mac or hostname):
             return
         netbox = self.get_spoke_by_type("ipam")

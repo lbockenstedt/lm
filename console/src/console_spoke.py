@@ -144,6 +144,14 @@ class ConsoleSpoke(BaseSpoke):
                 return p["device"]
         return None
 
+    def _port_product(self, port_id: str) -> str:
+        """The USB/adapter product string for a port (e.g. 'USB Serial
+        Controller') — a friendlier fallback name than the raw port id."""
+        for p in enumerate_ports():
+            if p["port_id"] == port_id:
+                return (p.get("product") or "").strip()
+        return ""
+
     # ── command dispatch ──────────────────────────────────────────────────────
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
         cmd = command_type.upper()
@@ -593,7 +601,7 @@ class ConsoleSpoke(BaseSpoke):
                 "tenant_id": self.store.get(port_id).get("tenant_id", ""),  # per-port override
                 "vendor": probe["vendor"], "identity": probe["identity"],
                 "banner": probe["banner"][-500:], "logged_in": probe["logged_in"],
-                "method": method,
+                "method": method, "product": self._port_product(port_id),
             })
 
     def _ensure_autoprobe_task(self) -> None:
