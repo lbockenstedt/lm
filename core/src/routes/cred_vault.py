@@ -102,7 +102,7 @@ def register(app, hub, ctx):
             rec = existing.get(b, {"bucket": b, "has_psk": False, "secret_count": 0})
             out.append({**rec, "is_admin_slot": b == _cv.ADMIN_BUCKET})
         return {"buckets": out, "is_global_admin": _is_global_admin(sess),
-                "admin_slot": _cv.ADMIN_BUCKET}
+                "admin_slot": _cv.ADMIN_BUCKET, "vault_available": _cv._vault_available(hub)}
 
     @app.get("/tenant/cred-vault/secrets")
     async def cv_secrets(request: Request):

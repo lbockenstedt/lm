@@ -8,6 +8,12 @@ broker (:mod:`key_vault`) — the same SSO-app-certificate auth as the DR kit �
 no new Azure config is required beyond the vault URL already set under
 ``global_config["key_vault"]``.
 
+Storage backend is transparent: when a Key Vault URL is configured the encrypted
+ciphertext is stored in the vault; on a standalone/vault-less deployment (the hub
+running as a plain local VM) it falls back to an encrypted-blob map in hub state.
+The ciphertext is Fernet-encrypted either way, so the vault is *used when
+available* but never *required*.
+
 Security model (decided with the operator)
 ------------------------------------------
 * **Reach = role, decrypt = PSK.** Which buckets a caller can *reach* is decided
@@ -55,6 +61,8 @@ _KV_PREFIX = "cred-"                # opaque Key Vault secret-name prefix
 _MODE_PSK = "psk"
 _MODE_HUB = "hub"
 _MODES = (_MODE_PSK, _MODE_HUB)
+_STORE_KV = "kv"                    # ciphertext lives in Azure Key Vault
+_STORE_LOCAL = "local"             # ciphertext lives in hub state (no-KV deploy)
 
 # scrypt work factors (N,r,p) — ~16 MiB memory, interactive-fast.
 _SCRYPT_N = 1 << 14
@@ -93,12 +101,17 @@ def _meta(hub) -> Dict[str, Any]:
     """The persistent metadata blob under ``global_config["cred_vault"]``.
 
     Shape: ``{"buckets": {bucket: {"psk": {salt,hash}, "created_at": ...}},
-    "secrets": {bucket: {name: {mode,type,description,kv_name,salt,...}}}}``.
-    Values are NEVER stored here — only in Key Vault."""
+    "secrets": {bucket: {name: {mode,type,description,kv_name,salt,store,...}}},
+    "blobs": {kv_name: ciphertext}}``. Plaintext is NEVER stored here. When
+    Azure Key Vault is configured the ciphertext lives in the vault; on a
+    vault-less deployment it falls back to the encrypted ``blobs`` map (the
+    ciphertext is already Fernet-encrypted, exactly like the other at-rest
+    encrypted blobs in hub state)."""
     gc = hub.state.system_state.setdefault("global_config", {})
     cv = gc.setdefault("cred_vault", {})
     cv.setdefault("buckets", {})
     cv.setdefault("secrets", {})
+    cv.setdefault("blobs", {})
     return cv
 
 
@@ -110,11 +123,51 @@ def _oidc(hub):
     return get_oidc_config(hub)
 
 
+def _vault_available(hub) -> bool:
+    """True when Azure Key Vault is configured (a vault URL is set). Standalone
+    hubs deployed as a plain VM without a vault return False and transparently
+    use the local encrypted-blob store instead."""
+    try:
+        return bool(str((_kv.get_config(hub) or {}).get("vault_url") or "").strip())
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _vault_url(hub) -> str:
     url = str((_kv.get_config(hub) or {}).get("vault_url") or "").strip()
     if not url:
         raise CredVaultError("Azure Key Vault is not configured (set the vault URL in Setup → Azure → Key Vault)")
     return url
+
+
+# ── storage backend (Key Vault when configured, else local hub state) ────────
+def _secret_store(sm: Dict[str, Any]) -> str:
+    """Which backend a stored secret lives in (``kv`` for pre-existing records
+    without an explicit marker — they were vault-only before this fallback)."""
+    return sm.get("store") or _STORE_KV
+
+
+async def _store_put(hub, kv_name: str, token: str, store: str) -> None:
+    if store == _STORE_LOCAL:
+        _meta(hub)["blobs"][kv_name] = token
+    else:
+        await _kv.set_secret(_oidc(hub), _vault_url(hub), kv_name, token)
+
+
+async def _store_get(hub, kv_name: str, store: str) -> Optional[str]:
+    if store == _STORE_LOCAL:
+        return _meta(hub)["blobs"].get(kv_name)
+    return await _kv.get_secret(_oidc(hub), _vault_url(hub), kv_name)
+
+
+async def _store_del(hub, kv_name: str, store: str) -> None:
+    if store == _STORE_LOCAL:
+        _meta(hub)["blobs"].pop(kv_name, None)
+        return
+    try:
+        await _kv.delete_secret(_oidc(hub), _vault_url(hub), kv_name)
+    except _kv.KeyVaultError:
+        pass  # metadata removal proceeds even if the vault delete 404s/soft-deletes
 
 
 # ── bucket / PSK management ─────────────────────────────────────────────────
@@ -170,7 +223,7 @@ async def _rekey_bucket(hub, bucket: str, old_psk: str, new_psk: str) -> None:
         value = await _fetch_and_decrypt(hub, bucket, name, psk=old_psk)
         salt = secrets.token_bytes(16)
         token = _psk_fernet(new_psk, salt).encrypt(json.dumps(value).encode("utf-8")).decode("ascii")
-        await _kv.set_secret(_oidc(hub), _vault_url(hub), sm["kv_name"], token)
+        await _store_put(hub, sm["kv_name"], token, _secret_store(sm))
         sm["salt"] = _b64(salt)
         sm["updated_at"] = _now()
     _save(hub)
@@ -195,7 +248,7 @@ def list_secrets(hub, bucket: str) -> List[Dict[str, Any]]:
         out.append({
             "name": name, "type": sm.get("type", "generic"), "mode": sm.get("mode", _MODE_PSK),
             "description": sm.get("description", ""), "fields": sm.get("fields", []),
-            "automation": sm.get("mode") == _MODE_HUB,
+            "automation": sm.get("mode") == _MODE_HUB, "store": _secret_store(sm),
             "created_at": sm.get("created_at"), "updated_at": sm.get("updated_at"),
             "last_accessed_at": sm.get("last_accessed_at"),
         })
@@ -221,6 +274,9 @@ async def put_secret(hub, bucket: str, name: str, value: Dict[str, Any], *,
     cv = _meta(hub)
     existing = cv["secrets"].setdefault(bucket, {}).get(name)
     kv_name = existing["kv_name"] if existing else _KV_PREFIX + uuid.uuid4().hex
+    # Keep a replaced secret in its original backend; otherwise pick Key Vault
+    # when configured, else the local encrypted-blob store (vault-less deploy).
+    store = _secret_store(existing) if existing else (_STORE_KV if _vault_available(hub) else _STORE_LOCAL)
     payload = dict(value)
     payload["_bucket"] = bucket
     payload["_name"] = name
@@ -234,26 +290,26 @@ async def put_secret(hub, bucket: str, name: str, value: Dict[str, Any], *,
         token = _psk_fernet(psk, salt_bytes).encrypt(plain).decode("ascii")
         salt = _b64(salt_bytes)
 
-    await _kv.set_secret(_oidc(hub), _vault_url(hub), kv_name, token)
+    await _store_put(hub, kv_name, token, store)
     now = _now()
     cv["secrets"][bucket][name] = {
         "mode": mode, "type": sec_type, "description": description,
         "fields": sorted(k for k in value if not k.startswith("_")),
-        "kv_name": kv_name, "salt": salt,
+        "kv_name": kv_name, "salt": salt, "store": store,
         "created_at": existing["created_at"] if existing else now,
         "created_by": existing["created_by"] if existing else actor,
         "updated_at": now, "updated_by": actor,
         "last_accessed_at": existing.get("last_accessed_at") if existing else None,
     }
     _save(hub)
-    return {"bucket": bucket, "name": name, "mode": mode}
+    return {"bucket": bucket, "name": name, "mode": mode, "store": store}
 
 
 async def _fetch_and_decrypt(hub, bucket: str, name: str, *, psk: Optional[str]) -> Dict[str, Any]:
     sm = _meta(hub)["secrets"].get(bucket, {}).get(name)
     if not sm:
         raise CredVaultError(f"secret '{name}' not found")
-    token = await _kv.get_secret(_oidc(hub), _vault_url(hub), sm["kv_name"])
+    token = await _store_get(hub, sm["kv_name"], _secret_store(sm))
     if token is None:
         raise CredVaultError(f"secret '{name}' is missing from the vault")
     try:
@@ -301,9 +357,6 @@ async def delete_secret(hub, bucket: str, name: str, *, psk: str, actor: str = "
     sm = cv["secrets"].get(bucket, {}).get(name)
     if not sm:
         raise CredVaultError(f"secret '{name}' not found")
-    try:
-        await _kv.delete_secret(_oidc(hub), _vault_url(hub), sm["kv_name"])
-    except _kv.KeyVaultError:
-        pass  # metadata removal proceeds even if the vault delete 404s/soft-deletes
+    await _store_del(hub, sm["kv_name"], _secret_store(sm))
     del cv["secrets"][bucket][name]
     _save(hub)

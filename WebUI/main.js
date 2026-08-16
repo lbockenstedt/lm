@@ -4263,6 +4263,7 @@ async function apiJson(url, options = {}) {
 // shown once, copied via a self-clearing clipboard, and purged from the DOM.
 let _cvIsGlobalAdmin = false;
 let _cvAdminSlot = '__admin__';
+let _cvVaultAvailable = true;
 let _cvBuckets = [];
 let _cvCurrentBucket = '';
 
@@ -4273,6 +4274,7 @@ async function loadCredVault() {
         const d = await apiJson('/tenant/cred-vault/buckets');
         _cvIsGlobalAdmin = !!d.is_global_admin;
         _cvAdminSlot = d.admin_slot || '__admin__';
+        _cvVaultAvailable = d.vault_available !== false;
         _cvBuckets = d.buckets || [];
         if (!_cvBuckets.some(b => b.bucket === _cvCurrentBucket)) {
             _cvCurrentBucket = _cvBuckets.length ? _cvBuckets[0].bucket : '';
@@ -4303,8 +4305,11 @@ function _cvRenderShell() {
         <button onclick="_cvLoadOther()" class="px-3 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Load</button>
         <button onclick="_cvImportConsole()" title="Copy the console auto-identify login list into the Global Admin slot (automation-readable)" class="px-3 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Import console creds</button>
       </div>` : '';
+    const storageHint = _cvVaultAvailable ? '' : `
+      <div class="text-xs px-3 py-2 rounded-md bg-amber-50 text-amber-700 border border-amber-200">Azure Key Vault is not configured — secrets are stored locally (encrypted in hub state). Configure a vault under Setup → Azure → Key Vault to store them there instead.</div>`;
     host.innerHTML = `
       <div class="hpe-card rounded-lg p-5 shadow-sm space-y-4">
+        ${storageHint}
         <div class="flex flex-wrap items-center justify-between gap-3">
           <div class="flex items-center gap-2">
             <label class="text-xs font-bold text-slate-500 uppercase tracking-wider">Bucket</label>

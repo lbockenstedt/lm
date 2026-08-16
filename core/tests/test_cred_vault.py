@@ -130,11 +130,40 @@ def test_delete_removes_metadata_and_vault(hub):
     assert hub._kv_store == {}
 
 
-def test_vault_not_configured_raises(monkeypatch):
+def test_no_vault_falls_back_to_local_store(monkeypatch):
+    """A vault-less hub (plain local VM) stores ciphertext in hub state and still
+    roundtrips — the vault is used when available, never required."""
     state = FakeState(system_state={"global_config": {}})
     h = FakeHub(state=state)
     monkeypatch.setattr(cv, "get_oidc_config", lambda _h: object())
-    # setting a PSK is local metadata; STORING a secret needs the vault
+    # No Key Vault URL configured.
+    assert cv._vault_available(h) is False
+
     run(cv.set_bucket_psk(h, "t1", "hunter2pass"))
-    with pytest.raises(cv.CredVaultError):
-        run(cv.put_secret(h, "t1", "he", {"password": "x"}, mode="psk", psk="hunter2pass"))
+    res = run(cv.put_secret(h, "t1", "he", {"username": "u", "password": "s3cr3t-value"},
+                            mode="psk", sec_type="login", psk="hunter2pass", actor="admin"))
+    assert res["store"] == "local"
+
+    # ciphertext lives in hub state (local blobs), never as plaintext
+    blobs = h.state.system_state["global_config"]["cred_vault"]["blobs"]
+    assert blobs and all("s3cr3t-value" not in b for b in blobs.values())
+
+    # roundtrips: reveal (PSK) + list marks it local + delete purges the blob
+    assert run(cv.reveal_secret(h, "t1", "he", psk="hunter2pass")) == {"username": "u", "password": "s3cr3t-value"}
+    assert cv.list_secrets(h, "t1")[0]["store"] == "local"
+    run(cv.delete_secret(h, "t1", "he", psk="hunter2pass"))
+    assert cv.list_secrets(h, "t1") == []
+    assert h.state.system_state["global_config"]["cred_vault"]["blobs"] == {}
+
+
+def test_no_vault_hub_mode_automation_readable(monkeypatch):
+    """hub-mode secrets stored locally are still unattended-readable."""
+    state = FakeState(system_state={"global_config": {}})
+    h = FakeHub(state=state)
+    monkeypatch.setattr(cv, "get_oidc_config", lambda _h: object())
+    run(cv.set_bucket_psk(h, cv.ADMIN_BUCKET, "adminpass1"))
+    run(cv.put_secret(h, cv.ADMIN_BUCKET, "console-auto-credentials",
+                      {"credentials": [{"username": "a", "password": "b"}]},
+                      mode="hub", sec_type="console", psk="adminpass1"))
+    got = run(cv.automation_get(h, cv.ADMIN_BUCKET, "console-auto-credentials"))
+    assert got == {"credentials": [{"username": "a", "password": "b"}]}
