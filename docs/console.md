@@ -19,7 +19,7 @@ serial ports from the hub WebUI's **Console** view (an xterm.js terminal in the 
 - **Interactive terminal** in the hub WebUI (xterm.js) over the hub↔spoke WS, reusing the
   VNC-relay pattern. **One writer per port**, extra viewers are read-only observers.
 - **Auto-identify (fingerprint)** — fully automatic on a newly-seen port (read-only): banner
-  scrape → vendor-profile match (Cisco IOS/NX-OS, Aruba AOS-CX, HP ProCurve, generic Linux) →
+  scrape → vendor-profile match (Cisco IOS/NX-OS, Aruba AOS-CX, ArubaOS gateway/controller, HP ProCurve, Juniper, generic Linux) →
   credential login (global encrypted list, tried once each) → run the profile's read-only
   identity commands → parse serial/MAC/mgmt-IP/model/hostname → **NetBox match + create**.
 - **Two-level tenant binding** — the whole console agent (spoke Tenant action) or an individual
@@ -108,12 +108,15 @@ A deliberate, admin/`console_write`-gated write path, separate from the read-onl
   (`_autoprobe_loop` in `console/src/console_spoke.py`, polling every ~30s — a newly
   connected console cable is auto-profiled almost immediately — unless
   `auto_identify=false`) automatically — and read-only — wakes the line, captures the
-  banner, matches it against a built-in vendor profile (Cisco IOS, Aruba AOS-CX, HP
-  ProCurve, generic Linux — `console/src/fingerprint.py::PROFILES`), tries the
+  banner, matches it against a built-in vendor profile (Cisco IOS, Aruba AOS-CX,
+  ArubaOS gateway/controller — recognised by its `(hostname) #` prompt — HP
+  ProCurve, Juniper, generic Linux — `console/src/fingerprint.py::PROFILES`), tries the
   hub-managed encrypted credential list once each at a login prompt (never re-hammering),
   and if it gets in, runs that profile's read-only identity commands (`show version`,
-  `show system`, etc.) and regex-parses serial number, MAC, management IP, model, and
-  hostname. **When the identify used one of our credentials to log in, it then cleanly
+  `show inventory`, `show system`, etc.) and regex-parses serial number, MAC, management
+  IP, model, and hostname — the model + serial are bubbled up in the UI (port identity
+  line + device card) so the box can be found in NetBox and physically in the rack.
+  **When the identify used one of our credentials to log in, it then cleanly
   logs out** (sends `exit`/`logout` and confirms a login prompt returns — `diag.logged_out`),
   so profiling never leaves a privileged shell open on the shared line; an already-open
   console we only read from is left untouched. The result is pushed to the hub as
@@ -184,8 +187,9 @@ A deliberate, admin/`console_write`-gated write path, separate from the read-onl
   push and is usually granted to fewer users.
 - **A device is never auto-identified.** Either `auto_identify=false` is set in that
   agent's role config (check with the admin who loaded the role), the device's banner
-  doesn't match any built-in vendor profile (only Cisco IOS/NX-OS, Aruba AOS-CX, HP
-  ProCurve, and generic Linux are recognized today), or none of the configured
+  doesn't match any built-in vendor profile (only Cisco IOS/NX-OS, Aruba AOS-CX,
+  ArubaOS gateway/controller, HP ProCurve, Juniper, and generic Linux are recognized
+  today), or none of the configured
   credentials logged in (the probe stops after trying each once — it deliberately does
   not retry/hammer). A manual Identify surfaces the raw banner even if the profile match
   or login failed, which helps diagnose which step is failing.

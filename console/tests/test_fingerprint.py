@@ -24,7 +24,42 @@ def test_detect_vendor_arubaos_switch():
     assert fp.detect_vendor(escaped)["name"] == "hp-procurve"
 
 
-def test_sanitize_console_text_strips_vt100():
+def test_detect_vendor_arubaos_gateway_by_prompt():
+    """ArubaOS gateway/controller shows no banner — only its parenthesised prompt
+    '(host) *#'. We must recognise it by that shape WITHOUT misfiring on a Cisco
+    'host(config)#' (no space before #, hostname glued to the paren)."""
+    assert fp.detect_vendor("(MIA-GW-02) *# ")["name"] == "aruba-os"
+    assert fp.detect_vendor("(MIA-GW-02) #")["name"] == "aruba-os"
+    assert fp.detect_vendor("ArubaOS (MODEL: A7010), Version 8.6")["name"] == "aruba-os"
+    # Must NOT hijack a Cisco config-mode prompt or a CX/AOS-S switch.
+    assert fp.detect_vendor("CORE-SW(config)#") is None or \
+        fp.detect_vendor("CORE-SW(config)#")["name"] != "aruba-os"
+    assert fp.detect_vendor("ArubaOS-CX GL.10.08")["name"] == "aruba-cx"
+
+
+def test_run_identify_arubaos_gateway_serial_model_hostname():
+    """Full identify on an ArubaOS gateway pulls model + serial (for NetBox / rack
+    identification) and gleans the hostname from the prompt."""
+    show_ver = ("\r\nAruba Operating System Software.\r\n"
+                "ArubaOS (MODEL: A7010), Version 8.6.0.7\r\n(MIA-GW-02) *#")
+    show_inv = ("\r\nSystem Serial#      : CV0001234\r\n"
+                "SC Model#           : A7010\r\n(MIA-GW-02) *#")
+    responses = [
+        ("no paging", "\r\n(MIA-GW-02) *#"),
+        ("show version", show_ver),
+        ("show inventory", show_inv),
+    ]
+    chan = _FakeChan("\r\n(MIA-GW-02) *# ", responses)
+    res = fp.run_identify(chan.read, chan.write, [])
+    assert res["vendor"] == "aruba-os"
+    assert res["identity"]["model"] == "A7010"
+    assert res["identity"]["serial"] == "CV0001234"
+    assert res["identity"]["os"] == "8.6.0.7"
+    assert res["identity"]["hostname"] == "MIA-GW-02"
+    assert res["identity"]["type"] == "Gateway/Controller"
+
+
+
     escaped = ("\x1b[24;1H\x1b[24;14HMIA-SW-AOSS> \x1b[?25h\x1b[1;24r"
                "Invalid input: get\x1b[2K\x1b]0;title\x07\r\nMIA-SW-AOSS>")
     clean = fp.sanitize_console_text(escaped)
