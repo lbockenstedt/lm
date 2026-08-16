@@ -71,6 +71,21 @@ def test_unidentified_port_escalates_to_llm_and_skips_sync():
     assert hub.synced == []  # placeholder device NOT created
 
 
+def test_gleaned_hostname_without_vendor_still_escalates():
+    # A logged-in port we named from its prompt (hostname set) but whose vendor
+    # we couldn't recognize must STILL auto-escalate to the LLM — a name alone
+    # doesn't tell us the device type. Escalation keys on missing vendor, not on
+    # missing identity.
+    hub = _Hub()
+    _run(hub._handle_console_probe("console-1", {
+        "port_id": "usb-1", "vendor": None,
+        "identity": {"hostname": "edge-core"},
+        "banner": "edge-core> ", "method": "login",
+    }))
+    assert hub.orchestrated == [("bugfixer-1", "console-1", "usb-1")]
+    assert hub.synced == []
+
+
 def test_llm_result_does_not_re_escalate():
     hub = _Hub()
     _run(hub._handle_console_probe("console-1", {
