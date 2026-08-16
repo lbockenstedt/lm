@@ -16843,6 +16843,11 @@ async function saveConsoleSettings(spokeId, portId) {
 }
 
 async function openConsolePortTenantModal(spokeId, portId, currentTenantId) {
+    // Reassigning a port to another tenant is a GLOBAL-admin action only — a
+    // tenant admin (or any non-global-admin) must not be able to move a device
+    // between tenants. The row button is already hidden for them; guard here too
+    // in case the modal is ever invoked another way. The server also enforces it.
+    if (!isAdmin()) { showToast('Only a global admin can reassign a port to another tenant.', 'error'); return; }
     const modal = document.createElement('div');
     modal.id = 'console-port-tenant-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
@@ -16874,6 +16879,7 @@ async function openConsolePortTenantModal(spokeId, portId, currentTenantId) {
 }
 
 async function saveConsolePortTenant(spokeId, portId) {
+    if (!isAdmin()) { showToast('Only a global admin can reassign a port to another tenant.', 'error'); return; }
     const tenantId = document.getElementById('console-port-tenant').value;
     try {
         const res = await fetch('/api/console/tenant', {
