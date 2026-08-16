@@ -27,12 +27,12 @@ try:
     from serial_manager import (
         PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
     )
-    from fingerprint import run_identify, read_running_config, push_config, PROFILES, passive_identify
+    from fingerprint import run_identify, read_running_config, push_config, PROFILES, passive_identify, run_commands
 except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .serial_manager import (  # type: ignore
         PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
     )
-    from .fingerprint import run_identify, read_running_config, push_config, PROFILES, passive_identify  # type: ignore
+    from .fingerprint import run_identify, read_running_config, push_config, PROFILES, passive_identify, run_commands  # type: ignore
 
 logger = logging.getLogger("ConsoleSpoke")
 
@@ -252,6 +252,26 @@ class ConsoleSpoke(BaseSpoke):
                     "vendor": res.get("vendor"), "logged_in": bool(res.get("logged_in")),
                     "identity": res.get("identity") or {}}
 
+        if cmd == "CONSOLE_LLM_COLLECT":
+            # Log in (generically) and run a validated set of READ-ONLY commands,
+            # returning the raw output for the hub's LLM-driven identify to parse.
+            # Gated off by default; every command is re-validated in run_commands.
+            if not self.config.get("console_llm_identify", False):
+                return {"status": "ERROR", "message": "LLM-assisted identify is disabled"}
+            pid = data.get("port_id")
+            dev = self._port_device(pid) if pid else None
+            if not dev:
+                return {"status": "ERROR", "message": f"port {pid} not found"}
+            if self.sessions.has_user_sessions(pid):
+                return {"status": "ERROR", "message": "port is in use; close sessions first"}
+            cmds = data.get("commands") or []
+            res = await self._exclusive_probe(pid, self._collect_blocking, pid, dev, cmds)
+            if str(res.get("error", "")).lower().startswith("open failed"):
+                self._mark_unopenable(pid, res["error"])
+            else:
+                self._clear_unopenable(pid)
+            return {"status": "SUCCESS", "port_id": pid, **res}
+
         if cmd == "CONSOLE_GET_CONFIG":
             pid = data.get("port_id")
             dev = self._port_device(pid) if pid else None
@@ -424,6 +444,22 @@ class ConsoleSpoke(BaseSpoke):
         if detected:
             res["detected_baud"] = detected
         return res
+
+    def _collect_blocking(self, port_id: str, dev: str, commands) -> Dict[str, Any]:
+        """Blocking generic-login + read-only command run on a transient handle
+        (for LLM-driven identify). Commands are re-validated inside run_commands."""
+        baud = self.store.settings(port_id).get("baud") or 9600
+        try:
+            ser = open_raw(dev, baud, 0.3)
+        except Exception as e:  # noqa: BLE001
+            return {"error": f"open failed: {e}"}
+        try:
+            return run_commands(lambda: ser.read(256), ser.write, self._credentials, commands or [])
+        finally:
+            try:
+                ser.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _profile_for(self, port_id: str):
         """The vendor profile a port was last identified as (None if never
