@@ -16227,10 +16227,30 @@ async function openConsoleCredentialsModal() {
     modal.id = 'console-creds-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
     let existing = [];
+    let vaultBacked = false;
     try {
         const res = await fetch('/api/console/credentials', { credentials: 'same-origin' });
-        if (res.ok) existing = (await res.json()).credentials || [];
+        if (res.ok) { const j = await res.json(); existing = j.credentials || []; vaultBacked = !!j.read_only; }
     } catch (e) { console.error(e); }
+    if (vaultBacked) {
+        // Sourced (read-only) from Azure Key Vault — the hub only reads it, so
+        // editing lives in the vault, not here.
+        const list = existing.length
+            ? existing.map(c => `<li class="font-mono text-xs text-slate-600">${escapeHtml(c.username)}${c.has_password ? '' : ' <span class="text-amber-500">(no password)</span>'}</li>`).join('')
+            : '<li class="text-xs text-slate-400 italic">no credentials resolved from the vault</li>';
+        modal.innerHTML = `<div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+              <h3 class="text-lg font-bold text-[#263040]">Console Credential Library</h3>
+              <button onclick="this.closest('#console-creds-modal').remove()" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
+            </div>
+            <div class="p-6 space-y-3">
+              <div class="text-xs px-3 py-2 rounded bg-blue-50 text-blue-700 border border-blue-100">🔐 Managed in <b>Azure Key Vault</b> (read-only here). Edit the vault secret to change these credentials.</div>
+              <ul class="space-y-1 list-disc list-inside">${list}</ul>
+              <div class="pt-3 flex justify-end"><button onclick="this.closest('#console-creds-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Close</button></div>
+            </div></div>`;
+        document.body.appendChild(modal);
+        return;
+    }
     const rowFor = (u) => `<div class="flex gap-2 console-cred-row">
         <input class="console-cred-user flex-1 border border-slate-300 rounded-md px-3 py-2 text-sm" placeholder="username" value="${(u || '').replace(/"/g, '&quot;')}">
         <input class="console-cred-pass flex-1 border border-slate-300 rounded-md px-3 py-2 text-sm" type="password" placeholder="password (blank = keep)">

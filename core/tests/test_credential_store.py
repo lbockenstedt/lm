@@ -209,6 +209,31 @@ def test_resolve_key_empty_and_missing_returns_none():
     assert cs.resolve_private_key_material("no-such-secret") is None
 
 
+# ── resolve_secret_text (vault-backed config blobs, e.g. console creds) ───────
+
+def test_resolve_secret_text_from_kv_ref(monkeypatch):
+    client = _FakeSecretClient("https://kv.vault.azure.net", "fake-cred")
+    monkeypatch.setattr(cs, "_AZURE_AVAILABLE", True)
+    monkeypatch.setattr(cs, "SecretClient", lambda vault_url, credential: client)
+    monkeypatch.setattr(cs, "DefaultAzureCredential", lambda **kw: "fake-cred")
+    client.set("console-creds", '[{"username": "admin", "password": "s3cret"}]')
+    os.environ["LM_KEYVAULT_URL"] = "https://kv.vault.azure.net"
+    cs.reset_credential_provider()
+    txt = cs.resolve_secret_text("kv:console-creds")
+    assert txt == '[{"username": "admin", "password": "s3cret"}]'
+
+
+def test_resolve_secret_text_from_env_bare_name():
+    os.environ["LM_TEST_SECRET"] = '[{"username":"u","password":"p"}]'
+    assert cs.resolve_secret_text("LM_TEST_SECRET") == '[{"username":"u","password":"p"}]'
+
+
+def test_resolve_secret_text_missing_returns_none():
+    assert cs.resolve_secret_text("") is None
+    assert cs.resolve_secret_text("kv:nope") is None
+    assert cs.resolve_secret_text("no-such-secret") is None
+
+
 # ── resolve_password_hash (break-glass) ──────────────────────────────────────
 
 def test_password_hash_stored_wins():

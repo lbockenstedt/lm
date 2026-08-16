@@ -253,6 +253,23 @@ def resolve_private_key_material(ref: str,
     return val.encode("utf-8") if val else None
 
 
+def resolve_secret_text(ref: str,
+                        provider: Optional[CredentialProvider] = None
+                        ) -> Optional[str]:
+    """Resolve a secret's TEXT value from a ``kv:<name>`` reference, a filesystem
+    path, or a bare secret name (same resolution as
+    :func:`resolve_private_key_material`, decoded as UTF-8). Used for
+    vault-backed config blobs such as the console auto-login credential list.
+    Returns ``None`` if unresolved or not valid UTF-8. Never raises."""
+    data = resolve_private_key_material(ref, provider)
+    if data is None:
+        return None
+    try:
+        return data.decode("utf-8")
+    except (UnicodeDecodeError, AttributeError):
+        return None
+
+
 def resolve_password_hash(user: dict,
                           provider: Optional[CredentialProvider] = None
                           ) -> Optional[str]:
