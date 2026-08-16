@@ -444,6 +444,37 @@ _LOGIN_PROMPT = _PROMPTS["login_prompt"]
 _PASSWORD_PROMPT = _PROMPTS["password_prompt"]
 _SHELL_PROMPT = _PROMPTS["shell_prompt"]
 
+
+def looks_like_prompt(text: str) -> bool:
+    """True if the tail of ``text`` shows a login / password / shell / CLI prompt
+    — i.e. the device has finished booting and is ready to talk. Used by the boot
+    watcher to decide a boot cycle reached a usable prompt (vs. hung mid-boot)."""
+    tail = sanitize_console_text(text or "")[-400:]
+    return bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)
+                or _SHELL_PROMPT.search(tail) or prompt_hostname(text))
+
+
+# Boot-time fault signatures — phrases a device prints when it FAILS to boot
+# (kernel panic, watchdog reset loop, bad/missing image, memory/POST failure).
+# Deliberately conservative to avoid false alarms on normal boot chatter; a hit
+# during an in-progress boot flags the port as "stuck" so the UI can surface a
+# likely hardware/boot problem.
+_BOOT_FAULT = re.compile(
+    r"kernel panic|watchdog\s+reset|boot\s*loop|rebooting\.\.\.|"
+    r"unable to mount|no bootable device|no valid boot|bad magic|"
+    r"image (?:signature )?(?:invalid|corrupt)|crc (?:error|mismatch)|"
+    r"dram.*(?:fail|error)|memory test fail|post (?:error|fail)|"
+    r"(?:machine check|unrecoverable) (?:exception|error)|"
+    r"failed to boot|boot failure|system halted",
+    re.I)
+
+
+def boot_fault(text: str) -> str:
+    """Return the matched boot-fault phrase found in ``text`` (a likely stuck/dead
+    boot), or '' if none. Terminal escapes stripped first."""
+    m = _BOOT_FAULT.search(sanitize_console_text(text or ""))
+    return m.group(0).strip() if m else ""
+
 # Console lines are usually silent until they receive a keystroke: a device sits
 # idle at a prompt and emits nothing on its own (unless it happens to be booting).
 # So we actively wake the line by sending Enter (CR) — an initial CRLF plus a few

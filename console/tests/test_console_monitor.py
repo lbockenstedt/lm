@@ -410,3 +410,114 @@ def test_effective_credentials_appends_factory_defaults(spoke):
     # disabling factory defaults keeps only operator (+ extras)
     spoke.config["console_factory_default_creds"] = False
     assert spoke._effective_credentials() == [{"username": "op", "password": "p"}]
+
+
+# ── boot / wake capture ──────────────────────────────────────────────────────
+class _FakeBootChan:
+    """Stand-in channel exposing just what _boot_watch reads: a capture buffer."""
+    def __init__(self):
+        self.capture = b""
+
+    def set(self, text: str):
+        self.capture = text.encode()
+
+    def capture_tail(self, n=None):
+        return self.capture[-n:] if n else self.capture
+
+    def snapshot(self):
+        return {"monitoring": True, "last_activity": 0.0,
+                "capture_bytes": len(self.capture), "pending_out": 0,
+                "has_user": False, "writer": None, "baud": 9600}
+
+
+def _drive_boot(spoke, pid, clock, chan, cur_bytes, dev="/dev/ttyUSB0"):
+    """Invoke _boot_watch with a controlled snapshot + clock."""
+    snap = {"capture_bytes": cur_bytes, "last_activity": clock[0]}
+    spoke._boot_watch(pid, snap, dev)
+
+
+def _install_fake_boot_chan(spoke, pid):
+    chan = _FakeBootChan()
+    spoke.sessions._channels[pid] = chan  # type: ignore[attr-defined]
+    return chan
+
+
+def test_boot_watch_booting_then_booted(spoke, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    chan = _install_fake_boot_chan(spoke, "good")
+    # First tick establishes a byte baseline (no prior => no new output).
+    _drive_boot(spoke, "good", clock, chan, 0)
+    assert spoke._boot_info("good") is None
+    # Silence passes, then a burst of boot output appears => booting.
+    clock[0] += 100
+    chan.set("U-Boot 2013.01\r\nStarting kernel ...\r\nLinux version 5.10\r\n")
+    _drive_boot(spoke, "good", clock, chan, 60)
+    info = spoke._boot_info("good")
+    assert info and info["state"] == "booting"
+    # A prompt appears => booted.
+    clock[0] += 15
+    chan.set("Linux 5.10\r\nswitch login: ")
+    _drive_boot(spoke, "good", clock, chan, 90)
+    info = spoke._boot_info("good")
+    assert info["state"] == "booted" and info["prompt_seen"] is True
+
+
+def test_boot_watch_stuck_on_fault(spoke, monkeypatch):
+    clock = [2000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    chan = _install_fake_boot_chan(spoke, "good")
+    _drive_boot(spoke, "good", clock, chan, 0)
+    clock[0] += 100
+    chan.set("Booting...\r\nKernel panic - not syncing: VFS unable to mount root\r\n")
+    _drive_boot(spoke, "good", clock, chan, 70)
+    info = spoke._boot_info("good")
+    assert info["state"] == "stuck" and "panic" in info["stuck_reason"].lower()
+
+
+def test_boot_watch_stuck_on_timeout_no_prompt(spoke, monkeypatch):
+    clock = [3000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    spoke.config["console_boot_stuck_secs"] = 30
+    spoke.config["console_boot_idle_secs"] = 5
+    chan = _install_fake_boot_chan(spoke, "good")
+    _drive_boot(spoke, "good", clock, chan, 0)
+    clock[0] += 100
+    chan.set("Booting up, please wait ... garbled progress ...")
+    _drive_boot(spoke, "good", clock, chan, 50)
+    assert spoke._boot_info("good")["state"] == "booting"
+    # Output stops; well past stuck timeout with no prompt => stuck.
+    clock[0] += 40
+    _drive_boot(spoke, "good", clock, chan, 50)  # no new bytes
+    info = spoke._boot_info("good")
+    assert info["state"] == "stuck" and info["prompt_seen"] is False
+
+
+def test_boot_watch_surfaced_in_list_and_diagnostics(spoke, monkeypatch):
+    clock = [4000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    chan = _install_fake_boot_chan(spoke, "good")
+    _drive_boot(spoke, "good", clock, chan, 0)
+    clock[0] += 100
+    chan.set("Starting kernel\r\nswitch login: ")
+    _drive_boot(spoke, "good", clock, chan, 40)
+    # CONSOLE_LIST_PORTS carries a boot block.
+    res = asyncio.run(spoke.handle_command("CONSOLE_LIST_PORTS", {}))
+    good = next(p for p in res["ports"] if p["port_id"] == "good")
+    assert good["boot"] and good["boot"]["state"] == "booted"
+    # Diagnostics rows carry it too.
+    diag = spoke._diagnostics()
+    row = next(r for r in diag if r["port_id"] == "good")
+    assert row["boot"]["state"] == "booted"
+
+
+def test_boot_watch_disabled_by_config(spoke, monkeypatch):
+    clock = [5000.0]
+    monkeypatch.setattr(cs.time, "time", lambda: clock[0])
+    spoke.config["console_boot_watch"] = False
+    chan = _install_fake_boot_chan(spoke, "good")
+    _drive_boot(spoke, "good", clock, chan, 0)
+    clock[0] += 100
+    chan.set("switch login: ")
+    _drive_boot(spoke, "good", clock, chan, 40)
+    assert spoke._boot_info("good") is None

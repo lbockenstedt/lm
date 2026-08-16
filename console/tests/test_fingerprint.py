@@ -805,3 +805,22 @@ def test_read_command_output_advances_pager():
     out = fp._read_command_output(chan.read, chan.write, [fp._SHELL_PROMPT], 1.0)
     assert "line1" in out and "line2" in out
     assert "More" not in out.split("line2")[-1]     # pager consumed, real prompt reached
+
+
+def test_looks_like_prompt():
+    assert fp.looks_like_prompt("Switch> ")
+    assert fp.looks_like_prompt("MIA-SW-AOSS# ")
+    assert fp.looks_like_prompt("host login: ")
+    assert fp.looks_like_prompt("Password: ")
+    assert not fp.looks_like_prompt("U-Boot 2013.01 booting kernel ...")
+    assert not fp.looks_like_prompt("\xff\xfe garbled line noise \x01\x02")
+
+
+def test_boot_fault():
+    assert fp.boot_fault("Kernel panic - not syncing: VFS: Unable to mount root")
+    assert fp.boot_fault("Watchdog reset! rebooting...")
+    assert fp.boot_fault("No bootable device -- insert boot disk")
+    assert fp.boot_fault("CRC error, image corrupt")
+    # Normal boot chatter must NOT be flagged as a fault.
+    assert not fp.boot_fault("Starting kernel ...\r\nLinux version 5.10\r\nSwitch> ")
+    assert not fp.boot_fault("Booting system, please wait...")

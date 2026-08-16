@@ -16120,6 +16120,7 @@ function _renderConsolePorts(el, data) {
         const inUse = p.in_use ? ` <span class="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold uppercase">In use</span>` : '';
         const monDot = (p.monitoring && !p.in_use)
             ? ` <span title="Passively monitoring — capturing console output while idle" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-bold uppercase">● monitoring</span>` : '';
+        const bootBadge = _consoleBootBadge(p.boot);
         const agentName = p.agent_name || p.spoke_id || '';
         const tenantId = p.tenant_id || 'unassigned';
         const eP = esc(p.port_id), eS = esc(p.spoke_id || ''), eT = esc(p.tenant_override || '');
@@ -16131,7 +16132,7 @@ function _renderConsolePorts(el, data) {
         const dpaBadge = (p.dpa && p.dpa.telnet_port)
             ? `<div class="text-[11px] mt-0.5"><span class="font-mono px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200" title="Direct Port Access — connect a terminal straight to this serial line (unencrypted telnet; bound to ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))})">🔌 ${escapeHtml(String(p.dpa.proto || 'telnet'))} ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))}:${escapeHtml(String(p.dpa.telnet_port))}</span></div>` : '';
         return `<tr class="hover:bg-slate-50">
-            <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${monDot}</div>
+            <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${monDot}${bootBadge}</div>
               <div class="text-xs font-mono text-slate-400" title="${escapeHtml(p.spoke_id || '')}">${escapeHtml(tenantId)}:${escapeHtml(agentName)}:${escapeHtml(p.device)}:${escapeHtml(String(baud))}</div>
               ${dpaBadge}
               ${_consoleIdentityBlock(p)}</td>
@@ -16210,6 +16211,22 @@ function _consoleRelTime(ts) {
 // The identity line under a port. Placeholder until anything is scraped; once the
 // system gleans (passively) or verifies (active login) device info, it replaces
 // the placeholder. A badge marks how the info was obtained + when last seen.
+function _consoleBootBadge(boot) {
+    if (!boot || !boot.state || boot.state === 'idle') return '';
+    const relock = boot.relocked ? ' 🔒baud' : '';
+    if (boot.state === 'booting') {
+        return ` <span title="A boot/wake cycle is being captured${relock ? ' (re-locking baud)' : ''}" class="text-[10px] px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 font-bold uppercase">⟳ booting${relock}</span>`;
+    }
+    if (boot.state === 'booted') {
+        return ` <span title="Captured a boot cycle and reached a prompt" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-bold uppercase">✓ booted</span>`;
+    }
+    if (boot.state === 'stuck') {
+        const why = boot.stuck_reason ? ` — ${escapeHtml(String(boot.stuck_reason)).slice(0, 80)}` : '';
+        return ` <span title="Boot appears stuck / failed${why}. Likely a hardware or boot problem — check the console capture." class="text-[10px] px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold uppercase">⚠ boot stuck</span>`;
+    }
+    return '';
+}
+
 function _consoleIdentityBlock(p) {
     const probe = p.probe || {};
     const ident = probe.identity || {};
@@ -16329,6 +16346,7 @@ async function refreshConsoleDiagnostics() {
     };
     const failRows = rows.filter(d => d.open_failures || d.disconnects || d.currently_failing);
     const identRows = rows.filter(d => (d.identify && d.identify.attempts) || (d.present && d.schedule));
+    const bootRows = rows.filter(d => d.boot && d.boot.state && d.boot.state !== 'idle');
     const failTbl = failRows.length ? `<div class="text-[11px] font-bold text-slate-500 uppercase mb-1">Serial connection failures</div><table class="w-full text-left mb-5">
         <thead class="text-slate-500 uppercase text-[10px] border-b border-slate-200"><tr>
           <th class="py-2 pr-3">Port</th><th class="py-2 pr-3">Agent</th><th class="py-2 pr-3">Status</th>
@@ -16353,9 +16371,30 @@ async function refreshConsoleDiagnostics() {
           <th class="py-2 pr-2 text-center">Bytes</th><th class="py-2 pr-3">Why</th><th class="py-2 pr-3">Last</th>
         </tr></thead><tbody>${identRows.map(d => _consoleIdentDiagRow(d)).join('')}</tbody></table>
         <div class="mt-2 text-[10px] text-slate-400">Tip: click a row's “Why” to see the last raw line the device emitted (control chars stripped). A <b>flapping</b> hostname changes across probes — hover it for the distinct values, their source (command output vs CLI prompt vs AI) and when each was seen. A port with <b>no attempt yet</b> shows why it isn't being logged into and when the next try is due.</div>` : '';
+    const bootStatePill = (b) => {
+        if (b.state === 'stuck') return '<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase">stuck</span>';
+        if (b.state === 'booting') return '<span class="px-2 py-0.5 rounded-full bg-sky-100 text-sky-700 text-[10px] font-bold uppercase">booting</span>';
+        if (b.state === 'booted') return '<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase">booted</span>';
+        return escapeHtml(b.state || '');
+    };
+    const bootTbl = bootRows.length ? `<div class="text-[11px] font-bold text-slate-500 uppercase mb-1 mt-5">Boot / wake capture</div><table class="w-full text-left mb-2">
+        <thead class="text-slate-500 uppercase text-[10px] border-b border-slate-200"><tr>
+          <th class="py-2 pr-3">Port</th><th class="py-2 pr-3">State</th>
+          <th class="py-2 pr-3 text-center" title="Reached a login/shell prompt">Prompt</th>
+          <th class="py-2 pr-3 text-center" title="Age of this boot episode">Age</th>
+          <th class="py-2 pr-3">Why</th><th class="py-2 pr-3">Last output</th>
+        </tr></thead><tbody>${bootRows.map(d => { const b = d.boot; return `<tr class="border-b border-slate-50">
+          <td class="py-2 pr-3 font-mono text-xs">${escapeHtml(d.alias || d.device || d.port_id)}</td>
+          <td class="py-2 pr-3">${bootStatePill(b)}${b.relocked ? ' <span class="text-[9px] text-slate-400" title="Baud re-locked during this boot">🔒baud</span>' : ''}</td>
+          <td class="py-2 pr-3 text-center">${b.prompt_seen ? '✅' : '—'}</td>
+          <td class="py-2 pr-3 text-center text-xs text-slate-500">${b.age_s || 0}s</td>
+          <td class="py-2 pr-3 text-xs ${b.state === 'stuck' ? 'text-red-600' : 'text-slate-500'} max-w-[20rem] truncate" title="${escapeHtml((b.reason || '') + (b.stuck_reason ? ' — ' + b.stuck_reason : '') + (b.transcript_tail ? '\n\n' + b.transcript_tail : ''))}">${escapeHtml(b.stuck_reason || b.reason || '')}</td>
+          <td class="py-2 pr-3 text-xs text-slate-400">${b.since_output_s || 0}s ago</td>
+        </tr>`; }).join('')}</tbody></table>
+        <div class="mb-3 text-[10px] text-slate-400">A device that just powered on is watched until it reaches a prompt (<b>booted</b>) or its boot stalls / faults (<b>stuck</b> — likely a hardware or boot problem). Hover “Why” to see the captured boot transcript.</div>` : '';
     const errHtml = errs.length
         ? `<div class="mt-3 text-[11px] text-amber-600">Unreachable consoles: ${errs.map(([s, e]) => escapeHtml(s)).join(', ')}</div>` : '';
-    body.innerHTML = `${summaryBanner}${debugBanner}<div class="text-[11px] text-slate-400 mb-2">${failRows.length} port(s) with a failure/disconnect history · ${identRows.length} with identify attempts or pending (since each agent started).</div>${failTbl}${identTbl}${errHtml}
+    body.innerHTML = `${summaryBanner}${debugBanner}<div class="text-[11px] text-slate-400 mb-2">${failRows.length} port(s) with a failure/disconnect history · ${identRows.length} with identify attempts or pending (since each agent started).</div>${failTbl}${identTbl}${bootTbl}${errHtml}
       <div class="pt-4 flex justify-end gap-2">${_consoleDiagFooterBtns()}</div>`;
 }
 
@@ -16508,6 +16547,20 @@ function copyConsoleDiagnostics(btn) {
             }
             if (t.tail) L.push('    last raw line(s) from device:\n' + t.tail.split('\n').map(x => '      | ' + x).join('\n'));
         }
+        L.push('');
+    });
+
+    const bootRows = rows.filter(r => r.boot && r.boot.state && r.boot.state !== 'idle');
+    L.push(`BOOT / WAKE CAPTURE (${bootRows.length})`);
+    if (!bootRows.length) L.push('  (no boot cycles observed)');
+    bootRows.forEach(r => {
+        const b = r.boot;
+        L.push(`  ${r.alias || r.device || r.port_id} [${r.agent_name || r.spoke_id || ''}] — ${(b.state || '').toUpperCase()}`);
+        L.push(`    prompt_seen=${!!b.prompt_seen} relocked_baud=${!!b.relocked}` +
+               ` age=${b.age_s || 0}s since_output=${b.since_output_s || 0}s`);
+        if (b.reason) L.push(`    reason: ${b.reason}`);
+        if (b.stuck_reason) L.push(`    stuck_reason: ${b.stuck_reason}`);
+        if (b.transcript_tail) L.push('    boot transcript tail:\n' + b.transcript_tail.split('\n').map(x => '      | ' + x).join('\n'));
         L.push('');
     });
 

@@ -26,19 +26,23 @@ except ImportError:
 try:
     from serial_manager import (
         PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
+        score_sample,
     )
     from fingerprint import (run_identify, read_running_config, push_config, PROFILES,
                              passive_identify, run_commands, merge_credentials,
                              sanitize_console_text, _extract_profile_fields, prompt_hostname,
+                             looks_like_prompt, boot_fault,
                              FACTORY_DEFAULT_CREDENTIALS)
     from dpa import DpaManager
 except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .serial_manager import (  # type: ignore
         PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
+        score_sample,
     )
     from .fingerprint import (run_identify, read_running_config, push_config, PROFILES,  # type: ignore
                               passive_identify, run_commands, merge_credentials,
                               sanitize_console_text, _extract_profile_fields, prompt_hostname,
+                              looks_like_prompt, boot_fault,
                               FACTORY_DEFAULT_CREDENTIALS)
     from .dpa import DpaManager  # type: ignore
 
@@ -79,6 +83,13 @@ class ConsoleSpoke(BaseSpoke):
         self._probe_fails: Dict[str, int] = {}        # port_id → consecutive failed identify attempts
         self._seen_ports: set = set()                 # port_ids seen last scan (for first-seen detection)
         self._probing: set = set()
+        # Boot watcher: per-port last-observed capture byte count (to spot NEW
+        # output between scans) and last baud-relock attempt (monotonic), so we
+        # don't re-sweep a garbled line every cycle. Boot state itself lives in
+        # ``self._health[pid]["boot"]``.
+        self._mon_bytes: Dict[str, int] = {}
+        self._mon_new_at: Dict[str, float] = {}
+        self._baud_relock_at: Dict[str, float] = {}
         # Passive monitor: keep a read-only serial handle open per port so we
         # capture whatever a device emits even with NO user attached, and glean
         # identity from it opportunistically (config console_monitor, default on).
@@ -205,6 +216,7 @@ class ConsoleSpoke(BaseSpoke):
                     "capture_bytes": snap["capture_bytes"],  # total bytes captured this channel life
                     "pending_out": snap["pending_out"],  # bytes of a paste still draining
                     "dpa": self._dpa_info(pid),          # Direct Port Access endpoint (None if off)
+                    "boot": self._boot_info(pid),        # boot/wake cycle status (None if never seen)
                 })
             return {"status": "SUCCESS", "ports": ports}
 
@@ -960,6 +972,7 @@ class ConsoleSpoke(BaseSpoke):
             if self.sessions.has_user_sessions(pid):
                 self._clear_unopenable(pid)
                 self._passive_glean(pid)
+                self._boot_watch(pid, self.sessions.snapshot(pid), p["device"])
                 continue
             # A live monitor channel whose reader thread has died = the device was
             # pulled / the handle dropped: count a disconnect before we reopen.
@@ -974,6 +987,160 @@ class ConsoleSpoke(BaseSpoke):
                 continue
             self._clear_unopenable(pid)
             self._passive_glean(pid)
+            self._boot_watch(pid, self.sessions.snapshot(pid), p["device"])
+
+    def _boot_cfg(self) -> Dict[str, Any]:
+        """Tunables for the boot watcher (all optional; sane defaults). Boot
+        capture is passive — we watch what already scrolls into the rolling
+        buffer; the only active step is an opportunistic baud re-lock on a garbled
+        line (never on a port a user holds)."""
+        c = self.config
+
+        def _pos(key: str, default: float) -> float:
+            try:
+                v = float(c.get(key, default))
+            except (TypeError, ValueError):
+                return default
+            return v if v > 0 else default
+
+        return {
+            "enabled": bool(c.get("console_boot_watch", True)),
+            "wake_secs": _pos("console_boot_wake_secs", 45.0),
+            "idle_secs": _pos("console_boot_idle_secs", 12.0),
+            "stuck_secs": _pos("console_boot_stuck_secs", 150.0),
+            "relock_secs": _pos("console_boot_relock_secs", 30.0),
+            "garbage_score": float(c.get("console_boot_garbage_score", 0.55) or 0.55),
+        }
+
+    def _boot_watch(self, pid: str, snap: Dict[str, Any], dev: str) -> None:
+        """Passively watch a port for a boot/wake cycle and classify it.
+
+        A burst of NEW output after the line has been quiet for a while is treated
+        as a device powering on (or resetting). We snapshot the boot transcript,
+        and follow it to one of two terminal states:
+          • ``booted`` — a login/shell/CLI prompt appeared (device came up), or
+          • ``stuck``  — a boot-fault signature (kernel panic, watchdog loop, bad
+            image…) appeared, or the boot produced output then stalled with no
+            prompt past ``stuck_secs`` (likely a hardware/boot problem to flag).
+        If the line is garbled (wrong baud), we opportunistically kick off a baud
+        re-lock so the boot is captured legibly. All passive — no login attempts."""
+        cfg = self._boot_cfg()
+        if not cfg["enabled"]:
+            return
+        now = time.time()
+        cur = int(snap.get("capture_bytes") or 0)
+        prev = self._mon_bytes.get(pid)
+        self._mon_bytes[pid] = cur
+        # A channel reopen (baud relock / device re-plug) resets bytes_seen to 0;
+        # treat that as "no new output this tick" so we don't misfire.
+        new_bytes = (cur - prev) if (prev is not None and cur >= prev) else 0
+        talking = new_bytes > 0
+
+        h = self._health_rec(pid)
+        boot = h.get("boot")
+
+        chan = self.sessions.channel(pid)
+        if chan is not None and getattr(chan, "capture", None):
+            raw = chan.capture_tail(8192)
+            tail = raw.decode("utf-8", "replace")
+            score = score_sample(raw)
+        else:
+            tail, score = "", 1.0
+
+        if talking:
+            last_new = self._mon_new_at.get(pid, 0.0)
+            gap = (now - last_new) if last_new else 1e9
+            self._mon_new_at[pid] = now
+            # Start a fresh boot episode only if none is active and the line had
+            # been quiet long enough that this really is a (re)boot/wake — not a
+            # device that merely chats periodically.
+            if (boot is None or boot.get("state") in ("idle", "booted", "stuck")) \
+                    and gap >= cfg["wake_secs"]:
+                boot = {
+                    "state": "booting", "started_at": now, "last_output_at": now,
+                    "prompt_seen": False, "relocked": False,
+                    "reason": "output after silence — capturing boot cycle",
+                    "stuck_reason": "", "transcript_tail": "",
+                }
+                h["boot"] = boot
+            if boot is not None and boot.get("state") == "booting":
+                boot["last_output_at"] = now
+                boot["transcript_tail"] = sanitize_console_text(tail)[-1600:]
+                self._boot_maybe_relock(pid, dev, score, cfg, boot, now)
+                if looks_like_prompt(tail):
+                    boot["state"] = "booted"
+                    boot["prompt_seen"] = True
+                    boot["reason"] = "reached a login/shell prompt"
+                    boot["booted_at"] = now
+                else:
+                    fault = boot_fault(tail)
+                    if fault:
+                        boot["state"] = "stuck"
+                        boot["stuck_reason"] = fault
+                        boot["reason"] = "boot fault detected: %s" % fault
+                        boot["stuck_at"] = now
+        elif boot is not None and boot.get("state") == "booting":
+            # Output stopped. Once it's been quiet a moment, decide the outcome.
+            since_out = now - boot.get("last_output_at", now)
+            elapsed = now - boot.get("started_at", now)
+            if since_out >= cfg["idle_secs"]:
+                if looks_like_prompt(tail):
+                    boot["state"] = "booted"
+                    boot["prompt_seen"] = True
+                    boot["reason"] = "reached a login/shell prompt"
+                    boot["booted_at"] = now
+                elif elapsed >= cfg["stuck_secs"]:
+                    boot["state"] = "stuck"
+                    boot["stuck_reason"] = boot.get("stuck_reason") \
+                        or "no prompt within boot timeout"
+                    boot["reason"] = "boot output stopped before a prompt appeared"
+                    boot["stuck_at"] = now
+
+    def _boot_maybe_relock(self, pid: str, dev: str, score: float,
+                           cfg: Dict[str, Any], boot: Dict[str, Any],
+                           now: float) -> None:
+        """During a boot, if the line reads as garbage (likely wrong baud) and the
+        baud isn't already confidently locked, schedule ONE exclusive baud re-lock
+        (rate-limited) so we capture the boot legibly. No-op when a user holds the
+        port."""
+        if score >= cfg["garbage_score"]:
+            return
+        if self.sessions.has_user_sessions(pid) or pid in self._probing:
+            return
+        probe = self.store.get(pid).get("probe") or {}
+        if probe.get("baud_confident"):
+            return
+        if now - self._baud_relock_at.get(pid, 0.0) < cfg["relock_secs"]:
+            return
+        self._baud_relock_at[pid] = now
+        boot["relocked"] = True
+        loop = self._loop
+        if loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._relock_baud(pid, dev), loop)
+        except Exception:  # noqa: BLE001 - loop shutting down / not running
+            logger.debug("boot baud-relock dispatch failed for %s", pid)
+
+    async def _relock_baud(self, pid: str, dev: str) -> None:
+        """Sweep baud rates on a garbled line and, if we lock on confidently,
+        persist the new rate + mark it confident. The passive monitor then reopens
+        the channel at the correct baud on its next pass (ensure_monitor)."""
+        if pid in self._probing or self.sessions.has_user_sessions(pid):
+            return
+        try:
+            d = await self._exclusive_probe(pid, detect_baud, dev, DEFAULT_BAUD_CANDIDATES)
+        except Exception:  # noqa: BLE001
+            logger.exception("console: baud relock failed on %s", pid)
+            return
+        if not (d and d.get("confident") and d.get("baud")):
+            return
+        probe = dict(self.store.get(pid).get("probe") or {})
+        probe["detected_baud"] = d["baud"]
+        probe["baud_confident"] = True
+        self.store.update(pid, settings={"baud": d["baud"]}, probe=probe)
+        logger.info("console: locked baud %d on %s from boot capture", d["baud"], pid)
+
     # Substrings that indicate a KNOWN-faulty/non-real port (for clearer logs).
     # We hide on ANY open failure regardless; these just classify the message.
     _UNOPENABLE_HINTS = (
@@ -1057,6 +1224,28 @@ class ConsoleSpoke(BaseSpoke):
                  "last_disconnect": 0.0, "last_recovery": 0.0, "currently_failing": False}
             self._health[pid] = h
         return h
+
+    def _boot_info(self, pid: str) -> Optional[Dict[str, Any]]:
+        """Compact boot/wake status for the UI + diagnostics (None if this port has
+        never been seen booting). Ages are seconds-since for easy display; the
+        transcript tail is a short, ANSI-stripped snippet of the boot output."""
+        boot = (self._health.get(pid) or {}).get("boot")
+        if not boot:
+            return None
+        now = time.time()
+        started = boot.get("started_at", 0.0)
+        last_out = boot.get("last_output_at", 0.0)
+        return {
+            "state": boot.get("state", "idle"),
+            "reason": boot.get("reason", ""),
+            "stuck_reason": boot.get("stuck_reason", ""),
+            "prompt_seen": bool(boot.get("prompt_seen")),
+            "relocked": bool(boot.get("relocked")),
+            "started_at": started,
+            "age_s": round(now - started) if started else 0,
+            "since_output_s": round(now - last_out) if last_out else 0,
+            "transcript_tail": (boot.get("transcript_tail") or "")[-1200:],
+        }
 
     def _mark_unopenable(self, pid: str, err: str) -> None:
         now = time.time()
@@ -1193,6 +1382,7 @@ class ConsoleSpoke(BaseSpoke):
                 "vendor": probe.get("vendor"),
                 "identify": ident,   # login/AI-identify telemetry (why it did/didn't work)
                 "schedule": self._identify_status(pid, pid in live),  # why/when it (isn't) logging in
+                "boot": self._boot_info(pid),  # boot/wake cycle status (None if never observed)
             })
         rows.sort(key=lambda d: (d["currently_failing"],
                                  d["open_failures"] + d["disconnects"],
