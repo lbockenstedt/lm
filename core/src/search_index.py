@@ -147,6 +147,8 @@ class SearchIndexMixin:
         # scope_key -> {"resolved": str, "is_admin": bool, "proxmox_tag": str,
         #               "nb_slug": str, "seen": epoch}
         self._search_scopes: Dict[str, Dict[str, Any]] = {}
+        # scope_keys with an in-flight background warm (dedupe kick_warm).
+        self._search_warming: set = set()
 
     def search_index_enabled(self) -> bool:
         return self._search_index_enabled
@@ -258,18 +260,48 @@ class SearchIndexMixin:
         await self.warm_set(self._search_ns(cmd), scope_key,
                             {"items": results, "at": time.time()})
 
+    async def _search_populate_scope(self, scope_key: str,
+                                     scope: Dict[str, Any]) -> None:
+        """Refresh every leg cache for one scope (resolve spokes, build the
+        scoped empty-query payload — fetching prefixes off the request path —
+        then populate each leg). Never raises."""
+        try:
+            spokes = self._resolve_search_spokes(
+                scope.get("resolved") or "", bool(scope.get("is_admin")))
+            payload = await self._search_scope_payload(scope)
+            for _leg, cmd in SEARCH_LEGS:
+                await self._search_populate_leg(
+                    cmd, spokes.get(cmd), scope_key, payload)
+        except Exception as e:  # noqa: BLE001 - one bad scope must not stall callers
+            logger.debug("search-index populate scope %s failed: %s", scope_key, e)
+
     async def _search_refresh_once(self) -> None:
-        scopes = list(self._search_scopes.items())
-        for scope_key, scope in scopes:
-            try:
-                spokes = self._resolve_search_spokes(
-                    scope.get("resolved") or "", bool(scope.get("is_admin")))
-                payload = await self._search_scope_payload(scope)
-                for _leg, cmd in SEARCH_LEGS:
-                    await self._search_populate_leg(
-                        cmd, spokes.get(cmd), scope_key, payload)
-            except Exception as e:  # noqa: BLE001 - one bad scope must not stall the loop
-                logger.debug("search-index refresh scope %s failed: %s", scope_key, e)
+        for scope_key, scope in list(self._search_scopes.items()):
+            await self._search_populate_scope(scope_key, scope)
+
+    def search_kick_warm(self, scope_key: str) -> None:
+        """Fire-and-forget: warm every leg for a KNOWN scope right now, so a
+        memory hit can be returned immediately while the rest of the data (cold
+        or stale legs) is collected in the background. Deduped — a scope already
+        warming is not re-scheduled. No-op when the index is disabled, the scope
+        is unknown, or there is no running loop."""
+        if not self._search_index_enabled:
+            return
+        scope = self._search_scopes.get(scope_key)
+        if not scope or scope_key in self._search_warming:
+            return
+        try:
+            self._search_warming.add(scope_key)
+            task = asyncio.create_task(self._search_warm_scope(scope_key))
+            task.add_done_callback(
+                lambda _t: self._search_warming.discard(scope_key))
+        except RuntimeError:  # pragma: no cover - no running loop
+            self._search_warming.discard(scope_key)
+
+    async def _search_warm_scope(self, scope_key: str) -> None:
+        scope = self._search_scopes.get(scope_key)
+        if scope:
+            await self._search_populate_scope(scope_key, scope)
 
     async def run_search_index_refresh_loop(self) -> None:
         """Periodically re-populate every observed scope's leg caches."""
