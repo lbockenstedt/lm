@@ -136,6 +136,32 @@ def test_monitor_login_scan_attempts_login_with_stored_creds(spoke):
     assert calls == []
 
 
+def test_banner_identified_port_not_re_probed_on_timer(spoke):
+    # A device identified by BANNER (vendor + login, but no structured identity —
+    # e.g. an HP-ProCurve switch) must be treated as authoritatively identified:
+    # the auto-identify loops must NOT keep re-logging-into it every 30 min.
+    spoke.config["auto_identify"] = True
+    spoke._credentials = [{"username": "admin", "password": "x"}]
+    spoke._monitor_scan()
+    calls = []
+    spoke._identify_blocking = lambda pid, dev: calls.append(pid) or {
+        "vendor": "hp-procurve", "identity": {}, "logged_in": True, "banner": "ProCurve"}
+    asyncio.run(spoke._monitor_login_scan())
+    assert calls == ["good"]  # first identify happens
+    probe = spoke.store.get("good")["probe"]
+    assert probe["source"] == "active" and probe["vendor"] == "hp-procurve"
+    # Subsequent scans (login + autoprobe) must skip it — no periodic re-verify.
+    calls.clear()
+    asyncio.run(spoke._monitor_login_scan())
+    asyncio.run(spoke._autoprobe_scan())
+    assert "good" not in calls  # identified port never re-probed on a timer
+    # Diagnostics must advertise passive-only, not a re-verify countdown.
+    status = spoke._identify_status("good", present=True)
+    assert status["active_identity"] is True
+    assert status["next_attempt_in"] == 0
+    assert "no active re-probe" in status["skip_reason"]
+
+
 def test_monitor_login_scan_skips_without_credentials(spoke):
     spoke.config["auto_identify"] = True
     spoke._credentials = []

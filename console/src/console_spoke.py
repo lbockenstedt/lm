@@ -682,7 +682,9 @@ class ConsoleSpoke(BaseSpoke):
         defaults preserve prior behaviour):
           console_identify_retry_secs      floor backoff after a failed attempt (300)
           console_identify_retry_max_secs  cap the escalating backoff (3600)
-          console_identify_reverify_secs   re-verify interval after success (1800)
+          console_identify_reverify_secs   retained backoff bookkeeping only —
+                                            identified ports are NOT actively
+                                            re-probed on a timer (1800)
           console_identify_max_attempts    give up after N consecutive failures,
                                             0 = never give up (0)
           console_autoprobe_interval       scan/first-seen poll cadence secs (30)
@@ -711,6 +713,19 @@ class ConsoleSpoke(BaseSpoke):
             "scan_interval": _pos("console_autoprobe_interval", 30.0),
         }
 
+    @staticmethod
+    def _probe_identified(probe: Dict[str, Any]) -> bool:
+        """True once an ACTIVE login/identify has succeeded for a port (it yielded
+        an identity, a vendor, or a confirmed login). Such a port is treated as
+        authoritatively identified, so the auto-identify loops STOP actively
+        re-probing it on a timer: passive monitoring keeps its name/type fresh as
+        console output arrives, and the operator can force a fresh profile on
+        demand (Profile Device). This avoids needlessly re-logging-into a known
+        device — including banner-identified switches (vendor known, no structured
+        identity) that the old identity-only guard kept re-probing every 30 min."""
+        return probe.get("source") == "active" and bool(
+            probe.get("identity") or probe.get("vendor") or probe.get("logged_in"))
+
     async def _autoprobe_scan(self) -> None:
         """Probe each newly-seen port with the stored credentials. Guardrails:
         global toggle; skip ports a human holds or already identified actively;
@@ -732,8 +747,9 @@ class ConsoleSpoke(BaseSpoke):
             if self.sessions.has_user_sessions(pid) or pid in self._probing:
                 continue
             probe = self.store.get(pid).get("probe") or {}
-            # An ACTIVE (logged-in) identity is authoritative — don't re-probe.
-            if probe.get("identity") and probe.get("source") == "active":
+            # Already identified via active login — authoritative; passive
+            # monitoring keeps it fresh, so don't re-probe it on a timer.
+            if self._probe_identified(probe):
                 continue
             if not self._identify_due(pid):
                 continue
@@ -785,7 +801,7 @@ class ConsoleSpoke(BaseSpoke):
         await self._emit_probe_result(pid, res)
         if res.get("identity") or res.get("logged_in"):
             self._probe_fails[pid] = 0                 # success clears the give-up counter
-            self._probe_delay[pid] = cfg["reverify"]   # known → re-verify occasionally
+            self._probe_delay[pid] = cfg["reverify"]   # identified → auto-loops now skip it
         else:
             _fail_backoff()
         return res
@@ -921,7 +937,7 @@ class ConsoleSpoke(BaseSpoke):
             if pid in self._unopenable:  # can't open at all — monitor_scan handles recovery
                 continue
             probe = self.store.get(pid).get("probe") or {}
-            if probe.get("identity") and probe.get("source") == "active":
+            if self._probe_identified(probe):
                 continue
             if not self._identify_due(pid):
                 continue
@@ -1100,7 +1116,9 @@ class ConsoleSpoke(BaseSpoke):
         attempted = bool(last)
         next_in = 0.0 if not attempted else max(0.0, delay - (now - last))
         probe = self.store.get(pid).get("probe") or {}
-        active_id = bool(probe.get("identity")) and probe.get("source") == "active"
+        active_id = self._probe_identified(probe)
+        if active_id:
+            next_in = 0.0  # identified ports are not re-probed on a timer
         if not self.config.get("auto_identify", True):
             reason = "auto-identify is disabled for this agent (config auto_identify=false)"
         elif not present:
@@ -1110,7 +1128,8 @@ class ConsoleSpoke(BaseSpoke):
         elif pid in self._probing:
             reason = "identify in progress"
         elif active_id:
-            reason = "already identified via active login — re-verifies after backoff"
+            reason = ("identified via active login — passive monitoring only; "
+                      "no active re-probe (use Profile Device to re-check)")
         elif given_up:
             reason = (f"gave up after {fails} consecutive failed attempts "
                       f"(console_identify_max_attempts={cap}) — replug or probe manually")
@@ -1140,12 +1159,15 @@ class ConsoleSpoke(BaseSpoke):
             p = live.get(pid, {})
             saved = self.store.get(pid)
             probe = saved.get("probe") or {}
-            active_id = bool(probe.get("identity")) and probe.get("source") == "active"
             has_story = (h.get("open_failures") or h.get("disconnects")
                          or h.get("currently_failing") or ident.get("attempts"))
-            # Surface present, not-yet-actively-identified ports even with no
-            # attempt recorded — that's exactly the "isn't trying to login" case.
-            candidate = (pid in live) and not active_id
+            # Surface EVERY present port — identified or not. The identify-attempt
+            # counters live in the in-memory health record, which resets on an
+            # agent restart, so gating on them (or on "not yet actively identified")
+            # would hide already-identified ports until their next re-verify. The
+            # operator wants to see every device (e.g. to debug why one that IS
+            # identified still isn't getting a hostname), so any live port counts.
+            candidate = pid in live
             if not (has_story or candidate):
                 continue
             snap = self.sessions.snapshot(pid)
