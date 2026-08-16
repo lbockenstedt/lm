@@ -236,3 +236,26 @@ def test_llm_collect_runs_when_enabled(monkeypatch, tmp_path):
     assert res["logged_in"] is True
     assert "QQ7" in res["outputs"]["show version"]
     assert "reload" in res["rejected"]
+
+
+def test_llm_store_persists_identity_when_enabled(monkeypatch, tmp_path):
+    monkeypatch.setattr(sm, "serial", _FakeSerial)
+    monkeypatch.setattr(cs, "enumerate_ports",
+                        lambda: [{"port_id": "good", "device": "/dev/ttyUSB0", "product": "x"}])
+    sp = cs.ConsoleSpoke("console-1", {"console_monitor": True, "auto_identify": False,
+                                       "console_llm_identify": True})
+    sp.store = sm.PortStore(path=tmp_path / "ports.json")
+    sp._monitor_task = object(); sp._autoprobe_task = object()
+    res = asyncio.run(sp.handle_command("CONSOLE_LLM_STORE", {
+        "port_id": "good", "vendor": "juniper",
+        "identity": {"serial": "JN9"}, "logged_in": True, "banner": "Junos"}))
+    assert res["status"] == "SUCCESS"
+    probe = sp.store.get("good").get("probe")
+    assert probe["vendor"] == "juniper" and probe["identity"]["serial"] == "JN9"
+    assert probe["source"] == "active" and probe["method"] == "llm"
+
+
+def test_llm_store_disabled_by_default(spoke):
+    res = asyncio.run(spoke.handle_command("CONSOLE_LLM_STORE",
+                                           {"port_id": "good", "vendor": "x"}))
+    assert res["status"] == "ERROR" and "disabled" in res["message"].lower()
