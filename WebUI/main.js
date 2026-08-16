@@ -16292,9 +16292,8 @@ async function openConsoleCaptureModal(spokeId, portId) {
       </div>`;
     modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
     document.body.appendChild(modal);
-    const jesc = s => (s || '').replace(/'/g, "\\'");
     modal.querySelector('.js-capture-refresh').setAttribute(
-        'onclick', `openConsoleCaptureModal('${jesc(spokeId)}','${jesc(portId)}')`);
+        'onclick', `openConsoleCaptureModal('${escJsAttr(spokeId)}','${escJsAttr(portId)}')`);
 }
 
 async function openConsoleDiagnosticsModal() {
@@ -24326,7 +24325,7 @@ async function showDeviceDashboard(item) {
                 const busy = c.in_use ? `<span class="ml-2 px-1.5 py-0.5 rounded text-[9px] bg-amber-100 text-amber-700 font-bold">IN USE</span>` : '';
                 const canConnect = c.spoke_id && c.port_id;
                 const btn = canConnect
-                    ? `<button onclick="openConsoleTerminal('${jesc(c.spoke_id)}','${jesc(c.port_id)}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold shrink-0">🖥 Connect</button>`
+                    ? `<button onclick="openConsoleTerminal('${escJsAttr(c.spoke_id)}','${escJsAttr(c.port_id)}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold shrink-0">🖥 Connect</button>`
                     : '';
                 return `<div class="flex items-center justify-between gap-2 py-1.5 border-b border-slate-50 last:border-0">
                     <div class="min-w-0">
