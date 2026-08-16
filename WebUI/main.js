@@ -4294,7 +4294,20 @@ function _cvRenderShell() {
     const host = document.getElementById('credvault-content');
     if (!host) return;
     if (!_cvBuckets.length) {
-        host.innerHTML = `<div class="hpe-card rounded-lg p-5 shadow-sm"><p class="text-sm text-slate-500 italic">No buckets are reachable for your account.</p></div>`;
+        // A Global Admin always gets the __admin__ slot from the server, so an
+        // empty list here means the account is NOT a Global Admin (tenant-admin
+        // with no tenant buckets). Explain why + how to proceed instead of a
+        // dead-end. Still offer the Load box if the server did flag global-admin.
+        const help = _cvIsGlobalAdmin
+            ? `<p class="text-sm text-slate-600">No buckets yet. Load a tenant id to create its bucket, or use the Global Admin slot.</p>
+               <div class="flex items-center gap-2 pt-1">
+                 <input id="cv-other-bucket" type="text" placeholder="load tenant id…" autocomplete="off" class="px-2 py-1 text-sm border border-slate-300 rounded-md">
+                 <button onclick="_cvLoadOther()" class="px-3 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Load</button>
+                 <button onclick="_cvLoadOtherAdminSlot()" class="px-3 py-1 text-xs rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Open Global Admin slot</button>
+               </div>`
+            : `<p class="text-sm text-slate-600">No credential buckets are reachable for your account.</p>
+               <p class="text-xs text-slate-500">The Credential Vault is scoped by role: a <b>tenant-admin</b> can only access buckets for tenants assigned to their account, and a <b>Global Admin</b> additionally gets a shared admin slot. Your account currently has no reachable tenant buckets — ask a Global Admin to assign your user to a tenant, or to grant Global Admin rights.</p>`;
+        host.innerHTML = `<div class="hpe-card rounded-lg p-5 shadow-sm space-y-2">${help}</div>`;
         return;
     }
     const opts = _cvBuckets.map(b =>
@@ -4333,6 +4346,14 @@ async function _cvLoadOther() {
     if (!v) return;
     if (!_cvBuckets.some(b => b.bucket === v)) _cvBuckets.push({ bucket: v, has_psk: false, secret_count: 0 });
     _cvCurrentBucket = v;
+    _cvRenderShell();
+}
+
+function _cvLoadOtherAdminSlot() {
+    if (!_cvBuckets.some(b => b.bucket === _cvAdminSlot)) {
+        _cvBuckets.push({ bucket: _cvAdminSlot, has_psk: false, secret_count: 0 });
+    }
+    _cvCurrentBucket = _cvAdminSlot;
     _cvRenderShell();
 }
 
