@@ -388,3 +388,69 @@ def test_factory_default_login_when_no_stored_creds():
     creds = fp.merge_credentials([], fp.FACTORY_DEFAULT_CREDENTIALS)
     res = fp.run_identify(ch.read, ch.write, creds)
     assert res["logged_in"] is True
+
+
+class _RepeatChan:
+    """Scripted serial whose command responses are REPEATABLE (a trigger can fire
+    more than once) — needed when discovery and the profile command loop both
+    send the same command (e.g. 'show version')."""
+    def __init__(self, banner, responses):
+        self.buf = bytearray(banner.encode())
+        self.responses = list(responses)
+
+    def read(self):
+        out = bytes(self.buf[:256])
+        del self.buf[:256]
+        return out
+
+    def write(self, b):
+        s = b.decode(errors="replace")
+        for trig, resp in self.responses:
+            if trig and trig in s:
+                self.buf += resp.encode()
+                return
+
+
+def test_run_identify_direct_console_discovery():
+    """Live console, no login prompt, unrecognized prompt: discovery commands must
+    coax out an identifying banner so the device is identified without auth."""
+    banner = "\r\nmyconsole> "          # responsive, but no vendor cue and no login
+    cisco = ("\r\nCisco IOS Software, Version 15.2(4)E\r\n"
+             "Processor board ID FTXDIRECT1\r\n"
+             "Base ethernet MAC Address : 0011.2233.4455\r\nSwitch#")
+    responses = [
+        ("show version", cisco),
+        ("terminal length 0", "\r\nSwitch#"),
+        ("show ip interface brief", "\r\nVlan1 10.0.0.42 YES up up\r\nSwitch#"),
+    ]
+    chan = _RepeatChan(banner, responses)
+    res = fp.run_identify(chan.read, chan.write, [])
+    assert res["vendor"] == "cisco-ios"
+    assert res["logged_in"] is True
+    assert res["diag"].get("console_usable") is True
+    assert "show version" in res["diag"].get("discovery_cmds", [])
+    assert res["identity"]["serial"] == "FTXDIRECT1"
+
+
+def test_read_command_output_advances_pager():
+    """A --More-- pager is auto-advanced by sending space so the full output is
+    captured, not just the first screen."""
+    class _PagerChan:
+        def __init__(self):
+            self.buf = bytearray(b"line1\r\n --More-- ")
+            self.stage = 0
+
+        def read(self):
+            out = bytes(self.buf[:256])
+            del self.buf[:256]
+            return out
+
+        def write(self, b):
+            if b == b" " and self.stage == 0:      # space advances the pager
+                self.stage = 1
+                self.buf += b"line2\r\nSwitch#"
+
+    chan = _PagerChan()
+    out = fp._read_command_output(chan.read, chan.write, [fp._SHELL_PROMPT], 1.0)
+    assert "line1" in out and "line2" in out
+    assert "More" not in out.split("line2")[-1]     # pager consumed, real prompt reached
