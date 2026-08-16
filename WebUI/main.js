@@ -16140,7 +16140,7 @@ function _renderConsolePorts(el, data) {
             </td></tr>`;
     }).join('');
     const tools = admin
-        ? `<div class="flex justify-end gap-2 p-2 border-b border-slate-100"><button id="console-llm-toggle" onclick="toggleConsoleLlmIdentify()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Enable/disable LLM-driven device identification (🤖 AI Identify)">🤖 AI Identify: …</button><button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button><button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button></div>`
+        ? `<div class="flex justify-end gap-2 p-2 border-b border-slate-100"><button id="console-llm-toggle" onclick="toggleConsoleLlmIdentify()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Enable/disable LLM-driven device identification (🤖 AI Identify)">🤖 AI Identify: …</button><button onclick="consoleIdentifyLlmAll()" class="text-[11px] px-3 py-1.5 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Run 🤖 AI Identify on every listed port at once (skips ports currently open in a session)">🤖 AI Identify All</button><button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button><button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button></div>`
         : '';
     el.innerHTML = `${tools}<div class="p-0 overflow-hidden"><table class="w-full text-left text-sm">
         <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>
@@ -16286,6 +16286,25 @@ async function consoleIdentifyLlm(spokeId, portId) {
             showToast(d.status === 'ERROR' ? (d.message || 'AI identify error') : '🤖 Could not identify this device yet', 'info');
         }
     } catch (e) { showToast('AI identify failed: ' + e.message, 'error'); }
+}
+
+// Bulk trigger: fire 🤖 AI Identify across every listed port at once (server
+// runs them in the background). A convenient "scrape all devices" button.
+async function consoleIdentifyLlmAll() {
+    const n = (_consolePorts || []).filter(p => !p.in_use).length;
+    if (!n) { showToast('No idle ports to identify.', 'info'); return; }
+    if (!confirm(`Run 🤖 AI Identify on ${n} port(s)? Ports currently open in a session are skipped.`)) return;
+    showToast(`🤖 Scraping ${n} device(s) — this runs in the background…`, 'info');
+    try {
+        const res = await fetch(`/api/console/identify-llm-all?tenant=${encodeURIComponent(currentTenant || 'default')}`, {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(d.detail || 'Bulk AI identify failed', 'error'); return; }
+        const skipped = d.skipped_in_use ? `, ${d.skipped_in_use} in-use skipped` : '';
+        showToast(`🤖 Queued ${d.queued || 0} device(s)${skipped}. Results will populate as they finish.`, 'success');
+        setTimeout(loadConsoleData, 8000);  // pull in early results
+    } catch (e) { showToast('Bulk AI identify failed: ' + e.message, 'error'); }
 }
 
 // Show the recent console capture (whatever the device emitted while idle) —
