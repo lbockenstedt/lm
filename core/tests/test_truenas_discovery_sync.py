@@ -252,3 +252,24 @@ async def test_guard_disabled_when_no_storage_spokes():
     records, errors = await hub._truenas_pull_appliances()
     assert records == []
     assert errors == []
+
+async def test_device_record_carries_serial_and_model_for_netbox_matching():
+    # P2: TrueNAS system serial + hardware model ride the record so the sink can
+    # match/place the appliance by serial (hardware truth) and real device_type.
+    hub = _Hub(
+        gc={"truenas_discovery_sync": {"enabled": True}},
+        appliances_by_spoke={"truenas-1": [
+            {"id": "nas1", "name": "nas-01", "host": "10.0.0.50",
+             "tenant_id": "acme", "info": {"product_name": "TrueNAS SCALE",
+                                           "version": "25.04",
+                                           "system_serial": "TN-SER-42",
+                                           "system_product": "TrueNAS Mini X+"}}]},
+        pools_by_appliance={"nas1": [{"name": "tank", "status": "ONLINE"}]},
+    )
+    hub.state._tenants = {"acme": {"name": "Acme", "netbox_tenant_slug": "acme"}}
+    await hub.run_truenas_discovery_sync_all()
+    _sid, _cmd, payload = hub.pushed[0]
+    dev = payload["devices"][0]
+    assert dev["serial"] == "TN-SER-42"
+    assert dev["model"] == "TrueNAS Mini X+"
+    assert dev["manufacturer"] == "TrueNAS"

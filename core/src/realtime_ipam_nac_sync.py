@@ -166,7 +166,13 @@ class RealtimeIpamNacSyncMixin:
                 if not mac:
                     continue  # MAC-less → nothing to match/create by
                 ip = str(row.get("ip") or "").strip().split("/")[0].strip()
-                out.append({
+                # ClearPass endpoint profiling (best-effort — present only when
+                # the CPPM feed profiles the endpoint): model + manufacturer let
+                # the sink place the device under its real device_type.
+                model = str(row.get("model") or row.get("device_name") or "").strip()
+                manufacturer = str(row.get("manufacturer") or row.get("vendor")
+                                   or row.get("device_category") or "").strip()
+                sess_rec = {
                     "mac": mac,
                     "ip": ip,
                     "nas_ip": str(row.get("nas_ip") or "").strip().split("/")[0].strip(),
@@ -175,7 +181,12 @@ class RealtimeIpamNacSyncMixin:
                     "nas_port_type": str(row.get("nas_port_type") or "").strip(),
                     "username": str(row.get("username") or "").strip(),
                     "start_time": str(row.get("start_time") or "").strip(),
-                })
+                }
+                if model:
+                    sess_rec["model"] = model
+                if manufacturer:
+                    sess_rec["manufacturer"] = manufacturer
+                out.append(sess_rec)
             info = {"errors": errors, "total": int(d.get("total", len(out)) or 0) if isinstance(d, dict) else len(out),
                     "window_start": (d.get("window_start") if isinstance(d, dict) else "") or "",
                     "window_end": (d.get("window_end") if isinstance(d, dict) else "") or ""}
