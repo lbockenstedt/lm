@@ -3893,6 +3893,24 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         except Exception as e:
             logger.error(f"Failed to send HUB_RESPONSE to {spoke_id}: {e}")
 
+    def _forget_console_creds_seed(self, spoke_id: str) -> None:
+        """Drop ``spoke_id`` from the console credential-seed cache so the hub
+        re-pushes CONSOLE_SET_CREDENTIALS to it on the next console API touch.
+
+        The console spoke holds its auto-login credentials in memory only, so a
+        restart loses them; without this the hub's one-shot-per-process seed
+        marker would suppress the re-push and auto-login would fall back to
+        factory-default creds only. Safe no-op if seeding was never used.
+        """
+        seeded = getattr(self, "_console_creds_seeded", None)
+        if not seeded:
+            return
+        seeded.discard(spoke_id)
+        try:
+            seeded.discard(self._primary_key(spoke_id))
+        except Exception:  # noqa: BLE001
+            pass
+
     async def _install_active_connection(self, spoke_id: str, websocket, key_id: Optional[str]) -> bool:
         """Register ``websocket`` as the active connection for ``spoke_id``.
 
@@ -3909,6 +3927,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         was rejected as a stale-key reconnect (caller should return).
         """
         pk = self._primary_key(spoke_id)
+        # A newly-installed socket means a FRESH spoke process. A console spoke
+        # keeps its auto-login credential list in memory only, so a restart
+        # wipes it; the hub, however, tracks which spokes it has already seeded
+        # (``_console_creds_seeded``) and would otherwise never re-push them —
+        # leaving auto-identify to try only the factory-default creds and report
+        # "auth rejected" for devices whose real (operator-saved) creds are
+        # correct. Forget the marker on (re)connect so the next console API touch
+        # re-seeds the credentials into the fresh process.
+        self._forget_console_creds_seed(spoke_id)
         existing = self.active_connections.get(pk)
         if existing is not None and existing is not websocket:
             current = self.key_manager.keys.get(pk)
