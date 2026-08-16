@@ -17,12 +17,14 @@ from routes import console_llm_identify as m  # noqa: E402
 class _FakeHub:
     """Scripts request_response by command. ``llm_replies`` is an ordered queue of
     assistant-content strings returned for successive HELP_ASK calls."""
-    def __init__(self, capture="", llm_replies=None, collect=None):
+    def __init__(self, capture="", llm_replies=None, collect=None, collect_with_creds=None):
         self.capture = capture
         self.llm_replies = list(llm_replies or [])
         self.collect = collect or {}
+        self.collect_with_creds = collect_with_creds
         self.stored = None
         self.commands_sent = None
+        self.credentials_sent = None
         self.active_connections = {"bugfixer": object()}
 
     def _primary_key(self, sid):
@@ -37,6 +39,10 @@ class _FakeHub:
             return {"payload": {"data": {"status": "SUCCESS", "capture": self.capture}}}
         if cmd == "CONSOLE_LLM_COLLECT":
             self.commands_sent = payload.get("commands")
+            if payload.get("credentials"):
+                self.credentials_sent = payload.get("credentials")
+                if self.collect_with_creds is not None:
+                    return {"payload": {"data": {"status": "SUCCESS", **self.collect_with_creds}}}
             return {"payload": {"data": {"status": "SUCCESS", **self.collect}}}
         if cmd == "CONSOLE_LLM_STORE":
             self.stored = payload
@@ -126,3 +132,31 @@ def test_hub_setting_overrides_env(monkeypatch):
     h.state.system_state["console_llm_identify_enabled"] = True
     monkeypatch.delenv("LM_CONSOLE_LLM_IDENTIFY", raising=False)
     assert m.hub_llm_identify_enabled(h) is True
+
+
+def test_orchestrate_asks_llm_for_credentials_when_login_stuck():
+    """When the stored + factory-default creds fail (login prompt still showing),
+    the orchestrator asks the LLM for credentials and retries the collect with
+    them, then extracts the identity from the post-login output."""
+    import asyncio
+    hub = _FakeHub(
+        capture="\r\ndevice login: ",
+        llm_replies=[
+            '{"identified": false, "commands": ["show version"]}',       # round 1
+            '{"credentials": [{"username": "admin", "password": "aruba123"}]}',  # cred ask
+            '{"identified": true, "vendor": "aruba", "model": "CX6300", "serial": "AR9"}',  # extract
+        ],
+        collect={"logged_in": False, "outputs": {}, "rejected": [],
+                 "diag": {"login_prompt_seen": True, "password_prompt_seen": True,
+                          "reason": "credentials rejected"}},
+        collect_with_creds={"logged_in": True,
+                            "outputs": {"show version": "ArubaOS-CX CX6300 SN AR9"},
+                            "rejected": []},
+    )
+    res = asyncio.run(m.orchestrate(hub, "bugfixer", "console-1", "good"))
+    assert hub.credentials_sent == [{"username": "admin", "password": "aruba123"}]
+    assert res["llm_credentials_tried"] == 1
+    assert res["logged_in"] is True
+    assert res["vendor"] == "aruba"
+    assert res["identity"]["serial"] == "AR9"
+    assert res["status"] == "OK"

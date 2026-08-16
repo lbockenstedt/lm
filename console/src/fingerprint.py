@@ -157,6 +157,46 @@ _LOGIN_PROMPT = re.compile(r"(?:[Ll]ogin|[Uu]ser\s?name)\s*:\s*$")
 _PASSWORD_PROMPT = re.compile(r"[Pp]assword\s*:\s*$")
 _SHELL_PROMPT = re.compile(r"\S[>#$%]\s*$")
 
+# Console lines are usually silent until they receive a keystroke: a device sits
+# idle at a prompt and emits nothing on its own (unless it happens to be booting).
+# So we actively wake the line by sending Enter (CR) — an initial CRLF plus a few
+# more bare CRs — until a login/password/shell prompt appears. Many devices only
+# redraw their prompt on a fresh CR, so this also turns "output but no prompt"
+# into a detectable prompt without hammering (bounded attempt count).
+_LOGIN_NUDGES = 4          # extra CRs after the initial CRLF banner read
+_NUDGE_SECS = 1.2          # per-nudge read window
+
+# Well-known factory-default credentials, tried (in order, once each) AFTER any
+# operator-supplied credentials when a device sits at a login prompt and the
+# stored credentials don't work. Deliberately short + conservative to avoid
+# tripping account lockout — the most common console/network-gear defaults only.
+FACTORY_DEFAULT_CREDENTIALS: List[Dict[str, str]] = [
+    {"username": "admin", "password": "admin"},
+    {"username": "admin", "password": ""},
+    {"username": "admin", "password": "password"},
+    {"username": "cisco", "password": "cisco"},
+    {"username": "root", "password": "root"},
+    {"username": "root", "password": ""},
+    {"username": "manager", "password": "friend"},   # HPE/Aruba ProCurve
+    {"username": "admin", "password": "aruba123"},    # Aruba
+    {"username": "ubnt", "password": "ubnt"},          # Ubiquiti
+]
+
+
+def merge_credentials(*groups: Optional[List[Dict[str, str]]]) -> List[Dict[str, str]]:
+    """Concatenate credential lists, dropping duplicate ``(username, password)``
+    pairs while preserving order (operator creds first, then any fallbacks)."""
+    seen = set()
+    out: List[Dict[str, str]] = []
+    for g in groups:
+        for c in (g or []):
+            u, p = str(c.get("username", "")), str(c.get("password", ""))
+            if (u, p) in seen:
+                continue
+            seen.add((u, p))
+            out.append({"username": u, "password": p})
+    return out
+
 # ── Read-only command allowlist (safety gate for LLM-suggested commands) ───────
 # When an LLM proposes commands to run on an unknown device, EVERY command must
 # pass this gate before it touches the serial line. The guarantee we preserve:
@@ -289,7 +329,7 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
     """
     diag: Dict[str, Any] = {"login_prompt_seen": False, "password_prompt_seen": False,
                             "shell_prompt_seen": False, "creds_tried": 0,
-                            "bytes": 0, "any_output": False}
+                            "bytes": 0, "any_output": False, "nudges": 0}
 
     def _observe(tail: str) -> None:
         if _LOGIN_PROMPT.search(tail):
@@ -299,12 +339,28 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
         if _SHELL_PROMPT.search(tail):
             diag["shell_prompt_seen"] = True
 
+    prompts = [_LOGIN_PROMPT, _PASSWORD_PROMPT, _SHELL_PROMPT]
+
+    def _has_prompt(tail: str) -> bool:
+        return bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)
+                    or _SHELL_PROMPT.search(tail))
+
+    # Wake the line. A console device typically emits nothing until it receives a
+    # keystroke, so send an initial CRLF (+ banner read to catch any streaming
+    # boot output), then nudge with a bare CR up to _LOGIN_NUDGES more times until
+    # a prompt shows. This is what elicits a prompt from an idle, already-booted
+    # device instead of sitting forever on a silent line.
     write_fn(b"\r\n")
-    transcript = _read_until(read_fn, [_LOGIN_PROMPT, _PASSWORD_PROMPT, _SHELL_PROMPT], banner_secs)
+    transcript = _read_until(read_fn, prompts, banner_secs)
+    _observe(transcript[-200:])
+    while diag["nudges"] < _LOGIN_NUDGES and not _has_prompt(transcript[-200:]):
+        diag["nudges"] += 1
+        write_fn(b"\r")
+        transcript += _read_until(read_fn, prompts, _NUDGE_SECS)
+        _observe(transcript[-200:])
     diag["bytes"] = len(transcript)
     diag["any_output"] = bool(transcript.strip())
     tail = transcript[-200:]
-    _observe(tail)
     at_login = bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail))
     if not at_login:
         # Already at a shell (no auth), or nothing recognizable on the line.
@@ -397,7 +453,8 @@ def _login_diag(diag: Dict[str, Any], transcript: str, credentials) -> Dict[str,
     if d.get("shell_prompt_seen"):
         d["reason"] = "reached shell prompt"
     elif not d.get("any_output"):
-        d["reason"] = "no output from device (silent line or wrong baud)"
+        d["reason"] = ("no output after %d Enter nudge(s) — silent line, wrong "
+                       "baud, or dead/one-way cable" % (int(d.get("nudges", 0)) + 1))
     elif not (d.get("login_prompt_seen") or d.get("password_prompt_seen")):
         d["reason"] = "output seen but no recognizable login/password prompt"
     elif not d.get("creds_available"):

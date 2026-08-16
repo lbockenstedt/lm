@@ -27,12 +27,16 @@ try:
     from serial_manager import (
         PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
     )
-    from fingerprint import run_identify, read_running_config, push_config, PROFILES, passive_identify, run_commands
+    from fingerprint import (run_identify, read_running_config, push_config, PROFILES,
+                             passive_identify, run_commands, merge_credentials,
+                             FACTORY_DEFAULT_CREDENTIALS)
 except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .serial_manager import (  # type: ignore
         PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
     )
-    from .fingerprint import run_identify, read_running_config, push_config, PROFILES, passive_identify, run_commands  # type: ignore
+    from .fingerprint import (run_identify, read_running_config, push_config, PROFILES,  # type: ignore
+                              passive_identify, run_commands, merge_credentials,
+                              FACTORY_DEFAULT_CREDENTIALS)
 
 logger = logging.getLogger("ConsoleSpoke")
 
@@ -197,6 +201,16 @@ class ConsoleSpoke(BaseSpoke):
             return {"status": "SUCCESS", "spoke_id": self.spoke_id,
                     "generated": time.time(), "diagnostics": self._diagnostics()}
 
+        if cmd == "CONSOLE_DIAGNOSTICS_PURGE":
+            # Wipe ALL collected serial-health / identify telemetry for this spoke.
+            # Only accumulated history is cleared (failure/disconnect counts,
+            # identify attempts, transcript tails); live "currently failing" state
+            # re-derives on the next probe cycle, so nothing operational is lost.
+            n = len(self._health)
+            self._health.clear()
+            logger.info("console: purged diagnostics telemetry for %d port(s)", n)
+            return {"status": "SUCCESS", "spoke_id": self.spoke_id, "purged": n}
+
         if cmd == "CONSOLE_GET_SETTINGS":
             pid = data.get("port_id")
             if not pid:
@@ -275,7 +289,8 @@ class ConsoleSpoke(BaseSpoke):
             if self.sessions.has_user_sessions(pid):
                 return {"status": "ERROR", "message": "port is in use; close sessions first"}
             cmds = data.get("commands") or []
-            res = await self._exclusive_probe(pid, self._collect_blocking, pid, dev, cmds)
+            extra_creds = data.get("credentials") or []
+            res = await self._exclusive_probe(pid, self._collect_blocking, pid, dev, cmds, extra_creds)
             if str(res.get("error", "")).lower().startswith("open failed"):
                 self._mark_unopenable(pid, res["error"])
             else:
@@ -444,6 +459,19 @@ class ConsoleSpoke(BaseSpoke):
         await self._push_console_up(sid, header + tail)
 
     # ── auto-identify / fingerprint ───────────────────────────────────────────
+    def _effective_credentials(self, extra: Optional[list] = None) -> list:
+        """Credential list used for auto-identify: operator-supplied credentials
+        first, then any caller-supplied extras (e.g. LLM-proposed guesses), then
+        the well-known factory-default set (unless disabled via config). Deduped,
+        order preserved — so we try what the operator configured before falling
+        back to defaults, and never retry the same pair twice."""
+        groups = [self._credentials]
+        if extra:
+            groups.append(extra)
+        if self.config.get("console_factory_default_creds", True):
+            groups.append(FACTORY_DEFAULT_CREDENTIALS)
+        return merge_credentials(*groups)
+
     def _identify_blocking(self, port_id: str, dev: str) -> Dict[str, Any]:
         """Blocking read-only identify on a transient serial handle (run via
         asyncio.to_thread). Detects baud first if none is locked yet."""
@@ -463,7 +491,7 @@ class ConsoleSpoke(BaseSpoke):
         except Exception as e:  # noqa: BLE001
             return {"error": f"open failed: {e}"}
         try:
-            res = run_identify(lambda: ser.read(256), ser.write, self._credentials)
+            res = run_identify(lambda: ser.read(256), ser.write, self._effective_credentials())
         finally:
             try:
                 ser.close()
@@ -473,16 +501,19 @@ class ConsoleSpoke(BaseSpoke):
             res["detected_baud"] = detected
         return res
 
-    def _collect_blocking(self, port_id: str, dev: str, commands) -> Dict[str, Any]:
+    def _collect_blocking(self, port_id: str, dev: str, commands, extra_creds=None) -> Dict[str, Any]:
         """Blocking generic-login + read-only command run on a transient handle
-        (for LLM-driven identify). Commands are re-validated inside run_commands."""
+        (for LLM-driven identify). Commands are re-validated inside run_commands.
+        ``extra_creds`` are LLM-proposed credential guesses tried after the
+        operator's own creds (and before the factory-default fallback)."""
         baud = self.store.settings(port_id).get("baud") or 9600
         try:
             ser = open_raw(dev, baud, 0.3)
         except Exception as e:  # noqa: BLE001
             return {"error": f"open failed: {e}"}
         try:
-            return run_commands(lambda: ser.read(256), ser.write, self._credentials, commands or [])
+            return run_commands(lambda: ser.read(256), ser.write,
+                                self._effective_credentials(extra_creds), commands or [])
         finally:
             try:
                 ser.close()

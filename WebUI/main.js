@@ -16321,7 +16321,7 @@ async function refreshConsoleDiagnostics() {
     const errs = Object.entries(data.errors || {});
     if (!rows.length && !errs.length) {
         body.innerHTML = `<div class="text-emerald-600 flex items-center gap-2">✅ No failing or disconnecting serial connections.</div>
-          <div class="pt-4 flex justify-end"><button onclick="refreshConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">↻ Refresh</button></div>`;
+          <div class="pt-4 flex justify-end gap-2">${_consoleDiagFooterBtns()}</div>`;
         return;
     }
     const statusPill = (d) => {
@@ -16358,7 +16358,29 @@ async function refreshConsoleDiagnostics() {
     const errHtml = errs.length
         ? `<div class="mt-3 text-[11px] text-amber-600">Unreachable consoles: ${errs.map(([s, e]) => escapeHtml(s)).join(', ')}</div>` : '';
     body.innerHTML = `<div class="text-[11px] text-slate-400 mb-2">${failRows.length} port(s) with a failure/disconnect history · ${identRows.length} with identify attempts (since each agent started).</div>${failTbl}${identTbl}${errHtml}
-      <div class="pt-4 flex justify-end"><button onclick="refreshConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">↻ Refresh</button></div>`;
+      <div class="pt-4 flex justify-end gap-2">${_consoleDiagFooterBtns()}</div>`;
+}
+
+// Footer buttons shared by the diagnostics modal states: purge all collected
+// telemetry (admin) + refresh.
+function _consoleDiagFooterBtns() {
+    return `<button onclick="purgeConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50" title="Delete all collected serial-health / identify telemetry across every console agent">🗑 Purge data</button>`
+         + `<button onclick="refreshConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">↻ Refresh</button>`;
+}
+
+// Purge all collected diagnostics/identify telemetry (admin). Confirms first,
+// since the accumulated failure/identify history is cleared on every console agent.
+async function purgeConsoleDiagnostics() {
+    if (!confirm('Purge ALL collected serial-health and identify telemetry on every console agent?\n\nThis clears accumulated failure/disconnect counts, identify attempts and captured transcript tails. Live state re-derives on the next probe.')) return;
+    try {
+        const res = await fetch('/api/console/diagnostics/purge', {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(d.detail || `Purge failed (${res.status})`, 'error'); return; }
+        showToast(`Purged diagnostics for ${d.purged || 0} port(s)`, 'success');
+        await refreshConsoleDiagnostics();
+    } catch (e) { showToast('Purge failed: ' + e.message, 'error'); }
 }
 
 // One row of the identify/login telemetry table (explains why a device is / isn't
