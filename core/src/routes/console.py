@@ -1,4 +1,6 @@
 """VNC + serial console relay routes and helpers."""
+import os
+
 from api import (
     HTTPException, Request, WebSocket, WebSocketDisconnect, WebSocketState, access, asyncio,
     base64, json, logger, secrets, uuid,
@@ -307,9 +309,56 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=403,
                                 detail="not authorized for this console port's tenant")
 
+    def _console_credentials_ref(hub):
+        """The configured Key Vault reference for the console auto-login
+        credential list, or "" when the creds live in hub state. Env
+        ``LM_CONSOLE_CREDENTIALS_REF`` wins, then
+        ``global_config["console_credentials_ref"]``. A value like
+        ``kv:console-auto-credentials`` (or a bare secret name) names a Key Vault
+        secret holding the JSON credential list."""
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        return (os.environ.get("LM_CONSOLE_CREDENTIALS_REF")
+                or (gc.get("console_credentials_ref") if isinstance(gc, dict) else "")
+                or "").strip()
+
+    def _console_creds_keyvault_backed(hub):
+        """True when the credential list is sourced (read-only) from Key Vault."""
+        return bool(_console_credentials_ref(hub))
+
+    def _console_creds_from_vault(hub, ref):
+        """Resolve + parse the JSON credential list from the credential store
+        (Key Vault). Returns a normalised ``[{username,password}]`` list, or
+        ``None`` if the secret can't be fetched/parsed (caller fails closed)."""
+        from security.credential_store import get_credential_provider, resolve_secret_text
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        raw = resolve_secret_text(ref, get_credential_provider(gc))
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            logger.warning("console: Key Vault credential secret is not valid JSON")
+            return None
+        out = []
+        for c in (data or []):
+            if isinstance(c, dict) and c.get("username"):
+                out.append({"username": str(c.get("username", "")),
+                            "password": str(c.get("password", ""))})
+        return out
+
     def _console_load_credentials(hub):
-        """Decrypt the global auto-identify credential list from hub state ([] if
-        unset/undecryptable)."""
+        """Decrypt/resolve the global auto-identify credential list ([] if
+        unset/undecryptable). Sourced from Key Vault when a reference is
+        configured (:func:`_console_credentials_ref`), else the Fernet-encrypted
+        blob in hub state."""
+        ref = _console_credentials_ref(hub)
+        if ref:
+            creds = _console_creds_from_vault(hub, ref)
+            if creds is None:
+                logger.warning("console: credential ref %r configured but could "
+                               "not be resolved from the vault", ref)
+                return []
+            return creds
         blob = hub.state.system_state.get("console_credentials_enc")
         if not blob:
             return []
@@ -532,7 +581,9 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=403, detail="admin only")
         creds = _console_load_credentials(app.state.hub)
         return {"credentials": [{"username": c.get("username", ""),
-                                 "has_password": bool(c.get("password"))} for c in creds]}
+                                 "has_password": bool(c.get("password"))} for c in creds],
+                "source": "keyvault" if _console_creds_keyvault_backed(app.state.hub) else "hub",
+                "read_only": _console_creds_keyvault_backed(app.state.hub)}
 
     @app.post("/api/console/credentials")
     async def console_post_credentials(request: Request):
@@ -543,6 +594,11 @@ def register(app, hub, ctx):
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
+        # Vault-backed lists are managed in Key Vault (least-privilege: the hub
+        # only reads them) — editing here would be silently lost, so reject it.
+        if _console_creds_keyvault_backed(hub):
+            raise HTTPException(status_code=409,
+                                detail="console credentials are managed in Azure Key Vault (read-only here)")
         try:
             body = await request.json()
         except Exception:
