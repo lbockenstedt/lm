@@ -393,6 +393,30 @@ def register(app, hub, ctx):
         px_results  = (data.get("proxmox") or {}).get("results", []) if isinstance(data.get("proxmox"), dict) else []
         ld_results  = (data.get("ldap") or {}).get("results", []) if isinstance(data.get("ldap"), dict) else []
 
+        # Console leg: find serial-console port(s) whose identified device
+        # matches this record so the dashboard can offer a direct connect. Match
+        # precisely on hostname/alias/IP (not a loose substring) to avoid pairing
+        # the wrong device. Admin-only route → the tenant-scoped lister returns
+        # the global view. Best-effort: never fail device-detail on a slow fleet.
+        console_results = []
+        try:
+            from routes.console import console_port_result
+            lister = getattr(app.state, "console_list_visible_ports", None)
+            if lister:
+                cdata = await lister(request)
+                h = (identity.get("hostname") or "").strip().lower()
+                cip = (identity.get("ip") or "").strip()
+                for p in (cdata.get("ports") or []):
+                    probe = p.get("probe") or {}
+                    pident = probe.get("identity") or {}
+                    phost = str(pident.get("hostname") or "").strip().lower()
+                    palias = str(p.get("alias") or "").strip().lower()
+                    pip = str(pident.get("ip") or "").strip()
+                    if (h and (h == phost or h == palias)) or (cip and cip == pip):
+                        console_results.append(console_port_result(p))
+        except Exception as e:
+            logger.warning(f"device-detail: console leg failed: {e}")
+
         return {
             "identity": identity,
             "nac":      nac_result,
@@ -400,6 +424,7 @@ def register(app, hub, ctx):
             "netbox":   nb_results,
             "proxmox":  px_results,
             "ldap":     ld_results,
+            "console":  console_results,
         }
 
     @app.get("/api/cppm/device-enrich")

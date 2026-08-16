@@ -43,6 +43,50 @@ def _console_port_disposition(admin: bool, visible: bool, eff: str, sel, shared:
     return "show"
 
 
+def console_port_search_blob(p: dict) -> str:
+    """Lower-cased haystack of a console port's identifiers, for substring
+    search matching (hostname, alias, vendor, model, device path, port_id,
+    agent name, and the identified device IP)."""
+    probe = p.get("probe") or {}
+    ident = probe.get("identity") or {}
+    parts = [
+        p.get("alias"), ident.get("hostname"), ident.get("ip"),
+        ident.get("vendor") or probe.get("vendor"), ident.get("model"),
+        p.get("device"), p.get("port_id"), p.get("agent_name"),
+    ]
+    return " ".join(str(x) for x in parts if x).lower()
+
+
+def console_port_matches(p: dict, needle: str) -> bool:
+    """True when ``needle`` (already lower-cased, non-empty) is a substring of
+    the port's identifier blob."""
+    return bool(needle) and needle in console_port_search_blob(p)
+
+
+def console_port_result(p: dict) -> dict:
+    """Shape a tenant-scoped console port into a global-search / device-detail
+    result row carrying everything the WebUI needs to connect
+    (``openConsoleTerminal(spoke_id, port_id)``)."""
+    probe = p.get("probe") or {}
+    ident = probe.get("identity") or {}
+    return {
+        "source": "console",
+        "type": "console",
+        "name": ident.get("hostname") or p.get("alias") or p.get("device"),
+        "ip": ident.get("ip") or None,
+        "spoke_id": p.get("spoke_id"),
+        "port_id": p.get("port_id"),
+        "device": p.get("device"),
+        "agent_name": p.get("agent_name"),
+        "tenant_id": p.get("tenant_id") or "",
+        "baud": (p.get("settings") or {}).get("baud"),
+        "vendor": ident.get("vendor") or probe.get("vendor") or None,
+        "model": ident.get("model") or None,
+        "in_use": bool(p.get("in_use")),
+        "dpa": p.get("dpa"),
+    }
+
+
 def register(app, hub, ctx):
     """Register console routes on the Hub app."""
     _session_user = ctx._session_user
@@ -494,6 +538,11 @@ def register(app, hub, ctx):
     async def console_ports(request: Request):
         """Serial ports across every connected Console spoke (tenant-scoped)."""
         return await _list_visible_console_ports(request)
+
+    # Expose the tenant-scoped console listing so other route modules (global
+    # search, device-detail) can surface a found device's console for connect
+    # without duplicating the visibility/masking logic.
+    app.state.console_list_visible_ports = _list_visible_console_ports
 
     @app.post("/api/console/settings")
     async def console_settings(request: Request):
