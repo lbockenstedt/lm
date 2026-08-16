@@ -479,6 +479,25 @@ def register(app, hub, ctx):
         all_results = await _asyncio.gather(*tasks)
         merged = [item for sublist in all_results for item in sublist]
 
+        # Console leg: surface serial-console ports whose identified device
+        # (hostname / alias / vendor / model / device path / IP) matches the
+        # query, so a found device also carries its console for connect. Reuses
+        # the Console page's tenant-scoped listing (same visibility/masking), so
+        # a non-admin only ever sees consoles for its own tenant. Best-effort:
+        # a slow/absent console fleet must not fail the rest of the search.
+        try:
+            from routes.console import console_port_matches, console_port_result
+            lister = getattr(app.state, "console_list_visible_ports", None)
+            if lister:
+                cdata = await lister(request)
+                needle = raw_q.lower()
+                for p in (cdata.get("ports") or []):
+                    if console_port_matches(p, needle):
+                        merged.append(console_port_result(p))
+        except Exception as e:
+            logger.warning(f"search: console leg failed: {e}")
+            merged.append({"source": "console", "type": "error", "name": str(e)})
+
         # Categorise for the UI
         is_ip  = bool(re.match(r'^[\d:.]+(/\d+)?$', raw_q))
         return {
@@ -492,5 +511,6 @@ def register(app, hub, ctx):
                 "nac":        spoke_nac is not None,
                 "directory":  spoke_directory is not None,
                 "firewall":   spoke_firewall is not None,
+                "console":    bool(getattr(app.state, "console_list_visible_ports", None)),
             },
         }

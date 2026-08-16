@@ -24169,6 +24169,7 @@ function handleSearch(value) {
                 cppm:      '🔐',
                 ldap:      '👤',
                 opnsense:  '🔥',
+                console:   '🔌',
             };
             const typeLabel = {
                 device:      'Device',
@@ -24186,12 +24187,21 @@ function handleSearch(value) {
                 rack:        'Rack',
                 vlan:        'VLAN',
                 site:        'Site',
+                console:     'Console',
             };
 
             const rows = d.results.slice(0, 12).map(item => {
                 const icon  = sourceIcon[item.source] || '•';
                 const label = typeLabel[item.type]    || item.type;
                 const subParts = [item.ip, item.mac, item.cluster, item.dn];
+                if (item.source === 'console') {
+                    // Console rows carry connect coordinates, not IP/MAC — show
+                    // the serial device + baud so the operator knows the line.
+                    subParts.length = 0;
+                    if (item.device) subParts.push(item.device);
+                    if (item.baud)   subParts.push(item.baud + 'bps');
+                    if (item.model || item.vendor) subParts.push(item.model || item.vendor);
+                }
                 if (item.vid != null) subParts.push(`VLAN ${item.vid}`);
                 if (item.site) subParts.push(item.site);
                 if (item.rack) subParts.push(item.rack);
@@ -24219,6 +24229,14 @@ function openSearchResult(item) {
     const dd  = document.getElementById('search-results');
     if (inp) inp.value = '';
     if (dd)  { dd.classList.add('hidden'); dd.innerHTML = ''; }
+    // A console hit already carries its connect coordinates — open the serial
+    // terminal straight away instead of the (admin-only) device dashboard.
+    if (item.source === 'console' && item.spoke_id && item.port_id) {
+        if (typeof openConsoleTerminal === 'function') {
+            openConsoleTerminal(item.spoke_id, item.port_id);
+            return;
+        }
+    }
     showDeviceDashboard(item);
 }
 
@@ -24326,6 +24344,26 @@ async function showDeviceDashboard(item) {
                     <span class="font-medium text-slate-700">${u.name || u.dn || '—'}</span>
                     <span class="text-slate-400 ml-2">${u.type || ''}</span>
                 </div>`).join('') : empty));
+
+        // Console: serial-console port(s) mapped to this device, each with a
+        // direct connect button (opens the serial terminal for the line).
+        const con = d.console || [];
+        cards.push(card('Console', con.length ? 'bg-[#01A982]/10 text-[#01A982]' : 'bg-slate-50 text-slate-400',
+            con.length ? con.map(c => {
+                const meta = [c.device, c.baud ? c.baud + 'bps' : '', c.model || c.vendor || '', c.agent_name || '']
+                    .filter(Boolean).join(' · ');
+                const busy = c.in_use ? `<span class="ml-2 px-1.5 py-0.5 rounded text-[9px] bg-amber-100 text-amber-700 font-bold">IN USE</span>` : '';
+                const canConnect = c.spoke_id && c.port_id;
+                const btn = canConnect
+                    ? `<button onclick="openConsoleTerminal('${jesc(c.spoke_id)}','${jesc(c.port_id)}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold shrink-0">🖥 Connect</button>`
+                    : '';
+                return `<div class="flex items-center justify-between gap-2 py-1.5 border-b border-slate-50 last:border-0">
+                    <div class="min-w-0">
+                        <div class="text-xs font-medium text-slate-700 truncate">${escapeHtml(c.name || c.device || '—')}${busy}</div>
+                        <div class="text-[10px] text-slate-400 truncate font-mono">${escapeHtml(meta)}</div>
+                    </div>${btn}
+                </div>`;
+            }).join('') : empty));
 
         document.getElementById('dd-body').innerHTML = `<div class="grid grid-cols-1 md:grid-cols-2 gap-4">${cards.join('')}</div>`;
     } catch (e) {
