@@ -48,6 +48,12 @@ _PROMPT_HINTS = re.compile(
     re.MULTILINE,
 )
 
+# A baud sweep is only trustworthy — and the rate worth LOCKING — when the reply
+# is mostly printable text (the line is really talking at this rate, not emitting
+# framing noise). Below this we treat the port as "still unknown" and keep
+# sweeping on the next cycle rather than sticking on a dead guess.
+_BAUD_CONFIDENT_SCORE = 0.8
+
 _DEFAULT_SETTINGS = {"baud": 9600, "bytesize": 8, "parity": "N", "stopbits": 1, "flow": "none"}
 
 
@@ -176,6 +182,10 @@ def detect_baud(dev: str, candidates: Optional[List[int]] = None,
     return {
         "baud": best["baud"],
         "score": round(best["score"], 3),
+        # Only a mostly-printable reply means we truly locked onto the line's
+        # rate; a silent/garbled best-guess is reported but NOT confident, so
+        # callers keep sweeping instead of committing to a wrong baud.
+        "confident": bool(best["sample"]) and best["score"] >= _BAUD_CONFIDENT_SCORE,
         "sample": best["sample"].decode("utf-8", "replace"),
     }
 

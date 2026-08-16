@@ -208,3 +208,56 @@ def test_stop_monitor_keeps_channel_if_user_present(monkeypatch):
     assert sm.is_open("p1") and sm.has_user_sessions("p1")
     sm.close("u1")
     assert not sm.is_open("p1")  # now truly empty
+
+
+# ── detect_baud confidence flag ──────────────────────────────────────────────
+# Auto-baud must only LOCK a rate when the line yields readable text; a silent or
+# garbled sweep reports a best-guess but flags confident=False so callers keep
+# sweeping instead of committing to a wrong rate.
+class _BaudFakeSerial:
+    """Serial stand-in whose readable rate is configurable via ``good_baud``."""
+    good_baud = None
+
+    class SerialException(Exception):
+        pass
+
+    class Serial:
+        def __init__(self, dev, baud, timeout=0.3):
+            self.baud = baud
+            self._buf = (b"Switch> \r\nlogin: "
+                         if baud == _BaudFakeSerial.good_baud else b"")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def reset_input_buffer(self):
+            pass
+
+        def write(self, b):
+            pass
+
+        def read(self, n):
+            out, self._buf = self._buf[:n], self._buf[n:]
+            return out
+
+        def close(self):
+            pass
+
+
+def test_detect_baud_confident_when_line_is_readable(monkeypatch):
+    _BaudFakeSerial.good_baud = 115200
+    monkeypatch.setattr(m, "serial", _BaudFakeSerial)
+    res = m.detect_baud("/dev/ttyUSB0", [9600, 115200, 38400])
+    assert res["baud"] == 115200
+    assert res["confident"] is True
+
+
+def test_detect_baud_not_confident_when_silent(monkeypatch):
+    _BaudFakeSerial.good_baud = None  # every rate stays silent
+    monkeypatch.setattr(m, "serial", _BaudFakeSerial)
+    res = m.detect_baud("/dev/ttyUSB0", [9600, 115200, 38400])
+    # A best-guess baud may still be returned, but it must NOT be locked.
+    assert res["confident"] is False
