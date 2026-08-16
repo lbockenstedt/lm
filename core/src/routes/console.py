@@ -399,6 +399,16 @@ def register(app, hub, ctx):
             except Exception:  # noqa: BLE001
                 pass
 
+    async def _console_push_llm_flag(hub, spokes, enabled):
+        """Push the LLM-identify runtime gate to console spokes (fire-and-forget,
+        signed) so the toggle takes effect without an agent restart."""
+        for sid in spokes:
+            try:
+                await hub.send_to_spoke_command(sid, "CONSOLE_SET_LLM_IDENTIFY",
+                                                {"enabled": bool(enabled)})
+            except Exception:  # noqa: BLE001
+                pass
+
     @app.get("/api/console/ports")
     async def console_ports(request: Request):
         """Serial ports across every connected Console spoke, each tagged with its
@@ -542,9 +552,9 @@ def register(app, hub, ctx):
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
-        if not llm.hub_llm_identify_enabled():
+        if not llm.hub_llm_identify_enabled(hub):
             raise HTTPException(status_code=409,
-                                detail="LLM-assisted identify is disabled (set LM_CONSOLE_LLM_IDENTIFY).")
+                                detail="LLM-assisted identify is disabled — enable it in the Console tools.")
         agent = llm.find_bugfixer(hub)
         if not agent:
             raise HTTPException(status_code=409,
@@ -559,10 +569,42 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400, detail="spoke_id/port_id required")
         await _assert_port_tenant(request, sid, port_id)
         await _console_seed_credentials(hub, [sid])  # so the generic login can succeed
+        await _console_push_llm_flag(hub, [sid], True)  # ensure the spoke gate is on
         try:
             return await llm.orchestrate(hub, agent, sid, port_id)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=f"LLM identify error: {e}")
+
+    @app.get("/api/console/llm-identify")
+    async def console_llm_identify_get(request: Request):
+        """Current state of the LLM-assisted identify toggle (admin). Reports
+        whether it's enabled and whether the BugFixer LLM agent is connected."""
+        from routes import console_llm_identify as llm
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        hub = app.state.hub
+        return {"enabled": llm.hub_llm_identify_enabled(hub),
+                "available": llm.find_bugfixer(hub) is not None}
+
+    @app.post("/api/console/llm-identify")
+    async def console_llm_identify_set(request: Request):
+        """Enable/disable LLM-assisted identify (admin). Persists the hub setting
+        and pushes the runtime gate to every connected Console spoke."""
+        from routes import console_llm_identify as llm
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        enabled = bool((body or {}).get("enabled"))
+        hub.state.system_state["console_llm_identify_enabled"] = enabled
+        hub.state._mark_dirty()
+        await _console_push_llm_flag(hub, hub.get_all_spokes_by_type("console") or [], enabled)
+        return {"enabled": enabled, "available": llm.find_bugfixer(hub) is not None}
 
     @app.post("/api/console/capture")
     async def console_capture(request: Request):

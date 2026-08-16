@@ -297,3 +297,45 @@ def test_run_commands_no_auth_sends_nothing():
     assert res["logged_in"] is False
     assert res["outputs"] == {}
     assert "show version" not in " ".join(chan.sent)
+
+
+# ── login telemetry (diag) for troubleshooting ──────────────────────────────
+def test_run_identify_diag_silent_device():
+    class _Silent:
+        def read(self): return b""
+        def write(self, b): pass
+    ch = _Silent()
+    res = fp.run_identify(ch.read, ch.write, [{"username": "a", "password": "b"}])
+    d = res["diag"]
+    assert d["any_output"] is False
+    assert d["login_prompt_seen"] is False
+    assert "no output" in d["reason"]
+
+
+def test_run_identify_diag_login_prompt_no_creds():
+    chan = _FakeChan("\r\nswitch login: ", [])
+    res = fp.run_identify(chan.read, chan.write, [])   # no credentials
+    d = res["diag"]
+    assert d["login_prompt_seen"] is True
+    assert d["creds_available"] == 0
+    assert "no stored credentials" in d["reason"]
+
+
+def test_run_identify_diag_auth_rejected():
+    class _BadAuth:
+        def __init__(self): self.buf = bytearray(b"\r\ndev login: "); self.state = "login"
+        def read(self):
+            out = bytes(self.buf[:256]); del self.buf[:256]; return out
+        def write(self, b):
+            s = b.decode(errors="replace")
+            if self.state == "login" and s.strip():
+                self.state = "password"; self.buf += b"\r\nPassword: "
+            elif self.state == "password" and s.strip():
+                self.state = "login"; self.buf += b"\r\nLogin incorrect\r\ndev login: "
+    ch = _BadAuth()
+    res = fp.run_identify(ch.read, ch.write, [{"username": "x", "password": "y"}])
+    d = res["diag"]
+    assert d["login_prompt_seen"] and d["password_prompt_seen"]
+    assert d["creds_tried"] == 1
+    assert "rejected" in d["reason"]
+    assert d["tail"]  # a printable tail is captured for troubleshooting

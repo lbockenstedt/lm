@@ -259,3 +259,29 @@ def test_llm_store_disabled_by_default(spoke):
     res = asyncio.run(spoke.handle_command("CONSOLE_LLM_STORE",
                                            {"port_id": "good", "vendor": "x"}))
     assert res["status"] == "ERROR" and "disabled" in res["message"].lower()
+
+
+def test_identify_telemetry_surfaces_in_diagnostics(spoke):
+    # Simulate a login attempt that saw a login prompt but never authenticated.
+    spoke._record_identify_telemetry("good", {
+        "logged_in": False, "vendor": None, "identity": {},
+        "diag": {"login_prompt_seen": True, "password_prompt_seen": True,
+                 "shell_prompt_seen": False, "any_output": True, "bytes": 42,
+                 "creds_tried": 1, "creds_available": 2,
+                 "reason": "credentials rejected (re-prompted for login/password)",
+                 "tail": "dev login:"}}, method="login")
+    res = asyncio.run(spoke.handle_command("CONSOLE_DIAGNOSTICS", {}))
+    row = next(d for d in res["diagnostics"] if d["port_id"] == "good")
+    t = row["identify"]
+    assert t["attempts"] == 1 and t["logins_ok"] == 0
+    assert t["login_prompt_seen"] and t["password_prompt_seen"]
+    assert "rejected" in t["reason"] and t["tail"] == "dev login:"
+
+
+def test_set_llm_identify_toggles_runtime_config(spoke):
+    assert spoke.config.get("console_llm_identify") in (None, False)
+    res = asyncio.run(spoke.handle_command("CONSOLE_SET_LLM_IDENTIFY", {"enabled": True}))
+    assert res["status"] == "SUCCESS" and res["enabled"] is True
+    assert spoke.config["console_llm_identify"] is True
+    res = asyncio.run(spoke.handle_command("CONSOLE_SET_LLM_IDENTIFY", {"enabled": False}))
+    assert spoke.config["console_llm_identify"] is False

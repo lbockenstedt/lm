@@ -239,6 +239,15 @@ class ConsoleSpoke(BaseSpoke):
             logger.info("console: loaded %d credential(s) for auto-identify", len(self._credentials))
             return {"status": "SUCCESS", "count": len(self._credentials)}
 
+        if cmd == "CONSOLE_SET_LLM_IDENTIFY":
+            # Runtime toggle for LLM-driven identify (pushed by the hub when an
+            # admin flips the UI switch), so it can be enabled without restarting
+            # the agent to change static config.
+            enabled = bool(data.get("enabled"))
+            self.config["console_llm_identify"] = enabled
+            logger.info("console: LLM-assisted identify %s", "enabled" if enabled else "disabled")
+            return {"status": "SUCCESS", "enabled": enabled}
+
         if cmd == "CONSOLE_AUTOPROBE":
             pid = data.get("port_id")
             dev = self._port_device(pid) if pid else None
@@ -247,6 +256,7 @@ class ConsoleSpoke(BaseSpoke):
             if self.sessions.has_user_sessions(pid):
                 return {"status": "ERROR", "message": "port is in use; close sessions first"}
             res = await self._exclusive_probe(pid, self._identify_blocking, pid, dev)
+            self._record_identify_telemetry(pid, res, method="login")
             await self._emit_probe_result(pid, res)
             return {"status": "SUCCESS", "port_id": pid,
                     "vendor": res.get("vendor"), "logged_in": bool(res.get("logged_in")),
@@ -270,6 +280,7 @@ class ConsoleSpoke(BaseSpoke):
                 self._mark_unopenable(pid, res["error"])
             else:
                 self._clear_unopenable(pid)
+            self._record_identify_telemetry(pid, res, method="llm")
             return {"status": "SUCCESS", "port_id": pid, **res}
 
         if cmd == "CONSOLE_LLM_STORE":
@@ -617,6 +628,7 @@ class ConsoleSpoke(BaseSpoke):
             self._mark_unopenable(pid, res["error"])
         else:
             self._clear_unopenable(pid)
+        self._record_identify_telemetry(pid, res, method="login")
         await self._emit_probe_result(pid, res)
         if res.get("identity") or res.get("logged_in"):
             self._probe_delay[pid] = 1800.0  # known → re-verify occasionally
@@ -721,6 +733,40 @@ class ConsoleSpoke(BaseSpoke):
         "could not open", "device disconnected", "errno 6",
     )
 
+    def _record_identify_telemetry(self, pid: str, res: Dict[str, Any], method: str = "login") -> None:
+        """Fold the outcome of an identify / AI-identify attempt into the port's
+        health record so the diagnostics report can explain WHY a device isn't
+        being identified (login prompt seen? creds tried? what did the line say?).
+        Nothing sensitive is stored — only prompt-detection flags + a printable
+        transcript tail (control bytes stripped)."""
+        h = self._health_rec(pid)
+        diag = dict(res.get("diag") or {})
+        rec = h.setdefault("identify", {
+            "attempts": 0, "logins_ok": 0, "identifies_ok": 0,
+        })
+        rec["attempts"] += 1
+        if res.get("logged_in"):
+            rec["logins_ok"] += 1
+        if res.get("identity") or res.get("vendor"):
+            rec["identifies_ok"] += 1
+        rec["last_attempt"] = time.time()
+        rec["method"] = method
+        rec["logged_in"] = bool(res.get("logged_in"))
+        rec["vendor"] = res.get("vendor")
+        rec["error"] = res.get("error", "")
+        rec["login_prompt_seen"] = bool(diag.get("login_prompt_seen"))
+        rec["password_prompt_seen"] = bool(diag.get("password_prompt_seen"))
+        rec["shell_prompt_seen"] = bool(diag.get("shell_prompt_seen"))
+        rec["any_output"] = bool(diag.get("any_output"))
+        rec["bytes"] = diag.get("bytes", 0)
+        rec["creds_tried"] = diag.get("creds_tried", 0)
+        rec["creds_available"] = diag.get("creds_available", len(self._credentials))
+        rec["reason"] = diag.get("reason", "")
+        rec["tail"] = diag.get("tail", "")
+        if method == "llm":
+            rec["commands_run"] = res.get("commands_run") or list((res.get("outputs") or {}).keys())
+            rec["rejected"] = res.get("rejected") or []
+
     def _health_rec(self, pid: str) -> Dict[str, Any]:
         """Get-or-create the failure/disconnect history record for a port."""
         h = self._health.get(pid)
@@ -756,14 +802,18 @@ class ConsoleSpoke(BaseSpoke):
 
     def _diagnostics(self) -> List[Dict[str, Any]]:
         """Health rows for the serial-connection diagnostics report: every port
-        with a failure story (open failures, disconnects, or currently failing),
-        newest/worst first. Includes ports that have vanished from enumeration
-        (``present=False`` — device pulled)."""
+        with a failure story (open failures, disconnects, currently failing, OR a
+        recorded identify/login attempt), newest/worst first. Includes ports that
+        have vanished from enumeration (``present=False`` — device pulled) and the
+        identify telemetry that explains why a device isn't being identified."""
         live = {p["port_id"]: p for p in enumerate_ports()}
         rows: List[Dict[str, Any]] = []
         for pid in set(self._health) | set(live):
             h = self._health.get(pid, {})
-            if not (h.get("open_failures") or h.get("disconnects") or h.get("currently_failing")):
+            ident = h.get("identify") or {}
+            has_story = (h.get("open_failures") or h.get("disconnects")
+                         or h.get("currently_failing") or ident.get("attempts"))
+            if not has_story:
                 continue
             p = live.get(pid, {})
             saved = self.store.get(pid)
@@ -789,9 +839,11 @@ class ConsoleSpoke(BaseSpoke):
                 "last_activity": snap["last_activity"],
                 "identified": bool(probe.get("identity") or probe.get("vendor")),
                 "vendor": probe.get("vendor"),
+                "identify": ident,   # login/AI-identify telemetry (why it did/didn't work)
             })
         rows.sort(key=lambda d: (d["currently_failing"],
-                                 d["open_failures"] + d["disconnects"]), reverse=True)
+                                 d["open_failures"] + d["disconnects"],
+                                 (d.get("identify") or {}).get("attempts", 0)), reverse=True)
         return rows
 
     def _passive_glean(self, pid: str) -> None:
