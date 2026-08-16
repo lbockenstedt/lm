@@ -16242,12 +16242,17 @@ function _consoleIdentityBlock(p) {
 
 function _consoleIdentitySummary(identity) {
     if (!identity) return '';
+    const typePill = identity.type
+        ? `<span class="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 font-bold uppercase text-[9px]" title="Device role">${escapeHtml(identity.type)}</span> `
+        : '';
     const parts = [];
+    if (identity.model) parts.push(`<span class="font-semibold text-slate-700">${escapeHtml(identity.model)}</span>`);
+    if (identity.os) parts.push(escapeHtml(identity.os));
     if (identity.serial) parts.push('SN ' + escapeHtml(identity.serial));
-    if (identity.model) parts.push(escapeHtml(identity.model));
     if (identity.mac) parts.push(escapeHtml(identity.mac));
     if (identity.ip) parts.push(escapeHtml(identity.ip));
-    return parts.length ? `<span class="text-slate-500">${parts.join(' · ')}</span>` : '';
+    const body = parts.length ? `<span class="text-slate-500">${parts.join(' · ')}</span>` : '';
+    return (typePill || body) ? `${typePill}${body}` : '';
 }
 
 async function consoleIdentify(spokeId, portId) {
@@ -16279,7 +16284,7 @@ async function consoleIdentifyLlm(spokeId, portId) {
         const d = await res.json().catch(() => ({}));
         if (!res.ok) { showToast(d.detail || 'AI identify failed', 'error'); return; }
         if (d.identified && d.vendor) {
-            const bits = [d.vendor, (d.identity || {}).model, (d.identity || {}).serial].filter(Boolean).join(' · ');
+            const bits = [d.vendor, (d.identity || {}).type, (d.identity || {}).model, (d.identity || {}).serial].filter(Boolean).join(' · ');
             showToast(`🤖 Identified: ${bits}${d.rounds > 1 ? ` (ran ${(d.commands_run || []).length} cmd)` : ''}`, 'success');
             loadConsoleData();
         } else {
