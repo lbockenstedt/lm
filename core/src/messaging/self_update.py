@@ -482,13 +482,25 @@ class SelfUpdateMixin:
             head_after = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
 
             own_changed = (head_after != head_before)
+            # Restart even when THIS pull was a no-op if the running process
+            # booted at an OLDER commit than what's now on disk — the classic
+            # pulled-but-not-restarted trap (operator ran `git pull` manually,
+            # then clicked Update). Without this, head_before == head_after and
+            # we'd fall through to "already up to date; no restart" while the
+            # stale process keeps serving old code until the 5-min drift
+            # watchdog (if armed) catches it. _drift_baseline is the boot-time
+            # HEAD map published by the drift watchdog; absent (watchdog
+            # disabled) -> behave exactly as before.
+            boot_commit = getattr(self, "_drift_baseline", {}).get(os.path.abspath(cwd))
+            process_behind = bool(boot_commit) and head_after and (head_after != boot_commit)
+            need_own_reload = own_changed or process_behind
             # 6. Restart if EITHER the own repo or the shared core advanced.
-            if own_changed or core_changed:
+            if need_own_reload or core_changed:
                 # Skip a known-bad commit (rolled back before): reset to
                 # head_before and stay put rather than crash-looping into the
                 # same broken code. (Core known-bad is handled in its own block
                 # above — a bad core alone doesn't trip this branch.)
-                if own_changed and self._is_known_bad_commit(head_after):
+                if need_own_reload and self._is_known_bad_commit(head_after):
                     logger.warning(
                         "update: new HEAD %s is a known-bad commit "
                         "(rolled back before); resetting to %s and skipping.",
