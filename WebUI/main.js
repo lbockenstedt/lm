@@ -16134,7 +16134,7 @@ function _renderConsolePorts(el, data) {
             ? `<div class="text-[11px] mt-0.5"><span class="font-mono px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200" title="Direct Port Access — connect a terminal straight to this serial line (unencrypted telnet; bound to ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))})">🔌 ${escapeHtml(String(p.dpa.proto || 'telnet'))} ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))}:${escapeHtml(String(p.dpa.telnet_port))}</span></div>` : '';
         return `<tr class="hover:bg-slate-50">
             <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${monDot}</div>
-              <div class="text-xs font-mono text-slate-400">${escapeHtml(p.device)} · ${escapeHtml(p.port_id)}</div>
+              <div class="text-xs font-mono text-slate-400">${escapeHtml(p.device)}</div>
               ${dpaBadge}
               ${_consoleIdentityBlock(p)}</td>
             <td class="px-4 py-3 text-center text-sm">${baud}</td>
