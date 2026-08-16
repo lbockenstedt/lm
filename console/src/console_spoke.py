@@ -16,7 +16,7 @@ import base64
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     from base_spoke import BaseSpoke
@@ -78,6 +78,10 @@ class ConsoleSpoke(BaseSpoke):
         # the UI so operators never see a broken port or its raw error — but we
         # keep probing, so one that starts working reappears on its own.
         self._unopenable: Dict[str, Dict[str, Any]] = {}  # port_id → {error, since}
+        # Per-port failure/disconnect history for the diagnostics report: open
+        # failures (faulty/non-real ports), reader deaths (device pulled), and
+        # recovery cycles (flapping). In memory (since process start).
+        self._health: Dict[str, Dict[str, Any]] = {}
 
     # ── reader-thread → hub bridge ────────────────────────────────────────────
     def _on_serial_data(self, session_id: str, data: bytes) -> None:
@@ -186,6 +190,12 @@ class ConsoleSpoke(BaseSpoke):
                     "monitoring": snap["monitoring"], "last_activity": snap["last_activity"],
                     "capture_bytes": snap["capture_bytes"]}
 
+
+        if cmd == "CONSOLE_DIAGNOSTICS":
+            # Serial-connection health report: ports that keep failing to open
+            # (faulty/non-real), get disconnected (device pulled), or flap.
+            return {"status": "SUCCESS", "spoke_id": self.spoke_id,
+                    "generated": time.time(), "diagnostics": self._diagnostics()}
 
         if cmd == "CONSOLE_GET_SETTINGS":
             pid = data.get("port_id")
@@ -631,13 +641,19 @@ class ConsoleSpoke(BaseSpoke):
                 self._clear_unopenable(pid)
                 self._passive_glean(pid)
                 continue
+            # A live monitor channel whose reader thread has died = the device was
+            # pulled / the handle dropped: count a disconnect before we reopen.
+            existing = self.sessions.channel(pid)
+            if existing is not None and not existing.reader_alive():
+                h = self._health_rec(pid)
+                h["disconnects"] += 1
+                h["last_disconnect"] = time.time()
             chan = self.sessions.ensure_monitor(pid, p["device"], self.store.settings(pid))
             if chan is None:
                 self._mark_unopenable(pid, self.sessions.monitor_error(pid) or "cannot open port")
                 continue
             self._clear_unopenable(pid)
             self._passive_glean(pid)
-
     # Substrings that indicate a KNOWN-faulty/non-real port (for clearer logs).
     # We hide on ANY open failure regardless; these just classify the message.
     _UNOPENABLE_HINTS = (
@@ -647,16 +663,78 @@ class ConsoleSpoke(BaseSpoke):
         "could not open", "device disconnected", "errno 6",
     )
 
+    def _health_rec(self, pid: str) -> Dict[str, Any]:
+        """Get-or-create the failure/disconnect history record for a port."""
+        h = self._health.get(pid)
+        if h is None:
+            h = {"open_failures": 0, "disconnects": 0, "recoveries": 0,
+                 "last_error": "", "first_failure": 0.0, "last_failure": 0.0,
+                 "last_disconnect": 0.0, "last_recovery": 0.0, "currently_failing": False}
+            self._health[pid] = h
+        return h
+
     def _mark_unopenable(self, pid: str, err: str) -> None:
-        if pid not in self._unopenable:
-            known = any(h in (err or "").lower() for h in self._UNOPENABLE_HINTS)
+        now = time.time()
+        h = self._health_rec(pid)
+        if pid not in self._unopenable:  # transition healthy → failing = a new episode
+            known = any(hint in (err or "").lower() for hint in self._UNOPENABLE_HINTS)
             logger.info("console: hiding port %s from UI — %s serial port (%s)",
                         pid, "faulty/non-real" if known else "unopenable", err)
-        self._unopenable[pid] = {"error": err, "since": time.time()}
+            h["open_failures"] += 1
+            h["currently_failing"] = True
+            if not h["first_failure"]:
+                h["first_failure"] = now
+        h["last_failure"] = now
+        h["last_error"] = err
+        self._unopenable[pid] = {"error": err, "since": now}
 
     def _clear_unopenable(self, pid: str) -> None:
         if self._unopenable.pop(pid, None) is not None:
             logger.info("console: port %s is openable again — restoring to UI", pid)
+            h = self._health_rec(pid)
+            h["recoveries"] += 1
+            h["last_recovery"] = time.time()
+            h["currently_failing"] = False
+
+    def _diagnostics(self) -> List[Dict[str, Any]]:
+        """Health rows for the serial-connection diagnostics report: every port
+        with a failure story (open failures, disconnects, or currently failing),
+        newest/worst first. Includes ports that have vanished from enumeration
+        (``present=False`` — device pulled)."""
+        live = {p["port_id"]: p for p in enumerate_ports()}
+        rows: List[Dict[str, Any]] = []
+        for pid in set(self._health) | set(live):
+            h = self._health.get(pid, {})
+            if not (h.get("open_failures") or h.get("disconnects") or h.get("currently_failing")):
+                continue
+            p = live.get(pid, {})
+            saved = self.store.get(pid)
+            probe = saved.get("probe") or {}
+            snap = self.sessions.snapshot(pid)
+            rows.append({
+                "port_id": pid,
+                "device": p.get("device", ""),
+                "present": pid in live,
+                "alias": saved.get("alias", ""),
+                "tenant_id": saved.get("tenant_id", ""),
+                "currently_failing": bool(h.get("currently_failing")),
+                "open_failures": h.get("open_failures", 0),
+                "disconnects": h.get("disconnects", 0),
+                "recoveries": h.get("recoveries", 0),
+                "last_error": h.get("last_error", ""),
+                "first_failure": h.get("first_failure", 0.0),
+                "last_failure": h.get("last_failure", 0.0),
+                "last_disconnect": h.get("last_disconnect", 0.0),
+                "last_recovery": h.get("last_recovery", 0.0),
+                "monitoring": snap["monitoring"],
+                "in_use": snap["has_user"],
+                "last_activity": snap["last_activity"],
+                "identified": bool(probe.get("identity") or probe.get("vendor")),
+                "vendor": probe.get("vendor"),
+            })
+        rows.sort(key=lambda d: (d["currently_failing"],
+                                 d["open_failures"] + d["disconnects"]), reverse=True)
+        return rows
 
     def _passive_glean(self, pid: str) -> None:
         """Merge best-effort identity gleaned from the passive capture into the

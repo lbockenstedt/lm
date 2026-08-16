@@ -571,6 +571,34 @@ def register(app, hub, ctx):
         }, timeout=15.0)
         return _console_unwrap(r)
 
+    @app.get("/api/console/diagnostics")
+    async def console_diagnostics(request: Request):
+        """Serial-connection health report across every Console spoke: ports that
+        keep failing to open (faulty/non-real), get disconnected (device pulled),
+        or flap. Admin-gated (ops/troubleshooting view of infra-wide errors)."""
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        hub = app.state.hub
+        spokes = hub.get_all_spokes_by_type("console") or []
+        rows, errors = [], {}
+        for sid in spokes:
+            agent_name = hub.state.get_module_name(sid)
+            stenant = hub.state.get_spoke_tenant(sid) or ""
+            try:
+                r = await hub.request_response(sid, "CONSOLE_DIAGNOSTICS", {}, timeout=15.0)
+            except Exception as e:  # noqa: BLE001 - one dead console shouldn't blank the rest
+                errors[sid] = str(e)
+                continue
+            for d in (_console_unwrap(r).get("diagnostics") or []):
+                d["spoke_id"] = sid
+                d["agent_name"] = agent_name
+                d["tenant_id"] = d.get("tenant_id") or stenant  # per-port override else agent binding
+                rows.append(d)
+        rows.sort(key=lambda d: (d.get("currently_failing", False),
+                                 d.get("open_failures", 0) + d.get("disconnects", 0)), reverse=True)
+        return {"diagnostics": rows, "errors": errors, "consoles": spokes}
+
     @app.get("/api/console/credentials")
     async def console_get_credentials(request: Request):
         """Return the global auto-identify credential list with passwords MASKED

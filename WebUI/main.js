@@ -16110,7 +16110,7 @@ function _renderConsolePorts(el, data) {
             </td></tr>`;
     }).join('');
     const tools = admin
-        ? `<div class="flex justify-end gap-2 p-2 border-b border-slate-100"><button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button></div>`
+        ? `<div class="flex justify-end gap-2 p-2 border-b border-slate-100"><button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button><button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button></div>`
         : '';
     el.innerHTML = `${tools}<div class="p-0 overflow-hidden"><table class="w-full text-left text-sm">
         <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>
@@ -16220,6 +16220,63 @@ async function openConsoleCaptureModal(spokeId, portId) {
     const jesc = s => (s || '').replace(/'/g, "\\'");
     modal.querySelector('.js-capture-refresh').setAttribute(
         'onclick', `openConsoleCaptureModal('${jesc(spokeId)}','${jesc(portId)}')`);
+}
+
+async function openConsoleDiagnosticsModal() {
+    const modal = document.createElement('div');
+    modal.id = 'console-diag-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    modal.innerHTML = `<div class="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[85vh] overflow-hidden flex flex-col">
+        <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+          <h3 class="text-lg font-bold text-[#263040]">🩺 Serial Connection Diagnostics</h3>
+          <button onclick="this.closest('#console-diag-modal').remove()" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
+        </div>
+        <div id="console-diag-body" class="p-6 overflow-auto text-sm text-slate-500">Loading…</div></div>`;
+    document.body.appendChild(modal);
+    await refreshConsoleDiagnostics();
+}
+
+async function refreshConsoleDiagnostics() {
+    const body = document.getElementById('console-diag-body');
+    if (!body) return;
+    let data = { diagnostics: [], errors: {} };
+    try {
+        const res = await fetch('/api/console/diagnostics', { credentials: 'same-origin' });
+        if (res.ok) data = await res.json();
+        else { body.innerHTML = `<div class="text-red-500">Failed to load (${res.status})</div>`; return; }
+    } catch (e) { body.innerHTML = `<div class="text-red-500">${escapeHtml(e.message)}</div>`; return; }
+    const rows = data.diagnostics || [];
+    const errs = Object.entries(data.errors || {});
+    if (!rows.length && !errs.length) {
+        body.innerHTML = `<div class="text-emerald-600 flex items-center gap-2">✅ No failing or disconnecting serial connections.</div>
+          <div class="pt-4 flex justify-end"><button onclick="refreshConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">↻ Refresh</button></div>`;
+        return;
+    }
+    const statusPill = (d) => {
+        if (!d.present) return '<span class="px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 text-[10px] font-bold uppercase">gone</span>';
+        if (d.currently_failing) return '<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase">failing</span>';
+        if (d.recoveries > 1) return '<span class="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold uppercase">flapping</span>';
+        return '<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase">recovered</span>';
+    };
+    const tbl = `<table class="w-full text-left">
+        <thead class="text-slate-500 uppercase text-[10px] border-b border-slate-200"><tr>
+          <th class="py-2 pr-3">Port</th><th class="py-2 pr-3">Agent</th><th class="py-2 pr-3">Status</th>
+          <th class="py-2 pr-3 text-center">Open fails</th><th class="py-2 pr-3 text-center">Disconnects</th>
+          <th class="py-2 pr-3 text-center">Recoveries</th><th class="py-2 pr-3">Last error</th><th class="py-2 pr-3">Last event</th>
+        </tr></thead><tbody>${rows.map(d => `<tr class="border-b border-slate-50">
+          <td class="py-2 pr-3 font-mono text-xs">${escapeHtml(d.alias || d.device || d.port_id)}</td>
+          <td class="py-2 pr-3 text-xs">${escapeHtml(d.agent_name || d.spoke_id || '')}</td>
+          <td class="py-2 pr-3">${statusPill(d)}</td>
+          <td class="py-2 pr-3 text-center">${d.open_failures || 0}</td>
+          <td class="py-2 pr-3 text-center">${d.disconnects || 0}</td>
+          <td class="py-2 pr-3 text-center">${d.recoveries || 0}</td>
+          <td class="py-2 pr-3 text-xs text-red-500 max-w-[16rem] truncate" title="${escapeHtml(d.last_error || '')}">${escapeHtml(d.last_error || '')}</td>
+          <td class="py-2 pr-3 text-xs text-slate-400">${_consoleRelTime(Math.max(d.last_failure || 0, d.last_disconnect || 0, d.last_recovery || 0))}</td>
+        </tr>`).join('')}</tbody></table>`;
+    const errHtml = errs.length
+        ? `<div class="mt-3 text-[11px] text-amber-600">Unreachable consoles: ${errs.map(([s, e]) => escapeHtml(s)).join(', ')}</div>` : '';
+    body.innerHTML = `<div class="text-[11px] text-slate-400 mb-2">${rows.length} port(s) with a failure/disconnect history (since each agent started).</div>${tbl}${errHtml}
+      <div class="pt-4 flex justify-end"><button onclick="refreshConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">↻ Refresh</button></div>`;
 }
 
 async function openConsoleCredentialsModal() {

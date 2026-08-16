@@ -155,3 +155,37 @@ def test_login_backs_off_after_failure(spoke):
     assert spoke._probe_delay["good"] >= 300.0     # escalated backoff
     assert spoke._identify_due("good") is False     # just attempted → not due yet
 
+
+def test_diagnostics_reports_faulty_port(spoke):
+    spoke._monitor_scan()  # 'bad' can't open → open failure #1; 'good' is healthy
+    assert spoke._health["bad"]["open_failures"] == 1
+    assert spoke._health["bad"]["currently_failing"] is True
+    # Re-scanning while still faulty must NOT double-count the same episode.
+    spoke._monitor_scan()
+    assert spoke._health["bad"]["open_failures"] == 1
+    res = asyncio.run(spoke.handle_command("CONSOLE_DIAGNOSTICS", {}))
+    assert res["status"] == "SUCCESS"
+    bad = next(d for d in res["diagnostics"] if d["port_id"] == "bad")
+    assert bad["currently_failing"] is True and bad["open_failures"] == 1
+    assert "input/output error" in bad["last_error"].lower()
+    # A healthy port has no failure story → excluded from the report.
+    assert all(d["port_id"] != "good" for d in res["diagnostics"])
+
+
+def test_diagnostics_counts_recovery(spoke):
+    spoke._monitor_scan()
+    spoke._clear_unopenable("bad")  # simulate the port becoming openable again
+    assert spoke._health["bad"]["recoveries"] == 1
+    assert spoke._health["bad"]["currently_failing"] is False
+
+
+def test_diagnostics_counts_disconnect(spoke):
+    spoke._monitor_scan()  # 'good' is monitored
+    spoke.sessions.channel("good")._reader_alive = False  # reader thread died (device pulled)
+    spoke._monitor_scan()  # detect the dead reader → disconnect, then reopen
+    assert spoke._health["good"]["disconnects"] == 1
+    res = asyncio.run(spoke.handle_command("CONSOLE_DIAGNOSTICS", {}))
+    good = next(d for d in res["diagnostics"] if d["port_id"] == "good")
+    assert good["disconnects"] == 1
+
+
