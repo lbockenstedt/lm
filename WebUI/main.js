@@ -16126,7 +16126,6 @@ function _renderConsolePorts(el, data) {
             : '<span class="italic text-slate-400 text-xs">unassigned</span>';
         const eP = esc(p.port_id), eS = esc(p.spoke_id || ''), eT = esc(p.tenant_override || '');
         const tenantBtn = admin ? `<button onclick="openConsolePortTenantModal('${eS}','${eP}','${eT}')" class="text-[11px] px-2 py-1 rounded border border-[#01A982] text-[#01A982] hover:bg-slate-50">Tenant</button>` : '';
-        const aiIdBtn = admin ? `<button onclick="consoleIdentifyLlm('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Ask the LLM to identify this device from its console output (runs read-only commands only)">🤖 AI Identify</button>` : '';
         const configBtn = hasConsoleWrite() ? `<button onclick="openConsoleConfigModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-indigo-400 text-indigo-600 hover:bg-slate-50">Config</button>` : '';
         const captureBtn = (p.capture_bytes || p.monitoring || (p.probe && p.probe.banner))
             ? `<button onclick="openConsoleCaptureModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50" title="View recent console output captured from this port">Capture</button>` : '';
@@ -16134,7 +16133,7 @@ function _renderConsolePorts(el, data) {
             ? `<div class="text-[11px] mt-0.5"><span class="font-mono px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200" title="Direct Port Access — connect a terminal straight to this serial line (unencrypted telnet; bound to ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))})">🔌 ${escapeHtml(String(p.dpa.proto || 'telnet'))} ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))}:${escapeHtml(String(p.dpa.telnet_port))}</span></div>` : '';
         return `<tr class="hover:bg-slate-50">
             <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${monDot}</div>
-              <div class="text-xs font-mono text-slate-400">${escapeHtml(p.device)}</div>
+              <div class="text-xs font-mono text-slate-400">${escapeHtml(p.device)}:${escapeHtml(String(baud))}</div>
               ${dpaBadge}
               ${_consoleIdentityBlock(p)}</td>
             <td class="px-4 py-3 text-center text-sm">${baud}</td>
@@ -16142,9 +16141,6 @@ function _renderConsolePorts(el, data) {
             <td class="px-4 py-3">${tenant}</td>
             <td class="px-4 py-3 text-right whitespace-nowrap space-x-1">
               <button onclick="openConsoleTerminal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold">🖥 Open</button>
-              <button onclick="consoleDetectBaud('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Detect baud</button>
-              <button onclick="consoleIdentify('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Identify</button>
-              ${aiIdBtn}
               ${captureBtn}
               <button onclick="openConsoleSettingsModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Settings</button>
               ${configBtn}
@@ -16152,7 +16148,7 @@ function _renderConsolePorts(el, data) {
             </td></tr>`;
     }).join('');
     const tools = admin
-        ? `<div class="flex justify-end gap-2 p-2 border-b border-slate-100"><button id="console-llm-toggle" onclick="toggleConsoleLlmIdentify()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Enable/disable LLM-driven device identification (🤖 AI Identify)">🤖 AI Identify: …</button><button onclick="consoleIdentifyLlmAll()" class="text-[11px] px-3 py-1.5 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Run 🤖 AI Identify on every listed port at once (skips ports currently open in a session)">🤖 AI Identify All</button><button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button><button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button></div>`
+        ? `<div class="flex justify-end gap-2 p-2 border-b border-slate-100"><button id="console-llm-toggle" onclick="toggleConsoleLlmIdentify()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Enable/disable automatic LLM-driven device identification (runs continuously in the background)">🤖 AI Identify: …</button><button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button><button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button></div>`
         : '';
     el.innerHTML = `${tools}<div class="p-0 overflow-hidden"><table class="w-full text-left text-sm">
         <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>
@@ -16265,63 +16261,6 @@ function _consoleIdentitySummary(identity) {
     if (identity.ip) parts.push(escapeHtml(identity.ip));
     const body = parts.length ? `<span class="text-slate-500">${parts.join(' · ')}</span>` : '';
     return (typePill || body) ? `${typePill}${body}` : '';
-}
-
-async function consoleIdentify(spokeId, portId) {
-    showToast('Identifying device (baud + banner + login + harvest)…', 'info');
-    try {
-        const res = await fetch('/api/console/identify', {
-            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ spoke_id: spokeId, port_id: portId }),
-        });
-        const d = await res.json().catch(() => ({}));
-        if (res.ok) {
-            showToast(d.vendor ? `Identified: ${d.vendor}${d.logged_in ? ' (logged in)' : ''}` : 'No device identified', d.vendor ? 'success' : 'info');
-            loadConsoleData();
-        } else showToast(d.detail || 'Identify failed', 'error');
-    } catch (e) { showToast('Identify failed: ' + e.message, 'error'); }
-}
-
-// LLM-driven identify (admin): relay the device's console output to the LLM,
-// run any READ-ONLY commands it asks for, and extract the identity. Gated off by
-// default server-side (LM_CONSOLE_LLM_IDENTIFY + spoke config) — a clear toast
-// surfaces the 409 when it isn't enabled.
-async function consoleIdentifyLlm(spokeId, portId) {
-    showToast('🤖 Asking the LLM to identify this device…', 'info');
-    try {
-        const res = await fetch('/api/console/identify-llm', {
-            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ spoke_id: spokeId, port_id: portId }),
-        });
-        const d = await res.json().catch(() => ({}));
-        if (!res.ok) { showToast(d.detail || 'AI identify failed', 'error'); return; }
-        if (d.identified && d.vendor) {
-            const bits = [d.vendor, (d.identity || {}).type, (d.identity || {}).model, (d.identity || {}).serial].filter(Boolean).join(' · ');
-            showToast(`🤖 Identified: ${bits}${d.rounds > 1 ? ` (ran ${(d.commands_run || []).length} cmd)` : ''}`, 'success');
-            loadConsoleData();
-        } else {
-            showToast(d.status === 'ERROR' ? (d.message || 'AI identify error') : '🤖 Could not identify this device yet', 'info');
-        }
-    } catch (e) { showToast('AI identify failed: ' + e.message, 'error'); }
-}
-
-// Bulk trigger: fire 🤖 AI Identify across every listed port at once (server
-// runs them in the background). A convenient "scrape all devices" button.
-async function consoleIdentifyLlmAll() {
-    const n = (_consolePorts || []).filter(p => !p.in_use).length;
-    if (!n) { showToast('No idle ports to identify.', 'info'); return; }
-    if (!confirm(`Run 🤖 AI Identify on ${n} port(s)? Ports currently open in a session are skipped.`)) return;
-    showToast(`🤖 Scraping ${n} device(s) — this runs in the background…`, 'info');
-    try {
-        const res = await fetch(`/api/console/identify-llm-all?tenant=${encodeURIComponent(currentTenant || 'default')}`, {
-            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}',
-        });
-        const d = await res.json().catch(() => ({}));
-        if (!res.ok) { showToast(d.detail || 'Bulk AI identify failed', 'error'); return; }
-        const skipped = d.skipped_in_use ? `, ${d.skipped_in_use} in-use skipped` : '';
-        showToast(`🤖 Queued ${d.queued || 0} device(s)${skipped}. Results will populate as they finish.`, 'success');
-        setTimeout(loadConsoleData, 8000);  // pull in early results
-    } catch (e) { showToast('Bulk AI identify failed: ' + e.message, 'error'); }
 }
 
 // Show the recent console capture (whatever the device emitted while idle) —
@@ -16843,20 +16782,6 @@ function closeConsoleTerminal() {
         window.__consoleTerm = null;
         if (typeof currentView !== 'undefined' && currentView === 'console') loadConsoleData();
     }
-}
-
-async function consoleDetectBaud(spokeId, portId) {
-    showToast('Detecting baud rate…', 'info');
-    try {
-        const res = await fetch('/api/console/detect-baud', {
-            method: 'POST', credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ spoke_id: spokeId, port_id: portId }),
-        });
-        const d = await res.json().catch(() => ({}));
-        if (res.ok && d.baud) { showToast(`Detected ${d.baud} baud (score ${d.score})`, 'success'); loadConsoleData(); }
-        else showToast(d.detail || d.message || 'No baud rate detected', 'error');
-    } catch (e) { showToast('Detect failed: ' + e.message, 'error'); }
 }
 
 function openConsoleSettingsModal(spokeId, portId) {

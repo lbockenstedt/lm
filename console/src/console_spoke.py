@@ -505,20 +505,37 @@ class ConsoleSpoke(BaseSpoke):
             groups.append(FACTORY_DEFAULT_CREDENTIALS)
         return merge_credentials(*groups)
 
+    def _resolve_baud(self, port_id: str, dev: str):
+        """Auto-resolve the baud rate for an identify attempt, sweeping until the
+        line yields actual readable text. Returns ``(baud_to_use, locked_baud)``
+        where ``locked_baud`` is non-None only when this sweep CONFIDENTLY found
+        the rate (real text) and it should be persisted.
+
+        Fully automatic — no operator action. A port with a confidently-locked
+        baud is used as-is (no re-sweep); a port that has never yielded readable
+        text (silent/wrong-baud/newly-plugged) is re-swept across all candidate
+        rates every cycle until real output appears, at which point the rate is
+        locked and reused."""
+        probe = self.store.get(port_id).get("probe") or {}
+        settings = self.store.settings(port_id)
+        if probe.get("baud_confident") and settings.get("baud"):
+            return settings.get("baud"), None
+        try:
+            d = detect_baud(dev, DEFAULT_BAUD_CANDIDATES)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("baud auto-detect failed on %s: %s", dev, e)
+            return settings.get("baud"), None
+        if d.get("confident") and d.get("baud"):
+            return d["baud"], d["baud"]
+        # No readable text yet: use the best-scoring rate as a hint for THIS
+        # attempt but DON'T lock it, so the next cycle sweeps the others again.
+        return d.get("baud") or settings.get("baud"), None
+
     def _identify_blocking(self, port_id: str, dev: str) -> Dict[str, Any]:
         """Blocking read-only identify on a transient serial handle (run via
-        asyncio.to_thread). Detects baud first if none is locked yet."""
-        settings = self.store.settings(port_id)
-        baud = settings.get("baud")
-        detected = None
-        if not (self.store.get(port_id).get("probe") or {}).get("detected_baud"):
-            try:
-                d = detect_baud(dev, DEFAULT_BAUD_CANDIDATES)
-                if d.get("baud"):
-                    detected = d["baud"]
-                    baud = d["baud"]
-            except Exception as e:  # noqa: BLE001
-                logger.debug("probe baud-detect failed on %s: %s", dev, e)
+        asyncio.to_thread). Auto-resolves the baud rate first (sweeping until the
+        line yields real text), then logs in / fingerprints at that rate."""
+        baud, locked = self._resolve_baud(port_id, dev)
         try:
             ser = open_raw(dev, baud or 9600, timeout=0.3)
         except Exception as e:  # noqa: BLE001
@@ -530,8 +547,9 @@ class ConsoleSpoke(BaseSpoke):
                 ser.close()
             except Exception:  # noqa: BLE001
                 pass
-        if detected:
-            res["detected_baud"] = detected
+        if locked:
+            res["detected_baud"] = locked
+            res["baud_confident"] = True
         return res
 
     def _collect_blocking(self, port_id: str, dev: str, commands, extra_creds=None) -> Dict[str, Any]:
@@ -612,9 +630,18 @@ class ConsoleSpoke(BaseSpoke):
             "source": "active",  # logged-in identify (authoritative; beats passive)
             "method": method,
         }
-        if res.get("detected_baud"):
-            probe["detected_baud"] = res["detected_baud"]
-            self.store.update(port_id, settings={"baud": res["detected_baud"]})
+        # Preserve the auto-detected baud LOCK across probe rebuilds: only a
+        # confident sweep sets a fresh one (res.detected_baud); otherwise carry
+        # forward what a prior sweep already locked so we don't lose it and
+        # needlessly re-sweep a known-good port.
+        prev = self.store.get(port_id).get("probe") or {}
+        detected = res.get("detected_baud") or prev.get("detected_baud")
+        if detected:
+            probe["detected_baud"] = detected
+            if res.get("baud_confident") or prev.get("baud_confident"):
+                probe["baud_confident"] = True
+            if res.get("detected_baud"):
+                self.store.update(port_id, settings={"baud": res["detected_baud"]})
         self.store.update(port_id, probe=probe)
         self._probe_attempts[port_id] = time.monotonic()
         if self.control_plane is not None:
@@ -1166,8 +1193,15 @@ class ConsoleSpoke(BaseSpoke):
         merged = dict(probe.get("identity") or {})
         changed = False
         for k, v in gleaned.items():
-            # Passive fills only MISSING fields; active values are never replaced.
-            if v and not merged.get(k):
+            if not v:
+                continue
+            # Active-login identity is authoritative: passive only fills its gaps.
+            # For a passively-sourced probe, a device's name/type/etc. can legitimately
+            # change (rename, re-role, swap), so let a differing gleaned value update it.
+            if not merged.get(k):
+                merged[k] = v
+                changed = True
+            elif not active and merged.get(k) != v:
                 merged[k] = v
                 changed = True
         if not active and res.get("vendor") and probe.get("vendor") != res["vendor"]:
