@@ -16149,7 +16149,7 @@ function _renderConsolePorts(el, data) {
         : '';
     el.innerHTML = `${tools}<div class="p-0 overflow-hidden"><table class="w-full text-left text-sm">
         <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>
-          <th class="px-4 py-3">Port</th>
+          <th class="px-4 py-3">Device</th>
           <th class="px-4 py-3 text-right">Actions</th></tr></thead>
         <tbody class="divide-y divide-slate-200">${rows}</tbody></table></div>`;
 }
