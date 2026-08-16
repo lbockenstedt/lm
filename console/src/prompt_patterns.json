@@ -1,0 +1,23 @@
+{
+  "_README": [
+    "Prompt matchers used by fingerprint.py to log in to a console BEFORE the",
+    "vendor is known. Each family is a list of Python regexes; a device line is",
+    "considered a match if ANY regex in the family matches. Anchor with \\s*$ so",
+    "the pattern matches only at the END of the current line (the live prompt).",
+    "Add a newly-observed prompt string here (no code change needed) and restart",
+    "the console agent. If this file is missing or invalid, fingerprint.py falls",
+    "back to its built-in defaults. Override the path with $CONSOLE_PROMPT_PATTERNS.",
+    "When a device shows output but matches NONE of these, identification can't log",
+    "in and escalates to the LLM identify path (which reads the raw capture to work",
+    "out what the prompt is) — so adding the string here fixes it permanently."
+  ],
+  "login_prompt": [
+    "(?:[Ll]ogin|[Uu]ser(?:\\s?name)?)\\s*:\\s*$"
+  ],
+  "password_prompt": [
+    "[Pp]assword\\s*:\\s*$"
+  ],
+  "shell_prompt": [
+    "\\S[>#$%]\\s*$"
+  ]
+}

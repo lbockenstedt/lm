@@ -532,6 +532,66 @@ def test_factory_default_login_when_no_stored_creds():
     assert res["logged_in"] is True
 
 
+def test_load_prompt_patterns_from_json(tmp_path, monkeypatch):
+    """Prompt matchers are read from JSON so a new prompt string can be added
+    without a code change — a custom file must override the built-in defaults."""
+    import json as _json
+    pf = tmp_path / "prompt_patterns.json"
+    pf.write_text(_json.dumps({
+        "login_prompt": [r"ENTER USER>\s*$"],
+        "password_prompt": [r"PASS>\s*$"],
+        "shell_prompt": [r"\$\s*$"],
+    }))
+    monkeypatch.setenv("CONSOLE_PROMPT_PATTERNS", str(pf))
+    p = fp.load_prompt_patterns()
+    assert p["login_prompt"].search("ENTER USER> ")
+    assert not p["login_prompt"].search("Username: ")  # defaults replaced, not merged
+    assert p["password_prompt"].search("PASS> ")
+
+
+def test_load_prompt_patterns_falls_back_when_missing(monkeypatch):
+    monkeypatch.setenv("CONSOLE_PROMPT_PATTERNS", "/nonexistent/prompt_patterns.json")
+    p = fp.load_prompt_patterns()
+    assert p["login_prompt"].search("User: ")          # built-in default still works
+    assert p["login_prompt"].search("login: ")
+
+
+def test_load_prompt_patterns_bad_regex_falls_back(tmp_path, monkeypatch):
+    import json as _json
+    pf = tmp_path / "prompt_patterns.json"
+    pf.write_text(_json.dumps({"login_prompt": ["(unclosed"]}))
+    monkeypatch.setenv("CONSOLE_PROMPT_PATTERNS", str(pf))
+    p = fp.load_prompt_patterns()
+    assert p["login_prompt"].search("User: ")          # bad family reverts to default
+
+
+def test_generic_login_recognizes_bare_user_prompt():
+    """A device that prompts a bare 'User:' (not 'Username:'/'login:') must be
+    recognized as a login prompt so stored credentials are actually tried —
+    regression for consoles that were mistakenly treated as no-auth and had
+    'show version' blasted at the username prompt (creds_tried stayed 0)."""
+    assert fp._LOGIN_PROMPT.search("\r\nUser: ")
+    assert fp._LOGIN_PROMPT.search("User:")
+
+    class _UserAuth:
+        def __init__(self): self.buf = bytearray(b"\r\nUser: "); self.state = "login"
+        def read(self):
+            out = bytes(self.buf[:256]); del self.buf[:256]; return out
+        def write(self, b):
+            s = b.decode(errors="replace")
+            if self.state == "login" and s.strip():
+                self.user = s.strip(); self.state = "password"; self.buf += b"\r\nPassword: "
+            elif self.state == "password" and s.strip():
+                if getattr(self, "user", "") == "admin" and s.strip() == "secret":
+                    self.state = "done"; self.buf += b"\r\nSWITCH# "
+                else:
+                    self.state = "login"; self.buf += b"\r\nInvalid password\r\nUser: "
+    ch = _UserAuth()
+    res = fp.run_identify(ch.read, ch.write, [{"username": "admin", "password": "secret"}])
+    assert res["logged_in"] is True
+    assert res["diag"]["creds_tried"] >= 1  # it actually attempted a login
+
+
 class _RepeatChan:
     """Scripted serial whose command responses are REPEATABLE (a trigger can fire
     more than once) — needed when discovery and the profile command loop both

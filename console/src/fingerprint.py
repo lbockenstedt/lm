@@ -9,9 +9,12 @@ there is no free-form command path here, and every command is a read-only
 ``show``/``display``/``cat``. Pure helpers (:func:`detect_vendor`,
 :func:`parse_identity`) import without pyserial so they are unit-testable.
 """
+import json
 import logging
+import os
 import re
 import time
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("ConsoleSpoke")
@@ -266,9 +269,55 @@ def prompt_hostname(text: str) -> str:
 # Vendor-agnostic prompt shapes used to log in BEFORE we know the vendor. A device
 # sitting at a bare ``login:`` prompt reveals no banner/system info until you
 # authenticate, so identification has to log in generically first.
-_LOGIN_PROMPT = re.compile(r"(?:[Ll]ogin|[Uu]ser\s?name)\s*:\s*$")
-_PASSWORD_PROMPT = re.compile(r"[Pp]assword\s*:\s*$")
-_SHELL_PROMPT = re.compile(r"\S[>#$%]\s*$")
+#
+# These patterns are LOADED FROM prompt_patterns.json (next to this file) so a new
+# prompt string a device uses — e.g. a bare ``User:`` or a vendor's oddly-worded
+# password prompt — can be added by editing JSON, with NO code change. The
+# hardcoded values below are the built-in defaults / fallback if the file is
+# missing or malformed. Override the file location with $CONSOLE_PROMPT_PATTERNS.
+_DEFAULT_PROMPT_PATTERNS: Dict[str, List[str]] = {
+    "login_prompt": [r"(?:[Ll]ogin|[Uu]ser(?:\s?name)?)\s*:\s*$"],
+    "password_prompt": [r"[Pp]assword\s*:\s*$"],
+    "shell_prompt": [r"\S[>#$%]\s*$"],
+}
+
+
+def _prompt_patterns_path() -> Path:
+    return Path(os.environ.get("CONSOLE_PROMPT_PATTERNS")
+                or (Path(__file__).parent / "prompt_patterns.json"))
+
+
+def load_prompt_patterns() -> Dict[str, "re.Pattern"]:
+    """Compile the login/password/shell prompt matchers, reading pattern strings
+    from prompt_patterns.json when present (falling back to the built-in defaults
+    per family). Each family is an OR of its listed regexes, so operators can add
+    a newly-observed prompt string to the JSON without touching code."""
+    data: Dict[str, List[str]] = {k: list(v) for k, v in _DEFAULT_PROMPT_PATTERNS.items()}
+    path = _prompt_patterns_path()
+    try:
+        loaded = json.loads(path.read_text())
+        for key in _DEFAULT_PROMPT_PATTERNS:
+            pats = loaded.get(key)
+            if isinstance(pats, list) and pats and all(isinstance(p, str) for p in pats):
+                data[key] = pats
+    except FileNotFoundError:
+        pass
+    except Exception as e:  # noqa: BLE001 - bad JSON / bad regex list → keep defaults
+        logger.warning("console: invalid prompt_patterns.json (%s) — using built-in defaults", e)
+    compiled: Dict[str, "re.Pattern"] = {}
+    for key, pats in data.items():
+        try:
+            compiled[key] = re.compile("|".join(f"(?:{p})" for p in pats))
+        except re.error as e:  # a bad pattern in the file → fall back for that family
+            logger.warning("console: bad regex in prompt_patterns.json[%s] (%s) — using default", key, e)
+            compiled[key] = re.compile("|".join(f"(?:{p})" for p in _DEFAULT_PROMPT_PATTERNS[key]))
+    return compiled
+
+
+_PROMPTS = load_prompt_patterns()
+_LOGIN_PROMPT = _PROMPTS["login_prompt"]
+_PASSWORD_PROMPT = _PROMPTS["password_prompt"]
+_SHELL_PROMPT = _PROMPTS["shell_prompt"]
 
 # Console lines are usually silent until they receive a keystroke: a device sits
 # idle at a prompt and emits nothing on its own (unless it happens to be booting).
