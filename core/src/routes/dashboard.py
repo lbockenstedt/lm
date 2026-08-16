@@ -422,14 +422,108 @@ def register(app, hub, ctx):
         scope_key = search_scope_key(nb_slug, proxmox_tag, is_admin)
         idx_on = hub.search_index_enabled()
         needle = q_search.lower()
-        # Tenant prefixes (CIDRs) for DHCP lease filtering. Admin unscoped is
-        # allowed; a non-admin with no prefixes gets no DHCP results (safe).
-        # Fetched ONLY when the DHCP leg actually goes live — when it is served
-        # from the warm index we skip the (uncached, ~30s) NetBox prefix
-        # round-trip entirely; the background refresher already applied prefix
-        # scoping when it populated that leg's cache.
+        # ── Spoke resolution (needed by the live fan-out and by reporting). ──
+        spoke_ipam       = hub.get_spoke_by_type("ipam")
+        # Tenant-bound hypervisor: a non-admin only reaches a hypervisor bound
+        # to its tenant (None → no VM results, no leak). The admin's
+        # unscoped/default view falls back to any hypervisor.
+        if resolved and resolved != "default":
+            spoke_hypervisor = hub.get_hypervisor_spoke_for_tenant(resolved)
+        else:
+            spoke_hypervisor = hub.get_hypervisor_spoke()
+        spoke_nac        = hub.get_spoke_by_type("nac")
+        # Tenant-bound directory: a non-admin only reaches the LDAP spoke bound
+        # to its tenant (None → no user results). The spoke additionally scopes
+        # by the tenant's OU base DN (see ldap_spoke SEARCH_USERS), so even a
+        # shared directory spoke returns only the tenant's own OU.
+        if resolved and resolved != "default":
+            spoke_directory = hub.get_directory_spoke_for_tenant(resolved) or hub.get_spoke_by_type("directory")
+        else:
+            spoke_directory = hub.get_spoke_by_type("directory")
+        spoke_firewall   = hub.get_spoke_by_type("firewall")
+        _legs = [
+            (spoke_ipam,       "NETBOX_SEARCH"),
+            (spoke_hypervisor, "SEARCH_VMS"),
+            (spoke_nac,        "SEARCH_SESSIONS"),
+            (spoke_directory,  "SEARCH_USERS"),
+            (spoke_firewall,   "SEARCH_DHCP"),
+        ]
+
+        is_ip = bool(re.match(r'^[\\d:.]+(/\\d+)?$', raw_q))
+
+        def _envelope(results, cached, warming=False):
+            env = {
+                "query":       q,
+                "query_type":  "ip" if is_ip else ("mac" if is_mac else "name"),
+                "total":       len(results),
+                "results":     results,
+                "cached":      cached,
+                "spokes_queried": {
+                    "ipam":       spoke_ipam is not None,
+                    "hypervisor": spoke_hypervisor is not None,
+                    "nac":        spoke_nac is not None,
+                    "directory":  spoke_directory is not None,
+                    "firewall":   spoke_firewall is not None,
+                    "console":    bool(getattr(app.state, "console_list_visible_ports", None)),
+                },
+            }
+            if warming:
+                env["warming"] = True
+            return env
+
+        # ── Console leg (local, in-memory): cheap, so evaluate it up front — a
+        #    console hit counts as "found in memory". Reuses the Console page's
+        #    tenant-scoped listing (same visibility/masking), so a non-admin
+        #    only ever sees consoles for its own tenant. Best-effort: a
+        #    slow/absent console fleet must not fail the rest of the search.
+        console_hits = []
+        try:
+            from routes.console import console_port_matches, console_port_result
+            lister = getattr(app.state, "console_list_visible_ports", None)
+            if lister:
+                cdata = await lister(request)
+                cneedle = raw_q.lower()
+                for p in (cdata.get("ports") or []):
+                    if console_port_matches(p, cneedle):
+                        console_hits.append(console_port_result(p))
+        except Exception as e:
+            logger.warning(f"search: console leg failed: {e}")
+            console_hits.append({"source": "console", "type": "error", "name": str(e)})
+
+        # ── Memory-first ────────────────────────────────────────────────────
+        # Match the query against every warm, spoke-scoped index leg (+ the
+        # local console list) with NO network. If ANYTHING matches, return it
+        # immediately and warm the remaining/stale legs in the background — the
+        # operator never waits on a live NetBox / LDAP / hypervisor / DHCP
+        # round-trip unless memory yields nothing at all. (Requested UX: show
+        # what is in memory now; only pay the live fan-out when there is no
+        # in-memory hit.)
+        if idx_on:
+            hub.search_register_scope(
+                scope_key, resolved=resolved, is_admin=is_admin,
+                nb_slug=nb_slug, proxmox_tag=proxmox_tag)
+            mem = []
+            any_cold = False
+            for _spoke, cmd in _legs:
+                items = hub.search_index_leg_items(cmd, scope_key)
+                if items is None:
+                    any_cold = True
+                else:
+                    mem.extend(r for r in items if search_result_matches(r, needle))
+            if mem or console_hits:
+                # Found in memory → serve now; collect the rest in the
+                # background so the next query for this scope is instant too.
+                hub.search_kick_warm(scope_key)
+                return _envelope(mem + console_hits, True, warming=any_cold)
+            # Nothing in memory → warm for next time, then fall through to the
+            # blocking live fan-out below.
+            hub.search_kick_warm(scope_key)
+
+        # ── Live fan-out (blocking): index disabled or no in-memory hit. Pay
+        #    the (uncached, ~30s) NetBox prefix fetch + the 5-spoke fan-out
+        #    here; the background warm above makes the next such query instant.
         prefixes = []
-        if nb_slug and not (idx_on and hub.search_leg_is_warm("SEARCH_DHCP", scope_key)):
+        if nb_slug:
             try:
                 prefixes = await _resolve_prefixes_for_tenant(hub, resolved) or []
             except Exception as e:
@@ -450,8 +544,7 @@ def register(app, hub, ctx):
                 d = _unwrap_spoke(r)
                 # Surface spoke ERROR envelopes (bind failure, missing OU, bad
                 # slug) as an error row instead of collapsing them to [] —
-                # otherwise a broken directory leg is indistinguishable from "no
-                # matches" and the failure is invisible to the operator.
+                # otherwise a broken leg is indistinguishable from "no matches".
                 if isinstance(d, dict) and d.get("status") == "ERROR":
                     return [{"source": cmd, "type": "error",
                              "name": d.get("message") or d.get("error") or "spoke error"}]
@@ -459,99 +552,7 @@ def register(app, hub, ctx):
             except Exception as e:
                 return [{"source": cmd, "type": "error", "name": str(e)}]
 
-        # Index-first leg: when this (leg, scope) is warm in memory, match the
-        # query against the cached spoke-scoped result set with no network at
-        # all. Any miss / stale entry / error transparently falls back to the
-        # live spoke call (`_call`), so the warm path can only ever be faster,
-        # never wrong. Tracks whether ANY leg served from the index for the
-        # response's `cached` marker.
-        served_from_index = {"any": False}
-
-        async def _leg(spoke, cmd):
-            if idx_on:
-                try:
-                    cached = hub.search_index_leg_items(cmd, scope_key)
-                    if cached is not None:
-                        served_from_index["any"] = True
-                        return [r for r in cached if search_result_matches(r, needle)]
-                except Exception as e:
-                    logger.debug(f"search: index read {cmd} failed: {e}")
-            return await _call(spoke, cmd)
-
-        spoke_ipam       = hub.get_spoke_by_type("ipam")
-        # Tenant-bound hypervisor: a non-admin only reaches a hypervisor bound
-        # to its tenant (None → no VM results, no leak). The admin's
-        # unscoped/default view falls back to any hypervisor.
-        if resolved and resolved != "default":
-            spoke_hypervisor = hub.get_hypervisor_spoke_for_tenant(resolved)
-        else:
-            spoke_hypervisor = hub.get_hypervisor_spoke()
-        spoke_nac        = hub.get_spoke_by_type("nac")
-        # Tenant-bound directory: a non-admin only reaches the LDAP spoke bound
-        # to its tenant (None → no user results). The spoke additionally scopes
-        # by the tenant's OU base DN (see ldap_spoke SEARCH_USERS), so even a
-        # shared directory spoke returns only the tenant's own OU.
-        if resolved and resolved != "default":
-            spoke_directory = hub.get_directory_spoke_for_tenant(resolved) or hub.get_spoke_by_type("directory")
-        else:
-            spoke_directory = hub.get_spoke_by_type("directory")
-        spoke_firewall   = hub.get_spoke_by_type("firewall")
-
-        # Directory (LDAP) search is now tenant-OU scoped spoke-side, so it is
-        # safe to fan for non-admins (they only see their own tenant's OU). The
-        # spoke returns empty for a non-admin with no tenant slug. This used to
-        # be admin-only because directory users weren't tenant-scoped; the OU
-        # scoping closes that leak.
-        tasks = [
-            _leg(spoke_ipam,       "NETBOX_SEARCH"),
-            _leg(spoke_hypervisor, "SEARCH_VMS"),
-            _leg(spoke_nac,        "SEARCH_SESSIONS"),
-            _leg(spoke_directory,  "SEARCH_USERS"),
-            _leg(spoke_firewall,   "SEARCH_DHCP"),
-        ]
-        all_results = await _asyncio.gather(*tasks)
+        all_results = await _asyncio.gather(*[_call(s, c) for s, c in _legs])
         merged = [item for sublist in all_results for item in sublist]
-
-        # Remember this scope so the background loop keeps its leg caches warm
-        # (idempotent; refreshes the last-seen stamp). Best-effort.
-        if idx_on:
-            hub.search_register_scope(
-                scope_key, resolved=resolved, is_admin=is_admin,
-                nb_slug=nb_slug, proxmox_tag=proxmox_tag)
-
-        # Console leg: surface serial-console ports whose identified device
-        # (hostname / alias / vendor / model / device path / IP) matches the
-        # query, so a found device also carries its console for connect. Reuses
-        # the Console page's tenant-scoped listing (same visibility/masking), so
-        # a non-admin only ever sees consoles for its own tenant. Best-effort:
-        # a slow/absent console fleet must not fail the rest of the search.
-        try:
-            from routes.console import console_port_matches, console_port_result
-            lister = getattr(app.state, "console_list_visible_ports", None)
-            if lister:
-                cdata = await lister(request)
-                needle = raw_q.lower()
-                for p in (cdata.get("ports") or []):
-                    if console_port_matches(p, needle):
-                        merged.append(console_port_result(p))
-        except Exception as e:
-            logger.warning(f"search: console leg failed: {e}")
-            merged.append({"source": "console", "type": "error", "name": str(e)})
-
-        # Categorise for the UI
-        is_ip  = bool(re.match(r'^[\d:.]+(/\d+)?$', raw_q))
-        return {
-            "query":       q,
-            "query_type":  "ip" if is_ip else ("mac" if is_mac else "name"),
-            "total":       len(merged),
-            "results":     merged,
-            "cached":      served_from_index["any"],
-            "spokes_queried": {
-                "ipam":       spoke_ipam is not None,
-                "hypervisor": spoke_hypervisor is not None,
-                "nac":        spoke_nac is not None,
-                "directory":  spoke_directory is not None,
-                "firewall":   spoke_firewall is not None,
-                "console":    bool(getattr(app.state, "console_list_visible_ports", None)),
-            },
-        }
+        merged.extend(console_hits)
+        return _envelope(merged, False)

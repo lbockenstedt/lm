@@ -180,3 +180,87 @@ def test_enabled_flag_env(monkeypatch):
     assert hub.search_index_enabled() is False
     monkeypatch.setenv("LM_SEARCH_INDEX", "1")
     assert hub.search_index_enabled() is True
+
+
+class _WarmHub(_FakeHub):
+    """Adds the spoke-resolution surface the on-demand warm path uses so
+    ``search_kick_warm`` / ``_search_warm_scope`` can populate every leg."""
+
+    def get_spoke_by_type(self, t):
+        return f"spoke-{t}"
+
+    def get_hypervisor_spoke(self):
+        return "spoke-hyp"
+
+    def get_hypervisor_spoke_for_tenant(self, resolved):
+        return "spoke-hyp"
+
+    def get_directory_spoke_for_tenant(self, resolved):
+        return "spoke-dir"
+
+
+def test_warm_scope_populates_every_leg():
+    hub = _WarmHub(response={"payload": {"data": {"results": [{"name": "dev1"}]}}})
+    hub.search_register_scope("k1", resolved="acme", is_admin=False,
+                              nb_slug="acme", proxmox_tag="t")
+    asyncio.run(hub._search_warm_scope("k1"))
+    for cmd in ("NETBOX_SEARCH", "SEARCH_VMS", "SEARCH_SESSIONS",
+                "SEARCH_USERS", "SEARCH_DHCP"):
+        assert hub.search_index_leg_items(cmd, "k1") == [{"name": "dev1"}]
+
+
+def test_warm_scope_noop_unknown_scope():
+    hub = _WarmHub(response={"payload": {"data": {"results": [{"name": "x"}]}}})
+    asyncio.run(hub._search_warm_scope("nope"))
+    assert hub.requests == []  # never dialed a spoke for an unknown scope
+
+
+def test_kick_warm_noop_when_disabled(monkeypatch):
+    hub = _WarmHub(response={"payload": {"data": {"results": [{"name": "x"}]}}})
+    hub.search_register_scope("k1", resolved="acme", is_admin=False,
+                              nb_slug="acme", proxmox_tag="t")
+    monkeypatch.setenv("LM_SEARCH_INDEX", "0")
+
+    async def _run():
+        hub.search_kick_warm("k1")
+    asyncio.run(_run())
+    assert hub._search_warming == set()  # nothing scheduled while disabled
+
+
+def test_kick_warm_noop_unknown_scope():
+    hub = _WarmHub(response={"payload": {"data": {"results": [{"name": "x"}]}}})
+
+    async def _run():
+        hub.search_kick_warm("ghost")
+    asyncio.run(_run())
+    assert hub._search_warming == set()
+
+
+def test_kick_warm_dedups_in_flight():
+    hub = _WarmHub(response={"payload": {"data": {"results": [{"name": "x"}]}}})
+    hub.search_register_scope("k1", resolved="acme", is_admin=False,
+                              nb_slug="acme", proxmox_tag="t")
+    # Simulate an in-flight warm for this scope: a second kick must not dial.
+    hub._search_warming.add("k1")
+
+    async def _run():
+        hub.search_kick_warm("k1")
+        await asyncio.sleep(0)
+    asyncio.run(_run())
+    assert hub.requests == []  # deduped — no new populate scheduled
+
+
+def test_kick_warm_schedules_and_populates():
+    hub = _WarmHub(response={"payload": {"data": {"results": [{"name": "dev1"}]}}})
+    hub.search_register_scope("k1", resolved="acme", is_admin=False,
+                              nb_slug="acme", proxmox_tag="t")
+
+    async def _run():
+        hub.search_kick_warm("k1")
+        assert "k1" in hub._search_warming  # marked in-flight synchronously
+        # let the scheduled populate task run to completion
+        for _ in range(10):
+            await asyncio.sleep(0)
+    asyncio.run(_run())
+    assert hub.search_index_leg_items("NETBOX_SEARCH", "k1") == [{"name": "dev1"}]
+    assert hub._search_warming == set()  # cleared by done-callback
