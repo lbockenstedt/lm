@@ -409,8 +409,7 @@ def register(app, hub, ctx):
             except Exception:  # noqa: BLE001
                 pass
 
-    @app.get("/api/console/ports")
-    async def console_ports(request: Request):
+    async def _list_visible_console_ports(request: Request):
         """Serial ports across every connected Console spoke, each tagged with its
         spoke_id and EFFECTIVE tenant (per-port override, else the agent's tenant).
 
@@ -490,6 +489,11 @@ def register(app, hub, ctx):
                 visible_spokes.add(sid)
         consoles = spokes if sel is None else [s for s in spokes if s in visible_spokes]
         return {"consoles": consoles, "ports": ports, "errors": errors}
+
+    @app.get("/api/console/ports")
+    async def console_ports(request: Request):
+        """Serial ports across every connected Console spoke (tenant-scoped)."""
+        return await _list_visible_console_ports(request)
 
     @app.post("/api/console/settings")
     async def console_settings(request: Request):
@@ -574,6 +578,53 @@ def register(app, hub, ctx):
             return await llm.orchestrate(hub, agent, sid, port_id)
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=502, detail=f"LLM identify error: {e}")
+
+    @app.post("/api/console/identify-llm-all")
+    async def console_identify_llm_all(request: Request):
+        """Bulk 'scrape all devices' trigger: kick off LLM-driven identify for
+        EVERY visible console port at once. Runs in the background (bounded
+        concurrency, so the single BugFixer agent isn't swamped) and returns
+        immediately — results stream back through the normal probe/port refresh.
+        Ports a user currently has open are skipped so a live session isn't
+        disrupted. Admin only; same gating as the per-port identify."""
+        from routes import console_llm_identify as llm  # local import (optional feature)
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        hub = app.state.hub
+        if not llm.hub_llm_identify_enabled(hub):
+            raise HTTPException(status_code=409,
+                                detail="LLM-assisted identify is disabled — enable it in the Console tools.")
+        agent = llm.find_bugfixer(hub)
+        if not agent:
+            raise HTTPException(status_code=409,
+                                detail="LLM identify unavailable — the BugFixer LLM agent is not connected.")
+        data = await _list_visible_console_ports(request)  # tenant-scoped like the list view
+        all_ports = data.get("ports") or []
+        targets = [(p.get("spoke_id"), p.get("port_id")) for p in all_ports
+                   if p.get("spoke_id") and p.get("port_id") and not p.get("in_use")]
+        skipped_in_use = sum(1 for p in all_ports if p.get("in_use"))
+        if not targets:
+            return {"queued": 0, "skipped_in_use": skipped_in_use}
+        # Prep every involved spoke once (seed creds + runtime gate) up front.
+        spokes = sorted({sid for sid, _ in targets})
+        await _console_seed_credentials(hub, spokes)
+        await _console_push_llm_flag(hub, spokes, True)
+
+        sem = asyncio.Semaphore(2)  # single BugFixer agent → keep it gentle
+
+        async def _run_one(sid, pid):
+            async with sem:
+                try:
+                    await llm.orchestrate(hub, agent, sid, pid)
+                except Exception as e:  # noqa: BLE001 - one bad port can't stop the batch
+                    logger.warning("bulk AI identify failed for %s/%s: %s", sid, pid, e)
+
+        async def _run_all():
+            await asyncio.gather(*[_run_one(sid, pid) for sid, pid in targets])
+
+        asyncio.create_task(_run_all())  # fire-and-forget; survives this request
+        return {"queued": len(targets), "skipped_in_use": skipped_in_use}
 
     @app.get("/api/console/llm-identify")
     async def console_llm_identify_get(request: Request):
