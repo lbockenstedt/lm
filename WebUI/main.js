@@ -16148,9 +16148,17 @@ function _consoleIdentityBlock(p) {
             ? `<span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-bold uppercase text-[9px]">${escapeHtml(probe.vendor)}</span> ` : '';
         return `<div class="text-xs mt-0.5 flex items-center gap-1.5 flex-wrap">${vpill}${summary}${src}${seen}</div>`;
     }
-    // Nothing gleaned yet.
+    // Nothing gleaned yet. An active-source probe with no identity means we tried
+    // logging in with the stored credentials but the device hasn't revealed
+    // anything usable yet — say so instead of pretending we're only listening.
+    if (probe.source === 'active') {
+        const why = probe.logged_in
+            ? 'logged in, nothing identifiable yet'
+            : (probe.error ? escapeHtml(String(probe.error).slice(0, 80)) : 'no response to stored logins yet');
+        return `<div class="text-xs mt-0.5 text-slate-400 italic" title="Tried the stored credentials">🔑 Login attempted — ${why} ${seen}</div>`;
+    }
     if (p.monitoring) {
-        return `<div class="text-xs mt-0.5 text-slate-400 italic">🎧 Listening — no device data seen yet ${seen}</div>`;
+        return `<div class="text-xs mt-0.5 text-slate-400 italic" title="Passively capturing and periodically trying the stored logins">🎧 Listening &amp; trying stored logins — nothing yet ${seen}</div>`;
     }
     return `<div class="text-xs mt-0.5 text-slate-300 italic">not yet identified</div>`;
 }

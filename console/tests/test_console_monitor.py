@@ -115,3 +115,43 @@ def test_capture_command_returns_recent_output(spoke):
     assert res["status"] == "SUCCESS"
     assert "boot banner line" in res["capture"]
     assert res["monitoring"] is True
+
+
+def test_monitor_login_scan_attempts_login_with_stored_creds(spoke):
+    # Monitoring should ALSO try to log in with the stored credentials and learn
+    # what it can — a silent device reveals nothing to a passive listen.
+    spoke.config["auto_identify"] = True
+    spoke._credentials = [{"username": "admin", "password": "x"}]
+    spoke._monitor_scan()  # 'good' monitored, 'bad' hidden as unopenable
+    calls = []
+    spoke._identify_blocking = lambda pid, dev: calls.append(pid) or {
+        "vendor": "cisco-ios", "identity": {"serial": "S1"}, "logged_in": True, "banner": "hi"}
+    asyncio.run(spoke._monitor_login_scan())
+    assert calls == ["good"]  # attempted the openable port; skipped the unopenable one
+    probe = spoke.store.get("good")["probe"]
+    assert probe["source"] == "active" and probe["identity"]["serial"] == "S1"
+    # Now identified authoritatively → not attempted again.
+    calls.clear()
+    asyncio.run(spoke._monitor_login_scan())
+    assert calls == []
+
+
+def test_monitor_login_scan_skips_without_credentials(spoke):
+    spoke.config["auto_identify"] = True
+    spoke._credentials = []
+    spoke._monitor_scan()
+    called = []
+    spoke._identify_blocking = lambda pid, dev: called.append(pid) or {}
+    asyncio.run(spoke._monitor_login_scan())
+    assert called == []  # no creds → nothing to log in with
+
+
+def test_login_backs_off_after_failure(spoke):
+    spoke.config["auto_identify"] = True
+    spoke._credentials = [{"username": "a", "password": "b"}]
+    spoke._monitor_scan()
+    spoke._identify_blocking = lambda pid, dev: {"vendor": None, "identity": {}, "logged_in": False}
+    asyncio.run(spoke._monitor_login_scan())
+    assert spoke._probe_delay["good"] >= 300.0     # escalated backoff
+    assert spoke._identify_due("good") is False     # just attempted → not due yet
+
