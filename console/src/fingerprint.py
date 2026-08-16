@@ -144,6 +144,58 @@ def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str]) -> Dict[str
     return identity
 
 
+# Generic fallbacks — a hostname prompt, a MAC, or an IP scrolling by is worth
+# surfacing even before we can pin a vendor. Kept conservative to avoid noise.
+_GENERIC_PROMPT = re.compile(r"(?:^|\r|\n)\s*([\w][\w.\-]{1,62})[>#]\s*$")
+_GENERIC_LINUX_PROMPT = re.compile(r"(?:^|\r|\n)[\w.\-]+@([\w.\-]+):[\w.\-/~]*[#$]\s*$")
+_GENERIC_MAC = re.compile(r"\b([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\b")
+
+
+def passive_identify(text: str) -> Dict[str, Any]:
+    """Best-effort identity from PASSIVELY captured console text — no login, no
+    commands issued. Detects the vendor from the banner/prompt, then applies that
+    profile's identity field regexes across the whole capture (a human may have
+    just run ``show version``; a boot banner or syslog line may reveal the rest).
+
+    Conservative on purpose: full field extraction only for a matched vendor
+    profile (avoids cross-vendor false positives); otherwise a light generic pass
+    picks up a hostname prompt / MAC so the port stops showing "unknown".
+
+    Returns ``{"vendor": <name|None>, "identity": {...}}`` (identity may be {})."""
+    text = text or ""
+    prof = detect_vendor(text)
+    identity: Dict[str, str] = {}
+    vendor = prof["name"] if prof else None
+    # Full field extraction only for the LABELED network-vendor profiles (their
+    # regexes anchor on strings like "Processor board ID" / "Serial Number" /
+    # "Base MAC" / "IPv4 address", which are safe to match anywhere in a passive
+    # capture). The linux profile's field regexes are bare ``^(\S+)$`` forms tied
+    # to specific command outputs — matching those across arbitrary scrollback
+    # yields garbage, so linux/unknown fall to the generic prompt pass below.
+    if prof and prof["name"] != "linux":
+        for spec in prof.get("commands", []):
+            for key, rx in (spec.get("fields") or {}).items():
+                if key in identity:
+                    continue
+                m = rx.search(text)
+                if m and m.group(1).strip():
+                    identity[key] = m.group(1).strip()
+    if not identity.get("hostname"):
+        # Glean a hostname from the last shell/CLI prompt we saw.
+        for rx in (_GENERIC_LINUX_PROMPT, _GENERIC_PROMPT):
+            for m in rx.finditer(text):
+                cand = m.group(1).strip()
+                if cand and cand.lower() not in ("more", "username", "password", "login"):
+                    identity["hostname"] = cand
+    if not identity.get("mac"):
+        mm = _GENERIC_MAC.search(text)
+        if mm:
+            identity["mac"] = mm.group(1)
+    if identity.get("mac"):
+        identity["mac"] = normalize_mac(identity["mac"]) or identity["mac"]
+    return {"vendor": vendor, "identity": identity}
+
+
 def _read_until(read_fn: Callable[[], bytes], patterns: List[re.Pattern],
                 timeout: float, idle: float = 0.4) -> str:
     """Accumulate serial output until one of ``patterns`` matches the tail, or

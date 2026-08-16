@@ -27,12 +27,12 @@ try:
     from serial_manager import (
         PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
     )
-    from fingerprint import run_identify, read_running_config, push_config, PROFILES
+    from fingerprint import run_identify, read_running_config, push_config, PROFILES, passive_identify
 except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .serial_manager import (  # type: ignore
         PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
     )
-    from .fingerprint import run_identify, read_running_config, push_config, PROFILES  # type: ignore
+    from .fingerprint import run_identify, read_running_config, push_config, PROFILES, passive_identify  # type: ignore
 
 logger = logging.getLogger("ConsoleSpoke")
 
@@ -68,6 +68,15 @@ class ConsoleSpoke(BaseSpoke):
         self._autoprobe_task = None
         self._probe_attempts: Dict[str, float] = {}  # port_id → last attempt (monotonic)
         self._probing: set = set()
+        # Passive monitor: keep a read-only serial handle open per port so we
+        # capture whatever a device emits even with NO user attached, and glean
+        # identity from it opportunistically (config console_monitor, default on).
+        self._monitor_task = None
+        # Ports the automated system currently can't even OPEN (faulty/non-real
+        # /dev/ttyS* → "Could not configure port", I/O error, etc.). Hidden from
+        # the UI so operators never see a broken port or its raw error — but we
+        # keep probing, so one that starts working reappears on its own.
+        self._unopenable: Dict[str, Dict[str, Any]] = {}  # port_id → {error, since}
 
     # ── reader-thread → hub bridge ────────────────────────────────────────────
     def _on_serial_data(self, session_id: str, data: bytes) -> None:
@@ -128,6 +137,7 @@ class ConsoleSpoke(BaseSpoke):
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
         cmd = command_type.upper()
         self._ensure_autoprobe_task()  # start the fully-automatic identify loop once
+        self._ensure_monitor_task()    # start the passive keep-alive capture loop once
 
         if cmd == "GET_VERSION":
             return {"status": "SUCCESS", "version": self.get_version()}
@@ -136,17 +146,45 @@ class ConsoleSpoke(BaseSpoke):
             ports = []
             for p in enumerate_ports():
                 pid = p["port_id"]
+                # Hide ports the automated system can't open (faulty/non-real
+                # serial devices) so the operator never sees a broken port or its
+                # raw error — unless a live session is somehow attached to it.
+                if pid in self._unopenable and not self.sessions.has_user_sessions(pid):
+                    continue
                 saved = self.store.get(pid)
+                snap = self.sessions.snapshot(pid)
                 ports.append({
                     **p,
                     "alias": saved.get("alias", ""),
                     "tenant_id": saved.get("tenant_id", ""),  # per-port override; hub fills effective
                     "settings": self.store.settings(pid),
                     "probe": saved.get("probe", {}),
-                    "in_use": self.sessions.is_open(pid),
-                    "writer": self.sessions.writer_of(pid),
+                    "in_use": snap["has_user"],          # a HUMAN/relay is attached (not the monitor)
+                    "writer": snap["writer"],
+                    "monitoring": snap["monitoring"],    # passive keep-alive capture is holding the port
+                    "last_activity": snap["last_activity"],  # epoch of last byte seen (0 = never)
+                    "capture_bytes": snap["capture_bytes"],  # total bytes captured this channel life
+                    "pending_out": snap["pending_out"],  # bytes of a paste still draining
                 })
             return {"status": "SUCCESS", "ports": ports}
+
+        if cmd == "CONSOLE_GET_CAPTURE":
+            pid = data.get("port_id")
+            if not pid:
+                return {"status": "ERROR", "message": "port_id is required"}
+            chan = self.sessions.channel(pid)
+            try:
+                limit = int(data.get("bytes") or 0) or None
+            except (TypeError, ValueError):
+                limit = None
+            text = chan.capture_tail(limit).decode("utf-8", "replace") if chan else ""
+            if not text:  # no live channel — fall back to the last stored banner
+                text = (self.store.get(pid).get("probe") or {}).get("banner", "")
+            snap = self.sessions.snapshot(pid)
+            return {"status": "SUCCESS", "port_id": pid, "capture": text,
+                    "monitoring": snap["monitoring"], "last_activity": snap["last_activity"],
+                    "capture_bytes": snap["capture_bytes"]}
+
 
         if cmd == "CONSOLE_GET_SETTINGS":
             pid = data.get("port_id")
@@ -158,7 +196,8 @@ class ConsoleSpoke(BaseSpoke):
             pid = data.get("port_id")
             if not pid:
                 return {"status": "ERROR", "message": "port_id is required"}
-            fields = {k: data[k] for k in ("baud", "bytesize", "parity", "stopbits", "flow")
+            fields = {k: data[k] for k in ("baud", "bytesize", "parity", "stopbits", "flow",
+                                           "paste_line_delay_ms", "paste_chunk", "paste_char_delay_ms")
                       if k in data}
             self.store.update(pid, settings=fields)
             return {"status": "SUCCESS", "port_id": pid, "settings": self.store.settings(pid)}
@@ -194,9 +233,9 @@ class ConsoleSpoke(BaseSpoke):
             dev = self._port_device(pid) if pid else None
             if not dev:
                 return {"status": "ERROR", "message": f"port {pid} not found"}
-            if self.sessions.is_open(pid):
+            if self.sessions.has_user_sessions(pid):
                 return {"status": "ERROR", "message": "port is in use; close sessions first"}
-            res = await asyncio.to_thread(self._identify_blocking, pid, dev)
+            res = await self._exclusive_probe(pid, self._identify_blocking, pid, dev)
             await self._emit_probe_result(pid, res)
             return {"status": "SUCCESS", "port_id": pid,
                     "vendor": res.get("vendor"), "logged_in": bool(res.get("logged_in")),
@@ -207,33 +246,33 @@ class ConsoleSpoke(BaseSpoke):
             dev = self._port_device(pid) if pid else None
             if not dev:
                 return {"status": "ERROR", "message": f"port {pid} not found"}
-            if self.sessions.is_open(pid):
+            if self.sessions.has_user_sessions(pid):
                 return {"status": "ERROR", "message": "port is in use; close sessions first"}
-            return await asyncio.to_thread(self._read_config_blocking, pid, dev)
+            return await self._exclusive_probe(pid, self._read_config_blocking, pid, dev)
 
         if cmd == "CONSOLE_PUSH_CONFIG":
             pid = data.get("port_id")
             dev = self._port_device(pid) if pid else None
             if not dev:
                 return {"status": "ERROR", "message": f"port {pid} not found"}
-            if self.sessions.is_open(pid):
+            if self.sessions.has_user_sessions(pid):
                 return {"status": "ERROR", "message": "port is in use; close sessions first"}
             config = data.get("config") or ""
             if not config.strip():
                 return {"status": "ERROR", "message": "config is empty"}
             save = bool(data.get("save", True))
             rollback = data.get("rollback") or "negate"
-            return await asyncio.to_thread(self._push_config_blocking, pid, dev, config, save, rollback)
+            return await self._exclusive_probe(pid, self._push_config_blocking, pid, dev, config, save, rollback)
 
         if cmd == "CONSOLE_DETECT_BAUD":
             pid = data.get("port_id")
             dev = self._port_device(pid) if pid else None
             if not dev:
                 return {"status": "ERROR", "message": f"port {pid} not found"}
-            if self.sessions.is_open(pid):
+            if self.sessions.has_user_sessions(pid):
                 return {"status": "ERROR", "message": "port is in use; close sessions before baud detection"}
             try:
-                result = await asyncio.to_thread(detect_baud, dev, DEFAULT_BAUD_CANDIDATES)
+                result = await self._exclusive_probe(pid, detect_baud, dev, DEFAULT_BAUD_CANDIDATES)
             except Exception as e:  # noqa: BLE001
                 return {"status": "ERROR", "message": f"baud detect failed: {e}"}
             if result.get("baud"):
@@ -310,9 +349,40 @@ class ConsoleSpoke(BaseSpoke):
         # Tell the browser leg the stream is live (relay consumes CONSOLE_READY).
         if self.control_plane is not None:
             await self.control_plane.send_to_hub("CONSOLE_READY", {"session_id": sid})
+        # Streaming handoff: replay the recent passive-capture tail so a user who
+        # connects mid-stream immediately sees the context the monitor already
+        # captured (banner/prompt/output) instead of a blank screen. The hub
+        # buffers these CONSOLE_DATA_UP frames in the session queue until the
+        # browser WS drains them, so nothing is lost to the connect race.
+        if info.get("had_capture"):
+            await self._replay_capture(sid, pid)
         return {"status": "SUCCESS", "session_id": sid, "port_id": pid,
                 "settings": settings, "writer": info.get("writer"),
                 "read_only": bool(info.get("busy"))}
+
+    async def _push_console_up(self, sid: str, data_bytes: bytes) -> None:
+        """Push device→browser bytes for a session (edge-proxy route if present,
+        else up to the hub). Shared by the reader thread bridge and the replay."""
+        cp = self.control_plane
+        if cp is None or not data_bytes:
+            return
+        payload = {"session_id": sid, "data": base64.b64encode(data_bytes).decode()}
+        routed = False
+        if hasattr(cp, "_route_console_up"):
+            try:
+                routed = await cp._route_console_up("CONSOLE_DATA_UP", payload)
+            except Exception:  # noqa: BLE001
+                routed = False
+        if not routed:
+            await cp.send_to_hub("CONSOLE_DATA_UP", payload)
+
+    async def _replay_capture(self, sid: str, pid: str) -> None:
+        chan = self.sessions.channel(pid)
+        tail = chan.capture_tail(8192) if chan else b""
+        if not tail:
+            return
+        header = b"\r\n\x1b[2m--- recent console capture (replayed) ---\x1b[0m\r\n"
+        await self._push_console_up(sid, header + tail)
 
     # ── auto-identify / fingerprint ───────────────────────────────────────────
     def _identify_blocking(self, port_id: str, dev: str) -> Dict[str, Any]:
@@ -396,6 +466,7 @@ class ConsoleSpoke(BaseSpoke):
             "identity": res.get("identity") or {},
             "logged_in": bool(res.get("logged_in")),
             "error": res.get("error", ""),
+            "source": "active",  # logged-in identify (authoritative; beats passive)
         }
         if res.get("detected_baud"):
             probe["detected_baud"] = res["detected_baud"]
@@ -439,15 +510,26 @@ class ConsoleSpoke(BaseSpoke):
             return
         for p in enumerate_ports():
             pid = p["port_id"]
-            if self.sessions.is_open(pid) or pid in self._probing:
+            if self.sessions.has_user_sessions(pid) or pid in self._probing:
                 continue
             probe = self.store.get(pid).get("probe") or {}
             last = self._probe_attempts.get(pid, 0.0)
-            if probe.get("identity") or (last and (time.monotonic() - last) < 3600):
+            # An ACTIVE (logged-in) identity is authoritative — don't re-probe.
+            # A merely passive glean still warrants one active probe to harvest
+            # what login reveals (IP/serial), so it does NOT block here.
+            if (probe.get("identity") and probe.get("source") == "active") \
+                    or (last and (time.monotonic() - last) < 3600):
                 continue
             self._probing.add(pid)
+            self.sessions.stop_monitor(pid)  # release the passive handle for the probe
             try:
                 res = await asyncio.to_thread(self._identify_blocking, pid, p["device"])
+                # A bare "open failed" here (not a login/parse issue) means the
+                # port itself is unusable → hide it (still retried next cycle).
+                if str(res.get("error", "")).lower().startswith("open failed"):
+                    self._mark_unopenable(pid, res["error"])
+                else:
+                    self._clear_unopenable(pid)
                 await self._emit_probe_result(pid, res)
             except Exception:  # noqa: BLE001
                 logger.exception("autoprobe %s failed", pid)
@@ -455,14 +537,131 @@ class ConsoleSpoke(BaseSpoke):
             finally:
                 self._probing.discard(pid)
 
+    async def _exclusive_probe(self, pid, fn, *args):
+        """Run a blocking op that needs the EXCLUSIVE serial handle (identify,
+        detect-baud, config get/push). Pauses the passive monitor to release the
+        OS handle and marks the port ``probing`` so the monitor loop won't grab
+        it back mid-op; the monitor loop re-establishes capture afterward."""
+        self._probing.add(pid)
+        self.sessions.stop_monitor(pid)
+        try:
+            return await asyncio.to_thread(fn, *args)
+        finally:
+            self._probing.discard(pid)
+
+    # ── passive monitor (keep-alive capture + opportunistic identity) ─────────
+    def _ensure_monitor_task(self) -> None:
+        """Start the passive keep-alive capture loop once (config console_monitor,
+        default on). It holds a read-only serial handle per idle port so we catch
+        whatever a device emits whenever it decides to talk."""
+        if self._monitor_task is not None or not self.config.get("console_monitor", True):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._loop = self._loop or loop
+        self._monitor_task = loop.create_task(self._monitor_loop())
+
+    async def _monitor_loop(self) -> None:
+        await asyncio.sleep(5)
+        while True:
+            try:
+                await asyncio.to_thread(self._monitor_scan)
+            except Exception:  # noqa: BLE001
+                logger.exception("console monitor scan failed")
+            await asyncio.sleep(15)
+
+    def _monitor_scan(self) -> None:
+        """Ensure a passive capture handle on each idle port and glean identity
+        from what has scrolled by (no login, read-only). Runs in a thread. A port
+        the system can't open is flagged unopenable (hidden from the UI) but keeps
+        being retried here so it recovers if it ever starts working."""
+        if not self.config.get("console_monitor", True):
+            return
+        for p in enumerate_ports():
+            pid = p["port_id"]
+            # A human/relay owns the handle, or an exclusive probe is mid-flight —
+            # don't interfere; the live session already fans bytes into capture.
+            if pid in self._probing:
+                self._clear_unopenable(pid)  # it opened for the session → healthy
+                continue
+            if self.sessions.has_user_sessions(pid):
+                self._clear_unopenable(pid)
+                self._passive_glean(pid)
+                continue
+            chan = self.sessions.ensure_monitor(pid, p["device"], self.store.settings(pid))
+            if chan is None:
+                self._mark_unopenable(pid, self.sessions.monitor_error(pid) or "cannot open port")
+                continue
+            self._clear_unopenable(pid)
+            self._passive_glean(pid)
+
+    # Substrings that indicate a KNOWN-faulty/non-real port (for clearer logs).
+    # We hide on ANY open failure regardless; these just classify the message.
+    _UNOPENABLE_HINTS = (
+        "could not configure port", "input/output error", "errno 5",
+        "no such file or directory", "errno 2", "device or resource busy",
+        "errno 16", "permission denied", "errno 13", "open failed",
+        "could not open", "device disconnected", "errno 6",
+    )
+
+    def _mark_unopenable(self, pid: str, err: str) -> None:
+        if pid not in self._unopenable:
+            known = any(h in (err or "").lower() for h in self._UNOPENABLE_HINTS)
+            logger.info("console: hiding port %s from UI — %s serial port (%s)",
+                        pid, "faulty/non-real" if known else "unopenable", err)
+        self._unopenable[pid] = {"error": err, "since": time.time()}
+
+    def _clear_unopenable(self, pid: str) -> None:
+        if self._unopenable.pop(pid, None) is not None:
+            logger.info("console: port %s is openable again — restoring to UI", pid)
+
+    def _passive_glean(self, pid: str) -> None:
+        """Merge best-effort identity gleaned from the passive capture into the
+        stored probe — WITHOUT clobbering an authoritative active-probe result."""
+        chan = self.sessions.channel(pid)
+        if not chan or not chan.capture:
+            return
+        text = chan.capture_tail(65536).decode("utf-8", "replace")
+        res = passive_identify(text)
+        gleaned = res.get("identity") or {}
+        if not (gleaned or res.get("vendor")):
+            return
+        probe = dict(self.store.get(pid).get("probe") or {})
+        active = probe.get("source") == "active"
+        merged = dict(probe.get("identity") or {})
+        changed = False
+        for k, v in gleaned.items():
+            # Passive fills only MISSING fields; active values are never replaced.
+            if v and not merged.get(k):
+                merged[k] = v
+                changed = True
+        if not active and res.get("vendor") and probe.get("vendor") != res["vendor"]:
+            probe["vendor"] = res["vendor"]
+            changed = True
+        # Always refresh the banner tail so the port shows recent console output.
+        tail = text[-2000:]
+        if tail and probe.get("banner") != tail:
+            probe["banner"] = tail
+            changed = True
+        if not changed:
+            return
+        probe["identity"] = merged
+        if not active:
+            probe.setdefault("source", "passive")
+        self.store.update(pid, probe=probe)
+
     async def get_status(self) -> Dict[str, Any]:
         self._ensure_autoprobe_task()
+        self._ensure_monitor_task()
         ports = enumerate_ports()
         return {
             "spoke_id": self.spoke_id,
             "module": "console",
             "port_count": len(ports),
-            "open_ports": sum(1 for p in ports if self.sessions.is_open(p["port_id"])),
+            "open_ports": sum(1 for p in ports if self.sessions.has_user_sessions(p["port_id"])),
+            "monitored_ports": sum(1 for p in ports if self.sessions.snapshot(p["port_id"]).get("monitoring")),
             "credentials_loaded": len(self._credentials),
             "status": "HEALTHY",
         }

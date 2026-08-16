@@ -16080,27 +16080,30 @@ function _renderConsolePorts(el, data) {
     const rows = ports.map(p => {
         const label = p.alias || p.product || p.device;
         const baud = (p.settings && p.settings.baud) || '—';
-        const vendor = (p.probe && p.probe.vendor) || p.vendor || '';
         const inUse = p.in_use ? ` <span class="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold uppercase">In use</span>` : '';
+        const monDot = (p.monitoring && !p.in_use)
+            ? ` <span title="Passively monitoring — capturing console output while idle" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-bold uppercase">● monitoring</span>` : '';
+        const agentName = p.agent_name || p.spoke_id || '';
         const tenant = p.tenant_id
             ? `<span class="font-mono text-xs text-slate-700">${escapeHtml(p.tenant_id)}</span>${p.tenant_override ? ' <span class="text-[9px] text-slate-400">(port)</span>' : ' <span class="text-[9px] text-slate-400">(agent)</span>'}`
             : '<span class="italic text-slate-400 text-xs">unassigned</span>';
         const eP = esc(p.port_id), eS = esc(p.spoke_id || ''), eT = esc(p.tenant_override || '');
         const tenantBtn = admin ? `<button onclick="openConsolePortTenantModal('${eS}','${eP}','${eT}')" class="text-[11px] px-2 py-1 rounded border border-[#01A982] text-[#01A982] hover:bg-slate-50">Tenant</button>` : '';
         const configBtn = hasConsoleWrite() ? `<button onclick="openConsoleConfigModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-indigo-400 text-indigo-600 hover:bg-slate-50">Config</button>` : '';
+        const captureBtn = (p.capture_bytes || p.monitoring || (p.probe && p.probe.banner))
+            ? `<button onclick="openConsoleCaptureModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50" title="View recent console output captured from this port">Capture</button>` : '';
         return `<tr class="hover:bg-slate-50">
-            <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}</div>
+            <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${monDot}</div>
               <div class="text-xs font-mono text-slate-400">${escapeHtml(p.device)} · ${escapeHtml(p.port_id)}</div>
-              ${p.probe && p.probe.vendor
-                ? `<div class="text-xs mt-0.5"><span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-bold uppercase text-[9px]">${escapeHtml(p.probe.vendor)}</span> ${_consoleIdentitySummary(p.probe.identity)}</div>`
-                : (vendor ? `<div class="text-xs text-slate-500">${escapeHtml(vendor)}</div>` : '')}</td>
+              ${_consoleIdentityBlock(p)}</td>
             <td class="px-4 py-3 text-center text-sm">${baud}</td>
-            <td class="px-4 py-3 text-xs font-mono text-slate-500">${escapeHtml(p.spoke_id || '')}</td>
+            <td class="px-4 py-3 text-xs font-mono text-slate-600" title="${escapeHtml(p.spoke_id || '')}">${escapeHtml(agentName)}</td>
             <td class="px-4 py-3">${tenant}</td>
             <td class="px-4 py-3 text-right whitespace-nowrap space-x-1">
               <button onclick="openConsoleTerminal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold">🖥 Open</button>
               <button onclick="consoleDetectBaud('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Detect baud</button>
               <button onclick="consoleIdentify('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Identify</button>
+              ${captureBtn}
               <button onclick="openConsoleSettingsModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Settings</button>
               ${configBtn}
               ${tenantBtn}
@@ -16115,6 +16118,41 @@ function _renderConsolePorts(el, data) {
           <th class="px-4 py-3">Console agent</th><th class="px-4 py-3">Tenant</th>
           <th class="px-4 py-3 text-right">Actions</th></tr></thead>
         <tbody class="divide-y divide-slate-200">${rows}</tbody></table></div>`;
+}
+
+// Relative "last seen" string from an epoch-seconds timestamp (0/absent → '').
+function _consoleRelTime(ts) {
+    if (!ts) return '';
+    const secs = Math.max(0, Math.floor(Date.now() / 1000 - ts));
+    if (secs < 60) return secs + 's ago';
+    if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+    if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+    return Math.floor(secs / 86400) + 'd ago';
+}
+
+// The identity line under a port. Placeholder until anything is scraped; once the
+// system gleans (passively) or verifies (active login) device info, it replaces
+// the placeholder. A badge marks how the info was obtained + when last seen.
+function _consoleIdentityBlock(p) {
+    const probe = p.probe || {};
+    const ident = probe.identity || {};
+    const summary = _consoleIdentitySummary(ident);
+    const seen = p.last_activity
+        ? `<span class="text-[10px] text-slate-400" title="Last console output seen">· 👂 ${_consoleRelTime(p.last_activity)}</span>` : '';
+    if (probe.vendor || summary) {
+        const src = probe.source === 'active'
+            ? '<span class="text-[9px] px-1 py-0.5 rounded bg-green-100 text-green-700 font-bold uppercase" title="Verified via read-only login">verified</span>'
+            : (probe.source === 'passive'
+                ? '<span class="text-[9px] px-1 py-0.5 rounded bg-slate-100 text-slate-500 font-bold uppercase" title="Observed passively from console output (no login)">observed</span>' : '');
+        const vpill = probe.vendor
+            ? `<span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-bold uppercase text-[9px]">${escapeHtml(probe.vendor)}</span> ` : '';
+        return `<div class="text-xs mt-0.5 flex items-center gap-1.5 flex-wrap">${vpill}${summary}${src}${seen}</div>`;
+    }
+    // Nothing gleaned yet.
+    if (p.monitoring) {
+        return `<div class="text-xs mt-0.5 text-slate-400 italic">🎧 Listening — no device data seen yet ${seen}</div>`;
+    }
+    return `<div class="text-xs mt-0.5 text-slate-300 italic">not yet identified</div>`;
 }
 
 function _consoleIdentitySummary(identity) {
@@ -16140,6 +16178,40 @@ async function consoleIdentify(spokeId, portId) {
             loadConsoleData();
         } else showToast(d.detail || 'Identify failed', 'error');
     } catch (e) { showToast('Identify failed: ' + e.message, 'error'); }
+}
+
+// Show the recent console capture (whatever the device emitted while idle) —
+// the passive monitor keeps this filled even with no user connected.
+async function openConsoleCaptureModal(spokeId, portId) {
+    let d = {};
+    try {
+        const res = await fetch('/api/console/capture', {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spoke_id: spokeId, port_id: portId }),
+        });
+        d = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(d.detail || 'Capture unavailable', 'error'); return; }
+    } catch (e) { showToast('Capture failed: ' + e.message, 'error'); return; }
+    const text = (d.capture || '').trim() || '(no console output captured yet)';
+    const meta = `${d.monitoring ? '🎧 monitoring · ' : ''}${d.last_activity ? 'last output ' + _consoleRelTime(d.last_activity) : 'no activity'} · ${d.capture_bytes || 0} bytes seen`;
+    const old = document.getElementById('console-capture-modal');
+    if (old) old.remove();
+    const modal = document.createElement('div');
+    modal.id = 'console-capture-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-60 backdrop-blur-sm';
+    modal.innerHTML = `<div class="bg-[#1e1e1e] rounded-xl shadow-2xl w-full max-w-3xl overflow-hidden flex flex-col" style="height:70vh">
+        <div class="px-4 py-2 flex justify-between items-center bg-[#2d2d2d] text-slate-200">
+          <div class="text-sm font-mono">${escapeHtml(portId)} <span class="text-[10px] text-slate-400">${escapeHtml(meta)}</span></div>
+          <button onclick="document.getElementById('console-capture-modal').remove()" class="text-slate-300 hover:text-white text-2xl leading-none">&times;</button>
+        </div>
+        <pre class="flex-1 m-0 p-3 overflow-auto text-xs text-slate-100 font-mono whitespace-pre-wrap">${escapeHtml(text)}</pre>
+        <div class="px-4 py-2 bg-[#2d2d2d] text-right"><button class="js-capture-refresh text-[11px] px-3 py-1.5 rounded border border-slate-500 text-slate-200 hover:bg-slate-700">↻ Refresh</button></div>
+      </div>`;
+    modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
+    document.body.appendChild(modal);
+    const jesc = s => (s || '').replace(/'/g, "\\'");
+    modal.querySelector('.js-capture-refresh').setAttribute(
+        'onclick', `openConsoleCaptureModal('${jesc(spokeId)}','${jesc(portId)}')`);
 }
 
 async function openConsoleCredentialsModal() {
@@ -16307,6 +16379,15 @@ function openConsoleSettingsModal(spokeId, portId) {
             <div><label class="text-xs text-slate-500 uppercase font-bold">Parity</label><select id="console-cfg-parity" class="w-full border border-slate-300 rounded-md px-2 py-2 text-sm mt-1">${parOpts}</select></div>
             <div><label class="text-xs text-slate-500 uppercase font-bold">Flow</label><select id="console-cfg-flow" class="w-full border border-slate-300 rounded-md px-2 py-2 text-sm mt-1">${flowOpts}</select></div>
           </div>
+          <div class="pt-2 border-t border-slate-100">
+            <div class="text-xs text-slate-500 uppercase font-bold mb-1">Paste pacing <span class="normal-case text-slate-400 font-normal">— slows large pastes so slow devices don't drop lines</span></div>
+            <div class="grid grid-cols-2 gap-3">
+              <div><label class="text-[11px] text-slate-500">Delay after each line (ms)</label>
+                <input id="console-cfg-linedelay" type="number" min="0" max="2000" value="${Number.isFinite(+s.paste_line_delay_ms) ? +s.paste_line_delay_ms : 15}" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></div>
+              <div><label class="text-[11px] text-slate-500">Chunk size (bytes)</label>
+                <input id="console-cfg-chunk" type="number" min="1" max="4096" value="${Number.isFinite(+s.paste_chunk) ? +s.paste_chunk : 64}" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm mt-1"></div>
+            </div>
+          </div>
           <div class="pt-3 flex justify-end gap-3">
             <button onclick="this.closest('#console-settings-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
             <button onclick="saveConsoleSettings('${spokeId.replace(/'/g, "\\'")}','${portId.replace(/'/g, "\\'")}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Save</button>
@@ -16322,6 +16403,8 @@ async function saveConsoleSettings(spokeId, portId) {
         baud: parseInt(document.getElementById('console-cfg-baud').value, 10),
         parity: document.getElementById('console-cfg-parity').value,
         flow: document.getElementById('console-cfg-flow').value,
+        paste_line_delay_ms: parseInt(document.getElementById('console-cfg-linedelay').value, 10) || 0,
+        paste_chunk: parseInt(document.getElementById('console-cfg-chunk').value, 10) || 64,
     };
     try {
         // Alias is a separate command on the spoke; send it first if changed.

@@ -393,6 +393,7 @@ def register(app, hub, ctx):
         ports, errors, visible_spokes = [], {}, set()
         for sid in spokes:
             stenant = hub.state.get_spoke_tenant(sid) or ""
+            agent_name = hub.state.get_module_name(sid)  # friendly name, not the UUID
             # A dedicated agent bound to the selected tenant is "present" for it
             # even before its ports enumerate (accurate empty-state); shared /
             # unassigned agents only count once a port actually passes below.
@@ -407,6 +408,7 @@ def register(app, hub, ctx):
                 override = p.get("tenant_id") or ""
                 eff = override or stenant
                 p["spoke_id"] = sid
+                p["agent_name"] = agent_name    # display name for the "Console agent" column
                 p["tenant_id"] = eff            # effective (what scoping/NetBox uses)
                 p["tenant_override"] = override  # per-port override, if any
                 p["agent_tenant"] = stenant      # the whole-agent binding
@@ -480,7 +482,26 @@ def register(app, hub, ctx):
                                        {"port_id": (body or {}).get("port_id")}, timeout=90.0)
         return _console_unwrap(r)
 
-    @app.post("/api/console/tenant")
+    @app.post("/api/console/capture")
+    async def console_capture(request: Request):
+        """Return the recent passive-capture buffer for a port — whatever the
+        device has emitted (banner/boot/log/prompt), even with no user attached.
+        Tenant-guarded exactly like the other per-port actions."""
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        sid = _console_spoke_or_none(hub, body)
+        if not sid:
+            raise HTTPException(status_code=503, detail="No Console spoke connected")
+        await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
+        r = await hub.request_response(sid, "CONSOLE_GET_CAPTURE", {
+            "port_id": (body or {}).get("port_id"),
+            "bytes": (body or {}).get("bytes"),
+        }, timeout=15.0)
+        return _console_unwrap(r)
+
     async def console_set_tenant(request: Request):
         """Bind a single PORT to a tenant (per-port override). Admin-only, like the
         whole-agent tenant assignment. Empty tenant_id clears the override so the

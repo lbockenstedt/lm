@@ -58,3 +58,153 @@ def test_port_store_partial_settings_update_keeps_others(tmp_path):
     store.update("p1", settings={"baud": 38400})  # change only baud
     s = store.settings("p1")
     assert s["baud"] == 38400 and s["flow"] == "rtscts"
+
+
+# ── PortChannel capture + paced writes + SessionManager monitor lifecycle ────
+# These exercise the pieces that need a serial handle, using a fake serial module
+# injected into serial_manager (pyserial isn't installed in CI).
+import threading  # noqa: E402
+import time as _time  # noqa: E402
+
+
+class _FakeSerial:
+    """Minimal pyserial stand-in. ``feed`` bytes are handed out by read()."""
+    PARITY_NONE = "N"
+    PARITY_EVEN = "E"
+    PARITY_ODD = "O"
+
+    class SerialException(Exception):
+        pass
+
+    class Serial:
+        instances = []
+
+        def __init__(self, **kw):
+            port = kw.get("port", "")
+            if "bad" in port:  # simulate a faulty/non-real port
+                raise _FakeSerial.SerialException(
+                    "Could not configure port: (5, 'Input/output error')")
+            self.kw = kw
+            self.written = bytearray()
+            self.closed = False
+            self._feed = bytearray()
+            self._lock = threading.Lock()
+            _FakeSerial.Serial.instances.append(self)
+
+        def feed(self, data: bytes):
+            with self._lock:
+                self._feed += data
+
+        def read(self, n):
+            _time.sleep(0.005)
+            with self._lock:
+                if not self._feed:
+                    return b""
+                out = bytes(self._feed[:n])
+                del self._feed[:n]
+                return out
+
+        def write(self, b):
+            self.written += b
+
+        def flush(self):
+            pass
+
+        def send_break(self, duration=0.25):
+            pass
+
+        def close(self):
+            self.closed = True
+
+
+def _use_fake_serial(monkeypatch):
+    monkeypatch.setattr(m, "serial", _FakeSerial)
+    _FakeSerial.Serial.instances = []
+
+
+def _wait(cond, timeout=2.0):
+    end = _time.time() + timeout
+    while _time.time() < end:
+        if cond():
+            return True
+        _time.sleep(0.01)
+    return False
+
+
+def test_channel_records_capture_and_rolls(monkeypatch):
+    _use_fake_serial(monkeypatch)
+    chan = m.PortChannel("p1", "/dev/ttyUSB0", {"baud": 9600}, lambda sid, d: None)
+    chan._record(b"hello ")
+    chan._record(b"world")
+    assert chan.capture_tail() == b"hello world"
+    assert chan.bytes_seen == 11
+    assert chan.last_activity > 0
+    # Rolling cap keeps only the tail.
+    chan.CAPTURE_MAX = 8
+    chan._record(b"1234567890")
+    assert len(chan.capture) == 8
+    assert chan.capture_tail(4) == b"7890"
+
+
+def test_channel_paced_write_streams_full_paste_in_order(monkeypatch):
+    _use_fake_serial(monkeypatch)
+    # Zero delays so the test is fast; correctness = all bytes, in order.
+    chan = m.PortChannel("p1", "/dev/ttyUSB0",
+                         {"baud": 9600, "paste_line_delay_ms": 0, "paste_chunk": 16},
+                         lambda sid, d: None)
+    chan.start()
+    chan.attach("s1", writable=True)
+    paste = ("".join(f"line-{i}\n" for i in range(200))).encode()
+    assert chan.write("s1", paste) is True
+    assert _wait(lambda: bytes(chan.ser.written) == paste), "paste did not fully drain"
+    assert chan.pending_out() == 0
+    chan.close()
+
+
+def test_channel_write_requires_writer_lock(monkeypatch):
+    _use_fake_serial(monkeypatch)
+    chan = m.PortChannel("p1", "/dev/ttyUSB0", {"baud": 9600}, lambda sid, d: None)
+    chan.start()
+    chan.attach("reader", writable=False)  # observer, no writer lock
+    assert chan.write("reader", b"nope") is False
+    chan.close()
+
+
+def test_session_manager_monitor_keepalive_and_handoff(monkeypatch):
+    _use_fake_serial(monkeypatch)
+    sm = m.SessionManager(on_data=lambda sid, d: None)
+    # Passive monitor holds the port open with no user attached.
+    chan = sm.ensure_monitor("p1", "/dev/ttyUSB0", {"baud": 9600})
+    assert chan is not None and chan.monitored is True
+    assert sm.is_open("p1") and not sm.has_user_sessions("p1")
+    # A user attaches to the SAME channel (streaming handoff), gets writer lock.
+    info = sm.open("u1", "p1", "/dev/ttyUSB0", {"baud": 9600}, writable=True)
+    assert info["writer"] is True and info["created"] is False
+    assert sm.has_user_sessions("p1")
+    # User leaves — channel stays open because the monitor still wants it.
+    sm.close("u1")
+    assert sm.is_open("p1") and not sm.has_user_sessions("p1")
+    # Dropping the monitor with no users finally closes it.
+    sm.stop_monitor("p1")
+    assert not sm.is_open("p1")
+
+
+def test_session_manager_records_open_error_for_faulty_port(monkeypatch):
+    _use_fake_serial(monkeypatch)
+    sm = m.SessionManager(on_data=lambda sid, d: None)
+    chan = sm.ensure_monitor("bad1", "/dev/ttyS2-bad", {"baud": 9600})
+    assert chan is None
+    err = sm.monitor_error("bad1")
+    assert err and "input/output error" in err.lower()
+    assert not sm.is_open("bad1")
+
+
+def test_stop_monitor_keeps_channel_if_user_present(monkeypatch):
+    _use_fake_serial(monkeypatch)
+    sm = m.SessionManager(on_data=lambda sid, d: None)
+    sm.ensure_monitor("p1", "/dev/ttyUSB0", {"baud": 9600})
+    sm.open("u1", "p1", "/dev/ttyUSB0", {"baud": 9600}, writable=True)
+    sm.stop_monitor("p1")  # release passive hold, but a user is on it
+    assert sm.is_open("p1") and sm.has_user_sessions("p1")
+    sm.close("u1")
+    assert not sm.is_open("p1")  # now truly empty
