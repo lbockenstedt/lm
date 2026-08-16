@@ -2513,6 +2513,24 @@ async function dropHubBacklog() {
     }
 }
 
+// Restart the hub service (admin, System → Hub Status). Confirms first, since the
+// hub (and this WebUI session) briefly drops while lm.service cycles.
+async function restartHubService() {
+    const btn = document.getElementById('restart-hub-btn');
+    if (!confirm('Restart the hub service (lm.service) now?\n\n'
+               + 'This loads the latest pulled code (e.g. to fix a "Method Not Allowed" on a new endpoint after an update). '
+               + 'The hub and this page will be briefly unavailable for a few seconds; spokes reconnect automatically.')) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Restarting…'; }
+    try {
+        const data = await apiJson('/setup/hub/restart', { method: 'POST' });
+        showToast(`${data.message || 'Hub restarting'} — reloading in ~8s…`, 'success');
+        setTimeout(() => location.reload(), 8000);
+    } catch (e) {
+        showToast(`Restart failed: ${e.message}`, 'error');
+        if (btn) { btn.disabled = false; btn.textContent = '♻️ Restart hub service'; }
+    }
+}
+
 // Save the per-spoke rate-limit knob (System → Hub Status). Shallow-merges into
 // global_config["rate_limit"] via POST /setup/config; the hub applies it to each
 // spoke on its next (re)connect (main.py _rate_limit_params). Admin only.
@@ -4839,6 +4857,15 @@ function _renderSettingsSection(subMenu) {
                     <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Queue Depth</p><div id="sys-queue" class="text-xl font-bold text-slate-700 mt-1">—</div></div>
                     <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Backlog</p><div id="sys-backlog" class="text-xl font-bold text-slate-700 mt-1">—</div></div>
                     <div class="${card} p-6"><p class="text-[10px] uppercase text-slate-400 font-bold tracking-widest">Rate-Limit Drops</p><div id="sys-rate-drops" class="text-xl font-bold text-slate-700 mt-1">—</div></div>
+                </div>
+                <div class="${card} p-6">
+                    <div class="flex justify-between items-center">
+                        <div>
+                            <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Hub Service ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                            <p class="text-[10px] text-slate-400 mt-1">Restart <code>lm.service</code> to load freshly-pulled code. Use after an update when a new endpoint returns <b>405 Method Not Allowed</b> — the running process is still the old code until it cycles. Spokes reconnect automatically; this page reloads in a few seconds.</p>
+                        </div>
+                        <button onclick="restartHubService()" id="restart-hub-btn" class="text-xs px-3 py-1 rounded-md border border-amber-300 text-amber-700 hover:bg-amber-50 transition-all whitespace-nowrap" title="Restart the hub service (lm.service) now">♻️ Restart hub service</button>
+                    </div>
                 </div>
                 <div class="${card} p-6">
                     <div class="flex justify-between items-center mb-3">
@@ -16364,25 +16391,10 @@ async function refreshConsoleDiagnostics() {
 // Footer buttons shared by the diagnostics modal states: purge all collected
 // telemetry (admin) + refresh.
 function _consoleDiagFooterBtns() {
-    return `<button onclick="restartConsoleHubService()" class="text-[11px] px-3 py-1.5 rounded border border-amber-300 text-amber-700 hover:bg-amber-50" title="Restart the hub service (lm.service) to load freshly-pulled code — fixes a 'Method Not Allowed' on new endpoints after an update">♻️ Restart hub service</button>`
-         + `<button onclick="purgeConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50" title="Delete all collected serial-health / identify telemetry across every console agent">🗑 Purge data</button>`
+    return `<button onclick="purgeConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50" title="Delete all collected serial-health / identify telemetry across every console agent">🗑 Purge data</button>`
          + `<button onclick="refreshConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">↻ Refresh</button>`;
 }
 
-// Restart the hub service (admin) to load freshly-pulled code. Confirms first,
-// since the hub (and this WebUI session) briefly drops while lm.service cycles.
-async function restartConsoleHubService() {
-    if (!confirm('Restart the hub service (lm.service) now?\n\nThis loads the latest pulled code (e.g. to fix a "Method Not Allowed" on a new endpoint after an update). The hub and this page will be briefly unavailable for a few seconds while it restarts; console agents reconnect automatically.')) return;
-    try {
-        const res = await fetch('/api/console/diagnostics/restart-hub', {
-            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: '{}',
-        });
-        const d = await res.json().catch(() => ({}));
-        if (!res.ok) { showToast(d.detail || `Restart failed (${res.status})`, 'error'); return; }
-        showToast(`${d.message || 'Hub restarting'} — reloading in ~8s…`, 'success');
-        setTimeout(() => location.reload(), 8000);
-    } catch (e) { showToast('Restart failed: ' + e.message, 'error'); }
-}
 
 // Purge all collected diagnostics/identify telemetry (admin). Confirms first,
 // since the accumulated failure/identify history is cleared on every console agent.

@@ -341,6 +341,32 @@ def register(app, hub, ctx):
                     (sess.get("username") if isinstance(sess, dict) else "?"))
         return {"status": "ok", "cleared_spokes": n}
 
+    @app.post("/setup/hub/restart")
+    async def restart_hub_service(request: Request):
+        """Restart the hub service (lm.service) so freshly-pulled code is loaded —
+        e.g. after an update that added a route, curing a stale-process 405 on a
+        new endpoint (System → Hub Status 'Restart hub service'). Uses the
+        canonical ``lm-self-restart`` path: a transient systemd unit restarts lm
+        ~3s later (outside lm's cgroup), so this response returns first. Spokes
+        reconnect automatically. Admin only."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        restart = getattr(hub, "_hub_self_restart", None)
+        if restart is None:
+            raise HTTPException(status_code=503,
+                                detail="hub self-restart is unavailable on this deployment")
+        logger.warning("[diag] Hub service restart requested by %s",
+                       (sess.get("username") if isinstance(sess, dict) else "?"))
+        try:
+            msg = await restart()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[diag] hub self-restart failed: %s", e)
+            raise HTTPException(status_code=502, detail=f"restart could not be scheduled: {e}")
+        return {"status": "scheduled",
+                "message": msg or "lm.service restarting to apply the latest code"}
+
     @app.get("/status")
     async def get_status(request: Request):
         hub = app.state.hub
