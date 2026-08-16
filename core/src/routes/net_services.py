@@ -268,6 +268,21 @@ def register(app, hub, ctx):
         ret = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
         return hub, le_sid, _spoke_payload_or_raise(ret)
 
+    def _le_vault_enabled():
+        """True when the Credential Vault (Azure Key Vault) is configured. When
+        on, LE credentials belong in the vault; any raw creds still held on the
+        le spoke should be migrated there manually (we never auto-drop them)."""
+        try:
+            import cred_vault as _cv
+            return bool(_cv._vault_available(app.state.hub))
+        except Exception:  # noqa: BLE001
+            return False
+
+    _LE_MIGRATE_WARNING = (
+        "The credential vault is enabled but this LE credential is still stored "
+        "locally on the hub/spoke. Migrate it into the Credential Vault manually; "
+        "raw LE passwords can no longer be created here.")
+
     @app.post("/api/le/he-config")
     async def le_set_he_login(request: Request):
         """Store the Hurricane Electric account-login knob on the le spoke, so the
@@ -281,6 +296,13 @@ def register(app, hub, ctx):
         """Whether the HE account-login knob is configured (never returns the
         password) — drives the Setup knob's 'configured' state."""
         _hub, _sid, payload = await _le_request("LE_GET_HE_LOGIN", {})
+        if isinstance(payload, dict):
+            vault_on = _le_vault_enabled()
+            data = _le_inner(payload)
+            configured = bool(data.get("configured", payload.get("configured")))
+            payload["vault_enabled"] = vault_on
+            payload["local_passwords_present"] = configured
+            payload["migrate_warning"] = _LE_MIGRATE_WARNING if (vault_on and configured) else ""
         return payload
 
     # ── Per-tenant multi-provider DNS-01 credential store ────────────────────
@@ -298,6 +320,14 @@ def register(app, hub, ctx):
         plus the provider field catalog for the editor."""
         _hub, _sid, payload = await _le_request(
             "LE_LIST_DNS_CREDS", {"tenant_id": _le_tenant(request)})
+        if isinstance(payload, dict):
+            vault_on = _le_vault_enabled()
+            data = _le_inner(payload)
+            creds = data.get("credentials") or data.get("creds") or []
+            has_local = bool(creds)
+            payload["vault_enabled"] = vault_on
+            payload["local_passwords_present"] = has_local
+            payload["migrate_warning"] = _LE_MIGRATE_WARNING if (vault_on and has_local) else ""
         return payload
 
     @app.post("/api/le/dns-credentials")

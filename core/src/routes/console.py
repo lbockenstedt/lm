@@ -449,6 +449,40 @@ def register(app, hub, ctx):
             pass
         return _console_load_credentials(hub)
 
+    def _cv_admin_bucket():
+        try:
+            import cred_vault as _cv
+            return _cv.ADMIN_BUCKET
+        except Exception:  # noqa: BLE001
+            return "__admin__"
+
+    def _vault_enabled(hub):
+        """True when the Credential Vault is usable as a credential store — i.e.
+        an Azure Key Vault is configured (:func:`cred_vault._vault_available`).
+        Per the operator directive, when this is on, module passwords belong in
+        the vault; local passwords should be migrated there manually."""
+        try:
+            import cred_vault as _cv
+            return bool(_cv._vault_available(hub))
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _console_vault_secret_present(hub):
+        """True when the console login list lives in the Credential Vault
+        (``__admin__`` slot, automation-readable)."""
+        try:
+            import cred_vault as _cv
+            val = await _cv.automation_get(hub, _cv.ADMIN_BUCKET, _CONSOLE_VAULT_SECRET)
+            return bool(_console_creds_from_cred_vault(val))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _console_local_passwords_present(hub):
+        """True when legacy LOCAL console passwords still exist on the hub
+        (Fernet-encrypted ``console_credentials_enc``) — the thing the migrate
+        warning nudges the operator to move into the vault."""
+        return bool(hub.state.system_state.get("console_credentials_enc"))
+
     async def _console_hub_git_head():
         """Short git HEAD of the hub's own checkout, for the diagnostics debug
         block (tells an operator whether the HUB — where the console seed /
@@ -955,57 +989,53 @@ def register(app, hub, ctx):
     async def console_get_credentials(request: Request):
         """Return the global auto-identify credential list with passwords MASKED
         (usernames + has_password only). Admin-gated by the /api/console/* rule +
-        this explicit admin check (credentials are privileged)."""
-        sess = _session_user(request)
-        if not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="admin only")
-        creds = _console_load_credentials(app.state.hub)
-        return {"credentials": [{"username": c.get("username", ""),
-                                 "has_password": bool(c.get("password"))} for c in creds],
-                "source": "keyvault" if _console_creds_keyvault_backed(app.state.hub) else "hub",
-                "read_only": _console_creds_keyvault_backed(app.state.hub)}
+        this explicit admin check (credentials are privileged).
 
-    @app.post("/api/console/credentials")
-    async def console_post_credentials(request: Request):
-        """Replace the global auto-identify credential list (Fernet-encrypted in
-        hub state) and push it (signed) to every connected Console spoke. Admin
-        only."""
+        Creating credentials here is DISABLED: console logins are managed in the
+        Credential Vault (Global Admin slot → ``console-auto-credentials``) and
+        pulled unattended by the seed loop. ``creation_disabled`` tells the WebUI
+        to show the read-only, vault-managed view (no password entry)."""
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
-        # Vault-backed lists are managed in Key Vault (least-privilege: the hub
-        # only reads them) — editing here would be silently lost, so reject it.
-        if _console_creds_keyvault_backed(hub):
-            raise HTTPException(status_code=409,
-                                detail="console credentials are managed in Azure Key Vault (read-only here)")
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        # Merge: a blank password keeps the currently-stored one for that username
-        # (the GET never returns passwords, so the UI submits blanks to keep them).
-        stored = {c.get("username"): c.get("password") for c in _console_load_credentials(hub)}
-        creds = []
-        for c in (body.get("credentials") or []):
-            if not isinstance(c, dict):
-                continue
-            u = str(c.get("username", "")).strip()
-            if not u:
-                continue
-            p = str(c.get("password", ""))
-            if not p and u in stored:
-                p = stored[u]
-            creds.append({"username": u, "password": p})
-        _console_save_credentials(hub, creds)
-        hub._console_creds_seeded = set()  # force re-seed with the new list
-        for sid in (hub.get_all_spokes_by_type("console") or []):
-            try:
-                await hub.send_to_spoke_command(sid, "CONSOLE_SET_CREDENTIALS", {"credentials": creds})
-                _console_mark_seeded(hub, sid)
-            except Exception:  # noqa: BLE001
-                pass
-        return {"status": "ok", "count": len(creds)}
+        creds = await _console_load_credentials_resolved(hub)
+        vault_backed = await _console_vault_secret_present(hub)
+        vault_on = _vault_enabled(hub)
+        local_present = _console_local_passwords_present(hub)
+        # Warn (never auto-migrate/drop) when the vault is enabled but local
+        # passwords still linger — nudge the operator to move them by hand.
+        warning = ""
+        if vault_on and local_present and not vault_backed:
+            warning = ("The credential vault is enabled but local console passwords "
+                       "still exist on the hub. Migrate them into the Credential Vault "
+                       "(Global Admin slot → 'console-auto-credentials') manually; they "
+                       "are otherwise ignored and won't be updatable here.")
+        return {"credentials": [{"username": c.get("username", ""),
+                                 "has_password": bool(c.get("password"))} for c in creds],
+                "source": ("cred_vault" if vault_backed
+                           else "keyvault" if _console_creds_keyvault_backed(hub) else "hub"),
+                "read_only": True, "creation_disabled": True,
+                "vault_enabled": vault_on, "local_passwords_present": local_present,
+                "migrate_warning": warning,
+                "vault_bucket": _cv_admin_bucket(), "vault_secret": _CONSOLE_VAULT_SECRET}
+
+    @app.post("/api/console/credentials")
+    async def console_post_credentials(request: Request):
+        """DISABLED — creating passwords in the Console module is no longer
+        allowed. Store console logins in the Credential Vault (Global Admin slot
+        ``__admin__`` → secret ``console-auto-credentials``, automation-readable)
+        and the seed loop pulls them unattended. Existing hub/Key-Vault-stored
+        credentials are left untouched (no migration, no auto-delete) and keep
+        working until removed by an operator. Admin only."""
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        raise HTTPException(
+            status_code=409,
+            detail=("Creating passwords in the Console module is disabled. Store "
+                    "console logins in the Credential Vault (Global Admin slot → "
+                    "'console-auto-credentials') — they are used automatically."))
 
     @app.post("/api/console/credentials/to-vault")
     async def console_creds_to_vault(request: Request):
