@@ -123,6 +123,11 @@ const ROUTES = {
     runNwDiscoveryNow:      { m: 'POST', p: '/setup/nw-discovery-sync/run', api: 'run_nw_discovery_sync' },
     saveNwDiscoveryConfig:  { m: 'POST', p: '/setup/config',              api: 'update_global_config' },
 
+    // ── Console discovery sync (Console auto-identify → NetBox devices) ──
+    loadConsoleNetboxSync:   { m: 'GET',  p: '/setup/console-netbox-sync',        api: 'get_console_netbox_sync' },
+    saveConsoleNetboxSync:   { m: 'POST', p: '/setup/console-netbox-sync',        api: 'set_console_netbox_sync' },
+    loadConsoleNetboxStatus: { m: 'GET',  p: '/setup/console-netbox-sync/status', api: 'console_netbox_sync_status' },
+
     // ── NetBox staleness sweep (cluster-wide; System → Sync) ──
     loadStalenessSweepConfig: { m: 'GET',  p: '/setup/config',                  api: 'get_global_config' },
     loadStalenessSweepStatus: { m: 'GET',  p: '/setup/staleness-sweep/status',  api: 'staleness_sweep_status' },
@@ -6261,6 +6266,44 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Console → IPAM Sync ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <span class="text-xs text-slate-400">Event-driven</span>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">When a Console spoke <b>auto-identifies</b> a device on a serial port (hostname / vendor / model / <b>serial number</b> / MAC / IP scraped from the console session), the hub mirrors it into NetBox DCIM as a tenant-tagged device (<code>discovered_from = Console</code>). There is no schedule — each identify pushes immediately. The sink matches an existing device by <b>serial → IP → MAC → hostname</b> (serial is the strongest key, so a console-found box is reconciled with its firewall/switch-discovered record instead of duplicating). The device is attributed to the port's effective tenant; a tenant with no <code>netbox_tenant_slug</code> is skipped. Hardware is the source of truth: a device seen on the console is real.</p>
+                <div class="flex flex-wrap items-end gap-4">
+                    <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="console-sync-enabled" class="w-4 h-4 text-green-600 rounded">Sync identified devices to NetBox</label>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Source of truth</label>
+                        <select id="console-sync-sot" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                            <option value="external">Console feed (overwrite)</option>
+                            <option value="netbox">NetBox (fill gaps only)</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div class="space-y-1">
+                        <label class="${labelCls}">NetBox device role (slug)</label>
+                        <input id="console-sync-role" placeholder="discovered" class="${inputCls}">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">NetBox device type (slug)</label>
+                        <input id="console-sync-type" placeholder="discovered" class="${inputCls}">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">NetBox site (slug, optional)</label>
+                        <input id="console-sync-site" placeholder="" class="${inputCls}">
+                    </div>
+                </div>
+                <div class="mt-4 flex items-center justify-end gap-3">
+                    <span class="text-xs text-slate-400">Defaults apply to newly created devices only.</span>
+                </div>
+                <div class="mt-4">
+                    <div class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Recent console syncs per tenant</div>
+                    <div id="console-sync-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+                </div>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Staleness Sweep ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                     <button id="staleness-sweep-run-btn" onclick="runStalenessSweepNow()" class="${btnCls}">Sweep now</button>
                 </div>
@@ -6382,6 +6425,8 @@ function _renderSetupSyncTile(content) {
     loadNwDiscoverySources();
     loadNwDiscoveryConfig();
     loadNwDiscoveryStatus();
+    loadConsoleNetboxSync();
+    loadConsoleNetboxStatus();
     loadStalenessSweepConfig();
     loadStalenessSweepStatus();
     loadRepoSyncConfig();
@@ -6407,6 +6452,7 @@ function _syncSaveFnFor(el) {
     if (id.startsWith('vm-sync-'))          return saveVmSyncConfig;
     if (id.startsWith('fw-sync-'))          return saveFwDiscoveryConfig;
     if (id.startsWith('nw-sync-'))          return saveNwDiscoveryConfig;
+    if (id.startsWith('console-sync-'))     return saveConsoleNetboxSync;
     if (id.startsWith('staleness-sweep-'))  return saveStalenessSweepConfig;
     if (id.startsWith('spoke-alert-'))      return saveSpokeAlertConfig;
     if (id.startsWith('hcw-'))              return saveHubWatchdog;
@@ -10974,6 +11020,79 @@ async function saveNwDiscoveryConfig() {
         else showToast('Failed to save schedule.', 'error');
     } catch (e) {
         showToast('Error saving schedule: ' + e.message, 'error');
+    }
+}
+
+// Console → IPAM device sync (System → Sync). Event-driven (no schedule): each
+// Console auto-identify pushes the device to NetBox. Config lives in
+// global_config.console_netbox_device_sync (enabled default true).
+async function loadConsoleNetboxSync() {
+    try {
+        const data = await apiJson('/setup/console-netbox-sync');
+        const cfg = data.config || {};
+        const chk = document.getElementById('console-sync-enabled');
+        // Enabled by default when unset (preserves the original always-on sync).
+        if (chk) chk.checked = cfg.enabled !== false;
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+        set('console-sync-sot', cfg.source_of_truth === 'netbox' ? 'netbox' : 'external');
+        const d = cfg.defaults || {};
+        set('console-sync-role', d.role || '');
+        set('console-sync-type', d.device_type || '');
+        set('console-sync-site', d.site || '');
+    } catch (e) { console.error('loadConsoleNetboxSync failed', e); }
+}
+
+async function loadConsoleNetboxStatus() {
+    const wrap = document.getElementById('console-sync-status');
+    if (!wrap) return;
+    let data;
+    try {
+        data = await apiJson('/setup/console-netbox-sync/status');
+    } catch (e) {
+        wrap.innerHTML = `<p class="text-xs text-red-500">Failed: ${e.message}</p>`;
+        return;
+    }
+    const esc = escapeHtml;
+    const rows = data.tenants || [];
+    if (!rows.length) {
+        wrap.innerHTML = '<p class="text-xs text-slate-400 italic">No console syncs yet. A device is pushed the moment a Console spoke identifies it.</p>';
+        return;
+    }
+    wrap.innerHTML = rows.map(t => {
+        const st = String(t.status || '');
+        const pill = st === 'success' ? 'bg-green-100 text-green-700'
+            : st === 'error' ? 'bg-red-100 text-red-700'
+            : st === 'skipped' ? 'bg-slate-100 text-slate-500' : 'bg-slate-100 text-slate-400';
+        const synced = Number(t.synced) || 0;
+        const errors = Number(t.errors) || 0;
+        return `<div class="border border-slate-200 rounded-md p-3">
+            <div class="flex items-center justify-between mb-1">
+                <span class="text-sm font-bold text-slate-700">${esc(t.tenant_name || t.tenant_id)} <span class="text-xs font-mono text-slate-400">${esc(t.tenant_id)}</span></span>
+                <span class="text-xs px-2 py-0.5 rounded-full ${pill}">${esc(st || '—')}</span>
+            </div>
+            <p class="text-xs text-slate-500">synced ${synced} · errors ${errors}${t.last_device ? ` · last <span class="font-mono">${esc(t.last_device)}</span>` : ''} <span class="text-slate-400">· ${fmtDate(t.last_sync_ts)}</span></p>
+            ${t.message ? `<p class="text-xs text-slate-400 mt-1">${esc(t.message)}</p>` : ''}
+        </div>`;
+    }).join('');
+}
+
+async function saveConsoleNetboxSync() {
+    const enabled = document.getElementById('console-sync-enabled')?.checked ? true : false;
+    const sourceOfTruth = document.getElementById('console-sync-sot')?.value === 'netbox' ? 'netbox' : 'external';
+    const defaults = {
+        role: (document.getElementById('console-sync-role')?.value || '').trim(),
+        device_type: (document.getElementById('console-sync-type')?.value || '').trim(),
+        site: (document.getElementById('console-sync-site')?.value || '').trim(),
+    };
+    try {
+        const r = await setupFetch('/setup/console-netbox-sync', {
+            method: 'POST',
+            body: JSON.stringify({ config: { enabled, source_of_truth: sourceOfTruth, defaults } })
+        });
+        if (r.ok) showToast('Console → NetBox sync settings saved.', 'success');
+        else showToast('Failed to save settings.', 'error');
+    } catch (e) {
+        showToast('Error saving settings: ' + e.message, 'error');
     }
 }
 

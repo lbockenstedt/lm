@@ -141,3 +141,49 @@ def test_real_hostname_beats_product_string():
     }))
     dev = hub.synced[0][1]["devices"][0]
     assert dev["hostname"] == "MIA-SW-AOSS"  # real hostname wins
+
+
+def test_serial_included_in_synced_payload():
+    """The scraped serial rides in the NETBOX_SYNC_DEVICES device record so the
+    sink can match/create by serial (the strongest key)."""
+    hub = _Hub()
+    _run(hub._handle_console_probe("console-1", {
+        "port_id": "usb-1", "vendor": "hp-procurve",
+        "identity": {"hostname": "MIA-SW-1", "serial": "SG12345678"},
+        "banner": "MIA-SW-1> ", "method": "login",
+    }))
+    dev = hub.synced[0][1]["devices"][0]
+    assert dev["serial"] == "SG12345678"
+    assert hub.synced[0][1]["source"] == "Console"
+
+
+def test_disabled_toggle_skips_netbox_sync():
+    """With the System → Sync toggle off, an identify does NOT push to NetBox."""
+    hub = _Hub()
+    hub.state.system_state = {"global_config": {
+        "console_netbox_device_sync": {"enabled": False}}}
+    try:
+        _run(hub._handle_console_probe("console-1", {
+            "port_id": "usb-1", "vendor": "hp-procurve",
+            "identity": {"hostname": "MIA-SW-1", "serial": "SG1"},
+            "banner": "MIA-SW-1> ", "method": "login",
+        }))
+        assert hub.synced == []
+    finally:
+        # `state` is a shared class attribute — restore the default (enabled).
+        hub.state.system_state = {}
+
+
+def test_status_recorded_on_success():
+    """A successful console sync is tracked per tenant for the UI status card."""
+    hub = _Hub()
+    hub.state.system_state = {}  # enabled by default
+    _run(hub._handle_console_probe("console-1", {
+        "port_id": "usb-1", "vendor": "hp-procurve",
+        "identity": {"hostname": "MIA-SW-1"},
+        "banner": "MIA-SW-1> ", "method": "login",
+    }))
+    rows = hub.console_netbox_sync_status()
+    assert rows and rows[0]["status"] == "success"
+    assert rows[0]["synced"] == 1
+    assert rows[0]["last_device"] == "MIA-SW-1"
