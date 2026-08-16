@@ -16374,8 +16374,9 @@ async function refreshConsoleDiagnostics() {
     } catch (e) { body.innerHTML = `<div class="text-red-500">${escapeHtml(e.message)}</div>`; return; }
     const rows = data.diagnostics || [];
     const errs = Object.entries(data.errors || {});
+    const summaryBanner = _consoleDiagSummaryBanner(data.summaries || {});
     if (!rows.length && !errs.length) {
-        body.innerHTML = `<div class="text-emerald-600 flex items-center gap-2">✅ No failing or disconnecting serial connections.</div>
+        body.innerHTML = `${summaryBanner}<div class="text-emerald-600 flex items-center gap-2">✅ No failing or disconnecting serial connections.</div>
           <div class="pt-4 flex justify-end gap-2">${_consoleDiagFooterBtns()}</div>`;
         return;
     }
@@ -16386,7 +16387,7 @@ async function refreshConsoleDiagnostics() {
         return '<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase">recovered</span>';
     };
     const failRows = rows.filter(d => d.open_failures || d.disconnects || d.currently_failing);
-    const identRows = rows.filter(d => d.identify && d.identify.attempts);
+    const identRows = rows.filter(d => (d.identify && d.identify.attempts) || (d.present && d.schedule));
     const failTbl = failRows.length ? `<div class="text-[11px] font-bold text-slate-500 uppercase mb-1">Serial connection failures</div><table class="w-full text-left mb-5">
         <thead class="text-slate-500 uppercase text-[10px] border-b border-slate-200"><tr>
           <th class="py-2 pr-3">Port</th><th class="py-2 pr-3">Agent</th><th class="py-2 pr-3">Status</th>
@@ -16410,11 +16411,34 @@ async function refreshConsoleDiagnostics() {
           <th class="py-2 pr-2 text-center" title="credentials tried / available">Creds</th>
           <th class="py-2 pr-2 text-center">Bytes</th><th class="py-2 pr-3">Why</th><th class="py-2 pr-3">Last</th>
         </tr></thead><tbody>${identRows.map(d => _consoleIdentDiagRow(d)).join('')}</tbody></table>
-        <div class="mt-2 text-[10px] text-slate-400">Tip: click a row's “Why” to see the last raw line the device emitted (control chars stripped). A <b>flapping</b> hostname changes across probes — hover it for the distinct values, their source (command output vs CLI prompt vs AI) and when each was seen.</div>` : '';
+        <div class="mt-2 text-[10px] text-slate-400">Tip: click a row's “Why” to see the last raw line the device emitted (control chars stripped). A <b>flapping</b> hostname changes across probes — hover it for the distinct values, their source (command output vs CLI prompt vs AI) and when each was seen. A port with <b>no attempt yet</b> shows why it isn't being logged into and when the next try is due.</div>` : '';
     const errHtml = errs.length
         ? `<div class="mt-3 text-[11px] text-amber-600">Unreachable consoles: ${errs.map(([s, e]) => escapeHtml(s)).join(', ')}</div>` : '';
-    body.innerHTML = `<div class="text-[11px] text-slate-400 mb-2">${failRows.length} port(s) with a failure/disconnect history · ${identRows.length} with identify attempts (since each agent started).</div>${failTbl}${identTbl}${errHtml}
+    body.innerHTML = `${summaryBanner}<div class="text-[11px] text-slate-400 mb-2">${failRows.length} port(s) with a failure/disconnect history · ${identRows.length} with identify attempts or pending (since each agent started).</div>${failTbl}${identTbl}${errHtml}
       <div class="pt-4 flex justify-end gap-2">${_consoleDiagFooterBtns()}</div>`;
+}
+
+// Spoke-level banner explaining the whole-agent reasons a console might not be
+// logging in at all: auto-identify disabled, or zero operator credentials (only
+// the factory-default set is tried). Green when every agent is set up to log in.
+function _consoleDiagSummaryBanner(summaries) {
+    const entries = Object.entries(summaries || {});
+    if (!entries.length) return '';
+    const warns = [];
+    for (const [sid, s] of entries) {
+        const who = escapeHtml(s.agent_name || sid);
+        if (!s.auto_identify)
+            warns.push(`<div class="text-red-700">⛔ <b>${who}</b>: auto-identify is <b>disabled</b> — it will not attempt any login (enable via the agent's <span class="font-mono">auto_identify</span> config).</div>`);
+        else if (!s.login_enabled)
+            warns.push(`<div class="text-red-700">⛔ <b>${who}</b>: no credentials to try (operator list empty and factory defaults off) — logins can't run.</div>`);
+        else if ((s.credentials_loaded || 0) === 0)
+            warns.push(`<div class="text-amber-700">⚠ <b>${who}</b>: 0 operator credentials loaded — only factory-default logins are tried. Add creds via 🔑 Credentials.</div>`);
+    }
+    if (!warns.length) {
+        const total = entries.reduce((n, [, s]) => n + (s.credentials_loaded || 0), 0);
+        return `<div class="mb-3 text-[11px] px-3 py-2 rounded bg-emerald-50 border border-emerald-100 text-emerald-700">✅ Auto-identify is on for every console agent (${total} operator credential(s) loaded); logins run on the auto-probe schedule.</div>`;
+    }
+    return `<div class="mb-3 text-[11px] px-3 py-2 rounded bg-amber-50 border border-amber-100 space-y-1">${warns.join('')}</div>`;
 }
 
 // Footer buttons shared by the diagnostics modal states: purge all collected
@@ -16444,20 +16468,36 @@ async function purgeConsoleDiagnostics() {
 // being identified: what prompts were seen, creds tried, and the last raw line).
 function _consoleIdentDiagRow(d) {
     const t = d.identify || {};
+    const sched = d.schedule || {};
     const yn = (b) => b ? '<span class="text-emerald-600 font-bold">✓</span>' : '<span class="text-slate-300">·</span>';
     let pill;
-    if (t.logged_in) pill = '<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase">logged in</span>';
+    if (!t.attempts) {
+        // No login/identify attempt recorded yet — explain the state instead of
+        // mislabelling it "silent". This is the "isn't trying to login" case.
+        pill = sched.active_identity
+            ? '<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase">identified</span>'
+            : '<span class="px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 text-[10px] font-bold uppercase">not tried yet</span>';
+    } else if (t.logged_in) pill = '<span class="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold uppercase">logged in</span>';
     else if (t.shell_prompt_seen) pill = '<span class="px-2 py-0.5 rounded-full bg-blue-100 text-blue-700 text-[10px] font-bold uppercase">shell, no id</span>';
     else if (t.password_prompt_seen) pill = '<span class="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold uppercase">auth rejected</span>';
     else if (t.login_prompt_seen) pill = '<span class="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold uppercase">login prompt</span>';
     else if (t.any_output) pill = '<span class="px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 text-[10px] font-bold uppercase">no prompt</span>';
     else pill = '<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-[10px] font-bold uppercase">silent</span>';
-    const via = t.method === 'llm' ? '🤖 AI' : '🔑 login';
+    const via = t.method === 'llm' ? '🤖 AI' : (t.attempts ? '🔑 login' : '—');
     const cmds = (t.method === 'llm' && (t.commands_run || t.rejected))
         ? `<div class="text-[10px] text-slate-400">ran ${(t.commands_run || []).length}${(t.rejected || []).length ? ` · ${t.rejected.length} rejected` : ''}</div>` : '';
     const vend = t.vendor ? ` <span class="text-[10px] text-blue-600 font-bold uppercase">${escapeHtml(t.vendor)}</span>` : '';
-    const why = escapeHtml(t.reason || '');
+    // "Why" = for attempted ports, the last reason/line the device gave; for
+    // never-attempted ports, why it isn't being probed + when the next try lands.
+    const nextTxt = (sched.next_attempt_in > 0)
+        ? ` <span class="text-slate-400">(next in ${_consoleFmtDur(sched.next_attempt_in)})</span>` : '';
+    const why = t.attempts
+        ? `${escapeHtml(t.reason || '')}${sched.skip_reason ? `<div class="text-[10px] text-slate-400">${escapeHtml(sched.skip_reason)}${nextTxt}</div>` : ''}`
+        : `<span class="text-slate-500">${escapeHtml(sched.skip_reason || 'pending')}${nextTxt}</span>`;
     const tail = escapeHtml(t.tail || '(no output)');
+    const whyCell = t.attempts
+        ? `<span class="cursor-help underline decoration-dotted" title="Last line seen from device:&#10;${tail}">${why}</span>`
+        : why;
     return `<tr class="border-b border-slate-50 align-top">
       <td class="py-2 pr-3 font-mono text-xs">${escapeHtml(d.alias || d.device || d.port_id)}${vend}</td>
       <td class="py-2 pr-3 text-xs">${via}${cmds}</td>
@@ -16466,9 +16506,18 @@ function _consoleIdentDiagRow(d) {
       <td class="py-2 pr-2 text-center text-xs whitespace-nowrap">${yn(t.login_prompt_seen)}·${yn(t.password_prompt_seen)}·${yn(t.shell_prompt_seen)}</td>
       <td class="py-2 pr-2 text-center text-xs">${t.creds_tried || 0}/${t.creds_available || 0}</td>
       <td class="py-2 pr-2 text-center text-xs">${t.bytes || 0}</td>
-      <td class="py-2 pr-3 text-xs text-slate-500 max-w-[14rem]"><span class="cursor-help underline decoration-dotted" title="Last line seen from device:&#10;${tail}">${why}</span>${t.error ? `<div class="text-[10px] text-red-500">${escapeHtml(t.error)}</div>` : ''}</td>
-      <td class="py-2 pr-3 text-xs text-slate-400">${_consoleRelTime(t.last_attempt || 0)}</td>
+      <td class="py-2 pr-3 text-xs text-slate-500 max-w-[14rem]">${whyCell}${t.error ? `<div class="text-[10px] text-red-500">${escapeHtml(t.error)}</div>` : ''}</td>
+      <td class="py-2 pr-3 text-xs text-slate-400">${t.attempts ? _consoleRelTime(t.last_attempt || 0) : '—'}</td>
     </tr>`;
+}
+
+// Compact seconds → "3m"/"1h2m" duration for the "next attempt in …" hint.
+function _consoleFmtDur(s) {
+    s = Math.max(0, Math.round(s || 0));
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60), h = Math.floor(m / 60);
+    if (h) return `${h}h${m % 60 ? (m % 60) + 'm' : ''}`;
+    return `${m}m`;
 }
 
 // Hostname cell for the identify telemetry table: the current identified name,

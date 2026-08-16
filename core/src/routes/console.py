@@ -707,7 +707,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
         spokes = hub.get_all_spokes_by_type("console") or []
-        rows, errors = [], {}
+        rows, errors, summaries = [], {}, {}
         for sid in spokes:
             agent_name = hub.state.get_module_name(sid)
             stenant = hub.state.get_spoke_tenant(sid) or ""
@@ -716,14 +716,18 @@ def register(app, hub, ctx):
             except Exception as e:  # noqa: BLE001 - one dead console shouldn't blank the rest
                 errors[sid] = str(e)
                 continue
-            for d in (_console_unwrap(r).get("diagnostics") or []):
+            payload = _console_unwrap(r)
+            summ = payload.get("summary")
+            if summ:
+                summaries[sid] = {**summ, "agent_name": agent_name}
+            for d in (payload.get("diagnostics") or []):
                 d["spoke_id"] = sid
                 d["agent_name"] = agent_name
                 d["tenant_id"] = d.get("tenant_id") or stenant  # per-port override else agent binding
                 rows.append(d)
         rows.sort(key=lambda d: (d.get("currently_failing", False),
                                  d.get("open_failures", 0) + d.get("disconnects", 0)), reverse=True)
-        return {"diagnostics": rows, "errors": errors, "consoles": spokes}
+        return {"diagnostics": rows, "errors": errors, "consoles": spokes, "summaries": summaries}
 
     @app.post("/api/console/diagnostics/purge")
     async def console_diagnostics_purge(request: Request):
