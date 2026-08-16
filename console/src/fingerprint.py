@@ -150,6 +150,13 @@ _GENERIC_PROMPT = re.compile(r"(?:^|\r|\n)\s*([\w][\w.\-]{1,62})[>#]\s*$")
 _GENERIC_LINUX_PROMPT = re.compile(r"(?:^|\r|\n)[\w.\-]+@([\w.\-]+):[\w.\-/~]*[#$]\s*$")
 _GENERIC_MAC = re.compile(r"\b([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\b")
 
+# Vendor-agnostic prompt shapes used to log in BEFORE we know the vendor. A device
+# sitting at a bare ``login:`` prompt reveals no banner/system info until you
+# authenticate, so identification has to log in generically first.
+_LOGIN_PROMPT = re.compile(r"(?:[Ll]ogin|[Uu]ser\s?name)\s*:\s*$")
+_PASSWORD_PROMPT = re.compile(r"[Pp]assword\s*:\s*$")
+_SHELL_PROMPT = re.compile(r"\S[>#$%]\s*$")
+
 
 def passive_identify(text: str) -> Dict[str, Any]:
     """Best-effort identity from PASSIVELY captured console text — no login, no
@@ -216,6 +223,46 @@ def _read_until(read_fn: Callable[[], bytes], patterns: List[re.Pattern],
     return buf.decode("utf-8", "replace")
 
 
+def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
+                   credentials: List[Dict[str, str]], banner_secs: float = 3.0,
+                   step_secs: float = 4.0):
+    """Vendor-agnostic login run BEFORE vendor detection.
+
+    Nudges the line and inspects the tail: if a shell prompt is already showing we
+    return logged-in with no auth; if a ``login:``/``password:`` prompt is showing
+    we try each credential once (username then password) until a shell prompt
+    appears. Returns ``(logged_in, credential_index, transcript)``. This is what
+    lets a device sitting at a bare login prompt — which shows no banner/system
+    info until you authenticate — be identified at all.
+    """
+    write_fn(b"\r\n")
+    transcript = _read_until(read_fn, [_LOGIN_PROMPT, _PASSWORD_PROMPT, _SHELL_PROMPT], banner_secs)
+    tail = transcript[-200:]
+    at_login = bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail))
+    if not at_login:
+        # Already at a shell (no auth), or nothing recognizable on the line.
+        return bool(_SHELL_PROMPT.search(tail)), None, transcript
+    if not credentials:
+        return False, None, transcript
+    for idx, cred in enumerate(credentials):
+        tail = transcript[-200:]
+        if _LOGIN_PROMPT.search(tail):
+            write_fn((cred.get("username", "") + "\r").encode())
+            transcript += _read_until(read_fn, [_PASSWORD_PROMPT, _SHELL_PROMPT, _LOGIN_PROMPT], step_secs)
+            tail = transcript[-200:]
+        if _PASSWORD_PROMPT.search(tail):
+            write_fn((cred.get("password", "") + "\r").encode())
+            transcript += _read_until(read_fn, [_SHELL_PROMPT, _LOGIN_PROMPT, _PASSWORD_PROMPT], step_secs)
+            tail = transcript[-200:]
+        if _SHELL_PROMPT.search(tail) and not (_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)):
+            return True, idx, transcript
+        # Auth failed → the device re-shows a login prompt; nudge and let the loop
+        # try the next credential (attempt cap = len(credentials), no re-hammering).
+        write_fn(b"\r")
+        transcript += _read_until(read_fn, [_LOGIN_PROMPT, _PASSWORD_PROMPT, _SHELL_PROMPT], 2.0)
+    return False, None, transcript
+
+
 def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
                  credentials: List[Dict[str, str]], banner_secs: float = 3.0,
                  cmd_secs: float = 4.0) -> Dict[str, Any]:
@@ -229,39 +276,25 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     """
     result: Dict[str, Any] = {"banner": "", "vendor": None, "logged_in": False,
                               "credential_index": None, "identity": {}, "outputs": {}}
-    # 1. Wake the line + capture the banner/prompt.
-    write_fn(b"\r\n")
-    banner = _read_until(read_fn, [re.compile(r"login:|[Uu]sername:|[Pp]assword:"),
-                                   re.compile(r"[>#$]\s*$")], banner_secs)
-    result["banner"] = banner[-4000:]
-    profile = detect_vendor(banner)
+    # 1. Vendor-agnostic login FIRST. A device at a bare login prompt shows no
+    #    banner/system info until authenticated, so we must log in before we can
+    #    detect the vendor (and even unknown vendors get a captured post-login
+    #    banner for the passive-glean / LLM-identify paths to use).
+    logged_in, cred_idx, transcript = _generic_login(read_fn, write_fn, credentials, banner_secs)
+    result["banner"] = transcript[-4000:]
+    result["logged_in"] = logged_in
+    result["credential_index"] = cred_idx
+
+    # 2. Detect the vendor from everything seen (pre- and post-login).
+    profile = detect_vendor(transcript)
     if not profile:
-        return result
+        return result  # unknown vendor — the LLM-driven identify path takes over
     result["vendor"] = profile["name"]
 
-    # 2. Log in if a login/password prompt is showing (try each credential once).
-    tail = banner[-200:]
-    at_login = bool(profile["login_prompt"].search(tail) or profile["password_prompt"].search(tail))
-    if at_login and credentials:
-        for idx, cred in enumerate(credentials):
-            write_fn((cred.get("username", "") + "\r").encode())
-            out = _read_until(read_fn, [profile["password_prompt"], profile["prompt"]], 3.0)
-            if profile["password_prompt"].search(out[-200:]):
-                write_fn((cred.get("password", "") + "\r").encode())
-                out = _read_until(read_fn, [profile["prompt"], profile["login_prompt"],
-                                            profile["password_prompt"]], 4.0)
-            tail2 = out[-200:]
-            if profile["prompt"].search(tail2) and not (
-                    profile["login_prompt"].search(tail2) or profile["password_prompt"].search(tail2)):
-                result["logged_in"] = True
-                result["credential_index"] = idx
-                break
-    else:
-        # Already at an exec prompt (no auth) — treat as usable.
-        result["logged_in"] = bool(profile["prompt"].search(tail))
-
-    if not result["logged_in"] and at_login:
-        return result  # couldn't authenticate; stop (no re-hammering)
+    # If a login prompt is still showing (couldn't authenticate), stop here.
+    tail = transcript[-200:]
+    if not logged_in and (_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)):
+        return result
 
     # 3. Run the read-only identity commands + capture output.
     outputs: Dict[str, str] = {}

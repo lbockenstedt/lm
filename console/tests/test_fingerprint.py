@@ -150,6 +150,44 @@ def test_run_identify_login_then_harvest():
     assert res["identity"]["serial"] == "ABC123"
 
 
+def test_run_identify_bare_login_prompt_no_banner_until_authenticated():
+    """Device shows ONLY a login prompt (no vendor banner) until you log in — the
+    generic login-first path must authenticate before vendor detection can work."""
+    banner = "\r\nswitch login: "
+    responses = [
+        ("admin", "\r\nPassword: "),
+        ("secret", "\r\nCisco IOS Software, Version 15.2\r\nSwitch#"),
+        ("terminal length 0", "\r\nSwitch#"),
+        ("show version", "\r\nProcessor board ID XYZ789\r\nSwitch uptime is 3 days\r\nSwitch#"),
+        ("show ip interface brief", "\r\nVlan1 10.0.0.7 YES up up\r\nSwitch#"),
+    ]
+    chan = _FakeChan(banner, responses)
+    res = fp.run_identify(chan.read, chan.write, [{"username": "admin", "password": "secret"}])
+    assert res["logged_in"] is True
+    assert res["vendor"] == "cisco-ios"
+    assert res["identity"]["serial"] == "XYZ789"
+
+
+def test_run_identify_bad_credentials_stops_no_rehammer():
+    """Wrong credential → device re-prompts login; we stop after trying each once."""
+    class _BadAuthChan:
+        def __init__(self):
+            self.buf = bytearray(b"\r\ndevice login: ")
+            self.state = "login"
+        def read(self):
+            out = bytes(self.buf[:256]); del self.buf[:256]; return out
+        def write(self, b):
+            s = b.decode(errors="replace")
+            if self.state == "login" and s.strip():
+                self.state = "password"; self.buf += b"\r\nPassword: "
+            elif self.state == "password" and s.strip():
+                self.state = "login"; self.buf += b"\r\nLogin incorrect\r\ndevice login: "
+    chan = _BadAuthChan()
+    res = fp.run_identify(chan.read, chan.write, [{"username": "x", "password": "y"}])
+    assert res["logged_in"] is False
+    assert res["identity"] == {}
+
+
 # ── passive_identify: glean identity from PASSIVELY captured text (no login) ──
 def test_passive_identify_cisco_show_version_scrolled_by():
     text = (
