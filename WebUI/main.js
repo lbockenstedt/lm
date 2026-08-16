@@ -16105,7 +16105,8 @@ function _renderConsolePorts(el, data) {
     }
     const esc = s => (s || '').replace(/'/g, "\\'");
     const rows = ports.map(p => {
-        const label = p.alias || p.product || p.device;
+        const identHost = (p.probe && p.probe.identity && p.probe.identity.hostname) || '';
+        const label = p.alias || identHost || p.product || p.device;
         const baud = (p.settings && p.settings.baud) || '—';
         const inUse = p.in_use ? ` <span class="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold uppercase">In use</span>` : '';
         const monDot = (p.monitoring && !p.in_use)
