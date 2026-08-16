@@ -229,7 +229,8 @@ class ConsoleSpoke(BaseSpoke):
             # Serial-connection health report: ports that keep failing to open
             # (faulty/non-real), get disconnected (device pulled), or flap.
             return {"status": "SUCCESS", "spoke_id": self.spoke_id,
-                    "generated": time.time(), "diagnostics": self._diagnostics()}
+                    "generated": time.time(), "summary": self._diagnostics_summary(),
+                    "diagnostics": self._diagnostics()}
 
         if cmd == "CONSOLE_DIAGNOSTICS_PURGE":
             # Wipe ALL collected serial-health / identify telemetry for this spoke.
@@ -968,24 +969,81 @@ class ConsoleSpoke(BaseSpoke):
             h["last_recovery"] = time.time()
             h["currently_failing"] = False
 
+    def _diagnostics_summary(self) -> Dict[str, Any]:
+        """Spoke-level context for the diagnostics report: whether the agent is
+        even trying to log in (auto-identify on/off), how many operator
+        credentials it has (0 ⇒ only the factory-default set is tried), and
+        whether passive monitoring is on. This explains the whole-agent 'why it
+        isn't logging in' case that no per-port row can show."""
+        auto = bool(self.config.get("auto_identify", True))
+        creds = len(self._credentials)
+        factory = bool(self.config.get("console_factory_default_creds", True))
+        return {
+            "auto_identify": auto,
+            "credentials_loaded": creds,
+            "factory_default_creds": factory,
+            "monitor": bool(self.config.get("console_monitor", True)),
+            "port_count": len(enumerate_ports()),
+            # Login is only ever attempted when auto-identify is on AND there is at
+            # least one credential to try (operator creds or the factory defaults).
+            "login_enabled": auto and (creds > 0 or factory),
+        }
+
+    def _identify_status(self, pid: str, present: bool) -> Dict[str, Any]:
+        """Explain whether an active login/identify is being attempted for a port
+        and when the next attempt is due — the missing piece for the 'system isn't
+        trying to login' case, since a port that is never probed otherwise has no
+        telemetry row at all."""
+        now = time.monotonic()
+        last = self._probe_attempts.get(pid, 0.0)
+        delay = self._probe_delay.get(pid, 0.0)
+        attempted = bool(last)
+        next_in = 0.0 if not attempted else max(0.0, delay - (now - last))
+        probe = self.store.get(pid).get("probe") or {}
+        active_id = bool(probe.get("identity")) and probe.get("source") == "active"
+        if not self.config.get("auto_identify", True):
+            reason = "auto-identify is disabled for this agent (config auto_identify=false)"
+        elif not present:
+            reason = "device not currently present"
+        elif self.sessions.has_user_sessions(pid):
+            reason = "a user session holds this port — auto-probe is paused"
+        elif pid in self._probing:
+            reason = "identify in progress"
+        elif active_id:
+            reason = "already identified via active login — re-verifies after backoff"
+        elif not attempted:
+            reason = "not attempted yet — will try on the next scan"
+        elif next_in > 0:
+            reason = "waiting for retry backoff after a failed attempt"
+        else:
+            reason = "due — will attempt on the next scan"
+        return {"attempted": attempted, "backoff_s": round(delay),
+                "next_attempt_in": round(next_in), "skip_reason": reason,
+                "active_identity": active_id}
+
     def _diagnostics(self) -> List[Dict[str, Any]]:
         """Health rows for the serial-connection diagnostics report: every port
         with a failure story (open failures, disconnects, currently failing, OR a
-        recorded identify/login attempt), newest/worst first. Includes ports that
-        have vanished from enumeration (``present=False`` — device pulled) and the
-        identify telemetry that explains why a device isn't being identified."""
+        recorded identify/login attempt), plus any present port not yet identified
+        via active login (so the operator can see WHY it isn't being logged into
+        and when the next attempt is due). Newest/worst first. Includes ports that
+        have vanished from enumeration (``present=False`` — device pulled)."""
         live = {p["port_id"]: p for p in enumerate_ports()}
         rows: List[Dict[str, Any]] = []
         for pid in set(self._health) | set(live):
             h = self._health.get(pid, {})
             ident = h.get("identify") or {}
-            has_story = (h.get("open_failures") or h.get("disconnects")
-                         or h.get("currently_failing") or ident.get("attempts"))
-            if not has_story:
-                continue
             p = live.get(pid, {})
             saved = self.store.get(pid)
             probe = saved.get("probe") or {}
+            active_id = bool(probe.get("identity")) and probe.get("source") == "active"
+            has_story = (h.get("open_failures") or h.get("disconnects")
+                         or h.get("currently_failing") or ident.get("attempts"))
+            # Surface present, not-yet-actively-identified ports even with no
+            # attempt recorded — that's exactly the "isn't trying to login" case.
+            candidate = (pid in live) and not active_id
+            if not (has_story or candidate):
+                continue
             snap = self.sessions.snapshot(pid)
             rows.append({
                 "port_id": pid,
@@ -1008,6 +1066,7 @@ class ConsoleSpoke(BaseSpoke):
                 "identified": bool(probe.get("identity") or probe.get("vendor")),
                 "vendor": probe.get("vendor"),
                 "identify": ident,   # login/AI-identify telemetry (why it did/didn't work)
+                "schedule": self._identify_status(pid, pid in live),  # why/when it (isn't) logging in
             })
         rows.sort(key=lambda d: (d["currently_failing"],
                                  d["open_failures"] + d["disconnects"],

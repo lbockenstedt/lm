@@ -168,8 +168,36 @@ def test_diagnostics_reports_faulty_port(spoke):
     bad = next(d for d in res["diagnostics"] if d["port_id"] == "bad")
     assert bad["currently_failing"] is True and bad["open_failures"] == 1
     assert "input/output error" in bad["last_error"].lower()
-    # A healthy port has no failure story → excluded from the report.
-    assert all(d["port_id"] != "good" for d in res["diagnostics"])
+    # A healthy present port now surfaces as an identify CANDIDATE (so the
+    # operator can see WHY/WHEN it will be logged into) but carries no failure
+    # story of its own.
+    good = next((d for d in res["diagnostics"] if d["port_id"] == "good"), None)
+    assert good is not None
+    assert good["open_failures"] == 0 and good["currently_failing"] is False
+    assert good["schedule"]["skip_reason"]
+
+
+def test_diagnostics_summary_reports_login_readiness(spoke):
+    # Whole-agent context: auto-identify OFF ⇒ no login is even attempted, and
+    # that must be visible at the summary level (per-port rows can't show it).
+    spoke.config["auto_identify"] = False
+    spoke._credentials = []
+    res = asyncio.run(spoke.handle_command("CONSOLE_DIAGNOSTICS", {}))
+    s = res["summary"]
+    assert s["auto_identify"] is False
+    assert s["credentials_loaded"] == 0
+    # Present ports carry a skip_reason explaining the disabled state.
+    good = next((d for d in res["diagnostics"] if d["port_id"] == "good"), None)
+    assert good and "disabled" in good["schedule"]["skip_reason"].lower()
+
+
+def test_diagnostics_summary_login_enabled_with_creds(spoke):
+    spoke.config["auto_identify"] = True
+    spoke._credentials = [{"username": "admin", "password": "x"}]
+    res = asyncio.run(spoke.handle_command("CONSOLE_DIAGNOSTICS", {}))
+    s = res["summary"]
+    assert s["auto_identify"] is True and s["credentials_loaded"] == 1
+    assert s["login_enabled"] is True
 
 
 def test_diagnostics_counts_recovery(spoke):
