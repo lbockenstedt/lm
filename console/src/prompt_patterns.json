@@ -9,7 +9,10 @@
     "back to its built-in defaults. Override the path with $CONSOLE_PROMPT_PATTERNS.",
     "When a device shows output but matches NONE of these, identification can't log",
     "in and escalates to the LLM identify path (which reads the raw capture to work",
-    "out what the prompt is) — so adding the string here fixes it permanently."
+    "out what the prompt is) — so adding the string here fixes it permanently.",
+    "The 'hostname_prompt' family is different: each regex MUST capture the",
+    "device hostname in group 1 (it is read to name the port), and the first",
+    "pattern that matches wins — list the most specific shapes first."
   ],
   "login_prompt": [
     "(?:[Ll]ogin|[Uu]ser(?:\\s?name)?)\\s*:\\s*$"
@@ -19,5 +22,10 @@
   ],
   "shell_prompt": [
     "\\S[>#$%]\\s*$"
+  ],
+  "hostname_prompt": [
+    "(?:^|\\r|\\n)[\\w.\\-]+@([\\w.\\-]+):[\\w.\\-/~]*[#$]\\s*$",
+    "(?:^|\\r|\\n|\\s)\\(([\\w][\\w.\\-]{1,62})\\)\\s*(?:\\([\\w .\\-]+\\)\\s*)?\\*?\\s*[>#]",
+    "(?:^|\\r|\\n)\\s*([\\w][\\w.\\-]{1,62})[>#]\\s*$"
   ]
 }
