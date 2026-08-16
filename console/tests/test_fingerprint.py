@@ -46,6 +46,39 @@ def test_prompt_hostname():
     assert fp.prompt_hostname("") == ""
 
 
+def test_prompt_hostname_aruba_parenthesised():
+    # ArubaOS controller/gateway/Instant prompt: "(hostname) #" / "(hostname) *#"
+    # (the * = pending config). The hostname is INSIDE the parens with a space
+    # and possible * before #, which the plain "name#" matcher can't capture.
+    assert fp.prompt_hostname("(MIA-GW-02) #") == "MIA-GW-02"
+    assert fp.prompt_hostname("(MIA-GW-02) *#") == "MIA-GW-02"
+    # config-context prompt: "(host) (config) #" → still the host, not "config"
+    assert fp.prompt_hostname("(MIA-GW-02) (config) #") == "MIA-GW-02"
+    # realistic scrolling transcript ending at the live prompt
+    tail = ("Invalid input detected at '^' marker. (MIA-GW-02) *# uname -a  ^  "
+            "Invalid input detected at '^' marker. (MIA-GW-02) *#")
+    assert fp.prompt_hostname(tail) == "MIA-GW-02"
+
+
+def test_load_hostname_prompts_reads_json_override(tmp_path, monkeypatch):
+    # A new hostname-prompt shape can be added via JSON with no code change.
+    pf = tmp_path / "prompt_patterns.json"
+    pf.write_text('{"hostname_prompt": ["(?:^|\\\\s)ID=([\\\\w\\\\-]+)::"]}')
+    monkeypatch.setenv("CONSOLE_PROMPT_PATTERNS", str(pf))
+    pats = fp.load_hostname_prompts()
+    assert any(p.search("ID=core-7::") for p in pats)
+    assert fp._prompt_hostname_with(pats, "ID=core-7::") == "core-7"
+
+
+def test_load_hostname_prompts_bad_regex_falls_back(tmp_path, monkeypatch):
+    pf = tmp_path / "prompt_patterns.json"
+    pf.write_text('{"hostname_prompt": ["(unclosed"]}')  # invalid regex → skipped
+    monkeypatch.setenv("CONSOLE_PROMPT_PATTERNS", str(pf))
+    pats = fp.load_hostname_prompts()
+    # bad pattern skipped, defaults used → still gleans a normal prompt
+    assert pats and fp._prompt_hostname_with(pats, "Switch1#\r\n") == "Switch1"
+
+
 def test_run_identify_arubaos_switch_prompt_hostname():
     # AOS-S rejects the profile's identity commands ("Invalid input"), so the
     # hostname must come from the device's own CLI prompt.

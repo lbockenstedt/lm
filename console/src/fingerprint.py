@@ -245,26 +245,82 @@ def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str]) -> Dict[str
 
 # Generic fallbacks — a hostname prompt, a MAC, or an IP scrolling by is worth
 # surfacing even before we can pin a vendor. Kept conservative to avoid noise.
-_GENERIC_PROMPT = re.compile(r"(?:^|\r|\n)\s*([\w][\w.\-]{1,62})[>#]\s*$")
-_GENERIC_LINUX_PROMPT = re.compile(r"(?:^|\r|\n)[\w.\-]+@([\w.\-]+):[\w.\-/~]*[#$]\s*$")
+# Generic fallbacks — a hostname prompt, a MAC, or an IP scrolling by is worth
+# surfacing even before we can pin a vendor. Kept conservative to avoid noise.
+# These are the built-in DEFAULTS for the hostname_prompt family; the live
+# matchers are loaded from prompt_patterns.json (see load_hostname_prompts) so a
+# new prompt shape can be added with NO code change. Each pattern MUST capture
+# the hostname in group(1). Order = priority (first pattern that yields a
+# candidate wins), so list the most specific shapes first.
+def _prompt_patterns_path() -> Path:
+    return Path(os.environ.get("CONSOLE_PROMPT_PATTERNS")
+                or (Path(__file__).parent / "prompt_patterns.json"))
+
+
+_DEFAULT_HOSTNAME_PROMPTS: List[str] = [
+    # Linux shell: user@host:~$ / user@host:/path#
+    r"(?:^|\r|\n)[\w.\-]+@([\w.\-]+):[\w.\-/~]*[#$]\s*$",
+    # ArubaOS controller/gateway/Instant: "(hostname) #", "(hostname) *#"
+    # (the * = pending config), optionally with a config-context paren:
+    # "(hostname) (config) #". Hostname is the FIRST parenthesised token.
+    r"(?:^|\r|\n|\s)\(([\w][\w.\-]{1,62})\)\s*(?:\([\w .\-]+\)\s*)?\*?\s*[>#]",
+    # Generic vendor CLI: hostname immediately followed by > or #
+    r"(?:^|\r|\n)\s*([\w][\w.\-]{1,62})[>#]\s*$",
+]
 _GENERIC_MAC = re.compile(r"\b([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\b")
-_PROMPT_HOST_SKIP = frozenset({"more", "username", "password", "login"})
+_PROMPT_HOST_SKIP = frozenset({"more", "username", "password", "login", "config"})
+
+
+def load_hostname_prompts() -> List["re.Pattern"]:
+    """Compile the hostname-prompt matchers (each capturing the hostname in
+    group 1), reading them from prompt_patterns.json[``hostname_prompt``] when
+    present and falling back to the built-in defaults. Bad file / bad regex →
+    defaults, so a malformed edit can never break hostname gleaning."""
+    pats: List[str] = list(_DEFAULT_HOSTNAME_PROMPTS)
+    try:
+        loaded = json.loads(_prompt_patterns_path().read_text())
+        candidate = loaded.get("hostname_prompt")
+        if isinstance(candidate, list) and candidate and all(isinstance(p, str) for p in candidate):
+            pats = candidate
+    except FileNotFoundError:
+        pass
+    except Exception as e:  # noqa: BLE001 - bad JSON → keep defaults
+        logger.warning("console: invalid prompt_patterns.json hostname_prompt (%s) — using defaults", e)
+    compiled: List["re.Pattern"] = []
+    for p in pats:
+        try:
+            compiled.append(re.compile(p))
+        except re.error as e:  # skip a single bad pattern, keep the rest usable
+            logger.warning("console: bad hostname_prompt regex %r (%s) — skipping", p, e)
+    return compiled or [re.compile(p) for p in _DEFAULT_HOSTNAME_PROMPTS]
+
+
+_HOSTNAME_PROMPTS = load_hostname_prompts()
+
+
+def _prompt_hostname_with(patterns: List["re.Pattern"], text: str) -> str:
+    """Core of :func:`prompt_hostname`, parameterised by the compiled pattern
+    list so it can be unit-tested against an arbitrary (e.g. JSON-overridden)
+    pattern set. First pattern that yields a non-placeholder candidate wins;
+    within a pattern the LAST (most recent) match is kept."""
+    clean = sanitize_console_text(text or "")
+    for rx in patterns:
+        cand = ""
+        for m in rx.finditer(clean):
+            c = (m.group(1) or "").strip()
+            if c and c.lower() not in _PROMPT_HOST_SKIP:
+                cand = c
+        if cand:
+            return cand
+    return ""
 
 
 def prompt_hostname(text: str) -> str:
     """Best-effort hostname from the LAST CLI/shell prompt in ``text`` (e.g. the
-    ``MIA-SW-AOSS>`` prompt of an ArubaOS-Switch, or ``user@host:~$`` on Linux).
-    Terminal escapes are stripped first. Returns '' if none or a placeholder."""
-    clean = sanitize_console_text(text or "")
-    for rx in (_GENERIC_LINUX_PROMPT, _GENERIC_PROMPT):
-        cand = ""
-        for m in rx.finditer(clean):
-            c = m.group(1).strip()
-            if c and c.lower() not in _PROMPT_HOST_SKIP:
-                cand = c  # keep the last (most recent) matching prompt
-        if cand:
-            return cand
-    return ""
+    ``MIA-SW-AOSS>`` prompt of an ArubaOS-Switch, ``(MIA-GW-02) *#`` on an Aruba
+    controller/gateway, or ``user@host:~$`` on Linux). Terminal escapes are
+    stripped first. Returns '' if none or a placeholder."""
+    return _prompt_hostname_with(_HOSTNAME_PROMPTS, text)
 
 # Vendor-agnostic prompt shapes used to log in BEFORE we know the vendor. A device
 # sitting at a bare ``login:`` prompt reveals no banner/system info until you
@@ -280,11 +336,6 @@ _DEFAULT_PROMPT_PATTERNS: Dict[str, List[str]] = {
     "password_prompt": [r"[Pp]assword\s*:\s*$"],
     "shell_prompt": [r"\S[>#$%]\s*$"],
 }
-
-
-def _prompt_patterns_path() -> Path:
-    return Path(os.environ.get("CONSOLE_PROMPT_PATTERNS")
-                or (Path(__file__).parent / "prompt_patterns.json"))
 
 
 def load_prompt_patterns() -> Dict[str, "re.Pattern"]:
