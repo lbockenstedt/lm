@@ -16121,9 +16121,7 @@ function _renderConsolePorts(el, data) {
         const monDot = (p.monitoring && !p.in_use)
             ? ` <span title="Passively monitoring — capturing console output while idle" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-bold uppercase">● monitoring</span>` : '';
         const agentName = p.agent_name || p.spoke_id || '';
-        const tenant = p.tenant_id
-            ? `<span class="font-mono text-xs text-slate-700">${escapeHtml(p.tenant_id)}</span>${p.tenant_override ? ' <span class="text-[9px] text-slate-400">(port)</span>' : ' <span class="text-[9px] text-slate-400">(agent)</span>'}`
-            : '<span class="italic text-slate-400 text-xs">unassigned</span>';
+        const tenantId = p.tenant_id || 'unassigned';
         const eP = esc(p.port_id), eS = esc(p.spoke_id || ''), eT = esc(p.tenant_override || '');
         const tenantBtn = admin ? `<button onclick="openConsolePortTenantModal('${eS}','${eP}','${eT}')" class="text-[11px] px-2 py-1 rounded border border-[#01A982] text-[#01A982] hover:bg-slate-50">Tenant</button>` : '';
         const configBtn = hasConsoleWrite() ? `<button onclick="openConsoleConfigModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-indigo-400 text-indigo-600 hover:bg-slate-50">Config</button>` : '';
@@ -16134,10 +16132,9 @@ function _renderConsolePorts(el, data) {
             ? `<div class="text-[11px] mt-0.5"><span class="font-mono px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200" title="Direct Port Access — connect a terminal straight to this serial line (unencrypted telnet; bound to ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))})">🔌 ${escapeHtml(String(p.dpa.proto || 'telnet'))} ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))}:${escapeHtml(String(p.dpa.telnet_port))}</span></div>` : '';
         return `<tr class="hover:bg-slate-50">
             <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${monDot}</div>
-              <div class="text-xs font-mono text-slate-400" title="${escapeHtml(p.spoke_id || '')}">${escapeHtml(agentName)}:${escapeHtml(p.device)}:${escapeHtml(String(baud))}</div>
+              <div class="text-xs font-mono text-slate-400" title="${escapeHtml(p.spoke_id || '')}">${escapeHtml(tenantId)}:${escapeHtml(agentName)}:${escapeHtml(p.device)}:${escapeHtml(String(baud))}</div>
               ${dpaBadge}
               ${_consoleIdentityBlock(p)}</td>
-            <td class="px-4 py-3">${tenant}</td>
             <td class="px-4 py-3 text-right whitespace-nowrap space-x-1">
               <button onclick="openConsoleTerminal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold">🖥 Open</button>
               ${profileBtn}
@@ -16152,7 +16149,7 @@ function _renderConsolePorts(el, data) {
         : '';
     el.innerHTML = `${tools}<div class="p-0 overflow-hidden"><table class="w-full text-left text-sm">
         <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>
-          <th class="px-4 py-3">Port</th><th class="px-4 py-3">Tenant</th>
+          <th class="px-4 py-3">Port</th>
           <th class="px-4 py-3 text-right">Actions</th></tr></thead>
         <tbody class="divide-y divide-slate-200">${rows}</tbody></table></div>`;
 }
