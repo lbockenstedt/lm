@@ -590,6 +590,7 @@ class ConsoleSpoke(BaseSpoke):
                 "tenant_id": self.store.get(port_id).get("tenant_id", ""),  # per-port override
                 "vendor": probe["vendor"], "identity": probe["identity"],
                 "banner": probe["banner"][-500:], "logged_in": probe["logged_in"],
+                "method": method,
             })
 
     def _ensure_autoprobe_task(self) -> None:
