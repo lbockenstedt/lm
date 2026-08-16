@@ -191,6 +191,18 @@ def test_scrub_for_llm_preserves_identification_cues():
     assert "12:34:56" in out            # a clock time is not an IPv6/MAC
 
 
+def test_scrub_for_llm_strips_terminal_escapes():
+    s = m.scrub_for_llm
+    # ArubaOS-Switch menu CLI: VT100 escapes must be stripped so the LLM sees the
+    # readable prompt/error text, not cursor-move noise.
+    txt = ("\x1b[24;1H\x1b[24;14HMIA-SW-AOSS> \x1b[?25h\x1b[1;24r"
+           "Invalid input: get\x1b[2K\x1b]0;name\x07")
+    out = s(txt)
+    assert "\x1b" not in out
+    assert "[24;1H" not in out and "[?25h" not in out and "[1;24r" not in out
+    assert "Invalid input: get" in out
+
+
 def test_ask_llm_scrubs_before_sending(monkeypatch):
     import asyncio
 

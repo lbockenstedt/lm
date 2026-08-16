@@ -29,6 +29,7 @@ try:
     )
     from fingerprint import (run_identify, read_running_config, push_config, PROFILES,
                              passive_identify, run_commands, merge_credentials,
+                             sanitize_console_text,
                              FACTORY_DEFAULT_CREDENTIALS)
 except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .serial_manager import (  # type: ignore
@@ -36,6 +37,7 @@ except ImportError:  # loaded as a package (agent role loader) or from repo root
     )
     from .fingerprint import (run_identify, read_running_config, push_config, PROFILES,  # type: ignore
                               passive_identify, run_commands, merge_credentials,
+                              sanitize_console_text,
                               FACTORY_DEFAULT_CREDENTIALS)
 
 logger = logging.getLogger("ConsoleSpoke")
@@ -189,6 +191,7 @@ class ConsoleSpoke(BaseSpoke):
             text = chan.capture_tail(limit).decode("utf-8", "replace") if chan else ""
             if not text:  # no live channel — fall back to the last stored banner
                 text = (self.store.get(pid).get("probe") or {}).get("banner", "")
+            text = sanitize_console_text(text)  # strip VT100/ANSI for readable view + LLM
             snap = self.sessions.snapshot(pid)
             return {"status": "SUCCESS", "port_id": pid, "capture": text,
                     "monitoring": snap["monitoring"], "last_activity": snap["last_activity"],

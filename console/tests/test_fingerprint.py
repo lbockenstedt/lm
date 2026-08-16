@@ -15,6 +15,25 @@ def test_detect_vendor():
     assert fp.detect_vendor("\xff\xfe random line noise") is None
 
 
+def test_detect_vendor_arubaos_switch():
+    # ArubaOS-Switch (AOS-S) full-screen menu CLI: identifiable by its prompt and
+    # its "Invalid input:" rejection of non-show commands, even through VT100 noise.
+    assert fp.detect_vendor("MIA-SW-AOSS> ")["name"] == "hp-procurve"
+    assert fp.detect_vendor("switch> \r\nInvalid input: get")["name"] == "hp-procurve"
+    escaped = "\x1b[24;1H\x1b[24;14HMIA-SW-AOSS> \x1b[?25h\x1b[1;24rInvalid input: get"
+    assert fp.detect_vendor(escaped)["name"] == "hp-procurve"
+
+
+def test_sanitize_console_text_strips_vt100():
+    escaped = ("\x1b[24;1H\x1b[24;14HMIA-SW-AOSS> \x1b[?25h\x1b[1;24r"
+               "Invalid input: get\x1b[2K\x1b]0;title\x07\r\nMIA-SW-AOSS>")
+    clean = fp.sanitize_console_text(escaped)
+    assert "\x1b" not in clean
+    assert "[24;1H" not in clean and "[?25h" not in clean and "[1;24r" not in clean
+    assert "MIA-SW-AOSS>" in clean and "Invalid input: get" in clean
+    assert fp.sanitize_console_text("") == ""
+
+
 def test_normalize_mac():
     assert fp.normalize_mac("0011.2233.4455") == "00:11:22:33:44:55"
     assert fp.normalize_mac("00:11:22:33:44:55") == "00:11:22:33:44:55"

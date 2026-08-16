@@ -16,6 +16,32 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger("ConsoleSpoke")
 
+# Terminal escape-sequence strippers, used to turn raw console output (which is
+# full of VT100/ANSI cursor moves, scroll-region and show/hide-cursor codes on
+# full-screen menu CLIs like ArubaOS-Switch) into human-readable text for the
+# Capture view, the LLM identify prompt and vendor detection. The live xterm.js
+# view renders escapes itself, so only the static/analysis paths sanitize.
+_ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")      # OSC ... BEL/ST
+_ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")               # CSI ... final
+_ANSI_MISC = re.compile(r"\x1b[()#][0-9A-Za-z]|\x1b[=>78McDEHF]")  # charset/misc
+_CTRL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")     # keep \t \n \r
+
+
+def sanitize_console_text(text: str) -> str:
+    """Strip VT100/ANSI terminal escape sequences (CSI cursor moves, OSC, scroll
+    regions, show/hide-cursor) and bare control bytes from raw console output so
+    it is human-readable. Preserves tabs/newlines and normalizes CR/LF. Safe to
+    run on partial captures. Used for the Capture view, LLM input and detection."""
+    if not text:
+        return ""
+    s = _ANSI_OSC.sub("", text)
+    s = _ANSI_CSI.sub("", s)
+    s = _ANSI_MISC.sub("", s)
+    s = _CTRL_CHARS.sub("", s)
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    return re.sub(r"\n{3,}", "\n\n", s)
+
+
 # A profile matches a device family by banner/prompt and defines how to log in +
 # which read-only commands reveal identity. `fields` maps an identity key to a
 # regex whose first group is the value. `config` (enter/exit/save/show_running)
@@ -68,7 +94,10 @@ PROFILES: List[Dict[str, Any]] = [
     },
     {
         "name": "hp-procurve",
-        "match": re.compile(r"ProCurve|HP.*Switch|Aruba.*(?:2530|2540|2930)", re.I),
+        "match": re.compile(
+            r"ProCurve|HP.*Switch|Aruba.*(?:2530|2540|2930)|"
+            r"AOS-?S\b|-AOSS[>#]|\bAOSS[>#]|Invalid input:",
+            re.I),
         "prompt": re.compile(r"[\w.\-]+[>#]\s*$"),
         "login_prompt": re.compile(r"[Uu]sername:\s*$|Login Name:\s*$"),
         "password_prompt": re.compile(r"[Pp]assword:\s*$"),
@@ -118,9 +147,12 @@ def normalize_mac(mac: str) -> str:
 
 
 def detect_vendor(text: str) -> Optional[Dict[str, Any]]:
-    """Return the first profile whose ``match`` hits the banner/prompt text."""
+    """Return the first profile whose ``match`` hits the banner/prompt text.
+    Escape sequences are stripped first so a full-screen menu CLI (e.g. ArubaOS-S,
+    whose prompt/errors are interleaved with cursor-move codes) still matches."""
+    clean = sanitize_console_text(text)
     for prof in PROFILES:
-        if prof["match"].search(text or ""):
+        if prof["match"].search(clean):
             return prof
     return None
 
@@ -347,7 +379,9 @@ def _elicit_identity_banner(read_fn: Callable[[], bytes], write_fn: Callable[[by
     ``(transcript, profile, outputs)`` — a direct-console device (no auth) can be
     identified without ever seeing a login/password prompt."""
     outputs: Dict[str, str] = {}
-    profile = None
+    profile = detect_vendor(transcript)
+    if profile:  # passive banner/prompt already identifies it — send nothing
+        return transcript, profile, outputs
     for cmd in _DISCOVERY_COMMANDS:
         write_fn((cmd + "\r").encode())
         out = _read_command_output(read_fn, write_fn, [_SHELL_PROMPT], cmd_secs)
@@ -502,8 +536,9 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
 
 def _sanitize_tail(text: str, n: int = 240) -> str:
     """A short, printable tail of a transcript for troubleshooting telemetry —
-    control bytes collapsed to spaces so it renders safely in the UI/logs."""
-    tail = (text or "")[-n:]
+    terminal escapes stripped and remaining control bytes collapsed to spaces so
+    it renders safely in the UI/logs."""
+    tail = sanitize_console_text(text or "")[-n:]
     return re.sub(r"[^\x20-\x7e]+", " ", tail).strip()
 
 
