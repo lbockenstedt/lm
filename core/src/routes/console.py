@@ -531,6 +531,39 @@ def register(app, hub, ctx):
                                        {"port_id": (body or {}).get("port_id")}, timeout=90.0)
         return _console_unwrap(r)
 
+    @app.post("/api/console/identify-llm")
+    async def console_identify_llm(request: Request):
+        """LLM-driven identify for a device the built-in fingerprint profiles
+        don't recognize: relay its console output to the LLM, run any read-only
+        commands it asks for (spoke-validated), and extract the identity. Admin
+        only; gated off by default (LM_CONSOLE_LLM_IDENTIFY + spoke config)."""
+        from routes import console_llm_identify as llm  # local import (optional feature)
+        sess = _session_user(request)
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        hub = app.state.hub
+        if not llm.hub_llm_identify_enabled():
+            raise HTTPException(status_code=409,
+                                detail="LLM-assisted identify is disabled (set LM_CONSOLE_LLM_IDENTIFY).")
+        agent = llm.find_bugfixer(hub)
+        if not agent:
+            raise HTTPException(status_code=409,
+                                detail="LLM identify unavailable — the BugFixer LLM agent is not connected.")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        sid = _console_spoke_or_none(hub, body)
+        port_id = (body or {}).get("port_id")
+        if not sid or not port_id:
+            raise HTTPException(status_code=400, detail="spoke_id/port_id required")
+        await _assert_port_tenant(request, sid, port_id)
+        await _console_seed_credentials(hub, [sid])  # so the generic login can succeed
+        try:
+            return await llm.orchestrate(hub, agent, sid, port_id)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"LLM identify error: {e}")
+
     @app.post("/api/console/capture")
     async def console_capture(request: Request):
         """Return the recent passive-capture buffer for a port — whatever the

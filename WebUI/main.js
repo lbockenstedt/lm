@@ -16089,6 +16089,7 @@ function _renderConsolePorts(el, data) {
             : '<span class="italic text-slate-400 text-xs">unassigned</span>';
         const eP = esc(p.port_id), eS = esc(p.spoke_id || ''), eT = esc(p.tenant_override || '');
         const tenantBtn = admin ? `<button onclick="openConsolePortTenantModal('${eS}','${eP}','${eT}')" class="text-[11px] px-2 py-1 rounded border border-[#01A982] text-[#01A982] hover:bg-slate-50">Tenant</button>` : '';
+        const aiIdBtn = admin ? `<button onclick="consoleIdentifyLlm('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Ask the LLM to identify this device from its console output (runs read-only commands only)">🤖 AI Identify</button>` : '';
         const configBtn = hasConsoleWrite() ? `<button onclick="openConsoleConfigModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-indigo-400 text-indigo-600 hover:bg-slate-50">Config</button>` : '';
         const captureBtn = (p.capture_bytes || p.monitoring || (p.probe && p.probe.banner))
             ? `<button onclick="openConsoleCaptureModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50" title="View recent console output captured from this port">Capture</button>` : '';
@@ -16103,6 +16104,7 @@ function _renderConsolePorts(el, data) {
               <button onclick="openConsoleTerminal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold">🖥 Open</button>
               <button onclick="consoleDetectBaud('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Detect baud</button>
               <button onclick="consoleIdentify('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Identify</button>
+              ${aiIdBtn}
               ${captureBtn}
               <button onclick="openConsoleSettingsModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Settings</button>
               ${configBtn}
@@ -16186,6 +16188,29 @@ async function consoleIdentify(spokeId, portId) {
             loadConsoleData();
         } else showToast(d.detail || 'Identify failed', 'error');
     } catch (e) { showToast('Identify failed: ' + e.message, 'error'); }
+}
+
+// LLM-driven identify (admin): relay the device's console output to the LLM,
+// run any READ-ONLY commands it asks for, and extract the identity. Gated off by
+// default server-side (LM_CONSOLE_LLM_IDENTIFY + spoke config) — a clear toast
+// surfaces the 409 when it isn't enabled.
+async function consoleIdentifyLlm(spokeId, portId) {
+    showToast('🤖 Asking the LLM to identify this device…', 'info');
+    try {
+        const res = await fetch('/api/console/identify-llm', {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spoke_id: spokeId, port_id: portId }),
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(d.detail || 'AI identify failed', 'error'); return; }
+        if (d.identified && d.vendor) {
+            const bits = [d.vendor, (d.identity || {}).model, (d.identity || {}).serial].filter(Boolean).join(' · ');
+            showToast(`🤖 Identified: ${bits}${d.rounds > 1 ? ` (ran ${(d.commands_run || []).length} cmd)` : ''}`, 'success');
+            loadConsoleData();
+        } else {
+            showToast(d.status === 'ERROR' ? (d.message || 'AI identify error') : '🤖 Could not identify this device yet', 'info');
+        }
+    } catch (e) { showToast('AI identify failed: ' + e.message, 'error'); }
 }
 
 // Show the recent console capture (whatever the device emitted while idle) —

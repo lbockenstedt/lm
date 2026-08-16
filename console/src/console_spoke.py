@@ -272,6 +272,23 @@ class ConsoleSpoke(BaseSpoke):
                 self._clear_unopenable(pid)
             return {"status": "SUCCESS", "port_id": pid, **res}
 
+        if cmd == "CONSOLE_LLM_STORE":
+            # Persist a device identity the hub's LLM-driven identify determined,
+            # so it surfaces in the port list / NetBox like a fingerprint identify.
+            if not self.config.get("console_llm_identify", False):
+                return {"status": "ERROR", "message": "LLM-assisted identify is disabled"}
+            pid = data.get("port_id")
+            if not pid:
+                return {"status": "ERROR", "message": "port_id is required"}
+            await self._emit_probe_result(pid, {
+                "banner": data.get("banner", ""),
+                "vendor": data.get("vendor"),
+                "identity": data.get("identity") or {},
+                "logged_in": bool(data.get("logged_in")),
+            }, method="llm")
+            return {"status": "SUCCESS", "port_id": pid,
+                    "vendor": data.get("vendor"), "identity": data.get("identity") or {}}
+
         if cmd == "CONSOLE_GET_CONFIG":
             pid = data.get("port_id")
             dev = self._port_device(pid) if pid else None
@@ -505,8 +522,12 @@ class ConsoleSpoke(BaseSpoke):
             except Exception:  # noqa: BLE001
                 pass
 
-    async def _emit_probe_result(self, port_id: str, res: Dict[str, Any]) -> None:
-        """Persist the probe + push CONSOLE_PROBE_RESULT up (hub → NetBox)."""
+    async def _emit_probe_result(self, port_id: str, res: Dict[str, Any], method: str = "login") -> None:
+        """Persist the probe + push CONSOLE_PROBE_RESULT up (hub → NetBox).
+
+        ``method`` records provenance ("login" for the fingerprint identify,
+        "llm" for hub LLM-driven identify). ``source`` stays "active" for both —
+        a logged-in identity is authoritative and outranks passive glean."""
         probe = {
             "banner": (res.get("banner") or "")[-2000:],
             "vendor": res.get("vendor"),
@@ -514,6 +535,7 @@ class ConsoleSpoke(BaseSpoke):
             "logged_in": bool(res.get("logged_in")),
             "error": res.get("error", ""),
             "source": "active",  # logged-in identify (authoritative; beats passive)
+            "method": method,
         }
         if res.get("detected_baud"):
             probe["detected_baud"] = res["detected_baud"]
