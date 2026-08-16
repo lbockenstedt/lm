@@ -100,6 +100,35 @@ class HubVncConsoleMixin:
     def unregister_shell_session(self, session_id: str) -> None:
         self.shell_sessions.pop(session_id, None)
 
+    async def _auto_llm_console_identify(self, spoke_id: str, data: Dict[str, Any]) -> bool:
+        """Auto-escalate an unidentified console port to the LLM AI-identify path
+        when it's enabled — the local static fingerprint came back empty. Returns
+        True if the LLM orchestration ran (so the caller skips the placeholder
+        sync); False if AI-identify is off/unavailable or there's nothing to send.
+        Best-effort and rate-limited by the spoke's own probe backoff; the learned
+        fingerprint cache keeps repeat prompts from re-hitting the LLM."""
+        port_id = str(data.get("port_id") or "").strip()
+        banner = str(data.get("banner") or "")
+        if not port_id or not banner.strip():
+            return False
+        try:
+            from routes import console_llm_identify as llm  # optional feature
+        except Exception:  # noqa: BLE001
+            return False
+        if not llm.hub_llm_identify_enabled(self):
+            return False
+        agent = llm.find_bugfixer(self)
+        if not agent:
+            return False
+        try:
+            await llm.orchestrate(self, agent, spoke_id, port_id)
+            logger.info("console: auto-escalated %s to AI identify "
+                        "(local fingerprint found nothing)", port_id)
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("console auto AI-identify failed for %s: %s", port_id, e)
+            return False
+
     async def _handle_console_probe(self, spoke_id: str, data: Dict[str, Any]) -> None:
         """A console spoke auto-identified a device — match/create a NetBox device
         from the harvested identity (best-effort, event-driven). Uses the port's
@@ -110,7 +139,19 @@ class HubVncConsoleMixin:
         identity = data.get("identity") or {}
         ip = str(identity.get("ip") or "").strip()
         mac = str(identity.get("mac") or "").strip()
-        hostname = str(identity.get("hostname") or identity.get("serial") or data.get("port_id") or "").strip()
+        vendor = str(data.get("vendor") or "").strip()
+        real_host = str(identity.get("hostname") or "").strip()
+        serial = str(identity.get("serial") or "").strip()
+        # Local fingerprint failed to recognize the device (no vendor and no
+        # harvested identity). If AI-assisted identify is enabled, auto-escalate
+        # to the LLM instead of syncing a placeholder device — the fingerprint DB
+        # (console_learn) then caches the result so repeat prompts stay static.
+        # Guard on method != "llm" so the LLM's own result can't re-trigger this.
+        if (not vendor and not (ip or mac or real_host or serial)
+                and str(data.get("method") or "").strip() != "llm"):
+            if await self._auto_llm_console_identify(spoke_id, data):
+                return
+        hostname = str(real_host or serial or data.get("port_id") or "").strip()
         if not (ip or mac or hostname):
             return
         netbox = self.get_spoke_by_type("ipam")
