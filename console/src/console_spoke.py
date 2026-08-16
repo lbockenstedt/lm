@@ -29,7 +29,7 @@ try:
     )
     from fingerprint import (run_identify, read_running_config, push_config, PROFILES,
                              passive_identify, run_commands, merge_credentials,
-                             sanitize_console_text,
+                             sanitize_console_text, _extract_profile_fields, prompt_hostname,
                              FACTORY_DEFAULT_CREDENTIALS)
     from dpa import DpaManager
 except ImportError:  # loaded as a package (agent role loader) or from repo root
@@ -38,7 +38,7 @@ except ImportError:  # loaded as a package (agent role loader) or from repo root
     )
     from .fingerprint import (run_identify, read_running_config, push_config, PROFILES,  # type: ignore
                               passive_identify, run_commands, merge_credentials,
-                              sanitize_console_text,
+                              sanitize_console_text, _extract_profile_fields, prompt_hostname,
                               FACTORY_DEFAULT_CREDENTIALS)
     from .dpa import DpaManager  # type: ignore
 
@@ -1200,17 +1200,38 @@ class ConsoleSpoke(BaseSpoke):
         return rows
 
     def _passive_glean(self, pid: str) -> None:
-        """Merge best-effort identity gleaned from the passive capture into the
-        stored probe — WITHOUT clobbering an authoritative active-probe result."""
+        """Merge best-effort identity gleaned from the console into the stored
+        probe — WITHOUT clobbering an authoritative active-probe result.
+
+        Parses the live passive capture AND the port's SAVED identify banner: an
+        already-identified but silent device (e.g. a switch sitting at a bare
+        prompt) emits nothing new, yet its saved banner may still hold un-parsed
+        identity — notably a hostname an older identify never extracted. Since we
+        already know the vendor, we also apply that profile's field regexes
+        directly, so a missing name is recovered from the saved banner with NO
+        re-probe (respecting the 'don't re-login identified devices' rule)."""
+        probe = dict(self.store.get(pid).get("probe") or {})
         chan = self.sessions.channel(pid)
-        if not chan or not chan.capture:
+        live = chan.capture_tail(65536).decode("utf-8", "replace") if (chan and chan.capture) else ""
+        text = "\n".join(t for t in (probe.get("banner") or "", live) if t)
+        if not text:
             return
-        text = chan.capture_tail(65536).decode("utf-8", "replace")
         res = passive_identify(text)
-        gleaned = res.get("identity") or {}
+        gleaned = dict(res.get("identity") or {})
+        # We already know the vendor → apply that profile's anchored field regexes
+        # directly (detect_vendor can fail to re-recognize a truncated banner) to
+        # backfill any missing fields, e.g. an AOS-S "System Name : <host>".
+        if probe.get("vendor"):
+            prof = next((p for p in PROFILES if p["name"] == probe["vendor"]), None)
+            if prof:
+                for k, v in _extract_profile_fields(prof, text).items():
+                    gleaned.setdefault(k, v)
+        if not gleaned.get("hostname"):
+            hn = prompt_hostname(text)
+            if hn:
+                gleaned["hostname"] = hn
         if not (gleaned or res.get("vendor")):
             return
-        probe = dict(self.store.get(pid).get("probe") or {})
         active = probe.get("source") == "active"
         merged = dict(probe.get("identity") or {})
         changed = False
@@ -1229,11 +1250,13 @@ class ConsoleSpoke(BaseSpoke):
         if not active and res.get("vendor") and probe.get("vendor") != res["vendor"]:
             probe["vendor"] = res["vendor"]
             changed = True
-        # Always refresh the banner tail so the port shows recent console output.
-        tail = text[-2000:]
-        if tail and probe.get("banner") != tail:
-            probe["banner"] = tail
-            changed = True
+        # Refresh the banner tail with LIVE output (never overwrite it with itself)
+        # so the port shows recent console output.
+        if live:
+            tail = live[-2000:]
+            if tail and probe.get("banner") != tail:
+                probe["banner"] = tail
+                changed = True
         if not changed:
             return
         probe["identity"] = merged
