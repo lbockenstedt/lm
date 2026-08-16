@@ -77,6 +77,13 @@ class CodeDriftWatchdogMixin:
         baseline = {}
         for d in self._drift_watched_dirs():
             baseline[str(d)] = await _head(d)
+        # Publish the boot-time HEAD map so the self-update path can also detect
+        # a process running BEHIND on-disk HEAD (operator did a manual `git pull`
+        # before clicking Update — that pull is a no-op to the updater, which
+        # would otherwise take the "already up to date; no restart" branch and
+        # leave the stale process running until the next watchdog cycle). Same
+        # dict object so runtime-baselined repos stay in sync.
+        self._drift_baseline = baseline
         logger.info("code-drift watchdog armed (every %ss): %s", int(interval_s),
                     {k: v[:8] for k, v in baseline.items() if v})
         # _stop exists on the device-mode SpokeClient (shutdown flag); absent on

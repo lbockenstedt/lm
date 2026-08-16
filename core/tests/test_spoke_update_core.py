@@ -385,3 +385,57 @@ async def test_no_core_repo_url_skips_core(spoke, tmp_path, monkeypatch):
     pending = update_recovery.read_pending(state_dir=spoke._spoke_state_dir())
     assert "core_root" not in pending
     assert "--core-repo-root" not in fake_popen.calls[0]
+
+# ── (f) process-behind boot commit → restart even on a no-op pull ─────────────
+# Closes the "pulled-but-not-restarted" trap on the UPDATE path: operator ran
+# `git pull` by hand (disk HEAD already == origin), then clicked Update. The
+# pull is a no-op (before == after), but the RUNNING process booted at an older
+# commit (published by the drift watchdog as ``_drift_baseline``), so we must
+# still restart.
+@pytest.mark.asyncio
+async def test_process_behind_boot_commit_restarts_on_noop_pull(spoke, tmp_path, monkeypatch):
+    cwd = spoke._test_cwd
+    # Pull is a no-op: disk HEAD is already spoke_bbb before and after.
+    fake_git = _FakeGit({cwd: {"before": "spoke_bbb", "after": "spoke_bbb"}})
+    _patch_runner(monkeypatch, fake_git, spoke, core_root=None)
+    # The process booted at an OLDER commit than what's now on disk.
+    spoke._drift_baseline = {os.path.abspath(cwd): "spoke_aaa"}
+
+    with pytest.raises(_Exited) as ei:
+        await spoke.handle_system_command("SPOKE_UPDATE", {
+            "repo_url": "https://example/spoke.git",
+        })
+    assert ei.value.code == 3  # restarted despite the no-op pull
+    pending = update_recovery.read_pending(state_dir=spoke._spoke_state_dir())
+    assert pending is not None
+
+
+# ── (g) no drift baseline (watchdog disabled) → old "no restart" behavior ─────
+@pytest.mark.asyncio
+async def test_noop_pull_without_baseline_does_not_restart(spoke, tmp_path, monkeypatch):
+    cwd = spoke._test_cwd
+    fake_git = _FakeGit({cwd: {"before": "spoke_bbb", "after": "spoke_bbb"}})
+    _patch_runner(monkeypatch, fake_git, spoke, core_root=None)
+    # No _drift_baseline attribute at all → must behave exactly as before.
+
+    result = await spoke.handle_system_command("SPOKE_UPDATE", {
+        "repo_url": "https://example/spoke.git",
+    })
+    assert result["status"] == "SUCCESS"
+    assert "up to date" in result["message"].lower()
+
+
+# ── (h) process already ON the boot commit → no spurious restart ─────────────
+@pytest.mark.asyncio
+async def test_noop_pull_when_process_current_does_not_restart(spoke, tmp_path, monkeypatch):
+    cwd = spoke._test_cwd
+    fake_git = _FakeGit({cwd: {"before": "spoke_bbb", "after": "spoke_bbb"}})
+    _patch_runner(monkeypatch, fake_git, spoke, core_root=None)
+    # Process booted at the SAME commit that's on disk → nothing to reload.
+    spoke._drift_baseline = {os.path.abspath(cwd): "spoke_bbb"}
+
+    result = await spoke.handle_system_command("SPOKE_UPDATE", {
+        "repo_url": "https://example/spoke.git",
+    })
+    assert result["status"] == "SUCCESS"
+    assert "up to date" in result["message"].lower()
