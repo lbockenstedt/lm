@@ -756,6 +756,15 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
         spokes = hub.get_all_spokes_by_type("console") or []
+        # Re-seed operator credentials into any spoke that (re)connected since the
+        # last seed — the console spoke holds them in memory only, so a restart
+        # (manual or self-update) wipes them and auto-identify falls back to the
+        # factory-default set alone ("auth rejected" for devices whose real creds
+        # were saved). Diagnostics is the page an operator opens FIRST when login
+        # is failing, so seeding here (like the ports list does) guarantees the
+        # fresh process regains its creds instead of the operator having to open
+        # the ports tab to trigger it. See _forget_console_creds_seed / #275.
+        await _console_seed_credentials(hub, spokes)
         rows, errors, summaries = [], {}, {}
         for sid in spokes:
             agent_name = hub.state.get_module_name(sid)
