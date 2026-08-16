@@ -419,6 +419,21 @@ def register(app, hub, ctx):
             hub_encryption.encrypt(json.dumps(creds)).decode()
         hub.state._mark_dirty()
 
+    async def _console_hub_git_head():
+        """Short git HEAD of the hub's own checkout, for the diagnostics debug
+        block (tells an operator whether the HUB — where the console seed /
+        self-update logic lives — is actually on the latest code). '' on any
+        failure; never raises."""
+        try:
+            repo = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", repo, "rev-parse", "--short", "HEAD",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+            return out.decode().strip() if proc.returncode == 0 else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
     def _console_mark_seeded(hub, sid):
         s = getattr(hub, "_console_creds_seeded", None)
         if s is None:
@@ -785,7 +800,42 @@ def register(app, hub, ctx):
                 rows.append(d)
         rows.sort(key=lambda d: (d.get("currently_failing", False),
                                  d.get("open_failures", 0) + d.get("disconnects", 0)), reverse=True)
-        return {"diagnostics": rows, "errors": errors, "consoles": spokes, "summaries": summaries}
+        # Hub-side credential/seed debug — visible even when a console agent's own
+        # summary isn't rendering. Answers the two questions that explain the vast
+        # majority of "auth rejected / can't log in" reports without touching the
+        # agent: (1) are operator credentials actually SAVED on the hub, and where
+        # from; (2) has the hub pushed them to each connected agent (seed marker),
+        # or is the agent still on factory-defaults only. Plus the hub's own code
+        # version, so a stale hub (the seed/self-update fixes live here, not on the
+        # agent) is obvious at a glance. Credentials are reported as COUNTS only —
+        # never values.
+        seeded = getattr(hub, "_console_creds_seeded", None) or set()
+        try:
+            saved_creds = _console_load_credentials(hub)
+        except Exception:  # noqa: BLE001 - debug must never blank the report
+            saved_creds = []
+        if _console_creds_keyvault_backed(hub):
+            cred_source = "keyvault:" + _console_credentials_ref(hub)
+        elif hub.state.system_state.get("console_credentials_enc"):
+            cred_source = "hub-state (encrypted)"
+        else:
+            cred_source = "none"
+        debug = {
+            "hub_credentials_saved": len(saved_creds),
+            "hub_credentials_source": cred_source,
+            "hub_version": (hub._hub_version_str() if hasattr(hub, "_hub_version_str") else "unknown"),
+            "hub_head": await _console_hub_git_head(),
+            "spokes": {
+                sid: {
+                    "seeded": (sid in seeded),          # did the hub push creds to it
+                    "responded": (sid not in errors),   # did it answer CONSOLE_DIAGNOSTICS
+                    "summary_reported": (sid in summaries),
+                }
+                for sid in spokes
+            },
+        }
+        return {"diagnostics": rows, "errors": errors, "consoles": spokes,
+                "summaries": summaries, "debug": debug}
 
     @app.post("/api/console/diagnostics/purge")
     async def console_diagnostics_purge(request: Request):

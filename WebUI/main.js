@@ -16385,8 +16385,9 @@ async function refreshConsoleDiagnostics() {
     const rows = data.diagnostics || [];
     const errs = Object.entries(data.errors || {});
     const summaryBanner = _consoleDiagSummaryBanner(data.summaries || {});
+    const debugBanner = _consoleDiagDebugBanner(data.debug);
     if (!rows.length && !errs.length) {
-        body.innerHTML = `${summaryBanner}<div class="text-emerald-600 flex items-center gap-2">✅ No failing or disconnecting serial connections.</div>
+        body.innerHTML = `${summaryBanner}${debugBanner}<div class="text-emerald-600 flex items-center gap-2">✅ No failing or disconnecting serial connections.</div>
           <div class="pt-4 flex justify-end gap-2">${_consoleDiagFooterBtns()}</div>`;
         return;
     }
@@ -16424,7 +16425,7 @@ async function refreshConsoleDiagnostics() {
         <div class="mt-2 text-[10px] text-slate-400">Tip: click a row's “Why” to see the last raw line the device emitted (control chars stripped). A <b>flapping</b> hostname changes across probes — hover it for the distinct values, their source (command output vs CLI prompt vs AI) and when each was seen. A port with <b>no attempt yet</b> shows why it isn't being logged into and when the next try is due.</div>` : '';
     const errHtml = errs.length
         ? `<div class="mt-3 text-[11px] text-amber-600">Unreachable consoles: ${errs.map(([s, e]) => escapeHtml(s)).join(', ')}</div>` : '';
-    body.innerHTML = `${summaryBanner}<div class="text-[11px] text-slate-400 mb-2">${failRows.length} port(s) with a failure/disconnect history · ${identRows.length} with identify attempts or pending (since each agent started).</div>${failTbl}${identTbl}${errHtml}
+    body.innerHTML = `${summaryBanner}${debugBanner}<div class="text-[11px] text-slate-400 mb-2">${failRows.length} port(s) with a failure/disconnect history · ${identRows.length} with identify attempts or pending (since each agent started).</div>${failTbl}${identTbl}${errHtml}
       <div class="pt-4 flex justify-end gap-2">${_consoleDiagFooterBtns()}</div>`;
 }
 
@@ -16449,6 +16450,28 @@ function _consoleDiagSummaryBanner(summaries) {
         return `<div class="mb-3 text-[11px] px-3 py-2 rounded bg-emerald-50 border border-emerald-100 text-emerald-700">✅ Auto-identify is on for every console agent (${total} operator credential(s) loaded); logins run on the auto-probe schedule.</div>`;
     }
     return `<div class="mb-3 text-[11px] px-3 py-2 rounded bg-amber-50 border border-amber-100 space-y-1">${warns.join('')}</div>`;
+}
+
+// Hub-side credential/seed debug banner — the authoritative "why is login
+// failing" view even when a console agent's own summary is missing (stale hub /
+// agent not reporting). Shows whether operator creds are SAVED on the hub, its
+// code version, and per-agent whether the hub has pushed those creds (seeded).
+// Counts only — never secrets.
+function _consoleDiagDebugBanner(dbg) {
+    if (!dbg) return '';
+    const rows = [];
+    const saved = dbg.hub_credentials_saved || 0;
+    rows.push(`<div class="text-slate-600">🛈 Hub: <b>${saved}</b> operator credential(s) saved · source <span class="font-mono">${escapeHtml(dbg.hub_credentials_source || 'none')}</span> · version <span class="font-mono">${escapeHtml(dbg.hub_version || '?')}</span> (${escapeHtml(dbg.hub_head || '?')})</div>`);
+    if (!saved)
+        rows.push(`<div class="text-red-700">⛔ No operator credentials saved on the hub — every agent tries only the 9 factory defaults (<span class="font-mono">creds_tried=N/9</span>). Add them via 🔑 Credentials.</div>`);
+    for (const [sid, st] of Object.entries(dbg.spokes || {})) {
+        const bits = `seeded=${st.seeded} responded=${st.responded} summary=${st.summary_reported}`;
+        rows.push(`<div class="text-slate-500 font-mono text-[10px]">${escapeHtml(sid)}: ${bits}</div>`);
+        if (saved && !st.seeded)
+            rows.push(`<div class="text-amber-700">⚠ <b>${escapeHtml(sid)}</b>: creds saved but not yet pushed to this agent — Refresh (or open Console ports) to re-seed.</div>`);
+    }
+    const tone = !saved ? 'bg-red-50 border-red-100' : 'bg-slate-50 border-slate-200';
+    return `<div class="mb-3 text-[11px] px-3 py-2 rounded border ${tone} space-y-1">${rows.join('')}</div>`;
 }
 
 // Footer buttons shared by the diagnostics modal states: purge all collected
@@ -16481,6 +16504,29 @@ function copyConsoleDiagnostics(btn) {
         else if (!s.credentials_loaded) L.push('    ⚠ 0 operator credentials — only factory-default logins are tried.');
     });
     L.push('');
+    // Hub-side credential/seed debug — the authoritative "why is login failing"
+    // answer even when a console agent's own summary is missing above. Reports
+    // whether operator creds are SAVED on the hub, whether the hub pushed them to
+    // each agent, and the hub's own code version. Counts only, never secrets.
+    const dbg = d.debug;
+    if (dbg) {
+        L.push('DEBUG — HUB CREDENTIAL / SEED STATE');
+        L.push(`  hub_credentials_saved=${dbg.hub_credentials_saved}` +
+               `  source=${dbg.hub_credentials_source}` +
+               `  hub_version=${dbg.hub_version || '?'}  hub_head=${dbg.hub_head || '?'}`);
+        if (!dbg.hub_credentials_saved) {
+            L.push('  ⚠ NO operator credentials saved on the hub — every agent will try only the');
+            L.push('    9 factory-default logins (creds_tried=N/9). Set them in Console → credentials.');
+        }
+        const sp = Object.entries(dbg.spokes || {});
+        sp.forEach(([sid, st]) => {
+            L.push(`  ${sid}: seeded=${st.seeded} responded=${st.responded}` +
+                   ` summary_reported=${st.summary_reported}`);
+            if (dbg.hub_credentials_saved && !st.seeded)
+                L.push('    ⚠ creds saved but NOT yet pushed to this agent — open Console ports or Refresh to re-seed.');
+        });
+        L.push('');
+    }
     const errs = Object.entries(d.errors || {});
     if (errs.length) { L.push(`UNREACHABLE CONSOLES (${errs.length})`); errs.forEach(([s, e]) => L.push(`  ${s}: ${e}`)); L.push(''); }
 
