@@ -26,6 +26,45 @@ class HubVncConsoleMixin:
 
     VNC_SESSION_TTL = 60
 
+    # ── Console → NetBox device sync config/status (System → Sync) ────────────
+    _CONSOLE_NETBOX_SYNC_CFG_KEY = "console_netbox_device_sync"
+
+    def _console_netbox_sync_cfg(self) -> Dict[str, Any]:
+        """Read the console→NetBox sync config fresh from global_config
+        (enabled / source_of_truth / defaults{role,device_type,site})."""
+        return ((getattr(self.state, "system_state", {}) or {})
+                .get("global_config", {})
+                .get(self._CONSOLE_NETBOX_SYNC_CFG_KEY, {})) or {}
+
+    def _console_netbox_sync_enabled(self) -> bool:
+        """Whether console auto-identify results are mirrored into NetBox.
+        Enabled by default (preserves the original always-on behavior); an
+        operator opts out via the System → Sync card."""
+        return bool(self._console_netbox_sync_cfg().get("enabled", True))
+
+    def _record_console_sync_status(self, tenant_id: str, tenant_name: str,
+                                    status: str, name: str, message: str = "") -> None:
+        """Track the most recent console→NetBox sync per tenant for the UI
+        status card (in-memory; event-driven, so no persistent history)."""
+        if not hasattr(self, "_console_sync_status"):
+            self._console_sync_status: Dict[str, Dict[str, Any]] = {}
+        st = self._console_sync_status.setdefault(
+            tenant_id, {"tenant_id": tenant_id, "synced": 0, "errors": 0})
+        st["tenant_name"] = tenant_name
+        st["status"] = status
+        st["last_device"] = name
+        st["message"] = message
+        st["last_sync_ts"] = time.time()
+        if status == "success":
+            st["synced"] = int(st.get("synced", 0)) + 1
+        elif status == "error":
+            st["errors"] = int(st.get("errors", 0)) + 1
+
+    def console_netbox_sync_status(self) -> list:
+        """Per-tenant console→NetBox sync status rows for the UI."""
+        return list(getattr(self, "_console_sync_status", {}).values())
+
+
     def register_vnc_session(self, session_id: str, meta: Dict[str, Any]) -> None:
         """Create the session's frame queue and store its metadata."""
         self.vnc_sessions[session_id] = {
@@ -151,12 +190,18 @@ class HubVncConsoleMixin:
         if not vendor and str(data.get("method") or "").strip() != "llm":
             if await self._auto_llm_console_identify(spoke_id, data):
                 return
+        # Console → NetBox device sync toggle (System → Sync). Enabled by
+        # default (preserves the original always-on behavior); an operator can
+        # opt out in the UI. The LLM auto-identify above still runs regardless —
+        # it feeds the Console UI + global search independent of NetBox sync.
+        if not self._console_netbox_sync_enabled():
+            return
         # Name preference: the device's real hostname (or serial), else the USB
         # adapter product string (e.g. "USB Serial Controller") — a friendlier
         # name than the cryptic port id, which is the last resort.
         product = str(data.get("product") or "").strip()
         hostname = str(real_host or serial or product or data.get("port_id") or "").strip()
-        if not (ip or mac or hostname):
+        if not (ip or mac or hostname or serial):
             return
         netbox = self.get_spoke_by_type("ipam")
         if not netbox:
@@ -164,20 +209,36 @@ class HubVncConsoleMixin:
             return
         tenant_id = str(data.get("tenant_id") or "").strip() or (self.state.get_spoke_tenant(spoke_id) or "")
         tenant_cfg = self.state.get_tenant(tenant_id) or {}
+        tenant_name = tenant_cfg.get("name") or tenant_id
         slug = str(tenant_cfg.get("netbox_tenant_slug") or "").strip()
         if not tenant_id or not slug:
             logger.info("console probe from %s: tenant/netbox_tenant_slug unset; "
                         "device not synced to NetBox", spoke_id)
+            self._record_console_sync_status(
+                tenant_id or "(unmapped)", tenant_name, "skipped",
+                hostname or serial or mac or ip,
+                "tenant / netbox_tenant_slug unset")
             return
+        cfg = self._console_netbox_sync_cfg()
+        # NetBox gets ip/mac/hostname AND the serial — serial is the strongest
+        # match key (the sink matches serial → ip → mac → hostname), so a
+        # console-identified device is recognised across DHCP IP moves / renames.
         payload = {
             "tenant_id": tenant_id, "tenant_slug": slug,
-            "tenant_name": tenant_cfg.get("name") or tenant_id,
+            "tenant_name": tenant_name,
             "source": "Console", "replace": False,
-            "devices": [{"ip": ip, "mac": mac, "hostname": hostname}], "defaults": {},
+            "source_of_truth": str(cfg.get("source_of_truth") or "external"),
+            "devices": [{"ip": ip, "mac": mac, "hostname": hostname, "serial": serial}],
+            "defaults": cfg.get("defaults", {}) or {},
         }
         try:
             await self.request_response(netbox, "NETBOX_SYNC_DEVICES", payload, timeout=60.0)
             logger.info("console probe: synced %s to NetBox (tenant %s)",
-                        hostname or mac or ip, tenant_id)
+                        hostname or serial or mac or ip, tenant_id)
+            self._record_console_sync_status(
+                tenant_id, tenant_name, "success", hostname or serial or mac or ip)
         except Exception as e:  # noqa: BLE001
             logger.warning("console probe NetBox sync failed: %s", e)
+            self._record_console_sync_status(
+                tenant_id, tenant_name, "error",
+                hostname or serial or mac or ip, str(e)[:200])

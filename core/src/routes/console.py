@@ -587,6 +587,58 @@ def register(app, hub, ctx):
     # without duplicating the visibility/masking logic.
     app.state.console_list_visible_ports = _list_visible_console_ports
 
+    # ── Console → NetBox device sync config/status (System → Sync card) ───────
+    # Console auto-identify results are mirrored into NetBox event-driven (see
+    # HubVncConsoleMixin._handle_console_probe). These routes expose the toggle
+    # + creation defaults (global_config["console_netbox_device_sync"]) and the
+    # per-tenant last-sync status, mirroring the other discovery-sync cards.
+    @app.get("/setup/console-netbox-sync")
+    async def get_console_netbox_sync(request: Request):
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        cfg = hub.state.system_state.get("global_config", {}).get("console_netbox_device_sync", {}) or {}
+        return {"config": cfg, "netbox_connected": bool(hub.get_spoke_by_type("ipam"))}
+
+    @app.post("/setup/console-netbox-sync")
+    async def set_console_netbox_sync(request: Request):
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        cfg = (data or {}).get("config", {}) if isinstance(data, dict) else {}
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        old = gc.get("console_netbox_device_sync", {}) or {}
+        merged = {**old, **cfg}
+        gc["console_netbox_device_sync"] = merged
+        hub.state.system_state["global_config"] = gc
+        hub.state._mark_dirty()
+        return {"status": "ok", "config": merged}
+
+    @app.get("/setup/console-netbox-sync/status")
+    async def console_netbox_sync_status(request: Request):
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        rows = hub.console_netbox_sync_status()
+        tenants = [{
+            "tenant_id": r.get("tenant_id"),
+            "tenant_name": r.get("tenant_name") or r.get("tenant_id"),
+            "status": r.get("status"),
+            "synced": r.get("synced", 0),
+            "errors": r.get("errors", 0),
+            "last_device": r.get("last_device", ""),
+            "message": r.get("message", ""),
+            "last_sync_ts": r.get("last_sync_ts"),
+        } for r in rows]
+        return {"tenants": tenants}
+
     @app.post("/api/console/settings")
     async def console_settings(request: Request):
         """Set per-port settings (baud/parity/flow) or alias on a Console spoke."""
