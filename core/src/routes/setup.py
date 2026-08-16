@@ -1,7 +1,7 @@
 """Hub Setup routes: spokes, sync loops, module configs, metadata."""
 import asyncio
 from api import (
-    HTTPException, Request, _hub_msg, logger, time,
+    HTTPException, Request, _hub_msg, logger, time, _unwrap_spoke,
 )
 from access import tenant_is_shared as _tenant_is_shared, spoke_visible_to_session as _spoke_visible
 
@@ -1305,6 +1305,49 @@ def register(app, hub, ctx):
         if not sess or not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin required")
         return await hub.simulations_store.get_staleness_sweep_status()
+
+    @app.post("/setup/netbox-dedupe/run")
+    async def run_netbox_dedupe(request: Request):
+        """Find (and optionally merge) duplicate NetBox devices sharing a serial
+        or MAC — the pre-existing duplicates the unified sync ladder can't
+        retroactively fix.
+
+        POST ``{apply: bool, tenant_slug?: str}``. ``apply=false`` (default) is a
+        DRY RUN that returns the duplicate groups it WOULD merge (survivor +
+        duplicate ids) without changing anything; ``apply=true`` performs the
+        merge (gap-only backfill onto the survivor, then delete the duplicates).
+        Scope to one tenant via ``tenant_slug`` (empty = all).
+        """
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess or not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin required")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        apply = bool(body.get("apply", False))
+        tenant_slug = str(body.get("tenant_slug") or "").strip()
+        ipam = hub.get_spoke_by_type("ipam")
+        if not ipam:
+            return {"result": {"status": "error", "groups": [], "scanned": 0,
+                               "merged": 0, "applied": apply,
+                               "message": "NetBox spoke not connected"}}
+        try:
+            rr = await hub.request_response(
+                ipam, "NETBOX_DEDUPE_DEVICES",
+                {"apply": apply, "tenant_slug": tenant_slug}, timeout=180.0)
+            rd = _unwrap_spoke(rr) if isinstance(rr, dict) else {}
+        except Exception as e:
+            logger.warning("[sync-error] netbox-dedupe failed: %s", e)
+            return {"result": {"status": "error", "groups": [], "scanned": 0,
+                               "merged": 0, "applied": apply, "message": str(e)}}
+        if int((rd or {}).get("errors", 0) or 0) > 0:
+            logger.warning("[sync-error] netbox-dedupe status=%s groups=%d merged=%d errors=%d — %s",
+                           (rd or {}).get("status"), len((rd or {}).get("groups", [])),
+                           (rd or {}).get("merged", 0), (rd or {}).get("errors", 0),
+                           (rd or {}).get("message", ""))
+        return {"result": rd or {}}
 
     # ── GitHub repo sync (Setup → Sync, replaces the old autoupdate loop) ───
     # global_config["repo_sync"] is saved via the generic POST /setup/config

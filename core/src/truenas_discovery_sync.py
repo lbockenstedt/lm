@@ -187,9 +187,12 @@ class TruenasDiscoverySyncMixin:
             "hostname": str(app.get("name") or app.get("id") or ""),
             "ip": str(app.get("host") or "").strip(),
             "mac": "",
+            "serial": str(info.get("system_serial") or info.get("serial")
+                        or info.get("system_serial_number") or "").strip(),
+            "model": str(info.get("system_product") or info.get("model") or "").strip(),
+            "manufacturer": "TrueNAS",
             "tenant_id": str(app.get("tenant_id") or ""),
             "role": "storage",
-            "manufacturer": "TrueNAS",
             "custom_fields": {
                 "product": str(info.get("product_name") or info.get("product") or "TrueNAS"),
                 "version": str(info.get("version") or ""),

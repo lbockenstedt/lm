@@ -132,6 +132,7 @@ const ROUTES = {
     loadStalenessSweepConfig: { m: 'GET',  p: '/setup/config',                  api: 'get_global_config' },
     loadStalenessSweepStatus: { m: 'GET',  p: '/setup/staleness-sweep/status',  api: 'staleness_sweep_status' },
     runStalenessSweepNow:     { m: 'POST', p: '/setup/staleness-sweep/run',     api: 'run_staleness_sweep' },
+    runNetboxDedupe:          { m: 'POST', p: '/setup/netbox-dedupe/run',        api: 'run_netbox_dedupe' },
     saveStalenessSweepConfig: { m: 'POST', p: '/setup/config',                  api: 'update_global_config' },
 
     // ── GitHub repo sync (System → Sync; replaces the old auto-update loop) ──
@@ -6330,6 +6331,17 @@ function _renderSetupSyncTile(content) {
             </div>
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Device De-duplication ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <div class="flex gap-2">
+                        <button id="netbox-dedupe-scan-btn" onclick="runNetboxDedupe(false)" class="${btnCls}">Scan (dry run)</button>
+                        <button id="netbox-dedupe-merge-btn" onclick="runNetboxDedupe(true)" class="${btnCls}">Merge duplicates</button>
+                    </div>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">Finds NetBox devices that are the <strong>same physical box</strong> landed as separate records — grouped by shared <strong>serial</strong> or <strong>MAC</strong> (the pre-existing duplicates the unified sync ladder can't retroactively fix). <strong>Scan</strong> is a dry run that lists the duplicate groups it would merge; <strong>Merge</strong> keeps the most complete record per group (back-filling any identity gaps from the duplicates), re-points their IPs onto it, and deletes the rest. Network hardware is the source of truth.</p>
+                <div id="netbox-dedupe-status" class="space-y-2"><p class="text-xs text-slate-400 italic">Click “Scan (dry run)” to preview duplicate device groups.</p></div>
+            </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spoke Out-of-Contact Alerts ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Forgiving liveness alerting, separate from the realtime heartbeat traffic-light. A spoke that blips for a few seconds (restart, WAN jitter) stays quiet; only once an approved spoke has been <strong>out of contact</strong> for <em>warn minutes</em> does a <strong>warning</strong> fire, and after <em>error minutes</em> it escalates to <strong>error</strong> (which also lands in the Error Log / bugfixer feed). Decoupled from the 300s recovery watchdog — that still restarts stranded spokes on its own schedule.</p>
@@ -10280,6 +10292,46 @@ async function runStalenessSweepNow() {
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = orig; }
     }
+}
+
+async function runNetboxDedupe(apply) {
+    const scanBtn = document.getElementById('netbox-dedupe-scan-btn');
+    const mergeBtn = document.getElementById('netbox-dedupe-merge-btn');
+    const wrap = document.getElementById('netbox-dedupe-status');
+    if (apply && !confirm('Merge duplicate devices? The most complete record in each group is kept and the duplicates are deleted. This cannot be undone.')) return;
+    [scanBtn, mergeBtn].forEach(b => { if (b) b.disabled = true; });
+    if (wrap) wrap.innerHTML = '<p class="text-xs text-slate-400 italic">Running…</p>';
+    try {
+        const data = await apiJson('/setup/netbox-dedupe/run', {
+            method: 'POST',
+            body: JSON.stringify({ apply: !!apply })
+        });
+        renderNetboxDedupe(data.result || {}, !!apply);
+        const r = data.result || {};
+        showToast(apply
+            ? `De-dupe: merged ${r.merged || 0} device(s) across ${(r.groups || []).length} group(s)${(r.errors || 0) ? `, ${r.errors} errors` : ''}.`
+            : `De-dupe scan: ${(r.groups || []).length} duplicate group(s) across ${r.scanned || 0} device(s).`,
+            (r.errors || 0) ? 'info' : 'success');
+    } catch (e) {
+        if (wrap) wrap.innerHTML = `<p class="text-xs text-red-500">Error: ${escapeHtml(String((e && e.message) || e))}</p>`;
+        showToast('De-dupe failed: ' + (e && e.message || e), 'error');
+    } finally {
+        [scanBtn, mergeBtn].forEach(b => { if (b) b.disabled = false; });
+    }
+}
+
+function renderNetboxDedupe(res, applied) {
+    const wrap = document.getElementById('netbox-dedupe-status');
+    if (!wrap) return;
+    const groups = res.groups || [];
+    const head = `<p class="text-xs text-slate-500">Scanned <strong>${res.scanned || 0}</strong> device(s) — <strong>${groups.length}</strong> duplicate group(s)${applied ? `, merged <strong>${res.merged || 0}</strong> device(s)` : ' (dry run — nothing changed)'}${res.errors ? `, <span class="text-red-500">${res.errors} error(s)</span>` : ''}.</p>`;
+    if (!groups.length) { wrap.innerHTML = head + '<p class="text-xs text-slate-400 italic">No duplicate devices found.</p>'; return; }
+    const rows = groups.map(g => {
+        const dups = (g.duplicate_ids || []).map(id => '#' + id).join(', ');
+        const name = g.survivor_name ? ' (' + escapeHtml(g.survivor_name) + ')' : '';
+        return `<li class="text-xs text-slate-600"><code>${escapeHtml(g.key || '?')}</code> → keep #${g.survivor_id}${name}, ${applied ? 'merged' : 'would merge'} ${dups}</li>`;
+    }).join('');
+    wrap.innerHTML = head + `<ul class="space-y-1 list-none">${rows}</ul>`;
 }
 
 async function saveStalenessSweepConfig() {

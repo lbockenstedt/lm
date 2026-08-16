@@ -220,15 +220,24 @@ class HubVncConsoleMixin:
                 "tenant / netbox_tenant_slug unset")
             return
         cfg = self._console_netbox_sync_cfg()
+        # Discovered hardware model (from the LLM/fingerprint identify) +
+        # vendor → the sink places the device under its REAL device_type
+        # instead of the generic default.
+        model = str(identity.get("model") or data.get("model") or "").strip()
         # NetBox gets ip/mac/hostname AND the serial — serial is the strongest
         # match key (the sink matches serial → ip → mac → hostname), so a
         # console-identified device is recognised across DHCP IP moves / renames.
+        device_rec = {"ip": ip, "mac": mac, "hostname": hostname, "serial": serial}
+        if model:
+            device_rec["model"] = model
+        if vendor:
+            device_rec["manufacturer"] = vendor
         payload = {
             "tenant_id": tenant_id, "tenant_slug": slug,
             "tenant_name": tenant_name,
             "source": "Console", "replace": False,
             "source_of_truth": str(cfg.get("source_of_truth") or "external"),
-            "devices": [{"ip": ip, "mac": mac, "hostname": hostname, "serial": serial}],
+            "devices": [device_rec],
             "defaults": cfg.get("defaults", {}) or {},
         }
         try:
