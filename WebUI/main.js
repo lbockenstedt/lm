@@ -4425,6 +4425,7 @@ function _cvAddSecretModal() {
           <option value="login">Login (username + password)</option>
           <option value="apikey">API key</option>
           <option value="token">Token</option>
+          <option value="dns">DNS-01 credential (Let's Encrypt)</option>
           <option value="generic">Generic (key + value)</option>
         </select>
         <select id="cv-add-mode" class="${_CV_INP}" title="pass-phrase = human-only; automation = hub can read it unattended for tooling">
@@ -4451,7 +4452,32 @@ function _cvRenderAddFields() {
     if (t === 'login') el.innerHTML = f('cv-f-username', 'username') + f('cv-f-password', 'password', 'password');
     else if (t === 'apikey') el.innerHTML = f('cv-f-apikey', 'api key', 'password');
     else if (t === 'token') el.innerHTML = f('cv-f-token', 'token', 'password');
+    else if (t === 'dns') {
+        // A DNS-01 credential the LE module resolves unattended at issue time:
+        // a certbot provider name + the raw credentials INI. Automation-readable
+        // is required (the hub reads it without a pass-phrase), so force it.
+        const provOpts = Object.entries(DNS_CRED_PROVIDERS)
+            .map(([k, v]) => `<option value="${k}">${escapeHtml(v.label)} (${k})</option>`).join('');
+        el.innerHTML = `
+          <label class="block text-[11px] text-slate-500 mb-0.5">certbot provider</label>
+          <select id="cv-f-dns-provider" onchange="_cvDnsHint()" class="${_CV_INP}">${provOpts}</select>
+          <label class="block text-[11px] text-slate-500 mt-2 mb-0.5">credentials INI (written to the certbot creds file on the le spoke)</label>
+          <textarea id="cv-f-dns-creds" rows="5" autocomplete="off" placeholder="" class="${_CV_INP} font-mono text-xs"></textarea>`;
+        const modeSel = document.getElementById('cv-add-mode');
+        if (modeSel) { modeSel.value = 'hub'; modeSel.disabled = true; }
+        _cvDnsHint();
+        return;
+    }
     else el.innerHTML = f('cv-f-key', 'key') + f('cv-f-value', 'value', 'password');
+    const modeSel = document.getElementById('cv-add-mode');
+    if (modeSel) modeSel.disabled = false;  // re-enable if switching away from dns
+}
+
+// Prefill the DNS creds INI placeholder for the selected provider.
+function _cvDnsHint() {
+    const p = document.getElementById('cv-f-dns-provider')?.value || '';
+    const ta = document.getElementById('cv-f-dns-creds');
+    if (ta) ta.placeholder = LE_DNS_CREDS_HINT[p] || 'dns_<provider>_... = ...';
 }
 
 function _cvCollectAddValue() {
@@ -4460,6 +4486,7 @@ function _cvCollectAddValue() {
     if (t === 'login') return { username: v('cv-f-username'), password: v('cv-f-password') };
     if (t === 'apikey') return { apikey: v('cv-f-apikey') };
     if (t === 'token') return { token: v('cv-f-token') };
+    if (t === 'dns') return { provider: v('cv-f-dns-provider'), dns_creds: v('cv-f-dns-creds') };
     const k = v('cv-f-key').trim();
     return k ? { [k]: v('cv-f-value') } : {};
 }
@@ -20175,17 +20202,32 @@ function leIssueToggleChallenge() {
 async function leIssuePopulateCreds() {
     const sel = document.getElementById('le-issue-dns-credential');
     if (!sel || sel.dataset.loaded) return;
+    let opts = '<option value="">— enter manually below —</option>';
+    // (1) Named DNS credentials stored on the le spoke (this tenant's store).
     try {
         const r = await _spokeFetch('/api/le/dns-credentials', { method: 'GET' });
         const d = (r.data && r.data.data) ? r.data.data : (r.data || {});
         const creds = d.credentials || [];
-        sel.innerHTML = '<option value="">— enter manually below —</option>' +
-            creds.map(c => {
-                const label = (DNS_CRED_PROVIDERS[c.provider] || {}).label || c.provider;
-                return `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)} — ${escapeHtml(label)}</option>`;
-            }).join('');
-        sel.dataset.loaded = '1';
+        opts += creds.map(c => {
+            const label = (DNS_CRED_PROVIDERS[c.provider] || {}).label || c.provider;
+            return `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)} — ${escapeHtml(label)}</option>`;
+        }).join('');
     } catch (e) { /* leave manual entry available */ }
+    // (2) Automation-readable DNS credentials from the Credential Vault. The
+    // module only ever holds the {bucket,name} reference — the secret value is
+    // resolved server-side at issue time and never exposed to the browser.
+    try {
+        const v = await apiJson('/tenant/cred-vault/automation-secrets?type=dns');
+        const vaultCreds = (v && v.secrets) || [];
+        if (vaultCreds.length) {
+            opts += '<optgroup label="Credential Vault">' + vaultCreds.map(s => {
+                const bucketLabel = s.is_admin_slot ? 'Global Admin' : s.bucket;
+                return `<option value="vault:${escapeHtml(s.bucket)}/${escapeHtml(s.name)}">🔐 ${escapeHtml(s.name)} — ${escapeHtml(bucketLabel)}</option>`;
+            }).join('') + '</optgroup>';
+        }
+    } catch (e) { /* vault optional / not reachable — spoke creds still offered */ }
+    sel.innerHTML = opts;
+    sel.dataset.loaded = '1';
 }
 
 // When a saved credential is picked, it supplies the provider + secrets, so hide
@@ -20496,7 +20538,14 @@ async function leIssueCert() {
     if (chSel === 'http-webroot') body.webroot = webroot;
     // Resolve frontend provider aliases (e.g. Hurricane Electric → rfc2136) so
     // the spoke receives the real certbot plugin name.
-    if (challenge === 'dns' && savedCred) {
+    if (challenge === 'dns' && savedCred.startsWith('vault:')) {
+        // Vaulted DNS credential: send only the {bucket,name} reference. The hub
+        // resolves the secret value server-side (automation_get) at issue time
+        // and never exposes it to the browser.
+        const rest = savedCred.slice('vault:'.length);
+        const slash = rest.indexOf('/');
+        body.dns_vault_credential = { bucket: rest.slice(0, slash), name: rest.slice(slash + 1) };
+    } else if (challenge === 'dns' && savedCred) {
         // Named tenant credential: the spoke resolves provider + secrets from it.
         body.dns_credential = savedCred;
     } else if (challenge === 'dns') {

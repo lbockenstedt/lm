@@ -283,6 +283,61 @@ def register(app, hub, ctx):
         "locally on the hub/spoke. Migrate it into the Credential Vault manually; "
         "raw LE passwords can no longer be created here.")
 
+    # certbot plugin aliases (mirror of WebUI LE_DNS_PROVIDER_ALIAS): a vault
+    # secret may name a friendly provider that maps to a real certbot plugin.
+    _LE_DNS_PLUGIN_ALIAS = {"he": "rfc2136"}
+
+    async def _le_resolve_vault_dns_cred(request: Request, body: dict):
+        """Resolve a ``dns_vault_credential`` {bucket,name} reference in-place to
+        the inline spoke DNS-cred shape (``dns_provider`` + ``dns_creds`` INI, or
+        HE-login user/pass). The secret VALUE is read unattended via
+        :func:`cred_vault.automation_get` and forwarded to the le spoke — it is
+        never returned to the browser. Reach is enforced: a tenant-admin may only
+        reference buckets for their own tenants; a Global Admin, any bucket.
+
+        Expected vault secret value (hub-mode, type ``dns``)::
+
+            {"provider": "cloudflare", "dns_creds": "<certbot INI text>"}
+            {"provider": "he-login", "he_username": "...", "he_password": "..."}
+        """
+        ref = body.pop("dns_vault_credential", None)
+        if not isinstance(ref, dict):
+            return
+        bucket = (ref.get("bucket") or "").strip()
+        name = (ref.get("name") or "").strip()
+        if not bucket or not name:
+            raise HTTPException(status_code=400,
+                                detail="dns_vault_credential requires bucket + name")
+        sess = _session_user(request) or {}
+        if not _is_admin(sess):
+            reach = set((sess.get("user", {}) or {}).get("tenants") or [])
+            if bucket not in reach:
+                # Indistinguishable from missing so bucket existence never leaks.
+                raise HTTPException(status_code=404, detail="vault credential not found")
+        import cred_vault as _cv
+        try:
+            val = await _cv.automation_get(app.state.hub, bucket, name)
+        except Exception as e:  # noqa: BLE001 — vault/network
+            logger.warning("le: vault dns credential resolve failed: %s", e)
+            raise HTTPException(status_code=502,
+                                detail=f"could not resolve vault credential: {e}")
+        if not isinstance(val, dict):
+            raise HTTPException(status_code=404,
+                                detail="vault credential not found or not automation-readable")
+        provider = (val.get("provider") or "").strip()
+        if not provider:
+            raise HTTPException(status_code=400,
+                                detail="vault credential is missing a 'provider' field")
+        body.pop("dns_credential", None)  # vault ref supersedes any named cred
+        body["dns_provider"] = _LE_DNS_PLUGIN_ALIAS.get(provider, provider)
+        if provider == "he-login":
+            if val.get("he_username"):
+                body["he_username"] = val["he_username"]
+            if val.get("he_password"):
+                body["he_password"] = val["he_password"]
+        else:
+            body["dns_creds"] = val.get("dns_creds") or val.get("ini") or ""
+
     @app.post("/api/le/he-config")
     async def le_set_he_login(request: Request):
         """Store the Hurricane Electric account-login knob on the le spoke, so the
@@ -576,6 +631,7 @@ def register(app, hub, ctx):
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
         body["tenant_id"] = _le_tenant(request)  # server-derived; scopes dns_credential
+        await _le_resolve_vault_dns_cred(request, body)  # {bucket,name} → inline creds
         hub, le_sid, payload = await _le_request("LE_ISSUE_CERT", body,
                                                   timeout=_LE_CERTBOT_TIMEOUT)
         inner = _le_inner(payload)
