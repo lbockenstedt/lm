@@ -47,6 +47,8 @@
         onprem: 'central-on-prem',
         'on-prem': 'central-on-prem',
         dns: 'dns',
+        henet: 'henet',
+        'he.net': 'henet',
         dhcp: 'dhcp',
         nw: 'nw',
         network: 'nw',

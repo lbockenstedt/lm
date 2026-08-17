@@ -229,6 +229,106 @@ def register(app, hub, ctx):
             },
         }
 
+    # ─── Hurricane Electric (HE.NET) public-DNS API ───────────────────────────
+    # The public-address-space analogue of the DNS (Unbound) routes above:
+    # relays HENET_* commands to the ``henet`` spoke via _relay_spoke (same
+    # SUCCESS/ERROR + 502-on-spoke-error contract). The HE DDNS key is a secret
+    # and is NEVER held on the spoke — it lives in the hub Credential Vault; the
+    # write routes resolve a ``henet_vault_credential`` {bucket,name} reference
+    # unattended via cred_vault.automation_get and inject ``ddns_key`` into the
+    # relayed command, mirroring LE's _le_resolve_vault_dns_cred. Writes are
+    # Global-Admin-only (see api.py _ADMIN_INFRA_WRITE_PREFIXES) — HE.NET manages
+    # shared public DNS with no per-object tenant model.
+    def _get_henet_spoke(hub):
+        return get_spoke_or_503(hub, "henet", "HE.NET")
+
+    async def _henet_resolve_vault_cred(request: Request, body: dict):
+        """Resolve a ``henet_vault_credential`` {bucket,name} reference in-place
+        to the HE DDNS key. The secret VALUE is read unattended via
+        :func:`cred_vault.automation_get` and injected as ``ddns_key`` — it is
+        never returned to the browser. Reach is enforced: a tenant-admin may only
+        reference buckets for their own tenants; a Global Admin, any bucket
+        (including the ``__admin__`` infra slot where the HE account key belongs).
+
+        Expected vault secret value (hub-mode, type ``henet``)::
+
+            {"ddns_key": "<per-record Hurricane Electric DDNS key>"}
+        """
+        ref = body.pop("henet_vault_credential", None)
+        if not isinstance(ref, dict):
+            return
+        bucket = (ref.get("bucket") or "").strip()
+        name = (ref.get("name") or "").strip()
+        if not bucket or not name:
+            raise HTTPException(status_code=400,
+                                detail="henet_vault_credential requires bucket + name")
+        sess = _session_user(request) or {}
+        if not _is_admin(sess):
+            reach = set((sess.get("user", {}) or {}).get("tenants") or [])
+            if bucket not in reach:
+                # Indistinguishable from missing so bucket existence never leaks.
+                raise HTTPException(status_code=404, detail="vault credential not found")
+        import cred_vault as _cv
+        try:
+            val = await _cv.automation_get(app.state.hub, bucket, name)
+        except Exception as e:  # noqa: BLE001 — vault/network
+            logger.warning("henet: vault credential resolve failed: %s", e)
+            raise HTTPException(status_code=502,
+                                detail=f"could not resolve vault credential: {e}")
+        if not isinstance(val, dict) or not val.get("ddns_key"):
+            raise HTTPException(status_code=404,
+                                detail="vault credential not found, not automation-readable, "
+                                       "or missing a 'ddns_key' field")
+        body["ddns_key"] = val["ddns_key"]
+
+    @app.get("/api/henet/records")
+    async def henet_list_records(request: Request):
+        """List the HE.NET records this module manages (from spoke-local state)."""
+        logger.debug("relay GET /api/henet/records")
+        return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_LIST",
+                                  log_name="henet_list_records")
+
+    @app.get("/api/henet/status")
+    async def henet_status(request: Request):
+        """HE dyndns endpoint reachability + managed-record count."""
+        logger.debug("relay GET /api/henet/status")
+        return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_STATUS",
+                                  log_name="henet_status")
+
+    @app.post("/api/henet/record")
+    async def henet_add_record(request: Request):
+        body = await request.json()
+        body = dict(body) if isinstance(body, dict) else {}
+        await _henet_resolve_vault_cred(request, body)
+        return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_ADD", body,
+                                  log_name="henet_add_record")
+
+    @app.put("/api/henet/record")
+    async def henet_update_record(request: Request):
+        body = await request.json()
+        body = dict(body) if isinstance(body, dict) else {}
+        await _henet_resolve_vault_cred(request, body)
+        return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_UPDATE", body,
+                                  log_name="henet_update_record")
+
+    @app.delete("/api/henet/record")
+    async def henet_delete_record(request: Request):
+        """Remove a record from local management (no HE credential needed — HE's
+        dyndns API has no delete verb, so the zone entry itself is left as-is)."""
+        body = await request.json()
+        body = dict(body) if isinstance(body, dict) else {}
+        return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_DELETE", body,
+                                  log_name="henet_delete_record")
+
+    @app.post("/api/henet/sync")
+    async def henet_sync(request: Request):
+        """Replace the managed set and push every A/AAAA record to HE.NET."""
+        body = await request.json()
+        body = dict(body) if isinstance(body, dict) else {}
+        await _henet_resolve_vault_cred(request, body)
+        return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_SYNC", body,
+                                  log_name="henet_sync")
+
     # ─── Certificate Management (le) API ──────────────────────────────────────
     # Relays LE_* commands to the certificates spoke via _relay_spoke (same
     # SUCCESS/ERROR contract + 502-on-spoke-error as DNS/DHCP). The le spoke

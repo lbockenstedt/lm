@@ -401,6 +401,7 @@ const MODULE_CLASSES = {
     'IPAM': ['netbox', 'phpipam'],
     'Security/NAC': ['cppm', 'ise'],
     'DNS': ['dns'],
+    'HE.NET': ['henet'],
     'DHCP': ['dhcp'],
     'Network': ['nw'],
     'Simulations': ['cs'],
@@ -472,6 +473,7 @@ function updateContextActions() {
 // Roles available to load on a generic agent (matches lm/agent/src/agent_spoke.py _ROLE_MAP)
 const AGENT_ROLES = {
     'dns':        { name: 'DNS (Unbound module)',  desc: 'Manages a running Unbound. Syncs records from NetBox. Needs an Unbound server — deploy the "DNS Server" role (or install standalone).', deploy: false },
+    'henet':      { name: 'HE.NET (Hurricane Electric public DNS)', desc: 'Manages public DNS records at dns.he.net over HE\'s dynamic-DNS update API. No server to deploy — the HE DDNS key lives in the Credential Vault (secret type "HE.NET DDNS key") and the hub resolves it unattended when pushing records.', deploy: false },
     'dns-server': { name: 'DNS Server (Unbound)', desc: 'Deploys Unbound itself (server + remote-control + conf.d include). Runs as its own service on this host; does NOT create a spoke. Load the "DNS (Unbound module)" role to manage it.', deploy: true },
     'dhcp':       { name: 'DHCP (Kea module)',     desc: 'Manages a running Kea DHCP4. Syncs subnets and reservations from NetBox. Needs a Kea server — deploy the "DHCP Server" role (or install standalone).', deploy: false },
     'dhcp-server':{ name: 'DHCP Server (Kea)', desc: 'Deploys Kea itself (kea-dhcp4-server + kea-ctrl-agent on :8001). Runs as its own service on this host; does NOT create a spoke. Load the "DHCP (Kea module)" role to manage it.', deploy: true },
@@ -499,6 +501,7 @@ const PRODUCT_MAP = {
     'cppm': 'cppm',
     'netbox': 'netbox',
     'dns': 'dns',
+    'henet': 'henet',
     'dhcp': 'dhcp',
     'nw': 'nw',
     'le': 'le',
@@ -523,6 +526,7 @@ const MODULE_TYPE_PRODUCT = {
     simulation: 'cs',
     ipam: 'netbox',
     dns: 'dns',
+    henet: 'henet',
     dhcp: 'dhcp',
     nw: 'nw',
     certificates: 'le',
@@ -544,6 +548,7 @@ const _ID_PREFIX_PRODUCT = {
     pxmx: 'pxmx', opn: 'opnsense', opnsense: 'opnsense', pfsense: 'opnsense',
     cppm: 'cppm', ise: 'cppm', cs: 'cs', netbox: 'netbox', phpipam: 'netbox',
     dns: 'dns', dhcp: 'dhcp', nw: 'nw', le: 'le', truenas: 'truenas',
+    henet: 'henet',
 };
 function _productFromIdPrefix(sid) {
     for (const [prefix, product] of Object.entries(_ID_PREFIX_PRODUCT)) {
@@ -739,7 +744,7 @@ const pollManager = (() => {
 // granted its explicit right. Today only the Simulations (cs) module is gated
 // this way; other modules remain product-driven (visible when their spoke is
 // connected). Add a key here to gate another module the same way.
-const MODULE_RIGHT = { 'Simulations': 'cs', 'Network': 'nw', 'IPAM': 'ipam', 'Certificates': 'le', 'Console': 'console', 'Firewalls': 'firewall', 'Security/NAC': 'nac', 'DNS': 'dns', 'DHCP': 'dhcp', 'Hypervisors': 'pxmx', 'Directory': 'ldap', 'Reports': 'reports' };
+const MODULE_RIGHT = { 'Simulations': 'cs', 'Network': 'nw', 'IPAM': 'ipam', 'Certificates': 'le', 'Console': 'console', 'Firewalls': 'firewall', 'Security/NAC': 'nac', 'DNS': 'dns', 'HE.NET': 'henet', 'DHCP': 'dhcp', 'Hypervisors': 'pxmx', 'Directory': 'ldap', 'Reports': 'reports' };
 function canSeeModule(className) {
     const right = MODULE_RIGHT[className];
     if (!right) return true;              // no right defined → product-driven
@@ -1421,6 +1426,7 @@ const VIEW_SUBMENUS = {
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
     dns: ['Records', 'Statistics', 'Forwarders'],
+    henet: ['Records'],
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations'],
     nw: ['Devices', 'IP Addresses', 'VLANs', 'MAC Table', 'ARP', 'Interfaces'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
@@ -3629,6 +3635,18 @@ function _viewTemplate(viewId) {
   <div id="dns-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;
 
+        case 'henet':
+            return `<div class="space-y-6">
+  <div class="flex flex-wrap items-center justify-between gap-2">
+    <div id="henet-status" class="text-xs text-slate-500"></div>
+    <div class="flex gap-2">
+      ${isAdmin() ? `<button onclick="showHenetRecordModal()" class="${btn}">+ Add Record</button>` : ''}
+      ${isAdmin() ? `<button onclick="syncHenet()" class="${btn}" title="Re-push every managed A/AAAA record to HE.NET">↻ Sync all</button>` : ''}
+    </div>
+  </div>
+  <div id="henet-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
+</div>`;
+
         case 'dhcp':
             return `<div class="space-y-6">
   <div class="flex justify-end gap-2">
@@ -4162,6 +4180,9 @@ function initView(viewId, subView) {
         case 'dns':
             loadDNSData(subView || 'Records');
             break;
+        case 'henet':
+            loadHenet();
+            break;
         case 'dhcp':
             loadDHCPData(subView || 'Overview');
             break;
@@ -4448,6 +4469,7 @@ function _cvAddSecretModal(preset) {
           <option value="apikey"${sel(pType, 'apikey')}>API key</option>
           <option value="token"${sel(pType, 'token')}>Token</option>
           <option value="dns"${sel(pType, 'dns')}>DNS-01 credential (Let's Encrypt)</option>
+          <option value="henet"${sel(pType, 'henet')}>HE.NET DDNS key (Hurricane Electric public DNS)</option>
           <option value="generic"${sel(pType, 'generic')}>Generic (key + value)</option>
         </select>
         <select id="cv-add-mode" ${editing ? 'disabled' : ''} class="${_CV_INP}" title="pass-phrase = human-only; automation = hub can read it unattended for tooling">
@@ -4505,6 +4527,17 @@ function _cvRenderAddFields() {
         _cvDnsRenderFields();
         return;
     }
+    else if (t === 'henet') {
+        // HE.NET dynamic-DNS key the henet module resolves unattended when it
+        // pushes A/AAAA records to dns.he.net. Automation-readable is required
+        // (the hub reads it without a pass-phrase), so force + lock hub mode.
+        el.innerHTML = `
+          <label class="block text-[11px] text-slate-500 mb-0.5">HE DDNS key (per-record "dynamic DNS" key from dns.he.net)</label>
+          ${f('cv-f-henet-key', 'HE DDNS key', 'password')}`;
+        const modeSel = document.getElementById('cv-add-mode');
+        if (modeSel) { modeSel.value = 'hub'; modeSel.disabled = true; }
+        return;
+    }
     else el.innerHTML = f('cv-f-key', 'key') + f('cv-f-value', 'value', 'password');
     const modeSel = document.getElementById('cv-add-mode');
     if (modeSel) modeSel.disabled = false;  // re-enable if switching away from dns
@@ -4547,6 +4580,7 @@ function _cvCollectAddValue() {
             .join('\n');
         return { provider: p, dns_creds: ini };
     }
+    if (t === 'henet') return { ddns_key: v('cv-f-henet-key') };
     const k = v('cv-f-key').trim();
     return k ? { [k]: v('cv-f-value') } : {};
 }
@@ -9559,6 +9593,7 @@ const LM_NAV_ICONS = [
     { id: 6,  name: 'Security/NAC', key: 'cppm',       svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>' },
     { id: 7,  name: 'Simulations',  key: 'cs',         svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"></path></svg>' },
     { id: 8,  name: 'DNS',          key: 'dns',        svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.6 9h16.8M3.6 15h16.8M11.5 3a17 17 0 000 18M12.5 3a17 17 0 010 18"></path></svg>' },
+    { id: 138, name: 'HE.NET',       key: 'henet',      svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.6 9h16.8M3.6 15h16.8M11.5 3a17 17 0 000 18M12.5 3a17 17 0 010 18"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10v4m0-2h3m0-2v4m5-4v4m0-2h-1.5"></path></svg>' },
     { id: 9,  name: 'DHCP',         key: 'dhcp',       svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 3.75H6.912a2.25 2.25 0 00-2.15 1.588L2.35 13.177a2.25 2.25 0 00-.1.661V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18v-4.162c0-.224-.034-.447-.1-.661L19.24 5.338a2.25 2.25 0 00-2.15-1.588H15M2.25 13.5h3.86a2.25 2.25 0 012.012 1.244l.256.512a2.25 2.25 0 002.013 1.244h3.218a2.25 2.25 0 002.013-1.244l.256-.512a2.25 2.25 0 012.013-1.244h3.859M12 3v8.25m0 0l-3-3m3 3l3-3"></path></svg>' },
     { id: 10, name: 'Certificates', key: 'le',         svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m-6-8h6M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14.5 19.5l1.5 1.5 2.5-2.5"></path></svg>' },
     { id: 11, name: 'Reports',      key: 'reports',    svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M8 17V11m4 6V7m4 10v-4M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>' },
@@ -21778,6 +21813,214 @@ async function deleteDnsRecord(name, rtype) {
         });
         if (ok && d.status === 'SUCCESS') loadDNSData('Records');
         else showToast('Error: ' + (detail || d?.message || 'Delete failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+// ─── HE.NET (Hurricane Electric public DNS) ─────────────────────────────────
+// Manages A/AAAA records at dns.he.net over HE's dynamic-DNS update API. The HE
+// DDNS key is NEVER sent from the browser — the operator picks a Credential
+// Vault secret of type 'henet' (a {bucket,name} reference) and the hub resolves
+// it unattended (net_services._henet_resolve_vault_cred). Writes are
+// Global-Admin-only (see api.py _ADMIN_INFRA_WRITE_PREFIXES).
+
+// Collect every reachable Credential Vault secret of type 'henet' as
+// {bucket, name, label} options for the DDNS-key picker. Best-effort per bucket
+// (a bucket without a pass-phrase set / no reach simply yields nothing).
+async function _henetVaultCredOptions() {
+    const out = [];
+    let buckets = [];
+    try {
+        const b = await apiJson('/tenant/cred-vault/buckets');
+        buckets = b.buckets || [];
+    } catch (e) { return out; }
+    for (const b of buckets) {
+        try {
+            const d = await apiJson('/tenant/cred-vault/secrets?bucket=' + encodeURIComponent(b.bucket));
+            for (const s of (d.secrets || [])) {
+                if (s.type === 'henet') {
+                    out.push({ bucket: b.bucket, name: s.name,
+                               label: `${_cvBucketLabel(b)} › ${s.name}` });
+                }
+            }
+        } catch (e) { /* unreachable / no PSK — skip this bucket */ }
+    }
+    return out;
+}
+
+function _henetPushBadge(r) {
+    if (!r.last_push_status) return '<span class="text-slate-400">—</span>';
+    const ok = r.last_push_status === 'ok';
+    const cls = ok ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700';
+    const detail = r.last_push_detail ? ` title="${escapeHtml(String(r.last_push_detail))}"` : '';
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${cls}"${detail}>${ok ? 'pushed' : 'error'}</span>`;
+}
+
+async function loadHenet() {
+    const container = document.getElementById('henet-content');
+    if (!container) return;
+    container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
+    const th = tableHead, tw = tableWrap;
+    const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
+    const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
+
+    // Status line (HE dyndns reachability + record count).
+    const statusEl = document.getElementById('henet-status');
+    if (statusEl) {
+        try {
+            const s = await _spokeFetch('/api/henet/status');
+            if (s.ok && s.data && s.data.status === 'SUCCESS') {
+                const dot = s.data.reachable ? 'text-emerald-600' : 'text-amber-600';
+                statusEl.innerHTML = `<span class="${dot} font-medium">● HE dyndns ${s.data.reachable ? 'reachable' : 'unreachable'}</span> · ${s.data.record_count} managed record(s)`;
+            } else {
+                statusEl.textContent = '';
+            }
+        } catch (e) { statusEl.textContent = ''; }
+    }
+
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/henet/records');
+        if (!ok) {
+            container.innerHTML = `${_spokeErrorBanner(detail, 'HE.NET spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Load the “HE.NET” role on an agent and store an HE DDNS key in the Credential Vault (secret type “HE.NET DDNS key”).</p>`;
+            return;
+        }
+        const records = d.records || [];
+        window._henetRecords = records;
+        const cols = ['Name', 'Type', 'Value', 'TTL', 'Last Push', ''];
+        const rows = records.map(r => {
+            const eName = String(r.name).replace(/'/g, "\\'");
+            const eType = String(r.type).replace(/'/g, "\\'");
+            return `<tr class="border-b border-slate-100 hover:bg-slate-50">
+                <td class="px-4 py-2 font-mono font-medium">${escapeHtml(r.name)}</td>
+                <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">${escapeHtml(r.type)}</span></td>
+                <td class="px-4 py-2 font-mono text-xs">${escapeHtml(r.value)}</td>
+                <td class="px-4 py-2 text-center text-xs">${escapeHtml(String(r.ttl))}</td>
+                <td class="px-4 py-2 text-center">${_henetPushBadge(r)}</td>
+                <td class="px-4 py-2 whitespace-nowrap">
+                    ${isAdmin() ? `<button onclick="editHenetRecord('${eName}','${eType}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
+                    <button onclick="deleteHenetRecord('${eName}','${eType}')" title="Remove from management" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>` : ''}
+                </td>
+            </tr>`;
+        }).join('');
+        container.innerHTML = records.length === 0
+            ? '<p class="p-4 text-slate-400 italic text-sm">No HE.NET records under management yet. Use “+ Add Record”.</p>'
+            : tw(th(cols) + `<tbody>${rows}</tbody>`);
+    } catch (err) {
+        container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
+    }
+}
+
+function editHenetRecord(name, type) {
+    const rec = (window._henetRecords || []).find(r => r.name === name && r.type === type);
+    showHenetRecordModal(rec || { name, type });
+}
+
+async function showHenetRecordModal(editItem) {
+    const editing = !!(editItem && editItem.value != null);
+    const val = v => (v == null ? '' : String(v).replace(/"/g, '&quot;'));
+    const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
+    const typeOpts = ['A', 'AAAA'].map(t =>
+        `<option value="${t}"${editItem && editItem.type === t ? ' selected' : ''}>${t}</option>`).join('');
+    const creds = await _henetVaultCredOptions();
+    const credOpts = creds.length
+        ? creds.map(c => `<option value="${escapeHtml(c.bucket)}|${escapeHtml(c.name)}">${escapeHtml(c.label)}</option>`).join('')
+        : '<option value="">— no HE.NET credential in the vault —</option>';
+    const modal = openModal('henet-record-modal', `
+        <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} HE.NET Record</h3>
+        <div class="space-y-3">
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Name</label><input id="henet-r-name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="host.example.com" ${editing ? 'readonly' : ''}></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Type</label><select id="henet-r-type" class="${inputCls}" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Value (IP)</label><input id="henet-r-value" value="${val(editItem?.value)}" class="${inputCls}" placeholder="203.0.113.5"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="henet-r-ttl" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">HE DDNS credential</label><select id="henet-r-cred" class="${inputCls}">${credOpts}</select><span class="block text-[11px] text-slate-400 mt-1">A Credential Vault secret (type “HE.NET DDNS key”, automation-readable). The key never leaves the hub.</span></div>
+        </div>
+        <div class="flex justify-end gap-2 pt-2">
+            <button onclick="saveHenetRecord()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
+            <button onclick="document.getElementById('henet-record-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+    if (editing) { modal.dataset.editName = editItem.name; modal.dataset.editType = editItem.type; }
+}
+
+function _henetCredRef(selVal) {
+    const [bucket, name] = String(selVal || '').split('|');
+    return (bucket && name) ? { bucket, name } : null;
+}
+
+async function saveHenetRecord() {
+    const modal = document.getElementById('henet-record-modal');
+    const editing = modal && modal.dataset.editName;
+    const get = id => document.getElementById(id)?.value?.trim() || '';
+    const cred = _henetCredRef(get('henet-r-cred'));
+    if (!cred) { showToast('Select an HE.NET DDNS credential from the vault first', 'error'); return; }
+    const payload = {
+        name: editing ? modal.dataset.editName : get('henet-r-name'),
+        type: editing ? modal.dataset.editType : get('henet-r-type'),
+        value: get('henet-r-value'),
+        ttl: parseInt(get('henet-r-ttl')) || 300,
+        henet_vault_credential: cred,
+    };
+    if (!payload.name || !payload.value) { showToast('Name and Value are required', 'error'); return; }
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/henet/record', {
+            method: editing ? 'PUT' : 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (ok && (d.status === 'SUCCESS' || d.status === 'PARTIAL')) {
+            modal.remove();
+            if (d.status === 'PARTIAL') showToast('HE.NET reported: ' + (d.errors || []).join('; '), 'error');
+            else showToast('Record pushed to HE.NET', 'success');
+            loadHenet();
+        } else showToast('Error: ' + (detail || d?.message || 'Operation failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+async function deleteHenetRecord(name, type) {
+    if (!await showConfirmToast(`Remove ${name} (${type}) from HE.NET management? (The zone entry at dns.he.net is left unchanged — delete it there if you want it gone.)`)) return;
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/henet/record', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, type }),
+        });
+        if (ok && d.status === 'SUCCESS') loadHenet();
+        else showToast('Error: ' + (detail || d?.message || 'Delete failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+async function syncHenet() {
+    const records = (window._henetRecords || []).filter(r => r.type === 'A' || r.type === 'AAAA')
+        .map(r => ({ name: r.name, type: r.type, value: r.value, ttl: r.ttl }));
+    if (!records.length) { showToast('No A/AAAA records under management to sync', 'error'); return; }
+    const creds = await _henetVaultCredOptions();
+    if (!creds.length) { showToast('Store an HE.NET DDNS key in the Credential Vault first', 'error'); return; }
+    const modal = openModal('henet-sync-modal', `
+        <h3 class="text-lg font-bold text-[#263040]">Sync all HE.NET records</h3>
+        <p class="text-sm text-slate-500">Re-push all ${records.length} managed A/AAAA record(s) to HE.NET using the selected DDNS credential.</p>
+        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">HE DDNS credential</label>
+          <select id="henet-sync-cred" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm">${creds.map(c => `<option value="${escapeHtml(c.bucket)}|${escapeHtml(c.name)}">${escapeHtml(c.label)}</option>`).join('')}</select></div>
+        <div class="flex justify-end gap-2 pt-2">
+            <button onclick="_henetDoSync()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Sync</button>
+            <button onclick="document.getElementById('henet-sync-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+    modal._records = records;
+}
+
+async function _henetDoSync() {
+    const modal = document.getElementById('henet-sync-modal');
+    if (!modal) return;
+    const cred = _henetCredRef(document.getElementById('henet-sync-cred')?.value);
+    if (!cred) { showToast('Select a credential', 'error'); return; }
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/henet/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ records: modal._records, henet_vault_credential: cred }),
+        });
+        if (ok && (d.status === 'SUCCESS' || d.status === 'PARTIAL')) {
+            modal.remove();
+            showToast(`Synced — ${d.pushed || 0} pushed${d.errors ? `, ${d.errors.length} error(s)` : ''}`, d.errors ? 'error' : 'success');
+            loadHenet();
+        } else showToast('Error: ' + (detail || d?.message || 'Sync failed'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 

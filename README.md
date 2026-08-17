@@ -32,7 +32,7 @@ same core flags: `--hub`, `--id`/`--name`, `--secret`, `--hub-secret`,
 | **qa** (auditor) | `qa/install_qa.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/qa/main/install_qa.sh \| sudo bash -s -- --hub ws://HUB:8765` |
 | **bugfixer** | `bugfixer/install.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh \| bash -s -- wss://HUB` |
 | **tsa** | `tsa/install.sh` | `curl -fsSL https://raw.githubusercontent.com/lbockenstedt/tsa/main/install.sh \| bash -s -- azure` |
-| **dns**, **dhcp** | *(no installer)* | Agent roles `dns` / `dhcp`, or `/opt/lm/<mod>/install_<mod>.sh` |
+| **dns**, **dhcp**, **henet** | *(no installer required)* | Agent roles `dns` / `dhcp` / `henet`, or `/opt/lm/<mod>/install_<mod>.sh` |
 
 `kvm` and `qa` are the two exceptions: they do **not** normalize a bare hostname,
 so give them a full `ws://`/`wss://` URL.
@@ -61,7 +61,7 @@ sudo bash /opt/lm/install_all.sh --hub-only
 | `--reset-secrets` | Regenerate spoke secrets. |
 | `--reset-users` | Reset WebUI user accounts. |
 | `--exclude a,b,c` | Comma-separated modules to skip. |
-| `--hub-only` | Hub and its self-update/watchdog/restart machinery only — shorthand for `--exclude cs,pxmx,opnsense,cppm,netbox,ldap,dns,dhcp,nw,le`. Those then onboard as remote spokes. |
+| `--hub-only` | Hub and its self-update/watchdog/restart machinery only — shorthand for `--exclude cs,pxmx,opnsense,cppm,netbox,ldap,dns,dhcp,nw,le,henet`. Those then onboard as remote spokes. |
 | `--tls-verify` | Verify TLS to the hub. |
 | `--tls-ca-cert PATH` | CA certificate for that verification. |
 | `--no-setup-token` | Leave first-run `/auth/setup` open instead of gating it behind `LM_SETUP_TOKEN`. Dev/loopback only. |
@@ -96,7 +96,7 @@ curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_a
 | `--tls-verify` | Verify the hub certificate. |
 | `--tls-ca-cert PATH` | CA certificate for that verification. |
 
-Valid roles: `dns`, `dhcp`, `network`, `netbox`, `opnsense`, `ldap`,
+Valid roles: `dns`, `dhcp`, `henet`, `network`, `netbox`, `opnsense`, `ldap`,
 `simulation`, `cppm`, `proxmox`, `le`, `console`, `statuspage`, `proxy`,
 `truenas`.
 
@@ -109,6 +109,7 @@ Valid roles: `dns`, `dhcp`, `network`, `netbox`, `opnsense`, `ldap`,
 | `collab_sink/install_collab_sink.sh` | Hub-side UDP listener for Teams/Zoom/WebEx traffic simulation. Hub-native, not an agent role; stdlib-only, no venv. Called by `install_all.sh`. |
 | `scripts/install-lm-watchdog.sh` | The hub auto-heal watchdog. Idempotent; run as root on the hub box: `sudo bash install-lm-watchdog.sh`. |
 | `dns/install_dns.sh`, `dhcp/install_dhcp.sh` | Co-located Unbound DNS / Kea DHCP spokes. Flags: `--hub`, `--id`, `--secret`, `--infra-only`. |
+| `henet/install_henet.sh` | Hurricane Electric public-DNS (`henet`) spoke — pure HE dyndns API client (no local server). Flags: `--hub`, `--id`, `--secret`. |
 <!-- INSTALLERS:END -->
 
 ## 🗺️ Repository & Directory Map

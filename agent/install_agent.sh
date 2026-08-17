@@ -11,7 +11,7 @@
 # Usage:
 #   curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \
 #     | sudo bash -s -- --hub wss://HUB_IP:443/ws/spoke [--id my-agent-1] [--roles dns,dhcp]
-#   Roles: dns | dhcp | network | netbox | opnsense | ldap | simulation | cppm | proxmox | le
+#   Roles: dns | henet | dhcp | network | netbox | opnsense | ldap | simulation | cppm | proxmox | le
 #   (--roles is a comma-list; --role <one> is accepted as a backward-compat alias.
 #    Omit both for a bare agent that loads roles later via the hub WebUI.)
 #
@@ -327,7 +327,7 @@ python3 -m venv venv
     ./venv/bin/pip install -r "$INSTALL_DIR/core/requirements.txt" -q
 
 # Stage each startup role's code + Python deps + system packages.
-#   - in-repo roles (dns, dhcp) ship inside the lm clone already.
+#   - in-repo roles (dns, dhcp, henet) ship inside the lm clone already.
 #   - sibling roles (network, netbox, opnsense, ldap, simulation, cppm, proxmox,
 #     le) live in separate GitHub repos; clone them shallowly into /opt/lm/<dir>
 #     so the boot-time --roles load (which does NOT run the agent's _install_role)
@@ -340,6 +340,7 @@ stage_role() {
     local ROLE_REPO="" ROLE_CLONE_DIR="" ROLE_REQ="" ROLE_APT=""
     case "$role" in
         dns)        ROLE_REQ="$INSTALL_DIR/dns/requirements.txt" ;;
+        henet)      ROLE_REQ="$INSTALL_DIR/henet/requirements.txt" ;;   # in-repo (websockets/dotenv); manages HE.NET public DNS, no local server
         dhcp)       ROLE_REQ="$INSTALL_DIR/dhcp/requirements.txt" ;;
         console)    ROLE_REQ="$INSTALL_DIR/console/requirements.txt" ;;   # in-repo (pyserial); agent runs as root so /dev/tty* needs no dialout
         statuspage) ROLE_REQ="$INSTALL_DIR/statuspage/requirements.txt" ;;   # in-repo (fastapi/uvicorn); serves the public status page on its own port
@@ -354,7 +355,7 @@ stage_role() {
         le)         ROLE_REPO="https://github.com/lbockenstedt/le.git";        ROLE_CLONE_DIR="le";       ROLE_REQ="$INSTALL_DIR/le/requirements.txt"
                     ROLE_APT="certbot python3-certbot-dns-cloudflare python3-certbot-dns-route53 openssl" ;;
         truenas)    ROLE_REPO="https://github.com/lbockenstedt/truenas.git";    ROLE_CLONE_DIR="truenas";  ROLE_REQ="$INSTALL_DIR/truenas/requirements.txt" ;;   # sibling repo; requirements.txt pins truenas-api-client (official WS JSON-RPC client) + websockets
-        *) echo "❌ Unknown role '$role'"; echo "Valid: dns dhcp network netbox opnsense ldap simulation cppm proxmox le console statuspage proxy truenas"; exit 1 ;;
+        *) echo "❌ Unknown role '$role'"; echo "Valid: dns henet dhcp network netbox opnsense ldap simulation cppm proxmox le console statuspage proxy truenas"; exit 1 ;;
     esac
 
     if [[ -n "$ROLE_REPO" ]]; then

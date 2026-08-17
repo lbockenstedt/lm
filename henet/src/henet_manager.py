@@ -1,0 +1,196 @@
+"""Hurricane Electric (dns.he.net) public-DNS record manager for the henet spoke.
+
+The public-address-space analogue of ``unbound_manager`` (the DNS module):
+instead of writing records into a local Unbound conf and reloading, this pushes
+A/AAAA records to Hurricane Electric's **free DNS** hosting over HE's officially
+documented **dynamic-DNS update** protocol (``https://dyn.dns.he.net/nic/update``).
+
+HE's dyndns endpoint authenticates each record with a per-record **DDNS key**
+(the "Enable entry for dynamic DNS" key you generate in the dns.he.net UI). The
+key is a SECRET and — exactly like the LE module's DNS-01 credentials — is NEVER
+stored on this spoke. It lives in the hub-side **Credential Vault**; the hub
+resolves it unattended (``cred_vault.automation_get``) and injects it into each
+HENET_* command as ``ddns_key`` (or a per-record ``key``). This manager only ever
+receives the key as a call argument for the duration of one push.
+
+Because HE's dyndns endpoint has no "list" or "delete" verb, the set of records
+this module manages is tracked in a small local JSON state file (the moral
+equivalent of unbound's conf file) so the WebUI can list what's under management
+and show each record's last push result. Deleting a record removes it from local
+management (HE keeps the zone entry — dyndns cannot delete it).
+"""
+from __future__ import annotations
+
+import ipaddress
+import json
+import logging
+import os
+import time
+from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
+logger = logging.getLogger("HENetManager")
+
+DYN_UPDATE_URL = "https://dyn.dns.he.net/nic/update"
+STATE_PATH = "/etc/lm-henet/records.json"
+
+# HE dyndns response first-token → meaning. "good"/"nochg" are the two success
+# tokens; everything else is an error we surface verbatim.
+_OK_TOKENS = ("good", "nochg")
+
+
+class HENetManager:
+    """Manage HE.NET public A/AAAA records via the dyndns update API.
+
+    ``http_post`` is injectable so unit tests can drive the manager without
+    touching the network; it takes ``(url, form_dict)`` and returns HE's raw
+    response body (str)."""
+
+    def __init__(self, state_path: str = STATE_PATH,
+                 http_post: Optional[Callable[[str, Dict[str, str]], str]] = None):
+        self.state_path = state_path
+        self._post = http_post or self._default_post
+        os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
+
+    # ── Public API ────────────────────────────────────────────────────
+
+    def list_records(self) -> List[Dict[str, Any]]:
+        """The records this module currently manages (from local state)."""
+        return self._load()
+
+    def sync(self, records: List[Dict[str, Any]], ddns_key: str = "") -> Dict[str, Any]:
+        """Replace the managed set with ``records`` and push every A/AAAA to HE.
+
+        Each record: ``{"name","type","value","ttl"?, "key"?}``. A per-record
+        ``key`` overrides the shared ``ddns_key``. Records are persisted with the
+        outcome of their push so the UI can show what succeeded."""
+        managed: List[Dict[str, Any]] = []
+        pushed = 0
+        errors: List[str] = []
+        for r in records:
+            entry = self._normalize(r)
+            if not entry:
+                continue
+            ok, detail = self._push(entry, r.get("key") or ddns_key)
+            entry["last_push_status"] = "ok" if ok else "error"
+            entry["last_push_detail"] = detail
+            entry["last_pushed_at"] = int(time.time())
+            if ok:
+                pushed += 1
+            else:
+                errors.append(f"{entry['name']}: {detail}")
+            managed.append(entry)
+        self._save(managed)
+        logger.info("Synced %d HE.NET records (%d pushed, %d error)",
+                    len(managed), pushed, len(errors))
+        result = {"status": "SUCCESS", "records_written": len(managed), "pushed": pushed}
+        if errors:
+            result["status"] = "PARTIAL"
+            result["errors"] = errors
+        return result
+
+    def add_record(self, name: str, rtype: str, value: str, ttl: int = 300,
+                   ddns_key: str = "", key: str = "") -> Dict[str, Any]:
+        existing = [r for r in self._load()
+                    if not (r["name"] == name and r["type"] == rtype.upper())]
+        existing.append({"name": name, "type": rtype, "value": value, "ttl": ttl,
+                         **({"key": key} if key else {})})
+        return self.sync(existing, ddns_key=ddns_key)
+
+    def update_record(self, name: str, rtype: str, value: str, ttl: int = 300,
+                      ddns_key: str = "", key: str = "") -> Dict[str, Any]:
+        # Upsert semantics identical to add — HE dyndns "update" is just another
+        # push of the new IP for the same hostname.
+        return self.add_record(name, rtype, value, ttl, ddns_key=ddns_key, key=key)
+
+    def delete_record(self, name: str, rtype: Optional[str] = None) -> Dict[str, Any]:
+        """Drop a record from LOCAL management. HE's dyndns API has no delete
+        verb, so the zone entry itself remains at HE — remove it in the dns.he.net
+        UI if you want it gone. Returns the pruned local record count."""
+        rt = rtype.upper() if rtype else None
+        kept = [r for r in self._load()
+                if not (r["name"] == name and (rt is None or r["type"] == rt))]
+        self._save(kept)
+        return {"status": "SUCCESS", "records_written": len(kept),
+                "note": "removed from local management (HE zone entry unchanged — "
+                        "delete it in the dns.he.net UI if desired)"}
+
+    def status(self) -> Dict[str, Any]:
+        """Reachability of the HE dyndns endpoint + managed-record count."""
+        reachable = self._endpoint_reachable()
+        return {
+            "reachable": reachable,
+            "record_count": len(self._load()),
+            "endpoint": DYN_UPDATE_URL,
+            "state_path": self.state_path,
+        }
+
+    # ── Helpers ───────────────────────────────────────────────────────
+
+    def _normalize(self, r: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        name = str(r.get("name", "")).strip().rstrip(".")
+        rtype = str(r.get("type", "A")).upper()
+        value = str(r.get("value", "")).strip()
+        try:
+            ttl = int(r.get("ttl", 300))
+        except (TypeError, ValueError):
+            ttl = 300
+        if not name or not value:
+            return None
+        return {"name": name, "type": rtype, "value": value, "ttl": ttl}
+
+    def _push(self, entry: Dict[str, Any], key: str) -> tuple:
+        """Push one A/AAAA record to HE dyndns. Returns ``(ok, detail)``."""
+        rtype = entry["type"]
+        if rtype not in ("A", "AAAA"):
+            return (False, f"HE dyndns can only update A/AAAA records, not {rtype}")
+        try:
+            ipaddress.ip_address(entry["value"])
+        except ValueError:
+            return (False, f"{entry['value']!r} is not a valid IP address")
+        if not key:
+            return (False, "no DDNS key supplied (add an HE.NET credential to the "
+                           "Credential Vault and select it)")
+        form = {"hostname": entry["name"], "password": key, "myip": entry["value"]}
+        try:
+            body = (self._post(DYN_UPDATE_URL, form) or "").strip()
+        except Exception as exc:  # noqa: BLE001 — network/transport
+            logger.warning("HE.NET push failed for %s: %s", entry["name"], exc)
+            return (False, f"request failed: {exc}")
+        first = body.split()[0] if body else ""
+        return (first in _OK_TOKENS, body or "empty response")
+
+    def _endpoint_reachable(self) -> bool:
+        try:
+            # A keyless GET returns HE's "badauth"/usage body with HTTP 200 — enough
+            # to prove the endpoint is reachable without sending any credential.
+            self._post(DYN_UPDATE_URL, {})
+            return True
+        except Exception:
+            return False
+
+    def _default_post(self, url: str, form: Dict[str, str]) -> str:
+        data = urlencode(form).encode("utf-8")
+        req = Request(url, data=data, method="POST",
+                      headers={"User-Agent": "lm-henet/1.0"})
+        with urlopen(req, timeout=10) as resp:  # noqa: S310 — fixed HE endpoint
+            return resp.read().decode("utf-8", "replace")
+
+    def _load(self) -> List[Dict[str, Any]]:
+        try:
+            with open(self.state_path, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+        except FileNotFoundError:
+            return []
+        except Exception as exc:  # noqa: BLE001 — corrupt state → start empty
+            logger.warning("henet: could not read %s: %s", self.state_path, exc)
+            return []
+
+    def _save(self, records: List[Dict[str, Any]]) -> None:
+        os.makedirs(os.path.dirname(self.state_path), exist_ok=True)
+        tmp = self.state_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(records, f, indent=2)
+        os.replace(tmp, self.state_path)

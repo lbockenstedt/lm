@@ -659,7 +659,7 @@ def register(app, hub, ctx):
             module_type_map = {
                 "opn": "firewall", "pxmx": "hypervisor", "cppm": "nac",
                 "cs": "simulation", "ldap": "directory", "netbox": "ipam",
-                "dns": "dns", "dhcp": "dhcp", "nw": "nw", "le": "certificates",
+                "dns": "dns", "dhcp": "dhcp", "henet": "henet", "nw": "nw", "le": "certificates",
             }
             mtype = module_type_map.get(module)
             matching_sids = set()
@@ -716,6 +716,7 @@ def register(app, hub, ctx):
                 "ldap":   "lm-ldap",
                 "netbox": "lm-netbox-spoke",
                 "dns":    "lm-dns",
+                "henet":  "lm-henet",
                 "dhcp":   "lm-dhcp",
             }
             filename = log_name_map.get(module, f"lm-{module}")

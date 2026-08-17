@@ -1445,7 +1445,9 @@ def create_app(hub):
         # until per-object subnet ownership is enforced on the bodies (dns/dhcp/le
         # phases). GET reads stay right-gated (method-gated here).
         # le + dns/dhcp SYNC (fleet-wide rebuild) have no per-object tenant model → admin-only.
-        _ADMIN_INFRA_WRITE_PREFIXES = ("/api/le/", "/api/dns/", "/api/dhcp/")
+        # henet (Hurricane Electric public DNS) is public-address-space infra with
+        # no per-object tenant model → admin-only writes, same as le/dns/dhcp.
+        _ADMIN_INFRA_WRITE_PREFIXES = ("/api/le/", "/api/dns/", "/api/dhcp/", "/api/henet/")
         if request.method in ("POST", "PUT", "DELETE", "PATCH"):
             if any(path.startswith(p) for p in _SHARED_CONSTRAINED_WRITE_PREFIXES):
                 if not _can_edit_shared(sess):

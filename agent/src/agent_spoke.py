@@ -54,11 +54,12 @@ RoleConnection = None
 # Each entry: (rel_path, cls_name, module_type, repo_url_or_None)
 #   rel_path   — spoke file under the lm-root (e.g. dns/src/dns_spoke.py);
 #                the first path segment is also the clone target dir name.
-#   repo_url   — None for roles that ship inside the lm repo (dns, dhcp);
+#   repo_url   — None for roles that ship inside the lm repo (dns, dhcp, henet);
 #                otherwise the GitHub URL the agent shallow-clones on LOAD_ROLE
 #                when the spoke code isn't already present on the node.
 _ROLE_MAP = {
     "dns":        ("dns/src/dns_spoke.py",          "DNSSpoke",  "dns",        None),
+    "henet":      ("henet/src/henet_spoke.py",      "HENetSpoke", "henet",     None),
     "dhcp":       ("dhcp/src/dhcp_spoke.py",        "DHCPSpoke", "dhcp",       None),
     "network":    ("nw/src/nw_spoke.py",            "NwSpoke",   "nw",         "https://github.com/lbockenstedt/nw.git"),
     "netbox":     ("netbox/src/netbox_spoke.py",    "NetboxSpoke", "ipam",     "https://github.com/lbockenstedt/netbox.git"),
@@ -99,6 +100,7 @@ _ROLE_MAP = {
 # discoverable mis-route, never cross-contamination between sibling roles).
 _ROLE_LOG_PREFIXES: Dict[str, tuple] = {
     "dns":        ("DNS", "Unbound"),
+    "henet":      ("HENet",),
     "dhcp":       ("DHCP", "Kea"),
     "network":    ("Nw",),
     "netbox":     ("Netbox",),
