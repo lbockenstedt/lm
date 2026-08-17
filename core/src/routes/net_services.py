@@ -816,7 +816,20 @@ def register(app, hub, ctx):
         except Exception as e:
             logger.exception("le_distribute failed")
             raise HTTPException(status_code=500, detail=str(e))
-        payload = await _relay_spoke(le_sid, "LE_LIST_CERTS", log_name="le_distribute")
+        # Distributing a cert to the "hub" target self-restarts the hub (to load
+        # the new server cert), which briefly severs the le spoke connection.
+        # The distribution itself already succeeded (``dist`` holds the per-
+        # target results); don't turn that into a red "failed" just because the
+        # trailing refresh can't reach the momentarily-gone le spoke. Fall back
+        # to the warm cert cache (marked stale) so the UI still renders the
+        # table + the per-target toast, mirroring GET /api/le/certs.
+        try:
+            payload = await _relay_spoke(le_sid, "LE_LIST_CERTS", log_name="le_distribute")
+        except HTTPException:
+            cached = hub.le_cache_get("certs")
+            payload = (dict(cached) if isinstance(cached, dict)
+                       else {"certs": cached or []})
+            payload["stale"] = True
         _le_inner(payload)["distribution"] = dist or []
         return payload
 
