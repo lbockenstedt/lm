@@ -97,6 +97,42 @@ def mask_ldap_config(gldap):
     }
 
 
+def canonicalize_user_attrs(attrs):
+    """Map the WebUI's friendly user-attribute keys to the canonical LDAP
+    attribute names the directory spoke writes.
+
+    The spoke's READ side (``list_users_scoped``) already emits friendly keys
+    (``givenName``→``first_name``, ``sn``→``last_name``, ``mail``→``email``), so
+    the WebUI speaks ``first_name``/``last_name``/``email`` on the way in too —
+    but the spoke's WRITE side (``create_user_scoped``/``update_user_scoped``)
+    only reads the canonical LDAP names. Without this translation a created or
+    updated user silently loses its name/email (``cn``/``sn`` fall back to the
+    uid) and shows up blank in the list, looking as though nothing was saved.
+
+    Translates the friendly keys, derives a ``cn``/``displayName`` from the
+    name parts when one isn't supplied, and passes any already-canonical keys
+    through untouched (forward-compatible). Pure."""
+    attrs = attrs or {}
+    out = dict(attrs)
+    first = str(attrs.get("first_name") or attrs.get("givenName") or "").strip()
+    last = str(attrs.get("last_name") or attrs.get("sn") or "").strip()
+    email = str(attrs.get("email") or attrs.get("mail") or "").strip()
+    for friendly in ("first_name", "last_name", "email"):
+        out.pop(friendly, None)
+    if first:
+        out["givenName"] = first
+    if last:
+        out["sn"] = last
+    if email:
+        out["mail"] = email
+    full = " ".join(p for p in (first, last) if p)
+    if full and not out.get("cn"):
+        out["cn"] = full
+    if full and not out.get("displayName"):
+        out["displayName"] = full
+    return out
+
+
 def register(app, hub, ctx):
     """Register directory (LDAP) routes on the Hub app."""
     _session_user = ctx._session_user
@@ -280,7 +316,7 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=400, detail="uid is required")
             auth_mode = "entra" if str(data.get("auth_mode")) == "entra" else "local"
             payload = {"tenant_slug": slug, "uid": uid, "auth_mode": auth_mode,
-                       "attrs": data.get("attrs") or {}}
+                       "attrs": canonicalize_user_attrs(data.get("attrs"))}
             if auth_mode == "entra":
                 upn = str(data.get("upn") or "").strip()
                 if not upn:
@@ -308,7 +344,7 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=400, detail="uid is required")
             return await _relay("LDAP_UPDATE_USER",
                                 {"tenant_slug": slug, "uid": uid,
-                                 "attrs": data.get("attrs") or {}},
+                                 "attrs": canonicalize_user_attrs(data.get("attrs"))},
                                 _directory_spoke(tid))
         except HTTPException:
             raise
