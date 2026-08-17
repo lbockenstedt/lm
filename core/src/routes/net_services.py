@@ -253,6 +253,27 @@ def register(app, hub, ctx):
             return {"bucket": ref["bucket"].strip(), "name": ref["name"].strip()}
         return None
 
+    # Field names, in priority order, from which the dyndns update password may
+    # be pulled. This lets ONE Hurricane Electric vault secret serve BOTH the LE
+    # module (DNS-01) and this External-DNS module: whether the operator stored
+    # it as an ``henet`` DDNS key (``ddns_key``) or as an LE DNS-01 "Hurricane
+    # Electric (account login)" secret (``he_password``), the module reformats
+    # it to the single push password HE's dyndns API expects — the operator
+    # never keeps two copies of the same credential.
+    _HENET_KEY_FIELDS = ("ddns_key", "he_password", "password", "secret", "key", "value")
+
+    def _henet_extract_ddns_key(val):
+        """Pull the HE dyndns update password out of a resolved vault secret,
+        tolerating the several shapes an identical HE credential can be stored in
+        (see :data:`_HENET_KEY_FIELDS`). Returns the key string or ``None``."""
+        if not isinstance(val, dict):
+            return None
+        for f in _HENET_KEY_FIELDS:
+            v = val.get(f)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return None
+
     async def _henet_resolve_vault_cred(request: Request, body: dict):
         """Resolve the HE DDNS key into ``body['ddns_key']`` unattended.
 
@@ -265,9 +286,12 @@ def register(app, hub, ctx):
         (including the ``__admin__`` infra slot where the HE account key belongs).
         Raises 400 when neither an explicit nor an assigned credential exists.
 
-        Expected vault secret value (hub-mode, type ``henet``)::
+        The stored secret may be an ``henet`` DDNS key OR a shared LE DNS-01
+        "Hurricane Electric" secret — :func:`_henet_extract_ddns_key` reformats
+        either shape into the single dyndns push password::
 
-            {"ddns_key": "<per-record Hurricane Electric DDNS key>"}
+            {"ddns_key": "..."}   # henet secret
+            {"provider": "he-login", "he_username": "...", "he_password": "..."}
         """
         ref = body.pop("henet_vault_credential", None)
         if not isinstance(ref, dict):
@@ -277,7 +301,8 @@ def register(app, hub, ctx):
                 status_code=400,
                 detail="No HE.NET DDNS credential assigned. Assign one under "
                        "DNS → External DNS → HE.NET (a Credential Vault secret "
-                       "of type 'HE.NET DDNS key').")
+                       "of type 'HE.NET DDNS key', or a shared Let's Encrypt "
+                       "'Hurricane Electric' DNS-01 secret).")
         bucket = (ref.get("bucket") or "").strip()
         name = (ref.get("name") or "").strip()
         if not bucket or not name:
@@ -296,11 +321,12 @@ def register(app, hub, ctx):
             logger.warning("henet: vault credential resolve failed: %s", e)
             raise HTTPException(status_code=502,
                                 detail=f"could not resolve vault credential: {e}")
-        if not isinstance(val, dict) or not val.get("ddns_key"):
+        key = _henet_extract_ddns_key(val)
+        if not key:
             raise HTTPException(status_code=404,
                                 detail="vault credential not found, not automation-readable, "
-                                       "or missing a 'ddns_key' field")
-        body["ddns_key"] = val["ddns_key"]
+                                       "or missing a usable HE DDNS key / password")
+        body["ddns_key"] = key
 
     @app.get("/api/henet/credential")
     async def henet_get_credential(request: Request):
@@ -313,9 +339,10 @@ def register(app, hub, ctx):
     async def henet_set_credential(request: Request):
         """Assign the module-level HE DDNS credential (Global-Admin-only via the
         /api/henet/ write gate). Validates the reference resolves to an
-        automation-readable ``henet`` secret carrying a ``ddns_key`` before
-        persisting it, so a bad reference is rejected up-front rather than at
-        first push."""
+        automation-readable secret carrying a usable HE DDNS key / password (an
+        ``henet`` DDNS key OR a shared LE DNS-01 "Hurricane Electric" secret)
+        before persisting it, so a bad reference is rejected up-front rather than
+        at first push."""
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
         bucket = (body.get("bucket") or "").strip()
@@ -332,10 +359,10 @@ def register(app, hub, ctx):
             val = await _cv.automation_get(app.state.hub, bucket, name)
         except Exception as e:  # noqa: BLE001 — vault/network
             raise HTTPException(status_code=502, detail=f"could not resolve vault credential: {e}")
-        if not isinstance(val, dict) or not val.get("ddns_key"):
+        if not _henet_extract_ddns_key(val):
             raise HTTPException(status_code=404,
                                 detail="vault credential not found, not automation-readable, "
-                                       "or missing a 'ddns_key' field")
+                                       "or missing a usable HE DDNS key / password")
         hub = app.state.hub
         hub.state.update_global_config({"henet": {"vault_credential": {"bucket": bucket, "name": name}}})
         await hub.state.save_state_now()

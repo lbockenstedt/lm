@@ -21958,13 +21958,24 @@ function openExternalDns(id) {
 // (__admin__) infra slot, with no pass-phrase needed — unlike a per-bucket
 // ``secrets?bucket=`` listing, which is PSK-gated and skips the admin slot
 // (that's why the HE key never showed up here before).
+//
+// A single Hurricane Electric credential serves BOTH modules, so the picker
+// lists ``henet`` DDNS-key secrets AND shared LE DNS-01 "Hurricane Electric
+// (account login)" secrets (``dns`` secrets carrying he_username/he_password).
+// The hub reformats whichever shape into the dyndns push password
+// (net_services._henet_extract_ddns_key), so the operator never keeps two
+// copies of the same key.
 async function _henetVaultCredOptions() {
     try {
-        const v = await apiJson('/tenant/cred-vault/automation-secrets?type=henet');
-        return ((v && v.secrets) || []).map(s => ({
+        const v = await apiJson('/tenant/cred-vault/automation-secrets');
+        const isHeUsable = s =>
+            s.type === 'henet' ||
+            (s.type === 'dns' && (s.fields || []).some(f => f === 'he_username' || f === 'he_password' || f === 'ddns_key'));
+        return ((v && v.secrets) || []).filter(isHeUsable).map(s => ({
             bucket: s.bucket,
             name: s.name,
-            label: `${s.is_admin_slot ? 'Global Admin' : s.bucket} › ${s.name}`,
+            label: `${s.is_admin_slot ? 'Global Admin' : s.bucket} › ${s.name}`
+                + (s.type === 'dns' ? ' (LE HE credential)' : ''),
         }));
     } catch (e) { return []; }
 }
@@ -22101,11 +22112,11 @@ async function showHenetCredModal() {
         : '';
     openModal('henet-cred-modal', `
         <h3 class="text-lg font-bold text-[#263040]">Assign HE.NET DDNS credential</h3>
-        <p class="text-sm text-slate-500">The HE.NET module uses this Credential Vault secret to push records — assign it once and you won't be asked per record. Add a key under <b>Credential Vault → + Add secret → HE.NET DDNS key</b> (automation mode).</p>
+        <p class="text-sm text-slate-500">The HE.NET module uses this Credential Vault secret to push records — assign it once and you won't be asked per record. Add a key under <b>Credential Vault → + Add secret → HE.NET DDNS key</b> (automation mode), or reuse an existing Let's Encrypt <b>Hurricane Electric</b> DNS-01 credential — the same HE key works for both.</p>
         <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">DDNS credential</label>
           ${creds.length
             ? `<select id="henet-assign-cred" class="${inputCls}">${opts}</select>`
-            : `<p class="text-sm text-amber-600 italic">No automation-readable “HE.NET DDNS key” secret found in the Credential Vault. Add one first.</p>`}
+            : `<p class="text-sm text-amber-600 italic">No automation-readable HE.NET credential found in the Credential Vault. Add an “HE.NET DDNS key” (or a Hurricane Electric DNS-01) secret first.</p>`}
         </div>
         <div class="flex justify-end gap-2 pt-2">
             ${assigned ? `<button onclick="_henetClearCred()" class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-4 py-2 rounded-md text-sm mr-auto">Clear</button>` : ''}
