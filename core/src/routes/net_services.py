@@ -400,8 +400,9 @@ def register(app, hub, ctx):
             {"provider": "cloudflare", "dns_creds": "<certbot INI text>"}
             {"provider": "he-login", "he_username": "...", "he_password": "..."}
         """
-        ref = body.pop("dns_vault_credential", None)
+        ref = body.get("dns_vault_credential")
         if not isinstance(ref, dict):
+            body.pop("dns_vault_credential", None)
             return
         bucket = (ref.get("bucket") or "").strip()
         name = (ref.get("name") or "").strip()
@@ -437,6 +438,31 @@ def register(app, hub, ctx):
                 body["he_password"] = val["he_password"]
         else:
             body["dns_creds"] = val.get("dns_creds") or val.get("ini") or ""
+        # Keep a normalized (secret-free) reference in the body so the spoke can
+        # persist it on its ledger and the hub can re-resolve it on renew / after
+        # a spoke reinstall. Only {bucket,name} — never the resolved secret.
+        body["dns_vault_credential"] = {"bucket": bucket, "name": name}
+
+    def _le_store_vault_ref(domain, ref):
+        """Persist a secret-free {bucket,name} vault DNS-01 reference for ``domain``
+        in hub state so it survives a spoke reinstall (re-pushed on reconnect)."""
+        if not (domain and isinstance(ref, dict)):
+            return
+        b = (ref.get("bucket") or "").strip()
+        n = (ref.get("name") or "").strip()
+        if not (b and n):
+            return
+        gc = app.state.hub.state.system_state.setdefault("global_config", {})
+        refs = gc.setdefault("le_vault_dns_creds", {})
+        refs[domain] = {"bucket": b, "name": n}
+
+    def _le_forget_vault_ref(domain):
+        gc = app.state.hub.state.system_state.get("global_config", {}) or {}
+        refs = gc.get("le_vault_dns_creds")
+        if isinstance(refs, dict) and domain in refs:
+            refs.pop(domain, None)
+            return True
+        return False
 
     @app.post("/api/le/he-config")
     async def le_set_he_login(request: Request):
@@ -743,11 +769,22 @@ def register(app, hub, ctx):
         body = dict(body) if isinstance(body, dict) else {}
         body["tenant_id"] = _le_tenant(request)  # server-derived; scopes dns_credential
         await _le_resolve_vault_dns_cred(request, body)  # {bucket,name} → inline creds
+        vault_ref = body.get("dns_vault_credential") if isinstance(body, dict) else None
         hub, le_sid, payload = await _le_request("LE_ISSUE_CERT", body,
                                                   timeout=_LE_CERTBOT_TIMEOUT)
         inner = _le_inner(payload)
         domain = inner.get("domain")
         targets = inner.get("targets") or []
+        # Persist the vault DNS-01 reference hub-side (durable across a spoke
+        # reinstall) and re-seed the spoke's DNS hook creds from the vault now.
+        if domain and isinstance(vault_ref, dict):
+            _le_store_vault_ref(domain, vault_ref)
+            try:
+                await hub.state.save_state_now()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("persist le vault ref for %s failed: %s", domain, e)
+            if le_sid:
+                asyncio.create_task(hub._le_sync_vault_dns_creds(le_sid))
         dist = []
         # Always invoke distribution (even with no targets) so the no-targets
         # skip is logged under Certificates — otherwise a freshly-issued cert
@@ -870,7 +907,18 @@ def register(app, hub, ctx):
         """Renew one (body.domain) or all managed certs via the le spoke, then
         hub-broker renewed material to each renewed cert's targets. Returns the
         spoke result with per-cert + aggregate ``distribution`` summaries."""
-        hub, le_sid, payload = await _le_request("LE_RENEW_CERT", await request.json(),
+        hub = app.state.hub
+        renew_body = await request.json()
+        renew_body = dict(renew_body) if isinstance(renew_body, dict) else {}
+        # Re-seed DNS-01 hook creds from the vault for this renew, so an on-demand
+        # renew succeeds even if the spoke's local he-login.ini was lost.
+        try:
+            vmap = await hub._le_resolve_vault_map()
+            if vmap:
+                renew_body["vault_dns_creds"] = vmap
+        except Exception as e:  # noqa: BLE001
+            logger.debug("le renew vault map resolve skipped: %s", e)
+        hub, le_sid, payload = await _le_request("LE_RENEW_CERT", renew_body,
                                                   timeout=_LE_CERTBOT_TIMEOUT)
         inner = _le_inner(payload)
         agg = []
@@ -896,9 +944,19 @@ def register(app, hub, ctx):
 
     @app.post("/api/le/revoke")
     async def le_revoke_cert(request: Request):
-        return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_REVOKE_CERT",
-                                  await request.json(), log_name="le_revoke_cert",
-                                  timeout=_LE_CERTBOT_TIMEOUT)
+        body = await request.json()
+        domain = (body or {}).get("domain") if isinstance(body, dict) else None
+        result = await _relay_spoke(_get_le_spoke(app.state.hub), "LE_REVOKE_CERT",
+                                    body, log_name="le_revoke_cert",
+                                    timeout=_LE_CERTBOT_TIMEOUT)
+        # Drop the stored vault DNS-01 reference for a revoked domain so it isn't
+        # re-pushed to spokes after the cert is gone.
+        if domain and _le_forget_vault_ref(domain):
+            try:
+                await app.state.hub.state.save_state_now()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("prune le vault ref for %s failed: %s", domain, e)
+        return result
 
     @app.post("/api/le/distribute")
     async def le_distribute():

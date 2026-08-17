@@ -99,3 +99,64 @@ class LeCacheMixin:
             json.dump(snapshot, f, default=str)
         os.chmod(tmp, 0o600)  # cert domains/targets — match the 0600 at-rest policy
         os.replace(tmp, path)
+
+    # ── vault DNS-01 credential durability ────────────────────────────────────
+    # The DNS-01 secret (e.g. the Hurricane Electric account login) lives ONLY in
+    # the Credential Vault. The hub stores a secret-free {bucket,name} reference
+    # per cert domain in ``global_config['le_vault_dns_creds']`` at issue time,
+    # then re-resolves it from the vault and pushes it to the le spoke on every
+    # (re)connect — so certbot's DNS hook creds (``/etc/lm-le/he-login.ini``)
+    # survive a spoke reinstall that wiped them. Reach=role, decrypt=hub key.
+
+    async def _le_resolve_vault_map(self) -> Dict[str, Dict[str, str]]:
+        """Resolve every stored LE vault DNS-01 reference to inline creds, keyed
+        by cert domain. Best-effort — a reference that can't be resolved is
+        skipped, never raised. Currently supports HE account-login (he-login)."""
+        out: Dict[str, Dict[str, str]] = {}
+        try:
+            gc = self.state.system_state.get("global_config", {}) or {}
+            refs = gc.get("le_vault_dns_creds") or {}
+            if not isinstance(refs, dict) or not refs:
+                return out
+            import cred_vault
+            for domain, ref in list(refs.items()):
+                if not isinstance(ref, dict):
+                    continue
+                bucket = (ref.get("bucket") or "").strip()
+                name = (ref.get("name") or "").strip()
+                if not (bucket and name):
+                    continue
+                try:
+                    val = await cred_vault.automation_get(self, bucket, name)
+                except Exception as e:  # noqa: BLE001 — vault/network, per-ref
+                    logger.debug("le vault map: resolve %s failed: %s", domain, e)
+                    continue
+                if not isinstance(val, dict):
+                    continue
+                if (val.get("provider") == "he-login" or val.get("he_username")):
+                    u = (val.get("he_username") or "").strip()
+                    p = val.get("he_password") or ""
+                    if u and p:
+                        out[domain] = {"he_username": u, "he_password": p}
+        except Exception as e:  # noqa: BLE001
+            logger.debug("le vault map resolve skipped: %s", e)
+        return out
+
+    async def _le_sync_vault_dns_creds(self, spoke_id: str) -> None:
+        """Push freshly vault-resolved DNS-01 hook creds to the le spoke so its
+        ``he-login.ini`` is (re)seeded — e.g. after a reconnect/reinstall. HE
+        uses a single account-login file, so one push suffices. Best-effort;
+        never raises (durability nicety, not a hard dependency of connect)."""
+        if not spoke_id:
+            return
+        try:
+            vmap = await self._le_resolve_vault_map()
+            he = next((v for v in vmap.values()
+                       if v.get("he_username") and v.get("he_password")), None)
+            if not he:
+                return
+            await self.request_response(spoke_id, "LE_SYNC_VAULT_DNS", he, timeout=15)
+            logger.info("le vault sync: pushed HE DNS-01 creds to %s", spoke_id)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("le vault sync to %s skipped: %s", spoke_id, e)
+
