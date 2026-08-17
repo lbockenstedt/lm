@@ -4287,7 +4287,8 @@ async function loadCredVault() {
 
 function _cvBucketLabel(b) {
     if (b.bucket === _cvAdminSlot) return 'Global Admin slot';
-    return b.bucket;
+    // Prefer the server-provided friendly tenant name; fall back to the id.
+    return b.name && b.name !== b.bucket ? `${b.name} (${b.bucket})` : b.bucket;
 }
 
 function _cvRenderShell() {
@@ -4299,12 +4300,6 @@ function _cvRenderShell() {
     }
     const opts = _cvBuckets.map(b =>
         `<option value="${escapeHtml(b.bucket)}"${b.bucket === _cvCurrentBucket ? ' selected' : ''}>${escapeHtml(_cvBucketLabel(b))}${b.has_psk ? '' : ' (no pass-phrase)'}</option>`).join('');
-    const adminTools = _cvIsGlobalAdmin ? `
-      <div class="flex items-center gap-2">
-        <input id="cv-other-bucket" type="text" placeholder="load tenant id…" autocomplete="off" class="px-2 py-1 text-sm border border-slate-300 rounded-md">
-        <button onclick="_cvLoadOther()" class="px-3 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Load</button>
-        <button onclick="_cvImportConsole()" title="Copy the console auto-identify login list into the Global Admin slot (automation-readable)" class="px-3 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Import console creds</button>
-      </div>` : '';
     const storageHint = _cvVaultAvailable ? '' : `
       <div class="text-xs px-3 py-2 rounded-md bg-amber-50 text-amber-700 border border-amber-200">Azure Key Vault is not configured — secrets are stored locally (encrypted in hub state). Configure a vault under Setup → Azure → Key Vault to store them there instead.</div>`;
     host.innerHTML = `
@@ -4315,7 +4310,6 @@ function _cvRenderShell() {
             <label class="text-xs font-bold text-slate-500 uppercase tracking-wider">Bucket</label>
             <select id="cv-bucket-select" onchange="_cvSwitchBucket(this.value)" class="px-3 py-1.5 text-sm border border-slate-300 rounded-md bg-white">${opts}</select>
           </div>
-          ${adminTools}
         </div>
         <div class="flex items-center gap-2">
           <button onclick="_cvSetPskModal()" class="px-3 py-1.5 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Set / change pass-phrase</button>
@@ -4327,14 +4321,6 @@ function _cvRenderShell() {
 }
 
 function _cvSwitchBucket(v) { _cvCurrentBucket = v; _cvRenderBucketBody(); }
-
-async function _cvLoadOther() {
-    const v = (document.getElementById('cv-other-bucket')?.value || '').trim();
-    if (!v) return;
-    if (!_cvBuckets.some(b => b.bucket === v)) _cvBuckets.push({ bucket: v, has_psk: false, secret_count: 0 });
-    _cvCurrentBucket = v;
-    _cvRenderShell();
-}
 
 async function _cvRenderBucketBody() {
     const el = document.getElementById('cv-secrets');
@@ -4559,31 +4545,6 @@ async function _cvDoDelete(enc) {
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
-// Migrate the console auto-identify login list into the Global Admin slot as a
-// hub-mode (automation-readable) secret, so the console seed loop can pull it
-// unattended alongside every other credential. Requires the __admin__ PSK.
-function _cvImportConsole() {
-    const body = `
-      <h3 class="text-lg font-bold text-[#263040]">Import console credentials</h3>
-      <p class="text-sm text-slate-500">Copies the current console auto-identify login list into the <b>Global Admin slot</b> as an automation-readable secret (<code>console-auto-credentials</code>). The console seed loop then pulls it from the vault unattended. Set the Global Admin slot pass-phrase first if you haven't.</p>
-      <input id="cv-imp-psk" type="password" autocomplete="off" placeholder="Global Admin slot pass-phrase" class="${_CV_INP}">
-      <div class="flex justify-end gap-2 pt-2">
-        <button onclick="document.getElementById('cv-imp-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
-        <button onclick="_cvDoImportConsole()" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Import</button>
-      </div>`;
-    openModal('cv-imp-modal', body, { backdropClose: true });
-}
-
-async function _cvDoImportConsole() {
-    const psk = document.getElementById('cv-imp-psk')?.value || '';
-    try {
-        const d = await apiJson('/api/console/credentials/to-vault', { method: 'POST', body: JSON.stringify({ psk }) });
-        document.getElementById('cv-imp-modal')?.remove();
-        showToast(`Imported ${d.count} console credential(s) into the Global Admin slot`, 'success');
-        _cvCurrentBucket = _cvAdminSlot;
-        loadCredVault();
-    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
-}
 // ──────────────────────────────────────────────────────────────────
 
 function _renderLogsSection(subMenu) {
