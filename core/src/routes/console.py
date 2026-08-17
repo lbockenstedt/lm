@@ -91,6 +91,7 @@ def register(app, hub, ctx):
     """Register console routes on the Hub app."""
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
+    _has_console_write_access = ctx._has_console_write_access
     _resolve_tenant = ctx._resolve_tenant
 
     @app.websocket("/ws/console/{session_id}")
@@ -770,14 +771,17 @@ def register(app, hub, ctx):
 
     @app.post("/api/console/identify-llm")
     async def console_identify_llm(request: Request):
-        """Profile ONE device (admin, on-demand). Fingerprint-first: a device the
+        """Profile ONE device (on-demand). Fingerprint-first: a device the
         built-in/learned fingerprint DB already recognizes is resolved WITHOUT the
         AI; only an unknown device is relayed (scrubbed) to the LLM, which may run
         spoke-validated read-only commands to identify it. Clicking this button is
-        the explicit opt-in, so no global toggle gates it."""
+        the explicit opt-in, so no global toggle gates it. Open to the console
+        WRITE tier (Global Admin, tenant admin, or a ``console_write`` user); the
+        per-port ``_assert_port_tenant`` guard then confines a non-admin to a port
+        it can see (own-dedicated, or a shared device in its subnet)."""
         sess = _session_user(request)
-        if not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="admin only")
+        if not (_is_admin(sess) or _has_console_write_access(sess)):
+            raise HTTPException(status_code=403, detail="Console write access required")
         hub = app.state.hub
         try:
             body = await request.json()
@@ -798,14 +802,18 @@ def register(app, hub, ctx):
 
     @app.post("/api/console/identify-llm-all")
     async def console_identify_llm_all(request: Request):
-        """Profile EVERY visible console port at once (admin, on-demand). Each port
-        is fingerprint-first (known devices resolve without the AI); only unknown
+        """Profile EVERY visible console port at once (on-demand). Each port is
+        fingerprint-first (known devices resolve without the AI); only unknown
         ones are relayed (scrubbed) to the LLM. Runs in the background with bounded
         concurrency and returns immediately — results stream back through the
-        normal probe/port refresh. Ports a user currently has open are skipped."""
+        normal probe/port refresh. Ports a user currently has open are skipped.
+        Open to the console WRITE tier (Global Admin, tenant admin, or a
+        ``console_write`` user); the target list is the caller's tenant-scoped
+        visible ports (``_list_visible_console_ports``), so a non-admin only
+        profiles the ports it can see."""
         sess = _session_user(request)
-        if not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="admin only")
+        if not (_is_admin(sess) or _has_console_write_access(sess)):
+            raise HTTPException(status_code=403, detail="Console write access required")
         hub = app.state.hub
         data = await _list_visible_console_ports(request)  # tenant-scoped like the list view
         all_ports = data.get("ports") or []
