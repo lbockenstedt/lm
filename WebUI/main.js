@@ -4501,9 +4501,9 @@ function _cvAddSecretModal(preset) {
     const pMode = editing ? (preset.mode || 'psk') : '';
     const body = `
       <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} secret — ${escapeHtml(_cvBucketLabel({ bucket: _cvCurrentBucket }))}</h3>
-      <input id="cv-add-name" type="text" autocomplete="off" ${nameAttrs} class="${_CV_INP}${editing ? ' bg-slate-100 text-slate-500' : ''}">
+      <input id="cv-add-name" type="text" autocomplete="off" ${nameAttrs} title="A name to identify this secret within the bucket (e.g. 'HE.NET DDNS key', 'Cloudflare token')" class="${_CV_INP}${editing ? ' bg-slate-100 text-slate-500' : ''}">
       <div class="flex gap-2">
-        <select id="cv-add-type" onchange="_cvRenderAddFields()" ${editing ? 'disabled' : ''} class="${_CV_INP}">
+        <select id="cv-add-type" onchange="_cvRenderAddFields()" ${editing ? 'disabled' : ''} class="${_CV_INP}" title="Secret shape — DNS-01 = Let's Encrypt DNS provider creds; HE.NET DDNS key = Hurricane Electric public DNS (shared with LE); others are generic login/key/token">
           <option value="login"${sel(pType, 'login')}>Login (username + password)</option>
           <option value="apikey"${sel(pType, 'apikey')}>API key</option>
           <option value="token"${sel(pType, 'token')}>Token</option>
@@ -4519,7 +4519,7 @@ function _cvAddSecretModal(preset) {
       ${editing ? '<p class="text-[11px] text-slate-400">Re-enter the values below to overwrite this secret. Name, type and mode are fixed — delete and re-add to change them.</p>' : ''}
       <div id="cv-add-fields"></div>
       <input id="cv-add-desc" type="text" autocomplete="off" value="${editing ? escapeHtml(preset.description || '') : ''}" placeholder="description (optional)" class="${_CV_INP}">
-      <input id="cv-add-psk" type="password" autocomplete="off" placeholder="bucket pass-phrase (the one you set for this bucket)" class="${_CV_INP}">
+      <input id="cv-add-psk" type="password" autocomplete="off" placeholder="bucket pass-phrase (the one you set for this bucket)" title="The bucket pass-phrase you set — required to encrypt/store the secret" class="${_CV_INP}">
       <div class="flex justify-end gap-2 pt-2">
         <button onclick="document.getElementById('cv-add-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
         <button onclick="_cvDoAddSecret()" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Save</button>
@@ -4572,7 +4572,7 @@ function _cvRenderAddFields() {
         // (the hub reads it without a pass-phrase), so force + lock hub mode.
         el.innerHTML = `
           <label class="block text-[11px] text-slate-500 mb-0.5">HE DDNS key (per-record "dynamic DNS" key from dns.he.net)</label>
-          ${f('cv-f-henet-key', 'HE DDNS key', 'password')}`;
+          <input id="cv-f-henet-key" type="password" autocomplete="off" placeholder="HE DDNS key" title="The per-record 'dynamic DNS' key generated in the dns.he.net UI — the hub uses it to push A/AAAA records unattended" class="${_CV_INP}">`;
         const modeSel = document.getElementById('cv-add-mode');
         if (modeSel) { modeSel.value = 'hub'; modeSel.disabled = true; }
         return;
@@ -22083,10 +22083,10 @@ async function showHenetRecordModal(editItem) {
     const modal = openModal('henet-record-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} HE.NET Record</h3>
         <div class="space-y-3">
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Name</label><input id="henet-r-name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="host.example.com" ${editing ? 'readonly' : ''}></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Type</label><select id="henet-r-type" class="${inputCls}" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Value (IP)</label><input id="henet-r-value" value="${val(editItem?.value)}" class="${inputCls}" placeholder="203.0.113.5"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="henet-r-ttl" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Name</label><input id="henet-r-name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="host.example.com" title="Fully-qualified DNS record name to manage at HE.NET (e.g. host.example.com) — must have dynamic DNS enabled at dns.he.net" ${editing ? 'readonly' : ''}></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Type</label><select id="henet-r-type" class="${inputCls}" title="Record type: A (IPv4) or AAAA (IPv6) — HE's dyndns endpoint only updates A/AAAA" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Value (IP)</label><input id="henet-r-value" value="${val(editItem?.value)}" class="${inputCls}" placeholder="203.0.113.5" title="IP address the record resolves to (A = IPv4, AAAA = IPv6)"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="henet-r-ttl" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}" title="Time-to-live in seconds (minimum 60; default 300)"></div>
             <p class="text-[11px] text-slate-400">Pushed to HE.NET with the assigned DDNS credential${cred ? ` (<span class="font-mono">🔐 ${escapeHtml(cred.name)}</span>)` : ''}. The key never leaves the hub.</p>
         </div>
         <div class="flex justify-end gap-2 pt-2">
@@ -22115,7 +22115,7 @@ async function showHenetCredModal() {
         <p class="text-sm text-slate-500">The HE.NET module uses this Credential Vault secret to push records — assign it once and you won't be asked per record. Add a key under <b>Credential Vault → + Add secret → HE.NET DDNS key</b> (automation mode), or reuse an existing Let's Encrypt <b>Hurricane Electric</b> DNS-01 credential — the same HE key works for both.</p>
         <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">DDNS credential</label>
           ${creds.length
-            ? `<select id="henet-assign-cred" class="${inputCls}">${opts}</select>`
+            ? `<select id="henet-assign-cred" class="${inputCls}" title="Credential Vault HE.NET DDNS key — or a shared Let's Encrypt Hurricane Electric credential — used to push records unattended">${opts}</select>`
             : `<p class="text-sm text-amber-600 italic">No automation-readable HE.NET credential found in the Credential Vault. Add an “HE.NET DDNS key” (or a Hurricane Electric DNS-01) secret first.</p>`}
         </div>
         <div class="flex justify-end gap-2 pt-2">

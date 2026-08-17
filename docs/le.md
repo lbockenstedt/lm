@@ -46,6 +46,22 @@ Background `_renew_loop`: daily reconcile of ledger vs `/etc/letsencrypt/live`, 
 - TLS-ALPN-01: `--preferred-challenges tls-alpn-01`. certbot ships no authenticator for this challenge by default — it requires a TLS-ALPN-01 plugin installed on the host (le does not auto-install one).
 - Certs stored in certbot's native `/etc/letsencrypt/live/<name>/` layout so `certbot renew`/standard tooling still work; the LM ledger is the parallel index.
 
+## DNS-01 credentials via the Credential Vault
+
+DNS-01 provider credentials are now managed in the hub-side **[Credential
+Vault](credential-vault.md)** rather than typed into the LE form each time. Add a
+`dns` (DNS-01) secret in the vault — e.g. Cloudflare API token, Route 53 keys,
+RFC 2136 TSIG, or **Hurricane Electric (account login)** — then pick it in the
+issue-cert form. The module stores only a `{bucket, name}` reference; the hub
+resolves the plaintext unattended at issue time (`_le_resolve_vault_dns_cred`,
+`core/src/routes/net_services.py`) and hands certbot the INI — the secret value
+never reaches the browser. The tenant's chosen reference persists in
+`global_config["le_vault_dns_creds"]` and re-syncs to the spoke on reconnect
+(`core/src/le_cache.py`). The Hurricane Electric credential is **shared with the
+HE.NET External-DNS module** — one vault entry serves both (see [henet.md](henet.md)).
+The legacy per-spoke `/etc/lm-le/dns-<provider>.ini` path still works for
+existing named credentials, but new ones should go in the vault.
+
 ## Key files
 
 `src/control_plane.py` (`LEControlPlane`, `run_hub_mode`), `src/le_spoke.py` (`LESpoke` + renewal loop), `src/acme.py` (certbot wrapper: `issue`/`renew`/`revoke`/`list_certs`/`read_material`/`expiring`), `src/ledger.py` (`Ledger` atomic JSON — `upsert_cert`/`add_target`/`remove_target`/`target_key`), `install_le.sh`, `tests/test_acme.py`, `tests/test_le_spoke.py`, `tests/test_ledger.py`, `requirements.txt`, `VERSION`.
@@ -69,7 +85,7 @@ Background `_renew_loop`: daily reconcile of ledger vs `/etc/letsencrypt/live`, 
 
 ## How to use it
 
-1. **Issue a certificate.** In the Certificate Management view, provide the domain, a contact email, and a challenge type (`http`, `dns`, or `tls-alpn`). For `http`, make sure port 80 on this host is reachable from the internet and DNS for the domain already points here. For `dns`, pick a DNS provider and supply its API credentials — le writes them to a locked-down file and never logs them. For `tls-alpn`, a TLS-ALPN-01 authenticator plugin must be installed on the host. You can optionally seed one or more distribution targets (module type + identifier) at issue time.
+1. **Issue a certificate.** In the Certificate Management view, provide the domain, a contact email, and a challenge type (`http`, `dns`, or `tls-alpn`). For `http`, make sure port 80 on this host is reachable from the internet and DNS for the domain already points here. For `dns`, pick a saved **[Credential Vault](credential-vault.md)** DNS-01 secret (or a provider + credentials to enter manually — le writes them to a locked-down file and never logs them). For `tls-alpn`, a TLS-ALPN-01 authenticator plugin must be installed on the host. You can optionally seed one or more distribution targets (module type + identifier) at issue time.
 2. **Enable/disable a distribution target — right on the Certificates list.** Each cert row has a **Distribute** strip listing every connected cert-capable spoke/agent as a chip: click a grey **`+`** chip to **enable** distribution to that node, or click a green **`✓`** chip to **disable** it (it turns red on hover to signal the click stops distribution). The status badges above the strip show each enabled target's last push result (✓/✗) and click-to-deploy that cert to just that target. (The Manage modal offers the same add/remove plus removing targets whose spoke is currently offline.)
 3. **Renew a certificate.** Renew a single domain, or trigger renewal for everything le manages. le also renews automatically as certs approach their 30-day expiry window — manual renew is mainly for testing or forcing a push after a target-list change.
 4. **Revoke a certificate.** Revoking calls certbot's revoke (optionally deleting the local material) and removes the domain from le's ledger — any target spokes keep serving the old cert until it expires or is replaced, since revoke doesn't push anything to targets.

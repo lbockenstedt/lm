@@ -4,6 +4,66 @@ Feature reference for the Lab Manager system — so you can look up what each th
 
 The canonical doc set lives here in `lm/docs/`. Each separate repo also carries a `docs/` with its own feature page + the shared topology page (pointing back here for the full set).
 
+## Installation — start here
+
+All install commands in one place. Installers are **idempotent** — re-running one
+updates code and preserves credentials. Every flag and env var is in
+[install-flags.md](install-flags.md) and [environment-variables.md](environment-variables.md).
+
+### 1. Hub (start here)
+
+Interactive bootstrap — this box becomes the hub + WebUI (with an optional
+checklist of co-located module roles), or a remote agent:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_menu.sh | sudo bash
+```
+
+Non-interactive hub-only (what the menu calls underneath):
+
+```bash
+sudo bash /opt/lm/install_all.sh --hub-only
+```
+
+### 2. Agent (every remote node)
+
+One agent **hosts many module roles at once** — each loaded role opens its own
+auto-approving sub-spoke. Assign roles from the WebUI, or pre-load them here.
+`dns`, `dhcp`, and `henet` need **no installer** — just load the role:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \
+  | sudo bash -s -- --hub HUB --roles dns,dhcp,henet
+```
+
+Roles: `dns dhcp network netbox opnsense ldap simulation cppm proxmox le console statuspage proxy truenas`.
+
+### 3. Per-module standalone installers
+
+Each module is its own repo with its own installer. Unless noted they take the
+same core flags (`--hub`, `--id`/`--name`, `--secret`, `--hub-secret`,
+`--all-prereqs`) and accept a bare hostname for `--hub`.
+
+| Module | Installer | One-liner |
+| :--- | :--- | :--- |
+| **lm** (hub) | `install_menu.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_menu.sh \| sudo bash` |
+| **agent** (any role) | `lm/agent/install_agent.sh` | `curl -sSL .../lm/main/agent/install_agent.sh \| sudo bash -s -- --hub HUB --roles <csv>` |
+| **cs** (simulation) | `cs/install_cs.sh` | `curl -sSL .../cs/main/install_cs.sh \| sudo bash -s -- --hub HUB` |
+| **pxmx** (hypervisor) | `pxmx/install_pxmx.sh` | `curl -sSL .../pxmx/main/install_pxmx.sh \| sudo bash -s -- --hub HUB` |
+| **netbox** (IPAM) | `netbox/install.sh` | `curl -sSL .../netbox/main/install.sh \| sudo bash -s -- --hub HUB` |
+| **opnsense** (firewall) | `opnsense/install_opnsense.sh` | `curl -sSL .../opnsense/main/install_opnsense.sh \| sudo bash -s -- --hub HUB` |
+| **cppm** (NAC) | `cppm/install.sh` | `curl -sSL .../cppm/main/install.sh \| sudo bash -s -- --hub HUB` |
+| **ldap** (directory) | `ldap/install_ldap.sh` | `curl -sSL .../ldap/main/install_ldap.sh \| sudo bash -s -- --hub HUB` |
+| **nw** (network devices) | `nw/install_nw.sh` | `curl -sSL .../nw/main/install_nw.sh \| sudo bash -s -- --hub HUB` |
+| **le** (certificates) | `le/install_le.sh` | `curl -sSL .../le/main/install_le.sh \| sudo bash -s -- --hub HUB` |
+| **truenas** (storage) | `truenas/install_truenas.sh` | `curl -sSL .../truenas/main/install_truenas.sh \| sudo bash -s -- --hub HUB` |
+| **bugfixer** | `bugfixer/install.sh` | `curl -sSL .../bugfixer/main/install.sh \| bash -s -- wss://HUB` |
+| **dns**, **dhcp**, **henet** | *(no installer — agent roles)* | Load the `dns` / `dhcp` / `henet` role (§2), or run `/opt/lm/<mod>/install_<mod>.sh` |
+
+Full one-liners (with the complete raw.githubusercontent.com paths) and every
+flag live in the repo-root `README.md` **Installation** block and in
+[install-flags.md](install-flags.md).
+
 ## Overview
 
 - [architecture-topology.md](architecture-topology.md) — the backbone: hub/spoke/agent mesh, WebSocket + TLS scheme (unified `:443`, `/ws/spoke` + `/ws/agent` byte-proxy), mDNS/DNS discovery, message signing & keys, onboarding & clone detection, log relay, self-update & rollback, state & tenancy, module-type → spoke → repo map. **Start here.**
@@ -12,6 +72,7 @@ The canonical doc set lives here in `lm/docs/`. Each separate repo also carries 
 
 - [lm-hub.md](lm-hub.md) — the hub: `LabManagerHub`, FastAPI route groups, background loops, security, state, update pipeline, logging, dep guard.
 - [webui.md](webui.md) — the browser UI: panels/tabs, view router, HTTP+WS comms.
+- [credential-vault.md](credential-vault.md) — hub-side encrypted secret store (buckets, `psk` vs automation-readable `hub` modes, Azure Key Vault / local Fernet); the `{bucket,name}` reference + server-side resolve pattern LE / HE.NET / Console use.
 - [generic-agent.md](generic-agent.md) — the agent-spoke `_ROLE_MAP` role loader (11 hosted roles + bugfixer/netbox-server deploy roles). The legacy `GenericLeafAgent` leaf was removed.
 
 ## Spokes
