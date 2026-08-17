@@ -4295,7 +4295,13 @@ function _cvRenderShell() {
     const host = document.getElementById('credvault-content');
     if (!host) return;
     if (!_cvBuckets.length) {
-        host.innerHTML = `<div class="hpe-card rounded-lg p-5 shadow-sm"><p class="text-sm text-slate-500 italic">No buckets are reachable for your account.</p></div>`;
+        // A Global Admin always gets the __admin__ slot (and every tenant
+        // bucket) from the server, so an empty list here means the account is
+        // NOT a Global Admin (a tenant-admin with no tenant buckets). Explain
+        // the role scoping instead of showing a dead-end.
+        const help = `<p class="text-sm text-slate-600">No credential buckets are reachable for your account.</p>
+               <p class="text-xs text-slate-500">The Credential Vault is scoped by role: a <b>tenant-admin</b> can only access buckets for tenants assigned to their account, and a <b>Global Admin</b> additionally gets a shared admin slot. Your account currently has no reachable tenant buckets — ask a Global Admin to assign your user to a tenant, or to grant Global Admin rights.</p>`;
+        host.innerHTML = `<div class="hpe-card rounded-lg p-5 shadow-sm space-y-2">${help}</div>`;
         return;
     }
     const opts = _cvBuckets.map(b =>
@@ -4329,8 +4335,16 @@ async function _cvRenderBucketBody() {
     try {
         const d = await apiJson('/tenant/cred-vault/secrets?bucket=' + encodeURIComponent(_cvCurrentBucket));
         const secrets = d.secrets || [];
+        // Sync the authoritative has_psk from the read back into the bucket record
+        // so the "+ Add secret" guard (and the dropdown label) reflect reality —
+        // e.g. a Global-Admin-loaded bucket whose PSK state wasn't known upfront.
+        const _cur = _cvBuckets.find(b => b.bucket === _cvCurrentBucket);
+        if (_cur) _cur.has_psk = !!d.has_psk;
         if (!d.has_psk) {
-            el.innerHTML = `<p class="text-sm text-amber-600">This bucket has no pass-phrase yet. Set one before adding secrets.</p>`;
+            el.innerHTML = `<div class="text-sm text-amber-600 space-y-2">
+              <p>This bucket has no pass-phrase yet. A pass-phrase is required before you can add or reveal secrets.</p>
+              <button onclick="_cvSetPskModal()" class="px-3 py-1.5 text-xs rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Set a pass-phrase</button>
+            </div>`;
             return;
         }
         if (!secrets.length) {
@@ -4395,6 +4409,14 @@ async function _cvDoSetPsk() {
 }
 
 function _cvAddSecretModal() {
+    // A write always needs the bucket pass-phrase (server-enforced). Steer the
+    // operator to set one first instead of letting the save fail with an error.
+    const cur = _cvBuckets.find(b => b.bucket === _cvCurrentBucket);
+    if (!cur || !cur.has_psk) {
+        showToast('Set a bucket pass-phrase first, then add secrets.', 'error');
+        _cvSetPskModal();
+        return;
+    }
     const body = `
       <h3 class="text-lg font-bold text-[#263040]">Add secret — ${escapeHtml(_cvBucketLabel({ bucket: _cvCurrentBucket }))}</h3>
       <input id="cv-add-name" type="text" autocomplete="off" placeholder="secret name (e.g. henet-dns)" class="${_CV_INP}">
@@ -4412,7 +4434,7 @@ function _cvAddSecretModal() {
       </div>
       <div id="cv-add-fields"></div>
       <input id="cv-add-desc" type="text" autocomplete="off" placeholder="description (optional)" class="${_CV_INP}">
-      <input id="cv-add-psk" type="password" autocomplete="off" placeholder="bucket pass-phrase" class="${_CV_INP}">
+      <input id="cv-add-psk" type="password" autocomplete="off" placeholder="bucket pass-phrase (the one you set for this bucket)" class="${_CV_INP}">
       <div class="flex justify-end gap-2 pt-2">
         <button onclick="document.getElementById('cv-add-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
         <button onclick="_cvDoAddSecret()" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Save</button>
