@@ -83,6 +83,17 @@ async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
                      domain or "<unknown>")
         return summary
     logger.info("[cert] distributing %s to %d target(s)", domain, len(targets))
+    # Push the "hub" target LAST. Installing a (non-wildcard) cert on the hub
+    # itself (install_on_hub) schedules a full `systemctl restart lm`, which
+    # tears down EVERY spoke connection — including the le spoke this very
+    # distribution keeps talking to (LE_GET_CERT already ran above, but each
+    # target still fires an LE_MARK_DISTRIBUTED) and any other target spoke not
+    # yet pushed. If the hub is processed mid-list, the restart severs those
+    # connections and the remaining targets fail with a spurious "spoke not
+    # connected". Ordering the hub last makes the disruptive self-restart the
+    # final act of the sweep, so every other target (and its ledger mark)
+    # completes first. Stable sort — non-hub relative order is preserved.
+    targets = sorted(targets, key=lambda _t: 1 if _t.get("module_type") == "hub" else 0)
     mat = await rr(le_spoke_id, "LE_GET_CERT", {"domain": domain}, timeout=15.0)
     mat_ret = unwrap_spoke(mat)
     if not (isinstance(mat_ret, dict) and mat_ret.get("status") == "SUCCESS"):

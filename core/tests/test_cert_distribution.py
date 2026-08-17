@@ -343,6 +343,41 @@ def test_distribute_hub_target_calls_install_on_hub():
         and marks[0]["data"]["status"] == "SUCCESS"
 
 
+def test_distribute_processes_hub_target_last():
+    """Installing a cert on the hub self-restarts it (systemctl restart lm),
+    tearing down every spoke connection. So even when the hub is listed FIRST,
+    distribution must push every OTHER target — and record its ledger mark —
+    BEFORE the hub install schedules that restart. Guards against the spurious
+    'Certificate spoke not connected' a mid-list hub restart caused."""
+    rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok(),
+                           (_FW, "INSTALL_CERT"): _install_ok()})
+    get_by_type = lambda mt, ident="": (_FW if mt == "firewall" else None)
+    order = []
+
+    async def install_on_hub(domain, fullchain, privkey, chain, identifier):
+        order.append("hub-install")
+        return {"status": "SUCCESS", "message": "installed on hub"}
+
+    # Hub listed FIRST, firewall SECOND — must still push firewall first.
+    summary = _run(cd.distribute_cert_to_targets(
+        rr, get_by_type, cd.CERT_CAPABLE_MODULES, _LE, "hub.example.com",
+        [{"module_type": "hub"}, {"module_type": "firewall"}],
+        install_on_hub=install_on_hub))
+    assert all(s["status"] == "SUCCESS" for s in summary)
+    # The firewall INSTALL_CERT relay ran before the hub self-install.
+    fw_install_idx = next(i for i, c in enumerate(calls) if c["cmd"] == "INSTALL_CERT")
+    fw_mark_idx = next(i for i, c in enumerate(calls)
+                       if c["cmd"] == "LE_MARK_DISTRIBUTED"
+                       and c["data"]["module_type"] == "firewall")
+    hub_mark_idx = next(i for i, c in enumerate(calls)
+                        if c["cmd"] == "LE_MARK_DISTRIBUTED"
+                        and c["data"]["module_type"] == "hub")
+    assert order == ["hub-install"]
+    # Firewall push + its ledger mark precede the hub's ledger mark (the hub's
+    # install — and thus its restart — is the final step).
+    assert fw_install_idx < hub_mark_idx and fw_mark_idx < hub_mark_idx
+
+
 def test_distribute_hub_target_without_callable_records_error():
     """No install_on_hub wired → a hub target records a clear ERROR (visible,
     not silently dropped). "hub" is in CERT_CAPABLE_MODULES so it does NOT take
