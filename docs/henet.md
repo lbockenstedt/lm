@@ -12,7 +12,7 @@ Pure HE-API client — no local server, no daemon to manage. Runs as the **`hene
 
 Manages public DNS A/AAAA records hosted at Hurricane Electric. Each record is pushed to HE's dyndns endpoint, which authenticates the update with a per-record **DDNS key** (the "Enable entry for dynamic DNS" key generated in the dns.he.net UI). The module tracks the set of records it manages in a small local JSON state file so the WebUI can list what's under management and show each record's last push result.
 
-In the WebUI, open the **HE.NET** module from the sidebar to reach the **Records** view — add/edit/delete managed records and re-push them all with **Sync all**.
+In the WebUI, HE.NET lives **under the DNS module** ("all things DNS"): open **DNS → HE.NET** tab to reach the records view — an admin can add/edit/delete managed records and re-push them all with **Sync all**; a non-admin DNS viewer sees the records read-only.
 
 ## Credential Vault (DDNS key) — exactly like the LE module
 
@@ -45,11 +45,11 @@ Talks to Hurricane Electric's fixed dyndns endpoint `https://dyn.dns.he.net/nic/
 
 ## Hub API endpoints (`core/src/routes/net_services.py`)
 
-`GET /api/henet/records`, `GET /api/henet/status`, `POST/PUT/DELETE /api/henet/record`, `POST /api/henet/sync`. Writes are **Global-Admin-only** (`api.py` `_ADMIN_INFRA_WRITE_PREFIXES` includes `/api/henet/`), because HE.NET is public-address-space infra with no per-tenant object model. Read/nav visibility is gated by the `henet` module right (`access.py`).
+`GET /api/henet/records`, `GET /api/henet/status`, `POST/PUT/DELETE /api/henet/record`, `POST /api/henet/sync`. Writes are **Global-Admin-only** (`api.py` `_ADMIN_INFRA_WRITE_PREFIXES` includes `/api/henet/`), because HE.NET is public-address-space infra with no per-tenant object model. **Reads** are gated like the DNS module — the `dns` right OR the explicit `henet` right OR admin — so anyone who can view DNS can also view HE.NET records (`api.py` `/api/henet/` read gate; `access.py`).
 
 ## WebUI
 
-Module view: **Records** — status line (HE dyndns reachable? + managed-record count), a records table (Name / Type / Value / TTL / Last Push), and admin-only **+ Add Record** / **Sync all** actions. The Add/Edit modal includes a **HE DDNS credential** picker populated from Credential Vault secrets of type `henet`. Add a key under **Credential Vault → + Add secret → HE.NET DDNS key** (automation mode is forced).
+HE.NET is a subtab of the **DNS** module (the DNS nav item covers Unbound *and* HE.NET). **DNS → HE.NET** shows a status line (HE dyndns reachable? + managed-record count) and a records table (Name / Type / Value / TTL / Last Push). Management — **+ Add Record** / edit / delete / **Sync all** — is admin-only; a non-admin DNS viewer sees the table read-only. The Add/Edit modal includes a **HE DDNS credential** picker populated from Credential Vault secrets of type `henet`. Add a key under **Credential Vault → + Add secret → HE.NET DDNS key** (automation mode is forced). The HE.NET tab appears once a `henet` spoke is connected.
 
 ## Key files
 

@@ -400,8 +400,7 @@ const MODULE_CLASSES = {
     'Firewalls': ['opnsense', 'pfsense', 'juniper', 'fortigate'],
     'IPAM': ['netbox', 'phpipam'],
     'Security/NAC': ['cppm', 'ise'],
-    'DNS': ['dns'],
-    'HE.NET': ['henet'],
+    'DNS': ['dns', 'henet'],
     'DHCP': ['dhcp'],
     'Network': ['nw'],
     'Simulations': ['cs'],
@@ -409,6 +408,13 @@ const MODULE_CLASSES = {
     'Storage': ['truenas'],
     'Console': ['console']
 };
+
+// Multi-product classes that render ONE unified primary view, surfacing the
+// other products as subtabs instead of as separate nav items. DNS is "all
+// things DNS": the Unbound `dns` view (Records/Statistics/Forwarders) plus an
+// HE.NET (Hurricane Electric public DNS) subtab. The `henet` product has no
+// standalone view — it always lives under the `dns` view. See setView().
+const CLASS_PRIMARY_VIEW = { 'DNS': 'dns' };
 
 // Header module label: maps the active view/product to the nav class name shown
 // in the header (Logo | Lab Manager | <Module>). e.g. opnsense -> 'Firewalls',
@@ -1425,8 +1431,7 @@ const VIEW_SUBMENUS = {
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
-    dns: ['Records', 'Statistics', 'Forwarders'],
-    henet: ['Records'],
+    dns: ['Records', 'Statistics', 'Forwarders', 'HE.NET'],
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations'],
     nw: ['Devices', 'IP Addresses', 'VLANs', 'MAC Table', 'ARP', 'Interfaces'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
@@ -3274,7 +3279,16 @@ async function setView(viewId) {
             return;
         }
 
-        if (products.length === 1) {
+        // Some multi-product classes render ONE unified view with the other
+        // products surfaced as subtabs (DNS = Unbound Records/Statistics/
+        // Forwarders + an HE.NET subtab). Such a class pins to its primary view
+        // regardless of which product(s) are active — the henet product has no
+        // standalone view of its own, and the class name is never a real view.
+        const primaryView = CLASS_PRIMARY_VIEW[viewId];
+        if (primaryView) {
+            currentView = primaryView;
+            currentProduct = products[0];
+        } else if (products.length === 1) {
             currentView = products[0];
             currentProduct = products[0];
         } else {
@@ -3365,7 +3379,15 @@ function renderTopNav(viewId) {
     // Logs is dynamic: only show tabs for modules that are actually installed
     // (see logsSubmenu). Every other view uses its fixed VIEW_SUBMENUS list.
     const rawSubmenus = (viewId === 'logs') ? logsSubmenu() : (VIEW_SUBMENUS[viewId] || []);
-    const subMenus = rawSubmenus.filter(m => !(m === 'Simulations' && !isAdmin()));
+    const subMenus = rawSubmenus.filter(m => {
+        if (m === 'Simulations' && !isAdmin()) return false;
+        // The HE.NET subtab (under DNS) only appears once a henet spoke is
+        // actually connected/approved — mirrors "a tab shows when its spoke
+        // exists". Anyone who can see the DNS view can VIEW HE.NET records;
+        // add/edit/delete/sync stay admin-only (enforced in loadHenet + server).
+        if (m === 'HE.NET' && !(window.activeProducts && window.activeProducts.has('henet'))) return false;
+        return true;
+    });
     // Trailing help affordance for tabbed module views (esp. the table-tab
     // modules — opnsense/netbox/nw/dns/dhcp/ldap/le — whose pages are just a
     // table with no on-page section header to attach an inline icon to). Placed
@@ -3628,23 +3650,11 @@ function _viewTemplate(viewId) {
 
         case 'dns':
             return `<div class="space-y-6">
-  <div class="flex justify-end gap-2">
+  <div id="dns-actions" class="flex justify-end gap-2">
     ${addServerButtonHtml('dns', 'DNS')}
     ${(isAdmin() || isTenantAdmin()) ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" class="${btn}">+ Add Record</button>` : ''}
   </div>
   <div id="dns-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
-</div>`;
-
-        case 'henet':
-            return `<div class="space-y-6">
-  <div class="flex flex-wrap items-center justify-between gap-2">
-    <div id="henet-status" class="text-xs text-slate-500"></div>
-    <div class="flex gap-2">
-      ${isAdmin() ? `<button onclick="showHenetRecordModal()" class="${btn}">+ Add Record</button>` : ''}
-      ${isAdmin() ? `<button onclick="syncHenet()" class="${btn}" title="Re-push every managed A/AAAA record to HE.NET">↻ Sync all</button>` : ''}
-    </div>
-  </div>
-  <div id="henet-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;
 
         case 'dhcp':
@@ -4179,9 +4189,6 @@ function initView(viewId, subView) {
             break;
         case 'dns':
             loadDNSData(subView || 'Records');
-            break;
-        case 'henet':
-            loadHenet();
             break;
         case 'dhcp':
             loadDHCPData(subView || 'Overview');
@@ -9593,7 +9600,6 @@ const LM_NAV_ICONS = [
     { id: 6,  name: 'Security/NAC', key: 'cppm',       svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>' },
     { id: 7,  name: 'Simulations',  key: 'cs',         svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"></path></svg>' },
     { id: 8,  name: 'DNS',          key: 'dns',        svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.6 9h16.8M3.6 15h16.8M11.5 3a17 17 0 000 18M12.5 3a17 17 0 010 18"></path></svg>' },
-    { id: 138, name: 'HE.NET',       key: 'henet',      svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.6 9h16.8M3.6 15h16.8M11.5 3a17 17 0 000 18M12.5 3a17 17 0 010 18"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10v4m0-2h3m0-2v4m5-4v4m0-2h-1.5"></path></svg>' },
     { id: 9,  name: 'DHCP',         key: 'dhcp',       svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 3.75H6.912a2.25 2.25 0 00-2.15 1.588L2.35 13.177a2.25 2.25 0 00-.1.661V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18v-4.162c0-.224-.034-.447-.1-.661L19.24 5.338a2.25 2.25 0 00-2.15-1.588H15M2.25 13.5h3.86a2.25 2.25 0 012.012 1.244l.256.512a2.25 2.25 0 002.013 1.244h3.218a2.25 2.25 0 002.013-1.244l.256-.512a2.25 2.25 0 012.013-1.244h3.859M12 3v8.25m0 0l-3-3m3 3l3-3"></path></svg>' },
     { id: 10, name: 'Certificates', key: 'le',         svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m-6-8h6M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14.5 19.5l1.5 1.5 2.5-2.5"></path></svg>' },
     { id: 11, name: 'Reports',      key: 'reports',    svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M8 17V11m4 6V7m4 10v-4M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>' },
@@ -19216,6 +19222,16 @@ async function _ddSyncStatusLine(side) {
 async function loadDNSData(subMenu) {
     const container = document.getElementById('dns-content');
     if (!container) return;
+    // HE.NET subtab: "all things DNS" also covers Hurricane Electric public
+    // DNS. It renders its own self-contained UI (status + admin actions +
+    // records table) into the shared dns-content pane, so hide the Unbound
+    // header actions and hand off to loadHenet.
+    const dnsActions = document.getElementById('dns-actions');
+    if (subMenu === 'HE.NET') {
+        if (dnsActions) dnsActions.classList.add('hidden');
+        return loadHenet();
+    }
+    if (dnsActions) dnsActions.classList.remove('hidden');
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
     const addBtn = document.getElementById('dns-add-btn');
     // Add-record only applies to the Records tab; Statistics/Forwarders are read-only.
@@ -21856,36 +21872,44 @@ function _henetPushBadge(r) {
 }
 
 async function loadHenet() {
-    const container = document.getElementById('henet-content');
+    const container = document.getElementById('dns-content');
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
     const th = tableHead, tw = tableWrap;
+    const admin = isAdmin();
+    const btnCls = 'bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold shadow-sm';
     const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
 
     // Status line (HE dyndns reachability + record count).
-    const statusEl = document.getElementById('henet-status');
-    if (statusEl) {
-        try {
-            const s = await _spokeFetch('/api/henet/status');
-            if (s.ok && s.data && s.data.status === 'SUCCESS') {
-                const dot = s.data.reachable ? 'text-emerald-600' : 'text-amber-600';
-                statusEl.innerHTML = `<span class="${dot} font-medium">● HE dyndns ${s.data.reachable ? 'reachable' : 'unreachable'}</span> · ${s.data.record_count} managed record(s)`;
-            } else {
-                statusEl.textContent = '';
-            }
-        } catch (e) { statusEl.textContent = ''; }
-    }
+    let statusHtml = '';
+    try {
+        const s = await _spokeFetch('/api/henet/status');
+        if (s.ok && s.data && s.data.status === 'SUCCESS') {
+            const dot = s.data.reachable ? 'text-emerald-600' : 'text-amber-600';
+            statusHtml = `<span class="${dot} font-medium">● HE dyndns ${s.data.reachable ? 'reachable' : 'unreachable'}</span> · ${s.data.record_count} managed record(s)`;
+        }
+    } catch (e) { /* status is best-effort */ }
+
+    // Admin-only action bar (add/sync). A non-admin DNS viewer sees the records
+    // read-only — writes are Global-Admin-only server-side.
+    const actionBar = `<div class="flex flex-wrap items-center justify-between gap-2 mb-3">
+        <div class="text-xs text-slate-500">${statusHtml}</div>
+        <div class="flex gap-2">
+          ${admin ? `<button onclick="showHenetRecordModal()" class="${btnCls}">+ Add Record</button>` : ''}
+          ${admin ? `<button onclick="syncHenet()" class="${btnCls}" title="Re-push every managed A/AAAA record to HE.NET">↻ Sync all</button>` : ''}
+        </div>
+      </div>`;
 
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/records');
         if (!ok) {
-            container.innerHTML = `${_spokeErrorBanner(detail, 'HE.NET spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Load the “HE.NET” role on an agent and store an HE DDNS key in the Credential Vault (secret type “HE.NET DDNS key”).</p>`;
+            container.innerHTML = actionBar + `${_spokeErrorBanner(detail, 'HE.NET spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Load the “HE.NET” role on an agent and store an HE DDNS key in the Credential Vault (secret type “HE.NET DDNS key”).</p>`;
             return;
         }
         const records = d.records || [];
         window._henetRecords = records;
-        const cols = ['Name', 'Type', 'Value', 'TTL', 'Last Push', ''];
+        const cols = ['Name', 'Type', 'Value', 'TTL', 'Last Push'].concat(admin ? [''] : []);
         const rows = records.map(r => {
             const eName = String(r.name).replace(/'/g, "\\'");
             const eType = String(r.type).replace(/'/g, "\\'");
@@ -21895,17 +21919,17 @@ async function loadHenet() {
                 <td class="px-4 py-2 font-mono text-xs">${escapeHtml(r.value)}</td>
                 <td class="px-4 py-2 text-center text-xs">${escapeHtml(String(r.ttl))}</td>
                 <td class="px-4 py-2 text-center">${_henetPushBadge(r)}</td>
-                <td class="px-4 py-2 whitespace-nowrap">
-                    ${isAdmin() ? `<button onclick="editHenetRecord('${eName}','${eType}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                    <button onclick="deleteHenetRecord('${eName}','${eType}')" title="Remove from management" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>` : ''}
-                </td>
+                ${admin ? `<td class="px-4 py-2 whitespace-nowrap">
+                    <button onclick="editHenetRecord('${eName}','${eType}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
+                    <button onclick="deleteHenetRecord('${eName}','${eType}')" title="Remove from management" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
+                </td>` : ''}
             </tr>`;
         }).join('');
-        container.innerHTML = records.length === 0
-            ? '<p class="p-4 text-slate-400 italic text-sm">No HE.NET records under management yet. Use “+ Add Record”.</p>'
-            : tw(th(cols) + `<tbody>${rows}</tbody>`);
+        container.innerHTML = actionBar + (records.length === 0
+            ? '<p class="p-4 text-slate-400 italic text-sm">No HE.NET records under management yet.' + (admin ? ' Use “+ Add Record”.' : '') + '</p>'
+            : tw(th(cols) + `<tbody>${rows}</tbody>`));
     } catch (err) {
-        container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
+        container.innerHTML = actionBar + `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
     }
 }
 
