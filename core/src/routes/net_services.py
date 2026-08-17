@@ -387,13 +387,17 @@ def register(app, hub, ctx):
 
     @app.post("/api/le/dns-credentials")
     async def le_set_dns_cred(request: Request):
-        """Add/update one of THIS tenant's DNS-01 credentials. Empty secret fields
-        keep the stored value (sentinel-merge)."""
-        body = await request.json()
-        body = dict(body) if isinstance(body, dict) else {}
-        body["tenant_id"] = _le_tenant(request)  # server-derived; ignore any client value
-        _hub, _sid, payload = await _le_request("LE_SET_DNS_CRED", body)
-        return payload
+        """DISABLED — creating raw DNS-01 credentials in the LE module is no
+        longer allowed. Store DNS credentials in the Credential Vault (add a
+        ``DNS-01`` secret, automation-readable) and select it in the issue-cert
+        form; the hub resolves it unattended at issue time. Existing spoke-stored
+        credentials are left untouched (no migration, no auto-delete) and can
+        still be used by name or deleted for cleanup."""
+        raise HTTPException(
+            status_code=409,
+            detail=("Creating DNS credentials in the LE module is disabled. Store "
+                    "them in the Credential Vault (add a 'DNS-01' secret) and pick "
+                    "the vault credential when issuing a certificate."))
 
     @app.delete("/api/le/dns-credentials")
     async def le_delete_dns_cred(request: Request):
