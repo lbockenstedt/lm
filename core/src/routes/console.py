@@ -419,6 +419,21 @@ def register(app, hub, ctx):
             hub_encryption.encrypt(json.dumps(creds)).decode()
         hub.state._mark_dirty()
 
+    def _console_load_local_credentials(hub):
+        """The LOCAL Fernet-encrypted console credential list (hub state only),
+        ignoring any Key Vault ref. These legacy passwords are what an operator
+        may DELETE to clean up once the Credential Vault is in use — deletion is
+        the one mutation still allowed on this store (creation is disabled)."""
+        blob = hub.state.system_state.get("console_credentials_enc")
+        if not blob:
+            return []
+        try:
+            from security.encryption import hub_encryption
+            return json.loads(hub_encryption.decrypt(blob.encode()))
+        except Exception:  # noqa: BLE001
+            logger.warning("console: could not decrypt stored credentials")
+            return []
+
     # Name of the Credential Vault secret (in the Global Admin slot, __admin__)
     # that holds the console auto-identify login list as a hub-mode
     # (automation-readable) secret ``{"credentials": [{username,password}, …]}``.
@@ -1018,24 +1033,76 @@ def register(app, hub, ctx):
                 "read_only": True, "creation_disabled": True,
                 "vault_enabled": vault_on, "local_passwords_present": local_present,
                 "migrate_warning": warning,
+                "local_credentials": [{"username": c.get("username", ""),
+                                       "has_password": bool(c.get("password"))}
+                                      for c in _console_load_local_credentials(hub)],
                 "vault_bucket": _cv_admin_bucket(), "vault_secret": _CONSOLE_VAULT_SECRET}
 
     @app.post("/api/console/credentials")
     async def console_post_credentials(request: Request):
-        """DISABLED — creating passwords in the Console module is no longer
-        allowed. Store console logins in the Credential Vault (Global Admin slot
+        """Delete-only. CREATING or CHANGING console passwords here is disabled —
+        store console logins in the Credential Vault (Global Admin slot
         ``__admin__`` → secret ``console-auto-credentials``, automation-readable)
-        and the seed loop pulls them unattended. Existing hub/Key-Vault-stored
-        credentials are left untouched (no migration, no auto-delete) and keep
-        working until removed by an operator. Admin only."""
+        and the seed loop pulls them unattended. But an operator MAY still REMOVE
+        legacy LOCAL passwords to clean them up once the vault is in use (the
+        agreed "delete but not add" rule): the submitted ``credentials`` list must
+        be a subset of the existing local usernames with NO passwords supplied;
+        any new username or supplied password is rejected 409. Submitting an empty
+        list clears all local passwords. Never touches Key-Vault-backed creds
+        (those are read-only / managed in the vault). Admin only."""
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
-        raise HTTPException(
-            status_code=409,
-            detail=("Creating passwords in the Console module is disabled. Store "
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        existing = _console_load_local_credentials(hub)
+        existing_users = {c.get("username") for c in existing}
+        keep_users = set()
+        for c in (body.get("credentials") or []):
+            if not isinstance(c, dict):
+                continue
+            u = str(c.get("username", "")).strip()
+            if not u:
+                continue
+            if u not in existing_users:
+                raise HTTPException(status_code=409, detail=(
+                    "Creating passwords in the Console module is disabled. Store "
                     "console logins in the Credential Vault (Global Admin slot → "
-                    "'console-auto-credentials') — they are used automatically."))
+                    "'console-auto-credentials'). You may only DELETE existing "
+                    "local credentials here."))
+            if str(c.get("password", "")):
+                raise HTTPException(status_code=409, detail=(
+                    "Changing console passwords here is disabled. Store console "
+                    "logins in the Credential Vault. You may only DELETE existing "
+                    "local credentials here."))
+            keep_users.add(u)
+        new_local = [c for c in existing if c.get("username") in keep_users]
+        removed = len(existing) - len(new_local)
+        if removed == 0:
+            # Nothing to delete — reject rather than silently no-op so the caller
+            # knows this endpoint only performs deletions now.
+            raise HTTPException(status_code=409, detail=(
+                "No local credentials to delete. Creating console passwords is "
+                "disabled — manage them in the Credential Vault."))
+        _console_save_credentials(hub, new_local)
+        hub._console_creds_seeded = set()  # force re-seed with the reduced list
+        # Push the effective (resolved) credential list so removals take effect on
+        # the spokes immediately (vault-backed creds still win if a vault secret
+        # exists; otherwise the reduced local list — possibly empty — is pushed).
+        resolved = await _console_load_credentials_resolved(hub)
+        for sid in (hub.get_all_spokes_by_type("console") or []):
+            try:
+                await hub.send_to_spoke_command(sid, "CONSOLE_SET_CREDENTIALS",
+                                                {"credentials": resolved})
+                _console_mark_seeded(hub, sid)
+            except Exception:  # noqa: BLE001
+                pass
+        logger.info("console: %d local credential(s) deleted by %s",
+                    removed, (sess.get("user", {}) or {}).get("username", "?"))
+        return {"status": "ok", "removed": removed, "remaining": len(new_local)}
 
     @app.post("/api/console/credentials/to-vault")
     async def console_creds_to_vault(request: Request):
