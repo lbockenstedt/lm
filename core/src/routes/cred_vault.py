@@ -112,6 +112,33 @@ def register(app, hub, ctx):
         return {"bucket": bucket, "has_psk": _cv.bucket_has_psk(hub, bucket),
                 "secrets": _cv.list_secrets(hub, bucket)}
 
+    @app.get("/tenant/cred-vault/automation-secrets")
+    async def cv_automation_secrets(request: Request):
+        """Picker source for module credential references (LE, Console): every
+        AUTOMATION-READABLE (``hub``-mode) secret in the buckets the caller can
+        reach — names + non-secret metadata ONLY, never a value. A module stores
+        just the ``{bucket, name}`` reference and resolves the value unattended
+        via :func:`cred_vault.automation_get` at use-time, so the plaintext is
+        never exposed to the browser. Optional ``?type=`` filters by secret type
+        (e.g. ``console`` / ``dns`` / ``he``)."""
+        sess = _sess(request)
+        want_type = (request.query_params.get("type") or "").strip()
+        if _is_global_admin(sess):
+            reach = set(b["bucket"] for b in _cv.list_buckets(hub)) | {_cv.ADMIN_BUCKET}
+        else:
+            reach = set(_acting_tenants(sess))
+        out = []
+        for b in sorted(reach):
+            for s in _cv.list_secrets(hub, b):
+                if not s.get("automation"):
+                    continue  # psk-only secrets can't be read unattended
+                if want_type and s.get("type") != want_type:
+                    continue
+                out.append({"bucket": b, "name": s["name"], "type": s.get("type", "generic"),
+                            "fields": s.get("fields", []), "description": s.get("description", ""),
+                            "is_admin_slot": b == _cv.ADMIN_BUCKET})
+        return {"secrets": out, "is_global_admin": _is_global_admin(sess)}
+
     # ── pass-phrase ─────────────────────────────────────────────────────────
     @app.post("/tenant/cred-vault/psk")
     @_guard

@@ -17217,23 +17217,39 @@ async function openConsoleCredentialsModal() {
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
     let existing = [];
     let vaultBacked = false;
+    let source = 'hub';
+    let migrateWarning = '';
     try {
         const res = await fetch('/api/console/credentials', { credentials: 'same-origin' });
-        if (res.ok) { const j = await res.json(); existing = j.credentials || []; vaultBacked = !!j.read_only; }
+        if (res.ok) {
+            const j = await res.json();
+            existing = j.credentials || [];
+            vaultBacked = (j.read_only !== false);
+            source = j.source || 'hub';
+            migrateWarning = j.migrate_warning || '';
+        }
     } catch (e) { console.error(e); }
     if (vaultBacked) {
-        // Sourced (read-only) from Azure Key Vault — the hub only reads it, so
-        // editing lives in the vault, not here.
+        // Creation is disabled: console logins are managed in the Credential
+        // Vault (or a legacy Key Vault ref). The hub only reads them here, so
+        // editing lives in the vault, not this modal.
         const list = existing.length
             ? existing.map(c => `<li class="font-mono text-xs text-slate-600">${escapeHtml(c.username)}${c.has_password ? '' : ' <span class="text-amber-500">(no password)</span>'}</li>`).join('')
             : '<li class="text-xs text-slate-400 italic">no credentials resolved from the vault</li>';
+        const srcLabel = source === 'cred_vault' ? 'the <b>Credential Vault</b> (Global Admin slot)'
+            : source === 'keyvault' ? 'a legacy <b>Azure Key Vault</b> reference'
+            : 'the <b>hub</b> (legacy local store)';
+        const warnBanner = migrateWarning
+            ? `<div class="text-xs px-3 py-2 rounded bg-amber-50 text-amber-800 border border-amber-200">⚠ ${escapeHtml(migrateWarning)}</div>`
+            : '';
         modal.innerHTML = `<div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
               <h3 class="text-lg font-bold text-[#263040]">Console Credential Library</h3>
               <button onclick="this.closest('#console-creds-modal').remove()" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
             </div>
             <div class="p-6 space-y-3">
-              <div class="text-xs px-3 py-2 rounded bg-blue-50 text-blue-700 border border-blue-100">🔐 Managed in <b>Azure Key Vault</b> (read-only here). Edit the vault secret to change these credentials.</div>
+              <div class="text-xs px-3 py-2 rounded bg-blue-50 text-blue-700 border border-blue-100">🔐 Resolved from ${srcLabel} (read-only here). New raw passwords can no longer be created — manage credentials in the Credential Vault.</div>
+              ${warnBanner}
               <ul class="space-y-1 list-disc list-inside">${list}</ul>
               <div class="pt-3 flex justify-end"><button onclick="this.closest('#console-creds-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Close</button></div>
             </div></div>`;
@@ -20679,13 +20695,18 @@ async function dnsCredReloadList() {
     const box = document.getElementById('dns-creds-list');
     if (!box) return;
     let creds = [];
+    let warn = '';
     try {
         const r = await _spokeFetch('/api/le/dns-credentials', { method: 'GET' });
         const d = (r.data && r.data.data) ? r.data.data : (r.data || {});
         creds = d.credentials || [];
+        warn = d.migrate_warning || (r.data && r.data.migrate_warning) || '';
     } catch (e) { box.innerHTML = `<p class="text-sm text-red-500">Could not load: ${escapeHtml(e.message)}</p>`; return; }
-    if (!creds.length) { box.innerHTML = '<p class="text-sm text-slate-400 italic">No credentials yet — add one below.</p>'; return; }
-    box.innerHTML = creds.map(c => {
+    const warnBanner = warn
+        ? `<div class="text-xs px-3 py-2 mb-2 rounded bg-amber-50 text-amber-800 border border-amber-200">⚠ ${escapeHtml(warn)}</div>`
+        : '';
+    if (!creds.length) { box.innerHTML = warnBanner + '<p class="text-sm text-slate-400 italic">No credentials yet — add one below.</p>'; return; }
+    box.innerHTML = warnBanner + creds.map(c => {
         const label = (DNS_CRED_PROVIDERS[c.provider] || {}).label || c.provider;
         return `<div class="flex items-center justify-between border border-slate-200 rounded-md px-3 py-2">
           <div><span class="text-sm font-medium text-slate-700">${escapeHtml(c.name)}</span>
