@@ -412,8 +412,8 @@ const MODULE_CLASSES = {
 // Multi-product classes that render ONE unified primary view, surfacing the
 // other products as subtabs instead of as separate nav items. DNS is "all
 // things DNS": the Unbound `dns` view (Records/Statistics/Forwarders) plus an
-// HE.NET (Hurricane Electric public DNS) subtab. The `henet` product has no
-// standalone view — it always lives under the `dns` view. See setView().
+// External DNS subtab (internet-facing providers like HE.NET). Such products
+// have no standalone view — they always live under the `dns` view. See setView().
 const CLASS_PRIMARY_VIEW = { 'DNS': 'dns' };
 
 // Header module label: maps the active view/product to the nav class name shown
@@ -1431,7 +1431,7 @@ const VIEW_SUBMENUS = {
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
-    dns: ['Records', 'Statistics', 'Forwarders', 'HE.NET'],
+    dns: ['Records', 'Statistics', 'Forwarders', 'External DNS'],
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations'],
     nw: ['Devices', 'IP Addresses', 'VLANs', 'MAC Table', 'ARP', 'Interfaces'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
@@ -3281,9 +3281,9 @@ async function setView(viewId) {
 
         // Some multi-product classes render ONE unified view with the other
         // products surfaced as subtabs (DNS = Unbound Records/Statistics/
-        // Forwarders + an HE.NET subtab). Such a class pins to its primary view
-        // regardless of which product(s) are active — the henet product has no
-        // standalone view of its own, and the class name is never a real view.
+        // Forwarders + an External DNS subtab). Such a class pins to its primary
+        // view regardless of which product(s) are active — external providers
+        // (henet, …) have no standalone view, and the class name is never a real view.
         const primaryView = CLASS_PRIMARY_VIEW[viewId];
         if (primaryView) {
             currentView = primaryView;
@@ -3381,11 +3381,12 @@ function renderTopNav(viewId) {
     const rawSubmenus = (viewId === 'logs') ? logsSubmenu() : (VIEW_SUBMENUS[viewId] || []);
     const subMenus = rawSubmenus.filter(m => {
         if (m === 'Simulations' && !isAdmin()) return false;
-        // The HE.NET subtab (under DNS) only appears once a henet spoke is
-        // actually connected/approved — mirrors "a tab shows when its spoke
-        // exists". Anyone who can see the DNS view can VIEW HE.NET records;
-        // add/edit/delete/sync stay admin-only (enforced in loadHenet + server).
-        if (m === 'HE.NET' && !(window.activeProducts && window.activeProducts.has('henet'))) return false;
+        // The External DNS subtab (under DNS) appears once ANY internet-facing
+        // DNS provider spoke (HE.NET, …) is connected — the DNS module is "all
+        // things DNS", internal and external. Anyone who can see the DNS view
+        // can VIEW external-DNS records; add/edit/delete/sync stay admin-only
+        // (enforced per-provider loader + server). See EXTERNAL_DNS_PROVIDERS.
+        if (m === 'External DNS' && _externalDnsConnected().length === 0) return false;
         return true;
     });
     // Trailing help affordance for tabbed module views (esp. the table-tab
@@ -19222,14 +19223,14 @@ async function _ddSyncStatusLine(side) {
 async function loadDNSData(subMenu) {
     const container = document.getElementById('dns-content');
     if (!container) return;
-    // HE.NET subtab: "all things DNS" also covers Hurricane Electric public
-    // DNS. It renders its own self-contained UI (status + admin actions +
-    // records table) into the shared dns-content pane, so hide the Unbound
-    // header actions and hand off to loadHenet.
+    // External DNS subtab: "all things DNS" also covers internet-facing DNS
+    // providers (HE.NET, …). Each connected provider is rendered as its own
+    // tile (or drilled straight into when only one is connected) inside the
+    // shared dns-content pane, so hide the Unbound header actions and hand off.
     const dnsActions = document.getElementById('dns-actions');
-    if (subMenu === 'HE.NET') {
+    if (subMenu === 'External DNS') {
         if (dnsActions) dnsActions.classList.add('hidden');
-        return loadHenet();
+        return loadExternalDNS();
     }
     if (dnsActions) dnsActions.classList.remove('hidden');
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
@@ -21832,6 +21833,75 @@ async function deleteDnsRecord(name, rtype) {
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
+// ─── External DNS (internet-facing DNS providers) ───────────────────────────
+// Public/internet DNS services managed from the hub, surfaced under
+// DNS → External DNS (the DNS module is "all things DNS" — internal AND
+// external). Each connected provider gets its own tile; picking one drills into
+// its record management. To add a provider, append an entry here (a stable id,
+// display name, description, its window.activeProducts product key, and a loader
+// that renders into #dns-content) and wire its spoke — the subtab visibility,
+// the tile grid, and nav-gating all derive from this registry automatically.
+const EXTERNAL_DNS_PROVIDERS = [
+    {
+        id: 'henet',
+        product: 'henet',
+        name: 'HE.NET',
+        desc: 'Hurricane Electric public DNS — A/AAAA records pushed to dns.he.net over its dynamic-DNS API.',
+        load: loadHenet,
+    },
+];
+
+// External DNS providers whose spoke/product is currently active (approved).
+function _externalDnsConnected() {
+    const active = window.activeProducts;
+    return EXTERNAL_DNS_PROVIDERS.filter(p => active && active.has(p.product));
+}
+
+// Breadcrumb/back bar shown atop a provider's records view — only when more than
+// one external provider is connected (so the operator can return to the tiles).
+// With a single provider there is no tile hop, so no back bar.
+function _extDnsBackBar(name) {
+    if (!window._extDnsMulti) return '';
+    return `<div class="mb-3 flex items-center gap-2 text-xs">
+        <button onclick="loadExternalDNS()" class="inline-flex items-center gap-1 text-slate-500 hover:text-[#01A982] font-medium">← External DNS</button>
+        <span class="text-slate-300">/</span>
+        <span class="font-bold text-slate-600">${escapeHtml(name)}</span>
+      </div>`;
+}
+
+// DNS → External DNS landing. No provider → empty state. Exactly one → drill
+// straight into it (no needless tile hop). Multiple → a tile per provider,
+// each opening that provider's record management.
+async function loadExternalDNS() {
+    const container = document.getElementById('dns-content');
+    if (!container) return;
+    const providers = _externalDnsConnected();
+    if (providers.length === 0) {
+        container.innerHTML = '<p class="p-4 text-slate-400 italic text-sm">No external DNS provider connected. Connect a provider spoke (e.g. HE.NET) to manage internet-facing DNS here.</p>';
+        return;
+    }
+    if (providers.length === 1) {
+        window._extDnsMulti = false;
+        return providers[0].load();
+    }
+    window._extDnsMulti = true;
+    container.innerHTML = `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 p-1">` +
+        providers.map(p => `
+          <button onclick="openExternalDns('${p.id}')" class="text-left bg-white border border-slate-200 rounded-lg p-4 hover:border-[#01A982] hover:shadow-md transition-all">
+            <div class="flex items-center justify-between mb-1">
+              <span class="text-sm font-bold text-[#263040]">${escapeHtml(p.name)}</span>
+              <span class="text-[10px] font-mono text-slate-400">${escapeHtml(p.id)}</span>
+            </div>
+            <p class="text-xs text-slate-500 leading-snug">${escapeHtml(p.desc)}</p>
+            <span class="inline-block mt-3 text-[11px] font-bold text-[#01A982]">Manage records →</span>
+          </button>`).join('') + `</div>`;
+}
+
+function openExternalDns(id) {
+    const p = EXTERNAL_DNS_PROVIDERS.find(x => x.id === id);
+    if (p) p.load();
+}
+
 // ─── HE.NET (Hurricane Electric public DNS) ─────────────────────────────────
 // Manages A/AAAA records at dns.he.net over HE's dynamic-DNS update API. The HE
 // DDNS key is NEVER sent from the browser — the operator picks a Credential
@@ -21877,6 +21947,7 @@ async function loadHenet() {
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
     const th = tableHead, tw = tableWrap;
     const admin = isAdmin();
+    const backBar = _extDnsBackBar('HE.NET');
     const btnCls = 'bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold shadow-sm';
     const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
@@ -21904,7 +21975,7 @@ async function loadHenet() {
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/records');
         if (!ok) {
-            container.innerHTML = actionBar + `${_spokeErrorBanner(detail, 'HE.NET spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Load the “HE.NET” role on an agent and store an HE DDNS key in the Credential Vault (secret type “HE.NET DDNS key”).</p>`;
+            container.innerHTML = backBar + actionBar + `${_spokeErrorBanner(detail, 'HE.NET spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Load the “HE.NET” role on an agent and store an HE DDNS key in the Credential Vault (secret type “HE.NET DDNS key”).</p>`;
             return;
         }
         const records = d.records || [];
@@ -21925,11 +21996,11 @@ async function loadHenet() {
                 </td>` : ''}
             </tr>`;
         }).join('');
-        container.innerHTML = actionBar + (records.length === 0
+        container.innerHTML = backBar + actionBar + (records.length === 0
             ? '<p class="p-4 text-slate-400 italic text-sm">No HE.NET records under management yet.' + (admin ? ' Use “+ Add Record”.' : '') + '</p>'
             : tw(th(cols) + `<tbody>${rows}</tbody>`));
     } catch (err) {
-        container.innerHTML = actionBar + `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
+        container.innerHTML = backBar + actionBar + `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
     }
 }
 
