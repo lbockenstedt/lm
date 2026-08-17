@@ -16809,7 +16809,7 @@ function _renderConsolePorts(el, data) {
         const eP = esc(p.port_id), eS = esc(p.spoke_id || ''), eT = esc(p.tenant_override || '');
         const tenantBtn = admin ? `<button onclick="openConsolePortTenantModal('${eS}','${eP}','${eT}')" class="text-[11px] px-2 py-1 rounded border border-[#01A982] text-[#01A982] hover:bg-slate-50">Tenant</button>` : '';
         const configBtn = hasConsoleWrite() ? `<button onclick="openConsoleConfigModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-indigo-400 text-indigo-600 hover:bg-slate-50">Config</button>` : '';
-        const profileBtn = admin ? `<button onclick="profileDevice('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile this device: use the known fingerprint if we have one, otherwise ask the AI to identify it from its (scrubbed) console output">🔎 Profile Device</button>` : '';
+        const profileBtn = hasConsoleWrite() ? `<button onclick="profileDevice('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile this device: use the known fingerprint if we have one, otherwise ask the AI to identify it from its (scrubbed) console output">🔎 Profile Device</button>` : '';
         const captureBtn = (p.capture_bytes || p.monitoring || (p.probe && p.probe.banner))
             ? `<button onclick="openConsoleCaptureModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50" title="View recent console output captured from this port">Capture</button>` : '';
         const dpaBadge = (p.dpa && p.dpa.telnet_port)
@@ -16828,8 +16828,14 @@ function _renderConsolePorts(el, data) {
               ${tenantBtn}
             </td></tr>`;
     }).join('');
-    const tools = admin
-        ? `<div class="flex justify-end gap-2 p-2 border-b border-slate-100"><button onclick="profileAllDevices()" class="text-[11px] px-3 py-1.5 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile every listed device at once: known fingerprints are used as-is; unknown devices are sent (scrubbed) to the AI to identify. Ports open in a session are skipped.">🔎 Profile All Devices</button><button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button><button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button></div>`
+    const profileAllBtn = hasConsoleWrite()
+        ? `<button onclick="profileAllDevices()" class="text-[11px] px-3 py-1.5 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile every listed device at once: known fingerprints are used as-is; unknown devices are sent (scrubbed) to the AI to identify. Ports open in a session are skipped.">🔎 Profile All Devices</button>`
+        : '';
+    const adminTools = admin
+        ? `<button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button><button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button>`
+        : '';
+    const tools = (profileAllBtn || adminTools)
+        ? `<div class="flex justify-end gap-2 p-2 border-b border-slate-100">${profileAllBtn}${adminTools}</div>`
         : '';
     el.innerHTML = `${tools}<div class="p-0 overflow-hidden"><table class="w-full text-left text-sm">
         <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>
