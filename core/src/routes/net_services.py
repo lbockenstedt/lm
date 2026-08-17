@@ -242,13 +242,28 @@ def register(app, hub, ctx):
     def _get_henet_spoke(hub):
         return get_spoke_or_503(hub, "henet", "HE.NET")
 
+    def _henet_get_assigned_cred(hub):
+        """The module-level HE DDNS credential the operator assigned once (a
+        non-secret ``{bucket, name}`` vault reference), or None. Persisted in
+        global config under ``henet.vault_credential`` so add/sync don't have to
+        re-pick the credential on every write."""
+        gc = hub.state.get_global_config() or {}
+        ref = (gc.get("henet") or {}).get("vault_credential")
+        if isinstance(ref, dict) and (ref.get("bucket") or "").strip() and (ref.get("name") or "").strip():
+            return {"bucket": ref["bucket"].strip(), "name": ref["name"].strip()}
+        return None
+
     async def _henet_resolve_vault_cred(request: Request, body: dict):
-        """Resolve a ``henet_vault_credential`` {bucket,name} reference in-place
-        to the HE DDNS key. The secret VALUE is read unattended via
+        """Resolve the HE DDNS key into ``body['ddns_key']`` unattended.
+
+        Precedence: an explicit ``henet_vault_credential`` {bucket,name} in the
+        request wins; otherwise the module-level assigned credential
+        (:func:`_henet_get_assigned_cred`) is used. The secret VALUE is read via
         :func:`cred_vault.automation_get` and injected as ``ddns_key`` — it is
         never returned to the browser. Reach is enforced: a tenant-admin may only
         reference buckets for their own tenants; a Global Admin, any bucket
         (including the ``__admin__`` infra slot where the HE account key belongs).
+        Raises 400 when neither an explicit nor an assigned credential exists.
 
         Expected vault secret value (hub-mode, type ``henet``)::
 
@@ -256,7 +271,13 @@ def register(app, hub, ctx):
         """
         ref = body.pop("henet_vault_credential", None)
         if not isinstance(ref, dict):
-            return
+            ref = _henet_get_assigned_cred(app.state.hub)
+        if not isinstance(ref, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="No HE.NET DDNS credential assigned. Assign one under "
+                       "DNS → External DNS → HE.NET (a Credential Vault secret "
+                       "of type 'HE.NET DDNS key').")
         bucket = (ref.get("bucket") or "").strip()
         name = (ref.get("name") or "").strip()
         if not bucket or not name:
@@ -280,6 +301,55 @@ def register(app, hub, ctx):
                                 detail="vault credential not found, not automation-readable, "
                                        "or missing a 'ddns_key' field")
         body["ddns_key"] = val["ddns_key"]
+
+    @app.get("/api/henet/credential")
+    async def henet_get_credential(request: Request):
+        """The module-level assigned HE DDNS credential reference (or null). A
+        non-secret {bucket,name} — the value is never returned. Readable by any
+        DNS viewer (same gate as the records list)."""
+        return {"status": "SUCCESS", "credential": _henet_get_assigned_cred(app.state.hub)}
+
+    @app.post("/api/henet/credential")
+    async def henet_set_credential(request: Request):
+        """Assign the module-level HE DDNS credential (Global-Admin-only via the
+        /api/henet/ write gate). Validates the reference resolves to an
+        automation-readable ``henet`` secret carrying a ``ddns_key`` before
+        persisting it, so a bad reference is rejected up-front rather than at
+        first push."""
+        body = await request.json()
+        body = dict(body) if isinstance(body, dict) else {}
+        bucket = (body.get("bucket") or "").strip()
+        name = (body.get("name") or "").strip()
+        if not bucket or not name:
+            raise HTTPException(status_code=400, detail="bucket and name are required")
+        sess = _session_user(request) or {}
+        if not _is_admin(sess):
+            reach = set((sess.get("user", {}) or {}).get("tenants") or [])
+            if bucket not in reach:
+                raise HTTPException(status_code=404, detail="vault credential not found")
+        import cred_vault as _cv
+        try:
+            val = await _cv.automation_get(app.state.hub, bucket, name)
+        except Exception as e:  # noqa: BLE001 — vault/network
+            raise HTTPException(status_code=502, detail=f"could not resolve vault credential: {e}")
+        if not isinstance(val, dict) or not val.get("ddns_key"):
+            raise HTTPException(status_code=404,
+                                detail="vault credential not found, not automation-readable, "
+                                       "or missing a 'ddns_key' field")
+        hub = app.state.hub
+        hub.state.update_global_config({"henet": {"vault_credential": {"bucket": bucket, "name": name}}})
+        await hub.state.save_state_now()
+        logger.info("henet: DDNS credential assigned -> %s/%s", bucket, name)
+        return {"status": "SUCCESS", "credential": {"bucket": bucket, "name": name}}
+
+    @app.delete("/api/henet/credential")
+    async def henet_clear_credential(request: Request):
+        """Clear the module-level assigned HE DDNS credential (Global-Admin-only)."""
+        hub = app.state.hub
+        hub.state.update_global_config({"henet": {}})
+        await hub.state.save_state_now()
+        logger.info("henet: DDNS credential assignment cleared")
+        return {"status": "SUCCESS", "credential": None}
 
     @app.get("/api/henet/records")
     async def henet_list_records(request: Request):
