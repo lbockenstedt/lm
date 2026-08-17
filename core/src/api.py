@@ -946,9 +946,13 @@ def spoke_or_503(spoke_id, label: str) -> str:
     The shared tail of every "spoke not connected → 503" route preamble.
     Use this form when the resolver isn't a plain by-type lookup (e.g.
     ``hub.get_hypervisor_spoke()``); use ``get_spoke_or_503`` for the common
-    by-type case."""
+    by-type case. ``label`` is retained for call-site readability + logging
+    context but is intentionally NOT surfaced in the 503 detail: the WebUI shows
+    one GENERIC "No spoke connected" for every module (a missing spoke is the
+    same condition regardless of type), so the message never leaks a module
+    brand (was e.g. "No CPPM spoke connected")."""
     if not spoke_id:
-        raise HTTPException(status_code=503, detail=f"{label} spoke not connected")
+        raise HTTPException(status_code=503, detail="No spoke connected")
     return spoke_id
 
 

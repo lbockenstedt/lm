@@ -59,7 +59,7 @@ def register(app, hub, ctx):
         spokes = [s for s in (hub.get_all_spokes_by_type("nac") or [])
                   if s in hub.active_connections and hub.approved_modules.get(s, False)]
         if not spokes:
-            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
 
         async def _one(sid):
             try:
@@ -95,7 +95,7 @@ def register(app, hub, ctx):
             cached = hub.warm_get(cmd.lower(), scoped_key)
             if cached is not None:
                 return cached
-            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, cmd, payload or {}, timeout=20.0)
             data = _cppm_unwrap(result)
@@ -116,7 +116,7 @@ def register(app, hub, ctx):
         cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
             logger.error("API: No CPPM spoke connected for refresh")
-            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "CPPM_REFRESH_CACHE", {})
             return result
@@ -129,7 +129,7 @@ def register(app, hub, ctx):
         hub = app.state.hub
         cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
-            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "TEST_AUTH", {})
             data = _unwrap_spoke(result)
@@ -143,7 +143,7 @@ def register(app, hub, ctx):
         hub = app.state.hub
         cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
-            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "PROBE_API", {"path": path, "method": method})
             data = _unwrap_spoke(result)
@@ -159,7 +159,7 @@ def register(app, hub, ctx):
         cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
             logger.error("API: No CPPM spoke connected")
-            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "CPPM_GET_SYSTEM_HEALTH", {})
             data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
@@ -479,7 +479,7 @@ def register(app, hub, ctx):
         hub = app.state.hub
         cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
-            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "GET_DEVICE_SESSIONS", {"mac": mac})
             return await _filter_tenant(request, _cppm_unwrap(result), "nac", ["ip"], tenant)
@@ -498,7 +498,7 @@ def register(app, hub, ctx):
         cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
             logger.error("API: No CPPM spoke connected")
-            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "LIST_ROLES", {})
             data = _unwrap_spoke(result)
@@ -516,7 +516,7 @@ def register(app, hub, ctx):
         cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
             logger.error("API: No CPPM spoke connected")
-            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "GET_LOGS", {"start": start, "end": end})
             data = _unwrap_spoke(result)
@@ -548,7 +548,7 @@ def register(app, hub, ctx):
         if tenant and _effective_tenant(request, tenant):
             cppm_spoke = _nac_spoke_for_request(request, tenant)
             if not cppm_spoke:
-                raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+                raise HTTPException(status_code=503, detail="No spoke connected")
             try:
                 result = await hub.request_response(cppm_spoke, "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset})
                 return await _filter_tenant(request, _cppm_unwrap(result), "nac", ["ip"], tenant)
@@ -582,7 +582,7 @@ def register(app, hub, ctx):
                 cached = _cache_entry(tenant_id, "cppm_sessions") if tenant_id else None
                 if cached:
                     return await _filter_session(request, cached["data"], "nac", ["ip"])
-            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset})
             return await _filter_session(request, _cppm_unwrap(result), "nac", ["ip"])
@@ -597,7 +597,7 @@ def register(app, hub, ctx):
         hub = app.state.hub
         cppm_spoke = _nac_spoke_for_request(request, tenant)
         if not cppm_spoke:
-            raise HTTPException(status_code=503, detail="No CPPM spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(cppm_spoke, "CPPM_GET_NAC_STATUS", {})
             return _cppm_unwrap(result)

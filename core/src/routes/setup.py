@@ -427,7 +427,7 @@ def register(app, hub, ctx):
         opn_spoke = hub.get_spoke_by_type("firewall")
 
         if not opn_spoke:
-            raise HTTPException(status_code=503, detail="No OPNsense spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
 
         # 3. Use the async bridge to request rules from the spoke
         try:

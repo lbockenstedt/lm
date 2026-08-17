@@ -609,7 +609,7 @@ def register(app, hub, ctx):
         owning_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
             or hub.get_hypervisor_spoke()
         if not owning_spoke:
-            raise HTTPException(status_code=503, detail="No agent-hosting spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(owning_spoke, "SPOKE_RELAY", {
                 "target_agent_id": hub._agent_relay_name(agent_id),

@@ -219,7 +219,7 @@ def register(app, hub, ctx):
                         return await _filter_session(request, data, "netbox", subnet_fields)
                     return data
             return await _warm_or_raise(
-                HTTPException(status_code=503, detail="NetBox spoke not connected"))
+                HTTPException(status_code=503, detail="No spoke connected"))
         try:
             payload = dict(slice_query)
             payload["tenant"] = scoping["netbox_tenant_slug"] or None

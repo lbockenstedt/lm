@@ -799,7 +799,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         spoke's data dict on success."""
         sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
         if not sid:
-            raise HTTPException(status_code=503, detail="Client-Sim spoke not connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(sid, cmd_type, payload, timeout=timeout)
         except Exception as exc:
@@ -4000,7 +4000,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             added += int(data.get("added") or 0)
             errors.update(data.get("errors") or {})
         if not results:
-            raise HTTPException(status_code=503, detail="Client-Sim spoke not connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         return {"status": "SUCCESS" if not errors else "PARTIAL",
                 "added": added, "errors": errors}
 
@@ -4046,7 +4046,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 sid = get_spoke(tenant_id) if callable(get_spoke) else None
                 spoke_ids = [sid] if sid else []
             if not spoke_ids:
-                raise HTTPException(status_code=503, detail="Client-Sim spoke not connected")
+                raise HTTPException(status_code=503, detail="No spoke connected")
             pushed, errors, refusals = 0, [], []
             for sid in spoke_ids:
                 try:
@@ -4072,7 +4072,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
 
         sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
         if not sid:
-            raise HTTPException(status_code=503, detail="Client-Sim spoke not connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(sid, "CS_QUEUE_COMMAND", payload, timeout=5.0)
         except Exception as exc:
@@ -4260,7 +4260,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 spoke_id = (hub.get_client_sim_spoke(tenant_id)
                             if hasattr(hub, "get_client_sim_spoke") else None) or ""
             if not spoke_id:
-                raise HTTPException(status_code=503, detail="Client-Sim spoke not connected")
+                raise HTTPException(status_code=503, detail="No spoke connected")
         session_id = str(_uuid.uuid4())
         ws_token = _secrets.token_urlsafe(32)
         hub.register_vnc_session(session_id, {

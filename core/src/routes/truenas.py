@@ -150,7 +150,7 @@ def register(app, hub, ctx):
                                  "TrueNAS spoke offline — showing last-known data")
                 return out
             raise HTTPException(status_code=503,
-                                detail="TrueNAS spoke not connected")
+                                detail="No spoke connected")
 
         merged, seen = [], set()
         for sid in spokes:
@@ -222,7 +222,7 @@ def register(app, hub, ctx):
                     filtered["stale"] = True
                 return filtered
             raise HTTPException(status_code=503,
-                                detail="TrueNAS spoke not connected")
+                                detail="No spoke connected")
         try:
             result = await hub.request_response(spoke_id, spoke_cmd, relay_payload,
                                                 timeout=timeout)
@@ -254,7 +254,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=403, detail="admin required")
         app_, _scope, spoke_id = _authz_truenas_appliance(request, appliance_id)
         if not spoke_id:
-            raise HTTPException(status_code=503, detail="TrueNAS spoke not connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(spoke_id, "TRUENAS_POLL",
                                                 {"appliance_id": appliance_id,
@@ -276,7 +276,7 @@ def register(app, hub, ctx):
         hub = app.state.hub
         app_, _scope, spoke_id = _authz_truenas_appliance(request, appliance_id, write=True)
         if not spoke_id:
-            raise HTTPException(status_code=503, detail="TrueNAS spoke not connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             data = await request.json()
         except Exception:
@@ -297,7 +297,7 @@ def register(app, hub, ctx):
         hub = app.state.hub
         app_, _scope, spoke_id = _authz_truenas_appliance(request, appliance_id, write=True)
         if not spoke_id:
-            raise HTTPException(status_code=503, detail="TrueNAS spoke not connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             data = await request.json()
         except Exception:
@@ -319,7 +319,7 @@ def register(app, hub, ctx):
         hub = app.state.hub
         app_, _scope, spoke_id = _authz_truenas_appliance(request, appliance_id, write=True)
         if not spoke_id:
-            raise HTTPException(status_code=503, detail="TrueNAS spoke not connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             data = await request.json()
         except Exception:
@@ -343,7 +343,7 @@ def register(app, hub, ctx):
         hub = app.state.hub
         app_, _scope, spoke_id = _authz_truenas_appliance(request, appliance_id, write=True)
         if not spoke_id:
-            raise HTTPException(status_code=503, detail="TrueNAS spoke not connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             data = await request.json()
         except Exception:
@@ -364,7 +364,7 @@ def register(app, hub, ctx):
         hub = app.state.hub
         app_, _scope, spoke_id = _authz_truenas_appliance(request, appliance_id, write=True)
         if not spoke_id:
-            raise HTTPException(status_code=503, detail="TrueNAS spoke not connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             data = await request.json()
         except Exception:
