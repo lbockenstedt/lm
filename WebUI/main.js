@@ -4302,8 +4302,6 @@ function _cvRenderShell() {
         `<option value="${escapeHtml(b.bucket)}"${b.bucket === _cvCurrentBucket ? ' selected' : ''}>${escapeHtml(_cvBucketLabel(b))}${b.has_psk ? '' : ' (no pass-phrase)'}</option>`).join('');
     const adminTools = _cvIsGlobalAdmin ? `
       <div class="flex items-center gap-2">
-        <input id="cv-other-bucket" type="text" placeholder="load tenant id…" autocomplete="off" class="px-2 py-1 text-sm border border-slate-300 rounded-md">
-        <button onclick="_cvLoadOther()" class="px-3 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Load</button>
         <button onclick="_cvImportConsole()" title="Copy the console auto-identify login list into the Global Admin slot (automation-readable)" class="px-3 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Import console creds</button>
       </div>` : '';
     const storageHint = _cvVaultAvailable ? '' : `
@@ -4328,14 +4326,6 @@ function _cvRenderShell() {
 }
 
 function _cvSwitchBucket(v) { _cvCurrentBucket = v; _cvRenderBucketBody(); }
-
-async function _cvLoadOther() {
-    const v = (document.getElementById('cv-other-bucket')?.value || '').trim();
-    if (!v) return;
-    if (!_cvBuckets.some(b => b.bucket === v)) _cvBuckets.push({ bucket: v, has_psk: false, secret_count: 0 });
-    _cvCurrentBucket = v;
-    _cvRenderShell();
-}
 
 async function _cvRenderBucketBody() {
     const el = document.getElementById('cv-secrets');
