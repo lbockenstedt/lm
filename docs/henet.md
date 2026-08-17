@@ -12,7 +12,7 @@ Pure HE-API client — no local server, no daemon to manage. Runs as the **`hene
 
 Manages public DNS A/AAAA records hosted at Hurricane Electric. Each record is pushed to HE's dyndns endpoint, which authenticates the update with a per-record **DDNS key** (the "Enable entry for dynamic DNS" key generated in the dns.he.net UI). The module tracks the set of records it manages in a small local JSON state file so the WebUI can list what's under management and show each record's last push result.
 
-In the WebUI, HE.NET lives **under the DNS module** ("all things DNS"): open **DNS → HE.NET** tab to reach the records view — an admin can add/edit/delete managed records and re-push them all with **Sync all**; a non-admin DNS viewer sees the records read-only.
+In the WebUI, HE.NET lives **under the DNS module** ("all things DNS") on the **External DNS** subtab, which groups internet-facing DNS providers (one tile each when more than one is connected): open **DNS → External DNS → HE.NET** to reach the records view — an admin can add/edit/delete managed records and re-push them all with **Sync all**; a non-admin DNS viewer sees the records read-only.
 
 ## Credential Vault (DDNS key) — exactly like the LE module
 
@@ -49,7 +49,7 @@ Talks to Hurricane Electric's fixed dyndns endpoint `https://dyn.dns.he.net/nic/
 
 ## WebUI
 
-HE.NET is a subtab of the **DNS** module (the DNS nav item covers Unbound *and* HE.NET). **DNS → HE.NET** shows a status line (HE dyndns reachable? + managed-record count) and a records table (Name / Type / Value / TTL / Last Push). Management — **+ Add Record** / edit / delete / **Sync all** — is admin-only; a non-admin DNS viewer sees the table read-only. The Add/Edit modal includes a **HE DDNS credential** picker populated from Credential Vault secrets of type `henet`. Add a key under **Credential Vault → + Add secret → HE.NET DDNS key** (automation mode is forced). The HE.NET tab appears once a `henet` spoke is connected.
+HE.NET is reached via the **DNS** module's **External DNS** subtab (the DNS nav item covers Unbound *and* internet-facing providers). **DNS → External DNS** lists each connected external provider as a tile (or drills straight in when only one is connected); the HE.NET view shows a status line (HE dyndns reachable? + managed-record count) and a records table (Name / Type / Value / TTL / Last Push). Management — **+ Add Record** / edit / delete / **Sync all** — is admin-only; a non-admin DNS viewer sees the table read-only. The Add/Edit modal includes a **HE DDNS credential** picker populated from Credential Vault secrets of type `henet`. Add a key under **Credential Vault → + Add secret → HE.NET DDNS key** (automation mode is forced). The External DNS tab appears once a `henet` (or other external-DNS) spoke is connected.
 
 ## Key files
 
@@ -65,7 +65,7 @@ HE.NET is a subtab of the **DNS** module (the DNS nav item covers Unbound *and* 
 
 ## How to use it
 
-- **Add a record:** HE.NET module → **+ Add Record** → name/type(A|AAAA)/value(IP)/ttl → pick an HE DDNS credential → submit. The hub resolves the key and pushes to HE; the record's Last Push badge shows the result.
+- **Add a record:** DNS → External DNS → HE.NET → **+ Add Record** → name/type(A|AAAA)/value(IP)/ttl → pick an HE DDNS credential → submit. The hub resolves the key and pushes to HE; the record's Last Push badge shows the result.
 - **Edit a record:** edit action → change the IP → save (re-pushes the same hostname).
 - **Remove from management:** delete action (leaves the HE zone entry intact — remove it at dns.he.net if desired).
 - **Re-push everything:** **Sync all** → pick a credential → syncs every managed A/AAAA record to HE.
