@@ -205,32 +205,22 @@ def register(app, hub, ctx):
         Distinct from /tenant/devices/spokes: that one uses can_bind_spoke
         (own-tenant ONLY — for the Add-device dropdown), which excludes SHARED
         spokes; the nav must ALSO show shared modules, so this endpoint mirrors
-        the frontend _spokeVisibleToTenant (own + shared) instead."""
+        the frontend _spokeVisibleToTenant (own + shared) instead.
+
+        Reuses the CANONICAL /setup/pending_spokes aggregation (_aggregate_spokes)
+        rather than hand-rolling a parallel row build: that guarantees the exact
+        same ``module_type`` derivation the admin nav uses (so a module_type that
+        lights the admin's menu lights the tenant-admin's identically) AND picks
+        up orphan approved spokes that never mirrored into ``known_modules`` — a
+        hand-rolled ``known_modules`` walk would silently miss both. The ONLY
+        difference from the admin endpoint is the per-row visibility filter."""
         sess = _session_user(request)
-        known = hub.state.system_state.get("known_modules", []) or []
-        names = hub.state.system_state.get("module_names", {}) or {}
-        meta = hub.state.system_state.get("module_metadata", {}) or {}
-        out = []
-        for sid in known:
-            if not hub.approved_modules.get(hub._primary_key(sid), False):
-                continue
-            tenant_id = hub.state.get_spoke_tenant(sid) or ""
-            if not access.spoke_visible_to_session(sess, tenant_id):
-                continue
-            m = meta.get(sid, {}) or {}
-            out.append({
-                "spoke_id": sid,
-                "display_name": names.get(sid, sid),
-                "approved": True,
-                "module_type": _module_type_for(sid),
-                "tenant_id": tenant_id,
-                "tenant_shared": access.tenant_is_shared(tenant_id),
-                "spoke_guid": m.get("install_uuid", ""),
-                "install_uuid": m.get("install_uuid", ""),
-                "parent_spoke_id": (hub._primary_key(m.get("parent_name", ""))
-                                    if m.get("parent_name") else ""),
-                "role_name": m.get("role_name", ""),
-            })
+        from routes.setup import _aggregate_spokes  # lazy: avoid import cycle
+        payload = await _aggregate_spokes(hub)
+        rows = (payload or {}).get("spokes", []) or []
+        out = [r for r in rows
+               if r.get("approved")
+               and access.spoke_visible_to_session(sess, r.get("tenant_id") or "")]
         return {"spokes": out}
 
     def _register_product(route, prod):
