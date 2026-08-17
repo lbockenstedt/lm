@@ -167,3 +167,59 @@ def test_no_vault_hub_mode_automation_readable(monkeypatch):
                       mode="hub", sec_type="console", psk="adminpass1"))
     got = run(cv.automation_get(h, cv.ADMIN_BUCKET, "console-auto-credentials"))
     assert got == {"credentials": [{"username": "a", "password": "b"}]}
+
+
+# ── crypto-engine-failure handling (regression) ─────────────────────────────
+# A runtime scrypt failure must NOT masquerade as a wrong pass-phrase. Before
+# this guard, verify_psk swallowed every exception as False, so a transient
+# crypto/resource error looked like "incorrect pass-phrase" for every bucket and
+# tenant at once, with no trace in the logs.
+
+def test_verify_psk_engine_failure_raises_not_false(hub, monkeypatch):
+    run(cv.set_bucket_psk(hub, "t1", "hunter2pass"))
+
+    def _boom(_pw, _salt):
+        raise MemoryError("scrypt: cannot allocate")
+
+    monkeypatch.setattr(cv, "_scrypt", _boom)
+    with pytest.raises(cv.CredVaultEngineError):
+        cv.verify_psk(hub, "t1", "hunter2pass")
+
+
+def test_verify_psk_engine_failure_is_logged(hub, monkeypatch, caplog):
+    run(cv.set_bucket_psk(hub, "t1", "hunter2pass"))
+
+    def _boom(_pw, _salt):
+        raise MemoryError("scrypt: cannot allocate")
+
+    monkeypatch.setattr(cv, "_scrypt", _boom)
+    with caplog.at_level("ERROR"):
+        with pytest.raises(cv.CredVaultEngineError):
+            cv.verify_psk(hub, "t1", "hunter2pass")
+    assert any("ENGINE FAILURE" in r.getMessage() for r in caplog.records)
+
+
+def test_require_psk_engine_failure_distinct_from_mismatch(hub, monkeypatch):
+    run(cv.set_bucket_psk(hub, "t1", "hunter2pass"))
+
+    # A genuine mismatch stays a plain CredVaultError, not an engine error.
+    with pytest.raises(cv.CredVaultError) as mismatch:
+        cv._require_psk(hub, "t1", "wrongpass")
+    assert not isinstance(mismatch.value, cv.CredVaultEngineError)
+    assert "incorrect pass-phrase" in str(mismatch.value)
+
+    # An engine failure surfaces as the distinct engine error, NOT a mismatch.
+    def _boom(_pw, _salt):
+        raise RuntimeError("openssl scrypt backend error")
+
+    monkeypatch.setattr(cv, "_scrypt", _boom)
+    with pytest.raises(cv.CredVaultEngineError) as engine:
+        cv._require_psk(hub, "t1", "hunter2pass")
+    assert "server crypto error" in str(engine.value)
+
+
+def test_verify_psk_no_record_or_empty_still_false(hub):
+    # Absent record / empty pass-phrase remain a plain False (not an engine error).
+    assert cv.verify_psk(hub, "t1", "anything") is False
+    run(cv.set_bucket_psk(hub, "t1", "hunter2pass"))
+    assert cv.verify_psk(hub, "t1", "") is False

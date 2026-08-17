@@ -96,6 +96,12 @@ def register(app, hub, ctx):
                 return await fn(*a, **k)
             except HTTPException:
                 raise
+            except _cv.CredVaultEngineError as e:
+                # Crypto-engine / resource failure — not a client mistake. Surface
+                # a meaningful 503 (with the safe message) instead of a 400 that
+                # would read as "incorrect pass-phrase".
+                logger.error("cred-vault: PSK engine failure: %s", e)
+                raise HTTPException(status_code=503, detail=str(e))
             except _cv.CredVaultError as e:
                 raise HTTPException(status_code=400, detail=str(e))
             except Exception as e:  # noqa: BLE001 — Key Vault / network

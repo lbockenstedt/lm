@@ -44,6 +44,7 @@ from __future__ import annotations
 import base64
 import hmac
 import json
+import logging
 import secrets
 import time
 import uuid
@@ -55,6 +56,8 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 import key_vault as _kv
 from security.encryption import hub_encryption
 from security.oidc import get_oidc_config
+
+logger = logging.getLogger("CredVault")
 
 ADMIN_BUCKET = "__admin__"          # the non-tenant "Global Admin slot"
 _KV_PREFIX = "cred-"                # opaque Key Vault secret-name prefix
@@ -72,6 +75,17 @@ _SCRYPT_P = 1
 
 class CredVaultError(Exception):
     """Raised for any credential-vault failure; message is safe to surface."""
+
+
+class CredVaultEngineError(CredVaultError):
+    """Raised when the PSK crypto engine (scrypt) fails at runtime — as opposed
+    to a genuine pass-phrase mismatch.
+
+    Kept distinct so a transient crypto/resource failure (e.g. an allocation or
+    OpenSSL-backend error deriving the ~16 MiB scrypt hash) is never silently
+    reported as ``"incorrect pass-phrase"`` for every bucket/tenant at once.
+    Subclasses :class:`CredVaultError` so existing handlers still catch it, but
+    the route layer maps it to HTTP 503 (server error) rather than 400."""
 
 
 # ── low-level crypto helpers ────────────────────────────────────────────────
@@ -182,8 +196,20 @@ def verify_psk(hub, bucket: str, psk: str) -> bool:
     try:
         expect = _unb64(rec["hash"])
         got = _scrypt(psk, _unb64(rec["salt"]))
-    except Exception:  # noqa: BLE001
-        return False
+    except Exception as exc:  # noqa: BLE001
+        # A failure HERE is a crypto-engine / resource error (scrypt derivation
+        # or verifier decode), NOT a wrong pass-phrase. Silently returning False
+        # would make a transient failure look like a fleet-wide "incorrect
+        # pass-phrase" for EVERY bucket/tenant, with no trace in the logs. Log it
+        # loudly and raise a distinct error so it is diagnosable and surfaced.
+        logger.error(
+            "PSK verification ENGINE FAILURE for bucket %r: %s: %s — this is a "
+            "server crypto/resource error, NOT a wrong pass-phrase (check hub "
+            "memory and the OpenSSL/cryptography backend)",
+            bucket, type(exc).__name__, exc, exc_info=True)
+        raise CredVaultEngineError(
+            "pass-phrase check failed due to a server crypto error (not a wrong "
+            "pass-phrase) — check the hub logs and retry") from exc
     return hmac.compare_digest(expect, got)
 
 
