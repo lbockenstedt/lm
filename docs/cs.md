@@ -117,9 +117,13 @@ That is why the sim↔site linkage is **PXMX-server-based, not bucket-based**: l
 
 **Quota State view.** Config → Quota State shows the live ledger: which clients are currently assigned to each effective quota, the target count vs. assigned count, and `multi_capable`/`rehome` flags. (Manual-refresh under Config — form editors and the state view share the Config primary's no-auto-refresh.)
 
+**Inherit learned values (adaptive count).** A consumer row in the Sim Quota editor has an **Inherit learned values (count)** checkbox: with it on, the row's target tracks the adaptive controller's learned floor/ceiling instead of a pinned min/max, and the controller folds `producing_count` into its confirmed count so a stale stored limit won't cap the fill (`WebUI/sim-views.js`, `core/src/simulations/sim_quota.py`). Leave it off to keep the row pinned to its own min/max.
+
 ## Diagnostic tab (per product)
 
 Each product tab (Central, Central On-Prem, Mist) has a **Diagnostic** subtab that compares the RAW vendor-API findings (alerts + insights) against the DERIVED dashboard status + firing, per monitored check and per site — so you can see exactly where the engine's view of a check diverges from what the vendor API actually returned (a stale poll, a missing site mapping, a check that's monitored but never fires). The render is one shared function, `_csRenderDiag(source)` (`WebUI/sim-views.js`), that routes per-source to its own browse call (`csCentralBrowse` / `csCentralOnPremBrowse` / `csMistBrowse`) and filters `monitored_checks` to that source only. A **Copy** button (`csCopyText(window._csDiagCopyText, …)`) puts the raw comparison in the clipboard for a support paste.
+
+**Freshness + "monitored but not firing" signals.** The Central alerts/insights tables carry a **freshness badge** driven by `telemetry_stale` (from the service's `stale_collect`, surfaced by the poller's per-check `monitored_checks`, `core/src/simulations/central_hub_poller.py`) so you can tell at a glance whether the numbers are live or a stale poll. Checks that Central has configured/monitored but that aren't currently tripping are counted and labelled **monitored but not firing** — expected when a check is armed but the live plant isn't currently in the fault state, and a quick tell that a supposedly-active fault sim isn't actually surfacing at the vendor.
 
 ## How to use it
 
@@ -136,6 +140,10 @@ Each product tab (Central, Central On-Prem, Mist) has a **Diagnostic** subtab th
 **Toggle a per-client fault (persisted override).** Simulations → **Clients** → the client row's **⚙ Control** button opens **"Live Overrides — {hostname}"** with the 11 toggles: `kill_switch`, `dns_fail`, `iperf`, `download`, `www_traffic`, `ping_test`, `ssidpw_fail`, `auth_fail`, `dhcp_fail`, `port_flap`, `assoc_fail`. Set what you want → **Apply** (persists to that client), **Clear Overrides** (removes them), or **Apply to ALL** (pushes the same set to every registered client). Unlike a demo, these persist until you clear them. The client picks them up on its next `/api/config` fetch.
 
 **Use the kill switch (emergency stop).** Simulations → **Clients** → the banner at the top: **"⛔ Emergency Stop"** halts all sims (clients poll `/api/kill-switch` and stand down); **"▶ Resume Sims"** re-enables. This is global; the per-client `kill_switch` override above stops just one client.
+
+**Manage the client fleet (Offline view, delete, purge).** The **Clients** tab has an **Offline** sub-tab (`Clients → Offline`) that filters the list to offline rows only — a view over the same client data, not a separate source (`WebUI/sim-views.js`, `WebUI/main.js`). To remove clients: a client row's **🗑 Remove** button deletes that one client record (`DELETE /{tenant}/clients/{hostname}`) surgically — it never touches the real VM — and **🗑 Purge Clients** wipes the whole client fleet from memory/disk (`cs_purge_clients`, `core/src/simulations/routes.py`). A background scrub loop (`_clients_scrub_loop` / `_stale_clients_no_vm`) also auto-prunes stale clients that no longer match any VM, so the list self-cleans between sweeps.
+
+**Trip a MAC-auth-failure alert (`mac_auth_fail`).** A Wi-Fi client sim that flaps a predictable deny-listed MAC so Aruba Central / ClearPass fires a MAC-auth-failure alert. Enable **Mac Auth Fail** on a client (its help field `mac_auth_fail_mac` sets the exact MAC to spoof, `WebUI/sim-views.js`); the client script (`lm-spoke/src/sim_primitives.py sim_mac_auth_fail`, Windows `simulation.ps1`) does the association attempt. Gotcha: the alert only fires when the spoofed MAC matches the value actually deny-listed/monitored in Central.
 
 ## Troubleshooting / common questions
 

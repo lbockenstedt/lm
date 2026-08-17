@@ -76,8 +76,8 @@ The agentic loop allows up to 5 turns (model calls a tool → hub executes it �
 - **"The ✨ Ask AI button doesn't appear."** The bugfixer agent isn't connected to the hub right now — `GET /api/help/available` returned `available: false`. This isn't a WebUI bug; check whether the bugfixer module/spoke is up and connected.
 - **"The assistant says it can't find the answer."** The RAG-lite step only feeds the model the ~4 docs that best match your question's keywords — if your phrasing doesn't overlap with the right doc's vocabulary (or the topic genuinely isn't documented anywhere), it won't be in context. Try rephrasing closer to a doc's own headings/filename, or open the Help drawer and browse the index directly.
 - **"I get an HTTP 409 when I try to ask."** Bugfixer was connected when the page loaded (so the button appeared) but disconnected before the question was submitted. Wait for it to reconnect and try again.
-- **"A module's data looks stale or won't load."** Check the relevant `VIEW_LOADERS` entry's route in `main.js` and confirm the underlying spoke is connected — the WebUI itself has no cache of its own beyond what a given view keeps in memory; a 503 from the hub route means the spoke isn't connected, a 502 means the spoke replied with an error.
+- **"A module's data looks stale or won't load."** Check the relevant `VIEW_LOADERS` entry's route in `main.js` and confirm the underlying spoke is connected — the WebUI itself has no cache of its own beyond what a given view keeps in memory; a 503 from the hub route means the spoke isn't connected, a 502 means the spoke replied with an error. When a spoke is down the module now shows a **generic "No spoke connected"** message (not a module-specific string like "No CPPM spoke connected"), so the empty-state reads the same across modules.
 
 ## Related pages
 
-[lm-hub.md](lm-hub.md), [architecture-topology.md](architecture-topology.md), [cs.md](cs.md), [pxmx.md](pxmx.md).
+[lm-hub.md](lm-hub.md), [architecture-topology.md](architecture-topology.md), [credential-vault.md](credential-vault.md), [cs.md](cs.md), [pxmx.md](pxmx.md).
