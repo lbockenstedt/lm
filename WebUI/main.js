@@ -4266,6 +4266,7 @@ let _cvAdminSlot = '__admin__';
 let _cvVaultAvailable = true;
 let _cvBuckets = [];
 let _cvCurrentBucket = '';
+let _cvSecrets = [];
 
 async function loadCredVault() {
     const host = document.getElementById('credvault-content');
@@ -4335,6 +4336,7 @@ async function _cvRenderBucketBody() {
     try {
         const d = await apiJson('/tenant/cred-vault/secrets?bucket=' + encodeURIComponent(_cvCurrentBucket));
         const secrets = d.secrets || [];
+        _cvSecrets = secrets;  // cached for in-place Edit (look up type/mode by name)
         // Sync the authoritative has_psk from the read back into the bucket record
         // so the "+ Add secret" guard (and the dropdown label) reflect reality —
         // e.g. a Global-Admin-loaded bucket whose PSK state wasn't known upfront.
@@ -4375,6 +4377,7 @@ function _cvRenderSecretRow(s) {
       <td class="text-slate-500">${escapeHtml(s.description || '')}</td>
       <td class="text-right whitespace-nowrap">
         <button onclick="_cvRevealModal('${enc}')" class="px-2 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Reveal</button>
+        <button onclick="_cvEditModal('${enc}')" class="px-2 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Edit</button>
         <button onclick="_cvDeleteModal('${enc}')" class="px-2 py-1 text-xs rounded-md border border-red-200 text-red-600 hover:bg-red-50">Delete</button>
       </td>
     </tr>`;
@@ -4408,7 +4411,7 @@ async function _cvDoSetPsk() {
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
-function _cvAddSecretModal() {
+function _cvAddSecretModal(preset) {
     // A write always needs the bucket pass-phrase (server-enforced). Steer the
     // operator to set one first instead of letting the save fail with an error.
     const cur = _cvBuckets.find(b => b.bucket === _cvCurrentBucket);
@@ -4417,24 +4420,32 @@ function _cvAddSecretModal() {
         _cvSetPskModal();
         return;
     }
+    // Edit mode: a POST to the same name overwrites (upsert), so "Edit" reuses
+    // this form with the name + type locked and the value fields re-entered.
+    const editing = !!(preset && preset.name);
+    const nameAttrs = editing ? `value="${escapeHtml(preset.name)}" readonly` : `placeholder="secret name (e.g. henet-dns)"`;
+    const sel = (v, want) => v === want ? ' selected' : '';
+    const pType = editing ? (preset.type || 'generic') : '';
+    const pMode = editing ? (preset.mode || 'psk') : '';
     const body = `
-      <h3 class="text-lg font-bold text-[#263040]">Add secret — ${escapeHtml(_cvBucketLabel({ bucket: _cvCurrentBucket }))}</h3>
-      <input id="cv-add-name" type="text" autocomplete="off" placeholder="secret name (e.g. henet-dns)" class="${_CV_INP}">
+      <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} secret — ${escapeHtml(_cvBucketLabel({ bucket: _cvCurrentBucket }))}</h3>
+      <input id="cv-add-name" type="text" autocomplete="off" ${nameAttrs} class="${_CV_INP}${editing ? ' bg-slate-100 text-slate-500' : ''}">
       <div class="flex gap-2">
-        <select id="cv-add-type" onchange="_cvRenderAddFields()" class="${_CV_INP}">
-          <option value="login">Login (username + password)</option>
-          <option value="apikey">API key</option>
-          <option value="token">Token</option>
-          <option value="dns">DNS-01 credential (Let's Encrypt)</option>
-          <option value="generic">Generic (key + value)</option>
+        <select id="cv-add-type" onchange="_cvRenderAddFields()" ${editing ? 'disabled' : ''} class="${_CV_INP}">
+          <option value="login"${sel(pType, 'login')}>Login (username + password)</option>
+          <option value="apikey"${sel(pType, 'apikey')}>API key</option>
+          <option value="token"${sel(pType, 'token')}>Token</option>
+          <option value="dns"${sel(pType, 'dns')}>DNS-01 credential (Let's Encrypt)</option>
+          <option value="generic"${sel(pType, 'generic')}>Generic (key + value)</option>
         </select>
-        <select id="cv-add-mode" class="${_CV_INP}" title="pass-phrase = human-only; automation = hub can read it unattended for tooling">
-          <option value="psk">Pass-phrase only</option>
-          <option value="hub">Automation-readable</option>
+        <select id="cv-add-mode" ${editing ? 'disabled' : ''} class="${_CV_INP}" title="pass-phrase = human-only; automation = hub can read it unattended for tooling">
+          <option value="psk"${sel(pMode, 'psk')}>Pass-phrase only</option>
+          <option value="hub"${sel(pMode, 'hub')}>Automation-readable</option>
         </select>
       </div>
+      ${editing ? '<p class="text-[11px] text-slate-400">Re-enter the values below to overwrite this secret. Name, type and mode are fixed — delete and re-add to change them.</p>' : ''}
       <div id="cv-add-fields"></div>
-      <input id="cv-add-desc" type="text" autocomplete="off" placeholder="description (optional)" class="${_CV_INP}">
+      <input id="cv-add-desc" type="text" autocomplete="off" value="${editing ? escapeHtml(preset.description || '') : ''}" placeholder="description (optional)" class="${_CV_INP}">
       <input id="cv-add-psk" type="password" autocomplete="off" placeholder="bucket pass-phrase (the one you set for this bucket)" class="${_CV_INP}">
       <div class="flex justify-end gap-2 pt-2">
         <button onclick="document.getElementById('cv-add-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
@@ -4442,6 +4453,19 @@ function _cvAddSecretModal() {
       </div>`;
     openModal('cv-add-modal', body, { backdropClose: true });
     _cvRenderAddFields();
+    // _cvRenderAddFields re-enables the mode select for non-dns types; in edit
+    // mode keep name/type/mode locked (change via delete + re-add).
+    if (editing) { const m = document.getElementById('cv-add-mode'); if (m) m.disabled = true; }
+}
+
+// Edit an existing secret in place: reuse the add-secret form with the name,
+// type and mode locked to the stored values. A save overwrites (upsert by name)
+// — the bucket pass-phrase is still required (server-enforced write).
+function _cvEditModal(enc) {
+    const name = decodeURIComponent(enc);
+    const s = _cvSecrets.find(x => x.name === name);
+    if (!s) { showToast('Secret not found — reload the bucket', 'error'); return; }
+    _cvAddSecretModal({ name: s.name, type: s.type || 'generic', mode: s.mode || 'psk', description: s.description || '' });
 }
 
 function _cvRenderAddFields() {
