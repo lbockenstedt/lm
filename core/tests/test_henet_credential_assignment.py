@@ -105,7 +105,7 @@ def test_post_credential_requires_bucket_and_name():
 
 
 def test_post_credential_rejects_reference_without_ddns_key(patch_vault):
-    patch_vault({"something_else": "x"})  # resolves but no ddns_key
+    patch_vault({"something_else": "x"})  # resolves but no usable HE key
     c, hub, holder = _build()
     holder.current = _global_admin()
     r = c.post("/api/henet/credential",
@@ -113,6 +113,21 @@ def test_post_credential_rejects_reference_without_ddns_key(patch_vault):
     assert r.status_code == 404
     # nothing persisted on a bad reference
     assert "henet" not in hub.state.get_global_config()
+
+
+def test_post_credential_accepts_shared_le_hurricane_electric_secret(patch_vault):
+    # ONE Hurricane Electric credential serves both modules: a secret stored via
+    # the LE DNS-01 "Hurricane Electric (account login)" form has no ddns_key but
+    # carries he_password — the module reformats it into the dyndns push
+    # password, so it must be accepted here too.
+    patch_vault({"provider": "he-login", "he_username": "me@example.com",
+                 "he_password": "acct-pass"})
+    c, hub, holder = _build()
+    holder.current = _global_admin()
+    r = c.post("/api/henet/credential",
+               json={"bucket": "acme", "name": "he-le-cred"})
+    assert r.status_code == 200
+    assert r.json()["credential"] == {"bucket": "acme", "name": "he-le-cred"}
 
 
 # ── POST happy path + persistence ───────────────────────────────────────────
