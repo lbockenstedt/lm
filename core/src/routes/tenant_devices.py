@@ -195,6 +195,44 @@ def register(app, hub, ctx):
             })
         return {"spokes": out}
 
+    @app.get("/tenant/spokes", operation_id="tdev_visible_spokes")
+    async def _visible_spokes(request: Request):
+        """Approved spokes VISIBLE to the caller — a tenant-admin's OWN-tenant
+        AND shared-tenant approved spokes (access.spoke_visible_to_session), a
+        Global Admin's every approved spoke. Shaped like /setup/pending_spokes so
+        the WebUI left-nav builder (_rebuildMainNav) consumes it unchanged.
+
+        Distinct from /tenant/devices/spokes: that one uses can_bind_spoke
+        (own-tenant ONLY — for the Add-device dropdown), which excludes SHARED
+        spokes; the nav must ALSO show shared modules, so this endpoint mirrors
+        the frontend _spokeVisibleToTenant (own + shared) instead."""
+        sess = _session_user(request)
+        known = hub.state.system_state.get("known_modules", []) or []
+        names = hub.state.system_state.get("module_names", {}) or {}
+        meta = hub.state.system_state.get("module_metadata", {}) or {}
+        out = []
+        for sid in known:
+            if not hub.approved_modules.get(hub._primary_key(sid), False):
+                continue
+            tenant_id = hub.state.get_spoke_tenant(sid) or ""
+            if not access.spoke_visible_to_session(sess, tenant_id):
+                continue
+            m = meta.get(sid, {}) or {}
+            out.append({
+                "spoke_id": sid,
+                "display_name": names.get(sid, sid),
+                "approved": True,
+                "module_type": _module_type_for(sid),
+                "tenant_id": tenant_id,
+                "tenant_shared": access.tenant_is_shared(tenant_id),
+                "spoke_guid": m.get("install_uuid", ""),
+                "install_uuid": m.get("install_uuid", ""),
+                "parent_spoke_id": (hub._primary_key(m.get("parent_name", ""))
+                                    if m.get("parent_name") else ""),
+                "role_name": m.get("role_name", ""),
+            })
+        return {"spokes": out}
+
     def _register_product(route, prod):
         base = f"/tenant/devices/{route}"
         op = route.replace("-", "_")

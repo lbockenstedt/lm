@@ -2291,6 +2291,16 @@ async function updateStatus() {
         if (isAdmin()) {
             requests.push(setupFetch('/setup/pending_spokes').catch(() => null),
                           setupFetch('/setup/diagnostics').catch(() => null));
+        } else if (isTenantAdmin()) {
+            // A tenant-admin cannot reach the Global-Admin-only /setup/* surface
+            // (it 403s), so they get the spoke list that builds the left nav from
+            // the tenant-scoped /tenant/spokes mirror instead — their OWN + shared
+            // approved spokes. Without this the nav has NO spoke list at all and
+            // every module menu vanishes for a tenant-admin. No /setup/diagnostics
+            // sibling (hub-health is admin-only), so push a null placeholder to
+            // keep the [status, approvals, diag] destructuring positions aligned.
+            requests.push(setupFetch('/tenant/spokes').catch(() => null),
+                          Promise.resolve(null));
         }
         const [statusRes, approvalsRes, diagRes] = await Promise.all(requests);
 
@@ -2307,7 +2317,7 @@ async function updateStatus() {
         }
         _statusBackoffUntil = 0;
         if (!statusRes.ok) throw new Error('API Error');
-        const approvalsOk = isAdmin() && approvalsRes?.ok;
+        const approvalsOk = (isAdmin() || isTenantAdmin()) && approvalsRes?.ok;
         const diagOk = isAdmin() && diagRes?.ok;
 
         const statusData = await statusRes.json();
@@ -13413,7 +13423,7 @@ async function loadUsers() {
                     <td class="px-4 py-3 text-center">${check('pxmx')}</td>
                     <td class="px-4 py-3 text-center">${check('firewall')}</td>
                     <td class="px-4 py-3 text-center">${check('dns')}</td>
-                    <td class="px-4 py-3 text-center">${check('security')}</td>
+                    <td class="px-4 py-3 text-center">${check('nac')}</td>
                     <td class="px-4 py-3 text-center">${check('nw')}</td>
                     <td class="px-4 py-3 text-center">${check('ipam')}</td>
                     <td class="px-4 py-3 text-center">${check('cs')}</td>
@@ -22897,7 +22907,7 @@ async function showAddUserModal() {
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Firewall</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-firewall" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">DNS</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-dns" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">DHCP</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-dhcp" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
-                    <div><label class="text-xs text-slate-500 uppercase font-bold">NAC</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-security" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
+                    <div><label class="text-xs text-slate-500 uppercase font-bold">NAC</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-nac" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Network Devices</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-nw" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">IPAM</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-ipam" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
                     <div><label class="text-xs text-slate-500 uppercase font-bold">Simulations</label><div class="flex items-center gap-2 py-2"><input type="checkbox" id="perm-cs" class="w-4 h-4 text-green-600 border-slate-300 rounded focus:ring-green-500"></div></div>
@@ -22947,7 +22957,7 @@ async function saveUser() {
         firewall: document.getElementById('perm-firewall').checked,
         dns: document.getElementById('perm-dns').checked,
         dhcp: document.getElementById('perm-dhcp').checked,
-        security: document.getElementById('perm-security').checked,
+        nac: document.getElementById('perm-nac').checked,
         nw: document.getElementById('perm-nw').checked,
         ipam: document.getElementById('perm-ipam').checked,
         cs: document.getElementById('perm-cs').checked,
@@ -23032,7 +23042,7 @@ async function editUser(userId) {
             {id: 'firewall', label: 'Firewall'},
             {id: 'dns', label: 'DNS'},
             {id: 'dhcp', label: 'DHCP'},
-            {id: 'security', label: 'NAC'},
+            {id: 'nac', label: 'NAC'},
             {id: 'nw', label: 'Network Devices'},
             {id: 'ipam', label: 'IPAM'},
             {id: 'cs', label: 'Simulations'},
@@ -23128,7 +23138,7 @@ async function saveUserEdits(userId) {
             firewall: document.getElementById('edit-perm-firewall').checked,
             dns: document.getElementById('edit-perm-dns').checked,
             dhcp: document.getElementById('edit-perm-dhcp').checked,
-            security: document.getElementById('edit-perm-security').checked,
+            nac: document.getElementById('edit-perm-nac').checked,
             nw: document.getElementById('edit-perm-nw').checked,
             ipam: document.getElementById('edit-perm-ipam').checked,
             cs: document.getElementById('edit-perm-cs').checked,
