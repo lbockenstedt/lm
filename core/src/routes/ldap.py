@@ -229,7 +229,7 @@ def register(app, hub, ctx):
         entra = {"status": "down", "detail": "OIDC config error"}
         try:
             cfg = get_oidc_config(hub)
-            if not cfg.ready():
+            if not cfg.ready:
                 entra = {"status": "degraded", "detail": "not configured"}
             else:
                 try:

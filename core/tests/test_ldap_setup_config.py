@@ -235,3 +235,21 @@ def test_push_route_repushes_without_change():
     assert r.status_code == 200
     assert r.json()["pushed_to_spokes"] == 1
     assert hub.push_calls == 1
+
+
+def test_health_entra_reports_degraded_when_oidc_unconfigured(monkeypatch):
+    """Regression: ``/api/ldap/health`` reads ``OidcConfig.ready`` as a PROPERTY,
+    not a callable. It was called as ``cfg.ready()`` which raised
+    ``'bool' object is not callable`` and mislabeled Entra as
+    ``down: OIDC config error`` even when OIDC was merely unconfigured. With no
+    OIDC config the Entra dot must be ``degraded / not configured``."""
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv("LM_FERNET_KEY", Fernet.generate_key().decode())
+    client, _ = _build(_admin_state())
+    ck = _admin_login(client)
+    r = client.get("/api/ldap/health", cookies={"lm_session": ck})
+    assert r.status_code == 200, r.text
+    entra = r.json()["entra"]
+    assert entra["status"] == "degraded", entra
+    assert entra["detail"] == "not configured", entra
+    assert "not callable" not in entra["detail"]
