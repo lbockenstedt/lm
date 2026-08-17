@@ -86,7 +86,7 @@ def register(app, hub, ctx):
         cs_spoke = hub.get_client_sim_spoke(tid) if hasattr(hub, "get_client_sim_spoke") else None
         if not cs_spoke:
             raise HTTPException(status_code=503,
-                                detail="Client-Sim spoke not connected")
+                                detail="No spoke connected")
         try:
             await hub.request_response(
                 cs_spoke, "CS_QUEUE_COMMAND",

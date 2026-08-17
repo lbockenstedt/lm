@@ -159,7 +159,7 @@ def register(app, hub, ctx):
             cached = hub.warm_get(key, slug)
             if cached is not None:
                 return cached
-            raise HTTPException(status_code=503, detail="LDAP spoke not connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             result = await hub.request_response(spoke_id, cmd, {"tenant_slug": slug},
                                                 timeout=20.0)
@@ -186,7 +186,7 @@ def register(app, hub, ctx):
         never lands on another tenant's spoke."""
         sid = hub.get_directory_spoke_for_tenant(tid)
         if not sid:
-            raise HTTPException(status_code=503, detail="LDAP spoke not connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         return sid
 
     # ── Server + Entra health (Directory page status icons) ────────────────

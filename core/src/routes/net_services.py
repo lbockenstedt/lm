@@ -83,7 +83,7 @@ def register(app, hub, ctx):
         spokes = [s for s in (hub.get_all_spokes_by_type("dns") or [])
                   if s in hub.active_connections and hub.approved_modules.get(s, False)]
         if not spokes:
-            raise HTTPException(status_code=503, detail="No DNS spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
 
         async def _one(sid):
             try:
@@ -209,7 +209,7 @@ def register(app, hub, ctx):
         hub = app.state.hub
         result = await hub.sync_dns_from_netbox()
         if result.get("status") == "skipped":
-            raise HTTPException(status_code=503, detail=result.get("reason", "spoke not connected"))
+            raise HTTPException(status_code=503, detail=result.get("reason", "No spoke connected"))
         if result.get("status") == "error":
             raise HTTPException(status_code=500, detail=result.get("error", "sync failed"))
         return result
@@ -580,7 +580,7 @@ def register(app, hub, ctx):
                 out = dict(cached) if isinstance(cached, dict) else {"certs": cached}
                 out["stale"] = True
                 return await _filter_le_certs(request, _tag_bugfixer(out), tenant)
-            raise HTTPException(status_code=503, detail="Certificate spoke not connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             data = await _relay_spoke(le_sid, "LE_LIST_CERTS", log_name="le_list_certs")
             await hub.le_cache_set("certs", data)
@@ -1338,7 +1338,7 @@ def register(app, hub, ctx):
         spokes = [s for s in (hub.get_all_spokes_by_type("dhcp") or [])
                   if s in hub.active_connections and hub.approved_modules.get(s, False)]
         if not spokes:
-            raise HTTPException(status_code=503, detail="No DHCP spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
 
         async def _one(sid):
             try:
@@ -1449,7 +1449,7 @@ def register(app, hub, ctx):
         hub = app.state.hub
         result = await hub.sync_dhcp_from_netbox()
         if result.get("status") == "skipped":
-            raise HTTPException(status_code=503, detail=result.get("reason", "spoke not connected"))
+            raise HTTPException(status_code=503, detail=result.get("reason", "No spoke connected"))
         if result.get("status") == "error":
             raise HTTPException(status_code=500, detail=result.get("error", "sync failed"))
         return result

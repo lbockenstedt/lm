@@ -22006,6 +22006,24 @@ function _cppm403Hint(status) {
         : '';
 }
 
+// Shared error panel for the CPPM (NAC) data views. A 503 here means the module
+// has NO spoke connected (not an actual ClearPass API fault), so render the
+// SAME neutral, generic "No spoke connected" message every module uses — not a
+// red "ClearPass API Error" that misattributes a missing spoke to ClearPass.
+// Any other status keeps the API-error framing (+ the 403 credential hint).
+function _cppmErrorPanel(r, e) {
+    if (r.status === 503) {
+        return `<div class="p-6 text-center">
+            <p class="text-slate-500 font-medium text-sm">No spoke connected</p>
+        </div>`;
+    }
+    return `<div class="p-6 text-center">
+        <p class="text-red-500 font-medium text-sm mb-1">ClearPass API Error (${r.status})</p>
+        <p class="text-xs text-slate-500 font-mono">${e.detail || r.statusText}</p>
+        ${_cppm403Hint(r.status)}
+    </div>`;
+}
+
 async function loadCPPMNACStatus() {
     try {
         const r = await fetch('/api/cppm/nac-status');
@@ -22030,11 +22048,7 @@ async function _renderCppmSessions(container, subMenu, th, tableWrap) {
     const r = await fetch(`/api/cppm/sessions?limit=${limit}${tparam}`);
     if (!r.ok) {
         const e = await r.json().catch(() => ({}));
-        container.innerHTML = `<div class="p-6 text-center">
-            <p class="text-red-500 font-medium text-sm mb-1">ClearPass API Error (${r.status})</p>
-            <p class="text-xs text-slate-500 font-mono">${e.detail || r.statusText}</p>
-            ${_cppm403Hint(r.status)}
-        </div>`;
+        container.innerHTML = _cppmErrorPanel(r, e);
         return;
     }
     const d = await r.json();
@@ -22082,11 +22096,7 @@ async function _renderCppmDevices(container, subMenu, th, tableWrap) {
     const r = await fetch(isUnknown ? `/api/cppm/unknown-devices${tparam}` : `/api/cppm/devices${tparam}`);
     if (!r.ok) {
         const e = await r.json().catch(() => ({}));
-        container.innerHTML = `<div class="p-6 text-center">
-            <p class="text-red-500 font-medium text-sm mb-1">ClearPass API Error (${r.status})</p>
-            <p class="text-xs text-slate-500 font-mono">${e.detail || r.statusText}</p>
-            ${_cppm403Hint(r.status)}
-        </div>`;
+        container.innerHTML = _cppmErrorPanel(r, e);
         return;
     }
     const d = await r.json();

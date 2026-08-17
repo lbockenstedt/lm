@@ -728,7 +728,7 @@ def register(app, hub, ctx):
             body = {}
         sid = _console_spoke_or_none(hub, body)
         if not sid:
-            raise HTTPException(status_code=503, detail="No Console spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
         cmd = "CONSOLE_SET_ALIAS" if "alias" in body else "CONSOLE_SET_SETTINGS"
         r = await hub.request_response(sid, cmd, body or {}, timeout=15.0)
@@ -744,7 +744,7 @@ def register(app, hub, ctx):
             body = {}
         sid = _console_spoke_or_none(hub, body)
         if not sid:
-            raise HTTPException(status_code=503, detail="No Console spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
         r = await hub.request_response(sid, "CONSOLE_DETECT_BAUD",
                                        {"port_id": (body or {}).get("port_id")}, timeout=45.0)
@@ -761,7 +761,7 @@ def register(app, hub, ctx):
             body = {}
         sid = _console_spoke_or_none(hub, body)
         if not sid:
-            raise HTTPException(status_code=503, detail="No Console spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
         await _console_seed_credentials(hub, [sid])
         r = await hub.request_response(sid, "CONSOLE_AUTOPROBE",
@@ -876,7 +876,7 @@ def register(app, hub, ctx):
             body = {}
         sid = _console_spoke_or_none(hub, body)
         if not sid:
-            raise HTTPException(status_code=503, detail="No Console spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
         r = await hub.request_response(sid, "CONSOLE_GET_CAPTURE", {
             "port_id": (body or {}).get("port_id"),
@@ -1151,7 +1151,7 @@ def register(app, hub, ctx):
         port_id = str((body or {}).get("port_id", "")).strip()
         mode = str((body or {}).get("mode", "rw")).lower()
         if not sid:
-            raise HTTPException(status_code=503, detail="No Console spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         if not port_id:
             raise HTTPException(status_code=400, detail="port_id is required")
         # Enforce the port's effective tenant for non-admins — same rule as the
@@ -1213,7 +1213,7 @@ def register(app, hub, ctx):
             body = {}
         sid = _console_spoke_or_none(hub, body)
         if not sid:
-            raise HTTPException(status_code=503, detail="No Console spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
         await _console_seed_credentials(hub, [sid])
         r = await hub.request_response(sid, "CONSOLE_GET_CONFIG",
@@ -1231,7 +1231,7 @@ def register(app, hub, ctx):
             body = {}
         sid = _console_spoke_or_none(hub, body)
         if not sid:
-            raise HTTPException(status_code=503, detail="No Console spoke connected")
+            raise HTTPException(status_code=503, detail="No spoke connected")
         if not str((body or {}).get("config", "")).strip():
             raise HTTPException(status_code=400, detail="config is required")
         await _assert_port_tenant(request, sid, (body or {}).get("port_id"))
