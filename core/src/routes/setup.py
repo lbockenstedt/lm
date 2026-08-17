@@ -39,6 +39,7 @@ _PREFIX_MODULE = {
     "pxmx": "hypervisor", "opn": "firewall", "cppm": "nac",
     "cs": "simulation", "netbox": "ipam", "ldap": "directory",
     "dns": "dns", "dhcp": "dhcp", "nw": "nw",
+    "henet": "henet",
 }
 
 

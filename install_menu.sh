@@ -49,6 +49,7 @@ MODULES=(
     "netbox|NetBox|IPAM — device/VM/IP/MAC registry"
     "ldap|LDAP|directory service"
     "dns|DNS|name service (unbound/dnsmasq)"
+    "henet|HE.NET|public DNS — manage dns.he.net records (dynamic DNS)"
     "dhcp|DHCP|address service (Kea)"
     "nw|Network Watcher|MAC/ARP discovery + switch inventory"
 )

@@ -72,7 +72,7 @@ _UPDATE_SOURCE_PREFIX_MAP = {
 # tree (the class of bug that broke lm-opnsense). Role sub-spokes that DO have
 # their own repo (firewall→opnsense, ipam→netbox, …) resolve via
 # _UPDATE_SOURCE_MODULE_KEY above and are unaffected.
-_IN_LM_REPO_MODULE_TYPES = {"agent", "dns", "dhcp", "console", "statuspage"}
+_IN_LM_REPO_MODULE_TYPES = {"agent", "dns", "dhcp", "henet", "console", "statuspage"}
 
 # Modules that update THEMSELVES and must not be fanned out a SPOKE_UPDATE.
 # bugfixer runs its own updater thread (bugfixer/main.py updater_worker, which
@@ -1398,7 +1398,7 @@ class UpdatePipelineMixin:
                         # repo_sync path; a stall here times out every spoke).
                         backup_dir = await asyncio.to_thread(
                             snapshot_code, hub_root, ts,
-                            ["core/src", "WebUI", "dns", "dhcp"])
+                            ["core/src", "WebUI", "dns", "dhcp", "henet"])
                         await asyncio.to_thread(write_pending, backup_dir, local_v, remote_v, ts)
                     except Exception as _e:
                         logger.warning(
@@ -1422,7 +1422,7 @@ class UpdatePipelineMixin:
                             else:
                                 _hub_needs_restart = self._paths_need_restart(_changed)
                                 _dns_dhcp_changed = any(
-                                    c.startswith(("dns/", "dhcp/")) for c in _changed)
+                                    c.startswith(("dns/", "dhcp/", "henet/")) for c in _changed)
                                 logger.info(
                                     "Hub update: %d file(s) changed; restart %s (%s)",
                                     len(_changed),
@@ -1722,7 +1722,7 @@ class UpdatePipelineMixin:
             # restart). Only on a real git update — a stale-process reload didn't
             # change their code — and only when their own code actually moved.
             if hub_updated and _dns_dhcp_changed:
-                for local_svc in ("lm-dns", "lm-dhcp"):
+                for local_svc in ("lm-dns", "lm-dhcp", "lm-henet"):
                     try:
                         subprocess.Popen(["sudo", "systemctl", "restart", local_svc])
                         logger.info(f"Restarting local spoke service {local_svc}")
@@ -1883,7 +1883,7 @@ class UpdatePipelineMixin:
 
         # Restart local in-repo spokes (dns/dhcp share the lm repo; they need a
         # service restart so they pick up the code the hub already pulled).
-        for local_svc in ("lm-dns", "lm-dhcp"):
+        for local_svc in ("lm-dns", "lm-dhcp", "lm-henet"):
             try:
                 subprocess.Popen(["sudo", "systemctl", "restart", local_svc])
                 triggered.append(local_svc)

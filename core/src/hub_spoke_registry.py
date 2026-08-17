@@ -25,6 +25,7 @@ _MODULE_TYPE_PREFIX = {
     "ipam":       "netbox",
     "simulation": "cs",
     "dns":        "dns",
+    "henet":      "henet",
     "dhcp":       "dhcp",
     "agent":      "agent",
     "nw":         "nw",

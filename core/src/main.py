@@ -6942,7 +6942,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     _SPOKE_UNIT_PREFIX = {
         "cs": "lm-cs", "pxmx": "lm-pxmx", "opn": "lm-opnsense",
         "cppm": "lm-cppm", "netbox": "lm-netbox", "ldap": "lm-ldap",
-        "dns": "lm-dns", "dhcp": "lm-dhcp",
+        "dns": "lm-dns", "dhcp": "lm-dhcp", "henet": "lm-henet",
     }
 
     def _spoke_unit(self, spoke_id: str) -> str:
@@ -7001,6 +7001,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     _SENTINEL_MODULE_TYPES = {
         "opn": "firewall", "pxmx": "hypervisor", "cppm": "nac", "cs": "simulation",
         "ldap": "directory", "netbox": "ipam", "dns": "dns", "dhcp": "dhcp",
+        "henet": "henet",
         "nw": "nw", "le": "certificates", "truenas": "storage",
     }
 

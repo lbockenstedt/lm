@@ -497,14 +497,14 @@ def session_user(sessions: dict, request: "Request"):
 # editors and the effective-permission union operate over this set (plus the
 # admin flag). Kept here so the UI, routes, and resolver agree on one list.
 ENFORCED_RIGHTS = ("cs", "nw", "ipam", "le", "console", "console_write",
-                   "firewall", "dns", "dhcp", "nac", "ldap", "pxmx", "reports", "edit")
+                   "firewall", "dns", "dhcp", "henet", "nac", "ldap", "pxmx", "reports", "edit")
 # Module ACCESS rights (menu + API visibility). Each gates one module's nav +
 # API namespace; a user needs the right (or admin/tenant-admin, which auto-pass)
 # to see/reach it. cs is included but the Simulations module keeps its own
 # tenant model. ``edit`` is NOT here — it is the cross-module write tier (see
 # has_edit_access), not a module.
 MODULE_RIGHTS = ("cs", "nw", "ipam", "le", "console",
-                 "firewall", "dns", "dhcp", "nac", "ldap", "pxmx", "reports")
+                 "firewall", "dns", "dhcp", "henet", "nac", "ldap", "pxmx", "reports")
 
 
 def resolve_effective_permissions(hub, user_record: dict) -> dict:

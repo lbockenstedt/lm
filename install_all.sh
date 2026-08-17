@@ -34,7 +34,7 @@ while [[ "$#" -gt 0 ]]; do
         # machinery ONLY — no co-located module roles (cs/pxmx/opnsense/…). Those
         # run as remote spokes that onboard to this hub. Shortcut for
         # --exclude cs,pxmx,opnsense,cppm,netbox,ldap,dns,dhcp,nw,le.
-        --hub-only)        EXCLUDE=(cs pxmx opnsense cppm netbox ldap dns dhcp nw le) ;;
+        --hub-only)        EXCLUDE=(cs pxmx opnsense cppm netbox ldap dns dhcp henet nw le) ;;
         --tls-verify)      TLS_VERIFY=true ;;
         --tls-ca-cert)     shift; TLS_CA_CERT="$1" ;;
         --no-setup-token)  SETUP_TOKEN=false ;;  # leave first-run /auth/setup open (dev/loopback)
@@ -780,9 +780,9 @@ fi
 # checks the HEAD actually advanced) instead of the fragile download/tarball
 # fallback that reports success even when nothing changed. Relocate the clone's
 # .git into $BASE_DIR and let git materialize the whole tracked tree in place
-# (core/, WebUI/, dns/, dhcp/, root scripts, VERSION, docs). Untracked paths
+# (core/, WebUI/, dns/, dhcp/, henet/, root scripts, VERSION, docs). Untracked paths
 # (cs/, pxmx/, venv/, .env, certs/, data/) are left untouched by reset --hard.
-rm -rf "$BASE_DIR/core" "$BASE_DIR/WebUI" "$BASE_DIR/dns" "$BASE_DIR/dhcp"
+rm -rf "$BASE_DIR/core" "$BASE_DIR/WebUI" "$BASE_DIR/dns" "$BASE_DIR/dhcp" "$BASE_DIR/henet"
 rm -rf "$BASE_DIR/.git"
 mv lm_tmp/.git "$BASE_DIR/.git"
 rm -rf lm_tmp
@@ -1174,10 +1174,10 @@ AGENT_ID="agent-$(hostname -s)"
 declare -A MODULE_ROLE=(
     ["cs"]="simulation" ["pxmx"]="proxmox" ["opnsense"]="opnsense"
     ["cppm"]="cppm" ["netbox"]="netbox" ["ldap"]="ldap"
-    ["dns"]="dns" ["dhcp"]="dhcp" ["nw"]="network" ["le"]="le"
+    ["dns"]="dns" ["dhcp"]="dhcp" ["henet"]="henet" ["nw"]="network" ["le"]="le"
 )
 ROLES=()
-for mod in cs pxmx opnsense cppm netbox ldap dns dhcp nw le; do
+for mod in cs pxmx opnsense cppm netbox ldap dns dhcp henet nw le; do
     skip=false
     for ex in "${EXCLUDE[@]}"; do [[ "$mod" == "$ex" ]] && skip=true && break; done
     if $skip; then
@@ -1639,7 +1639,7 @@ log_c "🔄 Restarting spoke services to connect with hub..."
 # the app is up at the end of a run, even if something earlier stopped them.
 # Guarded by `systemctl is-enabled` so this is a no-op on hosts that use an
 # external NetBox (no local app units present).
-for svc in netbox netbox-rq lm-netbox lm-ldap lm-dns lm-dhcp lm-nw; do
+for svc in netbox netbox-rq lm-netbox lm-ldap lm-dns lm-dhcp lm-henet lm-nw; do
     if systemctl is-enabled "$svc" >/dev/null 2>&1; then
         systemctl reset-failed "$svc" 2>/dev/null || true
         # Gate the success log on the actual restart exit code so a failed

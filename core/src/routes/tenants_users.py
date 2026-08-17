@@ -100,6 +100,7 @@ def register(app, hub, ctx):
             "cs":       {"path": "cs/install_cs.sh",             "installed": False},
             "dhcp":     {"path": "dhcp/install_dhcp.sh",         "installed": False},
             "dns":      {"path": "dns/install_dns.sh",           "installed": False},
+            "henet":    {"path": "henet/install_henet.sh",       "installed": False},
             "ldap":     {"path": "ldap/install_ldap.sh",         "installed": False},
             "netbox":   {"path": "netbox/install.sh",            "installed": False},
             "opnsense": {"path": "opnsense/install_opnsense.sh", "installed": False},
@@ -140,6 +141,7 @@ def register(app, hub, ctx):
             # runs as a sub-spoke {agent}-{role} (parent-auto-approved).
             _MODULE_ROLE = {
                 "cppm": "cppm", "cs": "simulation", "dhcp": "dhcp", "dns": "dns",
+                "henet": "henet",
                 "ldap": "ldap", "netbox": "netbox", "opnsense": "opnsense",
                 "pxmx": "proxmox", "nw": "network", "le": "le", "console": "console",
             }
