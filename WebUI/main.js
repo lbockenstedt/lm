@@ -19449,24 +19449,26 @@ async function loadLEData(subMenu) {
             return { text: `${dt.toISOString().slice(0, 10)} · ${label}`, cls, days };
         };
         const cols = ['Domain', 'Email', 'Challenge', 'Staging', 'Expires', 'Actions'];
-        // Per-domain last-issue indicator from window._leIssueStatus (the
-        // client-side tracker fed by _leRunIssue). Green = last issue
-        // succeeded, red = last issue failed (hover for the message), amber
-        // spinner = issue in progress. Sits in front of the domain name so a
-        // glance at the table shows issue health; the expiry badge still owns
-        // validity.
+        // Per-domain last-issue indicator. Prefers the in-memory tracker
+        // (window._leIssueStatus, fed by _leRunIssue this session) but falls
+        // back to the BACKEND-persisted last_issue_error on the cert entry, so a
+        // failed issue still shows red + offers Edit/Retry after a reboot or a
+        // fresh page load (the tracker is memory-only and empty then).
         const issueDot = domain => {
             const st = window._leIssueStatus && window._leIssueStatus[domain];
-            if (!st) return '';
-            if (st.state === 'pending') return `<span class="inline-block w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse mr-2 align-middle" title="Issuing…"></span>`;
-            if (st.state === 'success') return `<span class="inline-block w-2.5 h-2.5 rounded-full bg-green-500 mr-2 align-middle" title="Last issue succeeded"></span>`;
-            if (st.state === 'failed') return `<span class="inline-block w-2.5 h-2.5 rounded-full bg-red-500 mr-2 align-middle" title="Last issue failed: ${escJsAttr(st.message || '')}"></span>`;
+            if (st) {
+                if (st.state === 'pending') return `<span class="inline-block w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse mr-2 align-middle" title="Issuing…"></span>`;
+                if (st.state === 'success') return `<span class="inline-block w-2.5 h-2.5 rounded-full bg-green-500 mr-2 align-middle" title="Last issue succeeded"></span>`;
+                if (st.state === 'failed') return `<span class="inline-block w-2.5 h-2.5 rounded-full bg-red-500 mr-2 align-middle" title="Last issue failed: ${escJsAttr(st.message || '')}"></span>`;
+            }
+            const cc = (window._leCerts || []).find(x => x.domain === domain);
+            if (cc && cc.last_issue_error) return `<span class="inline-block w-2.5 h-2.5 rounded-full bg-red-500 mr-2 align-middle" title="Last issue failed: ${escJsAttr(cc.last_issue_error)}"></span>`;
             return '';
         };
         const rows = certs.map(c => {
             const dEsc = escJsAttr(c.domain || '');
             const st = window._leIssueStatus && window._leIssueStatus[c.domain];
-            const isFailed = st && st.state === 'failed';
+            const isFailed = (st && st.state === 'failed') || !!c.last_issue_error;
             const tgts = c.targets || [];
             const tgtBadges = tgts.length
                 ? `<div class="flex flex-wrap gap-1">${tgts.map(t => tgtBadge(t, c.domain)).join('')}</div>`
@@ -20741,21 +20743,41 @@ async function _leRunIssue(body, { closeModalOnSuccess = false } = {}) {
 async function leRetryIssue(domain) {
     const st = window._leIssueStatus && window._leIssueStatus[domain];
     if (!st || !st.params) {
-        showToast('No stored issue params for ' + domain + ' — open Issue certificate to re-file.', 'error');
-        return;
+        // No in-memory params (e.g. after a reboot/reload) — a blind retry is
+        // impossible because the DNS credential/secret was never persisted.
+        // Open the Edit modal pre-filled from the persisted cert entry so the
+        // operator can re-select the credential and re-file.
+        return leEditIssue(domain);
     }
     return _leRunIssue(st.params, { closeModalOnSuccess: false });
 }
 
 // Edit a failed request before re-filing: reopen the Issue-certificate modal
 // pre-populated with the stored params (fixes the "can't edit the request"
-// gap — Retry alone re-posts the same params blindly). Falls back to a blank
-// modal with just the domain if the in-memory tracker has no stored params
-// (e.g. after a page reload).
+// gap — Retry alone re-posts the same params blindly). Prefers the in-memory
+// tracker's params; falls back to the BACKEND-persisted cert entry (from
+// window._leCerts) so Edit still works after a reboot/reload, when the
+// in-memory tracker is empty. The persisted entry carries domain/email/
+// challenge/staging/targets/profile/renew window — but NOT the DNS secret
+// (never stored), so the operator re-selects the credential.
 async function leEditIssue(domain) {
     const st = window._leIssueStatus && window._leIssueStatus[domain];
-    const prefill = (st && st.params) ? st.params : { domain };
-    return showLeIssueModal(prefill);
+    if (st && st.params) return showLeIssueModal(st.params);
+    const c = (window._leCerts || []).find(x => x.domain === domain);
+    if (c) {
+        return showLeIssueModal({
+            domain: c.domain,
+            email: c.email,
+            challenge: c.challenge,
+            staging: c.staging,
+            profile: c.profile,
+            renew_window_days: c.renew_window_days,
+            dns_provider: c.dns_provider,
+            dns_credential: c.dns_credential,
+            targets: c.targets,
+        });
+    }
+    return showLeIssueModal({ domain });
 }
 
 
