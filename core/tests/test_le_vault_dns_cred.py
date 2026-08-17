@@ -75,7 +75,9 @@ def test_global_admin_resolves_cloudflare(monkeypatch):
     body = {"dns_vault_credential": {"bucket": "t-acme", "name": "cf"},
             "dns_credential": "should-be-dropped"}
     _run(fn(object(), body))
-    assert "dns_vault_credential" not in body
+    # The secret-free reference is now KEPT (normalized to {bucket,name}) so it
+    # round-trips to the spoke ledger + is re-resolvable on renew/reinstall.
+    assert body["dns_vault_credential"] == {"bucket": "t-acme", "name": "cf"}
     assert "dns_credential" not in body            # vault ref supersedes named cred
     assert body["dns_provider"] == "cloudflare"
     assert body["dns_creds"] == "dns_cloudflare_api_token = TKN"

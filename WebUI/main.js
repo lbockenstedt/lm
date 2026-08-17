@@ -20866,6 +20866,7 @@ async function leEditIssue(domain) {
             renew_window_days: c.renew_window_days,
             dns_provider: c.dns_provider,
             dns_credential: c.dns_credential,
+            dns_vault_credential: c.dns_vault_credential,
             targets: c.targets,
         });
     }

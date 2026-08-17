@@ -2196,6 +2196,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             except Exception as e:
                 logger.warning(f"Failed to push watchdog config to {spoke_id}: {e}")
 
+            # Re-seed the le (certificates) spoke's DNS-01 hook creds from the
+            # Credential Vault on every (re)connect, BEFORE the module_key
+            # early-return below (certificates has no module_key so it would
+            # otherwise be skipped). This is the durability guarantee: a spoke
+            # that was reinstalled (its /etc/lm-le/he-login.ini wiped) gets its
+            # HE account login re-pushed from the vault the moment it reconnects,
+            # so autonomous renewals keep working with no operator action.
+            try:
+                if self.spoke_module_types.get(self._primary_key(spoke_id)) == "certificates":
+                    await self._le_sync_vault_dns_creds(spoke_id)
+            except Exception as e:
+                logger.warning(f"Failed to sync le vault DNS creds to {spoke_id}: {e}")
+
             # Resolve the push_config branch tag from the module_type registry
             # first, then fall back to a spoke_id prefix match for legacy spokes.
             # See _PUSH_CONFIG_MODULE_KEY / _PUSH_CONFIG_PREFIX_MAP (branch-tag
