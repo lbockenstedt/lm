@@ -45,6 +45,23 @@ def register(app, hub, ctx):
     def _acting_tenants(sess):
         return (sess or {}).get("user", {}).get("tenants") or []
 
+    def _all_tenants(hub):
+        """Every known tenant → {tenant_id: label}. Global-Admin-only helper so
+        the vault can list a bucket per tenant (even ones with no secrets yet),
+        letting a Global Admin add credentials for any tenant. ``default`` is
+        excluded (it's the unassigned/system bucket, not a real tenant)."""
+        try:
+            tenants = (hub.state.tenant_state or {}).get("tenants", {}) or {}
+        except Exception:  # noqa: BLE001
+            return {}
+        out = {}
+        for tid, meta in tenants.items():
+            if not tid or tid == "default":
+                continue
+            meta = meta or {}
+            out[tid] = meta.get("display_name") or meta.get("name") or tid
+        return out
+
     def _is_global_admin(sess) -> bool:
         return access.is_admin(sess)
 
@@ -89,18 +106,23 @@ def register(app, hub, ctx):
     # ── discovery ───────────────────────────────────────────────────────────
     @app.get("/tenant/cred-vault/buckets")
     async def cv_buckets(request: Request):
-        """Buckets the caller may reach, with pass-phrase + count status."""
+        """Buckets the caller may reach, with pass-phrase + count status. A
+        Global Admin sees EVERY tenant bucket (even empty ones with no secrets
+        yet) plus the ``__admin__`` slot, so they can add/remove credentials for
+        any tenant when they hold that tenant's pass-phrase."""
         sess = _sess(request)
         existing = {b["bucket"]: b for b in _cv.list_buckets(hub)}
-        reach = set()
+        labels = {}
         if _is_global_admin(sess):
-            reach = set(existing) | {_cv.ADMIN_BUCKET}
+            labels = _all_tenants(hub)
+            reach = set(existing) | set(labels) | {_cv.ADMIN_BUCKET}
         else:
             reach = set(_acting_tenants(sess))
         out = []
         for b in sorted(reach):
             rec = existing.get(b, {"bucket": b, "has_psk": False, "secret_count": 0})
-            out.append({**rec, "is_admin_slot": b == _cv.ADMIN_BUCKET})
+            name = ("Global Admin slot" if b == _cv.ADMIN_BUCKET else labels.get(b, b))
+            out.append({**rec, "name": name, "is_admin_slot": b == _cv.ADMIN_BUCKET})
         return {"buckets": out, "is_global_admin": _is_global_admin(sess),
                 "admin_slot": _cv.ADMIN_BUCKET, "vault_available": _cv._vault_available(hub)}
 
@@ -111,6 +133,33 @@ def register(app, hub, ctx):
         _require_reach(sess, bucket)
         return {"bucket": bucket, "has_psk": _cv.bucket_has_psk(hub, bucket),
                 "secrets": _cv.list_secrets(hub, bucket)}
+
+    @app.get("/tenant/cred-vault/automation-secrets")
+    async def cv_automation_secrets(request: Request):
+        """Picker source for module credential references (LE, Console): every
+        AUTOMATION-READABLE (``hub``-mode) secret in the buckets the caller can
+        reach — names + non-secret metadata ONLY, never a value. A module stores
+        just the ``{bucket, name}`` reference and resolves the value unattended
+        via :func:`cred_vault.automation_get` at use-time, so the plaintext is
+        never exposed to the browser. Optional ``?type=`` filters by secret type
+        (e.g. ``console`` / ``dns`` / ``he``)."""
+        sess = _sess(request)
+        want_type = (request.query_params.get("type") or "").strip()
+        if _is_global_admin(sess):
+            reach = set(b["bucket"] for b in _cv.list_buckets(hub)) | {_cv.ADMIN_BUCKET}
+        else:
+            reach = set(_acting_tenants(sess))
+        out = []
+        for b in sorted(reach):
+            for s in _cv.list_secrets(hub, b):
+                if not s.get("automation"):
+                    continue  # psk-only secrets can't be read unattended
+                if want_type and s.get("type") != want_type:
+                    continue
+                out.append({"bucket": b, "name": s["name"], "type": s.get("type", "generic"),
+                            "fields": s.get("fields", []), "description": s.get("description", ""),
+                            "is_admin_slot": b == _cv.ADMIN_BUCKET})
+        return {"secrets": out, "is_global_admin": _is_global_admin(sess)}
 
     # ── pass-phrase ─────────────────────────────────────────────────────────
     @app.post("/tenant/cred-vault/psk")

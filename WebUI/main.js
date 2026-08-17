@@ -4287,37 +4287,25 @@ async function loadCredVault() {
 
 function _cvBucketLabel(b) {
     if (b.bucket === _cvAdminSlot) return 'Global Admin slot';
-    return b.bucket;
+    // Prefer the server-provided friendly tenant name; fall back to the id.
+    return b.name && b.name !== b.bucket ? `${b.name} (${b.bucket})` : b.bucket;
 }
 
 function _cvRenderShell() {
     const host = document.getElementById('credvault-content');
     if (!host) return;
     if (!_cvBuckets.length) {
-        // A Global Admin always gets the __admin__ slot from the server, so an
-        // empty list here means the account is NOT a Global Admin (tenant-admin
-        // with no tenant buckets). Explain why + how to proceed instead of a
-        // dead-end. Still offer the Load box if the server did flag global-admin.
-        const help = _cvIsGlobalAdmin
-            ? `<p class="text-sm text-slate-600">No buckets yet. Load a tenant id to create its bucket, or use the Global Admin slot.</p>
-               <div class="flex items-center gap-2 pt-1">
-                 <input id="cv-other-bucket" type="text" placeholder="load tenant id…" autocomplete="off" class="px-2 py-1 text-sm border border-slate-300 rounded-md">
-                 <button onclick="_cvLoadOther()" class="px-3 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Load</button>
-                 <button onclick="_cvLoadOtherAdminSlot()" class="px-3 py-1 text-xs rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Open Global Admin slot</button>
-               </div>`
-            : `<p class="text-sm text-slate-600">No credential buckets are reachable for your account.</p>
+        // A Global Admin always gets the __admin__ slot (and every tenant
+        // bucket) from the server, so an empty list here means the account is
+        // NOT a Global Admin (a tenant-admin with no tenant buckets). Explain
+        // the role scoping instead of showing a dead-end.
+        const help = `<p class="text-sm text-slate-600">No credential buckets are reachable for your account.</p>
                <p class="text-xs text-slate-500">The Credential Vault is scoped by role: a <b>tenant-admin</b> can only access buckets for tenants assigned to their account, and a <b>Global Admin</b> additionally gets a shared admin slot. Your account currently has no reachable tenant buckets — ask a Global Admin to assign your user to a tenant, or to grant Global Admin rights.</p>`;
         host.innerHTML = `<div class="hpe-card rounded-lg p-5 shadow-sm space-y-2">${help}</div>`;
         return;
     }
     const opts = _cvBuckets.map(b =>
         `<option value="${escapeHtml(b.bucket)}"${b.bucket === _cvCurrentBucket ? ' selected' : ''}>${escapeHtml(_cvBucketLabel(b))}${b.has_psk ? '' : ' (no pass-phrase)'}</option>`).join('');
-    const adminTools = _cvIsGlobalAdmin ? `
-      <div class="flex items-center gap-2">
-        <input id="cv-other-bucket" type="text" placeholder="load tenant id…" autocomplete="off" class="px-2 py-1 text-sm border border-slate-300 rounded-md">
-        <button onclick="_cvLoadOther()" class="px-3 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Load</button>
-        <button onclick="_cvImportConsole()" title="Copy the console auto-identify login list into the Global Admin slot (automation-readable)" class="px-3 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Import console creds</button>
-      </div>` : '';
     const storageHint = _cvVaultAvailable ? '' : `
       <div class="text-xs px-3 py-2 rounded-md bg-amber-50 text-amber-700 border border-amber-200">Azure Key Vault is not configured — secrets are stored locally (encrypted in hub state). Configure a vault under Setup → Azure → Key Vault to store them there instead.</div>`;
     host.innerHTML = `
@@ -4328,7 +4316,6 @@ function _cvRenderShell() {
             <label class="text-xs font-bold text-slate-500 uppercase tracking-wider">Bucket</label>
             <select id="cv-bucket-select" onchange="_cvSwitchBucket(this.value)" class="px-3 py-1.5 text-sm border border-slate-300 rounded-md bg-white">${opts}</select>
           </div>
-          ${adminTools}
         </div>
         <div class="flex items-center gap-2">
           <button onclick="_cvSetPskModal()" class="px-3 py-1.5 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Set / change pass-phrase</button>
@@ -4340,22 +4327,6 @@ function _cvRenderShell() {
 }
 
 function _cvSwitchBucket(v) { _cvCurrentBucket = v; _cvRenderBucketBody(); }
-
-async function _cvLoadOther() {
-    const v = (document.getElementById('cv-other-bucket')?.value || '').trim();
-    if (!v) return;
-    if (!_cvBuckets.some(b => b.bucket === v)) _cvBuckets.push({ bucket: v, has_psk: false, secret_count: 0 });
-    _cvCurrentBucket = v;
-    _cvRenderShell();
-}
-
-function _cvLoadOtherAdminSlot() {
-    if (!_cvBuckets.some(b => b.bucket === _cvAdminSlot)) {
-        _cvBuckets.push({ bucket: _cvAdminSlot, has_psk: false, secret_count: 0 });
-    }
-    _cvCurrentBucket = _cvAdminSlot;
-    _cvRenderShell();
-}
 
 async function _cvRenderBucketBody() {
     const el = document.getElementById('cv-secrets');
@@ -4596,31 +4567,6 @@ async function _cvDoDelete(enc) {
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
-// Migrate the console auto-identify login list into the Global Admin slot as a
-// hub-mode (automation-readable) secret, so the console seed loop can pull it
-// unattended alongside every other credential. Requires the __admin__ PSK.
-function _cvImportConsole() {
-    const body = `
-      <h3 class="text-lg font-bold text-[#263040]">Import console credentials</h3>
-      <p class="text-sm text-slate-500">Copies the current console auto-identify login list into the <b>Global Admin slot</b> as an automation-readable secret (<code>console-auto-credentials</code>). The console seed loop then pulls it from the vault unattended. Set the Global Admin slot pass-phrase first if you haven't.</p>
-      <input id="cv-imp-psk" type="password" autocomplete="off" placeholder="Global Admin slot pass-phrase" class="${_CV_INP}">
-      <div class="flex justify-end gap-2 pt-2">
-        <button onclick="document.getElementById('cv-imp-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
-        <button onclick="_cvDoImportConsole()" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Import</button>
-      </div>`;
-    openModal('cv-imp-modal', body, { backdropClose: true });
-}
-
-async function _cvDoImportConsole() {
-    const psk = document.getElementById('cv-imp-psk')?.value || '';
-    try {
-        const d = await apiJson('/api/console/credentials/to-vault', { method: 'POST', body: JSON.stringify({ psk }) });
-        document.getElementById('cv-imp-modal')?.remove();
-        showToast(`Imported ${d.count} console credential(s) into the Global Admin slot`, 'success');
-        _cvCurrentBucket = _cvAdminSlot;
-        loadCredVault();
-    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
-}
 // ──────────────────────────────────────────────────────────────────
 
 function _renderLogsSection(subMenu) {
@@ -17254,23 +17200,39 @@ async function openConsoleCredentialsModal() {
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
     let existing = [];
     let vaultBacked = false;
+    let source = 'hub';
+    let migrateWarning = '';
     try {
         const res = await fetch('/api/console/credentials', { credentials: 'same-origin' });
-        if (res.ok) { const j = await res.json(); existing = j.credentials || []; vaultBacked = !!j.read_only; }
+        if (res.ok) {
+            const j = await res.json();
+            existing = j.credentials || [];
+            vaultBacked = (j.read_only !== false);
+            source = j.source || 'hub';
+            migrateWarning = j.migrate_warning || '';
+        }
     } catch (e) { console.error(e); }
     if (vaultBacked) {
-        // Sourced (read-only) from Azure Key Vault — the hub only reads it, so
-        // editing lives in the vault, not here.
+        // Creation is disabled: console logins are managed in the Credential
+        // Vault (or a legacy Key Vault ref). The hub only reads them here, so
+        // editing lives in the vault, not this modal.
         const list = existing.length
             ? existing.map(c => `<li class="font-mono text-xs text-slate-600">${escapeHtml(c.username)}${c.has_password ? '' : ' <span class="text-amber-500">(no password)</span>'}</li>`).join('')
             : '<li class="text-xs text-slate-400 italic">no credentials resolved from the vault</li>';
+        const srcLabel = source === 'cred_vault' ? 'the <b>Credential Vault</b> (Global Admin slot)'
+            : source === 'keyvault' ? 'a legacy <b>Azure Key Vault</b> reference'
+            : 'the <b>hub</b> (legacy local store)';
+        const warnBanner = migrateWarning
+            ? `<div class="text-xs px-3 py-2 rounded bg-amber-50 text-amber-800 border border-amber-200">⚠ ${escapeHtml(migrateWarning)}</div>`
+            : '';
         modal.innerHTML = `<div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
               <h3 class="text-lg font-bold text-[#263040]">Console Credential Library</h3>
               <button onclick="this.closest('#console-creds-modal').remove()" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
             </div>
             <div class="p-6 space-y-3">
-              <div class="text-xs px-3 py-2 rounded bg-blue-50 text-blue-700 border border-blue-100">🔐 Managed in <b>Azure Key Vault</b> (read-only here). Edit the vault secret to change these credentials.</div>
+              <div class="text-xs px-3 py-2 rounded bg-blue-50 text-blue-700 border border-blue-100">🔐 Resolved from ${srcLabel} (read-only here). New raw passwords can no longer be created — manage credentials in the Credential Vault.</div>
+              ${warnBanner}
               <ul class="space-y-1 list-disc list-inside">${list}</ul>
               <div class="pt-3 flex justify-end"><button onclick="this.closest('#console-creds-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Close</button></div>
             </div></div>`;
@@ -20716,13 +20678,18 @@ async function dnsCredReloadList() {
     const box = document.getElementById('dns-creds-list');
     if (!box) return;
     let creds = [];
+    let warn = '';
     try {
         const r = await _spokeFetch('/api/le/dns-credentials', { method: 'GET' });
         const d = (r.data && r.data.data) ? r.data.data : (r.data || {});
         creds = d.credentials || [];
+        warn = d.migrate_warning || (r.data && r.data.migrate_warning) || '';
     } catch (e) { box.innerHTML = `<p class="text-sm text-red-500">Could not load: ${escapeHtml(e.message)}</p>`; return; }
-    if (!creds.length) { box.innerHTML = '<p class="text-sm text-slate-400 italic">No credentials yet — add one below.</p>'; return; }
-    box.innerHTML = creds.map(c => {
+    const warnBanner = warn
+        ? `<div class="text-xs px-3 py-2 mb-2 rounded bg-amber-50 text-amber-800 border border-amber-200">⚠ ${escapeHtml(warn)}</div>`
+        : '';
+    if (!creds.length) { box.innerHTML = warnBanner + '<p class="text-sm text-slate-400 italic">No credentials yet — add one below.</p>'; return; }
+    box.innerHTML = warnBanner + creds.map(c => {
         const label = (DNS_CRED_PROVIDERS[c.provider] || {}).label || c.provider;
         return `<div class="flex items-center justify-between border border-slate-200 rounded-md px-3 py-2">
           <div><span class="text-sm font-medium text-slate-700">${escapeHtml(c.name)}</span>
