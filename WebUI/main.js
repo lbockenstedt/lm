@@ -21951,28 +21951,22 @@ function openExternalDns(id) {
 // it unattended (net_services._henet_resolve_vault_cred). Writes are
 // Global-Admin-only (see api.py _ADMIN_INFRA_WRITE_PREFIXES).
 
-// Collect every reachable Credential Vault secret of type 'henet' as
-// {bucket, name, label} options for the DDNS-key picker. Best-effort per bucket
-// (a bucket without a pass-phrase set / no reach simply yields nothing).
+// Collect every automation-readable Credential Vault secret of type 'henet' as
+// {bucket, name, label} options for the DDNS-key picker. Uses the same
+// server-side ``automation-secrets`` endpoint the LE module uses: it returns
+// hub-mode secrets across every reachable bucket INCLUDING the Global-Admin
+// (__admin__) infra slot, with no pass-phrase needed — unlike a per-bucket
+// ``secrets?bucket=`` listing, which is PSK-gated and skips the admin slot
+// (that's why the HE key never showed up here before).
 async function _henetVaultCredOptions() {
-    const out = [];
-    let buckets = [];
     try {
-        const b = await apiJson('/tenant/cred-vault/buckets');
-        buckets = b.buckets || [];
-    } catch (e) { return out; }
-    for (const b of buckets) {
-        try {
-            const d = await apiJson('/tenant/cred-vault/secrets?bucket=' + encodeURIComponent(b.bucket));
-            for (const s of (d.secrets || [])) {
-                if (s.type === 'henet') {
-                    out.push({ bucket: b.bucket, name: s.name,
-                               label: `${_cvBucketLabel(b)} › ${s.name}` });
-                }
-            }
-        } catch (e) { /* unreachable / no PSK — skip this bucket */ }
-    }
-    return out;
+        const v = await apiJson('/tenant/cred-vault/automation-secrets?type=henet');
+        return ((v && v.secrets) || []).map(s => ({
+            bucket: s.bucket,
+            name: s.name,
+            label: `${s.is_admin_slot ? 'Global Admin' : s.bucket} › ${s.name}`,
+        }));
+    } catch (e) { return []; }
 }
 
 function _henetPushBadge(r) {
@@ -22004,13 +21998,30 @@ async function loadHenet() {
         }
     } catch (e) { /* status is best-effort */ }
 
-    // Admin-only action bar (add/sync). A non-admin DNS viewer sees the records
-    // read-only — writes are Global-Admin-only server-side.
+    // Module-level assigned DDNS credential — resolved once, reused for every
+    // add/sync so the operator never re-picks it. Stored as a non-secret
+    // {bucket,name} reference (GET /api/henet/credential).
+    let assignedCred = null;
+    try {
+        const c = await _spokeFetch('/api/henet/credential');
+        if (c.ok && c.data) assignedCred = c.data.credential || null;
+    } catch (e) { /* best-effort */ }
+    window._henetAssignedCred = assignedCred;
+    const credInfo = admin
+        ? (assignedCred
+            ? ` · <span class="text-slate-600">DDNS credential: <span class="font-mono">🔐 ${escapeHtml(assignedCred.name)}</span></span>`
+            : ` · <span class="text-amber-600 font-medium">no DDNS credential assigned</span>`)
+        : '';
+
+    // Admin-only action bar. Writes need the assigned DDNS credential, so Add /
+    // Sync only appear once one is assigned; otherwise an Assign CTA is shown. A
+    // non-admin DNS viewer sees the records read-only (writes are admin-only).
     const actionBar = `<div class="flex flex-wrap items-center justify-between gap-2 mb-3">
-        <div class="text-xs text-slate-500">${statusHtml}</div>
+        <div class="text-xs text-slate-500">${statusHtml}${credInfo}</div>
         <div class="flex gap-2">
-          ${admin ? `<button onclick="showHenetRecordModal()" class="${btnCls}">+ Add Record</button>` : ''}
-          ${admin ? `<button onclick="syncHenet()" class="${btnCls}" title="Re-push every managed A/AAAA record to HE.NET">↻ Sync all</button>` : ''}
+          ${admin ? `<button onclick="showHenetCredModal()" class="${btnCls}" title="${assignedCred ? 'Change the assigned HE DDNS credential' : 'Assign an HE DDNS credential from the Credential Vault'}">🔐 ${assignedCred ? 'Change credential' : 'Assign credential'}</button>` : ''}
+          ${admin && assignedCred ? `<button onclick="showHenetRecordModal()" class="${btnCls}">+ Add Record</button>` : ''}
+          ${admin && assignedCred ? `<button onclick="syncHenet()" class="${btnCls}" title="Re-push every managed A/AAAA record to HE.NET">↻ Sync all</button>` : ''}
         </div>
       </div>`;
 
@@ -22057,10 +22068,7 @@ async function showHenetRecordModal(editItem) {
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const typeOpts = ['A', 'AAAA'].map(t =>
         `<option value="${t}"${editItem && editItem.type === t ? ' selected' : ''}>${t}</option>`).join('');
-    const creds = await _henetVaultCredOptions();
-    const credOpts = creds.length
-        ? creds.map(c => `<option value="${escapeHtml(c.bucket)}|${escapeHtml(c.name)}">${escapeHtml(c.label)}</option>`).join('')
-        : '<option value="">— no HE.NET credential in the vault —</option>';
+    const cred = window._henetAssignedCred;
     const modal = openModal('henet-record-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} HE.NET Record</h3>
         <div class="space-y-3">
@@ -22068,7 +22076,7 @@ async function showHenetRecordModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Type</label><select id="henet-r-type" class="${inputCls}" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Value (IP)</label><input id="henet-r-value" value="${val(editItem?.value)}" class="${inputCls}" placeholder="203.0.113.5"></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="henet-r-ttl" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">HE DDNS credential</label><select id="henet-r-cred" class="${inputCls}">${credOpts}</select><span class="block text-[11px] text-slate-400 mt-1">A Credential Vault secret (type “HE.NET DDNS key”, automation-readable). The key never leaves the hub.</span></div>
+            <p class="text-[11px] text-slate-400">Pushed to HE.NET with the assigned DDNS credential${cred ? ` (<span class="font-mono">🔐 ${escapeHtml(cred.name)}</span>)` : ''}. The key never leaves the hub.</p>
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="saveHenetRecord()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
@@ -22077,23 +22085,74 @@ async function showHenetRecordModal(editItem) {
     if (editing) { modal.dataset.editName = editItem.name; modal.dataset.editType = editItem.type; }
 }
 
-function _henetCredRef(selVal) {
-    const [bucket, name] = String(selVal || '').split('|');
-    return (bucket && name) ? { bucket, name } : null;
+// ── Module-level HE DDNS credential assignment ──────────────────────────────
+// Pick a Credential Vault 'henet' secret once; the hub uses it for every
+// add/sync (POST /api/henet/credential). Global-Admin-only server-side.
+async function showHenetCredModal() {
+    const creds = await _henetVaultCredOptions();
+    const assigned = window._henetAssignedCred;
+    const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
+    const opts = creds.length
+        ? creds.map(c => {
+            const v = `${c.bucket}|${c.name}`;
+            const sel = assigned && assigned.bucket === c.bucket && assigned.name === c.name ? ' selected' : '';
+            return `<option value="${escapeHtml(v)}"${sel}>${escapeHtml(c.label)}</option>`;
+          }).join('')
+        : '';
+    openModal('henet-cred-modal', `
+        <h3 class="text-lg font-bold text-[#263040]">Assign HE.NET DDNS credential</h3>
+        <p class="text-sm text-slate-500">The HE.NET module uses this Credential Vault secret to push records — assign it once and you won't be asked per record. Add a key under <b>Credential Vault → + Add secret → HE.NET DDNS key</b> (automation mode).</p>
+        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">DDNS credential</label>
+          ${creds.length
+            ? `<select id="henet-assign-cred" class="${inputCls}">${opts}</select>`
+            : `<p class="text-sm text-amber-600 italic">No automation-readable “HE.NET DDNS key” secret found in the Credential Vault. Add one first.</p>`}
+        </div>
+        <div class="flex justify-end gap-2 pt-2">
+            ${assigned ? `<button onclick="_henetClearCred()" class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-4 py-2 rounded-md text-sm mr-auto">Clear</button>` : ''}
+            ${creds.length ? `<button onclick="_henetSaveCred()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Save</button>` : ''}
+            <button onclick="document.getElementById('henet-cred-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+}
+
+async function _henetSaveCred() {
+    const sel = document.getElementById('henet-assign-cred')?.value || '';
+    const [bucket, name] = String(sel).split('|');
+    if (!bucket || !name) { showToast('Add an HE.NET DDNS key to the Credential Vault first', 'error'); return; }
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/henet/credential', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bucket, name }),
+        });
+        if (ok && d.status === 'SUCCESS') {
+            document.getElementById('henet-cred-modal')?.remove();
+            showToast('HE.NET DDNS credential assigned', 'success');
+            loadHenet();
+        } else showToast('Error: ' + (detail || d?.message || 'Failed to assign credential'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+async function _henetClearCred() {
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/henet/credential', { method: 'DELETE' });
+        if (ok && d.status === 'SUCCESS') {
+            document.getElementById('henet-cred-modal')?.remove();
+            showToast('HE.NET DDNS credential cleared', 'success');
+            loadHenet();
+        } else showToast('Error: ' + (detail || d?.message || 'Failed to clear credential'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
 async function saveHenetRecord() {
     const modal = document.getElementById('henet-record-modal');
     const editing = modal && modal.dataset.editName;
     const get = id => document.getElementById(id)?.value?.trim() || '';
-    const cred = _henetCredRef(get('henet-r-cred'));
-    if (!cred) { showToast('Select an HE.NET DDNS credential from the vault first', 'error'); return; }
+    if (!window._henetAssignedCred) { showToast('Assign an HE.NET DDNS credential first', 'error'); return; }
     const payload = {
         name: editing ? modal.dataset.editName : get('henet-r-name'),
         type: editing ? modal.dataset.editType : get('henet-r-type'),
         value: get('henet-r-value'),
         ttl: parseInt(get('henet-r-ttl')) || 300,
-        henet_vault_credential: cred,
     };
     if (!payload.name || !payload.value) { showToast('Name and Value are required', 'error'); return; }
     try {
@@ -22128,33 +22187,15 @@ async function syncHenet() {
     const records = (window._henetRecords || []).filter(r => r.type === 'A' || r.type === 'AAAA')
         .map(r => ({ name: r.name, type: r.type, value: r.value, ttl: r.ttl }));
     if (!records.length) { showToast('No A/AAAA records under management to sync', 'error'); return; }
-    const creds = await _henetVaultCredOptions();
-    if (!creds.length) { showToast('Store an HE.NET DDNS key in the Credential Vault first', 'error'); return; }
-    const modal = openModal('henet-sync-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">Sync all HE.NET records</h3>
-        <p class="text-sm text-slate-500">Re-push all ${records.length} managed A/AAAA record(s) to HE.NET using the selected DDNS credential.</p>
-        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">HE DDNS credential</label>
-          <select id="henet-sync-cred" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm">${creds.map(c => `<option value="${escapeHtml(c.bucket)}|${escapeHtml(c.name)}">${escapeHtml(c.label)}</option>`).join('')}</select></div>
-        <div class="flex justify-end gap-2 pt-2">
-            <button onclick="_henetDoSync()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Sync</button>
-            <button onclick="document.getElementById('henet-sync-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
-    modal._records = records;
-}
-
-async function _henetDoSync() {
-    const modal = document.getElementById('henet-sync-modal');
-    if (!modal) return;
-    const cred = _henetCredRef(document.getElementById('henet-sync-cred')?.value);
-    if (!cred) { showToast('Select a credential', 'error'); return; }
+    if (!window._henetAssignedCred) { showToast('Assign an HE.NET DDNS credential first', 'error'); return showHenetCredModal(); }
+    if (!await showConfirmToast(`Re-push all ${records.length} managed A/AAAA record(s) to HE.NET using the assigned DDNS credential?`)) return;
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/sync', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ records: modal._records, henet_vault_credential: cred }),
+            body: JSON.stringify({ records }),
         });
         if (ok && (d.status === 'SUCCESS' || d.status === 'PARTIAL')) {
-            modal.remove();
             showToast(`Synced — ${d.pushed || 0} pushed${d.errors ? `, ${d.errors.length} error(s)` : ''}`, d.errors ? 'error' : 'success');
             loadHenet();
         } else showToast('Error: ' + (detail || d?.message || 'Sync failed'), 'error');

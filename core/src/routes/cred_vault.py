@@ -142,7 +142,7 @@ def register(app, hub, ctx):
         just the ``{bucket, name}`` reference and resolves the value unattended
         via :func:`cred_vault.automation_get` at use-time, so the plaintext is
         never exposed to the browser. Optional ``?type=`` filters by secret type
-        (e.g. ``console`` / ``dns`` / ``he``)."""
+        (e.g. ``console`` / ``dns`` / ``henet``)."""
         sess = _sess(request)
         want_type = (request.query_params.get("type") or "").strip()
         if _is_global_admin(sess):

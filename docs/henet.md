@@ -19,8 +19,10 @@ In the WebUI, HE.NET lives **under the DNS module** ("all things DNS") on the **
 The HE DDNS key is a **secret** and — exactly like the LE module's DNS-01 credentials — is **NEVER stored on the spoke** and never sent to the browser. It lives in the hub-side **Credential Vault** ([le.md](le.md) uses the same mechanism):
 
 - Store the key as a Credential Vault secret of type **`henet`** (`{ ddns_key: ... }`), in **automation-readable** (`hub`) mode so the hub can resolve it unattended.
-- On each write, the WebUI sends a `henet_vault_credential` `{bucket, name}` reference (not the key itself).
+- **Assign the credential once** (module-level), rather than picking it per record. A Global Admin assigns a `{bucket, name}` reference under **DNS → External DNS → HE.NET → 🔐 Assign credential**; the hub persists it in global config under `henet.vault_credential` and validates up-front that it resolves to an automation-readable `henet` secret carrying a `ddns_key`. See the credential routes below.
+- On each write the hub falls back to the assigned credential (`net_services._henet_get_assigned_cred`) when the request carries no explicit `henet_vault_credential` reference — so add/sync never have to re-pick the key.
 - The hub resolves it in-place via `cred_vault.automation_get(hub, bucket, name)` (`net_services._henet_resolve_vault_cred`) and injects `ddns_key` into the relayed `HENET_*` command — mirroring LE's `_le_resolve_vault_dns_cred`.
+- The credential **picker** lists Credential Vault secrets via the automation-readable endpoint (`/tenant/cred-vault/automation-secrets?type=henet`, the same one the LE module uses), so automation/Global-Admin-slot (`__admin__`) keys appear — the older per-bucket, pass-phrase-gated listing skipped that slot.
 - When Azure Key Vault is configured the secret lives there; otherwise it's stored encrypted-local (Fernet) in hub state. Either way the plaintext key only ever exists on the spoke for the duration of one push.
 
 ## Entrypoints
@@ -45,11 +47,11 @@ Talks to Hurricane Electric's fixed dyndns endpoint `https://dyn.dns.he.net/nic/
 
 ## Hub API endpoints (`core/src/routes/net_services.py`)
 
-`GET /api/henet/records`, `GET /api/henet/status`, `POST/PUT/DELETE /api/henet/record`, `POST /api/henet/sync`. Writes are **Global-Admin-only** (`api.py` `_ADMIN_INFRA_WRITE_PREFIXES` includes `/api/henet/`), because HE.NET is public-address-space infra with no per-tenant object model. **Reads** are gated like the DNS module — the `dns` right OR the explicit `henet` right OR admin — so anyone who can view DNS can also view HE.NET records (`api.py` `/api/henet/` read gate; `access.py`).
+`GET /api/henet/records`, `GET /api/henet/status`, `POST/PUT/DELETE /api/henet/record`, `POST /api/henet/sync`, and the module-level credential-assignment routes `GET/POST/DELETE /api/henet/credential` (GET returns the assigned `{bucket, name}` reference — never a secret value — and is readable by any DNS viewer; POST/DELETE assign/clear it). Writes are **Global-Admin-only** (`api.py` `_ADMIN_INFRA_WRITE_PREFIXES` includes `/api/henet/`), because HE.NET is public-address-space infra with no per-tenant object model. **Reads** are gated like the DNS module — the `dns` right OR the explicit `henet` right OR admin — so anyone who can view DNS can also view HE.NET records (`api.py` `/api/henet/` read gate; `access.py`).
 
 ## WebUI
 
-HE.NET is reached via the **DNS** module's **External DNS** subtab (the DNS nav item covers Unbound *and* internet-facing providers). **DNS → External DNS** lists each connected external provider as a tile (or drills straight in when only one is connected); the HE.NET view shows a status line (HE dyndns reachable? + managed-record count) and a records table (Name / Type / Value / TTL / Last Push). Management — **+ Add Record** / edit / delete / **Sync all** — is admin-only; a non-admin DNS viewer sees the table read-only. The Add/Edit modal includes a **HE DDNS credential** picker populated from Credential Vault secrets of type `henet`. Add a key under **Credential Vault → + Add secret → HE.NET DDNS key** (automation mode is forced). The External DNS tab appears once a `henet` (or other external-DNS) spoke is connected.
+HE.NET is reached via the **DNS** module's **External DNS** subtab (the DNS nav item covers Unbound *and* internet-facing providers). **DNS → External DNS** lists each connected external provider as a tile (or drills straight in when only one is connected); the HE.NET view shows a status line (HE dyndns reachable? + managed-record count + the assigned DDNS credential, or "no DDNS credential assigned") and a records table (Name / Type / Value / TTL / Last Push). Management — **+ Add Record** / edit / delete / **Sync all** — is admin-only; a non-admin DNS viewer sees the table read-only. A Global Admin first assigns the DDNS credential once via **🔐 Assign/Change credential** (populated from Credential Vault `henet` secrets via the automation-readable listing, so Global-Admin-slot keys appear); **+ Add Record** and **Sync all** only appear once a credential is assigned, and they reuse it without re-picking. Add a key under **Credential Vault → + Add secret → HE.NET DDNS key** (automation mode is forced). The External DNS tab appears once a `henet` (or other external-DNS) spoke is connected.
 
 ## Key files
 
@@ -65,15 +67,17 @@ HE.NET is reached via the **DNS** module's **External DNS** subtab (the DNS nav 
 
 ## How to use it
 
-- **Add a record:** DNS → External DNS → HE.NET → **+ Add Record** → name/type(A|AAAA)/value(IP)/ttl → pick an HE DDNS credential → submit. The hub resolves the key and pushes to HE; the record's Last Push badge shows the result.
+- **First-time setup:** store the HE DDNS key in the Credential Vault (secret type "HE.NET DDNS key", automation-readable), then **assign it once** to the module: DNS → External DNS → HE.NET → **🔐 Assign credential** → pick the vault secret → save. **+ Add Record** and **Sync all** appear once a credential is assigned.
+- **Add a record:** DNS → External DNS → HE.NET → **+ Add Record** → name/type(A|AAAA)/value(IP)/ttl → submit. The hub resolves the assigned key and pushes to HE; the record's Last Push badge shows the result.
 - **Edit a record:** edit action → change the IP → save (re-pushes the same hostname).
 - **Remove from management:** delete action (leaves the HE zone entry intact — remove it at dns.he.net if desired).
-- **Re-push everything:** **Sync all** → pick a credential → syncs every managed A/AAAA record to HE.
-- **First-time setup:** store the HE DDNS key in the Credential Vault (secret type "HE.NET DDNS key", automation-readable) before adding records.
+- **Re-push everything:** **Sync all** → confirm → syncs every managed A/AAAA record to HE using the assigned credential.
+- **Change/clear the credential:** DNS → External DNS → HE.NET → **🔐 Assign/Change credential** → pick another secret and save, or **Clear** to unassign.
 
 ## Troubleshooting / common questions
 
-- **"Add failed: no DDNS key supplied."** No `henet` credential was selected/resolvable. Store the HE DDNS key as a Credential Vault secret of type `henet` (automation mode) and select it in the Add/Sync modal.
+- **"No HE.NET DDNS credential assigned."** No module-level credential is assigned. Store the HE DDNS key as a Credential Vault secret of type `henet` (automation mode) and assign it via **🔐 Assign credential**.
+- **Credential doesn't appear in the picker.** The picker lists automation-readable `henet` secrets (including the Global-Admin `__admin__` slot) via `/tenant/cred-vault/automation-secrets?type=henet`. Ensure the secret was saved with type "HE.NET DDNS key" (automation mode is forced on save).
 - **"HE.NET spoke not connected."** The `henet` role isn't loaded on an agent. Load the `henet` agent role (or install `install_henet.sh`), and confirm the node's `lm-agent` unit is up.
 - **"I deleted a record but it still resolves at HE."** Expected — dyndns can't delete. Remove the entry in the dns.he.net UI; the module only stopped managing it.
 - **"Push returned an error token."** HE's raw response (e.g. `badauth`, `nohost`) is surfaced verbatim in the Last Push tooltip — check the DDNS key and that the hostname has dynamic-DNS enabled at HE.
