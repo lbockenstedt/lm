@@ -17277,6 +17277,7 @@ async function openConsoleCredentialsModal() {
     let vaultBacked = false;
     let source = 'hub';
     let migrateWarning = '';
+    let localCreds = [];
     try {
         const res = await fetch('/api/console/credentials', { credentials: 'same-origin' });
         if (res.ok) {
@@ -17285,12 +17286,14 @@ async function openConsoleCredentialsModal() {
             vaultBacked = (j.read_only !== false);
             source = j.source || 'hub';
             migrateWarning = j.migrate_warning || '';
+            localCreds = j.local_credentials || [];
         }
     } catch (e) { console.error(e); }
     if (vaultBacked) {
         // Creation is disabled: console logins are managed in the Credential
         // Vault (or a legacy Key Vault ref). The hub only reads them here, so
-        // editing lives in the vault, not this modal.
+        // editing lives in the vault, not this modal. Legacy LOCAL passwords may
+        // still be DELETED here to clean them up (delete-only, never add).
         const list = existing.length
             ? existing.map(c => `<li class="font-mono text-xs text-slate-600">${escapeHtml(c.username)}${c.has_password ? '' : ' <span class="text-amber-500">(no password)</span>'}</li>`).join('')
             : '<li class="text-xs text-slate-400 italic">no credentials resolved from the vault</li>';
@@ -17299,6 +17302,18 @@ async function openConsoleCredentialsModal() {
             : 'the <b>hub</b> (legacy local store)';
         const warnBanner = migrateWarning
             ? `<div class="text-xs px-3 py-2 rounded bg-amber-50 text-amber-800 border border-amber-200">⚠ ${escapeHtml(migrateWarning)}</div>`
+            : '';
+        // Legacy local passwords still on the hub — offer per-row delete so an
+        // operator can clean them up (they can't be edited, only removed).
+        const localSection = localCreds.length
+            ? `<div class="pt-2 border-t border-slate-100">
+                 <p class="text-[11px] font-semibold text-slate-500 mb-1">Legacy local passwords (delete to clean up)</p>
+                 <div class="space-y-1">${localCreds.map(c => `
+                   <div class="flex items-center justify-between gap-2 bg-slate-50 rounded px-2 py-1">
+                     <span class="font-mono text-xs text-slate-600">${escapeHtml(c.username)}${c.has_password ? '' : ' <span class="text-amber-500">(no password)</span>'}</span>
+                     <button onclick="deleteConsoleLocalCredential('${escJsAttr(c.username)}')" class="text-[11px] px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50" title="Delete this local credential">Delete</button>
+                   </div>`).join('')}</div>
+               </div>`
             : '';
         modal.innerHTML = `<div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
@@ -17309,6 +17324,7 @@ async function openConsoleCredentialsModal() {
               <div class="text-xs px-3 py-2 rounded bg-blue-50 text-blue-700 border border-blue-100">🔐 Resolved from ${srcLabel} (read-only here). New raw passwords can no longer be created — manage credentials in the Credential Vault.</div>
               ${warnBanner}
               <ul class="space-y-1 list-disc list-inside">${list}</ul>
+              ${localSection}
               <div class="pt-3 flex justify-end"><button onclick="this.closest('#console-creds-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Close</button></div>
             </div></div>`;
         document.body.appendChild(modal);
@@ -17340,6 +17356,35 @@ function _consoleCredRowHtml() {
         <input class="console-cred-user flex-1 border border-slate-300 rounded-md px-3 py-2 text-sm" placeholder="username">
         <input class="console-cred-pass flex-1 border border-slate-300 rounded-md px-3 py-2 text-sm" type="password" placeholder="password">
         <button onclick="this.closest('.console-cred-row').remove()" class="px-2 text-red-400 hover:text-red-600">&times;</button></div>`;
+}
+
+async function deleteConsoleLocalCredential(username) {
+    if (!confirm(`Delete local console credential "${username}"? This removes the legacy password from the hub; it cannot be undone.`)) return;
+    // Delete-only POST: re-read the current local list, drop the target, and
+    // submit the remaining usernames (no passwords — the backend rejects any
+    // password or new username). Creating/changing is disabled; only deletion.
+    let localCreds = [];
+    try {
+        const res = await fetch('/api/console/credentials', { credentials: 'same-origin' });
+        if (res.ok) localCreds = (await res.json()).local_credentials || [];
+    } catch (e) { console.error(e); }
+    const remaining = localCreds
+        .filter(c => c.username !== username)
+        .map(c => ({ username: c.username }));
+    try {
+        const res = await fetch('/api/console/credentials', {
+            method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ credentials: remaining }),
+        });
+        if (res.ok) {
+            showToast('Credential deleted', 'success');
+            document.getElementById('console-creds-modal')?.remove();
+            openConsoleCredentialsModal();
+        } else {
+            const d = await res.json().catch(() => ({}));
+            showToast(d.detail || 'Delete failed', 'error');
+        }
+    } catch (e) { showToast('Delete failed: ' + e.message, 'error'); }
 }
 
 async function saveConsoleCredentials() {
