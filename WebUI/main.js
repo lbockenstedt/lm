@@ -19495,7 +19495,8 @@ async function loadLEData(subMenu) {
             const tgtCell = `${tgtBadges}${redundNote}${errNote}${leFleetDetail(c.domain, tgts)}`;
             const exp = leExpiry(c.not_after);
             const retryBtn = isFailed
-                ? `<button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue (re-uses the stored params)">Retry</button>`
+                ? `<button onclick="leEditIssue('${dEsc}')" class="text-xs text-slate-600 hover:text-slate-800 font-medium" title="Edit the failed request and re-file">Edit</button>
+                   <button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue (re-uses the stored params)">Retry</button>`
                 : '';
             // Inline badges beside the domain (see the legend at the bottom of the
             // page). ★ BugFixer = pinned mTLS identity; 🔐 clientAuth = has the
@@ -19562,7 +19563,7 @@ async function loadLEData(subMenu) {
                 return `<tr class="border-b border-slate-100 bg-red-50/60">
                     <td class="px-4 py-2 font-mono font-medium"><span class="inline-block w-2.5 h-2.5 rounded-full bg-red-500 mr-2 align-middle"></span>${escapeHtml(dom)}</td>
                     <td class="px-4 py-2 text-xs text-red-700" colspan="3">last issue failed: ${escapeHtml(s.message || '')}</td>
-                    <td class="px-4 py-2"><button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue">Retry</button></td>
+                    <td class="px-4 py-2"><button onclick="leEditIssue('${dEsc}')" class="text-xs text-slate-600 hover:text-slate-800 font-medium mr-2" title="Edit the failed request and re-file">Edit</button><button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue">Retry</button></td>
                     <td class="px-4 py-2"></td>
                 </tr>`;
             }).join('');
@@ -20332,7 +20333,7 @@ async function leIssuePopulateDomains() {
     } catch (e) { /* best-effort — the field is still free-text */ }
 }
 
-async function showLeIssueModal() {
+async function showLeIssueModal(prefill) {
     _leIssueTargets = [];
     if (!window._leAvailableTargets || !window._leAvailableTargets.length) {
         await _leRefreshAvailableTargets();
@@ -20491,6 +20492,53 @@ async function showLeIssueModal() {
     leIssueRenderTargets();
     leIssueUpdateDnsFields();
     leTgtMtChange('le-issue-tgt-mt', 'le-issue-tgt-id');  // seed device list for the first module
+    if (prefill) await _leApplyIssuePrefill(prefill);
+}
+
+// Populate the Issue-certificate modal from a stored request body (used by the
+// "Edit" action on a failed row). Mirrors leIssueCert's body shape in reverse:
+// domain/email/challenge/key/profile/staging/renew + the DNS credential choice
+// (vault ref → named cred → manual provider / HE-login / INI) + targets.
+async function _leApplyIssuePrefill(p) {
+    if (!p || typeof p !== 'object') return;
+    const setV = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
+    setV('le-issue-domain', p.domain);
+    setV('le-issue-email', p.email);
+    const chSel = document.getElementById('le-issue-challenge');
+    if (chSel) {
+        // leIssueCert normalizes http-webroot → challenge:'http' + a webroot; the
+        // presence of webroot distinguishes the two HTTP modes on the way back.
+        chSel.value = p.webroot ? 'http-webroot'
+            : (p.challenge === 'dns' ? 'dns' : p.challenge === 'tls-alpn' ? 'tls-alpn' : 'http');
+    }
+    setV('le-issue-keytype', p.key_type);
+    setV('le-issue-profile', p.profile || '');
+    if (p.renew_window_days) setV('le-issue-renew-window', p.renew_window_days);
+    const stg = document.getElementById('le-issue-staging'); if (stg) stg.checked = !!p.staging;
+    setV('le-issue-webroot', p.webroot);
+    _leIssueTargets = Array.isArray(p.targets) ? p.targets.slice() : [];
+    leIssueRenderTargets();
+    leIssueToggleChallenge();  // reveal the rows for the selected challenge
+    if (chSel && chSel.value === 'dns') {
+        await leIssuePopulateCreds();  // ensure the saved/vault credential list is loaded
+        const credSel = document.getElementById('le-issue-dns-credential');
+        if (p.dns_vault_credential && p.dns_vault_credential.bucket) {
+            if (credSel) credSel.value = `vault:${p.dns_vault_credential.bucket}/${p.dns_vault_credential.name}`;
+        } else if (p.dns_credential) {
+            if (credSel) credSel.value = p.dns_credential;
+        } else if (p.dns_provider != null || p.he_username != null) {
+            if (credSel) credSel.value = '';  // manual entry
+            const provSel = document.getElementById('le-issue-dns-provider');
+            // he_username/he_password imply the HE account-login provider.
+            const prov = (p.he_username != null || p.he_password != null) ? 'he-login' : (p.dns_provider || '');
+            if (provSel && prov) provSel.value = prov;
+            leIssueUpdateDnsFields();
+            setV('le-issue-he-user', p.he_username);
+            setV('le-issue-he-pass', p.he_password);
+            if (p.dns_creds) setV('le-issue-dns-creds', p.dns_creds);
+        }
+        leIssueToggleSavedCred();  // show/hide manual inputs to match the credential choice
+    }
 }
 
 // Toggle the DNS-01 input shape for the selected provider. RFC 2136 family
@@ -20697,6 +20745,17 @@ async function leRetryIssue(domain) {
         return;
     }
     return _leRunIssue(st.params, { closeModalOnSuccess: false });
+}
+
+// Edit a failed request before re-filing: reopen the Issue-certificate modal
+// pre-populated with the stored params (fixes the "can't edit the request"
+// gap — Retry alone re-posts the same params blindly). Falls back to a blank
+// modal with just the domain if the in-memory tracker has no stored params
+// (e.g. after a page reload).
+async function leEditIssue(domain) {
+    const st = window._leIssueStatus && window._leIssueStatus[domain];
+    const prefill = (st && st.params) ? st.params : { domain };
+    return showLeIssueModal(prefill);
 }
 
 
