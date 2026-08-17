@@ -4453,19 +4453,20 @@ function _cvRenderAddFields() {
     else if (t === 'apikey') el.innerHTML = f('cv-f-apikey', 'api key', 'password');
     else if (t === 'token') el.innerHTML = f('cv-f-token', 'token', 'password');
     else if (t === 'dns') {
-        // A DNS-01 credential the LE module resolves unattended at issue time:
-        // a certbot provider name + the raw credentials INI. Automation-readable
-        // is required (the hub reads it without a pass-phrase), so force it.
+        // A DNS-01 credential the LE module resolves unattended at issue time.
+        // Present the same friendly, per-provider fields the LE module used
+        // (e.g. Hurricane Electric = account email + password); the certbot
+        // provider + credentials INI are auto-generated on save. Automation-
+        // readable is required (the hub reads it without a pass-phrase), forced.
         const provOpts = Object.entries(DNS_CRED_PROVIDERS)
-            .map(([k, v]) => `<option value="${k}">${escapeHtml(v.label)} (${k})</option>`).join('');
+            .map(([k, v]) => `<option value="${k}">${escapeHtml(v.label)}</option>`).join('');
         el.innerHTML = `
-          <label class="block text-[11px] text-slate-500 mb-0.5">certbot provider</label>
-          <select id="cv-f-dns-provider" onchange="_cvDnsHint()" class="${_CV_INP}">${provOpts}</select>
-          <label class="block text-[11px] text-slate-500 mt-2 mb-0.5">credentials INI (written to the certbot creds file on the le spoke)</label>
-          <textarea id="cv-f-dns-creds" rows="5" autocomplete="off" placeholder="" class="${_CV_INP} font-mono text-xs"></textarea>`;
+          <label class="block text-[11px] text-slate-500 mb-0.5">provider</label>
+          <select id="cv-f-dns-provider" onchange="_cvDnsRenderFields()" class="${_CV_INP}">${provOpts}</select>
+          <div id="cv-f-dns-fields" class="mt-2 space-y-2"></div>`;
         const modeSel = document.getElementById('cv-add-mode');
         if (modeSel) { modeSel.value = 'hub'; modeSel.disabled = true; }
-        _cvDnsHint();
+        _cvDnsRenderFields();
         return;
     }
     else el.innerHTML = f('cv-f-key', 'key') + f('cv-f-value', 'value', 'password');
@@ -4473,11 +4474,20 @@ function _cvRenderAddFields() {
     if (modeSel) modeSel.disabled = false;  // re-enable if switching away from dns
 }
 
-// Prefill the DNS creds INI placeholder for the selected provider.
-function _cvDnsHint() {
+// Render the per-provider input fields for the vault DNS-01 secret form
+// (mirrors the LE module's old credential editor: friendly labels per provider,
+// e.g. Hurricane Electric = account email + password).
+function _cvDnsRenderFields() {
     const p = document.getElementById('cv-f-dns-provider')?.value || '';
-    const ta = document.getElementById('cv-f-dns-creds');
-    if (ta) ta.placeholder = LE_DNS_CREDS_HINT[p] || 'dns_<provider>_... = ...';
+    const def = DNS_CRED_PROVIDERS[p];
+    const box = document.getElementById('cv-f-dns-fields');
+    if (!def || !box) return;
+    box.innerHTML = def.fields.map(f => `
+      <div class="flex flex-col">
+        <label class="text-[11px] text-slate-500 mb-0.5">${escapeHtml(f.label)}</label>
+        <input id="cv-f-dns-${f.k}" type="${f.type}" autocomplete="off"
+               placeholder="${f.placeholder ? escapeHtml(f.placeholder) : ''}" class="${_CV_INP}">
+      </div>`).join('');
 }
 
 function _cvCollectAddValue() {
@@ -4486,7 +4496,21 @@ function _cvCollectAddValue() {
     if (t === 'login') return { username: v('cv-f-username'), password: v('cv-f-password') };
     if (t === 'apikey') return { apikey: v('cv-f-apikey') };
     if (t === 'token') return { token: v('cv-f-token') };
-    if (t === 'dns') return { provider: v('cv-f-dns-provider'), dns_creds: v('cv-f-dns-creds') };
+    if (t === 'dns') {
+        const p = document.getElementById('cv-f-dns-provider')?.value || '';
+        const def = DNS_CRED_PROVIDERS[p];
+        if (!def) return { provider: p };
+        // he-login stores email/password directly (no INI); all other providers
+        // auto-assemble the certbot credentials INI from the friendly fields.
+        if (def.login) {
+            return { provider: p, he_username: v('cv-f-dns-username'), he_password: v('cv-f-dns-password') };
+        }
+        const ini = def.fields
+            .filter(f => f.ini && v('cv-f-dns-' + f.k).trim() !== '')
+            .map(f => `${f.ini} = ${v('cv-f-dns-' + f.k).trim()}`)
+            .join('\n');
+        return { provider: p, dns_creds: ini };
+    }
     const k = v('cv-f-key').trim();
     return k ? { [k]: v('cv-f-value') } : {};
 }
@@ -20657,19 +20681,19 @@ async function leRetryIssue(domain) {
 // Multi-tenant, multi-provider: each tenant keeps named credentials for
 // he-login / cloudflare / rfc2136 / route53. Certs pick one BY NAME at issue.
 const DNS_CRED_PROVIDERS = {
-    'he-login':   { label: 'Hurricane Electric (account login)', fields: [
+    'he-login':   { label: 'Hurricane Electric (account login)', login: true, fields: [
         { k: 'username', label: 'Account email', type: 'text' },
         { k: 'password', label: 'Account password', type: 'password', secret: true } ] },
     'cloudflare': { label: 'Cloudflare (API token)', fields: [
-        { k: 'api_token', label: 'API token (Zone.DNS edit)', type: 'password', secret: true } ] },
+        { k: 'api_token', label: 'API token (Zone.DNS edit)', type: 'password', secret: true, ini: 'dns_cloudflare_api_token' } ] },
     'rfc2136':    { label: 'RFC2136 dynamic DNS (TSIG)', fields: [
-        { k: 'server', label: 'DNS server (IP address)', type: 'text', placeholder: 'e.g. 192.0.2.53' },
-        { k: 'name', label: 'TSIG key name', type: 'text' },
-        { k: 'secret', label: 'TSIG key secret', type: 'password', secret: true },
-        { k: 'algorithm', label: 'Algorithm', type: 'text', placeholder: 'HMAC-SHA512' } ] },
+        { k: 'server', label: 'DNS server (IP address)', type: 'text', placeholder: 'e.g. 192.0.2.53', ini: 'dns_rfc2136_server' },
+        { k: 'name', label: 'TSIG key name', type: 'text', ini: 'dns_rfc2136_name' },
+        { k: 'secret', label: 'TSIG key secret', type: 'password', secret: true, ini: 'dns_rfc2136_secret' },
+        { k: 'algorithm', label: 'Algorithm', type: 'text', placeholder: 'HMAC-SHA512', ini: 'dns_rfc2136_algorithm' } ] },
     'route53':    { label: 'AWS Route 53', fields: [
-        { k: 'access_key_id', label: 'AWS access key ID', type: 'text' },
-        { k: 'secret_access_key', label: 'AWS secret access key', type: 'password', secret: true } ] },
+        { k: 'access_key_id', label: 'AWS access key ID', type: 'text', ini: 'dns_route53_access_key_id' },
+        { k: 'secret_access_key', label: 'AWS secret access key', type: 'password', secret: true, ini: 'dns_route53_secret_access_key' } ] },
 };
 
 async function showDnsCredentialsModal() {
