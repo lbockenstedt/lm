@@ -185,6 +185,18 @@ def register(app, hub, ctx):
         value = body.get("value")
         if not isinstance(value, dict):
             raise HTTPException(status_code=400, detail="value must be an object")
+        # Guard against a blank re-save silently STRIPPING a provider credential:
+        # a DNS secret always carries a non-secret ``provider`` marker, so a form
+        # that skips the (never-prefilled) password would otherwise overwrite the
+        # stored secret with empty fields. Reject when every non-marker field is
+        # blank — the caller must re-enter the secret rather than erase it.
+        if value.get("provider"):
+            cred_keys = [k for k in value if k not in ("provider",)]
+            if not cred_keys or all(not str(value[k]).strip() for k in cred_keys):
+                raise HTTPException(
+                    status_code=400,
+                    detail="credential fields are empty — re-enter the secret "
+                           "(a blank save would erase the stored credential)")
         res = await _cv.put_secret(
             hub, bucket, body.get("name") or "", value,
             mode=(body.get("mode") or "psk"), sec_type=(body.get("type") or "generic"),

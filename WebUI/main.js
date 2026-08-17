@@ -4632,7 +4632,17 @@ async function _cvDoAddSecret() {
     const psk = document.getElementById('cv-add-psk')?.value || '';
     const value = _cvCollectAddValue();
     if (!name) { showToast('Name is required', 'error'); return; }
-    if (!Object.keys(value).length || Object.values(value).every(x => !x)) { showToast('Enter a value', 'error'); return; }
+    // A DNS/provider secret always carries a non-secret `provider` marker, so the
+    // generic "all empty" test below would pass even with blank credential fields
+    // and silently OVERWRITE the stored secret with empty creds (the edit form
+    // can't prefill an encrypted password). Validate the real credential fields,
+    // ignoring the `provider` marker, so a blank re-save is rejected — not stored.
+    const credVals = Object.entries(value).filter(([k]) => k !== 'provider').map(([, v]) => v);
+    if (!credVals.length || credVals.every(x => !x)) { showToast('Enter a value', 'error'); return; }
+    if (value.provider && DNS_CRED_PROVIDERS[value.provider] && DNS_CRED_PROVIDERS[value.provider].login
+        && (!value.he_username || !value.he_password)) {
+        showToast('Enter both the account email and password', 'error'); return;
+    }
     try {
         await apiJson('/tenant/cred-vault/secret', { method: 'POST', body: JSON.stringify({ bucket: _cvCurrentBucket, name, value, mode, type, description, psk }) });
         document.getElementById('cv-add-modal')?.remove();
