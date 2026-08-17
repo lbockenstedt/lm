@@ -340,11 +340,18 @@ def register(app, hub, ctx):
 
     @app.post("/api/le/he-config")
     async def le_set_he_login(request: Request):
-        """Store the Hurricane Electric account-login knob on the le spoke, so the
-        email/password is reused for every he-login issue/renew instead of typed
-        each time. Admin-only (shared-infra write); the spoke persists it 0600."""
-        _hub, _sid, payload = await _le_request("LE_SET_HE_LOGIN", await request.json())
-        return payload
+        """DISABLED — storing a raw Hurricane Electric account email/password knob
+        on the le spoke is no longer allowed. Store the HE account login in the
+        Credential Vault (add a ``DNS-01`` secret, provider *Hurricane Electric
+        (account login)*, automation-readable) and select it when issuing a
+        certificate; the hub resolves it unattended. Existing spoke-stored knobs
+        are left untouched (no migration, no auto-delete)."""
+        raise HTTPException(
+            status_code=409,
+            detail=("Storing a Hurricane Electric account login in the LE module is "
+                    "disabled. Add it to the Credential Vault (DNS-01 secret, "
+                    "provider 'Hurricane Electric (account login)') and pick it "
+                    "when issuing a certificate."))
 
     @app.get("/api/le/he-config")
     async def le_get_he_login():

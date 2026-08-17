@@ -127,21 +127,29 @@ def test_missing_provider_is_400(monkeypatch):
     assert ei.value.status_code == 400
 
 
-def _load_post_route():
-    """Lift the ``le_set_dns_cred`` POST route (creating raw DNS creds is now
-    disabled) and exec it with the ``@app.post`` decorator stripped."""
+def _load_post_route(name="le_set_dns_cred"):
+    """Lift a disabled POST route (raw credential creation) with the
+    ``@app.post`` decorator stripped and exec it in a minimal namespace."""
     src = open(_NS).read()
     tree = ast.parse(src)
     ns = {"Request": object, "HTTPException": _HTTPError}
     for node in ast.walk(tree):
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "le_set_dns_cred":
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == name:
             node.decorator_list = []
             exec(compile(ast.Module(body=[node], type_ignores=[]), _NS, "exec"), ns)
-    return ns["le_set_dns_cred"]
+    return ns[name]
 
 
 def test_set_dns_cred_post_disabled():
     fn = _load_post_route()
+    with pytest.raises(_HTTPError) as ei:
+        _run(fn(object()))
+    assert ei.value.status_code == 409
+    assert "Credential Vault" in ei.value.detail
+
+
+def test_set_he_login_post_disabled():
+    fn = _load_post_route("le_set_he_login")
     with pytest.raises(_HTTPError) as ei:
         _run(fn(object()))
     assert ei.value.status_code == 409
