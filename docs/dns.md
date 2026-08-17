@@ -40,7 +40,7 @@ NetBox is the IPAM source of truth. The hub's `DnsDhcpSyncMixin` (`core/src/dns_
 
 ## WebUI
 
-Module view tabs: **Records**, **Statistics** (total-queries / cache-hit-ratio / recursion / uptime tiles + queries-by-type breakdown, `GET /api/dns/stats`), **Forwarders** (per-zone upstream resolvers, `GET /api/dns/forwarders`).
+Module view tabs: **Records**, **Statistics** (total-queries / cache-hit-ratio / recursion / uptime tiles + queries-by-type breakdown, `GET /api/dns/stats`), **Forwarders** (per-zone upstream resolvers, `GET /api/dns/forwarders`), and **HE.NET** (Hurricane Electric public DNS — appears once a `henet` spoke is connected; see [henet.md](henet.md)). The DNS module is "all things DNS": the Unbound tabs plus the HE.NET public-DNS subtab.
 
 ## Key files
 

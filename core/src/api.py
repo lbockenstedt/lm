@@ -1358,6 +1358,16 @@ def create_app(hub):
                 return JSONResponse(status_code=403,
                                     content={"detail": "DNS module access required"})
 
+        # /api/henet/* (HE.NET / Hurricane Electric public DNS) lives UNDER the
+        # DNS module ("all things DNS"). READS require the ``dns`` right (a DNS
+        # viewer sees HE.NET records too) OR the explicit ``henet`` right OR
+        # admin; WRITES stay Global-Admin-only via _ADMIN_INFRA_WRITE_PREFIXES
+        # below (public-address-space infra, no per-object tenant model).
+        if path.startswith("/api/henet/"):
+            if not (_is_admin(sess) or _has_dns_access(sess) or _has_henet_access(sess)):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "DNS module access required"})
+
         # /api/dhcp/* (DHCP module) requires the ``dhcp`` right OR admin. Writes
         # stay Global-Admin-only (shared Kea); GET reads are subnet-filtered.
         if path.startswith("/api/dhcp/"):
@@ -1601,6 +1611,9 @@ def create_app(hub):
 
     def _has_dns_access(sess):
         return access.has_dns_access(sess)
+
+    def _has_henet_access(sess):
+        return access.has_module_access(sess, "henet")
 
     def _has_dhcp_access(sess):
         return access.has_dhcp_access(sess)
