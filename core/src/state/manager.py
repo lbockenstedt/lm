@@ -700,6 +700,42 @@ class StateManager:
         tenants[tenant_id].update(data)
         self._mark_dirty()
 
+    def delete_tenant(self, tenant_id: str) -> bool:
+        """Remove a tenant's registry record and detach every user from it.
+
+        Returns True if a record was removed. Does NOT touch per-module data
+        (NetBox objects, simulations, etc.) or spoke bindings — the caller is
+        expected to guard against deleting a tenant that still owns spokes. If
+        the deleted tenant was the active one, the active pointer falls back to
+        ``default``.
+        """
+        tenants = self.tenant_state.setdefault("tenants", {})
+        # Case-insensitive / whitespace-tolerant match, mirroring get_tenant.
+        clean_id = str(tenant_id).strip()
+        match = None
+        if clean_id in tenants:
+            match = clean_id
+        else:
+            for key in list(tenants.keys()):
+                if str(key).strip() == clean_id:
+                    match = key
+                    break
+        if match is None:
+            return False
+        tenants.pop(match, None)
+        # Detach the tenant from every user's assignment list so stale grants
+        # don't dangle after the tenant is gone.
+        for user_data in (self.system_state.get("users", {}) or {}).values():
+            uts = user_data.get("tenants")
+            if isinstance(uts, list) and match in uts:
+                user_data["tenants"] = [t for t in uts if t != match]
+        # If the deleted tenant was active, fall back to the default view.
+        if self.system_state.get("active_tenant") == match:
+            self.system_state["active_tenant"] = "default"
+        self._mark_dirty()
+        logger.info(f"Tenant '{match}' deleted (users detached).")
+        return True
+
     def set_active_tenant(self, tenant_id: str):
         self.system_state["active_tenant"] = tenant_id
         logger.info(f"Active tenant switched to: {tenant_id}")

@@ -61,7 +61,8 @@ def _plain_cs_user(tenant="acme"):
 # ── fake hub/state with a real tenant store ─────────────────────────────────
 class _State:
     def __init__(self, tenants=None):
-        self.system_state = {"users": {}, "permission_groups": {}}
+        self.system_state = {"users": {}, "permission_groups": {},
+                             "module_metadata": {}, "active_tenant": "default"}
         # tenant_state mirrors StateManager: a dict of tenant_id -> record.
         self.tenant_state = {"tenants": dict(tenants or {})}
 
@@ -72,6 +73,21 @@ class _State:
         rec = self.tenant_state.setdefault("tenants", {}).setdefault(tid, {})
         rec.update(dict(data))
         return rec
+
+    def delete_tenant(self, tid):
+        # Mirrors StateManager.delete_tenant: pop the record, detach the tenant
+        # from every user, and reset the active pointer if it was active.
+        tenants = self.tenant_state.setdefault("tenants", {})
+        if tid not in tenants:
+            return False
+        tenants.pop(tid, None)
+        for ud in (self.system_state.get("users", {}) or {}).values():
+            uts = ud.get("tenants")
+            if isinstance(uts, list) and tid in uts:
+                ud["tenants"] = [t for t in uts if t != tid]
+        if self.system_state.get("active_tenant") == tid:
+            self.system_state["active_tenant"] = "default"
+        return True
 
     def save_state(self):
         return None
@@ -295,3 +311,51 @@ def test_edit_merge_preserves_existing_fields_as_tenant_admin():
     assert rec["netbox_tenant_slug"] == "acme"
     assert rec["quotas"] == {"vm": 5}
     assert rec["description"] == "original"
+
+# ── DELETE /setup/tenants/{id} ──────────────────────────────────────────────
+# The /setup prefix is Global-Admin-gated by the app middleware (not present in
+# this route-level harness), so these exercise the route's own guardrails.
+def test_delete_tenant_removes_record_and_detaches_users():
+    c, hub, holder = _build(_acme_record())
+    hub.state.system_state["users"] = {
+        "u1": {"tenants": ["acme", "other"]},
+        "u2": {"tenants": ["other"]},
+    }
+    hub.state.system_state["active_tenant"] = "acme"
+    holder.current = _global_admin()
+    r = c.delete("/setup/tenants/acme")
+    assert r.status_code == 200
+    assert "acme" not in hub.state.tenant_state["tenants"]
+    # User assignments detached; unrelated tenants untouched.
+    assert hub.state.system_state["users"]["u1"]["tenants"] == ["other"]
+    assert hub.state.system_state["users"]["u2"]["tenants"] == ["other"]
+    # Active pointer falls back to default.
+    assert hub.state.system_state["active_tenant"] == "default"
+
+
+def test_delete_default_tenant_rejected():
+    c, hub, holder = _build({"default": {"name": "Default"}})
+    holder.current = _global_admin()
+    r = c.delete("/setup/tenants/default")
+    assert r.status_code == 400
+    assert "default" in hub.state.tenant_state["tenants"]
+
+
+def test_delete_unknown_tenant_404():
+    c, hub, holder = _build(_acme_record())
+    holder.current = _global_admin()
+    r = c.delete("/setup/tenants/ghost")
+    assert r.status_code == 404
+
+
+def test_delete_tenant_with_bound_spoke_rejected_409():
+    c, hub, holder = _build(_acme_record())
+    hub.state.system_state["module_metadata"] = {
+        "spoke-1": {"tenant_id": "acme", "display_name": "acme-fw"},
+    }
+    holder.current = _global_admin()
+    r = c.delete("/setup/tenants/acme")
+    assert r.status_code == 409
+    assert "acme-fw" in r.json()["detail"]
+    # Tenant NOT removed while a spoke is still bound.
+    assert "acme" in hub.state.tenant_state["tenants"]

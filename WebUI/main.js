@@ -1891,6 +1891,10 @@ async function loadTenantConfig() {
                     : 'bg-slate-50 text-slate-300 cursor-not-allowed';
             const btnLabel = isActive ? 'Active' : accessible ? 'View as' : 'No access';
             const btnAction = accessible && !isActive ? `onclick="viewAsTenant('${t.id}')"` : '';
+            // Delete is a Global-Admin action (like create/sync/re-scope) and
+            // never offered for the built-in 'default' tenant.
+            const canDelete = isAdmin() && String(t.id).toLowerCase() !== 'default';
+            const nameArg = String(t.name || t.id).replace(/'/g, "\\'");
             return `
             <div class="flex items-center justify-between p-2 rounded-md transition-all ${isActive ? 'bg-green-50 border-l-4 border-green-500' : 'bg-white border border-slate-200'}">
                 <div class="flex items-center gap-2 flex-1 ${canEdit ? 'cursor-pointer group' : ''}" ${canEdit ? `onclick="editTenant('${t.id}')"` : ''}>
@@ -1902,6 +1906,7 @@ async function loadTenantConfig() {
                     <button ${btnAction} title="${btnLabel}" class="text-[10px] px-2 py-0.5 rounded ${btnCls} transition-colors">
                         ${btnLabel}
                     </button>
+                    ${canDelete ? `<button onclick="deleteTenant('${t.id}','${nameArg}')" title="Delete tenant" class="p-1 rounded text-slate-300 hover:text-red-500 hover:bg-red-50 transition-colors"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>` : ''}
                 </div>
             </div>`;
         }).join('');
@@ -2037,6 +2042,32 @@ async function addTenant() {
         }
     } catch (err) {
         showToast('Error creating tenant: ' + err.message, 'error');
+    }
+}
+
+// Global-Admin-only. Deletes a tenant's registry shell + user assignments via
+// DELETE /setup/tenants/{id}. The server refuses the 'default' tenant and any
+// tenant that still owns bound spokes (409) — per-module data is NOT purged
+// (use Migrate Data first if it must be moved). Surfaces the server's detail so
+// the operator sees exactly which spokes block the delete.
+async function deleteTenant(tenantId, tenantName) {
+    const label = tenantName || tenantId;
+    if (!await showConfirmToast(`Delete tenant “${label}”? This removes the tenant and detaches it from all users. Bound spokes must be re-bound or decommissioned first, and this does NOT delete the tenant's NetBox/Proxmox/LDAP data — use “Migrate Data” beforehand if you need it moved or purged.`)) return;
+    try {
+        const response = await setupFetch(`/setup/tenants/${encodeURIComponent(tenantId)}`, { method: 'DELETE' });
+        const d = await response.json().catch(() => ({}));
+        if (response.ok) {
+            showToast(d.message || `Tenant ${label} deleted.`, 'success');
+            // If we were viewing the deleted tenant, drop back to default.
+            if (currentTenant === tenantId && typeof setTenant === 'function') {
+                await setTenant('default');
+            }
+            await loadTenantConfig();
+        } else {
+            showToast('Failed to delete tenant: ' + (d.detail || response.statusText), 'error');
+        }
+    } catch (err) {
+        showToast('Error deleting tenant: ' + err.message, 'error');
     }
 }
 

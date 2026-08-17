@@ -318,6 +318,52 @@ def register(app, hub, ctx):
             logger.exception("create_tenant failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.delete("/setup/tenants/{tenant_id}")
+    async def delete_tenant(tenant_id: str):
+        """Remove a tenant's registry record + detach it from every user.
+
+        Global-Admin-only (the whole ``/setup`` prefix is admin-gated by the
+        middleware). Guardrails: the built-in ``default`` tenant can't be
+        deleted, and a tenant that still owns approved spokes is rejected (the
+        operator must re-bind or decommission those spokes first) so we never
+        orphan a spoke to a nonexistent tenant. Per-module DATA (NetBox objects,
+        simulations, LDAP OU, …) is intentionally left untouched — use Migrate
+        Data first if it must be moved/purged; this only removes the tenant
+        shell + user assignments.
+        """
+        hub = app.state.hub
+        clean = (tenant_id or "").strip()
+        if clean.lower() == "default":
+            raise HTTPException(status_code=400, detail="The default tenant cannot be deleted.")
+        if hub.state.get_tenant(clean) is None:
+            raise HTTPException(status_code=404, detail=f"Tenant {clean} not found")
+
+        # Refuse while any spoke is still bound to this tenant — deleting would
+        # orphan the binding. List the bound spokes so the UI can name them.
+        meta = hub.state.system_state.get("module_metadata", {}) or {}
+        bound = [
+            (m.get("display_name") or m.get("hostname") or sid)
+            for sid, m in meta.items()
+            if isinstance(m, dict) and (m.get("tenant_id") or "").strip() == clean
+        ]
+        if bound:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Tenant '{clean}' still has {len(bound)} bound spoke(s): "
+                    f"{', '.join(map(str, bound[:8]))}"
+                    f"{'…' if len(bound) > 8 else ''}. Re-bind or decommission "
+                    "them (Setup → Spokes) before deleting the tenant."
+                ),
+            )
+
+        removed = hub.state.delete_tenant(clean)
+        if not removed:
+            raise HTTPException(status_code=404, detail=f"Tenant {clean} not found")
+        await hub.state.save_state_now()
+        refresh_shared_tenant(hub)
+        return {"status": "ok", "message": f"Tenant {clean} deleted."}
+
     @app.post("/setup/ldap/provision-ous")
     async def provision_all_tenant_ous(request: Request):
         """Backfill: (re)provision the per-tenant OU (ou=<slug>,<base_dn>) for
