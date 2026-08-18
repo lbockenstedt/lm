@@ -1210,6 +1210,15 @@ def create_app(hub):
         if path.startswith("/api/netbox/racks/import-xlsx/") and request.method == "GET":
             return await call_next(request)
 
+        # Loopback-only admin ops (/admin/ops/*) — gated INSIDE the route by a
+        # loopback-peer check AND a root-minted bearer token
+        # (routes/admin_ops.py), NOT by a browser session. A hub-shell curl
+        # carries no lm_session cookie, so without this exemption the session
+        # middleware 401s it before the in-route double gate ever runs. The
+        # loopback + token check is the real access control here.
+        if path.startswith("/admin/ops/"):
+            return await call_next(request)
+
         sess = _session_user(request)
         if not sess:
             # A present-but-invalid lm_session cookie is a forged/tampered
