@@ -16,6 +16,7 @@ a tmp state dir, a fake ``os._exit`` (raises), and a monkeypatched
 import contextlib
 import os
 import sys
+import time
 
 import pytest
 
@@ -439,3 +440,70 @@ async def test_noop_pull_when_process_current_does_not_restart(spoke, tmp_path, 
     })
     assert result["status"] == "SUCCESS"
     assert "up to date" in result["message"].lower()
+
+
+
+# ── (i) restart rate-limiter — coalesce restarts under rapid upstream churn ───
+@pytest.mark.asyncio
+async def test_restart_coalesced_within_cooldown(spoke, tmp_path, monkeypatch):
+    cwd = spoke._test_cwd
+    fake_git = _FakeGit({cwd: {"before": "spoke_aaa", "after": "spoke_bbb"}})
+    _patch_runner(monkeypatch, fake_git, spoke, core_root=None)
+    os.makedirs(spoke._spoke_state_dir(), exist_ok=True)
+    with open(spoke._restart_marker_path(), "w") as fh:
+        fh.write("x")  # stamped "now" -> inside the default 180s cooldown
+    result = await spoke.handle_system_command("SPOKE_UPDATE", {
+        "repo_url": "https://example/spoke.git",
+    })
+    assert result["status"] == "SUCCESS"
+    assert "coalesced" in result["message"].lower()
+
+
+# ── (j) rate-limiter releases once the cooldown elapses ───────────────────────
+@pytest.mark.asyncio
+async def test_restart_allowed_after_cooldown(spoke, tmp_path, monkeypatch):
+    cwd = spoke._test_cwd
+    fake_git = _FakeGit({cwd: {"before": "spoke_aaa", "after": "spoke_bbb"}})
+    _patch_runner(monkeypatch, fake_git, spoke, core_root=None)
+    os.makedirs(spoke._spoke_state_dir(), exist_ok=True)
+    marker = spoke._restart_marker_path()
+    with open(marker, "w") as fh:
+        fh.write("x")
+    old = time.time() - (spoke._restart_cooldown_s() + 60)
+    os.utime(marker, (old, old))
+    with pytest.raises(_Exited) as ei:
+        await spoke.handle_system_command("SPOKE_UPDATE", {
+            "repo_url": "https://example/spoke.git",
+        })
+    assert ei.value.code == 3
+    assert os.path.getmtime(marker) > old + 1
+
+
+# ── (k) restart marker stamped on a real reload (no prior marker) ─────────────
+@pytest.mark.asyncio
+async def test_restart_stamps_marker(spoke, tmp_path, monkeypatch):
+    cwd = spoke._test_cwd
+    fake_git = _FakeGit({cwd: {"before": "spoke_aaa", "after": "spoke_bbb"}})
+    _patch_runner(monkeypatch, fake_git, spoke, core_root=None)
+    with pytest.raises(_Exited):
+        await spoke.handle_system_command("SPOKE_UPDATE", {
+            "repo_url": "https://example/spoke.git",
+        })
+    assert os.path.exists(spoke._restart_marker_path())
+
+
+# ── (l) cooldown=0 disables the limiter (fail-open ops override) ──────────────
+@pytest.mark.asyncio
+async def test_cooldown_zero_disables_limiter(spoke, tmp_path, monkeypatch):
+    cwd = spoke._test_cwd
+    fake_git = _FakeGit({cwd: {"before": "spoke_aaa", "after": "spoke_bbb"}})
+    _patch_runner(monkeypatch, fake_git, spoke, core_root=None)
+    monkeypatch.setenv("LM_SELFUPDATE_RESTART_COOLDOWN_S", "0")
+    os.makedirs(spoke._spoke_state_dir(), exist_ok=True)
+    with open(spoke._restart_marker_path(), "w") as fh:
+        fh.write("x")
+    with pytest.raises(_Exited) as ei:
+        await spoke.handle_system_command("SPOKE_UPDATE", {
+            "repo_url": "https://example/spoke.git",
+        })
+    assert ei.value.code == 3
