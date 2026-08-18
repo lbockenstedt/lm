@@ -17842,6 +17842,15 @@ async function _consoleLoadXterm() {
 }
 
 async function openConsoleTerminal(spokeId, portId) {
+    const key = spokeId + '::' + portId;
+    // Already open? Don't mint a second session for the same port — just surface
+    // the serial dock and switch to that port's existing tab.
+    if (window._serialConsoles && window._serialConsoles.has(key)) {
+        serialEnsureConsoleDock();
+        serialActivateConsole(key);
+        showToast(`Console for ${portId} is already open`, 'info');
+        return;
+    }
     const mod = await _consoleLoadXterm();
     if (!mod || !mod.Terminal) { showToast('Failed to load terminal (CDN unreachable)', 'error'); return; }
     let session;
@@ -17854,49 +17863,195 @@ async function openConsoleTerminal(spokeId, portId) {
         session = await res.json().catch(() => ({}));
         if (!res.ok) { showToast(session.detail || 'Open failed', 'error'); return; }
     } catch (e) { showToast('Open failed: ' + e.message, 'error'); return; }
-    _consoleShowTerminalModal(portId, session, mod.Terminal);
+    serialAddConsoleTab(spokeId, portId, session, mod.Terminal);
 }
 
-function _consoleShowTerminalModal(portId, session, Terminal) {
-    closeConsoleTerminal();
-    const modal = document.createElement('div');
-    modal.id = 'console-term-modal';
-    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-70 backdrop-blur-sm';
-    const ro = !!session.read_only;
-    modal.innerHTML = `<div class="bg-[#1e1e1e] rounded-xl shadow-2xl w-full max-w-4xl overflow-hidden flex flex-col" style="height:72vh">
-        <div class="px-4 py-2 flex justify-between items-center bg-[#2d2d2d] text-slate-200">
-          <div class="text-sm font-mono">${escapeHtml(portId)}${ro ? ' <span class="text-[10px] px-2 py-0.5 rounded bg-amber-600 text-white">READ-ONLY</span>' : ''}${session.settings && session.settings.baud ? ' <span class="text-[10px] text-slate-400">@' + session.settings.baud + '</span>' : ''}</div>
-          <button onclick="closeConsoleTerminal()" class="text-slate-300 hover:text-white text-2xl leading-none">&times;</button>
-        </div>
-        <div id="console-term-body" class="flex-1 p-1 overflow-hidden bg-[#1e1e1e]"></div>
-      </div>`;
+// ── Tabbed serial-console dock ──────────────────────────────────────────────
+// A single in-browser window hosting EVERY open serial console as a tab, so an
+// operator can keep several device consoles connected at once and switch
+// between them without dropping any. Each session's xterm renders into its own
+// body div; inactive bodies are hidden (display:none) but their WebSocket stays
+// open, so switching tabs is instant and non-destructive. The serial spoke
+// already fans one physical port to many sessions, so multiple people (and
+// multiple tabs) can watch/drive the same device concurrently. Registry:
+// window._serialConsoles (Map<key, {key, spokeId, portId, session, term, ws,
+// bodyEl, ro, statusText, statusCls}>); window._serialActiveConsole holds the
+// visible tab's key. key = `${spokeId}::${portId}`.
+
+// Create (or reveal) the shared serial-console dock shell. Idempotent — the tab
+// strip and bodies persist across opens; only wired once.
+function serialEnsureConsoleDock() {
+    let modal = document.getElementById('serial-console-modal');
+    if (modal) { modal.classList.remove('hidden'); return modal; }
+    modal = document.createElement('div');
+    modal.id = 'serial-console-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/70';
+    modal.innerHTML = `
+        <div class="bg-[#1e1e1e] rounded-lg shadow-2xl w-[92vw] max-w-6xl h-[86vh] flex flex-col overflow-hidden">
+            <div class="flex items-center gap-3 px-4 py-2 bg-[#2d2d2d] border-b border-slate-700 text-slate-200 text-sm">
+                <strong class="font-semibold">Serial Consoles</strong>
+                <button id="serial-console-fs" title="Fullscreen the active console" class="ml-2 px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
+                <span id="serial-console-status" class="ml-auto text-xs text-amber-400"></span>
+                <button id="serial-console-closeall" title="Close all consoles" class="ml-3 text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
+            </div>
+            <div id="serial-console-tabs" class="flex items-stretch gap-1 px-2 pt-1 bg-[#2d2d2d] border-b border-slate-700 overflow-x-auto"></div>
+            <div id="serial-console-bodies" class="relative flex-1 bg-[#1e1e1e]"></div>
+        </div>`;
     document.body.appendChild(modal);
+    modal.querySelector('#serial-console-fs').onclick = () => {
+        const c = serialActiveConsole();
+        const screen = c && c.bodyEl;
+        if (document.fullscreenElement) document.exitFullscreen();
+        else if (screen && screen.requestFullscreen) screen.requestFullscreen().catch(() => {});
+    };
+    modal.querySelector('#serial-console-closeall').onclick = () => serialCloseAllConsoles();
+    return modal;
+}
+
+// The registry entry for the currently visible tab (or null).
+function serialActiveConsole() {
+    return (window._serialConsoles && window._serialActiveConsole)
+        ? window._serialConsoles.get(window._serialActiveConsole) : null;
+}
+
+// Mint a serial console tab: build its body div, attach an xterm + WebSocket,
+// register it, and make it the active tab.
+function serialAddConsoleTab(spokeId, portId, session, Terminal) {
+    if (!window._serialConsoles) window._serialConsoles = new Map();
+    const key = spokeId + '::' + portId;
+    const modal = serialEnsureConsoleDock();
+    const bodies = modal.querySelector('#serial-console-bodies');
+    const bodyEl = document.createElement('div');
+    bodyEl.className = 'absolute inset-0 p-1 overflow-hidden bg-[#1e1e1e]';
+    bodyEl.setAttribute('data-console-key', key);
+    bodies.appendChild(bodyEl);
+    const ro = !!session.read_only;
+    const entry = { key, spokeId, portId, session, ro, term: null, ws: null, bodyEl,
+                    statusText: 'Connecting…', statusCls: 'text-amber-400' };
+    window._serialConsoles.set(key, entry);
+    // Make this tab active first so its body is visible when xterm lays out —
+    // an xterm opened into a display:none container measures 0×0 and renders blank.
+    serialActivateConsole(key);
+    const upd = (text, cls) => { entry.statusText = text; entry.statusCls = cls; serialRenderConsoleTabs(); serialSyncSerialHeader(); };
     const term = new Terminal({ cursorBlink: true, fontSize: 13, scrollback: 5000,
                                 theme: { background: '#1e1e1e' } });
-    term.open(document.getElementById('console-term-body'));
+    term.open(bodyEl);
     term.focus();
+    entry.term = term;
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws/console-serial/${session.session_id}?token=${encodeURIComponent(session.ws_token)}`);
     ws.binaryType = 'arraybuffer';
+    ws.onopen = () => upd(ro ? 'Connected (read-only)' : 'Connected', 'text-green-400');
     ws.onmessage = (ev) => {
         if (typeof ev.data === 'string') term.write(ev.data);
         else term.write(new Uint8Array(ev.data));
     };
-    ws.onclose = (ev) => { try { term.write(`\r\n\x1b[33m[disconnected${ev.reason ? ': ' + ev.reason : ''}]\x1b[0m\r\n`); } catch (e) {} };
+    ws.onclose = (ev) => {
+        try { term.write(`\r\n\x1b[33m[disconnected${ev.reason ? ': ' + ev.reason : ''}]\x1b[0m\r\n`); } catch (e) {}
+        upd('Disconnected' + (ev.reason ? ': ' + ev.reason : ''), 'text-red-400');
+    };
     if (!ro) term.onData(d => { if (ws.readyState === 1) ws.send(d); });
-    window.__consoleTerm = { term, ws, modal };
+    entry.ws = ws;
+    serialRenderConsoleTabs();
+    serialSyncSerialHeader();
 }
 
-function closeConsoleTerminal() {
-    const c = window.__consoleTerm;
+// Show one tab's console, hide the rest (their WS stays open). Re-renders the
+// tab strip + header and focuses the active terminal for keyboard input.
+function serialActivateConsole(key) {
+    window._serialActiveConsole = key;
+    if (window._serialConsoles) {
+        window._serialConsoles.forEach((e, k) => { if (e.bodyEl) e.bodyEl.classList.toggle('hidden', k !== key); });
+    }
+    serialRenderConsoleTabs();
+    serialSyncSerialHeader();
+    const c = window._serialConsoles && window._serialConsoles.get(key);
+    if (c && c.term) { try { c.term.focus(); c.term.scrollToBottom(); } catch (e) {} }
+}
+
+// Paint the tab strip from the registry (status dot + port label + per-tab close).
+function serialRenderConsoleTabs() {
+    const modal = document.getElementById('serial-console-modal');
+    if (!modal) return;
+    const tabs = modal.querySelector('#serial-console-tabs');
+    if (!tabs) return;
+    const active = window._serialActiveConsole;
+    const entries = window._serialConsoles ? Array.from(window._serialConsoles.values()) : [];
+    tabs.innerHTML = entries.map(e => {
+        const isA = e.key === active;
+        const dot = e.statusCls === 'text-green-400' ? 'bg-green-400'
+            : (e.statusCls === 'text-red-400' ? 'bg-red-400' : 'bg-amber-400');
+        const tabCls = isA ? 'bg-[#1e1e1e] text-slate-100 border-[#01A982]'
+            : 'bg-[#111] text-slate-400 border-transparent hover:text-slate-200';
+        const label = escapeHtml(e.portId || e.key);
+        const kAttr = escapeHtml(e.key);
+        const roBadge = e.ro ? '<span class="ml-1 px-1 rounded bg-amber-600 text-white text-[9px]">RO</span>' : '';
+        return `<div data-key="${kAttr}" class="serial-console-tab flex items-center gap-2 px-3 py-1 rounded-t border-b-2 cursor-pointer text-xs whitespace-nowrap ${tabCls}">
+            <span class="w-2 h-2 rounded-full ${dot}"></span>
+            <span class="font-mono">${label}</span>${roBadge}
+            <button data-close="${kAttr}" title="Close this console" class="ml-1 text-slate-500 hover:text-red-400 text-sm leading-none">&times;</button>
+        </div>`;
+    }).join('');
+    tabs.querySelectorAll('.serial-console-tab').forEach(el => {
+        el.onclick = (ev) => {
+            const closeBtn = ev.target.closest('[data-close]');
+            if (closeBtn) { ev.stopPropagation(); serialCloseConsole(closeBtn.getAttribute('data-close')); return; }
+            serialActivateConsole(el.getAttribute('data-key'));
+        };
+    });
+}
+
+// Sync the header status line to the active console's state.
+function serialSyncSerialHeader() {
+    const modal = document.getElementById('serial-console-modal');
+    if (!modal) return;
+    const statusEl = modal.querySelector('#serial-console-status');
+    if (!statusEl) return;
+    const c = serialActiveConsole();
+    let txt = '';
     if (c) {
-        try { c.ws.close(); } catch (e) {}
-        try { c.term.dispose(); } catch (e) {}
-        try { c.modal.remove(); } catch (e) {}
-        window.__consoleTerm = null;
-        if (typeof currentView !== 'undefined' && currentView === 'console') loadConsoleData();
+        txt = (c.portId || '') + ' — ' + c.statusText;
+        if (c.session && c.session.settings && c.session.settings.baud) txt += '  @' + c.session.settings.baud;
+    }
+    statusEl.textContent = txt;
+    statusEl.className = 'ml-auto text-xs ' + (c ? c.statusCls : 'text-slate-400');
+}
+
+// Close one serial console: close its WS, dispose the xterm, drop its body +
+// registry entry, then activate a sibling (or tear the dock down when last).
+function serialCloseConsole(key) {
+    const reg = window._serialConsoles;
+    if (!reg) return;
+    const e = reg.get(key);
+    if (e) {
+        try { if (e.ws) e.ws.close(); } catch (err) {}
+        try { if (e.term) e.term.dispose(); } catch (err) {}
+        if (e.bodyEl) e.bodyEl.remove();
+        reg.delete(key);
+    }
+    if (reg.size === 0) { serialCloseAllConsoles(); return; }
+    if (window._serialActiveConsole === key) {
+        serialActivateConsole(reg.keys().next().value);
+    } else {
+        serialRenderConsoleTabs();
     }
 }
+
+// Close every serial console and remove the dock.
+function serialCloseAllConsoles() {
+    const reg = window._serialConsoles;
+    if (reg) {
+        reg.forEach(e => { try { if (e.ws) e.ws.close(); } catch (err) {} try { if (e.term) e.term.dispose(); } catch (err) {} });
+        reg.clear();
+    }
+    window._serialActiveConsole = null;
+    const modal = document.getElementById('serial-console-modal');
+    if (modal) modal.remove();
+    if (typeof currentView !== 'undefined' && currentView === 'console' && typeof loadConsoleData === 'function') loadConsoleData();
+}
+
+// Backward-compatible alias: older callers used a single-modal serial terminal.
+function closeConsoleTerminal() { serialCloseAllConsoles(); }
 
 function openConsoleSettingsModal(spokeId, portId) {
     const p = _consolePorts.find(x => x.port_id === portId && x.spoke_id === spokeId) || {};
