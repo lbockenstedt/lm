@@ -257,20 +257,40 @@ class RoleConnection(AgentHostingControlPlane):
         except Exception:  # noqa: BLE001 - some inner instances may forbid attrs
             pass
 
-    # ── Agent listener (proxmox always; simulation/console opt-in) ───────────
+    # ── Agent listener (proxmox always; simulation default-on standalone) ────
+
+    def _is_colocated_with_hub(self) -> bool:
+        """True when this agent runs on the SAME box as the hub (all-in-one).
+
+        The installer's ``--loopback`` path (``install_all.sh``) dials the hub
+        at ``wss://localhost:443/ws/spoke``, so a loopback hub host is the
+        reliable runtime signal that the hub already owns ``:443`` here — the one
+        case where the cs ``/ws/agent`` listener must NOT bind. A standalone
+        agent dials a remote hub IP/host, so this is False for it."""
+        url = str(getattr(self, "hub_url", "") or "")
+        host = url.split("://", 1)[-1].split("/", 1)[0].rsplit("@", 1)[-1]
+        if host.startswith("["):                      # [::1]:443
+            host = host[1:].split("]", 1)[0]
+        elif host.count(":") == 1:                    # host:port
+            host = host.rsplit(":", 1)[0]
+        host = host.strip().lower()
+        return host in ("localhost", "127.0.0.1", "::1", "0.0.0.0") or host.startswith("127.")
 
     def _agent_listener_enabled(self) -> bool:
         """Which roles host a /ws/agent listener on this multi-role agent.
 
         * **proxmox** (hypervisor) — always on: it exists to host pxmx
           node-agents.
-        * **simulation** (cs) — opt-in via ``LM_CS_AGENT_LISTENER=1`` (mirrors
-          the standalone cs spoke's ``install_cs.sh --agent-listener``). When on,
-          a proxmox/unified node-agent can dial THIS box and the hub relays
-          CS_COMMANDs to it, so loading the simulation role is enough to run
-          client sims on the host — no separate pxmx spoke. Default OFF so a
-          relay-only / all-in-one box (where the hub already owns :443) never
-          binds the cs listener.
+        * **simulation** (cs) — **on by default for a standalone (non-colocated)
+          agent**, so loading the simulation role (via the WebUI ``LOAD_ROLE``,
+          at boot, or ``--roles simulation``) is enough to host the client-sim
+          listener — a Proxmox/unified node-agent dials THIS box and the hub
+          relays CS_COMMANDs to it, no separate cs/pxmx spoke needed. It is
+          suppressed when **co-located with the hub** (the hub owns ``:443`` —
+          ``_is_colocated_with_hub``), mirroring the installer's ``--loopback``
+          suppression. ``LM_CS_AGENT_LISTENER`` explicitly overrides either way
+          (``1/true/yes/on`` → force on; ``0/false/no/off`` → force off) — the
+          installer sets ``=1`` on the non-colocated ``--roles simulation`` path.
         * **console** — opt-in via ``LM_CONSOLE_RELAY_LISTENER=1`` ONLY to serve
           the edge-proxy ``/ws/console-relay`` endpoint (Phase 2 serial shortcut)
           on the same listener.
@@ -279,9 +299,13 @@ class RoleConnection(AgentHostingControlPlane):
         """
         if self.role_name == "proxmox":
             return True
-        if self.role_name == "simulation" and str(
-                os.environ.get(self.AGENT_LISTENER_ENV, "")).strip() in ("1", "true", "yes", "on"):
-            return True
+        if self.role_name == "simulation":
+            val = str(os.environ.get(self.AGENT_LISTENER_ENV, "")).strip().lower()
+            if val in ("1", "true", "yes", "on"):
+                return True
+            if val in ("0", "false", "no", "off"):
+                return False
+            return not self._is_colocated_with_hub()   # default: standalone → on
         if self.role_name == "console" and str(
                 os.environ.get("LM_CONSOLE_RELAY_LISTENER", "")).strip() in ("1", "true", "yes", "on"):
             return True

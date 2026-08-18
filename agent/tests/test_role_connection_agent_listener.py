@@ -53,8 +53,9 @@ def test_listener_gated_to_proxmox_only(monkeypatch, tmp_path):
     # Point AGENT_CONFIG_PATH at a temp path so the proxmox init can write.
     monkeypatch.setattr(cp_module.RoleConnection, "AGENT_CONFIG_PATH",
                        str(tmp_path / "agent-config.json"))
-    # Simulation is opt-in via LM_CS_AGENT_LISTENER — ensure it's OFF here so the
-    # default (relay-only / all-in-one safe) gating is exercised.
+    # No explicit LM_CS_AGENT_LISTENER — exercise the DEFAULT gating. The hub URL
+    # here is loopback (127.0.0.1), i.e. co-located/all-in-one, so the simulation
+    # default is OFF (the hub owns :443); dns/ldap never bind.
     monkeypatch.delenv("LM_CS_AGENT_LISTENER", raising=False)
     for role, expected in [
         ("proxmox", True), ("simulation", False), ("dns", False),
@@ -70,18 +71,62 @@ def test_listener_gated_to_proxmox_only(monkeypatch, tmp_path):
         }[role]
 
 
+def test_simulation_listener_default_on_standalone(monkeypatch, tmp_path):
+    """The simulation (cs) role hosts its OWN /ws/agent listener by DEFAULT on a
+    standalone agent — one that dials a REMOTE hub (non-loopback hub URL). This
+    is the WebUI-load / boot-load / --roles path: loading the simulation role is
+    enough for a Proxmox/unified node-agent to dial THIS box and have the hub
+    relay CS_COMMANDs to it (no separate cs/pxmx spoke, no .env edit). It is
+    suppressed only when co-located with the hub (loopback hub URL → the hub
+    owns :443). LM_CS_AGENT_LISTENER still explicitly overrides either way."""
+    monkeypatch.setattr(cp_module.RoleConnection, "AGENT_CONFIG_PATH",
+                       str(tmp_path / "agent-config.json"))
+    monkeypatch.delenv("LM_CS_AGENT_LISTENER", raising=False)
+
+    # Standalone (remote hub) → listener ON by default; self-provisions a secret.
+    for hub in ("wss://10.0.0.5:443", "wss://hub.example.com:443",
+                "wss://172.16.1.10:8443/ws/spoke"):
+        on = cp_module.RoleConnection(
+            "simulation", "lm-agent", hub, _make_role_instance())
+        assert on._agent_listener_enabled() is True, \
+            f"standalone simulation (hub={hub}) should default the listener ON"
+        assert on.agent_secret, \
+            "standalone simulation must self-provision an agent_secret"
+
+    # Co-located (loopback hub) → default OFF (hub owns :443).
+    for hub in ("wss://127.0.0.1:443", "wss://localhost:443/ws/spoke",
+                "wss://[::1]:443", "ws://0.0.0.0:443"):
+        off = cp_module.RoleConnection(
+            "simulation", "lm-agent", hub, _make_role_instance())
+        assert off._agent_listener_enabled() is False, \
+            f"co-located simulation (hub={hub}) should default the listener OFF"
+
+    # Explicit override wins over the co-location default (both directions).
+    monkeypatch.setenv("LM_CS_AGENT_LISTENER", "1")
+    forced_on = cp_module.RoleConnection(
+        "simulation", "lm-agent", "wss://127.0.0.1:443", _make_role_instance())
+    assert forced_on._agent_listener_enabled() is True, \
+        "LM_CS_AGENT_LISTENER=1 must force the listener on even when co-located"
+    monkeypatch.setenv("LM_CS_AGENT_LISTENER", "0")
+    forced_off = cp_module.RoleConnection(
+        "simulation", "lm-agent", "wss://10.0.0.5:443", _make_role_instance())
+    assert forced_off._agent_listener_enabled() is False, \
+        "LM_CS_AGENT_LISTENER=0 must force the listener off even when standalone"
+
+
 def test_simulation_listener_opt_in(monkeypatch, tmp_path):
     """The simulation (cs) role hosts its OWN /ws/agent listener when opted in
     via LM_CS_AGENT_LISTENER=1 — so a unified agent that loaded the simulation
     role can host the client-sim node-agent (no separate cs/pxmx spoke). Mirrors
-    the standalone cs spoke (install_cs.sh --agent-listener); default OFF so a
-    relay-only / all-in-one box never binds :443. When on, it uses the cs
-    listener PORT knobs (443/8767) so it can't collide with a co-loaded pxmx
-    role (8443/8766), sharing the base agent_secret for approval."""
+    the standalone cs spoke (install_cs.sh --agent-listener). When on, it uses
+    the cs listener PORT knobs (443/8767) so it can't collide with a co-loaded
+    pxmx role (8443/8766), sharing the base agent_secret for approval. Uses a
+    loopback (co-located) hub so the default is OFF and the ENV opt-in is what's
+    exercised."""
     monkeypatch.setattr(cp_module.RoleConnection, "AGENT_CONFIG_PATH",
                        str(tmp_path / "agent-config.json"))
 
-    # Opt-out (default): no listener.
+    # Opt-out (default) on a co-located box: no listener.
     monkeypatch.delenv("LM_CS_AGENT_LISTENER", raising=False)
     off = cp_module.RoleConnection(
         "simulation", "lm-agent", "wss://127.0.0.1:443", _make_role_instance())
