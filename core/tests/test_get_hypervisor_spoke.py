@@ -36,8 +36,9 @@ def test_none_when_neither_type_is_connected():
 # ── get_hypervisor_spoke_for_tenant — per-tenant VM-count isolation ──────────
 
 class _FakeState:
-    def __init__(self, metadata):
+    def __init__(self, metadata, tenant_state=None):
         self.system_state = {"module_metadata": metadata}
+        self.tenant_state = tenant_state or {}
 
 
 class _TenantHub:
@@ -125,14 +126,15 @@ class _MixedHub:
     box's Proxmox host is reached via a simulation spoke, not a pxmx one."""
 
     def __init__(self, hypervisors, simulations, metadata,
-                 approved=None, active=None, global_hypervisor=None):
+                 approved=None, active=None, global_hypervisor=None,
+                 tenant_state=None):
         self._hyp = list(hypervisors)
         self._sim = list(simulations)
         self._metadata = metadata
         allsids = self._hyp + self._sim
         self.approved_modules = approved or {sid: True for sid in allsids}
         self.active_connections = active or set(allsids)
-        self.state = _FakeState(metadata)
+        self.state = _FakeState(metadata, tenant_state)
         self._global_hypervisor = global_hypervisor
 
     def get_all_spokes_by_type(self, module_type):
@@ -198,3 +200,59 @@ def test_spokes_for_tenant_empty_for_default_or_none():
                     metadata={"pxmx-1": {"tenant_id": "t"}, "cs-06": {"tenant_id": "t"}})
     assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "default") == []
     assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, None) == []
+
+
+# ── shared-tenant infra visible to every tenant (Overview regression fix) ────
+
+_SHARED_TS = {"tenants": {"shared": {"shared": True}, "tenantLRB": {}}}
+
+
+def test_spokes_for_tenant_includes_shared_bound_hypervisor():
+    """A hypervisor bound to the SHARED tenant is shared infra — it must show in
+    EVERY tenant's Overview alongside that tenant's own bound spokes. Regression:
+    once a tenant gained any bound spoke, the shared host dropped off Overview
+    (its VMs still listed via get_pxmx_vms → Overview/VM-list divergence)."""
+    hub = _MixedHub(
+        hypervisors=["pxmx-shared"],
+        simulations=["cs-06"],
+        metadata={"pxmx-shared": {"tenant_id": "shared"},
+                  "cs-06": {"tenant_id": "tenantLRB"}},
+        tenant_state=_SHARED_TS)
+    got = LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantLRB")
+    assert sorted(got) == ["cs-06", "pxmx-shared"]
+
+
+def test_spokes_for_tenant_shared_visible_even_with_no_own_spoke():
+    """Shared host shows even when the tenant has no bound spoke of its own."""
+    hub = _MixedHub(
+        hypervisors=["pxmx-shared"],
+        simulations=[],
+        metadata={"pxmx-shared": {"tenant_id": "shared"}},
+        tenant_state=_SHARED_TS)
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantLRB") == ["pxmx-shared"]
+
+
+def test_spokes_for_tenant_shared_does_not_leak_other_real_tenants():
+    """Only the SHARED tenant is cross-visible — a spoke bound to a different
+    REAL tenant is still excluded."""
+    hub = _MixedHub(
+        hypervisors=["pxmx-shared", "pxmx-other"],
+        simulations=["cs-06"],
+        metadata={"pxmx-shared": {"tenant_id": "shared"},
+                  "pxmx-other": {"tenant_id": "tenantB"},
+                  "cs-06": {"tenant_id": "tenantLRB"}},
+        tenant_state=_SHARED_TS)
+    got = LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantLRB")
+    assert sorted(got) == ["cs-06", "pxmx-shared"]
+    assert "pxmx-other" not in got
+
+
+def test_spokes_for_tenant_no_shared_flag_stays_strict():
+    """With no tenant flagged shared, behaviour is unchanged (strict scoping)."""
+    hub = _MixedHub(
+        hypervisors=["pxmx-1"],
+        simulations=["cs-06"],
+        metadata={"pxmx-1": {"tenant_id": "shared"},
+                  "cs-06": {"tenant_id": "tenantLRB"}},
+        tenant_state={"tenants": {"tenantLRB": {}}})   # nothing marked shared
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantLRB") == ["cs-06"]
