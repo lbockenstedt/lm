@@ -4534,7 +4534,9 @@ function _cvAddSecretModal(preset) {
         return;
     }
     // Edit mode: a POST to the same name overwrites (upsert), so "Edit" reuses
-    // this form with the name + type locked and the value fields re-entered.
+    // this form. The NAME is the identity key (locked); the type and mode can be
+    // changed on save (put_secret overwrites both) — the value fields must be
+    // re-entered regardless, so a type/mode switch is safe.
     const editing = !!(preset && preset.name);
     const nameAttrs = editing ? `value="${escapeHtml(preset.name)}" readonly` : `placeholder="secret name (e.g. henet-dns)"`;
     const sel = (v, want) => v === want ? ' selected' : '';
@@ -4544,7 +4546,7 @@ function _cvAddSecretModal(preset) {
       <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} secret — ${escapeHtml(_cvBucketLabel({ bucket: _cvCurrentBucket }))}</h3>
       <input id="cv-add-name" type="text" autocomplete="off" ${nameAttrs} title="A name to identify this secret within the bucket (e.g. 'HE.NET DDNS key', 'Cloudflare token')" class="${_CV_INP}${editing ? ' bg-slate-100 text-slate-500' : ''}">
       <div class="flex gap-2">
-        <select id="cv-add-type" onchange="_cvRenderAddFields()" ${editing ? 'disabled' : ''} class="${_CV_INP}" title="Secret shape — DNS = DNS provider creds (a 'Hurricane Electric (account login)' DNS secret is used by BOTH the External DNS / HE.NET module and certificate DNS-01 issuance, so store just one HE credential); others are generic login/key/token">
+        <select id="cv-add-type" onchange="_cvRenderAddFields()" class="${_CV_INP}" title="Secret shape — DNS = DNS provider creds (a 'Hurricane Electric (account login)' DNS secret is used by BOTH the External DNS / HE.NET module and certificate DNS-01 issuance, so store just one HE credential); others are generic login/key/token">
           <option value="login"${sel(pType, 'login')}>Login (username + password)</option>
           <option value="console"${sel(pType, 'console')}>Console login (device auto-identify)</option>
           <option value="apikey"${sel(pType, 'apikey')}>API key</option>
@@ -4553,12 +4555,12 @@ function _cvAddSecretModal(preset) {
           ${(editing && pType === 'henet') ? `<option value="henet" selected>HE.NET DDNS key (Hurricane Electric public DNS)</option>` : ``}
           <option value="generic"${sel(pType, 'generic')}>Generic (key + value)</option>
         </select>
-        <select id="cv-add-mode" ${editing ? 'disabled' : ''} class="${_CV_INP}" title="pass-phrase = human-only; automation = hub can read it unattended for tooling">
+        <select id="cv-add-mode" class="${_CV_INP}" title="pass-phrase = human-only; automation = hub can read it unattended for tooling">
           <option value="psk"${sel(pMode, 'psk')}>Pass-phrase only</option>
           <option value="hub"${sel(pMode, 'hub')}>Automation-readable</option>
         </select>
       </div>
-      ${editing ? '<p class="text-[11px] text-slate-400">Re-enter the values below to overwrite this secret. Name, type and mode are fixed — delete and re-add to change them.</p>' : ''}
+      ${editing ? '<p class="text-[11px] text-slate-400">Name is fixed. Re-enter the values below to overwrite this secret — you may also change the type or mode.</p>' : ''}
       <div id="cv-add-fields"></div>
       <input id="cv-add-desc" type="text" autocomplete="off" value="${editing ? escapeHtml(preset.description || '') : ''}" placeholder="description (optional)" class="${_CV_INP}">
       <input id="cv-add-psk" type="password" autocomplete="off" placeholder="bucket pass-phrase (the one you set for this bucket)" title="The bucket pass-phrase you set — required to encrypt/store the secret" class="${_CV_INP}">
@@ -4567,10 +4569,11 @@ function _cvAddSecretModal(preset) {
         <button onclick="_cvDoAddSecret()" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Save</button>
       </div>`;
     openModal('cv-add-modal', body, { backdropClose: true });
+    // _cvRenderAddFields renders the value fields for the selected type and
+    // governs the mode select (forced to automation-readable for console / dns /
+    // henet, free choice otherwise) — for both add and edit, so a type switch in
+    // edit mode updates the fields + mode correctly.
     _cvRenderAddFields();
-    // _cvRenderAddFields re-enables the mode select for non-dns types; in edit
-    // mode keep name/type/mode locked (change via delete + re-add).
-    if (editing) { const m = document.getElementById('cv-add-mode'); if (m) m.disabled = true; }
 }
 
 // Edit an existing secret in place: reuse the add-secret form with the name,
