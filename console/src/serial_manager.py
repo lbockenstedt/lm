@@ -258,6 +258,100 @@ class PortStore:
         return entry
 
 
+# ── Session recording (per-port circular capture) ──────────────────────────────
+
+# Every console device records its serial output into a fixed-size circular log
+# so the stream survives with no browser attached ("leave the server connected")
+# and a late/second viewer warm-starts with the recent scrollback. Capped per
+# device; oldest bytes are evicted first.
+CAPTURE_MAX_BYTES = 5 * 1024 * 1024  # 5 MiB per console device
+
+
+def _capture_max_bytes() -> int:
+    """Per-device capture cap. Override with LM_CONSOLE_CAPTURE_BYTES (0 keeps the
+    recording in memory only — disk persistence disabled)."""
+    try:
+        v = int(os.environ.get("LM_CONSOLE_CAPTURE_BYTES", "") or CAPTURE_MAX_BYTES)
+        return max(0, v)
+    except Exception:  # noqa: BLE001
+        return CAPTURE_MAX_BYTES
+
+
+def _capture_dir() -> Path:
+    d = _state_dir() / "capture"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception:  # noqa: BLE001
+        pass
+    return d
+
+
+def _safe_port_name(port_id: str) -> str:
+    """A filesystem-safe stem for a port_id (which may contain '/', ':' etc.)."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", str(port_id))[:180] or "port"
+
+
+class CaptureLog:
+    """Append-only on-disk mirror of a port's circular capture buffer.
+
+    Appends are cheap (O(bytes)); the file is compacted to the last
+    ``max_bytes`` only when it grows past ``2 * max_bytes``, so a persistent
+    recording never lets the file grow unbounded yet keeps writes fast. Reload
+    on spoke restart via :meth:`load_tail`. Thread-safe (the reader thread
+    appends)."""
+
+    def __init__(self, port_id: str, max_bytes: int = CAPTURE_MAX_BYTES,
+                 path: Optional[Path] = None):
+        self.port_id = port_id
+        self.max_bytes = max_bytes
+        self.path = path or (_capture_dir() / f"{_safe_port_name(port_id)}.log")
+        self._lock = threading.Lock()
+        try:
+            self._size = self.path.stat().st_size
+        except Exception:  # noqa: BLE001
+            self._size = 0
+
+    def append(self, data: bytes) -> None:
+        if not data:
+            return
+        with self._lock:
+            try:
+                with open(self.path, "ab") as fh:
+                    fh.write(data)
+                self._size += len(data)
+                if self._size > 2 * self.max_bytes:
+                    self._compact_locked()
+            except Exception as e:  # noqa: BLE001
+                logger.debug("capture append failed for %s: %s", self.port_id, e)
+
+    def _compact_locked(self) -> None:
+        """Rewrite the file down to the last ``max_bytes`` (atomic)."""
+        try:
+            with open(self.path, "rb") as fh:
+                if self._size > self.max_bytes:
+                    fh.seek(self._size - self.max_bytes)
+                tail = fh.read()
+            tmp = self.path.with_suffix(".log.tmp")
+            with open(tmp, "wb") as fh:
+                fh.write(tail)
+            os.replace(tmp, self.path)
+            self._size = len(tail)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("capture compact failed for %s: %s", self.port_id, e)
+
+    def load_tail(self, cap: int) -> bytes:
+        """Return the last ``cap`` bytes of the on-disk capture (warm start)."""
+        with self._lock:
+            try:
+                size = self.path.stat().st_size
+                with open(self.path, "rb") as fh:
+                    if size > cap:
+                        fh.seek(size - cap)
+                    return fh.read()
+            except Exception:  # noqa: BLE001
+                return b""
+
+
 # ── Live sessions (one-writer / many-observer) ─────────────────────────────────
 
 class PortChannel:
@@ -272,6 +366,8 @@ class PortChannel:
     # tail of everything the device emits — even with NO attached user — so the
     # port section can surface identity/banner and a user connecting later can be
     # replayed recent context (the "we never know when a device will talk" case).
+    # This LIVE in-memory tail feeds auto-identify/gleaning; the larger persistent
+    # scrollback lives in an on-disk circular log (see ``_capture_log``).
     CAPTURE_MAX = 65536
     # Outbound write-pacing defaults. A 1000-line paste must stream WITHOUT
     # overrunning a slow console-server/device UART (which silently drops chars).
@@ -297,7 +393,13 @@ class PortChannel:
         self._stop = threading.Event()
         self._reader: Optional[threading.Thread] = None
         self._reader_alive: bool = True  # cleared when the read loop exits (device pulled/error)
-        # Passive-capture state (updated by the reader thread).
+        # Passive-capture state (updated by the reader thread). ``capture`` is the
+        # LIVE in-memory tail used for gleaning/telemetry; ``_capture_log`` is the
+        # durable per-device circular recording on disk (default 5 MiB, override
+        # LM_CONSOLE_CAPTURE_BYTES; 0 disables persistence) that survives a spoke
+        # restart and backs warm-start scrollback for a (re)connecting viewer.
+        self._capture_log: Optional[CaptureLog] = (
+            CaptureLog(port_id, _capture_max_bytes()) if _capture_max_bytes() else None)
         self.capture = bytearray()
         self.last_activity: float = 0.0
         self.bytes_seen: int = 0
@@ -328,10 +430,15 @@ class PortChannel:
         self._writer_thread.start()
 
     def _record(self, data: bytes) -> None:
-        """Append to the rolling capture tail + update liveness telemetry."""
+        """Append to the rolling in-memory capture tail + update liveness
+        telemetry, and mirror to the on-disk circular log so the full recording
+        survives a restart. The in-memory tail stays bounded at ``CAPTURE_MAX``
+        (used for gleaning); the durable scrollback lives on disk."""
         self.capture += data
         if len(self.capture) > self.CAPTURE_MAX:
             del self.capture[:-self.CAPTURE_MAX]
+        if self._capture_log is not None:
+            self._capture_log.append(data)
         self.bytes_seen += len(data)
         self.last_activity = time.time()
 
@@ -427,9 +534,20 @@ class PortChannel:
             return len(self._outbuf)
 
     def capture_tail(self, n: Optional[int] = None) -> bytes:
-        """Last ``n`` bytes of everything the device has emitted (all if None)."""
+        """Last ``n`` bytes of the LIVE in-memory capture (all if None)."""
         buf = bytes(self.capture)
         return buf[-n:] if n else buf
+
+    def persisted_tail(self, n: Optional[int] = None) -> bytes:
+        """Last ``n`` bytes of the durable on-disk circular recording (up to the
+        full 5 MiB log), falling back to the live in-memory tail when disk
+        persistence is disabled. Used for warm-start scrollback so a viewer that
+        connects — even after a spoke restart — sees recent device output."""
+        if self._capture_log is not None:
+            data = self._capture_log.load_tail(n or self._capture_log.max_bytes)
+            if data:
+                return data
+        return self.capture_tail(n)
 
     def snapshot(self) -> Dict[str, Any]:
         """Live telemetry for the port listing."""

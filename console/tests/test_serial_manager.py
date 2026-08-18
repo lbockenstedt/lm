@@ -119,6 +119,10 @@ class _FakeSerial:
 
 def _use_fake_serial(monkeypatch):
     monkeypatch.setattr(m, "serial", _FakeSerial)
+    # In-memory capture only — no on-disk capture side effects (or cross-test
+    # contamination from a seeded capture file) in these unit tests. The
+    # persistent CaptureLog is covered by its own tests below.
+    monkeypatch.setenv("LM_CONSOLE_CAPTURE_BYTES", "0")
     _FakeSerial.Serial.instances = []
 
 
@@ -139,7 +143,7 @@ def test_channel_records_capture_and_rolls(monkeypatch):
     assert chan.capture_tail() == b"hello world"
     assert chan.bytes_seen == 11
     assert chan.last_activity > 0
-    # Rolling cap keeps only the tail.
+    # Rolling cap keeps only the tail. Force a small cap for the assertion.
     chan.CAPTURE_MAX = 8
     chan._record(b"1234567890")
     assert len(chan.capture) == 8
@@ -288,3 +292,52 @@ def test_detect_baud_not_confident_when_silent(monkeypatch):
     res = m.detect_baud("/dev/ttyUSB0", [9600, 115200, 38400])
     # A best-guess baud may still be returned, but it must NOT be locked.
     assert res["confident"] is False
+
+
+# ── Persistent circular capture (5 MiB per console device, disk-backed) ────────
+
+def test_safe_port_name_sanitizes():
+    assert m._safe_port_name("usb-0403:6001@1-1.2") == "usb-0403_6001_1-1.2"
+    assert m._safe_port_name("a/b\\c") == "a_b_c"
+    assert m._safe_port_name("") == "port"
+
+
+def test_capture_max_bytes_env_override(monkeypatch):
+    monkeypatch.delenv("LM_CONSOLE_CAPTURE_BYTES", raising=False)
+    assert m._capture_max_bytes() == m.CAPTURE_MAX_BYTES
+    monkeypatch.setenv("LM_CONSOLE_CAPTURE_BYTES", "1024")
+    assert m._capture_max_bytes() == 1024
+    monkeypatch.setenv("LM_CONSOLE_CAPTURE_BYTES", "0")  # disables disk persistence
+    assert m._capture_max_bytes() == 0
+    monkeypatch.setenv("LM_CONSOLE_CAPTURE_BYTES", "garbage")
+    assert m._capture_max_bytes() == m.CAPTURE_MAX_BYTES
+
+
+def test_capture_log_append_and_load_tail(tmp_path):
+    log = m.CaptureLog("p1", max_bytes=1000, path=tmp_path / "p1.log")
+    log.append(b"hello ")
+    log.append(b"world")
+    assert log.load_tail(1000) == b"hello world"
+    # load_tail caps to the last N bytes.
+    assert log.load_tail(5) == b"world"
+
+
+def test_capture_log_survives_reinstantiation(tmp_path):
+    p = tmp_path / "p1.log"
+    m.CaptureLog("p1", max_bytes=1000, path=p).append(b"persisted")
+    # A fresh CaptureLog (spoke restart) reloads the on-disk tail.
+    assert m.CaptureLog("p1", max_bytes=1000, path=p).load_tail(1000) == b"persisted"
+
+
+def test_capture_log_compacts_past_2x_cap(tmp_path):
+    p = tmp_path / "p1.log"
+    log = m.CaptureLog("p1", max_bytes=100, path=p)
+    log.append(b"A" * 80)   # size 80
+    log.append(b"B" * 80)   # size 160 (< 200, no compaction)
+    assert p.stat().st_size == 160
+    log.append(b"C" * 80)   # size 240 (> 2*100) → compact to last 100 bytes
+    assert p.stat().st_size == 100
+    tail = log.load_tail(100)
+    assert tail == b"B" * 20 + b"C" * 80        # last 100 of A80 B80 C80
+    # The circular log never keeps more than the cap once compacted.
+    assert len(tail) == 100
