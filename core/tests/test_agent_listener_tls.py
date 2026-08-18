@@ -61,13 +61,91 @@ def test_agent_listener_tls_paths_default_reads_env(monkeypatch):
     assert key == "/etc/lm/tls/privkey.pem"
 
 
-def test_agent_listener_tls_paths_default_empty_when_no_env(monkeypatch):
+def test_agent_listener_tls_paths_default_empty_when_no_env(monkeypatch, tmp_path):
     monkeypatch.delenv("LM_TLS_CERT", raising=False)
     monkeypatch.delenv("LM_TLS_KEY", raising=False)
+    monkeypatch.delenv("LM_AGENT_LISTENER_LE_DOMAIN", raising=False)
+    # Point LE discovery at an empty dir so the result is deterministic and does
+    # not depend on the test host having /etc/letsencrypt/live populated.
+    monkeypatch.setenv("LM_LE_LIVE_DIR", str(tmp_path))
     host = _Host()
     cert, key = AgentHostingControlPlane._agent_listener_tls_paths(host)
     assert cert == ""
     assert key == ""
+
+
+# ── _agent_listener_tls_paths (on-disk LE fallback) ─────────────────────────
+
+def _make_le_cert(live_dir, domain):
+    d = live_dir / domain
+    d.mkdir(parents=True)
+    fc = d / "fullchain.pem"
+    pk = d / "privkey.pem"
+    fc.write_text("CERT")
+    pk.write_text("KEY")
+    return str(fc), str(pk)
+
+
+def test_agent_listener_tls_paths_le_fallback_discovers_cert(monkeypatch, tmp_path):
+    """No LM_TLS_CERT env, but the co-located le role has a live cert on disk →
+    the listener discovers it so it comes up wss instead of plaintext."""
+    monkeypatch.delenv("LM_TLS_CERT", raising=False)
+    monkeypatch.delenv("LM_TLS_KEY", raising=False)
+    monkeypatch.delenv("LM_AGENT_LISTENER_LE_DOMAIN", raising=False)
+    monkeypatch.setenv("LM_LE_LIVE_DIR", str(tmp_path))
+    fc, pk = _make_le_cert(tmp_path, "*.orange-tme.com")
+    host = _Host()
+    cert, key = AgentHostingControlPlane._agent_listener_tls_paths(host)
+    assert cert == fc
+    assert key == pk
+
+
+def test_agent_listener_tls_paths_env_wins_over_le(monkeypatch, tmp_path):
+    """An explicitly provisioned LM_TLS_CERT takes precedence over the on-disk
+    LE fallback."""
+    monkeypatch.setenv("LM_TLS_CERT", "/etc/lm/tls/fullchain.pem")
+    monkeypatch.setenv("LM_TLS_KEY", "/etc/lm/tls/privkey.pem")
+    monkeypatch.setenv("LM_LE_LIVE_DIR", str(tmp_path))
+    _make_le_cert(tmp_path, "*.orange-tme.com")
+    host = _Host()
+    cert, key = AgentHostingControlPlane._agent_listener_tls_paths(host)
+    assert cert == "/etc/lm/tls/fullchain.pem"
+    assert key == "/etc/lm/tls/privkey.pem"
+
+
+def test_agent_listener_tls_paths_le_domain_override(monkeypatch, tmp_path):
+    """LM_AGENT_LISTENER_LE_DOMAIN pins which live cert dir is served."""
+    monkeypatch.delenv("LM_TLS_CERT", raising=False)
+    monkeypatch.delenv("LM_TLS_KEY", raising=False)
+    monkeypatch.setenv("LM_LE_LIVE_DIR", str(tmp_path))
+    _make_le_cert(tmp_path, "*.orange-tme.com")
+    fc, pk = _make_le_cert(tmp_path, "lm-agent.ext.orange-tme.com")
+    monkeypatch.setenv("LM_AGENT_LISTENER_LE_DOMAIN", "lm-agent.ext.orange-tme.com")
+    host = _Host()
+    cert, key = AgentHostingControlPlane._agent_listener_tls_paths(host)
+    assert cert == fc
+    assert key == pk
+
+
+def test_agent_listener_tls_paths_le_incomplete_pair_ignored(monkeypatch, tmp_path):
+    """A cert dir missing privkey.pem is not returned (would fail load_cert_chain)."""
+    monkeypatch.delenv("LM_TLS_CERT", raising=False)
+    monkeypatch.delenv("LM_TLS_KEY", raising=False)
+    monkeypatch.delenv("LM_AGENT_LISTENER_LE_DOMAIN", raising=False)
+    monkeypatch.setenv("LM_LE_LIVE_DIR", str(tmp_path))
+    d = tmp_path / "*.orange-tme.com"
+    d.mkdir(parents=True)
+    (d / "fullchain.pem").write_text("CERT")  # no privkey.pem
+    host = _Host()
+    cert, key = AgentHostingControlPlane._agent_listener_tls_paths(host)
+    assert cert == ""
+    assert key == ""
+
+
+def test_wss_port_default_is_443():
+    """The pxmx standalone listener defaults to 443 (the NSG-allowed port), not
+    8443 — hub-self and cs override this, so only pxmx is affected."""
+    assert AgentHostingControlPlane.AGENT_WSS_PORT == 443
 
 
 # ── _rebind_agent_server ────────────────────────────────────────────────────

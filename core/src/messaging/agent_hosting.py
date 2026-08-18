@@ -28,6 +28,7 @@ import time
 import os
 import ssl
 import hmac
+import socket
 import logging
 import websockets
 from typing import Any, Dict, List, Optional
@@ -55,7 +56,7 @@ class AgentHostingControlPlane(BaseControlPlane):
     * ``AGENT_CONFIG_PATH``     — ``"/etc/lm-agent/config.json"`` / ``"/etc/lm-cs-agent/config.json"``
     * ``AGENT_LISTENER_OPT_IN`` — ``False`` (pxmx: always on) / ``True`` (cs: env-gated)
     * ``AGENT_LOOPBACK_PORT``   — ``8443`` (loopback + wss default when env unset)
-    * ``AGENT_WSS_PORT``        — ``8443`` (pxmx; installer pins 443) / ``443`` (cs standalone)
+    * ``AGENT_WSS_PORT``        — ``443`` (pxmx standalone) / ``443`` (cs standalone)
     * ``AGENT_FALLBACK_PORT``   — ``8766`` (pxmx legacy no-cert) / ``8767`` (cs)
 
     Hooks (base default is a no-op):
@@ -74,7 +75,7 @@ class AgentHostingControlPlane(BaseControlPlane):
     AGENT_CONFIG_PATH: str = "/etc/lm-agent/config.json"
     AGENT_LISTENER_OPT_IN: bool = False
     AGENT_LOOPBACK_PORT: int = 8443
-    AGENT_WSS_PORT: int = 8443
+    AGENT_WSS_PORT: int = 443
     AGENT_FALLBACK_PORT: int = 8766
 
     def __init__(self, spoke_id: str, secret: str = None, hub_secret: str = None,
@@ -235,17 +236,82 @@ class AgentHostingControlPlane(BaseControlPlane):
 
     def _agent_listener_tls_paths(self):
         """Return the ``(cert, key)`` paths the ``/ws/agent`` listener should
-        present. Default: the ``LM_TLS_CERT`` / ``LM_TLS_KEY`` env the installer
-        provisioned. A subclass that applies a cert at runtime (cs
-        ``_apply_local_cert``) overrides this to prefer the persisted LE-cert
-        paths so the 443 agent listener serves the same cert as the 8080 webui
-        — otherwise the agent→spoke leg keeps the old/self-signed cert (or
-        plaintext) after INSTALL_CERT applies a fresh LE cert to the webui.
-        Returns paths that may be ``('', '')`` when no cert is configured →
-        ``run_agent_server`` falls back to plaintext (legacy/cert-less)."""
+        present. Resolution order:
+
+        1. ``LM_TLS_CERT`` / ``LM_TLS_KEY`` env — what the installer / hub
+           cert-distribution provisions on cert-capable spokes.
+        2. **On-disk LE fallback** — the box's own Let's Encrypt cert, which the
+           co-located ``le`` role obtains and renews in certbot's native layout
+           (``$LM_LE_LIVE_DIR`` / ``/etc/letsencrypt/live/<domain>/``). The
+           agent-hosting control plane is NOT in ``CERT_CAPABLE_MODULES``, so the
+           WebUI cert-distribution never wires ``LM_TLS_CERT`` for it; without
+           this fallback the listener drops to the plaintext (cert-less) port,
+           which a locked-down NSG (443-only) blocks. See
+           ``_discover_le_listener_cert``.
+
+        Returns ``('', '')`` when neither is available → ``run_agent_server``
+        falls back to plaintext (legacy/cert-less)."""
         cert = os.environ.get("LM_TLS_CERT", "").strip()
         key = os.environ.get("LM_TLS_KEY", "").strip()
-        return cert, key
+        if cert and key:
+            return cert, key
+        return self._discover_le_listener_cert()
+
+    def _discover_le_listener_cert(self):
+        """Best-effort discovery of an on-disk Let's Encrypt cert to serve on the
+        ``/ws/agent`` listener. Returns ``(fullchain, privkey)`` only when BOTH
+        files exist and are readable, else ``('', '')``.
+
+        Candidate selection (deterministic, so a renew never silently flips which
+        cert is served): an explicit ``LM_AGENT_LISTENER_LE_DOMAIN`` wins; else
+        rank live-cert dirs by exact-FQDN match > wildcard covering this host's
+        domain > most-recently-renewed. The downstream agent→spoke leg is
+        TLS-unverified (same as the spoke→hub leg), so a hostname-mismatched but
+        valid cert still upgrades the listener from plaintext ``ws`` to ``wss``."""
+        live_dir = os.environ.get("LM_LE_LIVE_DIR", "/etc/letsencrypt/live").strip()
+        if not live_dir or not os.path.isdir(live_dir):
+            return "", ""
+
+        def _pair(name):
+            d = os.path.join(live_dir, name)
+            fc = os.path.join(d, "fullchain.pem")
+            pk = os.path.join(d, "privkey.pem")
+            if (os.path.isfile(fc) and os.path.isfile(pk)
+                    and os.access(fc, os.R_OK) and os.access(pk, os.R_OK)):
+                return fc, pk
+            return "", ""
+
+        override = os.environ.get("LM_AGENT_LISTENER_LE_DOMAIN", "").strip()
+        if override:
+            fc, pk = _pair(override)
+            if fc:
+                logger.info("Agent listener using LE cert for %s (LM_AGENT_LISTENER_LE_DOMAIN)", override)
+            return fc, pk
+
+        try:
+            names = [n for n in os.listdir(live_dir)
+                     if os.path.isdir(os.path.join(live_dir, n))]
+        except OSError:
+            return "", ""
+
+        fqdn = socket.getfqdn().lower()
+
+        def _rank(n):
+            nl = n.lower()
+            exact = (nl == fqdn)
+            wild = nl.startswith("*.") and bool(nl[2:]) and fqdn.endswith("." + nl[2:])
+            try:
+                mtime = os.path.getmtime(os.path.join(live_dir, n, "fullchain.pem"))
+            except OSError:
+                mtime = 0.0
+            return (exact, wild, mtime)
+
+        for name in sorted(names, key=_rank, reverse=True):
+            fc, pk = _pair(name)
+            if fc:
+                logger.info("Agent listener falling back to on-disk LE cert %s (no LM_TLS_CERT configured)", name)
+                return fc, pk
+        return "", ""
 
     async def run_agent_server(self):
         """Serve the agent listener. Three modes:
