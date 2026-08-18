@@ -891,6 +891,42 @@ def spoke_visible_to_session(sess, tenant_id) -> bool:
     return bool(allowed) and tenant_id in allowed
 
 
+def hypervisor_owned_by_caller(hub, sess, spoke_id: str) -> bool:
+    """True iff the hypervisor ``spoke_id`` is BOUND to one of the caller's OWN
+    tenants — the caller owns the whole host, so they own every VM on it.
+
+    This is the ownership path the VM console/control gates were missing:
+    ``vm_in_tenant_scope`` attributes a VM only by its Proxmox TAG or its live
+    IP∈prefix, but a STOPPED VM (or one with no guest agent — appliances,
+    routers, freshly-installed OSes) exposes NO live IP to attribute, and many
+    fleets never tag individual VMs. So a tenant admin who owns a bound
+    hypervisor could open its HOST shell (which gates on spoke binding) yet was
+    denied a VM's console ("not authorized for this VM's tenant") — the reported
+    bug. Allowing whole-host ownership here closes that gap.
+
+    STRICT (not ``spoke_visible_to_session``): the host must be bound to a tenant
+    the caller actually belongs to. A SHARED/unbound hypervisor (no binding) →
+    False, so a multi-tenant host still falls through to per-VM tag/subnet
+    attribution (isolation preserved). Mirrors ``can_bind_spoke`` + the host-shell
+    gate. Admin → True."""
+    if is_admin(sess):
+        return True
+    if not spoke_id:
+        return False
+    try:
+        spoke_tenant = hub.state.get_spoke_tenant(spoke_id) or ""
+    except Exception:  # noqa: BLE001
+        spoke_tenant = ""
+    if not spoke_tenant:
+        return False
+    user = (sess or {}).get("user", {}) or {}
+    allowed = [str(t).strip() for t in (user.get("tenants") or []) if str(t).strip()]
+    if not allowed:
+        primary = str(user.get("tenant_id") or "").strip()
+        allowed = [primary] if primary else []
+    return spoke_tenant in allowed
+
+
 def can_bind_spoke(hub, sess, spoke_id: str) -> bool:
     """May this session bind a NEW device/instance to ``spoke_id``?
 

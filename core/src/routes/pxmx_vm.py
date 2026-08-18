@@ -13,22 +13,29 @@ def register(app, hub, ctx):
     _filter_tenant = ctx._filter_tenant
     _trigger_vm_sync_after_pxmx_edit = ctx._trigger_vm_sync_after_pxmx_edit
 
-    async def _assert_vm_control(request, vmid=None, node=None, unique_id=None):
+    async def _assert_vm_control(request, vmid=None, node=None, unique_id=None, agent_id=None):
         """Authorize a VM CONTROL action (start/stop/reboot/snapshot/backup).
         Global Admin → any VM. Otherwise the caller must (a) be a write-user or
-        above (access.has_edit_access) AND (b) OWN the target VM — the VM's
-        ips/tags/pool (from GET_VM_INFO) must survive the hypervisor tenant filter,
-        exactly like the tenant-filtered VM list + /vm/{id}/details. FAIL-CLOSED:
-        an unattributable VM (spoke down, empty info) → 403, so a tenant user can
-        never act on a VM they couldn't see. A view user (pxmx right, no edit) is
-        rejected before the ownership probe."""
+        above (access.has_edit_access) AND (b) OWN the target VM — either the VM's
+        hypervisor is BOUND to one of the caller's tenants (whole-host ownership),
+        or the VM's ips/tags/pool (from GET_VM_INFO) survive the hypervisor tenant
+        filter, exactly like the tenant-filtered VM list + /vm/{id}/details.
+        FAIL-CLOSED: an unattributable VM (spoke down, empty info) → 403, so a
+        tenant user can never act on a VM they couldn't see. A view user (pxmx
+        right, no edit) is rejected before the ownership probe."""
         sess = _session_user(request)
         if _is_admin(sess):
             return
         if not access.has_edit_access(sess):
             raise HTTPException(status_code=403, detail="Edit access required to control VMs")
         hub = app.state.hub
-        pxmx_spoke = hub.get_hypervisor_spoke()
+        pxmx_spoke = (hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
+                      if agent_id else None) or hub.get_hypervisor_spoke()
+        # Whole-host ownership: a hypervisor bound to one of the caller's tenants
+        # means they own every VM on it → allow (mirrors the VM console gate +
+        # host shell). Shared/unbound host → per-VM tag/subnet attribution below.
+        if access.hypervisor_owned_by_caller(hub, sess, pxmx_spoke):
+            return
         info: dict = {}
         if pxmx_spoke:
             ident = unique_id or (str(vmid) if vmid is not None else "")
@@ -73,7 +80,8 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400, detail=f"unknown action: {action}")
         # Admin → any VM; a write-user/tenant-admin → only a VM in their tenant.
         await _assert_vm_control(request, vmid=body.get("vmid"),
-                                 node=body.get("node"), unique_id=body.get("unique_id"))
+                                 node=body.get("node"), unique_id=body.get("unique_id"),
+                                 agent_id=body.get("agent_id"))
         hub = app.state.hub
         # Delete-protection safeguard: a Global Admin can mark VMs non-deletable
         # from Setup → Hypervisors (stored per-tenant, enforced as the UNION across
@@ -208,7 +216,8 @@ def register(app, hub, ctx):
             node = str(it.get("node", "") or "")
             try:
                 await _assert_vm_control(request, vmid=vmid, node=node,
-                                         unique_id=it.get("unique_id"))
+                                         unique_id=it.get("unique_id"),
+                                         agent_id=it.get("agent_id"))
             except HTTPException as he:
                 results.append({"vmid": vmid, "ok": False, "error": str(he.detail)})
                 continue
