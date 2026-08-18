@@ -18095,6 +18095,14 @@ async function consoleConfigPush(spokeId, portId) {
 async function pxmxOpenConsole(uniqueId) {
     const vm = (window._pxmxVms || []).find(v => v.unique_id === uniqueId);
     if (!vm) { showToast('VM not found in cache', 'error'); return; }
+    // Already open? Don't mint a second session — just surface the console dock
+    // and switch to that VM's existing tab.
+    if (window._pxmxConsoles && window._pxmxConsoles.has(vm.unique_id)) {
+        pxmxEnsureConsoleDock();
+        pxmxActivateConsole(vm.unique_id);
+        showToast(`Console for ${vm.name || vm.vmid} is already open`, 'info');
+        return;
+    }
     // Immediate feedback — the agent opens the Proxmox vncwebsocket + mints the
     // first-use VNC token, which can take several seconds on a busy host.
     showToast(`Connecting to console for ${vm.name || vm.vmid}…`, 'info');
@@ -18122,7 +18130,7 @@ async function pxmxOpenConsole(uniqueId) {
     const RFB = await pxmxLoadNoVNC();
     if (!RFB) { _restoreBtn(); showToast('Failed to load noVNC (CDN unreachable)', 'error'); return; }
     _restoreBtn();
-    pxmxShowVncModal(vm, RFB, session);
+    pxmxAddConsoleTab(vm, RFB, session);
 }
 
 // Load noVNC's RFB from CDN once, cache on window.__noVNCRFB. Mirrors the
@@ -18138,65 +18146,183 @@ function pxmxLoadNoVNC() {
     return _pxmxNoVncPromise;
 }
 
-// Build the modal DOM, attach the RFB, wire status + Ctrl+Alt+Del + close.
-// Closing the modal drops the RFB (closes the WS → hub sends VNC_DISCONNECT →
-// agent closes the Proxmox WSS). Returns nothing.
-function pxmxShowVncModal(vm, RFB, session) {
+// ── Tabbed VM-console dock ──────────────────────────────────────────────────
+// A single in-browser window hosting EVERY open console session as a tab, so an
+// operator can keep several VM consoles connected at once and switch between
+// them without dropping any. Each session's noVNC RFB renders into its own body
+// div; inactive bodies are hidden (display:none) but their WebSocket stays open,
+// so switching tabs is instant and non-destructive. Registry: window._pxmxConsoles
+// (Map<unique_id, {vm, session, rfb, bodyEl, statusText, statusCls}>);
+// window._pxmxActiveConsole holds the visible tab's key.
+
+// Create (or reveal) the shared console dock shell. Idempotent — the tab strip
+// and bodies persist across opens; only wired once.
+function pxmxEnsureConsoleDock() {
     let modal = document.getElementById('pxmx-vnc-modal');
-    if (modal) modal.remove();
+    if (modal) { modal.classList.remove('hidden'); return modal; }
     modal = document.createElement('div');
     modal.id = 'pxmx-vnc-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/70';
     modal.innerHTML = `
-        <div class="bg-[#1a1a2e] rounded-lg shadow-2xl w-[90vw] max-w-5xl h-[85vh] flex flex-col overflow-hidden">
+        <div class="bg-[#1a1a2e] rounded-lg shadow-2xl w-[92vw] max-w-6xl h-[88vh] flex flex-col overflow-hidden">
             <div class="flex items-center gap-3 px-4 py-2 bg-[#16213e] border-b border-slate-700 text-slate-200 text-sm">
-                <strong class="font-semibold">VM Console — ${escapeHtml(vm.name || vm.vmid)}</strong>
-                <span class="text-xs text-slate-400 font-mono">${escapeHtml(vm.unique_id || '')}</span>
-                <button id="pxmx-vnc-cad" class="ml-2 px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Ctrl+Alt+Del</button>
-                <button id="pxmx-vnc-fs" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
-                <span id="pxmx-vnc-status" class="ml-auto text-xs text-amber-400">Connecting…</span>
-                <button id="pxmx-vnc-close" class="ml-3 text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
+                <strong class="font-semibold">VM Consoles</strong>
+                <button id="pxmx-vnc-cad" title="Send Ctrl+Alt+Del to the active console" class="ml-2 px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Ctrl+Alt+Del</button>
+                <button id="pxmx-vnc-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
+                <span id="pxmx-vnc-status" class="ml-auto text-xs text-amber-400"></span>
+                <button id="pxmx-vnc-closeall" title="Close all consoles" class="ml-3 text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
             </div>
-            <div id="pxmx-vnc-screen" class="flex-1 bg-black"></div>
+            <div id="pxmx-vnc-tabs" class="flex items-stretch gap-1 px-2 pt-1 bg-[#16213e] border-b border-slate-700 overflow-x-auto"></div>
+            <div id="pxmx-vnc-bodies" class="relative flex-1 bg-black"></div>
         </div>`;
     document.body.appendChild(modal);
-    const statusEl = modal.querySelector('#pxmx-vnc-status');
-    const setStatus = (msg, cls) => { statusEl.textContent = msg; statusEl.className = 'ml-auto text-xs ' + (cls || 'text-amber-400'); };
+    modal.querySelector('#pxmx-vnc-cad').onclick = () => { const c = pxmxActiveConsole(); if (c && c.rfb) c.rfb.sendCtrlAltDel(); };
+    modal.querySelector('#pxmx-vnc-fs').onclick = () => {
+        const c = pxmxActiveConsole();
+        const screen = c && c.bodyEl;
+        if (document.fullscreenElement) document.exitFullscreen();
+        else if (screen && screen.requestFullscreen) screen.requestFullscreen().catch(() => {});
+    };
+    modal.querySelector('#pxmx-vnc-closeall').onclick = () => pxmxCloseAllConsoles();
+    return modal;
+}
+
+// The registry entry for the currently visible tab (or null).
+function pxmxActiveConsole() {
+    return (window._pxmxConsoles && window._pxmxActiveConsole)
+        ? window._pxmxConsoles.get(window._pxmxActiveConsole) : null;
+}
+
+// Mint a console tab: build its body div, attach a noVNC RFB, register it, and
+// make it the active tab. Mirrors the old single-modal RFB wiring (ticket →
+// VNC password, status events) but per-session.
+function pxmxAddConsoleTab(vm, RFB, session) {
+    if (!window._pxmxConsoles) window._pxmxConsoles = new Map();
+    const key = vm.unique_id || String(session.session_id);
+    const modal = pxmxEnsureConsoleDock();
+    const bodies = modal.querySelector('#pxmx-vnc-bodies');
+    const bodyEl = document.createElement('div');
+    bodyEl.className = 'absolute inset-0 bg-black';
+    bodyEl.setAttribute('data-console-key', key);
+    bodies.appendChild(bodyEl);
+    const entry = { key, vm, session, rfb: null, bodyEl, statusText: 'Connecting…', statusCls: 'text-amber-400' };
+    window._pxmxConsoles.set(key, entry);
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${proto}//${location.host}/ws/console/${encodeURIComponent(session.session_id)}?token=${encodeURIComponent(session.ws_token)}`;
-    let rfb = null;
+    const upd = (text, cls) => { entry.statusText = text; entry.statusCls = cls; pxmxRenderConsoleTabs(); pxmxSyncConsoleHeader(); };
     try {
         // Proxmox's vncwebsocket ticket doubles as the RFB VNC password — the
         // agent mints it and the hub returns it in the /api/pxmx/console
         // response. noVNC must present it during the RFB security handshake or
         // Proxmox drops the session ("Security failure" / blank console).
         const vncPassword = (session && session.ticket) || '';
-        rfb = new RFB(modal.querySelector('#pxmx-vnc-screen'), wsUrl, { credentials: { password: vncPassword } });
+        const rfb = new RFB(bodyEl, wsUrl, { credentials: { password: vncPassword } });
         rfb.scaleViewport = true;
         rfb.resizeSession = false;
-        rfb.addEventListener('connect', () => setStatus('Connected', 'text-green-400'));
-        rfb.addEventListener('disconnect', (e) => setStatus('Disconnected: ' + ((e.detail && e.detail.reason) || 'closed'), 'text-red-400'));
+        rfb.addEventListener('connect', () => upd('Connected', 'text-green-400'));
+        rfb.addEventListener('disconnect', (e) => upd('Disconnected: ' + ((e.detail && e.detail.reason) || 'closed'), 'text-red-400'));
         rfb.addEventListener('credentialsrequired', () => {
             // Ticket already supplied above; if Proxmox still asks, re-send it
             // rather than prompting the user for a password they don't have.
             if (vncPassword) rfb.sendCredentials({ password: vncPassword });
         });
-        rfb.addEventListener('securityfailure', (e) => setStatus('Security failure: ' + ((e.detail && e.detail.reason) || 'unknown'), 'text-red-400'));
+        rfb.addEventListener('securityfailure', (e) => upd('Security failure: ' + ((e.detail && e.detail.reason) || 'unknown'), 'text-red-400'));
+        entry.rfb = rfb;
     } catch (err) {
-        setStatus('Error: ' + (err.message || err), 'text-red-400');
+        entry.statusText = 'Error: ' + (err.message || err); entry.statusCls = 'text-red-400';
     }
-    modal.querySelector('#pxmx-vnc-cad').onclick = () => rfb && rfb.sendCtrlAltDel();
-    modal.querySelector('#pxmx-vnc-fs').onclick = () => {
-        const screen = modal.querySelector('#pxmx-vnc-screen');
-        if (document.fullscreenElement) document.exitFullscreen();
-        else screen.requestFullscreen && screen.requestFullscreen().catch(() => {});
-    };
-    const close = () => {
-        try { if (rfb) rfb.disconnect(); } catch (e) {}
-        modal.remove();
-    };
-    modal.querySelector('#pxmx-vnc-close').onclick = close;
-    modal.onclick = (e) => { if (e.target === modal) close(); };
+    pxmxActivateConsole(key);
+}
+
+// Show one tab's console, hide the rest (their WS stays open). Re-renders the
+// tab strip + header and focuses the active console for keyboard input.
+function pxmxActivateConsole(key) {
+    window._pxmxActiveConsole = key;
+    if (window._pxmxConsoles) {
+        window._pxmxConsoles.forEach((e, k) => { if (e.bodyEl) e.bodyEl.classList.toggle('hidden', k !== key); });
+    }
+    pxmxRenderConsoleTabs();
+    pxmxSyncConsoleHeader();
+    const c = window._pxmxConsoles && window._pxmxConsoles.get(key);
+    if (c && c.rfb && c.rfb.focus) { try { c.rfb.focus(); } catch (e) {} }
+    // A body hidden via display:none can't measure itself, so noVNC's
+    // scaleViewport may be stale when it's re-shown — nudge a resize so the
+    // newly visible console rescales to fill the dock.
+    try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+}
+
+// Paint the tab strip from the registry (status dot + name + per-tab close).
+function pxmxRenderConsoleTabs() {
+    const modal = document.getElementById('pxmx-vnc-modal');
+    if (!modal) return;
+    const tabs = modal.querySelector('#pxmx-vnc-tabs');
+    if (!tabs) return;
+    const active = window._pxmxActiveConsole;
+    const entries = window._pxmxConsoles ? Array.from(window._pxmxConsoles.values()) : [];
+    tabs.innerHTML = entries.map(e => {
+        const isA = e.key === active;
+        const dot = e.statusCls === 'text-green-400' ? 'bg-green-400'
+            : (e.statusCls === 'text-red-400' ? 'bg-red-400' : 'bg-amber-400');
+        const tabCls = isA ? 'bg-[#1a1a2e] text-slate-100 border-[#01A982]'
+            : 'bg-[#0f1830] text-slate-400 border-transparent hover:text-slate-200';
+        const label = escapeHtml(e.vm.name || e.vm.vmid || e.key);
+        const kAttr = escapeHtml(e.key);
+        return `<div data-key="${kAttr}" class="pxmx-vnc-tab flex items-center gap-2 px-3 py-1 rounded-t border-b-2 cursor-pointer text-xs whitespace-nowrap ${tabCls}">
+            <span class="w-2 h-2 rounded-full ${dot}"></span>
+            <span>${label}</span>
+            <button data-close="${kAttr}" title="Close this console" class="ml-1 text-slate-500 hover:text-red-400 text-sm leading-none">&times;</button>
+        </div>`;
+    }).join('');
+    tabs.querySelectorAll('.pxmx-vnc-tab').forEach(el => {
+        el.onclick = (ev) => {
+            const closeBtn = ev.target.closest('[data-close]');
+            if (closeBtn) { ev.stopPropagation(); pxmxCloseConsole(closeBtn.getAttribute('data-close')); return; }
+            pxmxActivateConsole(el.getAttribute('data-key'));
+        };
+    });
+}
+
+// Sync the header status line to the active console's state.
+function pxmxSyncConsoleHeader() {
+    const modal = document.getElementById('pxmx-vnc-modal');
+    if (!modal) return;
+    const statusEl = modal.querySelector('#pxmx-vnc-status');
+    if (!statusEl) return;
+    const c = pxmxActiveConsole();
+    statusEl.textContent = c ? ((c.vm.name || c.vm.vmid || '') + ' — ' + c.statusText) : '';
+    statusEl.className = 'ml-auto text-xs ' + (c ? c.statusCls : 'text-slate-400');
+}
+
+// Close one console: disconnect its RFB (→ hub VNC_DISCONNECT → agent drops the
+// Proxmox WSS), drop its body + registry entry, then activate a sibling (or tear
+// the dock down when it was the last one).
+function pxmxCloseConsole(key) {
+    const reg = window._pxmxConsoles;
+    if (!reg) return;
+    const e = reg.get(key);
+    if (e) {
+        try { if (e.rfb) e.rfb.disconnect(); } catch (err) {}
+        if (e.bodyEl) e.bodyEl.remove();
+        reg.delete(key);
+    }
+    if (reg.size === 0) { pxmxCloseAllConsoles(); return; }
+    if (window._pxmxActiveConsole === key) {
+        pxmxActivateConsole(reg.keys().next().value);
+    } else {
+        pxmxRenderConsoleTabs();
+    }
+}
+
+// Close every console and remove the dock.
+function pxmxCloseAllConsoles() {
+    const reg = window._pxmxConsoles;
+    if (reg) {
+        reg.forEach(e => { try { if (e.rfb) e.rfb.disconnect(); } catch (err) {} });
+        reg.clear();
+    }
+    window._pxmxActiveConsole = null;
+    const modal = document.getElementById('pxmx-vnc-modal');
+    if (modal) modal.remove();
 }
 
 // Render the clickable Nodes table; the selected row is highlighted.
