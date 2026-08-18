@@ -228,10 +228,12 @@ See [pxmx.md](pxmx.md) for the agent/VM lifecycle and [cs.md](cs.md) for the Sim
 
 ## Install model (deep dive)
 
-**Two shapes, one menu.** `install_menu.sh` is the single entry point and offers exactly two choices:
+**One menu, every shape.** `install_menu.sh` is the single entry point and drives every other installer:
 
 1. **Hub** — this box becomes the LM hub (+ WebUI, always), optionally co-locating spokes. It runs `install_all.sh`.
-2. **Agent** — a role-capable node that calls home to an existing hub and morphs into roles later. It runs `agent/install_agent.sh`.
+2. **Agent** — a role-capable node that calls home to an existing hub; the menu's role checklist maps to `install_agent.sh --roles <csv>` (or none → load roles later via the WebUI).
+3. **Proxmox Host Agent** — installs/uninstalls the pxmx **node-agent** (separate `pxmx` repo, driven via curl) that reports to a pxmx/simulation spoke's `/ws/agent` listener.
+4. **Uninstall** — guarded master teardown (`uninstall.sh`).
 
 **The hub install (`install_all.sh`).** Brings up the hub + WebUI (always), then stands up the co-located modules as **one unified agent** (`agent-<hostname>`, installed with `--loopback` because the hub owns `:443` on the same box). The spoke checklist in the menu maps to `--exclude <csv>`: any module you *didn't* pick is excluded, and the remaining ones become that agent's roles. So even the all-in-one hub follows the agent+roles model — it is not ten separate spoke services. `--tls-verify` (+ optional `--tls-ca-cert`) opts into hub-cert verification; without it the co-located clients encrypt-without-auth against the self-signed hub cert.
 

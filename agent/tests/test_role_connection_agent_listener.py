@@ -53,14 +53,55 @@ def test_listener_gated_to_proxmox_only(monkeypatch, tmp_path):
     # Point AGENT_CONFIG_PATH at a temp path so the proxmox init can write.
     monkeypatch.setattr(cp_module.RoleConnection, "AGENT_CONFIG_PATH",
                        str(tmp_path / "agent-config.json"))
-    for role, expected in [("proxmox", True), ("dns", False), ("ldap", False)]:
+    # Simulation is opt-in via LM_CS_AGENT_LISTENER — ensure it's OFF here so the
+    # default (relay-only / all-in-one safe) gating is exercised.
+    monkeypatch.delenv("LM_CS_AGENT_LISTENER", raising=False)
+    for role, expected in [
+        ("proxmox", True), ("simulation", False), ("dns", False),
+        ("ldap", False),
+    ]:
         conn = cp_module.RoleConnection(
             role, "lm-agent", "wss://127.0.0.1:443", _make_role_instance())
         assert conn._agent_listener_enabled() is expected, \
             f"{role}: listener should be {expected}"
         assert conn.module_type == {
-            "proxmox": "hypervisor", "dns": "dns", "ldap": "directory",
+            "proxmox": "hypervisor", "simulation": "simulation", "dns": "dns",
+            "ldap": "directory",
         }[role]
+
+
+def test_simulation_listener_opt_in(monkeypatch, tmp_path):
+    """The simulation (cs) role hosts its OWN /ws/agent listener when opted in
+    via LM_CS_AGENT_LISTENER=1 — so a unified agent that loaded the simulation
+    role can host the client-sim node-agent (no separate cs/pxmx spoke). Mirrors
+    the standalone cs spoke (install_cs.sh --agent-listener); default OFF so a
+    relay-only / all-in-one box never binds :443. When on, it uses the cs
+    listener PORT knobs (443/8767) so it can't collide with a co-loaded pxmx
+    role (8443/8766), sharing the base agent_secret for approval."""
+    monkeypatch.setattr(cp_module.RoleConnection, "AGENT_CONFIG_PATH",
+                       str(tmp_path / "agent-config.json"))
+
+    # Opt-out (default): no listener.
+    monkeypatch.delenv("LM_CS_AGENT_LISTENER", raising=False)
+    off = cp_module.RoleConnection(
+        "simulation", "lm-agent", "wss://127.0.0.1:443", _make_role_instance())
+    assert off._agent_listener_enabled() is False
+    # cs listener PORT knobs are wired regardless (only the gate is opt-in).
+    assert off.AGENT_LISTENER_ENV == "LM_CS_AGENT_LISTENER"
+    assert off.AGENT_WSS_PORT == 443
+    assert off.AGENT_FALLBACK_PORT == 8767
+    assert off.module_type == "simulation"
+
+    # Opt-in: listener enabled and the agent_secret self-provisions.
+    for val in ("1", "true", "yes", "on"):
+        monkeypatch.setenv("LM_CS_AGENT_LISTENER", val)
+        on = cp_module.RoleConnection(
+            "simulation", "lm-agent", "wss://127.0.0.1:443",
+            _make_role_instance())
+        assert on._agent_listener_enabled() is True, \
+            f"LM_CS_AGENT_LISTENER={val} should enable the cs listener"
+        assert on.agent_secret, \
+            "opted-in simulation role must self-provision an agent_secret"
 
 
 def test_non_pxmx_roles_empty_degrade_no_attributeerror(monkeypatch, tmp_path):

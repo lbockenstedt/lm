@@ -37,11 +37,13 @@ same core flags: `--hub`, `--id`/`--name`, `--secret`, `--hub-secret`,
 `kvm` and `qa` are the two exceptions: they do **not** normalize a bare hostname,
 so give them a full `ws://`/`wss://` URL.
 
-### Hub — `install_menu.sh` (start here)
+### `install_menu.sh` — the single master installer (start here)
 
-Interactive bootstrap covering both deployment shapes: this box becomes the hub
-(plus WebUI) with an optional checklist of co-located spokes, or it becomes a
-remote spoke. No flags.
+The one interactive entry point that drives every other installer. Menu options:
+**1) Hub** (this box → hub + WebUI, with a co-located-spoke checklist),
+**2) Agent** (remote node → pick the module role(s) to run now, or none and load
+them later), **3) Proxmox Host Agent** (install/uninstall the pxmx node-agent that
+reports to a pxmx/sim spoke), **4) Uninstall**. No flags.
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_menu.sh | sudo bash

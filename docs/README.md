@@ -6,20 +6,29 @@ The canonical doc set lives here in `lm/docs/`. Each separate repo also carries 
 
 ## Installation — start here
 
-All install commands in one place. Installers are **idempotent** — re-running one
-updates code and preserves credentials. Every flag and env var is in
+**One master installer drives everything.** `install_menu.sh` is the single
+interactive entry point — it calls every other installer for you, so you rarely
+need to run them directly. Installers are **idempotent** (re-running updates code
+and preserves credentials). Every flag and env var is in
 [install-flags.md](install-flags.md) and [environment-variables.md](environment-variables.md).
-
-### 1. Hub (start here)
-
-Interactive bootstrap — this box becomes the hub + WebUI (with an optional
-checklist of co-located module roles), or a remote agent:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/install_menu.sh | sudo bash
 ```
 
-Non-interactive hub-only (what the menu calls underneath):
+The menu offers:
+
+| # | Choice | Drives | Notes |
+| :-- | :--- | :--- | :--- |
+| 1 | **Hub** | `install_all.sh` | this box becomes the hub + WebUI; checklist of co-located module roles |
+| 2 | **Agent** | `agent/install_agent.sh` | leaf node; pick the module role(s) to run now (or none → load later in the WebUI) |
+| 3 | **Proxmox Host Agent** | `pxmx/agent/install_agent.sh` | node-agent on a Proxmox host that reports to a pxmx/sim spoke (install **or** uninstall) |
+| 4 | **Uninstall** | `uninstall.sh` | guarded master teardown |
+
+Everything below is what the menu runs underneath — use these directly only for
+non-interactive/automated installs.
+
+### 1. Hub (non-interactive)
 
 ```bash
 sudo bash /opt/lm/install_all.sh --hub-only
@@ -28,8 +37,8 @@ sudo bash /opt/lm/install_all.sh --hub-only
 ### 2. Agent (every remote node)
 
 One agent **hosts many module roles at once** — each loaded role opens its own
-auto-approving sub-spoke. Assign roles from the WebUI, or pre-load them here.
-`dns`, `dhcp`, and `henet` need **no installer** — just load the role:
+auto-approving sub-spoke. Menu option 2 lets you pick the roles; or pre-load them
+here. `dns`, `dhcp`, and `henet` need **no installer** — just load the role:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \
@@ -37,6 +46,12 @@ curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_a
 ```
 
 Roles: `dns dhcp network netbox opnsense ldap simulation cppm proxmox le console statuspage proxy truenas`.
+
+> **Client sims on the agent:** load the `simulation` role (menu option 2 → check
+> *Client Simulator*, or `--roles simulation`) and this box hosts the client-sim
+> `/ws/agent` listener (`LM_CS_AGENT_LISTENER=1`, set automatically for a
+> non-colocated simulation role). A Proxmox Host Agent (menu option 3,
+> `--spoke-ip <this-box>`) then reports to it — no separate cs/pxmx spoke needed.
 
 ### 3. Per-module standalone installers
 
@@ -50,6 +65,7 @@ same core flags (`--hub`, `--id`/`--name`, `--secret`, `--hub-secret`,
 | **agent** (any role) | `lm/agent/install_agent.sh` | `curl -sSL .../lm/main/agent/install_agent.sh \| sudo bash -s -- --hub HUB --roles <csv>` |
 | **cs** (simulation) | `cs/install_cs.sh` | `curl -sSL .../cs/main/install_cs.sh \| sudo bash -s -- --hub HUB` |
 | **pxmx** (hypervisor) | `pxmx/install_pxmx.sh` | `curl -sSL .../pxmx/main/install_pxmx.sh \| sudo bash -s -- --hub HUB` |
+| **pxmx host agent** (node-agent) | `pxmx/agent/install_agent.sh` | *(master menu option 3)* `curl -sSL .../pxmx/main/agent/install_agent.sh \| sudo bash -s -- --spoke-ip SPOKE` |
 | **netbox** (IPAM) | `netbox/install.sh` | `curl -sSL .../netbox/main/install.sh \| sudo bash -s -- --hub HUB` |
 | **opnsense** (firewall) | `opnsense/install_opnsense.sh` | `curl -sSL .../opnsense/main/install_opnsense.sh \| sudo bash -s -- --hub HUB` |
 | **cppm** (NAC) | `cppm/install.sh` | `curl -sSL .../cppm/main/install.sh \| sudo bash -s -- --hub HUB` |

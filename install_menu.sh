@@ -52,6 +52,17 @@ MODULES=(
     "henet|HE.NET|public DNS — manage dns.he.net records (dynamic DNS)"
     "dhcp|DHCP|address service (Kea)"
     "nw|Network Watcher|MAC/ARP discovery + switch inventory"
+    "le|Let's Encrypt|ACME cert issuance/distribution"
+)
+
+# ── Module id → agent ROLE name (mirrors install_all.sh MODULE_ROLE). The hub
+# path passes module ids to install_all.sh (--exclude); the Agent path passes
+# ROLE names to install_agent.sh (--roles), so map the two namespaces here.
+# Keep in sync with install_all.sh's MODULE_ROLE + agent_spoke._ROLE_MAP.
+declare -A MODULE_ROLE=(
+    ["cs"]="simulation" ["pxmx"]="proxmox" ["opnsense"]="opnsense"
+    ["cppm"]="cppm" ["netbox"]="netbox" ["ldap"]="ldap"
+    ["dns"]="dns" ["dhcp"]="dhcp" ["henet"]="henet" ["nw"]="network" ["le"]="le"
 )
 
 # ── Colors (degrade gracefully when not a terminal) ──
@@ -128,17 +139,19 @@ top_menu() {
     echo
     echo "${C_BOLD}${C_CYAN}=== Lab Manager Installer ===${C_RESET}"
     echo "  1) ${C_BOLD}Hub${C_RESET}        — this box runs the LM hub (+ WebUI); optionally co-locate spokes"
-    echo "  2) ${C_BOLD}Agent${C_RESET} — leaf spoke that calls home, morphs into a role later (netbox/ldap/…)"
-    echo "  3) ${C_BOLD}${C_RED}Uninstall${C_RESET}  — remove ALL LM components from this box (destructive)"
+    echo "  2) ${C_BOLD}Agent${C_RESET}      — leaf spoke that calls home; pick the module role(s) to run (dns/ldap/cs/…)"
+    echo "  3) ${C_BOLD}Proxmox Host Agent${C_RESET} — node-agent on a Proxmox host that reports to a pxmx/sim spoke"
+    echo "  4) ${C_BOLD}${C_RED}Uninstall${C_RESET}  — remove LM components from this box"
     echo "  q) Quit"
     while true; do
-        read -rp "Select [1/2/3/q]: " choice || choice=""
+        read -rp "Select [1/2/3/4/q]: " choice || choice=""
         case "$choice" in
             1|h|H|hub)       MODE="hub";       return 0 ;;
             2|g|G|generic)   MODE="generic";   return 0 ;;
-            3|u|U|uninstall) MODE="uninstall"; return 0 ;;
+            3|p|P|pxmx)      MODE="pxmx-agent"; return 0 ;;
+            4|u|U|uninstall) MODE="uninstall"; return 0 ;;
             q|Q|quit|exit)   echo "Aborted."; exit 0 ;;
-            *) echo "  (enter 1, 2, 3, or q)" ;;
+            *) echo "  (enter 1, 2, 3, 4, or q)" ;;
         esac
     done
 }
@@ -149,8 +162,8 @@ top_menu() {
 render_module_menu() {
     local i id label desc mark
     echo
-    echo "${C_BOLD}${C_CYAN}--- Hub: choose co-located spokes ---${C_RESET}"
-    echo "${C_DIM}Hub + WebUI are always installed. Toggle the spokes to add:${C_RESET}"
+    echo "${C_BOLD}${C_CYAN}--- ${MENU_TITLE:-Hub: choose co-located spokes} ---${C_RESET}"
+    echo "${C_DIM}${MENU_HINT:-Hub + WebUI are always installed. Toggle the spokes to add:}${C_RESET}"
     echo
     for i in "${!MODULES[@]}"; do
         IFS='|' read -r id label desc <<< "${MODULES[$i]}"
@@ -162,10 +175,27 @@ render_module_menu() {
 }
 
 module_menu_loop() {
+    MENU_TITLE="Hub: choose co-located spokes"
+    MENU_HINT="Hub + WebUI are always installed. Toggle the spokes to add:"
     SELECTED=()
     local i
     for i in "${!MODULES[@]}"; do SELECTED+=("1"); done   # default: all (matches install_all.sh)
-    local ans
+    _menu_toggle_loop
+}
+
+# Agent role checklist — same widget, but defaults to NONE (a bare agent is a
+# valid shape: it loads roles later via the hub WebUI) and titled for roles.
+role_menu_loop() {
+    MENU_TITLE="Agent: choose module role(s) to run now"
+    MENU_HINT="Leave all unchecked for a bare agent (load roles later in the hub WebUI). Toggle roles to pre-load:"
+    SELECTED=()
+    local i
+    for i in "${!MODULES[@]}"; do SELECTED+=("0"); done   # default: none
+    _menu_toggle_loop
+}
+
+_menu_toggle_loop() {
+    local i ans
     while true; do
         render_module_menu
         read -rp "Choice: " ans || ans=""
@@ -217,8 +247,8 @@ run_hub_install() {
 run_generic_install() {
     echo
     echo "${C_BOLD}${C_CYAN}--- Agent: connection details ---${C_RESET}"
-    echo "${C_DIM}This spoke calls home to an existing hub and is approved there, then${C_RESET}"
-    echo "${C_DIM}morphs into its role (netbox/ldap/dns/…) via hub provisioning.${C_RESET}"
+    echo "${C_DIM}This spoke calls home to an existing hub and is approved there. Pick the${C_RESET}"
+    echo "${C_DIM}module role(s) to run now (dns/ldap/cs/…), or none to load them later.${C_RESET}"
     echo
 
     local default_id="$(hostname -s 2>/dev/null || echo host)"
@@ -292,12 +322,28 @@ run_generic_install() {
     # Map menu prompts → install_agent.sh flags (--spoke-url becomes --hub).
     # Clone-only omits --id so each cloned disk derives its spoke id from its
     # own hostname at runtime; the PSK (--secret) is retained (carryover).
+    # Pick the module role(s) to run now (mapped to install_agent.sh --roles).
+    # Leaving all unchecked installs a bare agent that loads roles later via the
+    # hub WebUI (the original behavior). Selecting 'cs'/simulation makes THIS box
+    # host the client-sim node-agent listener (install_agent.sh sets
+    # LM_CS_AGENT_LISTENER=1 for a non-colocated simulation role), so a Proxmox
+    # host-agent can report to it — no separate spoke needed.
+    role_menu_loop
+    local roles=() i id
+    for i in "${!MODULES[@]}"; do
+        IFS='|' read -r id _ _ <<< "${MODULES[$i]}"
+        [ "${SELECTED[$i]}" -eq 1 ] && roles+=("${MODULE_ROLE[$id]}")
+    done
+    local roles_csv=""
+    [ "${#roles[@]}" -gt 0 ] && roles_csv="$(IFS=','; printf '%s' "${roles[*]}")"
+
     local generic_args=(--hub "$SPOKE_URL")
     [ "$CLONE_ONLY" -eq 0 ] && generic_args+=(--id "$SPOKE_ID")
     [ -n "$SPOKE_SECRET" ] && generic_args+=(--secret "$SPOKE_SECRET")
     [ -n "$HUB_SECRET" ]  && generic_args+=(--hub-secret "$HUB_SECRET")
     [ "$TLS_VERIFY" -eq 1 ] && generic_args+=(--tls-verify --tls-ca-cert "$TLS_CA_CERT")
     [ "$CLONE_ONLY" -eq 1 ] && generic_args+=(--clone)
+    [ -n "$roles_csv" ] && generic_args+=(--roles "$roles_csv")
 
     local id_disp
     if [ "$CLONE_ONLY" -eq 1 ]; then
@@ -309,6 +355,7 @@ run_generic_install() {
     echo "${C_BOLD}Installer source :${C_RESET} $CLONE_SRC"
     echo "${C_BOLD}Spoke URL        :${C_RESET} $SPOKE_URL"
     echo "${C_BOLD}Spoke ID         :${C_RESET} $id_disp"
+    echo "${C_BOLD}Roles            :${C_RESET} ${roles_csv:-none (bare agent — load roles later in the WebUI)}"
     echo "${C_BOLD}Secret           :${C_RESET} $([ -n "$SPOKE_SECRET" ] && echo provided || echo 'none — will await admin approval')"
     echo "${C_BOLD}TLS verify       :${C_RESET} $([ "$TLS_VERIFY" -eq 1 ] && echo "yes (CA=$TLS_CA_CERT)" || echo 'no — encrypt without auth')"
     echo "${C_BOLD}Clone-only       :${C_RESET} $([ "$CLONE_ONLY" -eq 1 ] && echo yes || echo no)"
@@ -317,6 +364,55 @@ run_generic_install() {
     # install_agent.sh expects to be run from the clone root (it clones lm
     # itself to /opt/lm; running the cloned copy guarantees the latest version).
     reexec_root bash "$CLONE_ROOT/agent/install_agent.sh" "${generic_args[@]}"
+}
+
+#======================================================================
+# Proxmox Host Agent path: install/uninstall the pxmx NODE-AGENT (telemetry +
+# CS command executor) that reports to a pxmx/simulation spoke's /ws/agent
+# listener. This lives in the SEPARATE pxmx repo, so we drive its installer via
+# curl (the one-liner from the My Devices "Proxmox Host Agent" card).
+#======================================================================
+PXMX_RAW="https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent"
+
+run_pxmx_agent_install() {
+    echo
+    echo "${C_BOLD}${C_CYAN}--- Proxmox Host Agent (node-agent) ---${C_RESET}"
+    echo "${C_DIM}Runs on a Proxmox HOST and reports to a spoke that hosts a /ws/agent${C_RESET}"
+    echo "${C_DIM}listener — either a pxmx (proxmox-role) spoke, or a cs (simulation-role)${C_RESET}"
+    echo "${C_DIM}spoke/agent with its listener enabled. It dials that spoke; the hub relays${C_RESET}"
+    echo "${C_DIM}telemetry + client-sim commands to it. (Not an lm agent — separate repo.)${C_RESET}"
+    echo
+    local sub
+    echo "  1) Install / update"
+    echo "  2) ${C_RED}Uninstall${C_RESET}"
+    echo "  b) Back"
+    read -rp "Select [1/2/b]: " sub || sub=""
+    case "$sub" in
+        2|u|U)
+            echo
+            echo "${C_BOLD}${C_RED}Uninstalling the Proxmox host agent...${C_RESET}"
+            reexec_root bash -c "curl -sSL '${PXMX_RAW}/uninstall_agent.sh' | bash"
+            return 0 ;;
+        b|B) return 0 ;;
+        *) : ;;  # 1/anything → install
+    esac
+
+    local SPOKE_IP
+    read -rp "Spoke IP/host the agent should report to [auto - discover on the LAN]: " SPOKE_IP || SPOKE_IP=""
+    local args=()
+    [ -n "$SPOKE_IP" ] && args=(--spoke-ip "$SPOKE_IP")
+    echo
+    echo "${C_BOLD}Target spoke     :${C_RESET} ${SPOKE_IP:-auto-discover}"
+    echo "${C_DIM}If it reports \"no agent listener answered\", the target spoke isn't hosting${C_RESET}"
+    echo "${C_DIM}a /ws/agent listener yet — install a pxmx role there, or (for sims) load the${C_RESET}"
+    echo "${C_DIM}simulation role on that box so its cs listener binds, then re-run this.${C_RESET}"
+    echo
+    # Fetch the pxmx installer and pass any --spoke-ip through to it.
+    if [ "${#args[@]}" -gt 0 ]; then
+        reexec_root bash -c "curl -sSL '${PXMX_RAW}/install_agent.sh' | bash -s -- $(printf '%q ' "${args[@]}")"
+    else
+        reexec_root bash -c "curl -sSL '${PXMX_RAW}/install_agent.sh' | bash"
+    fi
 }
 
 #======================================================================
@@ -410,7 +506,8 @@ ensure_bootstrap_deps
 locate_clone
 top_menu
 case "$MODE" in
-    hub)       module_menu_loop; run_hub_install "$@" ;;
-    generic)   run_generic_install ;;
-    uninstall) run_uninstall "$@" ;;
+    hub)        module_menu_loop; run_hub_install "$@" ;;
+    generic)    run_generic_install ;;
+    pxmx-agent) run_pxmx_agent_install ;;
+    uninstall)  run_uninstall "$@" ;;
 esac

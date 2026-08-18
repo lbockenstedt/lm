@@ -152,6 +152,24 @@ class RoleConnection(AgentHostingControlPlane):
                  role_instance, secret: str = None):
         _, _, mtype, _ = _ROLE_MAP[role_name]
         sub_id = f"{base_id}-{role_name}"
+        # The simulation (cs) role hosts client-sim node-agents on its OWN
+        # /ws/agent listener (the split-topology case cs_bridge documents), so a
+        # proxmox/unified node-agent dials THIS box (--spoke-ip <box>) and the
+        # hub relays CS_COMMANDs to it — no separate pxmx spoke required. Point
+        # the inherited AgentHostingControlPlane at the cs listener PORT knobs
+        # BEFORE super().__init__ so, if a pxmx role is co-loaded, the two
+        # listeners never collide (pxmx 8443/8766 vs cs 443/8767). The node-agent
+        # secret is shared via the base AGENT_CONFIG_PATH (/etc/lm-agent) so one
+        # approval works for either listener. Mirrors the standalone cs spoke
+        # (install_cs.sh --agent-listener); gated OFF by default (opt-in via
+        # LM_CS_AGENT_LISTENER) so a relay-only / all-in-one box never binds :443.
+        # Instance attrs shadow the pxmx class defaults for this sub-spoke only.
+        if role_name == "simulation":
+            self.AGENT_PORT_ENV = "LM_CS_AGENT_PORT"
+            self.AGENT_LOOPBACK_ENV = "LM_CS_AGENT_LOOPBACK"
+            self.AGENT_LISTENER_ENV = "LM_CS_AGENT_LISTENER"
+            self.AGENT_WSS_PORT = 443
+            self.AGENT_FALLBACK_PORT = 8767
         super().__init__(sub_id, secret, hub_secret="", hub_url=hub_url)
         self.role_name = role_name
         self.base_id = base_id
@@ -239,19 +257,30 @@ class RoleConnection(AgentHostingControlPlane):
         except Exception:  # noqa: BLE001 - some inner instances may forbid attrs
             pass
 
-    # ── Agent listener (proxmox role only) ───────────────────────────────────
+    # ── Agent listener (proxmox always; simulation/console opt-in) ───────────
 
     def _agent_listener_enabled(self) -> bool:
-        """Only the pxmx (hypervisor) role hosts node-agents. Other roles
-        (dns/dhcp/ldap/…) never bind a /ws/agent listener — the inherited
-        AgentHostingControlPlane gate (always-on for pxmx) is overridden so a
-        multi-role agent doesn't bind :8766/:443 for non-agent-hosting roles.
+        """Which roles host a /ws/agent listener on this multi-role agent.
 
-        The console role opts in via ``LM_CONSOLE_RELAY_LISTENER=1`` ONLY to serve
-        the edge-proxy ``/ws/console-relay`` endpoint (Phase 2 serial shortcut) on
-        the same listener; off by default so console never binds a port unless an
-        operator wires an edge proxy to it."""
+        * **proxmox** (hypervisor) — always on: it exists to host pxmx
+          node-agents.
+        * **simulation** (cs) — opt-in via ``LM_CS_AGENT_LISTENER=1`` (mirrors
+          the standalone cs spoke's ``install_cs.sh --agent-listener``). When on,
+          a proxmox/unified node-agent can dial THIS box and the hub relays
+          CS_COMMANDs to it, so loading the simulation role is enough to run
+          client sims on the host — no separate pxmx spoke. Default OFF so a
+          relay-only / all-in-one box (where the hub already owns :443) never
+          binds the cs listener.
+        * **console** — opt-in via ``LM_CONSOLE_RELAY_LISTENER=1`` ONLY to serve
+          the edge-proxy ``/ws/console-relay`` endpoint (Phase 2 serial shortcut)
+          on the same listener.
+
+        Every other role (dns/dhcp/ldap/…) never binds a port.
+        """
         if self.role_name == "proxmox":
+            return True
+        if self.role_name == "simulation" and str(
+                os.environ.get(self.AGENT_LISTENER_ENV, "")).strip() in ("1", "true", "yes", "on"):
             return True
         if self.role_name == "console" and str(
                 os.environ.get("LM_CONSOLE_RELAY_LISTENER", "")).strip() in ("1", "true", "yes", "on"):
@@ -259,9 +288,10 @@ class RoleConnection(AgentHostingControlPlane):
         return False
 
     async def run(self):
-        """Start the hub WS connection (BaseControlPlane.run) and, for the
-        proxmox role, the self-healing /ws/agent listener so pxmx node-agents
-        can dial this box (``--spoke-ip <box>``). Mirrors
+        """Start the hub WS connection (BaseControlPlane.run) and, when this
+        role hosts node-agents (``_agent_listener_enabled`` — proxmox always,
+        simulation opt-in), the self-healing /ws/agent listener so pxmx/cs
+        node-agents can dial this box (``--spoke-ip <box>``). Mirrors
         PxmxControlPlane.run (pxmx/src/control_plane.py)."""
         if self._agent_listener_enabled():
             self._start_agent_server_task()
