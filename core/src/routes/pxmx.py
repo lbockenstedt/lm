@@ -969,15 +969,18 @@ def register(app, hub, ctx):
             pxmx_spoke = hub.get_hypervisor_spoke()
         else:
             raise HTTPException(status_code=403, detail="Select a tenant to view its hypervisor nodes")
-        if not pxmx_spoke:
-            return {"nodes": [], "spoke_connected": False}
-        try:
-            result = await hub.request_response(pxmx_spoke, "GET_NODE_STATS", {})
-            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-            # Operator-hidden (deleted) servers: filter them out of the live feed
-            # so a shut-down host that cluster peers still report as offline stays
+        # Warm cache key: node stats are per hypervisor SPOKE, scoped by the
+        # tenant picker (a bound tenant → its own spoke's nodes; else global).
+        # Key by the resolved tenant scope so the key is knowable even when the
+        # spoke is momentarily down (mirrors the VM list's warm key).
+        warm_key = f"{tid or '_all_'}"
+
+        def _apply_hidden(data):
+            # Operator-hidden (deleted) servers: filter them out of the feed so a
+            # shut-down host that cluster peers still report as offline stays
             # gone. AUTO-UNHIDE any hidden node that reports back ONLINE (the host
-            # returned) so a live node is never permanently hidden.
+            # returned) so a live node is never permanently hidden. Applied to
+            # LIVE and warm-cached data alike.
             if isinstance(data, dict) and isinstance(data.get("nodes"), list):
                 ss = hub.state.system_state
                 hidden = list(ss.get("pxmx_hidden_nodes", []) or [])
@@ -995,8 +998,45 @@ def register(app, hub, ctx):
                     data["nodes"] = [n for n in data["nodes"]
                                      if not (isinstance(n, dict) and str(n.get("node") or "") in hset)]
             return data
+
+        def _warm_or_empty():
+            """Serve last-known nodes (stale) when the spoke is down / a live
+            fetch overruns — mirrors get_pxmx_vms so the Overview warm-starts
+            after a hub restart instead of blanking while the VM tab renders
+            from its own warm cache (the reported 'blank Overview' asymmetry)."""
+            cached = hub.warm_get("pxmx_nodes", warm_key)
+            if cached is None:
+                return {"nodes": [], "spoke_connected": False}
+            out = _apply_hidden(cached)
+            if isinstance(out, dict):
+                out = dict(out)
+                out["stale"] = True
+                out["spoke_connected"] = False
+            return out
+
+        if not pxmx_spoke:
+            return _warm_or_empty()
+        try:
+            # 30s (not the 5s relay default): a cold telemetry cache makes the
+            # spoke orchestrate live per-agent pvesh round-trips; the warm cache
+            # covers an overrun so the Overview still renders. Matches the VM
+            # list budget.
+            result = await hub.request_response(pxmx_spoke, "GET_NODE_STATS", {}, timeout=30.0)
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            if isinstance(data, dict) and isinstance(data.get("nodes"), list):
+                await hub.warm_set("pxmx_nodes", warm_key, data)  # cache raw (pre hidden-filter)
+            return _apply_hidden(data)
         except Exception as e:
             logger.exception("get_pxmx_nodes failed")
+            # Live fetch failed (timeout / spoke error) — serve stale from the
+            # warm cache if we have it, else surface the error.
+            cached = hub.warm_get("pxmx_nodes", warm_key)
+            if cached is not None:
+                out = _apply_hidden(cached)
+                if isinstance(out, dict):
+                    out = dict(out)
+                    out["stale"] = True
+                return out
             raise HTTPException(status_code=500, detail=str(e))
 
     # ── pxmx / Proxmox: VMs + agent commands (/api/pxmx/*) ───────────────────
