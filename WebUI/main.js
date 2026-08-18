@@ -4350,6 +4350,7 @@ let _cvVaultAvailable = true;
 let _cvBuckets = [];
 let _cvCurrentBucket = '';
 let _cvSecrets = [];
+let _cvSearchQuery = '';
 
 async function loadCredVault() {
     const host = document.getElementById('credvault-content');
@@ -4436,16 +4437,45 @@ async function _cvRenderBucketBody() {
             el.innerHTML = `<p class="text-sm text-slate-400 italic">No secrets stored in this bucket.</p>`;
             return;
         }
+        // Persistent search bar (outside the re-rendered table so typing keeps
+        // focus) + a table area that _cvRenderSecretsTable filters in place.
         el.innerHTML = `
-          <table class="w-full text-sm">
-            <thead><tr class="text-left text-xs text-slate-500 uppercase tracking-wider border-b border-slate-200">
-              <th class="py-2">Name</th><th>Type</th><th>Mode</th><th>Description</th><th class="text-right">Actions</th>
-            </tr></thead>
-            <tbody>${secrets.map(_cvRenderSecretRow).join('')}</tbody>
-          </table>`;
+          <div class="flex items-center gap-2 mb-3">
+            <input id="cv-search" type="text" value="${escapeHtml(_cvSearchQuery)}" oninput="_cvOnSearch(this.value)"
+                   placeholder="Search secrets (name / type / description)…" autocomplete="off"
+                   class="w-72 px-3 py-1.5 text-sm border border-slate-300 rounded-md">
+            <span id="cv-search-count" class="text-xs text-slate-400"></span>
+          </div>
+          <div id="cv-secrets-table"></div>`;
+        _cvRenderSecretsTable();
     } catch (e) {
         el.innerHTML = `<p class="text-sm text-red-600">Failed to load secrets: ${escapeHtml(e.message)}</p>`;
     }
+}
+
+// Filter the loaded bucket's secrets by name / type / description (metadata
+// only — values are never held client-side). Persists across bucket switches.
+function _cvOnSearch(v) { _cvSearchQuery = v; _cvRenderSecretsTable(); }
+
+function _cvRenderSecretsTable() {
+    const wrap = document.getElementById('cv-secrets-table');
+    if (!wrap) return;
+    const q = (_cvSearchQuery || '').trim().toLowerCase();
+    const list = !q ? _cvSecrets : _cvSecrets.filter(s =>
+        [s.name, s.type, s.description].some(x => String(x || '').toLowerCase().includes(q)));
+    const cnt = document.getElementById('cv-search-count');
+    if (cnt) cnt.textContent = q ? `${list.length} of ${_cvSecrets.length}` : '';
+    if (!list.length) {
+        wrap.innerHTML = `<p class="text-sm text-slate-400 italic">No secrets match “${escapeHtml(_cvSearchQuery)}”.</p>`;
+        return;
+    }
+    wrap.innerHTML = `
+      <table class="w-full text-sm">
+        <thead><tr class="text-left text-xs text-slate-500 uppercase tracking-wider border-b border-slate-200">
+          <th class="py-2">Name</th><th>Type</th><th>Mode</th><th>Description</th><th class="text-right">Actions</th>
+        </tr></thead>
+        <tbody>${list.map(_cvRenderSecretRow).join('')}</tbody>
+      </table>`;
 }
 
 function _cvRenderSecretRow(s) {
@@ -25470,6 +25500,7 @@ function handleSearch(value) {
                 ldap:      '👤',
                 opnsense:  '🔥',
                 console:   '🔌',
+                credvault: '🔑',
             };
             const typeLabel = {
                 device:      'Device',
@@ -25492,7 +25523,7 @@ function handleSearch(value) {
 
             const rows = d.results.slice(0, 12).map(item => {
                 const icon  = sourceIcon[item.source] || '•';
-                const label = typeLabel[item.type]    || item.type;
+                const label = item.source === 'credvault' ? 'Credential' : (typeLabel[item.type] || item.type);
                 const subParts = [item.ip, item.mac, item.cluster, item.dn];
                 if (item.source === 'console') {
                     // Console rows carry connect coordinates, not IP/MAC — show
@@ -25501,6 +25532,13 @@ function handleSearch(value) {
                     if (item.device) subParts.push(item.device);
                     if (item.baud)   subParts.push(item.baud + 'bps');
                     if (item.model || item.vendor) subParts.push(item.model || item.vendor);
+                }
+                if (item.source === 'credvault') {
+                    // Credential Vault hits are METADATA only (name/type/bucket)
+                    // — never a secret value. Show the bucket + secret type.
+                    subParts.length = 0;
+                    if (item.bucket_label || item.bucket) subParts.push(item.bucket_label || item.bucket);
+                    if (item.type) subParts.push(item.type);
                 }
                 if (item.vid != null) subParts.push(`VLAN ${item.vid}`);
                 if (item.site) subParts.push(item.site);
@@ -25536,6 +25574,14 @@ function openSearchResult(item) {
             openConsoleTerminal(item.spoke_id, item.port_id);
             return;
         }
+    }
+    // A credential-vault hit → open the Credential Vault at that bucket (the
+    // secret VALUE is never in the search payload; reveal still needs the
+    // bucket pass-phrase there).
+    if (item.source === 'credvault') {
+        if (item.bucket) _cvCurrentBucket = item.bucket;
+        if (typeof setView === 'function') setView('credvault');
+        return;
     }
     showDeviceDashboard(item);
 }

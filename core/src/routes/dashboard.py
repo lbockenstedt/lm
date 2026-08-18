@@ -465,6 +465,7 @@ def register(app, hub, ctx):
                     "directory":  spoke_directory is not None,
                     "firewall":   spoke_firewall is not None,
                     "console":    bool(getattr(app.state, "console_list_visible_ports", None)),
+                    "credvault":  bool(sess and (is_admin or access.is_tenant_admin(sess))),
                 },
             }
             if warming:
@@ -490,6 +491,36 @@ def register(app, hub, ctx):
             logger.warning(f"search: console leg failed: {e}")
             console_hits.append({"source": "console", "type": "error", "name": str(e)})
 
+        # ── Credential Vault leg (local, in-memory): match secret METADATA only
+        #    (name / type / description — NEVER the secret value) in the buckets
+        #    the caller can reach. Restricted to the vault's own audience — a
+        #    Global Admin (every bucket + the admin slot) or a tenant-admin
+        #    (their own tenant buckets only); any other user gets nothing, so a
+        #    plain user's banner search never surfaces credential names. Cheap
+        #    (reads hub state), so evaluate it up front like the console leg.
+        credvault_hits = []
+        try:
+            if sess and (is_admin or access.is_tenant_admin(sess)):
+                import cred_vault as _cv
+                if is_admin:
+                    reach = set(b["bucket"] for b in _cv.list_buckets(hub)) | {_cv.ADMIN_BUCKET}
+                else:
+                    reach = set((sess.get("user", {}) or {}).get("tenants") or [])
+                cvneedle = raw_q.lower()
+                for bucket in sorted(reach):
+                    label = "Global Admin slot" if bucket == _cv.ADMIN_BUCKET else bucket
+                    for s in _cv.list_secrets(hub, bucket):
+                        hay = " ".join([str(s.get("name", "")), str(s.get("type", "")),
+                                        str(s.get("description", ""))]).lower()
+                        if cvneedle in hay:
+                            credvault_hits.append({
+                                "source": "credvault", "type": s.get("type") or "generic",
+                                "name": s.get("name"), "bucket": bucket, "bucket_label": label,
+                                "mode": s.get("mode"), "description": s.get("description") or "",
+                            })
+        except Exception as e:
+            logger.warning(f"search: cred-vault leg failed: {e}")
+
         # ── Memory-first ────────────────────────────────────────────────────
         # Match the query against every warm, spoke-scoped index leg (+ the
         # local console list) with NO network. If ANYTHING matches, return it
@@ -510,11 +541,11 @@ def register(app, hub, ctx):
                     any_cold = True
                 else:
                     mem.extend(r for r in items if search_result_matches(r, needle))
-            if mem or console_hits:
+            if mem or console_hits or credvault_hits:
                 # Found in memory → serve now; collect the rest in the
                 # background so the next query for this scope is instant too.
                 hub.search_kick_warm(scope_key)
-                return _envelope(mem + console_hits, True, warming=any_cold)
+                return _envelope(mem + console_hits + credvault_hits, True, warming=any_cold)
             # Nothing in memory → warm for next time, then fall through to the
             # blocking live fan-out below.
             hub.search_kick_warm(scope_key)
@@ -555,4 +586,5 @@ def register(app, hub, ctx):
         all_results = await _asyncio.gather(*[_call(s, c) for s, c in _legs])
         merged = [item for sublist in all_results for item in sublist]
         merged.extend(console_hits)
+        merged.extend(credvault_hits)
         return _envelope(merged, False)
