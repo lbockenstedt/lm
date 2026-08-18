@@ -116,6 +116,12 @@ def register(app, hub, ctx):
             return
         spoke_id = sess["spoke_id"]
         queue = sess["queue"]
+        # Mark connected so the 60s TTL no longer reaps this session (a viewer
+        # sits on a console far longer than 60s, and each upstream frame re-reads
+        # the session by id). connected_at drives the multiuser presence roster.
+        import time as _time
+        sess["connected"] = True
+        sess["connected_at"] = _time.time()
         await websocket.accept()
         relay_tasks: list = []
         try:

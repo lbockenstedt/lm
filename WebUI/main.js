@@ -18205,7 +18205,7 @@ function pxmxAddConsoleTab(vm, RFB, session) {
     bodyEl.className = 'absolute inset-0 bg-black';
     bodyEl.setAttribute('data-console-key', key);
     bodies.appendChild(bodyEl);
-    const entry = { key, vm, session, rfb: null, bodyEl, statusText: 'Connecting…', statusCls: 'text-amber-400' };
+    const entry = { key, vm, session, rfb: null, bodyEl, statusText: 'Connecting…', statusCls: 'text-amber-400', viewers: [] };
     window._pxmxConsoles.set(key, entry);
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${proto}//${location.host}/ws/console/${encodeURIComponent(session.session_id)}?token=${encodeURIComponent(session.ws_token)}`;
@@ -18231,7 +18231,32 @@ function pxmxAddConsoleTab(vm, RFB, session) {
     } catch (err) {
         entry.statusText = 'Error: ' + (err.message || err); entry.statusCls = 'text-red-400';
     }
+    pxmxStartViewerPoll(entry);
     pxmxActivateConsole(key);
+}
+
+// Multiuser presence: poll who else is on this VM's console. Each viewer holds
+// their own VNC session (QEMU multiplexes them onto one shared screen), so the
+// roster lets a user see when a teammate is looking at / driving the same VM.
+function pxmxStartViewerPoll(entry) {
+    const poll = async () => {
+        try {
+            const vm = entry.vm || {};
+            const qs = `unique_id=${encodeURIComponent(vm.unique_id || entry.key)}` +
+                (vm.agent_id ? `&agent_id=${encodeURIComponent(vm.agent_id)}` : '');
+            const r = await setupFetch(`/api/pxmx/console/viewers?${qs}`);
+            const data = await r.json().catch(() => ({}));
+            entry.viewers = (data && Array.isArray(data.viewers)) ? data.viewers : [];
+        } catch (e) {
+            entry.viewers = entry.viewers || [];
+        }
+        if (window._pxmxConsoles && window._pxmxConsoles.get(entry.key)) {
+            pxmxRenderConsoleTabs();
+            if (entry.key === window._pxmxActiveConsole) pxmxSyncConsoleHeader();
+        }
+    };
+    poll();
+    entry.presenceTimer = setInterval(poll, 5000);
 }
 
 // Show one tab's console, hide the rest (their WS stays open). Re-renders the
@@ -18267,9 +18292,13 @@ function pxmxRenderConsoleTabs() {
             : 'bg-[#0f1830] text-slate-400 border-transparent hover:text-slate-200';
         const label = escapeHtml(e.vm.name || e.vm.vmid || e.key);
         const kAttr = escapeHtml(e.key);
+        const vc = (e.viewers && e.viewers.length) || 0;
+        const viewerBadge = vc > 1
+            ? `<span title="${vc} viewers on this console" class="ml-1 px-1 rounded bg-[#01A982]/20 text-[#01A982] text-[10px]">👁 ${vc}</span>`
+            : '';
         return `<div data-key="${kAttr}" class="pxmx-vnc-tab flex items-center gap-2 px-3 py-1 rounded-t border-b-2 cursor-pointer text-xs whitespace-nowrap ${tabCls}">
             <span class="w-2 h-2 rounded-full ${dot}"></span>
-            <span>${label}</span>
+            <span>${label}</span>${viewerBadge}
             <button data-close="${kAttr}" title="Close this console" class="ml-1 text-slate-500 hover:text-red-400 text-sm leading-none">&times;</button>
         </div>`;
     }).join('');
@@ -18289,7 +18318,12 @@ function pxmxSyncConsoleHeader() {
     const statusEl = modal.querySelector('#pxmx-vnc-status');
     if (!statusEl) return;
     const c = pxmxActiveConsole();
-    statusEl.textContent = c ? ((c.vm.name || c.vm.vmid || '') + ' — ' + c.statusText) : '';
+    let txt = c ? ((c.vm.name || c.vm.vmid || '') + ' — ' + c.statusText) : '';
+    if (c && c.viewers && c.viewers.length > 1) {
+        const names = c.viewers.map(v => v.username || '?').filter(Boolean);
+        txt += `  · 👁 ${c.viewers.length} viewers` + (names.length ? ` (${names.join(', ')})` : '');
+    }
+    statusEl.textContent = txt;
     statusEl.className = 'ml-auto text-xs ' + (c ? c.statusCls : 'text-slate-400');
 }
 
@@ -18301,6 +18335,7 @@ function pxmxCloseConsole(key) {
     if (!reg) return;
     const e = reg.get(key);
     if (e) {
+        if (e.presenceTimer) { try { clearInterval(e.presenceTimer); } catch (err) {} }
         try { if (e.rfb) e.rfb.disconnect(); } catch (err) {}
         if (e.bodyEl) e.bodyEl.remove();
         reg.delete(key);
@@ -18317,7 +18352,7 @@ function pxmxCloseConsole(key) {
 function pxmxCloseAllConsoles() {
     const reg = window._pxmxConsoles;
     if (reg) {
-        reg.forEach(e => { try { if (e.rfb) e.rfb.disconnect(); } catch (err) {} });
+        reg.forEach(e => { if (e.presenceTimer) { try { clearInterval(e.presenceTimer); } catch (err) {} } try { if (e.rfb) e.rfb.disconnect(); } catch (err) {} });
         reg.clear();
     }
     window._pxmxActiveConsole = null;

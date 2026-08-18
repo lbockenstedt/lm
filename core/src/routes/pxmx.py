@@ -1463,6 +1463,7 @@ def register(app, hub, ctx):
             "vmid": vmid,
             "node": node,
             "unique_id": unique_id,
+            "username": sess.get("username") or sess.get("user_id") or "",
         })
         try:
             # request_response (NOT send_to_spoke_command): the spoke→agent
@@ -1520,3 +1521,31 @@ def register(app, hub, ctx):
                 "relay": {"session_id": session_id, "relay_token": relay_token,
                           "spoke_id": pxmx_spoke, "agent_id": agent_id, "kind": "vnc",
                           "ticket": ticket}}
+
+    @app.get("/api/pxmx/console/viewers")
+    async def pxmx_console_viewers(request: Request):
+        """Multiuser presence: who is currently on a VM's VNC console.
+
+        Query: ``?unique_id=<cluster>/<node>/<vmid>``. Each viewer holds their
+        OWN VNC session (QEMU multiplexes the clients so they share one screen);
+        this returns the connected roster so the console dock can show a live
+        viewer count. Authorized exactly like opening the console — admin sees
+        any VM, otherwise the caller must OWN the VM (same _assert_vm_owned gate),
+        so a tenant cannot enumerate viewers on another tenant's VM."""
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        unique_id = str(request.query_params.get("unique_id", "")).strip()
+        parts = unique_id.split("/")
+        if len(parts) < 3:
+            raise HTTPException(status_code=400, detail="invalid unique_id")
+        node = parts[1]
+        try:
+            vmid = int(parts[2])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid vmid in unique_id")
+        await _assert_vm_owned(request, unique_id=unique_id, vmid=vmid, node=node,
+                               agent_id=str(request.query_params.get("agent_id") or "").strip())
+        hub = app.state.hub
+        viewers = hub.vnc_viewers(unique_id)
+        return {"unique_id": unique_id, "count": len(viewers), "viewers": viewers}

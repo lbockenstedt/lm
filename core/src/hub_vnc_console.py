@@ -70,22 +70,49 @@ class HubVncConsoleMixin:
         self.vnc_sessions[session_id] = {
             "queue": asyncio.Queue(),
             "expires": time.time() + self.VNC_SESSION_TTL,
+            "connected": False,
             **meta,
         }
 
     def get_vnc_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Return a live session dict (queue + meta) or None if absent/expired.
-        Expired sessions are reaped on read."""
+        The TTL only applies BEFORE the browser connects; a ``connected`` session
+        never expires. VNC sessions routinely outlive the 60s reap window (a user
+        sits on a console for minutes), and each VNC_FRAME_UP re-reads the session
+        by id — reaping a connected session mid-view silently freezes the screen
+        (upstream frames get dropped). Mirrors get_console_session / get_shell_session."""
         sess = self.vnc_sessions.get(session_id)
         if not sess:
             return None
-        if sess.get("expires", 0) < time.time():
+        if not sess.get("connected") and sess.get("expires", 0) < time.time():
             self.vnc_sessions.pop(session_id, None)
             return None
         return sess
 
     def unregister_vnc_session(self, session_id: str) -> None:
         self.vnc_sessions.pop(session_id, None)
+
+    def vnc_viewers(self, unique_id: str) -> list:
+        """Presence: the connected VNC viewers currently attached to ``unique_id``.
+
+        Each user opens their OWN VNC session (distinct session_id → its own
+        Proxmox vncwebsocket); QEMU's VNC server natively multiplexes the clients
+        so every viewer sees/controls the same screen. This lists who is attached
+        so the UI can show a live viewer roster. Returns newest-first."""
+        out = []
+        for sid, s in list(self.vnc_sessions.items()):
+            if not s.get("connected"):
+                continue
+            if str(s.get("unique_id") or "") != str(unique_id or ""):
+                continue
+            out.append({
+                "session_id": sid,
+                "username": s.get("username") or "",
+                "tenant_id": s.get("tenant_id") or "",
+                "since": s.get("connected_at") or 0,
+            })
+        out.sort(key=lambda v: v.get("since") or 0, reverse=True)
+        return out
 
     CONSOLE_SESSION_TTL = 60
 
