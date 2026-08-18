@@ -426,7 +426,15 @@ async def distribute_mtls_materials_to_all_spokes(
         return summary
 
     def _key(sid: str) -> str:
-        return f"{_MTLS_PUSH_PREFIX}|{sid}"
+        # Domain-qualified so two+ wildcard mTLS domains (e.g. *.orange-tme.com
+        # AND *.olth.lrbtechnologies.com) provisioning the SAME primary spoke
+        # can't clobber each other's stamp. A bare ``mtls|{sid}`` key let domain
+        # A stamp hashA, domain B overwrite with hashB, domain A see !=hashA and
+        # re-push, … — an infinite ping-pong where every push restarts the spoke
+        # "to arm verification", flapping the whole fleet. Mirrors the sibling
+        # ``distribute_wildcard_to_all_spokes`` key (``f"{domain}|{sid}"``); the
+        # ``mtls|`` prefix keeps it disjoint from that flow's INSTALL_CERT stamps.
+        return f"{_MTLS_PUSH_PREFIX}|{domain}|{sid}"
 
     def _current(sid: str) -> bool:
         return bool(material_hash) and push_state.get(_key(sid)) == material_hash
