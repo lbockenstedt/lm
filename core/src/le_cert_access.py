@@ -119,17 +119,25 @@ def is_owner(hub, sess, domain):
     return bool(set(get_tenants(hub, domain)) & set(user_tenants(sess)))
 
 
-def visible_to(hub, sess, domain, want_tenants):
+def visible_to(hub, sess, domain, want_tenants, admin_all=True):
     """Explicit-ownership visibility test for the cert list.
 
     Returns ``True`` / ``False`` when the cert HAS explicit owners (visible to an
-    admin, to an owner whose tenant intersects ``want_tenants``, or to anyone when
-    shared). Returns ``None`` when the cert has NO explicit owners, signalling the
-    caller to fall back to the legacy DNS-subnet match."""
+    owner whose tenant intersects ``want_tenants``, to anyone when shared, or —
+    when ``admin_all`` — to any Global Admin). Returns ``None`` when the cert has
+    NO explicit owners, signalling the caller to fall back to the legacy
+    DNS-subnet match.
+
+    ``admin_all`` (default True) grants a Global Admin the see-everything pass.
+    The cert-list filter turns it OFF when the caller has selected an EXPLICIT
+    tenant (the tenant picker): in that case even an admin is scoped to the
+    picked tenant — matching the ``nw``/``ipam``/``firewall`` modules — so an
+    admin viewing tenant LRB does NOT see certs owned solely by ``default`` or
+    another tenant."""
     owners = get_tenants(hub, domain)
     if not owners:
         return None
-    if access.is_admin(sess):
+    if admin_all and access.is_admin(sess):
         return True
     if set(owners) & set(want_tenants or []):
         return True

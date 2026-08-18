@@ -888,6 +888,11 @@ def register(app, hub, ctx):
         # test below.
         want_tenants = ([tid] if (tenant and tid)
                         else _lca.user_tenants(sess))
+        # An EXPLICIT tenant (the picker) scopes visibility to THAT tenant even
+        # for a Global Admin (matches nw/ipam/firewall) — so an admin viewing
+        # tenant LRB does NOT see certs owned solely by 'default' or another
+        # tenant. With no picker, an admin keeps their see-everything pass.
+        explicit_scope = bool(tenant and tid)
         if tenant and tid:
             # Explicit tenant selected → scope by its prefixes (admins included).
             prefixes = await access.resolve_prefixes_for_tenant(hub, tid)
@@ -918,7 +923,8 @@ def register(app, hub, ctx):
             # shared cert is always visible; a cert owned by OTHER tenants only
             # is hidden — regardless of DNS. Certs with no explicit owners fall
             # back to the legacy DNS-subnet match below (backward compatible).
-            own = _lca.visible_to(hub, sess, cert.get("domain"), want_tenants)
+            own = _lca.visible_to(hub, sess, cert.get("domain"), want_tenants,
+                                  admin_all=not explicit_scope)
             if own is not None:
                 return own
             if not tenant_hosts:

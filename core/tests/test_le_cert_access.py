@@ -121,6 +121,32 @@ def test_visible_admin_true(hub, monkeypatch):
     assert lca.visible_to(hub, _sess(["t9"]), "a.com", ["t9"]) is True
 
 
+def test_visible_admin_scoped_hides_other_tenant(hub, monkeypatch):
+    # admin_all=False (an explicit tenant is picked): even a Global Admin is
+    # scoped to the picked tenant, so a cert owned solely by 'default' is hidden
+    # when the admin is viewing tenant 'lrb'.
+    _admin(monkeypatch)
+    lca.set_tenants(hub, "a.com", ["default"])
+    assert lca.visible_to(hub, _sess([]), "a.com", ["lrb"],
+                          admin_all=False) is False
+
+
+def test_visible_admin_scoped_shows_picked_tenant(hub, monkeypatch):
+    # Scoped admin still sees a cert OWNED by the picked tenant.
+    _admin(monkeypatch)
+    lca.set_tenants(hub, "a.com", ["lrb"])
+    assert lca.visible_to(hub, _sess([]), "a.com", ["lrb"],
+                          admin_all=False) is True
+
+
+def test_visible_admin_scoped_shows_shared(hub, monkeypatch):
+    # Scoped admin still sees a SHARED cert regardless of the picked tenant.
+    _admin(monkeypatch)
+    lca.set_tenants(hub, "a.com", [SHARED])
+    assert lca.visible_to(hub, _sess([]), "a.com", ["lrb"],
+                          admin_all=False) is True
+
+
 # ── can_change ──────────────────────────────────────────────────────────────
 def test_can_change_legacy_true(hub):
     assert lca.can_change(hub, _sess(["t9"]), "a.com") is True
