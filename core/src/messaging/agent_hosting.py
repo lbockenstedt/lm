@@ -26,6 +26,7 @@ import json
 import uuid
 import time
 import os
+import secrets
 import ssl
 import hmac
 import socket
@@ -430,6 +431,52 @@ class AgentHostingControlPlane(BaseControlPlane):
             self._start_agent_server_task()
 
     # ── Pending approval / revocation ───────────────────────────────────────
+
+    def _ensure_agent_secret(self) -> None:
+        """Mint + persist an agent onboarding secret when the agent listener is
+        enabled but ``AGENT_CONFIG_PATH`` provided none.
+
+        The installer writes ``agent_secret`` at install time, but the listener
+        can come up at RUNTIME without that step having run — e.g. a standalone
+        cs/pxmx spoke whose ``/ws/agent`` listener now defaults ON, installed
+        (or upgraded) before the secret step, or with the listener flag toggled
+        on later. With no secret, ``approve_pending_agent`` has nothing to
+        provision, so every hosted (zero-touch) agent gets ``{"secret": null}``,
+        skips saving it, reconnects unauthenticated and flaps in
+        "pending / needs admin approval" FOREVER — the classic "approve → back
+        to pending" symptom. Mirrors ``HubSelfControlPlane``'s mint-on-missing.
+
+        Persisted (0600) to ``AGENT_CONFIG_PATH`` so it is STABLE across spoke
+        restarts: an in-memory-only secret would break an already-approved agent
+        on the next restart (the agent saved the minted secret; a fresh mint
+        would no longer match and bounce it back to pending). Best-effort — a
+        persist failure still sets the in-process secret so the immediate
+        approval succeeds. Idempotent: a no-op once a secret exists."""
+        if self.agent_secret:
+            return
+        self.agent_secret = secrets.token_hex(32)
+        self.agent_signer = MessageSigner(self.agent_secret)
+        cfg = self.config if isinstance(getattr(self, "config", None), dict) else {}
+        cfg["agent_secret"] = self.agent_secret
+        self.config = cfg
+        path = self.AGENT_CONFIG_PATH
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(cfg, f, indent=2)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+            logger.info(
+                "agent_secret was missing — minted + persisted a new one to %s "
+                "(the listener was enabled without an installer-provisioned "
+                "secret; hosted agents can now be approved)", path)
+        except Exception as e:  # noqa: BLE001 — in-memory secret still lets this approval succeed
+            logger.error(
+                "agent_secret was missing — minted one in-memory but could NOT "
+                "persist it to %s (%s); it will not survive a spoke restart, so "
+                "re-run the installer's agent-secret step for a stable secret",
+                path, e)
 
     async def approve_pending_agent(self, agent_id: str):
         """Called when the LM hub approves a pending agent. Sends the

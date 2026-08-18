@@ -74,9 +74,12 @@ def _pending(host, agent_id="node-a"):
 
 
 def test_refuses_to_send_null_secret():
-    """No secret and no provisioning hook → NOTHING is sent, the agent stays
-    pending (not popped), and the event is NOT set — so no null-secret flap."""
+    """With the provisioning hook FORCED OFF (no way to obtain a secret),
+    NOTHING is sent, the agent stays pending (not popped), and the event is NOT
+    set — so no null-secret flap. (The base ``_ensure_agent_secret`` normally
+    self-heals; this pins the ultimate refuse-rather-than-ship-null guard.)"""
     host = _Host(secret="")
+    host._ensure_agent_secret = None  # type: ignore[assignment]  # force no hook
     ws, ev = _pending(host)
     asyncio.run(host.approve_pending_agent("node-a"))
     assert ws.sent == [], "must not send an APPROVED frame with a null secret"
@@ -129,3 +132,37 @@ def test_ensure_hook_failure_still_refuses():
     assert ws.sent == []
     assert ev.is_set() is False
     assert "node-a" in host.pending_agents
+
+
+def test_base_ensure_agent_secret_mints_and_persists(tmp_path):
+    """A host with NO secret and NO injected hook now self-heals via the BASE
+    ``_ensure_agent_secret``: it mints a secret, APPROVED carries that truthy
+    secret, and the secret is persisted to AGENT_CONFIG_PATH so it survives a
+    spoke restart (the fix for a listener enabled without an installer-written
+    agent_secret — the cs sim spoke "approve → back to pending" flap)."""
+    host = _Host(secret="")
+    host.config = {}
+    cfg_path = tmp_path / "cs-agent-config.json"
+    host.AGENT_CONFIG_PATH = str(cfg_path)
+    ws, ev = _pending(host)
+
+    asyncio.run(host.approve_pending_agent("node-a"))
+
+    assert len(ws.sent) == 1
+    frame = json.loads(ws.sent[0])
+    assert frame["status"] == "APPROVED"
+    assert frame["secret"], "must send a truthy minted secret, never null"
+    assert ev.is_set() is True
+    # Persisted (stable across restart) and matches what was sent.
+    saved = json.loads(cfg_path.read_text())
+    assert saved["agent_secret"] == frame["secret"]
+    assert host.agent_secret == frame["secret"]
+
+
+def test_base_ensure_agent_secret_idempotent_when_present():
+    """The base hook is a no-op when a secret already exists — it never rotates
+    a provisioned secret out from under an already-approved agent."""
+    host = _Host(secret="keep-me-123")
+    host.config = {"agent_secret": "keep-me-123"}
+    host._ensure_agent_secret()
+    assert host.agent_secret == "keep-me-123"
