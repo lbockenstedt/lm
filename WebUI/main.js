@@ -12446,6 +12446,12 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                 // approve_agent_under_spoke in api.py.
                 const tenantId = s.tenant_id || '';
                 const eTenant = tenantId.replace(/'/g, "\\'");
+                // A spoke bound to the SHARED tenant is visible to every tenant.
+                // The server stamps `tenant_shared` per row (setup._aggregate_spokes);
+                // fall back to the cached shared-tenant id so the badge still shows
+                // if that field is ever absent. Mirrors the resource-chip badge.
+                const _tenantShared = !!s.tenant_shared
+                    || (!!tenantId && !!window._sharedTenantId && tenantId === window._sharedTenantId);
                 // Role sub-spoke → its own row carries an "Unload Role" action
                 // that removes the role from the parent agent (annotated in
                 // loadSpokesAndAgents). Uniform with "Add role" on the agent.
@@ -12460,7 +12466,7 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                         // line (was three stacked divs) to save vertical space.
                         `<div class="flex items-center gap-x-3 gap-y-0.5 flex-wrap text-xs pl-6">`
                           + (hostname ? `<span class="font-mono text-slate-500">host: ${escapeHtml(hostname)}</span>` : '')
-                          + `<span class="text-slate-500">tenant: ${tenantId ? `<span class="font-mono text-slate-700">${escapeHtml(tenantId)}</span>` : '<span class="italic text-slate-400">unassigned</span>'}</span>`
+                          + `<span class="text-slate-500">tenant: ${tenantId ? `<span class="font-mono text-slate-700">${escapeHtml(tenantId)}</span>${_tenantShared ? ` <span class="text-[9px] px-1.5 py-0.5 rounded-full font-bold uppercase bg-amber-100 text-amber-800 align-middle" title="Shared tenant — its spokes are visible to all tenants">shared</span>` : ''}` : '<span class="italic text-slate-400">unassigned</span>'}</span>`
                           + (extras && extras.status ? `<span class="font-bold ${extras.status.tone}">${escapeHtml(extras.status.text)}</span>` : '')
                           + `</div>`,
                         ...(extras ? extras.metaLines : []),
@@ -12586,6 +12592,11 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
             // different tenant than the picker (approval dead-ended with "could
             // not determine which spoke owns this agent").
             const eSpoke = String(a.spoke_id || '').replace(/'/g, "\\'");
+            // Shared-tenant badge: `tenant_shared` is stamped by the server for
+            // spoke-kind agents; for pxmx agents (no server flag) compare against
+            // the cached shared-tenant id. Mirrors the spoke-row badge.
+            const _rowTenantShared = !!a.tenant_shared
+                || (!!rowTenant && !!window._sharedTenantId && rowTenant === window._sharedTenantId);
             // Active Role line: a keyed placeholder for connected generic agents
             // that is filled async after paint (no barrier). Proxmox node agents
             // have no roles; pending generic agents show an em-dash.
@@ -12630,7 +12641,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                     // stays its own line below it.
                     `<div class="flex items-center gap-x-3 gap-y-0.5 flex-wrap text-xs pl-6">`
                       + (a.hostname ? `<span class="font-mono text-slate-500">host: ${escapeHtml(a.hostname)}</span>` : '')
-                      + `<span class="text-slate-500">tenant: ${rowTenant ? `<span class="font-mono text-slate-700">${escapeHtml(rowTenant)}</span>` : '<span class="italic text-slate-400">unassigned</span>'}</span>`
+                      + `<span class="text-slate-500">tenant: ${rowTenant ? `<span class="font-mono text-slate-700">${escapeHtml(rowTenant)}</span>${_rowTenantShared ? ` <span class="text-[9px] px-1.5 py-0.5 rounded-full font-bold uppercase bg-amber-100 text-amber-800 align-middle" title="Shared tenant — its spokes are visible to all tenants">shared</span>` : ''}` : '<span class="italic text-slate-400">unassigned</span>'}</span>`
                       + (extras && extras.status ? `<span class="font-bold ${extras.status.tone}">${escapeHtml(extras.status.text)}</span>` : '')
                       + `</div>`,
                     rolesLine,
