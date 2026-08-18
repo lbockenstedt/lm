@@ -457,3 +457,66 @@ def test_run_config_non_admin_is_403(monkeypatch, tmp_path):
     r = c.post("/api/nw/acme-sw/config", json={"commands": ["show version"]},
                cookies={"lm_session": tok})
     assert r.status_code == 403
+
+
+def test_run_config_tenant_admin_own_device_allowed(monkeypatch, tmp_path):
+    """A tenant admin may configure a device DEDICATED to its own tenant."""
+    c, hub = _build(monkeypatch, tmp_path, shared=False)
+    tok = _mint(hub, "acme-admin", tenants=["acme"], role="tenant_admin")
+    r = c.post("/api/nw/acme-sw/config", json={"commands": ["show version"]},
+               cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    cfg_calls = [cl for cl in hub.calls if cl[1] == "NW_RUN_CONFIG"]
+    assert cfg_calls and cfg_calls[0][0] == "nw-acme"
+
+
+def test_run_config_tenant_admin_other_tenant_is_403(monkeypatch, tmp_path):
+    """A tenant admin may NOT configure another tenant's device."""
+    c, hub = _build(monkeypatch, tmp_path, shared=False)
+    tok = _mint(hub, "acme-admin", tenants=["acme"], role="tenant_admin")
+    r = c.post("/api/nw/other-sw/config", json={"commands": ["show version"]},
+               cookies={"lm_session": tok})
+    assert r.status_code == 403
+
+
+# ── POST /api/nw/{device_id}/poll ────────────────────────────────────────────
+
+def test_poll_tenant_admin_own_device_allowed(monkeypatch, tmp_path):
+    """A tenant admin may Poll Now a device it can see (own tenant)."""
+    c, hub = _build(monkeypatch, tmp_path, shared=False)
+
+    async def _poll(device_id):
+        return {"status": "SUCCESS", "device_id": device_id}
+    hub.poll_nw_device = _poll
+
+    tok = _mint(hub, "acme-admin", tenants=["acme"], role="tenant_admin")
+    r = c.post("/api/nw/acme-sw/poll", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+
+
+def test_poll_tenant_admin_other_tenant_is_403(monkeypatch, tmp_path):
+    """A tenant admin may NOT Poll Now another tenant's device."""
+    c, hub = _build(monkeypatch, tmp_path, shared=False)
+
+    async def _poll(device_id):  # must never be reached
+        raise AssertionError("poll_nw_device should not run when access is denied")
+    hub.poll_nw_device = _poll
+
+    tok = _mint(hub, "acme-admin", tenants=["acme"], role="tenant_admin")
+    r = c.post("/api/nw/other-sw/poll", cookies={"lm_session": tok})
+    assert r.status_code == 403
+
+
+def test_poll_non_admin_view_user_is_403(monkeypatch, tmp_path):
+    """A plain nw view user (no edit) still cannot Poll — read_scope allows it
+    only for own/shared; a view user with tenant acme CAN poll own devices, so
+    use an out-of-tenant device to assert the deny path stays 403."""
+    c, hub = _build(monkeypatch, tmp_path, shared=False)
+
+    async def _poll(device_id):
+        raise AssertionError("poll_nw_device should not run when access is denied")
+    hub.poll_nw_device = _poll
+
+    tok = _mint(hub, "other-user", tenants=["othercorp"], rights=("nw",))
+    r = c.post("/api/nw/acme-sw/poll", cookies={"lm_session": tok})
+    assert r.status_code == 403

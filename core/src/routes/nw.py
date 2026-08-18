@@ -306,16 +306,16 @@ def register(app, hub, ctx):
 
     @app.post("/api/nw/{device_id}/config")
     async def nw_run_config(device_id: str, request: Request):
-        """Apply a CLI/REST config snippet to a device (admin-only). Body:
+        """Apply a CLI/REST config snippet to a device. Body:
         ``{"commands": ["...", ...]}``. Returns the spoke's applied/errors lists.
 
-        Resolves the spoke from the device record's ``spoke_id`` (per-tenant)
-        via ``_authz_nw_device`` rather than the single global resolver, so a
-        config push lands on the spoke that owns the device."""
+        Tenant-scoped via ``_authz_nw_device(write=True)``: a Global Admin may
+        configure any device; a tenant admin may configure devices DEDICATED to
+        its own tenant (and, as a shared-infra writer, the shared device) — any
+        other/unassigned device is denied. Resolves the spoke from the device
+        record's ``spoke_id`` (per-tenant) so a config push lands on the spoke
+        that owns the device."""
         hub = app.state.hub
-        sess = _session_user(request)
-        if not sess or not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="admin required")
         try:
             data = await request.json()
         except Exception:
@@ -341,15 +341,16 @@ def register(app, hub, ctx):
 
     @app.post("/api/nw/{device_id}/poll")
     async def nw_poll_device(device_id: str, request: Request):
-        """POLL NOW for one network device (admin-only): run a full
-        probe+info+interfaces+arp+mac poll on the spoke, then upsert the device
-        + its interfaces into NetBox via ``NETBOX_SYNC_NW_DEVICE``. Returns the
-        poll results + a NetBox push summary. Driven by the WebUI "Poll Now"
-        button on the Devices table."""
+        """POLL NOW for one network device: run a full probe+info+interfaces+
+        arp+mac poll on the spoke, then upsert the device + its interfaces into
+        NetBox via ``NETBOX_SYNC_NW_DEVICE``. Returns the poll results + a NetBox
+        push summary. Driven by the WebUI "Poll Now" button on the Devices table.
+
+        Tenant-scoped via ``_authz_nw_device``: a Global Admin may poll any
+        device; a tenant admin may poll devices it can see (own-tenant + shared);
+        other/unassigned devices are denied."""
         hub = app.state.hub
-        sess = _session_user(request)
-        if not sess or not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="admin required")
+        _authz_nw_device(request, device_id, write=False)  # 404/403 by tenant ownership
         try:
             result = await hub.poll_nw_device(device_id)
             # Fold the poll's rich result into the per-device cache so a later

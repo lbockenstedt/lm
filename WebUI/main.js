@@ -15483,7 +15483,7 @@ async function loadNwData(subMenu) {
                     : reachable === false || reachable === 'down'
                         ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
                         : `<span class="text-slate-400 text-xs">—</span>`;
-                const cfg = isAdmin()
+                const cfg = (isAdmin() || isTenantAdmin())
                     ? `<button onclick="pollNwDevice('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3">Poll Now</button>` +
                       `<button onclick="showNwConfigModal('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Configure</button>`
                     : '';
