@@ -3597,7 +3597,7 @@ function _viewTemplate(viewId) {
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Onboarding Keys</h3>
       <button onclick="_myDevGenPsk()" class="${btn}">+ Generate Key</button>
     </div>
-    <p class="text-xs text-slate-400 mb-3">A one-time onboarding key lets a new spoke register and bind to your tenant automatically, without an admin. Generate a key, copy the install command shown beneath it (hub address and key are pre-filled — just replace <code>&lt;MODULE&gt;</code>), run it on the new server, then revoke the key once it has connected.</p>
+    <p class="text-xs text-slate-400 mb-3">A one-time onboarding key lets a new spoke register and bind to your tenant automatically, without an admin. Generate a key, copy the install command shown beneath it (hub address and key are pre-filled — it runs as-is), run it on the new server, then revoke the key once it has connected. The new spoke loads its roles from this page; a copy-paste uninstall command is shown beneath each key too.</p>
     <div id="my-psk-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
   </div>
 </div>`;
@@ -14528,14 +14528,19 @@ async function loadMyDevicePsks() {
         if (!keys.length) { el.innerHTML = '<p class="text-xs text-slate-400 italic">No active onboarding keys.</p>'; return; }
         el.innerHTML = keys.map((k, i) => {
             const cmd = _myDevInstallCmd(k, tenant);
+            const uninstall = 'curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/uninstall.sh \\\n  | sudo bash -s -- --yes';
             return `<div class="border border-slate-100 rounded-md px-3 py-2">
                 <div class="flex items-center justify-between gap-3">
                     <code class="text-[11px] font-mono text-slate-600 break-all">${escapeHtml(k)}</code>
                     <button onclick="_myDevRevokePsk('${escapeHtml(k)}')" class="text-xs text-red-500 hover:underline shrink-0">Revoke</button>
                 </div>
-                <p class="text-[11px] font-bold text-slate-500 mt-2 mb-1">Install command (replace <code>&lt;MODULE&gt;</code>, e.g. <code>simulation</code>):</p>
+                <p class="text-[11px] font-bold text-slate-500 mt-2 mb-1">Install command:</p>
                 <pre id="my-psk-cmd-${i}" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">${escapeHtml(cmd)}</pre>
                 <button onclick="_myDevCopyEl('my-psk-cmd-${i}')" class="mt-1 text-xs text-[#01A982] hover:underline">Copy command</button>
+                <p class="text-[11px] text-slate-400 mt-2">The spoke installs as a bare agent and loads roles later from this page. To pre-assign roles instead, append <code>--roles &lt;module&gt;</code> (comma-separated, e.g. <code>--roles simulation</code> or <code>--roles dns,dhcp</code>).</p>
+                <p class="text-[11px] font-bold text-slate-500 mt-2 mb-1">Uninstall (removes all LM components from that host):</p>
+                <pre id="my-psk-uninstall-${i}" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">${escapeHtml(uninstall)}</pre>
+                <button onclick="_myDevCopyEl('my-psk-uninstall-${i}')" class="mt-1 text-xs text-[#01A982] hover:underline">Copy uninstall</button>
             </div>`;
         }).join('');
     } catch (e) {
@@ -14545,13 +14550,14 @@ async function loadMyDevicePsks() {
 }
 
 // Build the one-line installer for an onboarding key, with the hub address and
-// PSK/tenant pre-filled so the operator only substitutes <MODULE>. The hub is
-// the very host serving this WebUI (location.host) — the same origin the admin
-// is already talking to — matching install_agent.sh's `--hub wss://HOST[:port]`.
+// PSK/tenant pre-filled so it runs as-is. The spoke comes up as a bare agent and
+// loads roles later from My Devices; roles can be pre-assigned by appending
+// --roles (see the note beside the command). The hub is the very host serving
+// this WebUI (location.host) — matching install_agent.sh's `--hub wss://HOST[:port]`.
 function _myDevInstallCmd(psk, tenant) {
     const hub = (typeof location !== 'undefined' && location.host) ? `wss://${location.host}` : 'auto';
     return `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \\\n`
-        + `  | sudo bash -s -- --hub ${hub} --roles <MODULE> --onboarding-psk ${psk} --tenant-hint ${tenant}`;
+        + `  | sudo bash -s -- --hub ${hub} --onboarding-psk ${psk} --tenant-hint ${tenant}`;
 }
 
 async function _myDevGenPsk() {
