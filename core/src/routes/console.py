@@ -974,12 +974,41 @@ def register(app, hub, ctx):
     async def console_diagnostics(request: Request):
         """Serial-connection health report across every Console spoke: ports that
         keep failing to open (faulty/non-real), get disconnected (device pulled),
-        or flap. Admin-gated (ops/troubleshooting view of infra-wide errors)."""
+        or flap. Open to the console VIEW tier (Global Admin, tenant admin, or any
+        ``console`` user); a non-admin sees only the diagnostics for the console
+        ports it can see (tenant-scoped exactly like the ports list), while a
+        Global Admin sees the infra-wide report across every tenant."""
         sess = _session_user(request)
-        if not _is_admin(sess):
-            raise HTTPException(status_code=403, detail="admin only")
+        if not (_is_admin(sess) or _has_console_access(sess)):
+            raise HTTPException(status_code=403, detail="Console access required")
+        admin = _is_admin(sess)
         hub = app.state.hub
-        spokes = hub.get_all_spokes_by_type("console") or []
+        all_spokes = hub.get_all_spokes_by_type("console") or []
+        # Tenant scoping for non-admins: reuse the EXACT port-visibility logic so a
+        # tenant admin only ever sees its own tenant's console diagnostics (and
+        # shared-infra ports masked to it), never another tenant's or the
+        # admin-only unassigned holding state.
+        if admin:
+            spokes = all_spokes
+            ded_visible = set(all_spokes)   # every spoke fully visible
+            visible_keys = None             # None == no per-row filtering
+        else:
+            explicit = str(request.query_params.get("tenant") or "").strip()
+            tid = _resolve_tenant(request, explicit or None)
+            sel = tid if (tid and tid != "default") else None
+            vis = await _list_visible_console_ports(request)
+            visible_keys = {(p.get("spoke_id"), p.get("port_id"))
+                            for p in (vis.get("ports") or [])}
+            # A spoke DEDICATED to a tenant the caller can see: all its diagnostics
+            # belong to that tenant, so include even non-enumerated failing ports.
+            ded_visible = {
+                sid for sid in all_spokes
+                if (lambda st: st and not access.tenant_is_shared(st)
+                    and access.spoke_visible_to_session(sess, st)
+                    and (sel is None or st == sel))(hub.state.get_spoke_tenant(sid) or "")
+            }
+            contributing = {k[0] for k in visible_keys}
+            spokes = [s for s in all_spokes if s in ded_visible or s in contributing]
         # Re-seed operator credentials into any spoke that (re)connected since the
         # last seed — the console spoke holds them in memory only, so a restart
         # (manual or self-update) wipes them and auto-identify falls back to the
@@ -1003,6 +1032,9 @@ def register(app, hub, ctx):
             if summ:
                 summaries[sid] = {**summ, "agent_name": agent_name}
             for d in (payload.get("diagnostics") or []):
+                if not admin and sid not in ded_visible \
+                        and (sid, d.get("port_id")) not in visible_keys:
+                    continue  # a shared-spoke port not scoped to this tenant
                 d["spoke_id"] = sid
                 d["agent_name"] = agent_name
                 d["tenant_id"] = d.get("tenant_id") or stenant  # per-port override else agent binding

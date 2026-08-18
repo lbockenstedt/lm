@@ -16902,9 +16902,12 @@ function _renderConsolePorts(el, data) {
     const profileAllBtn = hasConsoleView()
         ? `<button onclick="profileAllDevices()" class="text-[11px] px-3 py-1.5 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile every listed device at once: known fingerprints are used as-is; unknown devices are sent (scrubbed) to the AI to identify. Ports open in a session are skipped.">🔎 Profile All Devices</button>`
         : '';
-    const adminTools = admin
-        ? `<button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button><button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button>`
+    const diagBtn = hasConsoleView()
+        ? `<button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button>`
         : '';
+    const adminTools = diagBtn + (admin
+        ? `<button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button>`
+        : '');
     const tools = (profileAllBtn || adminTools)
         ? `<div class="flex justify-end gap-2 p-2 border-b border-slate-100">${profileAllBtn}${adminTools}</div>`
         : '';
@@ -17204,10 +17207,14 @@ function _consoleDiagDebugBanner(dbg) {
 }
 
 // Footer buttons shared by the diagnostics modal states: purge all collected
-// telemetry (admin) + refresh.
+// telemetry (Global-Admin only — purge is infra-wide across every tenant's
+// spoke) + copy/refresh (available to the whole console view tier).
 function _consoleDiagFooterBtns() {
+    const purgeBtn = isAdmin()
+        ? `<button onclick="purgeConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50" title="Delete all collected serial-health / identify telemetry across every console agent">🗑 Purge data</button>`
+        : '';
     return `<button onclick="copyConsoleDiagnostics(this)" class="text-[11px] px-3 py-1.5 rounded border border-[#01A982] text-[#01A982] hover:bg-[#01A982]/10 font-bold" title="Copy the full diagnostics — every port's login/identify telemetry, prompts, creds tried, skip reason and the last raw device line — as plain text to paste into a ticket or chat">⧉ Copy debug</button>`
-         + `<button onclick="purgeConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-red-200 text-red-600 hover:bg-red-50" title="Delete all collected serial-health / identify telemetry across every console agent">🗑 Purge data</button>`
+         + purgeBtn
          + `<button onclick="refreshConsoleDiagnostics()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">↻ Refresh</button>`;
 }
 
