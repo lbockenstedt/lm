@@ -927,6 +927,61 @@ def hypervisor_owned_by_caller(hub, sess, spoke_id: str) -> bool:
     return spoke_tenant in allowed
 
 
+def last_known_vm_record(hub, unique_id="", vmid=None, node="") -> dict:
+    """Best-effort last-known ``{ips, tags, pool}`` for a VM from the ``pxmx_vms``
+    warm cache — the same raw VM lists ``get_pxmx_vms`` writes on every live fetch.
+
+    A running VM's guest-agent IP is only present in ``GET_VM_INFO`` while it's up;
+    a STOPPED / guest-agent-silent VM reports no live IP, so the console/control
+    gates (``vm_in_tenant_scope``) could not attribute — and denied — a subnet-
+    owned VM the tenant plainly SEES in their list (which had annotated the VM's
+    IP when it last ran). This recovers that last-known ip/tag so "if you can see
+    it, you can console it" holds across a stop.
+
+    SAFE (no cross-tenant leak): the returned ips/tags are still attributed against
+    the CALLER's own prefixes/tags by the gate — a foreign VM's cached IP won't
+    match the caller's prefixes, so this only ever recovers the caller's OWN VMs.
+    Returns ``{}`` when nothing is cached. Never raises."""
+    uid = str(unique_id or "").strip()
+    want_vmid = str(vmid).strip() if vmid is not None else ""
+    want_node = str(node or "").strip()
+    ips: list = []
+    tags: list = []
+    pool = ""
+    try:
+        cache = getattr(hub, "warm_cache", {}).get("pxmx_vms", {}) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+    for entry in cache.values():
+        data = entry.get("data") if isinstance(entry, dict) else None
+        vms = data.get("vms") if isinstance(data, dict) else (data if isinstance(data, list) else None)
+        if not isinstance(vms, list):
+            continue
+        for vm in vms:
+            if not isinstance(vm, dict):
+                continue
+            if uid:
+                if str(vm.get("unique_id") or "").strip() != uid:
+                    continue
+            elif want_vmid:
+                if str(vm.get("vmid") or "").strip() != want_vmid:
+                    continue
+                if want_node and str(vm.get("node") or "").strip() != want_node:
+                    continue
+            else:
+                continue
+            for x in (vm.get("ips") or []):
+                if x and x not in ips:
+                    ips.append(x)
+            for t in (vm.get("tags") or []):
+                if t and t not in tags:
+                    tags.append(t)
+            pool = pool or (vm.get("pool") or "")
+    if not ips and not tags and not pool:
+        return {}
+    return {"ips": ips, "tags": tags, "pool": pool}
+
+
 def can_bind_spoke(hub, sess, spoke_id: str) -> bool:
     """May this session bind a NEW device/instance to ``spoke_id``?
 

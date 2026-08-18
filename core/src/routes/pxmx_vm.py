@@ -51,6 +51,20 @@ def register(app, hub, ctx):
             "tags": info.get("tags") or [],
             "pool": info.get("pool") or "",
         }
+        # Recover a stopped / guest-agent-silent VM's last-known ips/tags from the
+        # pxmx_vms warm cache so a subnet-owned VM the tenant SEES in their list
+        # stays controllable across a stop. Still attributed below against the
+        # CALLER's own prefixes → never authorizes another tenant's VM.
+        if not vm_record["ips"] or not vm_record["tags"]:
+            lk = access.last_known_vm_record(
+                hub, unique_id=unique_id, vmid=vmid, node=node)
+            if lk:
+                if not vm_record["ips"]:
+                    vm_record["ips"] = lk.get("ips") or []
+                if not vm_record["tags"]:
+                    vm_record["tags"] = lk.get("tags") or []
+                if not vm_record["pool"]:
+                    vm_record["pool"] = lk.get("pool") or ""
         # Toggle-independent, fail-closed ownership (subnet or tenant tag). NOT
         # _filter_tenant — that returns the record unchanged when the hypervisor
         # display filter is off, which would fail OPEN for control actions.
