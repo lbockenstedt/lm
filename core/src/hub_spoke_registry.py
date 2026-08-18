@@ -304,27 +304,41 @@ class SpokeRegistryMixin:
 
     def get_hypervisor_spokes_for_tenant(self, tenant_id: str = None) -> list:
         """PLURAL sibling of ``get_hypervisor_spoke_for_tenant``: EVERY connected,
-        approved agent-hosting spoke (hypervisor=pxmx AND simulation=cs) bound to
-        ``tenant_id``.
+        approved agent-hosting spoke (hypervisor=pxmx AND simulation=cs) VISIBLE to
+        ``tenant_id`` — i.e. bound to it OR to the SHARED tenant.
 
         A single tenant can legitimately host Proxmox on more than one spoke — a
         dedicated pxmx hypervisor AND a CS-enabled box whose agent dials a cs
         spoke's ``/ws/agent`` (a mix of infra + sim-client VMs). The Overview /
         node list must aggregate across ALL of them, not just the one
         ``bound[0]`` the singular resolver returns, or the sim-hosted host
-        silently drops off the Hypervisors page. Still strictly tenant-scoped —
-        ONLY spokes bound to this tenant — so no cross-tenant host/node leak.
-        Empty (not a global fallback) when nothing is bound: the caller decides
-        whether to fall back, exactly as it does with the singular resolver."""
+        silently drops off the Hypervisors page. SHARED-tenant spokes (a lab
+        hypervisor marked shared, visible to every tenant — mirrors
+        ``spoke_visible_to_session``) are INCLUDED: without this a shared Proxmox
+        host's VMs still list (get_pxmx_vms fans every spoke + subnet-filters) but
+        its node dropped off the per-tenant Overview once the tenant gained any
+        bound spoke, so the fallback stopped firing (the reported regression).
+        Still no cross-tenant leak — a spoke bound to a DIFFERENT real tenant is
+        excluded. Empty (not a global fallback) when nothing is visible: the
+        caller decides whether to fall back, as with the singular resolver."""
         if not tenant_id or tenant_id == "default":
             return []
         cands = (list(self.get_all_spokes_by_type("hypervisor") or [])
                  + list(self.get_all_spokes_by_type("simulation") or []))
         md = self.state.system_state.get("module_metadata", {})
+        try:
+            _tenants = (getattr(self.state, "tenant_state", {}) or {}).get("tenants", {}) or {}
+            shared = next((tid for tid, cfg in _tenants.items()
+                           if isinstance(cfg, dict) and cfg.get("shared")), None)
+        except Exception:
+            shared = None
+        want = {tenant_id}
+        if shared:
+            want.add(shared)
         return [sid for sid in cands
                 if sid in self.active_connections
                 and self.approved_modules.get(sid, False)
-                and md.get(sid, {}).get("tenant_id") == tenant_id]
+                and md.get(sid, {}).get("tenant_id") in want]
 
     def get_nw_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
         """Tenant-aware network-devices (nw) spoke — mirrors
