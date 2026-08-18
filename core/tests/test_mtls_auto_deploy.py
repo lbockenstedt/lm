@@ -66,7 +66,8 @@ def _fake_push(responses):
 
 
 def _install_on_hub_ok():
-    async def install_on_hub(domain, fullchain, privkey, chain, identifier=""):
+    async def install_on_hub(domain, fullchain, privkey, chain, identifier="",
+                             ca_only=False):
         return {"status": "SUCCESS", "message": "installed on hub"}
     return install_on_hub
 
@@ -124,7 +125,7 @@ def test_non_wildcard_is_a_noop():
 def test_push_state_skip_avoids_repush():
     rr, _ = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok()})
     push, pcalls = _fake_push({})
-    state = {f"mtls|{_AGENT}": _H, "mtls|hub": _H}
+    state = {f"mtls|{_WILDCARD}|{_AGENT}": _H, f"mtls|{_WILDCARD}|hub": _H}
     summary = _run(cd.distribute_mtls_materials_to_all_spokes(
         rr, push, _primary([(_AGENT, "agent")]), _LE, _WILDCARD, _H, state,
         install_on_hub=_install_on_hub_ok()))
@@ -145,7 +146,7 @@ def test_offline_spoke_is_queued_not_errored():
     assert spoke_entry["status"] == "QUEUED"
     assert spoke_entry["queued"] is True
     # A queued push must NOT stamp the hash (so the next loop re-attempts live).
-    assert "mtls|offline-spoke" not in state
+    assert f"mtls|{_WILDCARD}|offline-spoke" not in state
 
 
 def test_live_success_stamps_push_state():
@@ -155,9 +156,54 @@ def test_live_success_stamps_push_state():
     summary = _run(cd.distribute_mtls_materials_to_all_spokes(
         rr, push, _primary([(_AGENT, "agent")]), _LE, _WILDCARD, _H, state,
         install_on_hub=_install_on_hub_ok()))
-    assert state[f"mtls|{_AGENT}"] == _H
-    assert state["mtls|hub"] == _H
+    assert state[f"mtls|{_WILDCARD}|{_AGENT}"] == _H
+    assert state[f"mtls|{_WILDCARD}|hub"] == _H
     assert summary[0]["status"] == "SUCCESS"
+
+
+def test_two_wildcard_domains_do_not_clobber_push_state():
+    """Regression: two wildcard mTLS domains provisioning the SAME primary spoke
+    must keep INDEPENDENT push-state stamps. A bare ``mtls|{sid}`` key let them
+    overwrite each other and re-push forever (each push restarts the spoke to
+    arm verification), flapping the whole fleet. Domain-qualified keys converge:
+    each domain pushes once, then both are ‘current’ and skip."""
+    dom_a = "*.orange-tme.com"
+    dom_b = "*.olth.lrbtechnologies.com"
+    h_a, h_b = "sha256:AAA", "sha256:BBB"
+
+    def _cert(h):
+        return {"payload": {"data": {"status": "SUCCESS", "data": {
+            "fullchain": _PEM, "privkey": _KEY, "chain": _CHAIN,
+            "material_hash": h, "not_after": "2099-01-01T00:00:00+00:00"}}}}
+
+    state: dict = {}
+    # Domain A provisions the shared spoke.
+    rr_a, _ = _fake_rr({(_LE, "LE_GET_CERT"): _cert(h_a)})
+    push_a, pa = _fake_push({})
+    _run(cd.distribute_mtls_materials_to_all_spokes(
+        rr_a, push_a, _primary([(_CS, "Client-Sim")]), _LE, dom_a, h_a, state))
+    # Domain B provisions the SAME spoke — must NOT be blocked by A's stamp, and
+    # must NOT erase it.
+    rr_b, _ = _fake_rr({(_LE, "LE_GET_CERT"): _cert(h_b)})
+    push_b, pb = _fake_push({})
+    _run(cd.distribute_mtls_materials_to_all_spokes(
+        rr_b, push_b, _primary([(_CS, "Client-Sim")]), _LE, dom_b, h_b, state))
+
+    # Both domains' stamps coexist for the shared spoke.
+    assert state[f"mtls|{dom_a}|{_CS}"] == h_a
+    assert state[f"mtls|{dom_b}|{_CS}"] == h_b
+    # Each domain pushed exactly once (no ping-pong).
+    assert sum(1 for c in pa if c["cmd"] == "SPOKE_SET_MTLS_MATERIALS") == 1
+    assert sum(1 for c in pb if c["cmd"] == "SPOKE_SET_MTLS_MATERIALS") == 1
+
+    # Re-running domain A with its stamp present is now a no-op (skipped) — the
+    # loop is broken.
+    rr_a2, _ = _fake_rr({(_LE, "LE_GET_CERT"): _cert(h_a)})
+    push_a2, pa2 = _fake_push({})
+    summary = _run(cd.distribute_mtls_materials_to_all_spokes(
+        rr_a2, push_a2, _primary([(_CS, "Client-Sim")]), _LE, dom_a, h_a, state))
+    assert len(summary) == 1 and summary[0].get("skipped") is True
+    assert pa2 == []
 
 
 def test_incomplete_material_is_an_error():
