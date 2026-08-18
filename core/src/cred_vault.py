@@ -377,6 +377,35 @@ async def automation_get(hub, bucket: str, name: str) -> Dict[str, Any]:
     return value
 
 
+async def automation_list_by_type(hub, sec_type: str,
+                                  buckets: Optional[List[str]] = None
+                                  ) -> List[Dict[str, Any]]:
+    """Unattended bulk retrieval for tooling — return every AUTOMATION-READABLE
+    (``hub``-mode) secret of a given ``type`` in the requested ``buckets`` (or
+    all buckets when ``buckets`` is None), decrypted. NO pass-phrase.
+
+    Each item is ``{"bucket","name","value"}``. Unreadable / pass-phrase-only /
+    wrong-type secrets are skipped silently — this is a best-effort scan used by
+    the console-credential resolver, so it must never raise on a bad record.
+
+    Unlike :func:`automation_get` it does NOT stamp ``last_accessed_*`` (a seed
+    can run on every spoke connect, so we avoid churning hub state on each scan)."""
+    want = set(buckets) if buckets is not None else None
+    out: List[Dict[str, Any]] = []
+    for bucket, secrets in (_meta(hub)["secrets"] or {}).items():
+        if want is not None and bucket not in want:
+            continue
+        for name, sm in (secrets or {}).items():
+            if sm.get("type") != sec_type or sm.get("mode") != _MODE_HUB:
+                continue
+            try:
+                value = await _fetch_and_decrypt(hub, bucket, name, psk=None)
+            except Exception:  # noqa: BLE001 — skip unreadable/corrupt records
+                continue
+            out.append({"bucket": bucket, "name": name, "value": value})
+    return out
+
+
 async def delete_secret(hub, bucket: str, name: str, *, psk: str, actor: str = "") -> None:
     _require_psk(hub, bucket, psk)
     cv = _meta(hub)

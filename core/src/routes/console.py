@@ -442,24 +442,73 @@ def register(app, hub, ctx):
     _CONSOLE_VAULT_SECRET = "console-auto-credentials"
 
     def _console_creds_from_cred_vault(creds_dict):
-        """Normalise a Credential Vault secret value into ``[{username,password}]``."""
+        """Normalise a Credential Vault secret value into ``[{username,password}]``.
+
+        Accepts BOTH shapes: the multi-login list
+        ``{"credentials":[{username,password},…]}`` (legacy
+        ``console-auto-credentials`` secret) and a single flat login
+        ``{"username","password"}`` (a ``console``-type secret, one login each)."""
+        d = creds_dict or {}
         out = []
-        for c in ((creds_dict or {}).get("credentials") or []):
-            if isinstance(c, dict) and c.get("username"):
-                out.append({"username": str(c.get("username", "")),
-                            "password": str(c.get("password", ""))})
+        items = d.get("credentials")
+        if isinstance(items, list):
+            for c in items:
+                if isinstance(c, dict) and c.get("username"):
+                    out.append({"username": str(c.get("username", "")),
+                                "password": str(c.get("password", ""))})
+        if not out and d.get("username"):
+            out.append({"username": str(d.get("username", "")),
+                        "password": str(d.get("password", ""))})
         return out
 
-    async def _console_load_credentials_resolved(hub):
-        """Async credential resolution used by the (async) seed path. Prefers the
-        central Credential Vault (``__admin__`` slot, automation-readable) so
-        console logins can be managed alongside every other secret; falls back to
-        the legacy ref / hub-state loader when the vault secret is absent or the
-        vault isn't configured. Purely additive — never worse than today."""
+    async def _console_creds_for_tenant(hub, tenant):
+        """Aggregate console auto-login credentials from the Credential Vault for
+        a console spoke bound to ``tenant``. ONLY secrets explicitly typed
+        ``console`` count — so an operator marks exactly which vault logins are
+        for device auto-identify (we never sweep unrelated ``login`` secrets in).
+
+        Reachable slots: the spoke's own tenant bucket + the global ``__admin__``
+        slot — so a tenant's console password is never pushed to another tenant's
+        console spoke. The legacy global ``console-auto-credentials`` list secret
+        (``__admin__``) is still honoured for backward-compat. De-duped by
+        (username, password)."""
+        creds, seen = [], set()
+
+        def _add(items):
+            for c in items:
+                key = (c["username"], c["password"])
+                if key not in seen:
+                    seen.add(key)
+                    creds.append(c)
+
         try:
             import cred_vault as _cv
-            val = await _cv.automation_get(hub, _cv.ADMIN_BUCKET, _CONSOLE_VAULT_SECRET)
-            creds = _console_creds_from_cred_vault(val)
+            buckets = [_cv.ADMIN_BUCKET]
+            if tenant and tenant not in buckets:
+                buckets.append(tenant)
+            for rec in await _cv.automation_list_by_type(hub, "console", buckets):
+                _add(_console_creds_from_cred_vault(rec.get("value")))
+            # Legacy single named list secret in the admin slot.
+            try:
+                val = await _cv.automation_get(hub, _cv.ADMIN_BUCKET, _CONSOLE_VAULT_SECRET)
+                _add(_console_creds_from_cred_vault(val))
+            except Exception:  # noqa: BLE001 — absent / unreadable
+                pass
+        except Exception:  # noqa: BLE001 — vault not configured
+            pass
+        return creds
+
+    async def _console_load_credentials_resolved(hub, tenant=None):
+        """Async credential resolution used by the (async) seed path. Prefers the
+        central Credential Vault so console logins can be managed alongside every
+        other secret; falls back to the legacy ref / hub-state loader when no
+        vault console secret applies. Purely additive — never worse than today.
+
+        ``tenant`` scopes the vault lookup to that tenant's bucket + ``__admin__``
+        (the per-spoke seed passes the spoke's tenant); ``None`` aggregates every
+        reachable ``console``-type secret (used by diagnostics/reporting)."""
+        try:
+            creds = await _console_creds_for_tenant(hub, tenant)
             if creds:
                 return creds
         except Exception:  # noqa: BLE001 — not configured / absent / unreadable
@@ -485,12 +534,11 @@ def register(app, hub, ctx):
             return False
 
     async def _console_vault_secret_present(hub):
-        """True when the console login list lives in the Credential Vault
-        (``__admin__`` slot, automation-readable)."""
+        """True when at least one console login lives in the Credential Vault —
+        any ``console``-type automation-readable secret (any reachable bucket) or
+        the legacy ``__admin__``/``console-auto-credentials`` list secret."""
         try:
-            import cred_vault as _cv
-            val = await _cv.automation_get(hub, _cv.ADMIN_BUCKET, _CONSOLE_VAULT_SECRET)
-            return bool(_console_creds_from_cred_vault(val))
+            return bool(await _console_creds_for_tenant(hub, None))
         except Exception:  # noqa: BLE001
             return False
 
@@ -525,14 +573,20 @@ def register(app, hub, ctx):
     async def _console_seed_credentials(hub, spokes):
         """Push the credential list to any console spoke not yet seeded this
         process (so a spoke that connects after credentials were set still gets
-        them). Fire-and-forget + signed."""
-        creds = await _console_load_credentials_resolved(hub)
-        if not creds:
-            return
+        them). Credentials are resolved PER SPOKE from the spoke's tenant scope,
+        so a tenant's console logins only ever reach that tenant's console spoke.
+        Fire-and-forget + signed."""
         seeded = getattr(hub, "_console_creds_seeded", None) or set()
         for sid in spokes:
             if sid in seeded:
                 continue
+            try:
+                tenant = hub.state.get_spoke_tenant(sid) or ""
+            except Exception:  # noqa: BLE001
+                tenant = ""
+            creds = await _console_load_credentials_resolved(hub, tenant)
+            if not creds:
+                continue  # nothing to push yet — retry on the next seed trigger
             try:
                 await hub.send_to_spoke_command(sid, "CONSOLE_SET_CREDENTIALS", {"credentials": creds})
                 _console_mark_seeded(hub, sid)

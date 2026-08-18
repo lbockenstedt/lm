@@ -4516,6 +4516,7 @@ function _cvAddSecretModal(preset) {
       <div class="flex gap-2">
         <select id="cv-add-type" onchange="_cvRenderAddFields()" ${editing ? 'disabled' : ''} class="${_CV_INP}" title="Secret shape — DNS-01 = Let's Encrypt DNS provider creds (a 'Hurricane Electric (account login)' DNS-01 secret is ALSO used by the External DNS / HE.NET module, so store just one HE credential); others are generic login/key/token">
           <option value="login"${sel(pType, 'login')}>Login (username + password)</option>
+          <option value="console"${sel(pType, 'console')}>Console login (device auto-identify)</option>
           <option value="apikey"${sel(pType, 'apikey')}>API key</option>
           <option value="token"${sel(pType, 'token')}>Token</option>
           <option value="dns"${sel(pType, 'dns')}>DNS-01 credential (Let's Encrypt)</option>
@@ -4558,6 +4559,20 @@ function _cvRenderAddFields() {
     if (!el) return;
     const f = (id, ph, type = 'text') => `<input id="${id}" type="${type}" autocomplete="off" placeholder="${ph}" class="${_CV_INP}">`;
     if (t === 'login') el.innerHTML = f('cv-f-username', 'username') + f('cv-f-password', 'password', 'password');
+    else if (t === 'console') {
+        // A device console auto-login. The console module reads these unattended
+        // to identify/log into serial-attached gear, so automation-readable is
+        // required (hub reads it without a pass-phrase) — force + lock hub mode.
+        // Add one 'Console login' secret per distinct login; console spokes only
+        // receive the console-type logins from their own tenant bucket + the
+        // global admin slot (never a flood of every stored credential).
+        el.innerHTML =
+            `<p class="text-[11px] text-slate-500 mb-1">Used by the console module to auto-identify/log into serial-attached devices for this bucket's tenant. Add one secret per distinct login.</p>` +
+            f('cv-f-username', 'device console username') + f('cv-f-password', 'device console password', 'password');
+        const modeSel = document.getElementById('cv-add-mode');
+        if (modeSel) { modeSel.value = 'hub'; modeSel.disabled = true; }
+        return;
+    }
     else if (t === 'apikey') el.innerHTML = f('cv-f-apikey', 'api key', 'password');
     else if (t === 'token') el.innerHTML = f('cv-f-token', 'token', 'password');
     else if (t === 'dns') {
@@ -4613,6 +4628,7 @@ function _cvCollectAddValue() {
     const t = document.getElementById('cv-add-type')?.value || 'login';
     const v = id => (document.getElementById(id)?.value || '');
     if (t === 'login') return { username: v('cv-f-username'), password: v('cv-f-password') };
+    if (t === 'console') return { username: v('cv-f-username'), password: v('cv-f-password') };
     if (t === 'apikey') return { apikey: v('cv-f-apikey') };
     if (t === 'token') return { token: v('cv-f-token') };
     if (t === 'dns') {
@@ -4653,6 +4669,9 @@ async function _cvDoAddSecret() {
     if (value.provider && DNS_CRED_PROVIDERS[value.provider] && DNS_CRED_PROVIDERS[value.provider].login
         && (!value.he_username || !value.he_password)) {
         showToast('Enter both the account email and password', 'error'); return;
+    }
+    if (type === 'console' && (!value.username || !value.password)) {
+        showToast('Enter both the console username and password', 'error'); return;
     }
     try {
         await apiJson('/tenant/cred-vault/secret', { method: 'POST', body: JSON.stringify({ bucket: _cvCurrentBucket, name, value, mode, type, description, psk }) });
