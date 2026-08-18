@@ -1073,10 +1073,12 @@ def register(app, hub, ctx):
                         saved_creds.append(c)
             except Exception:  # noqa: BLE001
                 pass
+        try:
+            legacy_present = bool(_console_load_credentials(hub))
+        except Exception:  # noqa: BLE001
+            legacy_present = False
         if vault_present:
-            legacy = _console_creds_keyvault_backed(hub) or bool(
-                hub.state.system_state.get("console_credentials_enc"))
-            cred_source = "credential vault" + (" + legacy" if legacy else "")
+            cred_source = "credential vault" + (" + legacy" if legacy_present else "")
         elif _console_creds_keyvault_backed(hub):
             cred_source = "keyvault:" + _console_credentials_ref(hub)
         elif hub.state.system_state.get("console_credentials_enc"):
