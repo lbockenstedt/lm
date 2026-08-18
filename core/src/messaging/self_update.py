@@ -45,7 +45,7 @@ import os
 import queue
 import subprocess
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger("lm.self_update")
 
@@ -262,6 +262,65 @@ class SelfUpdateMixin:
     # ------------------------------------------------------------------
     # external rollback watchdog arming
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # restart rate-limiter — circuit-breaker against perpetual reload loops
+    # ------------------------------------------------------------------
+
+    # Minimum seconds between two self-update restarts of THIS component. Under
+    # rapid upstream movement (many `main` merges + repeated hub redeploys in a
+    # short window) the SPOKE_UPDATE fan-out — amplified by the #281
+    # `process_behind` no-op-pull reload — can otherwise `os._exit(3)` a spoke
+    # every restart cycle, holding a whole fleet in a perpetual drain/restart
+    # loop that never stays up long enough to relay telemetry (the hosted pxmx
+    # agent flaps, so the hub's PXMX_LIST_VMS alternates live/stale and the
+    # Overview appears to "lose" connectivity). Coalescing restarts into at most
+    # one per window lets a spoke batch several commits into a single reload and
+    # keep serving in between; it still CONVERGES — the pulled code stays on
+    # disk and reloads on the next allowed window. Fail-open everywhere: any
+    # marker error allows the restart, so a limiter bug can never brick the
+    # update channel. Overridable via env for tests / ops.
+    _SELFUPDATE_RESTART_COOLDOWN_S = 180
+
+    def _restart_cooldown_s(self) -> int:
+        try:
+            return max(0, int(os.environ.get("LM_SELFUPDATE_RESTART_COOLDOWN_S",
+                                             self._SELFUPDATE_RESTART_COOLDOWN_S)))
+        except (TypeError, ValueError):
+            return self._SELFUPDATE_RESTART_COOLDOWN_S
+
+    def _restart_marker_path(self) -> str:
+        return os.path.join(self._spoke_state_dir(), "last_selfupdate_restart")
+
+    def _selfupdate_restart_allowed(self) -> Tuple[bool, int]:
+        """``(allowed, wait_s)``: False only when THIS component restarted for an
+        update less than the cooldown ago. Fail-open — a missing/unreadable
+        marker (fresh box, unwritable state dir, cooldown disabled) ALWAYS
+        allows the restart, so a limiter bug can never strand the box on old
+        code."""
+        cooldown = self._restart_cooldown_s()
+        if cooldown <= 0:
+            return True, 0
+        try:
+            last = os.path.getmtime(self._restart_marker_path())
+        except OSError:
+            return True, 0
+        elapsed = time.time() - last
+        if elapsed >= cooldown:
+            return True, 0
+        return False, int(cooldown - elapsed) + 1
+
+    def _record_selfupdate_restart(self) -> None:
+        """Stamp the restart marker (mtime = now) right before ``os._exit(3)`` so
+        the NEXT boot's update pass sees a recent restart and coalesces. Never
+        raises."""
+        try:
+            p = self._restart_marker_path()
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            with open(p, "w") as fh:
+                fh.write(str(int(time.time())))
+        except OSError as e:
+            logger.debug("could not stamp restart marker: %s", e)
 
     def _prepare_restart_with_watchdog(self, head_before: str, head_after: str,
                                        backup_dir, repo_root: str,
@@ -509,6 +568,23 @@ class SelfUpdateMixin:
                     self._clear_pending_update()
                     return {"status": "SUCCESS",
                             "message": f"Update {head_after[:8]} is marked bad; stayed on {head_before[:8]}"}
+                # Circuit-breaker: coalesce restarts so rapid upstream churn
+                # can't hold this component in a perpetual reload loop. The
+                # pulled code is already on disk and reloads on the next allowed
+                # window, so we still converge — we just refuse to os._exit(3)
+                # more than once per cooldown. Fail-open (see
+                # _selfupdate_restart_allowed), so this can never brick updates.
+                allowed, wait_s = self._selfupdate_restart_allowed()
+                if not allowed:
+                    logger.warning(
+                        "update: restart COALESCED — this component restarted "
+                        "<%ss ago; staying up on on-disk HEAD %s, will reload in "
+                        "~%ss (breaks churn-driven crash-loop).",
+                        self._restart_cooldown_s(), head_after[:8], wait_s)
+                    self._clear_pending_update()
+                    return {"status": "SUCCESS",
+                            "message": (f"Update {head_after[:8]} applied to disk; "
+                                        f"restart coalesced (~{wait_s}s)")}
                 # Reload to run the new code. _prepare_restart_with_watchdog
                 # writes the pending manifest + schedules the external
                 # health-gate watchdog (lm-component-update-restart) so a bad
@@ -527,6 +603,7 @@ class SelfUpdateMixin:
                 if self._prepare_restart_with_watchdog(
                         head_before, head_after, backup_dir, cwd,
                         reason=reason, core_repo=core_repo):
+                    self._record_selfupdate_restart()
                     self._flush_log_relay_sync()
                     os._exit(3)
                 return {"status": "SUCCESS",
