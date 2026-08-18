@@ -23,6 +23,8 @@ Consolidated reference for every environment variable read across the LM system.
 
 > **Why verify (and mTLS) are off by default — chicken-and-egg.** mTLS needs the LE wildcard + CA on the hub *and* every spoke, but spokes receive those materials *through* their hub connection (`SPOKE_SET_MTLS_MATERIALS`). The fleet must first come up under plain TLS, the hub distributes the wildcard + CA, then mTLS (and `LM_HUB_TLS_VERIFY`) can be switched on. Enabling either before every connected spoke holds the cert **orphans** that spoke — it can't authenticate and can't be fixed through the hub (manual on-box recovery). Use Auto-provision or wait for `/setup/mtls-readiness` green first. See [lm-hub.md](lm-hub.md#mutual-tls-mtls) for the full ordering + risks.
 
+> **Stale-hub-secret auto-recovery via `LM_ONBOARDING_PSK`.** With `LM_HUB_TLS_VERIFY=0`, a spoke whose stored `HUB_SECRET` has gone stale (hub root-key rotation, restore from a different install, or a rotation it was offline for) would otherwise refuse the hub as a possible MITM and loop forever (`Hub identity unverified (TLS verify off)`) — never getting the fresh `hub_secret` + mTLS cert the hub delivers on the approved connect. If the spoke is configured with a valid `LM_ONBOARDING_PSK` (+ `LM_TENANT_ID_HINT`), the hub additionally signs the mutual-auth challenge with that PSK (`psk_signature`); the spoke verifies it and recovers to zero-touch (the PSK is a shared secret a MITM hub does not hold). A spoke with **no** valid PSK still refuses as before. Configure the tenant PSK on any spoke that must self-recover without on-box intervention.
+
 ## Hub/Spoke — mutual TLS (mTLS) materials
 
 | Var | Purpose | Default | Read by |

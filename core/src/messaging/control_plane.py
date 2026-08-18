@@ -1162,8 +1162,30 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                             # All known hub_secrets failed to verify the hub's
                             # challenge — a stale hub root key (hub restart, a
                             # restore from a different install, or a rotation the
-                            # spoke was offline for). How safe it is to proceed
-                            # hinges on whether TLS authenticates the hub:
+                            # spoke was offline for). Before deciding how safe it
+                            # is to proceed, try the PSK-bound fallback: the hub
+                            # ALSO signs the challenge with the onboarding PSK it
+                            # validated for this spoke's tenant, and the PSK is a
+                            # shared secret a MITM hub does NOT hold. A matching
+                            # ``psk_signature`` therefore authenticates the hub
+                            # INDEPENDENTLY of the stale hub_secret AND of TLS
+                            # verification — so a spoke stuck in the
+                            # stale-secret + TLS-verify-off deadlock recovers
+                            # here (drop the stale secret, accept the hub, let the
+                            # hub re-provision a fresh hub_secret + mTLS cert on
+                            # the approved connect) instead of refusing forever.
+                            psk_sig = hub_proof.get("psk_signature")
+                            psk_verified = False
+                            if self.onboarding_psk and psk_sig:
+                                expected_psk_sig = hmac.new(
+                                    self.onboarding_psk.encode(),
+                                    challenge.encode(),
+                                    hashlib.sha256
+                                ).hexdigest()
+                                psk_verified = hmac.compare_digest(
+                                    expected_psk_sig, psk_sig)
+                            # How safe it is to proceed WITHOUT a PSK proof hinges
+                            # on whether TLS authenticates the hub:
                             #
                             #   * TLS verify ON (LM_HUB_TLS_VERIFY=1): the TLS
                             #     layer already authenticated the hub, so a failed
@@ -1187,7 +1209,13 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                             #     retry, not a storm. Operator re-onboards OOB
                             #     (re-deliver the current hub_secret, or flip
                             #     LM_HUB_TLS_VERIFY=1 once the hub cert is issued).
-                            if self._tls_verify:
+                            if psk_verified:
+                                logger.warning("Hub identity verified via onboarding PSK (stored hub_secret is stale) — discarding hub_secret(s), falling back to zero-touch so the hub can re-provision a fresh hub_secret + mTLS cert.")
+                                self.hub_secrets = []
+                                self._hub_secret_warned = True
+                                self._touch_healthy_marker()
+                                await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(',', ':')))
+                            elif self._tls_verify:
                                 logger.warning("Hub identity verification failed for all known secrets — TLS verifies the hub, so treating as a stale rotation: discarding hub_secret(s), falling back to zero-touch (pending approval).")
                                 self.hub_secrets = []
                                 self._hub_secret_warned = True

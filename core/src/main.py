@@ -3372,6 +3372,24 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             f"retry role activation."
         )
 
+    async def _psk_is_valid(self, tenant_hint: str, psk: str) -> bool:
+        """True iff ``psk`` matches one of ``tenant_hint``'s stored onboarding
+        PSKs. Pure check — NO approval/binding side-effects — so it can be used
+        both by ``_try_psk_self_provision`` and by the PSK-bound hub identity
+        proof in ``handle_connection`` (which must decide whether to sign the
+        challenge with the PSK BEFORE any approval happens). Constant-time
+        compare; never logs the PSK."""
+        if not tenant_hint or not psk:
+            return False
+        try:
+            psks = await self.simulations_store.get_psks(tenant_hint)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"PSK check: could not read PSKs for tenant {tenant_hint}: {e}")
+            return False
+        if not psks:
+            return False
+        return any(hmac.compare_digest(str(p), psk) for p in psks)
+
     async def _try_psk_self_provision(self, spoke_id: str, tenant_hint: str, psk: str) -> bool:
         """Validate a spoke's onboarding PSK against the tenant's stored PSKs
         and, on a match, auto-approve + auto-bind the spoke to that tenant (PSK
@@ -4251,6 +4269,30 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # spoke ignores the unknown field (fail-safe → plaintext).
                 if encryption_enabled():
                     proof["enc"] = ENC_MARKER
+                # PSK-bound hub proof (stale-hub-secret recovery): when the spoke
+                # presented a VALID onboarding PSK, ALSO sign the challenge with
+                # that PSK. The PSK is a deploy-time shared secret a MITM hub does
+                # NOT hold, so it is an INDEPENDENT hub authenticator. This lets a
+                # spoke whose stored hub_secret has gone stale (hub root-key
+                # rotation / restore-from-different-install / a rotation it was
+                # offline for) re-verify the hub and recover to zero-touch even
+                # with LM_HUB_TLS_VERIFY=0 — instead of hard-refusing forever
+                # ("Hub identity unverified (TLS verify off)") and never getting
+                # the fresh hub_secret + mTLS cert that push_config_to_spoke /
+                # _provision_spoke_mtls_cert deliver on the approved connect.
+                # Validated against the tenant's stored PSKs first so the hub
+                # never signs with attacker-supplied material. Additive field —
+                # the spoke verifies over ``challenge`` only, so this is
+                # signature-safe and legacy spokes ignore it.
+                if onboarding_psk and tenant_id_hint:
+                    try:
+                        if await self._psk_is_valid(tenant_id_hint, onboarding_psk):
+                            proof["psk_signature"] = hmac.new(
+                                onboarding_psk.encode(), challenge.encode(),
+                                hashlib.sha256).hexdigest()
+                    except Exception:  # noqa: BLE001 — never block connect on this
+                        logger.debug("PSK-bound hub proof skipped (psk check failed)",
+                                     exc_info=True)
                 await websocket.send(json.dumps(proof))
 
                 # If the spoke has a secret, it will respond. If not, it might just ignore or respond HUB_OK.
