@@ -479,7 +479,7 @@ function updateContextActions() {
 // Roles available to load on a generic agent (matches lm/agent/src/agent_spoke.py _ROLE_MAP)
 const AGENT_ROLES = {
     'dns':        { name: 'DNS (Unbound module)',  desc: 'Manages a running Unbound. Syncs records from NetBox. Needs an Unbound server — deploy the "DNS Server" role (or install standalone).', deploy: false },
-    'henet':      { name: 'HE.NET (Hurricane Electric public DNS)', desc: 'Manages public DNS records at dns.he.net over HE\'s dynamic-DNS update API. No server to deploy — the HE DDNS key lives in the Credential Vault (secret type "HE.NET DDNS key") and the hub resolves it unattended when pushing records.', deploy: false },
+    'henet':      { name: 'HE.NET (Hurricane Electric public DNS)', desc: 'Manages public DNS records at dns.he.net over HE\'s dynamic-DNS update API. No server to deploy — it reuses the SAME Credential Vault Hurricane Electric credential as certificates (DNS-01 credential → "Hurricane Electric (account login)"), so you store one HE credential for both certs and DNS; the hub reformats and resolves it unattended when pushing records.', deploy: false },
     'dns-server': { name: 'DNS Server (Unbound)', desc: 'Deploys Unbound itself (server + remote-control + conf.d include). Runs as its own service on this host; does NOT create a spoke. Load the "DNS (Unbound module)" role to manage it.', deploy: true },
     'dhcp':       { name: 'DHCP (Kea module)',     desc: 'Manages a running Kea DHCP4. Syncs subnets and reservations from NetBox. Needs a Kea server — deploy the "DHCP Server" role (or install standalone).', deploy: false },
     'dhcp-server':{ name: 'DHCP Server (Kea)', desc: 'Deploys Kea itself (kea-dhcp4-server + kea-ctrl-agent on :8001). Runs as its own service on this host; does NOT create a spoke. Load the "DHCP (Kea module)" role to manage it.', deploy: true },
@@ -4505,12 +4505,12 @@ function _cvAddSecretModal(preset) {
       <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} secret — ${escapeHtml(_cvBucketLabel({ bucket: _cvCurrentBucket }))}</h3>
       <input id="cv-add-name" type="text" autocomplete="off" ${nameAttrs} title="A name to identify this secret within the bucket (e.g. 'HE.NET DDNS key', 'Cloudflare token')" class="${_CV_INP}${editing ? ' bg-slate-100 text-slate-500' : ''}">
       <div class="flex gap-2">
-        <select id="cv-add-type" onchange="_cvRenderAddFields()" ${editing ? 'disabled' : ''} class="${_CV_INP}" title="Secret shape — DNS-01 = Let's Encrypt DNS provider creds; HE.NET DDNS key = Hurricane Electric public DNS (shared with LE); others are generic login/key/token">
+        <select id="cv-add-type" onchange="_cvRenderAddFields()" ${editing ? 'disabled' : ''} class="${_CV_INP}" title="Secret shape — DNS-01 = Let's Encrypt DNS provider creds (a 'Hurricane Electric (account login)' DNS-01 secret is ALSO used by the External DNS / HE.NET module, so store just one HE credential); others are generic login/key/token">
           <option value="login"${sel(pType, 'login')}>Login (username + password)</option>
           <option value="apikey"${sel(pType, 'apikey')}>API key</option>
           <option value="token"${sel(pType, 'token')}>Token</option>
           <option value="dns"${sel(pType, 'dns')}>DNS-01 credential (Let's Encrypt)</option>
-          <option value="henet"${sel(pType, 'henet')}>HE.NET DDNS key (Hurricane Electric public DNS)</option>
+          ${(editing && pType === 'henet') ? `<option value="henet" selected>HE.NET DDNS key (Hurricane Electric public DNS)</option>` : ``}
           <option value="generic"${sel(pType, 'generic')}>Generic (key + value)</option>
         </select>
         <select id="cv-add-mode" ${editing ? 'disabled' : ''} class="${_CV_INP}" title="pass-phrase = human-only; automation = hub can read it unattended for tooling">
@@ -22128,11 +22128,11 @@ async function showHenetCredModal() {
         : '';
     openModal('henet-cred-modal', `
         <h3 class="text-lg font-bold text-[#263040]">Assign HE.NET DDNS credential</h3>
-        <p class="text-sm text-slate-500">The HE.NET module uses this Credential Vault secret to push records — assign it once and you won't be asked per record. Add a key under <b>Credential Vault → + Add secret → HE.NET DDNS key</b> (automation mode), or reuse an existing Let's Encrypt <b>Hurricane Electric</b> DNS-01 credential — the same HE key works for both.</p>
+        <p class="text-sm text-slate-500">The HE.NET module uses this Credential Vault secret to push records — assign it once and you won't be asked per record. Use the SAME Hurricane Electric credential as certificates: add it under <b>Credential Vault → + Add secret → DNS-01 credential (Let's Encrypt) → Hurricane Electric (account login)</b> (automation mode), or reuse an existing one — the same HE credential works for both certs and DNS.</p>
         <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">DDNS credential</label>
           ${creds.length
-            ? `<select id="henet-assign-cred" class="${inputCls}" title="Credential Vault HE.NET DDNS key — or a shared Let's Encrypt Hurricane Electric credential — used to push records unattended">${opts}</select>`
-            : `<p class="text-sm text-amber-600 italic">No automation-readable HE.NET credential found in the Credential Vault. Add an “HE.NET DDNS key” (or a Hurricane Electric DNS-01) secret first.</p>`}
+            ? `<select id="henet-assign-cred" class="${inputCls}" title="Credential Vault Hurricane Electric credential (shared with Let's Encrypt DNS-01) used to push records unattended">${opts}</select>`
+            : `<p class="text-sm text-amber-600 italic">No automation-readable Hurricane Electric credential found in the Credential Vault. Add a <b>DNS-01 credential → Hurricane Electric (account login)</b> secret first (it serves both certs and DNS).</p>`}
         </div>
         <div class="flex justify-end gap-2 pt-2">
             ${assigned ? `<button onclick="_henetClearCred()" class="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 px-4 py-2 rounded-md text-sm mr-auto">Clear</button>` : ''}
@@ -22144,7 +22144,7 @@ async function showHenetCredModal() {
 async function _henetSaveCred() {
     const sel = document.getElementById('henet-assign-cred')?.value || '';
     const [bucket, name] = String(sel).split('|');
-    if (!bucket || !name) { showToast('Add an HE.NET DDNS key to the Credential Vault first', 'error'); return; }
+    if (!bucket || !name) { showToast('Add a Hurricane Electric credential to the Credential Vault first', 'error'); return; }
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/credential', {
             method: 'POST',
