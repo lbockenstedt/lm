@@ -55,7 +55,7 @@ The add-secret form (`WebUI/main.js:4486-4625`) supports:
 | `login` | `{username, password}` | generic |
 | `apikey` | `{apikey}` | generic |
 | `token` | `{token}` | generic |
-| `dns` (DNS-01) | `he-login`: `{provider, he_username, he_password}`; others: `{provider, dns_creds}` (INI) | LE (and shared with HE.NET) |
+| `dns` (DNS) | `he-login`: `{provider, he_username, he_password}`; others: `{provider, dns_creds}` (INI) | LE DNS-01 issuance (and shared with HE.NET) |
 | `henet` | `{ddns_key}` | HE.NET (and shared with LE) |
 | `console` | `{credentials: [{username, password}]}` | Console |
 | `generic` | `{[key]: value}` | anything |
