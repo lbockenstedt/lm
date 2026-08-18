@@ -1051,32 +1051,56 @@ def register(app, hub, ctx):
         # agent) is obvious at a glance. Credentials are reported as COUNTS only —
         # never values.
         seeded = getattr(hub, "_console_creds_seeded", None) or set()
-        # Credential inventory the seeder ACTUALLY uses — resolved per visible
-        # spoke's tenant, Credential-Vault (``console``-typed) secrets first and
-        # then the legacy hub-state / keyvault-ref list, de-duped. Mirrors
-        # _console_seed_credentials so the banner reflects vault-managed console
-        # logins instead of falsely warning "0 saved / factory defaults only"
-        # whenever the creds live in the vault rather than the legacy store.
+        # Console credential inventory available to the CALLER — a hub-level fact
+        # independent of which console spokes are currently connected: the
+        # Credential-Vault ``console``-typed secrets in the buckets the caller can
+        # reach (a tenant admin → its own tenants + the admin slot; a Global Admin
+        # → every bucket), plus the legacy hub-state / keyvault-ref list. Mirrors
+        # what _console_seed_credentials pushes, so the banner never falsely warns
+        # "0 saved / factory defaults only" when the creds live in the vault.
+        # Counts only — never values.
         saved_creds, _seen_c, vault_present = [], set(), False
-        for sid in spokes:
-            stn = hub.state.get_spoke_tenant(sid) or ""
-            try:
-                if await _console_creds_for_tenant(hub, stn):
+        try:
+            import cred_vault as _cv
+            if admin:
+                _recs = await _cv.automation_list_by_type(hub, "console", None)
+            else:
+                _reach = list((sess or {}).get("user", {}).get("tenants") or [])
+                _buckets = list(dict.fromkeys([_cv.ADMIN_BUCKET] + _reach))
+                _recs = await _cv.automation_list_by_type(hub, "console", _buckets)
+            for _rec in _recs:
+                _cc = _console_creds_from_cred_vault(_rec.get("value"))
+                if _cc:
                     vault_present = True
-            except Exception:  # noqa: BLE001 - debug must never blank the report
-                pass
-            try:
-                for c in await _console_load_credentials_resolved(hub, stn):
+                for c in _cc:
                     k = (c.get("username"), c.get("password"))
                     if k not in _seen_c:
                         _seen_c.add(k)
                         saved_creds.append(c)
-            except Exception:  # noqa: BLE001
+            # Legacy admin-slot named list secret (backward-compat).
+            try:
+                for c in _console_creds_from_cred_vault(
+                        await _cv.automation_get(hub, _cv.ADMIN_BUCKET, _CONSOLE_VAULT_SECRET)):
+                    k = (c.get("username"), c.get("password"))
+                    if k not in _seen_c:
+                        _seen_c.add(k)
+                        saved_creds.append(c)
+                        vault_present = True
+            except Exception:  # noqa: BLE001 — absent / unreadable
                 pass
+        except Exception:  # noqa: BLE001 — vault not configured / unavailable
+            pass
+        # Legacy hub-state / keyvault-ref list (backward-compat).
         try:
-            legacy_present = bool(_console_load_credentials(hub))
-        except Exception:  # noqa: BLE001
-            legacy_present = False
+            _legacy = _console_load_credentials(hub)
+        except Exception:  # noqa: BLE001 - debug must never blank the report
+            _legacy = []
+        legacy_present = bool(_legacy)
+        for c in _legacy:
+            k = (c.get("username"), c.get("password"))
+            if k not in _seen_c:
+                _seen_c.add(k)
+                saved_creds.append(c)
         if vault_present:
             cred_source = "credential vault" + (" + legacy" if legacy_present else "")
         elif _console_creds_keyvault_backed(hub):
