@@ -21,6 +21,7 @@ Global Admin); this module enforces per-record ownership on top of that.
 """
 import copy
 
+import instance_vault
 from api import (
     HTTPException, Request, _hub_msg, access, logger, uuid,
 )
@@ -111,11 +112,13 @@ def register(app, hub, ctx):
             mine = [d for d in devices if isinstance(d, dict) and d.get("spoke_id") == spoke_id]
             if not mine:
                 mine = [d for d in devices if isinstance(d, dict) and not d.get("spoke_id")]
+            mine = await instance_vault.overlay_many(hub, mine, prod["key"])
             payload = {"devices": [copy.deepcopy(d) for d in mine]}
             await hub.send_to_spoke(_hub_msg(spoke_id, "UPDATE_CONFIG", payload))
             return True
         if mode == "instance":
             fn = prod.get("payload_fn")
+            record = await instance_vault.overlay(hub, record, prod["key"])
             payload = fn(record) if fn else None
             if not payload:
                 return False
@@ -254,6 +257,9 @@ def register(app, hub, ctx):
                 # tenant_id is server-assigned from the bound spoke — never trust
                 # a client-supplied tenant on the way in.
                 rec["tenant_id"] = _bind_gate(sess, _prod, spoke_id)
+                await instance_vault.validate_ref(
+                    hub, rec, sess, is_admin=access.is_admin(sess), storage_key=_prod["key"])
+                instance_vault.strip_inline_secrets(rec, _prod["key"])
                 if "id" not in rec:
                     rec["id"] = str(uuid.uuid4())
                 records = _store(_prod)
@@ -286,6 +292,9 @@ def register(app, hub, ctx):
                 if new_spoke and new_spoke != rec.get("spoke_id"):
                     upd["tenant_id"] = _bind_gate(sess, _prod, new_spoke)
                 rec.update(upd)
+                await instance_vault.validate_ref(
+                    hub, rec, sess, is_admin=access.is_admin(sess), storage_key=_prod["key"])
+                instance_vault.strip_inline_secrets(rec, _prod["key"])
                 _save(_prod, _store(_prod))
                 pushed = await _push_record(_prod, rec)
                 return {"status": "ok" if pushed else "partial_success", "pushed": pushed}

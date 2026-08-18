@@ -2269,6 +2269,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # reader (shared-tenant-flag invariant). Read via access (cached
                 # at startup + tenant writes) to avoid a circular import here.
                 import access as _access
+                import instance_vault as _instance_vault
+                mine = await _instance_vault.overlay_many(self, mine, "nw_devices")
                 config = {"devices": _project_nw_devices(mine),
                           "shared_tenant_id": _access.shared_tenant_id() or "",
                           "default_poll_interval":
@@ -2324,6 +2326,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 if inst is None and instances and isinstance(instances[0], dict):
                     inst = instances[0]
                 if inst is not None:
+                    import instance_vault as _instance_vault
+                    inst = await _instance_vault.overlay(self, inst, storage_key)
                     config = project(inst)
                 else:
                     # Pre-multi-instance deployment: push the raw legacy config.
