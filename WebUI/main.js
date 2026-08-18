@@ -16913,6 +16913,9 @@ function _renderConsolePorts(el, data) {
         const label = p.alias || identHost || p.product || p.device;
         const baud = (p.settings && p.settings.baud) || '—';
         const inUse = p.in_use ? ` <span class="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold uppercase">In use</span>` : '';
+        const staleBadge = p.stale ? ` <span title="Console agent offline — showing last-known data (names/settings restored from cache). Live status resumes when the agent reconnects." class="text-[10px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 font-bold uppercase">offline</span>` : '';
+        const disconnectedBadge = (p.present === false && !p.stale) ? ` <span title="Device not connected right now (adapter unplugged or target powered off). Its saved name is retained; the port reappears live when it reconnects." class="text-[10px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-500 font-bold uppercase">disconnected</span>` : '';
+        const unreachable = (p.present === false || p.stale);
         const monDot = (p.monitoring && !p.in_use)
             ? ` <span title="Passively monitoring — capturing console output while idle" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-bold uppercase">● monitoring</span>` : '';
         const bootBadge = _consoleBootBadge(p.boot);
@@ -16927,12 +16930,14 @@ function _renderConsolePorts(el, data) {
         const dpaBadge = (p.dpa && p.dpa.telnet_port)
             ? `<div class="text-[11px] mt-0.5"><span class="font-mono px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200" title="Direct Port Access — connect a terminal straight to this serial line (unencrypted telnet; bound to ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))})">🔌 ${escapeHtml(String(p.dpa.proto || 'telnet'))} ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))}:${escapeHtml(String(p.dpa.telnet_port))}</span></div>` : '';
         return `<tr class="hover:bg-slate-50">
-            <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${monDot}${bootBadge}</div>
+            <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${staleBadge}${disconnectedBadge}${monDot}${bootBadge}</div>
               <div class="text-xs font-mono text-slate-400" title="${escapeHtml(p.spoke_id || '')}">${escapeHtml(tenantId)}:${escapeHtml(agentName)}:${escapeHtml(p.device)}:${escapeHtml(String(baud))}</div>
               ${dpaBadge}
               ${_consoleIdentityBlock(p)}</td>
             <td class="px-4 py-3 text-right whitespace-nowrap space-x-1">
-              <button onclick="openConsoleTerminal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold">🖥 Open</button>
+              ${unreachable
+                ? `<button disabled title="Device not connected — reconnect it to open a session" class="text-[11px] px-2 py-1 rounded bg-slate-100 text-slate-400 border border-slate-200 font-bold cursor-not-allowed">🖥 Open</button>`
+                : `<button onclick="openConsoleTerminal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold">🖥 Open</button>`}
               ${profileBtn}
               ${captureBtn}
               <button onclick="openConsoleSettingsModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Settings</button>

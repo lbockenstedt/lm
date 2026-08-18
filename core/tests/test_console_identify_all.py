@@ -32,9 +32,17 @@ class _Hub:
     def __init__(self, ports):
         self._ports = ports
         self.state = _State()
+        self.warm_cache = {}
 
     def get_all_spokes_by_type(self, kind):
         return ["c1"] if kind == "console" else []
+
+    def warm_get(self, namespace, key="_"):
+        entry = self.warm_cache.get(namespace, {}).get(str(key))
+        return entry.get("data") if isinstance(entry, dict) else None
+
+    async def warm_set(self, namespace, key, data):
+        self.warm_cache.setdefault(namespace, {})[str(key)] = {"data": data}
 
     async def request_response(self, sid, cmd, payload, timeout=15.0):
         if cmd == "CONSOLE_LIST_PORTS":
