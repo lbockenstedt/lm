@@ -12475,6 +12475,13 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
             // agents carry it in client_simulation.tenant_id (per-agent config).
             const rowTenant = isSpokeKind ? (a.tenant_id || '') : (a.client_simulation?.tenant_id || '');
             const eTenant = rowTenant.replace(/'/g, "\\'");
+            // The owning spoke is already known on the rendered row (pxmx agents
+            // carry spoke_id — see get_pxmx_agents). Pass it straight to Approve
+            // so it never has to re-resolve via a tenant-scoped fetch, which
+            // silently dropped the agent when its owning spoke was bound to a
+            // different tenant than the picker (approval dead-ended with "could
+            // not determine which spoke owns this agent").
+            const eSpoke = String(a.spoke_id || '').replace(/'/g, "\\'");
             // Active Role line: a keyed placeholder for connected generic agents
             // that is filled async after paint (no barrier). Proxmox node agents
             // have no roles; pending generic agents show an em-dash.
@@ -12549,7 +12556,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                         ? _mgmtBtn('Load Role', `showLoadRoleModal('${eAid}')`, 'bg-white hover:bg-slate-50 text-[#01A982] border border-[#01A982]')
                         : '',
                     isPending
-                        ? _mgmtBtn('Approve', `${approveFnName}('${eAid}')`, 'bg-blue-600 hover:bg-blue-700 text-white')
+                        ? _mgmtBtn('Approve', isSpokeKind ? `${approveFnName}('${eAid}')` : `${approveFnName}('${eAid}','${eSpoke}')`, 'bg-blue-600 hover:bg-blue-700 text-white')
                         // Spoke-kind agents move Un-approve into Edit; pxmx agents
                         // keep revoke on the row (its Edit is a separate config modal).
                         // An OFFLINE agent has nothing to un-approve (no live link) —
@@ -12851,37 +12858,38 @@ function _renderSpokesSummary(diagData) {
     `;
 }
 
-async function approveAgent(agentId) {
-    // Resolve the spoke that actually owns this agent from the same
-    // aggregated list the Agents tile renders from (now tagged with
-    // spoke_id — see get_pxmx_agents in api.py), rather than assuming a
-    // hypervisor (pxmx) spoke: a cs-dialed agent in the split-topology case
-    // is not on pxmx at all, and hardcoding that lookup either routed the
-    // approval to the wrong spoke (silently no-op — the agent stays pending
-    // forever) or blocked approval outright when no pxmx spoke was connected.
-    let spokeId = null;
-    try {
-        const res = await fetch('/api/pxmx/agents?tenant=' + encodeURIComponent(currentTenant), { credentials: 'same-origin' });
-        const data = res.ok ? await res.json() : {};
-        // offline_agents too: its rows carry spoke_id (routes/pxmx.py
-        // _offline_relay_agents), and an agent whose parent spoke is briefly
-        // disconnected appears ONLY there. Omitting it made Approve fail with
-        // "could not determine which spoke owns this agent" for a row the
-        // operator can plainly see in the tile.
-        const all = [...(data.agents || []), ...(data.pending_agents || []),
-                     ...(data.offline_agents || [])];
-        const found = all.find(a => a.agent_id === agentId);
-        spokeId = found && found.spoke_id;
-    } catch (e) { console.error('approveAgent: could not resolve owning spoke', e); }
+async function approveAgent(agentId, knownSpokeId) {
+    // Prefer the spoke_id the caller already has from the rendered row — the
+    // Agents tile tags every agent with its owning spoke_id (see
+    // get_pxmx_agents), so re-deriving it is unnecessary and was actively
+    // harmful: the old resolve fetched /api/pxmx/agents scoped to the tenant
+    // PICKER, which drops any agent whose owning spoke is bound to a different
+    // tenant (e.g. a hypervisor spoke on tenant "shared" while the picker is
+    // on "lrb"). That made Approve dead-end with "could not determine which
+    // spoke owns this agent" even though the row was plainly visible, and it
+    // never POSTed at all.
+    let spokeId = knownSpokeId || null;
     if (!spokeId) {
-        // The other way this misses: /api/pxmx/agents filters by the tenant
-        // picker, keeping only agents whose OWNING SPOKE carries a matching
-        // module_metadata tenant_id. A spoke that is not yet bound to a tenant
-        // (freshly onboarded, or unassigned) therefore hides its agents from
-        // every tenant-scoped view — so say that, instead of a dead end.
-        showToast('Could not determine which spoke owns this agent — its spoke may be '
-                  + 'unbound or not visible under the selected tenant. Switch the tenant '
-                  + 'picker to All and retry.', 'error');
+        try {
+            // Fallback resolve is deliberately tenant-AGNOSTIC (no ?tenant=):
+            // approval is an admin action and must not depend on the picker.
+            const res = await fetch('/api/pxmx/agents', { credentials: 'same-origin' });
+            const data = res.ok ? await res.json() : {};
+            // offline_agents too: its rows carry spoke_id (routes/pxmx.py
+            // _offline_relay_agents), and an agent whose parent spoke is briefly
+            // disconnected appears ONLY there.
+            const all = [...(data.agents || []), ...(data.pending_agents || []),
+                         ...(data.offline_agents || [])];
+            const found = all.find(a => a.agent_id === agentId);
+            spokeId = found && found.spoke_id;
+        } catch (e) { console.error('approveAgent: could not resolve owning spoke', e); }
+    }
+    if (!spokeId) {
+        // Genuinely no owning spoke on record — the agent hasn't been relayed
+        // by any connected spoke yet. This is now a true dead-end, not a
+        // tenant-visibility artifact.
+        showToast('Could not determine which spoke owns this agent — its owning '
+                  + 'spoke may not be connected yet. Retry once the spoke is online.', 'error');
         return;
     }
     try {
