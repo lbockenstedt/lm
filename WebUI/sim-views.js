@@ -10675,7 +10675,16 @@ window.csClearUsbHistory = async function (host) {
                + '— only currently-attached dongles are re-learned. Use this only '
                + 'after a deliberate hardware change (dongles moved / ports '
                + 'rewired / a controller card pulled).')) return;
-    _csUsbClearCmd(host, 'clear_usb_history', 'Dongle history purged on all spokes — missing counts rebuild from what is attached now', true);
+    await _csUsbClearCmd(host, 'clear_usb_history', 'Dongle history purged on all spokes — missing counts rebuild from what is attached now', true);
+    // The purge is ENQUEUED to each cs spoke; the pxmx agent runs it on its next
+    // inbox poll (a few seconds later) and only then scrubs its telemetry. A
+    // re-render now would still show the pre-purge roster, so refresh the panel
+    // a couple of times as the agents catch up (csRenderDongleDiag no-ops if the
+    // operator has since navigated away).
+    if (typeof csRenderDongleDiag === 'function') {
+        setTimeout(() => csRenderDongleDiag(), 5000);
+        setTimeout(() => csRenderDongleDiag(), 15000);
+    }
 };
 
 // No confirm dialog: the action is cheap and self-repairing — a dongle that is
