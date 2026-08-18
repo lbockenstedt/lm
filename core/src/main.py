@@ -3422,6 +3422,41 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self.record_spoke_event(spoke_id, "psk_self_provision", f"tenant={tenant_hint}")
         return True
 
+    @staticmethod
+    def _infer_sim_spoke_tenant(proxmox_hosts, agent_config) -> Optional[str]:
+        """The single tenant that a simulation spoke's backing CS-enabled agents
+        agree on (from ``client_simulation.tenant_id``), else ``None``.
+
+        Joins the spoke's ``proxmox_hosts`` (which carry the pxmx hostname, not an
+        agent_id) against ``agent_config`` by hostname — entries are keyed by
+        agent_id OR hostname, so do an exact hit then a tolerant value-scan on the
+        stored ``hostname``/``display_name`` (mirrors service._agent_cs_enabled /
+        cs_bridge._agent_config_entry). Only counts agents with CS enabled AND a
+        tenant_id. Returns a tenant only when EXACTLY one distinct tenant is found
+        (a shared spoke aggregating mixed tenants → ``None``, left for the
+        operator); ``None`` on no match so the caller leaves the spoke unbound."""
+        if not isinstance(proxmox_hosts, list) or not proxmox_hosts:
+            return None
+        store = agent_config if isinstance(agent_config, dict) else {}
+        tenants = set()
+        for h in proxmox_hosts:
+            hn = str((h or {}).get("hostname") or "").strip().lower()
+            if not hn:
+                continue
+            entry = store.get(hn) if isinstance(store.get(hn), dict) else None
+            if entry is None:
+                for v in store.values():
+                    if not isinstance(v, dict):
+                        continue
+                    alt = str(v.get("hostname") or v.get("display_name") or "").strip().lower()
+                    if alt and alt == hn:
+                        entry = v
+                        break
+            cs = (entry or {}).get("client_simulation") or {}
+            if cs.get("enabled") and cs.get("tenant_id"):
+                tenants.add(cs.get("tenant_id"))
+        return next(iter(tenants)) if len(tenants) == 1 else None
+
     async def _handle_cs_telemetry(self, spoke_id: str, cs_data) -> None:
         """Ingest a CS_TELEMETRY frame from a combined cs / unified pxmx spoke.
 
@@ -3456,7 +3491,29 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # the hub just no longer gates on it.)
         self.simulations_cache[pk] = cs_data
         self._sim_cache_dirty = True  # warm-load snapshot flushed by run_sim_cache_flush_loop
-        # Spoke-reported drain state (mid self-update). ``draining: true`` keeps
+        # Self-heal an UNBOUND simulation spoke's tenant from its backing agent's
+        # pinned client_simulation.tenant_id. A cs spoke that was approved without
+        # a tenant (module_metadata tenant_id unset) is invisible to BOTH the
+        # per-tenant Simulation VM Server view (service._spokes_for_tenant) and
+        # the per-tenant Hypervisor Overview (get_hypervisor_spokes_for_tenant) —
+        # they key off the SPOKE's tenant. When the spoke's own proxmox host(s)
+        # are backed by a CS-enabled agent that carries a client_simulation
+        # tenant_id (the operator's pin), that binding is authoritative, so
+        # inherit it onto the spoke. Never overrides an existing binding; only
+        # fires when the backing agents agree on ONE tenant (a shared spoke with
+        # mixed tenants is left for the operator). Best-effort — never break ingest.
+        try:
+            if not self.state.get_spoke_tenant(pk):
+                _tid = self._infer_sim_spoke_tenant(
+                    cs_data.get("proxmox_hosts"),
+                    self.state.system_state.get("agent_config", {}) or {})
+                if _tid:
+                    self.state.set_spoke_tenant(pk, _tid)
+                    self.state._mark_dirty()
+                    logger.info("[cs-tenant-heal] bound unbound simulation spoke %s to "
+                                "tenant %s (from pinned agent client_simulation)", pk[:8], _tid)
+        except Exception:  # noqa: BLE001 — tenant self-heal must never break ingest
+            pass
         # the hub from firing request/reply commands at a spoke that's about to
         # os._exit+relaunch (config pushes queue to the mailbox instead). A
         # spoke that just restarted reports ``draining: false`` on its first
