@@ -819,7 +819,11 @@ def build_available_targets(spoke_module_types: Dict[str, str],
         # _cert_target_spoke's identifier handling in hub_spoke_registry.py.
         targets.append({"module_type": mt, "identifier": sid,
                         "label": label, "spoke_id": sid})
-    # Agent-hosting: each connected pxmx agent = a per-node target.
+    # Agent-hosting: each connected pxmx agent = a per-node target. Stamp the
+    # owning spoke_id so tenant-scoping (target_owner_tenant) can resolve the
+    # node's spoke directly instead of via the ~30s-lagging agent_info index — a
+    # non-simulation pxmx agent has no client_simulation tenant pin to fall back
+    # on, so without this it would drop out of a tenant-admin's target list.
     for a in agents or []:
         mt = spoke_module_types.get(a.get("spoke_id"))
         if mt not in capable:
@@ -827,7 +831,8 @@ def build_available_targets(spoke_module_types: Dict[str, str],
         aid = a.get("agent_id") or ""
         label = a.get("display_name") or a.get("hostname") or aid
         targets.append({"module_type": mt, "identifier": aid,
-                        "label": f"{mt}/{label}", "agent_id": aid})
+                        "label": f"{mt}/{label}", "agent_id": aid,
+                        "spoke_id": a.get("spoke_id")})
     # "all nodes" broadcast entry per connected agent-hosting spoke. Include the
     # spoke's display name so multiple spokes of the SAME agent-hosting type
     # (e.g. three "simulation" cs spokes) render as DISTINCT entries instead of
@@ -894,6 +899,15 @@ def target_owner_tenant(target, spoke_tenant, agent_spoke, agent_tenant=None):
     node lives under a shared pxmx spoke could see/drive its console but NOT
     select it as an LE cert destination.
 
+    Per-node spoke fallback: a per-node target's owning spoke is taken from the
+    target's own ``spoke_id`` when present (``build_available_targets`` stamps
+    it), falling back to the live ``agent_spoke`` index only when it isn't. The
+    index (``agent_info``) lags connect by ~30s and is evicted on disconnect, so
+    a non-simulation pxmx agent — which, unlike a cs sim agent, usually has NO
+    ``client_simulation`` pin — would otherwise resolve to ``""`` and vanish from
+    a tenant-admin's destination list even though its hypervisor spoke IS bound
+    to their tenant. The stamped ``spoke_id`` makes that resolution reliable.
+
     ``spoke_tenant``: callable ``spoke_id -> tenant_id`` ("" if none).
     ``agent_spoke``:  callable ``agent_id -> spoke_id`` ("" if unknown).
     ``agent_tenant``: optional callable ``agent_id -> tenant_id`` (the node's own
@@ -904,17 +918,22 @@ def target_owner_tenant(target, spoke_tenant, agent_spoke, agent_tenant=None):
     mt = (target.get("module_type") or "").strip()
     if mt == "hub":
         return ""
-    sid = (target.get("spoke_id") or "").strip()
-    if not sid:
-        ident = str(target.get("identifier") or target.get("agent_id") or "").strip()
-        if mt in ("hypervisor", "simulation") and ident:
+    spoke_id = (target.get("spoke_id") or "").strip()
+    if mt in ("hypervisor", "simulation"):
+        # A non-empty agent id/identifier ⇒ a per-node agent target; an empty one
+        # with a spoke_id ⇒ the "all nodes" broadcast (spoke-level).
+        node = str(target.get("agent_id") or target.get("identifier") or "").strip()
+        if node:
             if agent_tenant is not None:
-                atid = (agent_tenant(ident) or "").strip()
+                atid = (agent_tenant(node) or "").strip()
                 if atid:
                     return atid
-            sid = (agent_spoke(ident) or "").strip()
-        else:
-            sid = ident
+            sid = spoke_id or (agent_spoke(node) or "").strip()
+            return (spoke_tenant(sid) or "").strip() if sid else ""
+        return (spoke_tenant(spoke_id) or "").strip() if spoke_id else ""
+    # Non-agent-hosting spoke-level target: identifier IS the spoke_id when the
+    # explicit spoke_id isn't set.
+    sid = spoke_id or str(target.get("identifier") or "").strip()
     if not sid:
         return ""
     return (spoke_tenant(sid) or "").strip()
