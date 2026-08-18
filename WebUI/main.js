@@ -3597,8 +3597,7 @@ function _viewTemplate(viewId) {
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Onboarding Keys</h3>
       <button onclick="_myDevGenPsk()" class="${btn}">+ Generate Key</button>
     </div>
-    <p class="text-xs text-slate-400 mb-3">A one-time onboarding key lets a new spoke register and bind to your tenant automatically, without an admin. Generate a key, run the install command on the new server, then revoke the key once it has connected.</p>
-    <div id="my-psk-cmd" class="hidden mb-3"></div>
+    <p class="text-xs text-slate-400 mb-3">A one-time onboarding key lets a new spoke register and bind to your tenant automatically, without an admin. Generate a key, copy the install command shown beneath it (hub address and key are pre-filled — just replace <code>&lt;MODULE&gt;</code>), run it on the new server, then revoke the key once it has connected.</p>
     <div id="my-psk-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
   </div>
 </div>`;
@@ -14527,38 +14526,50 @@ async function loadMyDevicePsks() {
         const r = await apiJson(`/tenant/${encodeURIComponent(tenant)}/onboarding-psk`);
         const keys = (r && r.psks) || [];
         if (!keys.length) { el.innerHTML = '<p class="text-xs text-slate-400 italic">No active onboarding keys.</p>'; return; }
-        el.innerHTML = keys.map((k) => `<div class="flex items-center justify-between border border-slate-100 rounded-md px-3 py-2">
-            <code class="text-[11px] font-mono text-slate-600 break-all">${escapeHtml(k)}</code>
-            <button onclick="_myDevRevokePsk('${escapeHtml(k)}')" class="ml-3 text-xs text-red-500 hover:underline shrink-0">Revoke</button></div>`).join('');
+        el.innerHTML = keys.map((k, i) => {
+            const cmd = _myDevInstallCmd(k, tenant);
+            return `<div class="border border-slate-100 rounded-md px-3 py-2">
+                <div class="flex items-center justify-between gap-3">
+                    <code class="text-[11px] font-mono text-slate-600 break-all">${escapeHtml(k)}</code>
+                    <button onclick="_myDevRevokePsk('${escapeHtml(k)}')" class="text-xs text-red-500 hover:underline shrink-0">Revoke</button>
+                </div>
+                <p class="text-[11px] font-bold text-slate-500 mt-2 mb-1">Install command (replace <code>&lt;MODULE&gt;</code>, e.g. <code>simulation</code>):</p>
+                <pre id="my-psk-cmd-${i}" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">${escapeHtml(cmd)}</pre>
+                <button onclick="_myDevCopyEl('my-psk-cmd-${i}')" class="mt-1 text-xs text-[#01A982] hover:underline">Copy command</button>
+            </div>`;
+        }).join('');
     } catch (e) {
         console.error('loadMyDevicePsks failed', e);
         el.innerHTML = `<p class="text-xs text-red-500 italic">Failed to load keys: ${escapeHtml(e.message || 'error')}</p>`;
     }
 }
 
+// Build the one-line installer for an onboarding key, with the hub address and
+// PSK/tenant pre-filled so the operator only substitutes <MODULE>. The hub is
+// the very host serving this WebUI (location.host) — the same origin the admin
+// is already talking to — matching install_agent.sh's `--hub wss://HOST[:port]`.
+function _myDevInstallCmd(psk, tenant) {
+    const hub = (typeof location !== 'undefined' && location.host) ? `wss://${location.host}` : 'auto';
+    return `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \\\n`
+        + `  | sudo bash -s -- --hub ${hub} --roles <MODULE> --onboarding-psk ${psk} --tenant-hint ${tenant}`;
+}
+
 async function _myDevGenPsk() {
     const tenant = _myDevTenant();
     if (!tenant) { if (typeof showToast === 'function') showToast('Select a tenant first', 'error'); return; }
-    const area = document.getElementById('my-psk-cmd');
     try {
-        const r = await apiJson(`/tenant/${encodeURIComponent(tenant)}/onboarding-psk`, { method: 'POST', body: '{}' });
-        if (area) {
-            const cmd = `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \\\n  | sudo bash -s -- --roles <MODULE> --onboarding-psk ${r.psk} --tenant-hint ${tenant}`;
-            area.classList.remove('hidden');
-            area.innerHTML = `<p class="text-xs font-bold text-slate-600 mb-1">Run this on the new spoke (replace <code>&lt;MODULE&gt;</code>, e.g. <code>simulation</code>):</p>
-                <pre id="my-psk-cmd-text" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">${escapeHtml(cmd)}</pre>
-                <button onclick="_myDevCopyCmd()" class="mt-2 text-xs text-[#01A982] hover:underline">Copy command</button>
-                <p class="mt-2 text-[11px] text-slate-400">Single-use for onboarding; it does not expire on its own. Revoke it once the spoke has connected.</p>`;
-        }
+        await apiJson(`/tenant/${encodeURIComponent(tenant)}/onboarding-psk`, { method: 'POST', body: '{}' });
+        // The new key (with its copy-paste install command) renders in the list.
         loadMyDevicePsks();
+        if (typeof showToast === 'function') showToast('Onboarding key generated', 'success');
     } catch (e) {
         console.error('_myDevGenPsk failed', e);
         if (typeof showToast === 'function') showToast(e.message, 'error');
     }
 }
 
-function _myDevCopyCmd() {
-    const el = document.getElementById('my-psk-cmd-text');
+function _myDevCopyEl(id) {
+    const el = document.getElementById(id);
     if (!el) return;
     navigator.clipboard.writeText(el.textContent || '');
     if (typeof showToast === 'function') showToast('Copied', 'success');
