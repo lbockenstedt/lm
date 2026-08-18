@@ -50,6 +50,16 @@ class _Hub:
     def get_hypervisor_spoke_for_tenant(self, tid=None):
         return self._bound
 
+    def get_hypervisor_spokes_for_tenant(self, tid=None):
+        # Plural tenant-scoped resolver: the single bound spoke (if any),
+        # mirroring the pre-fix bound_spoke semantics for these tests.
+        return [self._bound] if self._bound else []
+
+    def get_all_spokes_by_type(self, module_type):
+        if module_type == "hypervisor":
+            return [self._global] if self._global else []
+        return []
+
     def get_hypervisor_spoke(self):
         return self._global
 

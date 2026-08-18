@@ -74,6 +74,15 @@ class _Hub:
     def get_hypervisor_spoke(self):
         return self._spoke
 
+    def get_all_spokes_by_type(self, module_type):
+        # Only a hypervisor spoke in these warm-cache fakes; simulation empty.
+        if module_type == "hypervisor":
+            return [self._spoke] if self._spoke else []
+        return []
+
+    def get_spoke_for_agent(self, agent_id, fallback_hypervisor=True):
+        return self._spoke
+
     async def request_response(self, sid, cmd, payload, timeout=30.0,
                                signing_secret=None):
         if self.fail_live:

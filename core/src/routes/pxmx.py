@@ -298,6 +298,109 @@ async def _maybe_refresh_agents(hub, agent_spokes, force=False):
             _AGENTS_CACHE["refreshing"] = False
 
 
+async def _aggregate_pxmx_vms(hub, spokes, payload, timeout=30.0):
+    """Fan ``PXMX_LIST_VMS`` out to EVERY given agent-hosting spoke CONCURRENTLY
+    and merge the responses into one ``{vms, nodes, spoke_connected}`` envelope.
+
+    A Proxmox host can be hosted by a hypervisor (pxmx) spoke OR a simulation
+    (cs) spoke — a CS-enabled box dials the cs spoke's ``/ws/agent`` directly
+    yet must still appear in the Hypervisors VM list (it can run a MIX of infra
+    + sim-client VMs). The old single-``get_hypervisor_spoke()`` path preferred
+    the pxmx spoke and silently hid every sim-hosted host in a mixed deployment;
+    fanning out mirrors the Agents tile (``_aggregate_agents``) so both host
+    kinds show up. Tenant isolation is unchanged — the caller still runs the
+    merged list through ``_filter_tenant`` (subnet / tag scoping per reader).
+
+    One slow / dead spoke never blocks the others (bounded ``_FANOUT_SEM`` +
+    per-request timeout) and never drops the rest — a per-spoke failure is
+    logged and skipped so a still-reachable host stays visible. Raises only if
+    EVERY spoke fails, so the caller's warm-cache fallback still triggers.
+    Module-level (depends only on ``hub`` + the spoke list) for testability.
+    """
+    async def _one(sid):
+        async with _FANOUT_SEM:
+            res = await hub.request_response(sid, "PXMX_LIST_VMS", payload, timeout=timeout)
+        return res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
+
+    results = await asyncio.gather(*(_one(sid) for sid in spokes), return_exceptions=True)
+    merged_vms: list = []
+    merged_nodes: list = []
+    extras: dict = {}
+    any_ok = False
+    last_err = None
+    for sid, r in zip(spokes, results):
+        if isinstance(r, Exception):
+            last_err = r
+            logger.warning("PXMX_LIST_VMS fan-out: spoke %s failed: %s", sid, r)
+            continue
+        any_ok = True
+        if isinstance(r, dict):
+            vms = r.get("vms")
+            if isinstance(vms, list):
+                merged_vms.extend(vms)
+            nodes = r.get("nodes")
+            if isinstance(nodes, list):
+                merged_nodes.extend(nodes)
+            # Preserve any other top-level scalars (e.g. proxmox_tag echo) from
+            # the first spoke that set them, without letting a later spoke clobber.
+            for k, v in r.items():
+                if k not in ("vms", "nodes", "spoke_connected"):
+                    extras.setdefault(k, v)
+    if not any_ok:
+        # Every spoke failed → re-raise so the caller falls back to the warm cache.
+        raise last_err if last_err else RuntimeError(
+            "no agent-hosting spoke answered PXMX_LIST_VMS")
+    out = dict(extras)
+    out["vms"] = merged_vms
+    if merged_nodes:
+        out["nodes"] = merged_nodes
+    out["spoke_connected"] = True
+    return out
+
+
+async def _aggregate_pxmx_nodes(hub, spokes, timeout=30.0):
+    """Fan ``GET_NODE_STATS`` out to every given agent-hosting spoke and merge
+    the ``nodes`` lists into one ``{nodes, spoke_connected}`` envelope — the
+    Overview twin of ``_aggregate_pxmx_vms``. Without this, a CS/sim-hosted host
+    lists its VMs (via the fanned-out VM list) but shows a BLANK Overview
+    (the classic 'VMs present, Overview empty' asymmetry) because node stats came
+    from a single spoke. Callers pass an ALREADY tenant-scoped spoke list (only
+    spokes bound to the reader's tenant, or the global set for an admin) so this
+    never widens tenant visibility. One slow/dead spoke is logged and skipped;
+    raises only if EVERY spoke fails so the caller's warm-cache fallback fires.
+    """
+    async def _one(sid):
+        async with _FANOUT_SEM:
+            res = await hub.request_response(sid, "GET_NODE_STATS", {}, timeout=timeout)
+        return res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
+
+    results = await asyncio.gather(*(_one(sid) for sid in spokes), return_exceptions=True)
+    merged_nodes: list = []
+    extras: dict = {}
+    any_ok = False
+    last_err = None
+    for sid, r in zip(spokes, results):
+        if isinstance(r, Exception):
+            last_err = r
+            logger.warning("GET_NODE_STATS fan-out: spoke %s failed: %s", sid, r)
+            continue
+        any_ok = True
+        if isinstance(r, dict):
+            nodes = r.get("nodes")
+            if isinstance(nodes, list):
+                merged_nodes.extend(nodes)
+            for k, v in r.items():
+                if k not in ("nodes", "spoke_connected"):
+                    extras.setdefault(k, v)
+    if not any_ok:
+        raise last_err if last_err else RuntimeError(
+            "no agent-hosting spoke answered GET_NODE_STATS")
+    out = dict(extras)
+    out["nodes"] = merged_nodes
+    out["spoke_connected"] = True
+    return out
+
+
 def register(app, hub, ctx):
     """Register pxmx routes on the Hub app."""
     _session_user = ctx._session_user
@@ -525,7 +628,9 @@ def register(app, hub, ctx):
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="Admin only")
         hub = app.state.hub
-        pxmx_spokes = hub.get_all_spokes_by_type("hypervisor")
+        pxmx_spokes = list(dict.fromkeys(
+            hub.get_all_spokes_by_type("hypervisor")
+            + hub.get_all_spokes_by_type("simulation")))
 
         async def _one(sid):
             try:
@@ -1013,9 +1118,22 @@ def register(app, hub, ctx):
         # resolvable tenant still fails closed rather than the old flat 403.
         tid = _resolve_tenant(request, tenant)
         if tid and tid != "default":
-            pxmx_spoke = hub.get_hypervisor_spoke_for_tenant(tid) or hub.get_hypervisor_spoke()
+            # Every agent-hosting spoke (pxmx AND cs) BOUND to this tenant — a
+            # CS-enabled box on a cs spoke must contribute its node to the tenant's
+            # Overview too. Strictly tenant-scoped (no cross-tenant host leak). Fall
+            # back to the GLOBAL hypervisor spoke when nothing is bound so a
+            # connected-but-unbound host's Overview still matches its (subnet-
+            # filtered) VM list — the pre-existing behavior, unchanged.
+            node_spokes = hub.get_hypervisor_spokes_for_tenant(tid)
+            if not node_spokes:
+                gs = hub.get_hypervisor_spoke()
+                node_spokes = [gs] if gs else []
         elif _is_admin(sess):
-            pxmx_spoke = hub.get_hypervisor_spoke()
+            # Admin, no tenant selected ("All") → every node across every
+            # agent-hosting spoke (was: a single spoke, hiding sim-hosted hosts).
+            node_spokes = list(dict.fromkeys(
+                hub.get_all_spokes_by_type("hypervisor")
+                + hub.get_all_spokes_by_type("simulation")))
         else:
             raise HTTPException(status_code=403, detail="Select a tenant to view its hypervisor nodes")
         # Warm cache key: node stats are per hypervisor SPOKE, scoped by the
@@ -1063,15 +1181,15 @@ def register(app, hub, ctx):
                 out["spoke_connected"] = False
             return out
 
-        if not pxmx_spoke:
+        if not node_spokes:
             return _warm_or_empty()
         try:
             # 30s (not the 5s relay default): a cold telemetry cache makes the
             # spoke orchestrate live per-agent pvesh round-trips; the warm cache
             # covers an overrun so the Overview still renders. Matches the VM
-            # list budget.
-            result = await hub.request_response(pxmx_spoke, "GET_NODE_STATS", {}, timeout=30.0)
-            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            # list budget. Fanned across every (tenant-scoped) agent-hosting
+            # spoke so a sim-hosted host's node shows alongside pxmx hosts.
+            data = await _aggregate_pxmx_nodes(hub, node_spokes, timeout=30.0)
             if isinstance(data, dict) and isinstance(data.get("nodes"), list):
                 await hub.warm_set("pxmx_nodes", warm_key, data)  # cache raw (pre hidden-filter)
             return _apply_hidden(data)
@@ -1168,8 +1286,25 @@ def register(app, hub, ctx):
                 out["spoke_connected"] = False
             return _with_tpl(out)
 
-        pxmx_spoke = hub.get_hypervisor_spoke()
-        if not pxmx_spoke:
+        # A Proxmox host can be hosted by a hypervisor (pxmx) spoke OR a
+        # simulation (cs) spoke — a CS-enabled box dials the cs spoke's
+        # /ws/agent yet must still appear in the Hypervisors VM list (it can run
+        # a MIX of infra + sim-client VMs). So fan PXMX_LIST_VMS across EVERY
+        # agent-hosting spoke and merge (mirrors the Agents tile), not just the
+        # single get_hypervisor_spoke(), which preferred the pxmx spoke and hid
+        # every sim-hosted host in a mixed deployment. A ?agent_id= scopes back
+        # to that one agent's spoke. Tenant isolation is unchanged: the merged
+        # list still runs through _filter_tenant (subnet / tag) below.
+        if agent_id:
+            one = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
+                or hub.get_hypervisor_spoke()
+            pxmx_spokes = [one] if one else []
+        else:
+            pxmx_spokes = list(dict.fromkeys(
+                hub.get_all_spokes_by_type("hypervisor")
+                + hub.get_all_spokes_by_type("simulation")
+            ))
+        if not pxmx_spokes:
             if sess:
                 tid = sess.get("user", {}).get("tenant_id")
                 cached = _cache_entry(tid, "pxmx_vms") if tid else None
@@ -1186,8 +1321,7 @@ def register(app, hub, ctx):
             # IP annotation (QGA / lxc netns per-NIC) routinely exceeds 5s; the
             # warm cache covers an overrun so the page still renders. Matches the
             # vmid_alloc PXMX_LIST_VMS budget.
-            result = await hub.request_response(pxmx_spoke, "PXMX_LIST_VMS", payload, timeout=30.0)
-            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            data = await _aggregate_pxmx_vms(hub, pxmx_spokes, payload, timeout=30.0)
             await hub.warm_set("pxmx_vms", warm_key, data)  # cache raw (pre-filter)
             return _with_tpl(await _filter_tenant(request, data, "hypervisor", ["ips"], tenant))
         except Exception as e:
