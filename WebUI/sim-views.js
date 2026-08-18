@@ -10661,10 +10661,20 @@ async function _csUsbClearCmd(host, action, doneMsg, allSpokes) {
 // a controller card pulled — where the recorded history describes a machine
 // that no longer exists and would keep reporting phantom losses. Does NOT touch
 // quarantine or the exclusion list; it only forgets what USED to be attached.
-// No confirm dialog: the action is cheap and self-repairing — both files rebuild
-// from what is actually attached on the next pass, so a mis-click costs a
-// baseline, not data. The button tooltip carries the explanation instead.
+// UNLIKE clear_usb_quarantine / clear_usb_exclusions (which self-repair from live
+// faults on the next pass), this is genuinely DESTRUCTIVE: the roster rebuilds
+// only from what is CURRENTLY ATTACHED, so a genuinely-missing dongle — exactly
+// what this panel exists to surface — is forgotten for good, not re-learned. It
+// also runs FLEET-WIDE (every host), not just the one on screen. So it confirms
+// first — the old "cheap and self-repairing, no confirm" rationale held for the
+// quarantine/exclusion clears but never for this one.
 window.csClearUsbHistory = async function (host) {
+    if (!confirm('Purge missing-dongle history on ALL hosts (fleet-wide)?\n\n'
+               + 'This forgets every recorded dongle. Genuinely-missing dongles '
+               + 'will disappear from this panel and will NOT return on their own '
+               + '— only currently-attached dongles are re-learned. Use this only '
+               + 'after a deliberate hardware change (dongles moved / ports '
+               + 'rewired / a controller card pulled).')) return;
     _csUsbClearCmd(host, 'clear_usb_history', 'Dongle history purged on all spokes — missing counts rebuild from what is attached now', true);
 };
 
