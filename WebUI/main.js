@@ -4485,7 +4485,7 @@ function _cvRenderSecretRow(s) {
         : '<span class="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600" title="Pass-phrase-only (psk-mode)">pass-phrase</span>';
     return `<tr class="border-b border-slate-100">
       <td class="py-2 font-mono text-slate-800">${escapeHtml(s.name)}</td>
-      <td class="text-slate-600">${escapeHtml(s.type || 'generic')}</td>
+      <td class="text-slate-600">${escapeHtml(s.type || 'generic')}${(Array.isArray(s.fields) && s.fields.includes('client_id')) ? ' <span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 align-middle" title="OAuth2 account — Client ID + Client secret (grant_type=client_credentials)">OAuth2</span>' : ''}</td>
       <td>${mode}</td>
       <td class="text-slate-500">${escapeHtml(s.description || '')}</td>
       <td class="text-right whitespace-nowrap">
@@ -4569,6 +4569,9 @@ function _cvAddSecretModal(preset) {
         <button onclick="_cvDoAddSecret()" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Save</button>
       </div>`;
     openModal('cv-add-modal', body, { backdropClose: true });
+    // Seed the login OAuth toggle (client_id/client_secret vs username/password)
+    // from the edited secret before rendering the type's value fields.
+    window._cvLoginOauth = !!(preset && preset.oauth);
     // _cvRenderAddFields renders the value fields for the selected type and
     // governs the mode select (forced to automation-readable for console / dns /
     // henet, free choice otherwise) — for both add and edit, so a type switch in
@@ -4583,7 +4586,7 @@ function _cvEditModal(enc) {
     const name = decodeURIComponent(enc);
     const s = _cvSecrets.find(x => x.name === name);
     if (!s) { showToast('Secret not found — reload the bucket', 'error'); return; }
-    _cvAddSecretModal({ name: s.name, type: s.type || 'generic', mode: s.mode || 'psk', description: s.description || '' });
+    _cvAddSecretModal({ name: s.name, type: s.type || 'generic', mode: s.mode || 'psk', description: s.description || '', oauth: Array.isArray(s.fields) && s.fields.includes('client_id') });
 }
 
 function _cvRenderAddFields() {
@@ -4591,7 +4594,7 @@ function _cvRenderAddFields() {
     const el = document.getElementById('cv-add-fields');
     if (!el) return;
     const f = (id, ph, type = 'text') => `<input id="${id}" type="${type}" autocomplete="off" placeholder="${ph}" class="${_CV_INP}">`;
-    if (t === 'login') el.innerHTML = f('cv-f-username', 'username') + f('cv-f-password', 'password', 'password');
+    if (t === 'login') { _cvRenderLoginFields(); const ms = document.getElementById('cv-add-mode'); if (ms) ms.disabled = false; return; }
     else if (t === 'console') {
         // A device console auto-login. The console module reads these unattended
         // to identify/log into serial-attached gear, so automation-readable is
@@ -4657,10 +4660,42 @@ function _cvDnsRenderFields() {
       </div>`).join('');
 }
 
+// Login secret fields — a username/password login OR a ClearPass OAuth2 API
+// client (Client ID + Client secret, grant_type=client_credentials). The
+// checkbox flips which pair is stored: {username,password} vs
+// {client_id,client_secret}; the NAC/ClearPass overlay picks the grant by which
+// fields the resolved secret carries (instance_vault.SECRET_FIELDS.nac_instances).
+function _cvRenderLoginFields() {
+    const el = document.getElementById('cv-add-fields');
+    if (!el) return;
+    const oauth = !!window._cvLoginOauth;
+    const f = (id, ph, type = 'text') => `<input id="${id}" type="${type}" autocomplete="off" placeholder="${ph}" class="${_CV_INP}">`;
+    el.innerHTML = `
+      <label class="flex items-center gap-2 text-xs text-slate-600 mb-1 cursor-pointer" title="Check for a ClearPass OAuth2 API client (Client ID + Client secret, grant_type=client_credentials) instead of a username/password login.">
+        <input type="checkbox" id="cv-f-login-oauth" ${oauth ? 'checked' : ''} onchange="_cvLoginToggleOauth(this.checked)" class="w-4 h-4 accent-[#01A982]">
+        OAuth2 account (ClearPass) — use Client ID + Client secret
+      </label>
+      <div id="cv-f-login-inputs" class="space-y-2">${oauth
+        ? f('cv-f-client-id', 'OAuth2 Client ID') + f('cv-f-client-secret', 'OAuth2 Client secret', 'password')
+        : f('cv-f-username', 'username') + f('cv-f-password', 'password', 'password')}</div>`;
+}
+
+function _cvLoginToggleOauth(checked) {
+    window._cvLoginOauth = !!checked;
+    const box = document.getElementById('cv-f-login-inputs');
+    if (!box) return;
+    const f = (id, ph, type = 'text') => `<input id="${id}" type="${type}" autocomplete="off" placeholder="${ph}" class="${_CV_INP}">`;
+    box.innerHTML = checked
+        ? f('cv-f-client-id', 'OAuth2 Client ID') + f('cv-f-client-secret', 'OAuth2 Client secret', 'password')
+        : f('cv-f-username', 'username') + f('cv-f-password', 'password', 'password');
+}
+
 function _cvCollectAddValue() {
     const t = document.getElementById('cv-add-type')?.value || 'login';
     const v = id => (document.getElementById(id)?.value || '');
-    if (t === 'login') return { username: v('cv-f-username'), password: v('cv-f-password') };
+    if (t === 'login') return window._cvLoginOauth
+        ? { client_id: v('cv-f-client-id'), client_secret: v('cv-f-client-secret') }
+        : { username: v('cv-f-username'), password: v('cv-f-password') };
     if (t === 'console') return { username: v('cv-f-username'), password: v('cv-f-password') };
     if (t === 'apikey') return { apikey: v('cv-f-apikey') };
     if (t === 'token') return { token: v('cv-f-token') };
@@ -4705,6 +4740,12 @@ async function _cvDoAddSecret() {
     }
     if (type === 'console' && (!value.username || !value.password)) {
         showToast('Enter both the console username and password', 'error'); return;
+    }
+    if (type === 'login' && window._cvLoginOauth && (!value.client_id || !value.client_secret)) {
+        showToast('Enter both the Client ID and Client secret', 'error'); return;
+    }
+    if (type === 'login' && !window._cvLoginOauth && (!value.username || !value.password)) {
+        showToast('Enter both the username and password', 'error'); return;
     }
     try {
         await apiJson('/tenant/cred-vault/secret', { method: 'POST', body: JSON.stringify({ bucket: _cvCurrentBucket, name, value, mode, type, description, psk }) });
