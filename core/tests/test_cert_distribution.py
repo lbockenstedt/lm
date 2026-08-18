@@ -798,3 +798,55 @@ def test_available_targets_always_includes_hub_self_install():
     assert len(hub_entries) == 1
     assert hub_entries[0]["identifier"] == ""
     assert hub_entries[0]["label"] == "hub (LM WebUI)"
+
+
+# ── target_owner_tenant: per-target tenant resolution (LE deploy scoping) ─────
+# The LE routes tenant-scope both the available-targets list and add/deploy auth
+# by this function: a tenant-admin may only target a spoke/agent in their tenant,
+# never the hub or a shared/other-tenant target.
+_SPOKE_TENANT = {"pxmx-1": "lrb", "opn-1": "acme", "nw-1": ""}  # nw-1 unbound/shared
+_AGENT_SPOKE = {"node-a": "pxmx-1", "node-b": "pxmx-1"}
+
+
+def _st(sid):
+    return _SPOKE_TENANT.get(sid, "")
+
+
+def _as(aid):
+    return _AGENT_SPOKE.get(aid, "")
+
+
+def test_target_owner_tenant_hub_is_shared():
+    # The hub self-install target has no owning spoke → shared ("").
+    assert cd.target_owner_tenant(
+        {"module_type": "hub", "identifier": ""}, _st, _as) == ""
+
+
+def test_target_owner_tenant_per_node_agent_resolves_via_spoke():
+    # A hypervisor per-node target's identifier is an agent_id → its spoke's tenant.
+    t = {"module_type": "hypervisor", "identifier": "node-a", "agent_id": "node-a"}
+    assert cd.target_owner_tenant(t, _st, _as) == "lrb"
+
+
+def test_target_owner_tenant_all_nodes_uses_spoke_id():
+    # The "all nodes" broadcast carries spoke_id (identifier="") → spoke tenant.
+    t = {"module_type": "hypervisor", "identifier": "", "spoke_id": "pxmx-1"}
+    assert cd.target_owner_tenant(t, _st, _as) == "lrb"
+
+
+def test_target_owner_tenant_spoke_level_uses_identifier_as_spoke():
+    # A spoke-level target (firewall) uses identifier == spoke_id.
+    t = {"module_type": "firewall", "identifier": "opn-1", "spoke_id": "opn-1"}
+    assert cd.target_owner_tenant(t, _st, _as) == "acme"
+
+
+def test_target_owner_tenant_unbound_spoke_is_shared():
+    # A spoke bound to no tenant → "" (shared / fail-closed).
+    t = {"module_type": "nw", "identifier": "nw-1", "spoke_id": "nw-1"}
+    assert cd.target_owner_tenant(t, _st, _as) == ""
+
+
+def test_target_owner_tenant_unresolvable_agent_is_shared():
+    # An agent that resolves to no spoke → "" (fail-closed, never leaks access).
+    t = {"module_type": "hypervisor", "identifier": "ghost"}
+    assert cd.target_owner_tenant(t, _st, _as) == ""

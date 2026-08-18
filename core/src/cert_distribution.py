@@ -869,3 +869,35 @@ def build_available_targets(spoke_module_types: Dict[str, str],
         targets.append({"module_type": "ldap-server", "identifier": sid,
                         "label": f"ldap-server — {nm}", "spoke_id": sid})
     return targets
+
+
+def target_owner_tenant(target, spoke_tenant, agent_spoke):
+    """Resolve the owning tenant_id of a cert install TARGET, or ``""`` when it
+    has none (shared / unattributable — e.g. the hub self-install target, or an
+    unresolved spoke). Pure + fail-closed so the LE routes can tenant-scope both
+    the available-targets list and add/deploy authorization identically.
+
+    A target maps to a single spoke: the ``hub`` target has NONE (shared infra);
+    an agent-hosting per-node target (``hypervisor``/``simulation``) carries an
+    ``agent_id``/``identifier`` resolved to its owning spoke via ``agent_spoke``;
+    every other target's ``spoke_id`` (or ``identifier``, which IS the spoke_id
+    for spoke-level entries) names the spoke directly. The spoke's tenant
+    (``spoke_tenant``) is the target's tenant.
+
+    ``spoke_tenant``: callable ``spoke_id -> tenant_id`` ("" if none).
+    ``agent_spoke``:  callable ``agent_id -> spoke_id`` ("" if unknown)."""
+    if not isinstance(target, dict):
+        return ""
+    mt = (target.get("module_type") or "").strip()
+    if mt == "hub":
+        return ""
+    sid = (target.get("spoke_id") or "").strip()
+    if not sid:
+        ident = str(target.get("identifier") or target.get("agent_id") or "").strip()
+        if mt in ("hypervisor", "simulation") and ident:
+            sid = (agent_spoke(ident) or "").strip()
+        else:
+            sid = ident
+    if not sid:
+        return ""
+    return (spoke_tenant(sid) or "").strip()

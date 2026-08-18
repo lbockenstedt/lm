@@ -5,7 +5,7 @@ from api import (
     HTTPException, Request, _spoke_payload_or_raise, access, get_spoke_or_503,
     logger, spoke_or_503,
 )
-from cert_distribution import build_available_targets
+from cert_distribution import build_available_targets, target_owner_tenant
 import le_cert_access as _lca
 
 
@@ -621,6 +621,36 @@ def register(app, hub, ctx):
             await app.state.hub.state.save_state_now()
         except Exception as e:  # noqa: BLE001
             logger.warning("persist le cert tenants (%s) failed: %s", context, e)
+
+    def _le_target_tenant(module_type, identifier, spoke_id=None):
+        """The owning tenant_id of a cert install TARGET, or "" if it has none
+        (shared / unattributable). Thin hub-backed wrapper over the pure
+        cert_distribution.target_owner_tenant (see there for the resolution
+        rules): the hub target is shared (""); an agent-hosting per-node target's
+        agent_id resolves to its owning spoke; otherwise the identifier/spoke_id
+        IS the spoke, and its module_metadata tenant is the target's tenant."""
+        return target_owner_tenant(
+            {"module_type": module_type, "identifier": identifier,
+             "spoke_id": spoke_id},
+            lambda sid: hub.state.get_spoke_tenant(hub._primary_key(sid)) or "",
+            lambda aid: hub.get_spoke_for_agent(aid, fallback_hypervisor=False) or "")
+
+    def _le_guard_target(request, module_type, identifier, spoke_id=None):
+        """403 unless the caller may deploy to this install TARGET. A Global Admin
+        may target anything (incl. the hub + shared spokes). A tenant-admin may
+        target ONLY a spoke/agent bound to one of their own tenants — never the
+        hub and never another tenant's (or an unattributable/shared) target."""
+        sess = _session_user(request)
+        if _is_admin(sess):
+            return
+        ttid = _le_target_tenant(module_type, identifier, spoke_id)
+        mine = set(_lca.user_tenants(sess)) | {_lca.current_tenant(sess)}
+        if not ttid or ttid not in mine:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only deploy this certificate to targets in your "
+                       "own tenant. The hub and shared infrastructure are managed "
+                       "by a Global Admin.")
 
     def _nw_device_tenant(device_id):
         """The owning tenant_id of an nw device (from global_config.nw_devices),
@@ -1371,16 +1401,12 @@ def register(app, hub, ctx):
         body = await request.json()
         if not isinstance(body, dict) or not body.get("module_type"):
             raise HTTPException(status_code=400, detail="module_type required")
-        # Re-pushing to a shared install target (hub/spoke) is Global Admin only,
-        # symmetric with le_add_target. Own-device (nw) re-deploy is available via
-        # the per-device deploy endpoint (can_deploy scoped).
-        if not _is_admin(_session_user(request)):
-            raise HTTPException(
-                status_code=403,
-                detail="Deploying a certificate to a shared install target "
-                       "(the hub or a spoke) is a Global Admin action. Use the "
-                       "per-device deploy for your own devices instead.")
         _le_guard_change(request, domain)
+        # Per-target tenant scope (same rule as le_add_target): a tenant-admin may
+        # re-deploy only to a target in their own tenant; the hub + shared spokes
+        # are Global-Admin-only.
+        _le_guard_target(request, body.get("module_type"),
+                         body.get("identifier"), body.get("spoke_id"))
         target = {"module_type": body["module_type"],
                   "identifier": body.get("identifier") or ""}
         hub = app.state.hub
@@ -1393,7 +1419,7 @@ def register(app, hub, ctx):
         return {"status": "SUCCESS", "distribution": dist or []}
 
     @app.get("/api/le/targets/available")
-    async def le_available_targets():
+    async def le_available_targets(request: Request):
         """All connected spokes/agents this cert could be distributed to — the
         click-to-add list in the LE targets modal ("list all available targets
         so I can click and add that agent/module"). One entry per cert-capable
@@ -1405,7 +1431,12 @@ def register(app, hub, ctx):
         {targets: [{module_type, identifier, label, spoke_id?}]}. The per-node
         agent list reuses the /api/pxmx/agents stale-while-revalidate cache so
         opening the modal doesn't block on a fresh GET_AGENTS fan-out. List
-        shaping is in cert_distribution.build_available_targets (pure, tested)."""
+        shaping is in cert_distribution.build_available_targets (pure, tested).
+
+        Tenant scoping: a non-admin (tenant-admin) sees ONLY targets bound to one
+        of their own tenants — the hub and any shared / other-tenant target are
+        omitted, so they can't select an install target they aren't allowed to
+        deploy to (le_add_target / le_distribute_target enforce the same rule)."""
         hub = app.state.hub
         agent_spokes = list(dict.fromkeys(
             hub.get_all_spokes_by_type("hypervisor")
@@ -1419,11 +1450,19 @@ def register(app, hub, ctx):
             except Exception as e:  # noqa: BLE001 - modal still usable w/o agents
                 logger.debug("le_available_targets: agents gather failed: %s", e)
         module_names = hub.state.system_state.get("module_names", {}) or {}
-        return {"targets": build_available_targets(
+        targets = build_available_targets(
             dict(hub.spoke_module_types), hub.active_connections,
             module_names, hub.CERT_CAPABLE_MODULES, agents,
             netbox_server_agents=set(getattr(hub, "netbox_server_agents", set())),
-            ldap_server_agents=set(getattr(hub, "ldap_server_agents", set())))}
+            ldap_server_agents=set(getattr(hub, "ldap_server_agents", set())))
+        sess = _session_user(request)
+        if sess and not _is_admin(sess):
+            mine = set(_lca.user_tenants(sess)) | {_lca.current_tenant(sess)}
+            targets = [t for t in targets
+                       if _le_target_tenant(t.get("module_type"),
+                                            t.get("identifier"),
+                                            t.get("spoke_id")) in mine]
+        return {"targets": targets}
 
     @app.get("/api/le/wildcard/eligibility")
     async def le_wildcard_eligibility():
@@ -1486,18 +1525,13 @@ def register(app, hub, ctx):
         body = await request.json()
         if not isinstance(body, dict) or not body.get("module_type"):
             raise HTTPException(status_code=400, detail="module_type required")
-        # Attaching a cert to a SHARED install target (the hub's own serving cert,
-        # or a whole spoke/module) is shared-infrastructure work with no per-target
-        # tenant model → Global Admin only. A tenant-admin deploys their cert to
-        # their OWN nw devices via POST /api/le/certs/{domain}/devices/{id}/deploy
-        # (ownership + device-tenant scoped by can_deploy).
-        if not _is_admin(_session_user(request)):
-            raise HTTPException(
-                status_code=403,
-                detail="Attaching a certificate to a shared install target "
-                       "(the hub or a spoke) is a Global Admin action. Deploy the "
-                       "certificate to your own devices instead.")
         _le_guard_change(request, domain)
+        # Per-target tenant scope: a Global Admin may attach any target (incl. the
+        # hub + shared spokes); a tenant-admin may attach ONLY a spoke/agent bound
+        # to one of their own tenants (their Proxmox nodes, their spokes) — never
+        # the hub and never another tenant's or an unattributable/shared target.
+        _le_guard_target(request, body.get("module_type"),
+                         body.get("identifier"), body.get("spoke_id"))
         hub = app.state.hub
         mt = str(body.get("module_type") or "").strip()
         # Defense-in-depth: reject a target the UI would never offer. The UI
@@ -1856,13 +1890,9 @@ def register(app, hub, ctx):
 
     @app.delete("/api/le/certs/{domain}/targets/{idx}")
     async def le_remove_target(domain: str, idx: int, request: Request):
-        # Symmetric with le_add_target: shared install-target management is
-        # Global Admin only.
-        if not _is_admin(_session_user(request)):
-            raise HTTPException(
-                status_code=403,
-                detail="Managing a certificate's shared install targets is a "
-                       "Global Admin action.")
+        # Owner-or-admin: detaching a target from a cert you own only removes the
+        # install intent (no cert material is pushed), so the cert-change guard is
+        # the right gate — a tenant-admin may prune targets from their own cert.
         _le_guard_change(request, domain)
         return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_REMOVE_TARGET",
                                   {"domain": domain, "idx": idx},
