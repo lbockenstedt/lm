@@ -39,6 +39,25 @@ except ImportError:
 
 logger = logging.getLogger("GenericAgent")
 
+
+def _is_base_spoke(obj) -> bool:
+    """Robust ``isinstance(obj, BaseSpoke)`` that survives base_spoke's
+    dual-import identity split.
+
+    The agent imports ``base_spoke`` (this module) while a role repo (e.g. cs's
+    cs_spoke.py) imports ``core.src.base_spoke`` — SAME source file, but Python
+    keys modules by name, so the two ``BaseSpoke`` classes are DISTINCT objects
+    and a plain ``isinstance`` against one returns False for a spoke built
+    against the other. That false-negative wrongly wraps a genuine BaseSpoke
+    subclass (cs's CSSpoke) in ``_RoleAdapter``; RoleConnection then wires
+    ``control_plane`` onto the ADAPTER, leaving the inner spoke's
+    ``control_plane`` None — so its SPOKE_RELAY handler can never
+    ``approve_pending_agent`` (hosted agents flap in "pending" forever). Match
+    by isinstance first, then fall back to a name check across the MRO."""
+    if isinstance(obj, BaseSpoke):
+        return True
+    return any(getattr(c, "__name__", "") == "BaseSpoke" for c in type(obj).__mro__)
+
 # Set by control_plane.py right after its RoleConnection class is defined (both
 # modules are fully loaded by then; see the assignment there for why). LOAD_ROLE
 # reads this instead of doing `from control_plane import RoleConnection` at call
@@ -201,6 +220,26 @@ class _RoleAdapter(BaseSpoke):
         super().__init__(getattr(inner, "spoke_id", "role"), getattr(inner, "config", {}))
         self._inner = inner
 
+    # RoleConnection wires the sub-spoke's control plane via
+    # ``role_instance.control_plane = self``. Forward that write (and reads) to
+    # the INNER spoke so its command handlers — e.g. cs's SPOKE_RELAY →
+    # ``self.control_plane.approve_pending_agent`` — see the wired plane. Without
+    # this, an adapter-wrapped spoke's inner ``control_plane`` stays None and
+    # hosted-agent approval silently no-ops. Defense-in-depth alongside
+    # _is_base_spoke (which avoids wrapping genuine BaseSpokes in the first place).
+    @property
+    def control_plane(self):
+        inner = getattr(self, "_inner", None)
+        return getattr(inner, "control_plane", None) if inner is not None else None
+
+    @control_plane.setter
+    def control_plane(self, value):
+        if hasattr(self, "_inner"):
+            try:
+                self._inner.control_plane = value
+            except Exception:  # noqa: BLE001 - inner may forbid the attr
+                pass
+
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
         return await self._inner.handle_command(command_type, data)
 
@@ -303,8 +342,11 @@ class GenericAgent(BaseSpoke):
             return None
         inst = cls(sub_spoke_id or f"{self.spoke_id}-{role_name}", role_config)
         # Spokes that aren't BaseSpoke subclasses (cppm's CPPMSpoke) get wrapped
-        # so handle_command/get_status delegation stays uniform.
-        if not isinstance(inst, BaseSpoke):
+        # so handle_command/get_status delegation stays uniform. Use the
+        # dual-import-safe check so a genuine BaseSpoke subclass (cs's CSSpoke,
+        # built against core.src.base_spoke) is NOT needlessly wrapped — which
+        # would strand its control_plane on the adapter (see _is_base_spoke).
+        if not _is_base_spoke(inst):
             inst = _RoleAdapter(inst)
         logger.info("Role loaded: %s (sub-spoke %s)", role_name,
                     sub_spoke_id or f"{self.spoke_id}-{role_name}")

@@ -140,6 +140,53 @@ def test_role_adapter_passes_through_get_status_when_inner_has_it():
     assert asyncio.run(adapter.get_status()) == {"status": "SUCCESS", "devices": 7}
 
 
+# ── 3b. control_plane wiring across base_spoke's dual-import identity split ───
+# Regression for hosted-agent approval flapping in "pending" forever: cs's
+# CSSpoke is built against ``core.src.base_spoke`` while the agent imports
+# ``base_spoke`` — the two BaseSpoke classes are DISTINCT objects, so a plain
+# isinstance() false-negatived and wrapped the genuine BaseSpoke in _RoleAdapter.
+# RoleConnection then set control_plane on the adapter, leaving the inner spoke's
+# control_plane None → its SPOKE_RELAY handler could never approve_pending_agent.
+
+def test_is_base_spoke_recognizes_dual_import_subclass():
+    """A BaseSpoke subclass built against the OTHER import name (the split that
+    happens for role repos) must be recognized so it is NOT needlessly wrapped."""
+    from agent_spoke import _is_base_spoke
+    import core.src.base_spoke as cs_bs  # the role-repo import path
+    from base_spoke import BaseSpoke as agent_bs
+
+    class DualImportSpoke(cs_bs.BaseSpoke):
+        async def handle_command(self, c, d):
+            return {}
+        async def get_status(self):
+            return {}
+        def get_version(self):
+            return "1"
+
+    inst = DualImportSpoke("agent-cs-svr-06-simulation", {})
+    # The bug: plain isinstance against the agent's BaseSpoke is False when the
+    # two imports resolve to distinct class objects.
+    if agent_bs is not cs_bs.BaseSpoke:
+        assert not isinstance(inst, agent_bs)
+    # The fix: _is_base_spoke recognizes it regardless, so _sync_load_role does
+    # NOT wrap it and RoleConnection wires control_plane directly on the spoke.
+    assert _is_base_spoke(inst) is True
+
+
+def test_role_adapter_forwards_control_plane_to_inner():
+    """Even when a spoke IS wrapped, setting control_plane on the adapter (as
+    RoleConnection does via ``role_instance.control_plane = self``) must reach
+    the inner spoke, whose SPOKE_RELAY handler reads ``self.control_plane``."""
+    inner = _FakeNonBaseSpoke("agent-cppm", {})
+    inner.control_plane = None
+    adapter = _RoleAdapter(inner)
+
+    sentinel = object()
+    adapter.control_plane = sentinel               # RoleConnection wiring
+    assert inner.control_plane is sentinel          # forwarded to the inner spoke
+    assert adapter.control_plane is sentinel         # and readable back via the adapter
+
+
 # ── 4. _install_role clone logic ─────────────────────────────────────────────
 
 def _agent_with_tmp_root(tmp_path, monkeypatch):
