@@ -695,10 +695,22 @@ def register(app, hub, ctx):
             data = await request.json()
             display_name = (data.get("display_name") or "").strip() or None
             cs = data.get("client_simulation") or {}
-            cs_cfg = {
-                "enabled": bool(cs.get("enabled")),
-                "tenant_id": (cs.get("tenant_id") or "").strip() or None,
-            }
+            tenant_in = (cs.get("tenant_id") or "").strip() or None
+            # Merge onto any existing client_simulation so a tenant/enabled-only
+            # save from the UI doesn't wipe usb_config / protected_vmids the CS
+            # bridge stored.
+            store = hub.state.system_state.setdefault("agent_config", {})
+            agent_pk = hub._agent_primary_key(agent_id)
+            entry = dict(store.get(agent_pk, {}))
+            cs_cfg = dict(entry.get("client_simulation") or {})
+            cs_cfg["enabled"] = bool(cs.get("enabled"))
+            cs_cfg["tenant_id"] = tenant_in
+            # Pin a manually-set tenant so the periodic spoke-tenant inheritance
+            # (_inherit_agent_tenant, which runs on every relayed frame) can't
+            # roll a shared spoke's tenant back over the operator's override.
+            # Clearing the tenant unpins it → inheritance resumes for a genuinely
+            # auto-assigned agent.
+            cs_cfg["tenant_pinned"] = bool(tenant_in)
             # Managed crontab (optional): the operator-pasted crontab content this
             # node's agent keeps root's crontab in sync with. Only touched when the
             # key is present in the request so a client_simulation-only save (or a
@@ -709,9 +721,6 @@ def register(app, hub, ctx):
                 cron_val = "" if cron_val is None else str(cron_val)
 
             # Persist (merge with any existing entry so partial updates keep fields).
-            store = hub.state.system_state.setdefault("agent_config", {})
-            agent_pk = hub._agent_primary_key(agent_id)
-            entry = dict(store.get(agent_pk, {}))
             if display_name:
                 entry["display_name"] = display_name
             entry["client_simulation"] = cs_cfg
