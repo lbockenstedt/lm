@@ -1284,34 +1284,54 @@ async def fw_rule_in_tenant_scope(hub, sess, endpoint: str, firewall_id, payload
 
 async def vm_in_tenant_scope(hub, sess, vm_record) -> bool:
     """Toggle-INDEPENDENT VM ownership for CONTROL/console gates (start/stop/
-    snapshot/backup/create/clone/VNC). True iff the VM is attributable to the
-    caller's tenant by TENANT TAG or by SUBNET (ips ∈ the caller's prefixes).
+    snapshot/backup/create/clone/VNC). True iff the VM is attributable to ANY of
+    the caller's assigned tenants by TENANT TAG or by SUBNET (ips ∈ that tenant's
+    prefixes).
+
+    A tenant-admin may be assigned MULTIPLE tenants (``user.tenants``); the rest
+    of the tenancy model authorizes across that whole list
+    (``spoke_visible_to_session`` / ``read_scope`` / ``write_scope`` /
+    ``check_tenant_access``). Scoping this gate to only the session's PRIMARY
+    tenant (``tenant_id`` = ``tenants[0]``) denied console/control on a VM owned
+    by any of the caller's OTHER tenants even though the VM list (which fails
+    open when the display filter is off) still showed it — the reported
+    "not authorized for this VM's tenant" on a VM the admin legitimately manages.
+    So we check every assigned tenant and pass if the VM belongs to any.
 
     Unlike ``filter_tenant`` this:
       * ignores the ``hypervisor`` display toggle — control must NOT fail open when
         an operator disables the read filter;
       * does NOT count shared template pools as ownership (a tenant may clone FROM
         a template but must not control it) — ``template_pools=[]``;
-      * FAIL-CLOSES: no tenant tags AND no prefixes → False. (filter_hypervisor_vms
+      * FAIL-CLOSES: no assigned tenant attributes the VM (no matching tag AND no
+        matching prefix across any tenant) → False. (filter_hypervisor_vms
         short-circuits to "keep all" on empty prefixes, so the tag path is checked
         directly and the no-prefix case denies rather than delegating to it.)
     """
     if is_admin(sess):
         return True
-    tid = (sess or {}).get("user", {}).get("tenant_id")
-    if not tid:
+    user = (sess or {}).get("user", {}) or {}
+    tenant_ids = [str(t).strip() for t in (user.get("tenants") or []) if str(t).strip()]
+    if not tenant_ids:
+        # Fall back to the session's primary tenant for a user whose session
+        # predates the ``tenants`` list (login derives tenant_id from tenants[0]).
+        primary = str(user.get("tenant_id") or "").strip()
+        tenant_ids = [primary] if primary else []
+    if not tenant_ids:
         return False
-    tenant_tags = _tenant_tag_set(hub, tid) or set()
-    if tenant_tags:
-        vm_tags = {str(t).strip().lower() for t in (vm_record.get("tags") or [])}
-        if vm_tags & {str(t).strip().lower() for t in tenant_tags}:
+    vm_tags = {str(t).strip().lower() for t in (vm_record.get("tags") or [])}
+    for tid in tenant_ids:
+        tenant_tags = _tenant_tag_set(hub, tid) or set()
+        if tenant_tags and (vm_tags & {str(t).strip().lower() for t in tenant_tags}):
             return True
-    prefixes = await resolve_prefixes(hub, sess)
-    if not prefixes:
-        return False
-    out = filter_hypervisor_vms([vm_record], prefixes, template_pools=[],
-                                tenant_tags=tenant_tags)
-    return _list_len(out) > 0
+        prefixes = await resolve_prefixes_for_tenant(hub, tid)
+        if not prefixes:
+            continue
+        out = filter_hypervisor_vms([vm_record], prefixes, template_pools=[],
+                                    tenant_tags=tenant_tags)
+        if _list_len(out) > 0:
+            return True
+    return False
 
 
 async def record_in_tenant_scope(hub, sess, record, fields) -> bool:
