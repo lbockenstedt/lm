@@ -16,10 +16,12 @@ class FakeState:
 
     def __init__(self, system_state: Optional[dict] = None,
                  global_config: Optional[dict] = None,
-                 tenants: Optional[Dict[str, dict]] = None):
+                 tenants: Optional[Dict[str, dict]] = None,
+                 spoke_tenants: Optional[Dict[str, str]] = None):
         self.system_state = system_state or {}
         self._global_config = global_config or {}
         self._tenants = tenants or {}
+        self._spoke_tenants = spoke_tenants or {}
         # The sync mixins read ``self.state.tenant_state["tenants"]``; reflect
         # the constructor tenants so tests that exercise tenant scoping work
         # without per-test patching.
@@ -51,6 +53,10 @@ class FakeState:
 
     def get_tenant(self, tid: str) -> Optional[dict]:
         return self._tenants.get(tid)
+
+    def get_spoke_tenant(self, module_id: str) -> Optional[str]:
+        """Tenant a spoke/hypervisor is BOUND to (parity with StateManager)."""
+        return self._spoke_tenants.get(module_id)
 
 
 class FakeHub:

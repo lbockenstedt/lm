@@ -335,6 +335,13 @@ def register(app, hub, ctx):
         hub = app.state.hub
         spoke = (hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
                  if agent_id else None) or hub.get_hypervisor_spoke()
+        # Whole-host ownership: if this VM's hypervisor is BOUND to one of the
+        # caller's tenants, they own every VM on it → allow (a stopped / guest-
+        # agentless VM has no live IP to attribute, yet the tenant still owns it,
+        # and the host shell already gates this way). A shared/unbound host falls
+        # through to strict per-VM tag/subnet attribution below.
+        if access.hypervisor_owned_by_caller(hub, sess, spoke):
+            return
         info = {}
         if spoke:
             try:
