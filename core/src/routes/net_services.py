@@ -935,20 +935,7 @@ def register(app, hub, ctx):
                     return True
             return False
 
-        _in = _le_certs_holder(data) or []
-        _kept = [c for c in _in if _match(c)]
-        logger.info(
-            "LE-CERT-TENANTS FILTER sess_present=%s is_admin=%s tenant=%r tid=%r "
-            "want_tenants=%r filter_enabled=%s shared_id=%r in=%d out=%d "
-            "per_domain=%r",
-            bool(sess), (bool(sess) and _is_admin(sess)), tenant, tid,
-            want_tenants, access.filter_enabled(hub, "le"),
-            access.shared_tenant_id(),
-            len(_in), len(_kept),
-            {(c.get("domain") if isinstance(c, dict) else None):
-             (_lca.visible_to(hub, sess, c.get("domain"), want_tenants)
-              if isinstance(c, dict) else None) for c in _in})
-        return _le_with_certs(data, _kept)
+        return _le_with_certs(data, [c for c in (_le_certs_holder(data) or []) if _match(c)])
 
     def _bugfixer_pinned():
         """The set of DNS names designated as BugFixer certs (H1) —
