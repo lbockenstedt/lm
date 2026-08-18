@@ -324,6 +324,14 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
                         logger.info("Agent '%s' approved — reconnecting with secret.",
                                     self.agent_id)
                         return
+                    logger.warning(
+                        "Agent '%s' still pending: received frame status=%r "
+                        "secret_present=%s (keys=%s) — NOT applying. An APPROVED "
+                        "with no secret is the 'approve → back to pending' flap "
+                        "(the spoke provisioned a null secret); the agent stays "
+                        "unauthenticated and re-enters approval.",
+                        self.agent_id, msg.get("status"),
+                        bool(msg.get("secret")), sorted(msg.keys()))
                 return
             if status != "HUB_VERIFIED":
                 await ws.close(1008, "spoke identity not verified")
