@@ -87,6 +87,9 @@ def _load(hub):
         # Admin so validate_tenant_edit accepts any existing-tenant set.
         "_le_guard_change": lambda request, domain: None,
         "_tenant_exists": lambda tid: tid in hub.state.tenant_state["tenants"],
+        "_is_admin": lambda sess: True,
+        "_le_cert_tenant_store_keys": lambda: sorted(
+            (hub.state.system_state.get("global_config", {}) or {}).get(lca.STORE_KEY, {})),
     }
     for node in ast.walk(tree):
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "_le_apply_cert_tenants":

@@ -639,25 +639,49 @@ def register(app, hub, ctx):
     async def le_get_cert_tenants(domain: str, request: Request):
         """The cert's explicit owner-tenant list + the caller's rights."""
         sess = _session_user(request)
-        return {"status": "ok", "domain": domain, **_lca.meta(hub, sess, domain)}
+        meta = _lca.meta(hub, sess, domain)
+        logger.info("LE-CERT-TENANTS GET domain=%r -> meta=%r store_keys=%r",
+                    domain, meta, _le_cert_tenant_store_keys())
+        return {"status": "ok", "domain": domain, **meta}
+
+    def _le_cert_tenant_store_keys():
+        """The domains that currently have an explicit owner-tenant list stored,
+        for troubleshooting a save that 'doesn't stick' (a key mismatch between
+        the stored domain and the cert-list domain is the usual culprit)."""
+        gc = app.state.hub.state.system_state.get("global_config", {}) or {}
+        m = gc.get(_lca.STORE_KEY) or {}
+        return sorted(m.keys()) if isinstance(m, dict) else []
 
     async def _le_apply_cert_tenants(request, domain, want):
         """Shared core for the cert owner-tenant replace op: authorize, validate,
         set + durably persist, and return the tagging meta. Raises HTTPException
         (400/403/500) on any failure so the caller never reports a false
         success."""
+        sess = _session_user(request)
+        u = (sess or {}).get("user", {}) if isinstance(sess, dict) else {}
+        logger.info(
+            "LE-CERT-TENANTS SET request domain=%r want=%r caller(tenant_id=%r "
+            "tenants=%r admin=%s)", domain, want, u.get("tenant_id"),
+            u.get("tenants"), _is_admin(sess))
         if not (isinstance(domain, str) and domain.strip()):
+            logger.warning("LE-CERT-TENANTS SET rejected: empty/invalid domain %r", domain)
             raise HTTPException(status_code=400, detail="'domain' is required")
         domain = domain.strip()
         _le_guard_change(request, domain)
-        sess = _session_user(request)
         if not isinstance(want, list):
+            logger.warning("LE-CERT-TENANTS SET rejected: 'tenants' not a list: %r", want)
             raise HTTPException(status_code=400, detail="'tenants' must be a list")
         try:
             clean = _lca.validate_tenant_edit(hub, sess, domain, want, _tenant_exists)
         except _lca.TenantEditError as e:
+            logger.warning("LE-CERT-TENANTS SET rejected by validate domain=%r "
+                           "want=%r: %s", domain, want, e)
             raise HTTPException(status_code=400, detail=str(e))
         _lca.set_tenants(hub, domain, clean)
+        stored = _lca.get_tenants(hub, domain)
+        logger.info("LE-CERT-TENANTS SET stored domain=%r validated=%r read-back=%r "
+                    "store_keys=%r", domain, clean, stored,
+                    _le_cert_tenant_store_keys())
         # Durability-critical: the assignment IS the operation, so a failed
         # persist must surface as an error — never a false "saved" toast that
         # silently loses the tenant list on the next hub restart. (Sibling LE
@@ -672,6 +696,8 @@ def register(app, hub, ctx):
                        "not be saved to disk, so it would be lost on restart. "
                        "Check the hub state-storage location and permissions, "
                        "then try again.")
+        logger.info("LE-CERT-TENANTS SET persisted domain=%r read-back-after-save=%r",
+                    domain, _lca.get_tenants(hub, domain))
         return {"status": "ok", "domain": domain, **_lca.meta(hub, sess, domain)}
 
     # Domain in the BODY, not the URL path: a cert domain can be a WILDCARD
@@ -911,11 +937,25 @@ def register(app, hub, ctx):
             return data
         sess = _session_user(request)
         out = []
+        tagged_owned = {}
         for c in data.get("certs") or []:
             if not isinstance(c, dict):
                 out.append(c)
                 continue
-            out.append({**c, **_lca.meta(hub, sess, c.get("domain"))})
+            dom = c.get("domain")
+            meta = _lca.meta(hub, sess, dom)
+            if meta.get("tenants"):
+                tagged_owned[dom] = meta["tenants"]
+            out.append({**c, **meta})
+        # Surface the cross-reference so a save that 'doesn't stick' is easy to
+        # diagnose: the domains the cert LIST reports (verbatim), which of them
+        # resolved to an owner-tenant list, and the domains that actually have a
+        # stored list. A stored key not appearing under a cert domain (or vice
+        # versa) = a domain-key mismatch between save + list.
+        logger.info(
+            "LE-CERT-TENANTS LIST cert_domains=%r tagged_with_tenants=%r store_keys=%r",
+            [c.get("domain") for c in (data.get("certs") or []) if isinstance(c, dict)],
+            tagged_owned, _le_cert_tenant_store_keys())
         return {**data, "certs": out}
 
     @app.get("/api/le/certs")
