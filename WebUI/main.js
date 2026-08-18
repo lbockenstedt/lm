@@ -667,6 +667,15 @@ function hasConsoleWrite() {
     return isAdmin() || isTenantAdmin() || p.console_write === true;
 }
 
+// Console VIEW tier: admin, tenant-admin, or any `console` user. Profiling
+// (Profile Device / Profile All) is read-only device identification, so it is
+// gated here — NOT at the write tier — matching the server's has_console_access
+// guard on /api/console/identify-llm[-all] and the per-port tenant confinement.
+function hasConsoleView() {
+    const p = currentUser?.permissions || {};
+    return isAdmin() || isTenantAdmin() || p.console === true;
+}
+
 // ─── Session-expiry guard ───────────────────────────────────────────────────
 // This is a single-page client-rendered app: after the server session dies
 // (8h TTL, or an admin revoke), every gated fetch returns 401 JSON, but the
@@ -16819,7 +16828,7 @@ function _renderConsolePorts(el, data) {
         const eP = esc(p.port_id), eS = esc(p.spoke_id || ''), eT = esc(p.tenant_override || '');
         const tenantBtn = admin ? `<button onclick="openConsolePortTenantModal('${eS}','${eP}','${eT}')" class="text-[11px] px-2 py-1 rounded border border-[#01A982] text-[#01A982] hover:bg-slate-50">Tenant</button>` : '';
         const configBtn = hasConsoleWrite() ? `<button onclick="openConsoleConfigModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-indigo-400 text-indigo-600 hover:bg-slate-50">Config</button>` : '';
-        const profileBtn = hasConsoleWrite() ? `<button onclick="profileDevice('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile this device: use the known fingerprint if we have one, otherwise ask the AI to identify it from its (scrubbed) console output">🔎 Profile Device</button>` : '';
+        const profileBtn = hasConsoleView() ? `<button onclick="profileDevice('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile this device: use the known fingerprint if we have one, otherwise ask the AI to identify it from its (scrubbed) console output">🔎 Profile Device</button>` : '';
         const captureBtn = (p.capture_bytes || p.monitoring || (p.probe && p.probe.banner))
             ? `<button onclick="openConsoleCaptureModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50" title="View recent console output captured from this port">Capture</button>` : '';
         const dpaBadge = (p.dpa && p.dpa.telnet_port)
@@ -16838,7 +16847,7 @@ function _renderConsolePorts(el, data) {
               ${tenantBtn}
             </td></tr>`;
     }).join('');
-    const profileAllBtn = hasConsoleWrite()
+    const profileAllBtn = hasConsoleView()
         ? `<button onclick="profileAllDevices()" class="text-[11px] px-3 py-1.5 rounded border border-violet-400 text-violet-600 hover:bg-slate-50" title="Profile every listed device at once: known fingerprints are used as-is; unknown devices are sent (scrubbed) to the AI to identify. Ports open in a session are skipped.">🔎 Profile All Devices</button>`
         : '';
     const adminTools = admin

@@ -42,7 +42,7 @@ class _Hub:
         return {}
 
 
-def _build(monkeypatch, ports, *, enabled=True, agent="bf-1", is_admin=True, has_write=True):
+def _build(monkeypatch, ports, *, enabled=True, agent="bf-1", is_admin=True, has_write=True, has_access=True):
     # Deterministic tenant model: dedicated (not shared), admin sees all.
     monkeypatch.setattr(console_routes.access, "filter_enabled", lambda hub, m: False)
     monkeypatch.setattr(console_routes.access, "tenant_is_shared", lambda t: False)
@@ -64,6 +64,7 @@ def _build(monkeypatch, ports, *, enabled=True, agent="bf-1", is_admin=True, has
         _session_user=lambda req: {"user": {"is_admin": is_admin}},
         _is_admin=lambda s: is_admin,
         _has_console_write_access=lambda s: has_write,
+        _has_console_access=lambda s: has_access,
         _resolve_tenant=lambda req, explicit=None: "default",
     )
     console_routes.register(app, app.state.hub, ctx)
@@ -110,21 +111,34 @@ def test_identify_all_no_idle_ports(monkeypatch):
     assert body["queued"] == 0 and body["skipped_in_use"] == 1
 
 
-def test_identify_all_allowed_for_tenant_admin_write_tier(monkeypatch):
-    # A tenant admin is NOT a Global Admin but HAS the console write tier
-    # (has_console_write_access → True). Profiling their own tenant's visible
-    # ports must be allowed — the target list is already tenant-scoped.
+def test_identify_all_allowed_for_tenant_admin(monkeypatch):
+    # A tenant admin is NOT a Global Admin but HAS console access. Profiling
+    # their own tenant's visible ports must be allowed — the target list is
+    # already tenant-scoped.
     c, _ = _build(monkeypatch, [{"port_id": "p1", "in_use": False}],
-                  is_admin=False, has_write=True)
+                  is_admin=False, has_write=True, has_access=True)
     r = c.post("/api/console/identify-llm-all?tenant=default", json={})
     assert r.status_code == 200
     assert r.json()["queued"] == 1
 
 
-def test_identify_all_denied_for_read_only_console_user(monkeypatch):
-    # A plain (view-only) console user — no Global Admin, no write tier — may not
-    # trigger profiling (it logs into the device / may relay to the AI).
+def test_identify_all_allowed_for_read_only_console_user(monkeypatch):
+    # Profiling is read-only device identification, so a plain (view-only)
+    # console user — no Global Admin, no write tier, but WITH the `console`
+    # right — may trigger it on the ports they can already see. The target
+    # list (_list_visible_console_ports) is tenant-scoped, so they only reach
+    # their own visible ports.
     c, _ = _build(monkeypatch, [{"port_id": "p1", "in_use": False}],
-                  is_admin=False, has_write=False)
+                  is_admin=False, has_write=False, has_access=True)
+    r = c.post("/api/console/identify-llm-all?tenant=default", json={})
+    assert r.status_code == 200
+    assert r.json()["queued"] == 1
+
+
+def test_identify_all_denied_without_console_access(monkeypatch):
+    # A user with NO console access at all (not admin, no `console` right) may
+    # not trigger profiling.
+    c, _ = _build(monkeypatch, [{"port_id": "p1", "in_use": False}],
+                  is_admin=False, has_write=False, has_access=False)
     r = c.post("/api/console/identify-llm-all?tenant=default", json={})
     assert r.status_code == 403

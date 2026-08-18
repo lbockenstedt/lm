@@ -92,6 +92,7 @@ def register(app, hub, ctx):
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
     _has_console_write_access = ctx._has_console_write_access
+    _has_console_access = ctx._has_console_access
     _resolve_tenant = ctx._resolve_tenant
 
     @app.websocket("/ws/console/{session_id}")
@@ -775,13 +776,15 @@ def register(app, hub, ctx):
         built-in/learned fingerprint DB already recognizes is resolved WITHOUT the
         AI; only an unknown device is relayed (scrubbed) to the LLM, which may run
         spoke-validated read-only commands to identify it. Clicking this button is
-        the explicit opt-in, so no global toggle gates it. Open to the console
-        WRITE tier (Global Admin, tenant admin, or a ``console_write`` user); the
-        per-port ``_assert_port_tenant`` guard then confines a non-admin to a port
-        it can see (own-dedicated, or a shared device in its subnet)."""
+        the explicit opt-in, so no global toggle gates it. Profiling is read-only
+        device identification, so it's open to the console VIEW tier (Global
+        Admin, tenant admin, or any ``console`` user) — matching the plain
+        ``/api/console/identify`` fingerprint action; the per-port
+        ``_assert_port_tenant`` guard then confines a non-admin to a port it can
+        see (own-dedicated, or a shared device in its subnet)."""
         sess = _session_user(request)
-        if not (_is_admin(sess) or _has_console_write_access(sess)):
-            raise HTTPException(status_code=403, detail="Console write access required")
+        if not (_is_admin(sess) or _has_console_access(sess)):
+            raise HTTPException(status_code=403, detail="Console access required")
         hub = app.state.hub
         try:
             body = await request.json()
@@ -807,13 +810,14 @@ def register(app, hub, ctx):
         ones are relayed (scrubbed) to the LLM. Runs in the background with bounded
         concurrency and returns immediately — results stream back through the
         normal probe/port refresh. Ports a user currently has open are skipped.
-        Open to the console WRITE tier (Global Admin, tenant admin, or a
-        ``console_write`` user); the target list is the caller's tenant-scoped
-        visible ports (``_list_visible_console_ports``), so a non-admin only
-        profiles the ports it can see."""
+        Profiling is read-only device identification, so it's open to the console
+        VIEW tier (Global Admin, tenant admin, or any ``console`` user); the target
+        list is the caller's tenant-scoped visible ports
+        (``_list_visible_console_ports``), so a non-admin only profiles the ports
+        it can see."""
         sess = _session_user(request)
-        if not (_is_admin(sess) or _has_console_write_access(sess)):
-            raise HTTPException(status_code=403, detail="Console write access required")
+        if not (_is_admin(sess) or _has_console_access(sess)):
+            raise HTTPException(status_code=403, detail="Console access required")
         hub = app.state.hub
         data = await _list_visible_console_ports(request)  # tenant-scoped like the list view
         all_ports = data.get("ports") or []
