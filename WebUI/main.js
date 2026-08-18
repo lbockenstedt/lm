@@ -17885,19 +17885,44 @@ function serialEnsureConsoleDock() {
     if (modal) { modal.classList.remove('hidden'); return modal; }
     modal = document.createElement('div');
     modal.id = 'serial-console-modal';
-    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/70';
+    // Non-modal bottom drawer (no full-screen backdrop): the rest of the app —
+    // in particular the port list — stays interactive, so a user can open a
+    // second console while one is already docked. z-40 keeps it under true modals.
+    modal.className = 'fixed bottom-0 left-0 right-0 z-40 flex flex-col bg-[#1e1e1e] border-t border-slate-700 shadow-2xl';
+    modal.style.height = '45vh';
     modal.innerHTML = `
-        <div class="bg-[#1e1e1e] rounded-lg shadow-2xl w-[92vw] max-w-6xl h-[86vh] flex flex-col overflow-hidden">
-            <div class="flex items-center gap-3 px-4 py-2 bg-[#2d2d2d] border-b border-slate-700 text-slate-200 text-sm">
-                <strong class="font-semibold">Serial Consoles</strong>
-                <button id="serial-console-fs" title="Fullscreen the active console" class="ml-2 px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
-                <span id="serial-console-status" class="ml-auto text-xs text-amber-400"></span>
-                <button id="serial-console-closeall" title="Close all consoles" class="ml-3 text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
-            </div>
-            <div id="serial-console-tabs" class="flex items-stretch gap-1 px-2 pt-1 bg-[#2d2d2d] border-b border-slate-700 overflow-x-auto"></div>
-            <div id="serial-console-bodies" class="relative flex-1 bg-[#1e1e1e]"></div>
-        </div>`;
+        <div class="flex items-center gap-3 px-4 py-2 bg-[#2d2d2d] border-b border-slate-700 text-slate-200 text-sm">
+            <strong class="font-semibold">Serial Consoles</strong>
+            <button id="serial-console-min" title="Minimize / restore the console dock" class="ml-2 px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Minimize</button>
+            <button id="serial-console-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
+            <span id="serial-console-status" class="ml-auto text-xs text-amber-400"></span>
+            <button id="serial-console-closeall" title="Close all consoles" class="ml-3 text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
+        </div>
+        <div id="serial-console-tabs" class="flex items-stretch gap-1 px-2 pt-1 bg-[#2d2d2d] border-b border-slate-700 overflow-x-auto"></div>
+        <div id="serial-console-bodies" class="relative flex-1 bg-[#1e1e1e] overflow-hidden"></div>`;
     document.body.appendChild(modal);
+    modal.querySelector('#serial-console-min').onclick = () => {
+        const minimized = modal.getAttribute('data-min') === '1';
+        const tabsEl = modal.querySelector('#serial-console-tabs');
+        const bodiesEl = modal.querySelector('#serial-console-bodies');
+        const btn = modal.querySelector('#serial-console-min');
+        if (minimized) {
+            modal.setAttribute('data-min', '0');
+            modal.style.height = '45vh';
+            tabsEl.classList.remove('hidden');
+            bodiesEl.classList.remove('hidden');
+            btn.textContent = 'Minimize';
+            try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+            const c = serialActiveConsole();
+            if (c && c.term) { try { c.term.focus(); c.term.scrollToBottom(); } catch (e) {} }
+        } else {
+            modal.setAttribute('data-min', '1');
+            modal.style.height = '';
+            tabsEl.classList.add('hidden');
+            bodiesEl.classList.add('hidden');
+            btn.textContent = 'Restore';
+        }
+    };
     modal.querySelector('#serial-console-fs').onclick = () => {
         const c = serialActiveConsole();
         const screen = c && c.bodyEl;
@@ -18317,20 +18342,44 @@ function pxmxEnsureConsoleDock() {
     if (modal) { modal.classList.remove('hidden'); return modal; }
     modal = document.createElement('div');
     modal.id = 'pxmx-vnc-modal';
-    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/70';
+    // Non-modal bottom drawer (no full-screen backdrop) so the VM list behind it
+    // stays clickable and additional consoles can be opened while one is docked.
+    modal.className = 'fixed bottom-0 left-0 right-0 z-40 flex flex-col bg-[#1a1a2e] border-t border-slate-700 shadow-2xl';
+    modal.style.height = '55vh';
     modal.innerHTML = `
-        <div class="bg-[#1a1a2e] rounded-lg shadow-2xl w-[92vw] max-w-6xl h-[88vh] flex flex-col overflow-hidden">
-            <div class="flex items-center gap-3 px-4 py-2 bg-[#16213e] border-b border-slate-700 text-slate-200 text-sm">
-                <strong class="font-semibold">VM Consoles</strong>
-                <button id="pxmx-vnc-cad" title="Send Ctrl+Alt+Del to the active console" class="ml-2 px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Ctrl+Alt+Del</button>
-                <button id="pxmx-vnc-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
-                <span id="pxmx-vnc-status" class="ml-auto text-xs text-amber-400"></span>
-                <button id="pxmx-vnc-closeall" title="Close all consoles" class="ml-3 text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
-            </div>
-            <div id="pxmx-vnc-tabs" class="flex items-stretch gap-1 px-2 pt-1 bg-[#16213e] border-b border-slate-700 overflow-x-auto"></div>
-            <div id="pxmx-vnc-bodies" class="relative flex-1 bg-black"></div>
-        </div>`;
+        <div class="flex items-center gap-3 px-4 py-2 bg-[#16213e] border-b border-slate-700 text-slate-200 text-sm">
+            <strong class="font-semibold">VM Consoles</strong>
+            <button id="pxmx-vnc-min" title="Minimize / restore the console dock" class="ml-2 px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Minimize</button>
+            <button id="pxmx-vnc-cad" title="Send Ctrl+Alt+Del to the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Ctrl+Alt+Del</button>
+            <button id="pxmx-vnc-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
+            <span id="pxmx-vnc-status" class="ml-auto text-xs text-amber-400"></span>
+            <button id="pxmx-vnc-closeall" title="Close all consoles" class="ml-3 text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
+        </div>
+        <div id="pxmx-vnc-tabs" class="flex items-stretch gap-1 px-2 pt-1 bg-[#16213e] border-b border-slate-700 overflow-x-auto"></div>
+        <div id="pxmx-vnc-bodies" class="relative flex-1 bg-black overflow-hidden"></div>`;
     document.body.appendChild(modal);
+    modal.querySelector('#pxmx-vnc-min').onclick = () => {
+        const minimized = modal.getAttribute('data-min') === '1';
+        const tabsEl = modal.querySelector('#pxmx-vnc-tabs');
+        const bodiesEl = modal.querySelector('#pxmx-vnc-bodies');
+        const btn = modal.querySelector('#pxmx-vnc-min');
+        if (minimized) {
+            modal.setAttribute('data-min', '0');
+            modal.style.height = '55vh';
+            tabsEl.classList.remove('hidden');
+            bodiesEl.classList.remove('hidden');
+            btn.textContent = 'Minimize';
+            try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+            const c = pxmxActiveConsole();
+            if (c && c.rfb) { try { c.rfb.focus(); } catch (e) {} }
+        } else {
+            modal.setAttribute('data-min', '1');
+            modal.style.height = '';
+            tabsEl.classList.add('hidden');
+            bodiesEl.classList.add('hidden');
+            btn.textContent = 'Restore';
+        }
+    };
     modal.querySelector('#pxmx-vnc-cad').onclick = () => { const c = pxmxActiveConsole(); if (c && c.rfb) c.rfb.sendCtrlAltDel(); };
     modal.querySelector('#pxmx-vnc-fs').onclick = () => {
         const c = pxmxActiveConsole();
