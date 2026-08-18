@@ -3605,14 +3605,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
         A pxmx agent's owning spoke can be tenant-assigned (``module_metadata``
         ``tenant_id``) while the agent's own ``agent_config[agent_id]`` entry
-        has no tenant — or a stale one saved before the spoke was bound. Always
-        overwrite to match (per the user's "always overwrite to match" choice):
-        the spoke's binding is authoritative for the agent's tenant. Preserves
-        ``enabled`` + ``usb_config``; only ``tenant_id`` is stamped. Tolerant
-        (try/except + ``or {}``) like ``_relay_cs_event_inner`` / cs_bridge. A
-        no-op when the spoke has no tenant (unassigned spoke) so the agent's
-        existing tenant_id is left intact. Persisted via ``save_state``.
-        Best-effort: never raises into the relay path."""
+        has no tenant — or a stale one saved before the spoke was bound. For an
+        AUTO-assigned agent (no operator override) the spoke's binding is
+        authoritative, so we stamp it to correct drift. But a MANUAL override —
+        ``client_simulation.tenant_pinned`` set by the dedicated Tenant button /
+        Agent-Config modal (see set_pxmx_agent_config) — must WIN: a spoke can be
+        shared, and the operator deliberately pins an agent to a different tenant
+        than the shared spoke's. Without this guard the periodic re-inheritance
+        (this runs on EVERY relayed frame) rolled the override back to the
+        spoke's tenant "over time". Preserves ``enabled`` + ``usb_config``; only
+        ``tenant_id`` is stamped. Tolerant (try/except + ``or {}``) like
+        ``_relay_cs_event_inner`` / cs_bridge. A no-op when the spoke has no
+        tenant (unassigned spoke) or the agent's tenant is pinned. Persisted via
+        ``save_state``. Best-effort: never raises into the relay path."""
         if not agent_id:
             return
         try:
@@ -3629,6 +3634,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 entry = {"display_name": agent_id}
                 store[agent_pk] = entry
             cs_cfg = dict(entry.get("client_simulation") or {})
+            # Operator pinned a manual tenant → never roll it back to the spoke's
+            # (shared) tenant. Clearing the override in the UI unpins it, so
+            # inheritance resumes for a genuinely auto-assigned agent.
+            if cs_cfg.get("tenant_pinned"):
+                return
             if cs_cfg.get("tenant_id") != spoke_tenant:
                 cs_cfg["tenant_id"] = spoke_tenant
                 entry["client_simulation"] = cs_cfg

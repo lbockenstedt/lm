@@ -149,3 +149,40 @@ def test_idempotent_no_save_when_already_matches(tmp_path):
 
     assert saves == []  # already matches → no persist
     assert state.system_state["agent_config"]["ag-3"]["client_simulation"]["tenant_id"] == "t-match"
+
+def test_pinned_tenant_not_overwritten(tmp_path):
+    """A manually-set tenant (client_simulation.tenant_pinned=True, set by the
+    dedicated Tenant button / Agent-Config modal) must WIN over the spoke's
+    tenant — a spoke can be SHARED and the operator deliberately pins an agent
+    to a different tenant. Without this the periodic re-inheritance rolled the
+    override back to the spoke's tenant "over time"."""
+    state = _fresh_state(tmp_path)
+    state.update_module_metadata("shared-proxmox-spoke", {"tenant_id": "shared"})
+    state.system_state["agent_config"]["pxmx-cs-svr-06-agent"] = {
+        "client_simulation": {"enabled": True, "tenant_id": "lrb",
+                              "tenant_pinned": True},
+    }
+    hub = _Hub(state)
+
+    _inherit(hub, "pxmx-cs-svr-06-agent", "shared-proxmox-spoke")
+
+    cs = state.system_state["agent_config"]["pxmx-cs-svr-06-agent"]["client_simulation"]
+    assert cs["tenant_id"] == "lrb"          # pinned override preserved
+    assert cs["tenant_pinned"] is True
+
+
+def test_pinned_tenant_no_save_storm(tmp_path):
+    """A pinned agent takes the early return before any write, so the relay
+    path doesn't persist on every frame."""
+    state = _fresh_state(tmp_path)
+    state.update_module_metadata("shared-proxmox-spoke", {"tenant_id": "shared"})
+    state.system_state["agent_config"]["ag-pin"] = {
+        "client_simulation": {"tenant_id": "lrb", "tenant_pinned": True}}
+    hub = _Hub(state)
+    saves = []
+    state.save_state = lambda: saves.append(1)  # type: ignore
+
+    _inherit(hub, "ag-pin", "shared-proxmox-spoke")
+
+    assert saves == []
+    assert state.system_state["agent_config"]["ag-pin"]["client_simulation"]["tenant_id"] == "lrb"
