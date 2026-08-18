@@ -1126,8 +1126,29 @@ def register(app, hub, ctx):
             # filtered) VM list — the pre-existing behavior, unchanged.
             node_spokes = hub.get_hypervisor_spokes_for_tenant(tid)
             if not node_spokes:
+                # Fall back to the global hypervisor spoke ONLY when it is
+                # UNBOUND (no tenant): an unbound host's Overview should still
+                # match its (subnet-filtered) VM list. A spoke BOUND to a
+                # DIFFERENT real tenant must NEVER surface its nodes here — the
+                # global fallback otherwise leaked that tenant's Proxmox host
+                # into every OTHER tenant's Overview (reported cross-tenant
+                # leak). Bound-to-this-tenant and shared hosts are already
+                # returned by get_hypervisor_spokes_for_tenant above, so they
+                # never reach this fallback.
                 gs = hub.get_hypervisor_spoke()
-                node_spokes = [gs] if gs else []
+                gs_tid = ((hub.state.system_state.get("module_metadata", {}) or {})
+                          .get(gs, {}) or {}).get("tenant_id") if gs else None
+                if gs and not gs_tid:
+                    node_spokes = [gs]
+                else:
+                    # No spoke visible to this tenant. If a global spoke exists
+                    # but is bound to ANOTHER tenant, return a CLEAN empty
+                    # envelope rather than _warm_or_empty() — the per-tenant
+                    # warm cache may still hold that other tenant's nodes from a
+                    # pre-fix leaky fetch, and serving it would re-leak them.
+                    node_spokes = []
+                    if gs:
+                        return {"nodes": [], "spoke_connected": False}
         elif _is_admin(sess):
             # Admin, no tenant selected ("All") → every node across every
             # agent-hosting spoke (was: a single spoke, hiding sim-hosted hosts).

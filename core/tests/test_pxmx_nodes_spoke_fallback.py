@@ -37,7 +37,7 @@ class _Hub:
     """Minimal hub: records which spoke GET_NODE_STATS was relayed to."""
 
     def __init__(self, bound_spoke=None, global_spoke="pxmx-global",
-                 nodes=None, raise_on_relay=False):
+                 nodes=None, raise_on_relay=False, global_spoke_tenant=None):
         self.state = _State()
         self._bound = bound_spoke
         self._global = global_spoke
@@ -46,6 +46,11 @@ class _Hub:
         self.relayed_to = None
         self.raise_on_relay = raise_on_relay
         self.warm_cache = {}
+        # A global hypervisor spoke BOUND to a specific tenant — used to prove
+        # the Overview fallback never leaks a bound host into another tenant.
+        if global_spoke and global_spoke_tenant is not None:
+            self.state.system_state["module_metadata"] = {
+                global_spoke: {"tenant_id": global_spoke_tenant}}
 
     def get_hypervisor_spoke_for_tenant(self, tid=None):
         return self._bound
@@ -121,6 +126,47 @@ def test_admin_no_tenant_uses_global_spoke():
     c = _build(hub, admin=True, tenant=None)
     r = c.get("/api/pxmx/nodes")
     assert r.status_code == 200
+    assert hub.relayed_to == "pxmx-global"
+
+
+def test_foreign_bound_global_spoke_does_not_leak_into_other_tenant():
+    """CROSS-TENANT ISOLATION (reported leak): the global hypervisor spoke is
+    BOUND to tenant 'lrb'. Tenant 'ra' has no hypervisor of its own, so the
+    fallback must NOT surface lrb's host in ra's Overview — it returns an empty
+    envelope and never relays GET_NODE_STATS to the foreign spoke."""
+    hub = _Hub(bound_spoke=None, global_spoke="pxmx-lrb", global_spoke_tenant="lrb")
+    c = _build(hub, admin=True, tenant="ra")
+    r = c.get("/api/pxmx/nodes?tenant=ra")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["nodes"] == []
+    assert body["spoke_connected"] is False
+    assert hub.relayed_to is None  # never queried the foreign-bound host
+
+
+def test_foreign_bound_global_spoke_ignores_poisoned_warm_cache():
+    """Even if a pre-fix leaky fetch poisoned ra's per-tenant warm cache with
+    lrb's nodes, the isolation path returns a CLEAN empty envelope rather than
+    re-serving the stale cross-tenant data."""
+    hub = _Hub(bound_spoke=None, global_spoke="pxmx-lrb", global_spoke_tenant="lrb")
+    hub.warm_cache["pxmx_nodes"] = {"ra": {"nodes": [{"node": "lrb-pve", "status": "online"}]}}
+    c = _build(hub, admin=True, tenant="ra")
+    r = c.get("/api/pxmx/nodes?tenant=ra")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["nodes"] == []  # poisoned cache NOT served
+    assert hub.relayed_to is None
+
+
+def test_unbound_global_spoke_still_falls_back():
+    """A genuinely UNBOUND connected host (no tenant binding) still falls back
+    to the global spoke so its Overview matches its subnet-filtered VM list —
+    the isolation guard only excludes hosts bound to a DIFFERENT tenant."""
+    hub = _Hub(bound_spoke=None, global_spoke="pxmx-global", global_spoke_tenant="")
+    c = _build(hub, admin=True, tenant="acme")
+    r = c.get("/api/pxmx/nodes?tenant=acme")
+    assert r.status_code == 200
+    assert len(r.json()["nodes"]) == 1
     assert hub.relayed_to == "pxmx-global"
 
 
