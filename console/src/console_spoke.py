@@ -182,6 +182,44 @@ class ConsoleSpoke(BaseSpoke):
                 return (p.get("product") or "").strip()
         return ""
 
+    def _absent_named_ports(self, seen: set) -> list:
+        """Persisted ports we've NAMED (alias) or IDENTIFIED (probe.identity) that
+        aren't enumerated right now → returned as ``present=False`` telemetry rows
+        so an offline device (adapter unplugged / target powered off) keeps its
+        saved name across a reboot. ``seen`` is the set of live port_ids to skip.
+        """
+        out = []
+        for pid, saved in self.store.all_items().items():
+            if pid in seen:
+                continue
+            if not (saved.get("alias") or (saved.get("probe") or {}).get("identity")):
+                continue  # only resurface ports a human meaningfully named/identified
+            hw = saved.get("hw") or {}
+            out.append({
+                "port_id": pid,
+                "device": hw.get("device", ""),
+                "kind": hw.get("kind", "usb"),
+                "vendor": hw.get("vendor", ""),
+                "product": hw.get("product", ""),
+                "serial": hw.get("serial", ""),
+                "vid": hw.get("vid", ""),
+                "pid": hw.get("pid", ""),
+                "alias": saved.get("alias", ""),
+                "tenant_id": saved.get("tenant_id", ""),
+                "settings": self.store.settings(pid),
+                "probe": saved.get("probe", {}),
+                "in_use": False,
+                "writer": None,
+                "monitoring": False,
+                "last_activity": 0,
+                "capture_bytes": 0,
+                "pending_out": 0,
+                "dpa": None,
+                "boot": None,
+                "present": False,  # not physically enumerated (offline / unplugged)
+            })
+        return out
+
     # ── command dispatch ──────────────────────────────────────────────────────
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
         cmd = command_type.upper()
@@ -194,14 +232,22 @@ class ConsoleSpoke(BaseSpoke):
 
         if cmd == "CONSOLE_LIST_PORTS":
             ports = []
+            seen = set()
             for p in enumerate_ports():
                 pid = p["port_id"]
+                seen.add(pid)  # present now → never resurrect it as an absent row
                 # Hide ports the automated system can't open (faulty/non-real
                 # serial devices) so the operator never sees a broken port or its
                 # raw error — unless a live session is somehow attached to it.
                 if pid in self._unopenable and not self.sessions.has_user_sessions(pid):
                     continue
                 saved = self.store.get(pid)
+                # Remember this port's hardware descriptor (change-guarded) so an
+                # absent/offline port can still be listed with its saved name.
+                hw = {k: p.get(k, "") for k in
+                      ("device", "kind", "vendor", "product", "serial", "vid", "pid")}
+                if saved.get("hw") != hw:
+                    saved = self.store.update(pid, hw=hw)
                 snap = self.sessions.snapshot(pid)
                 ports.append({
                     **p,
@@ -217,7 +263,13 @@ class ConsoleSpoke(BaseSpoke):
                     "pending_out": snap["pending_out"],  # bytes of a paste still draining
                     "dpa": self._dpa_info(pid),          # Direct Port Access endpoint (None if off)
                     "boot": self._boot_info(pid),        # boot/wake cycle status (None if never seen)
+                    "present": True,                     # physically enumerated right now
                 })
+            # Known-but-absent NAMED ports: an offline device (adapter unplugged /
+            # target powered off) doesn't enumerate, so an enumeration-only list
+            # drops its saved name on reboot. Re-surface those we've named/
+            # identified, marked present=False, so the name survives regardless.
+            ports.extend(self._absent_named_ports(seen))
             return {"status": "SUCCESS", "ports": ports}
 
         if cmd == "CONSOLE_GET_CAPTURE":
