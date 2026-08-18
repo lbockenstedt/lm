@@ -714,14 +714,24 @@ def register(app, hub, ctx):
         """The owning tenant_id of a cert install TARGET, or "" if it has none
         (shared / unattributable). Thin hub-backed wrapper over the pure
         cert_distribution.target_owner_tenant (see there for the resolution
-        rules): the hub target is shared (""); an agent-hosting per-node target's
-        agent_id resolves to its owning spoke; otherwise the identifier/spoke_id
-        IS the spoke, and its module_metadata tenant is the target's tenant."""
+        rules): the hub target is shared (""); an agent-hosting per-node target
+        honors the node's OWN pinned tenant (agent_config → client_simulation
+        .tenant_id, same source the VM console + per-agent Tenant button use),
+        falling back to its owning spoke; otherwise the identifier/spoke_id IS
+        the spoke, and its module_metadata tenant is the target's tenant."""
+        def _agent_tenant(aid):
+            try:
+                ac = (hub.state.system_state.get("agent_config", {}) or {}).get(
+                    hub._agent_primary_key(aid), {}) or {}
+                return str((ac.get("client_simulation") or {}).get("tenant_id") or "").strip()
+            except Exception:  # noqa: BLE001 — fail-open to spoke-tenant fallback
+                return ""
         return target_owner_tenant(
             {"module_type": module_type, "identifier": identifier,
              "spoke_id": spoke_id},
             lambda sid: hub.state.get_spoke_tenant(hub._primary_key(sid)) or "",
-            lambda aid: hub.get_spoke_for_agent(aid, fallback_hypervisor=False) or "")
+            lambda aid: hub.get_spoke_for_agent(aid, fallback_hypervisor=False) or "",
+            _agent_tenant)
 
     def _le_guard_target(request, module_type, identifier, spoke_id=None):
         """403 unless the caller may deploy to this install TARGET. A Global Admin

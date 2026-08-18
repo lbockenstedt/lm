@@ -871,7 +871,7 @@ def build_available_targets(spoke_module_types: Dict[str, str],
     return targets
 
 
-def target_owner_tenant(target, spoke_tenant, agent_spoke):
+def target_owner_tenant(target, spoke_tenant, agent_spoke, agent_tenant=None):
     """Resolve the owning tenant_id of a cert install TARGET, or ``""`` when it
     has none (shared / unattributable — e.g. the hub self-install target, or an
     unresolved spoke). Pure + fail-closed so the LE routes can tenant-scope both
@@ -884,8 +884,21 @@ def target_owner_tenant(target, spoke_tenant, agent_spoke):
     for spoke-level entries) names the spoke directly. The spoke's tenant
     (``spoke_tenant``) is the target's tenant.
 
+    Per-node exception: a Proxmox node/agent can be PINNED to a tenant (the
+    per-agent Tenant button → ``agent_config[...].client_simulation.tenant_id``)
+    that differs from its — possibly shared / unassigned / other-tenant — owning
+    spoke, exactly as the VM console authorizes by the node's OWN tenant rather
+    than the spoke's. So for a per-node target we honor that pin FIRST
+    (``agent_tenant``); only when the node has no pinned tenant do we fall back
+    to the owning spoke's tenant. Without this, a tenant-admin whose Proxmox
+    node lives under a shared pxmx spoke could see/drive its console but NOT
+    select it as an LE cert destination.
+
     ``spoke_tenant``: callable ``spoke_id -> tenant_id`` ("" if none).
-    ``agent_spoke``:  callable ``agent_id -> spoke_id`` ("" if unknown)."""
+    ``agent_spoke``:  callable ``agent_id -> spoke_id`` ("" if unknown).
+    ``agent_tenant``: optional callable ``agent_id -> tenant_id`` (the node's own
+        pinned/effective tenant, "" if none/unknown). Applied only to per-node
+        agent-hosting targets."""
     if not isinstance(target, dict):
         return ""
     mt = (target.get("module_type") or "").strip()
@@ -895,6 +908,10 @@ def target_owner_tenant(target, spoke_tenant, agent_spoke):
     if not sid:
         ident = str(target.get("identifier") or target.get("agent_id") or "").strip()
         if mt in ("hypervisor", "simulation") and ident:
+            if agent_tenant is not None:
+                atid = (agent_tenant(ident) or "").strip()
+                if atid:
+                    return atid
             sid = (agent_spoke(ident) or "").strip()
         else:
             sid = ident
