@@ -327,3 +327,25 @@ def test_no_indexed_agents_falls_back_to_spoke_binding():
         agent_info={})  # nothing indexed yet
     assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantLRB") == ["pxmx-1"]
     assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantRA") == []
+
+
+class _HB:
+    def __init__(self, last_seen):
+        self.last_seen = last_seen or {}
+
+
+def test_pin_survives_restart_via_durable_heartbeat_keys():
+    """After a hub restart agent_info is empty for ~30s, but the DURABLE
+    composite heartbeat keys ({spoke_pk}:{agent_pk}) still map the pinned agent
+    to its spoke, so the pinned-to-LRB host is NOT re-leaked to RA in that
+    window (it does not fall back to the shared spoke binding)."""
+    hub = _MixedHub(
+        hypervisors=["pxmx-shared"],
+        simulations=[],
+        metadata={"pxmx-shared": {"tenant_id": "shared"}},
+        tenant_state=_SHARED_TS,
+        agent_info={},  # wiped by restart
+        agent_config={"ag-1": {"client_simulation": {"tenant_id": "tenantLRB"}}})
+    hub.heartbeat = _HB({"pxmx-shared:ag-1": 123.0})  # persisted composite key
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantLRB") == ["pxmx-shared"]
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantRA") == []

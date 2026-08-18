@@ -323,9 +323,24 @@ class SpokeRegistryMixin:
         spoke_tid = str((md.get(spoke_id, {}) or md.get(spoke_pk, {}) or {})
                         .get("tenant_id") or "").strip()
         agent_cfg = self.state.system_state.get("agent_config", {}) or {}
-        agents = [apk for apk, info in (getattr(self, "agent_info", {}) or {}).items()
-                  if info and info.get("spoke_id")
-                  and self._primary_key(info.get("spoke_id")) == spoke_pk]
+        # Agents on this spoke, from BOTH the live index (agent_info, wiped on hub
+        # restart / evicted on spoke disconnect) AND the DURABLE composite
+        # heartbeat keys ``{spoke_pk}:{agent_pk}`` (persisted via spoke_last_seen,
+        # re-seeded on boot — same source _offline_relay_agents uses). Without the
+        # durable source a hub restart would blank agent_info for ~30s and the
+        # pinned-host scope would fall back to the spoke's (shared) binding,
+        # re-leaking the host onto every tenant's Overview until agents relay.
+        agents = set()
+        for apk, info in (getattr(self, "agent_info", {}) or {}).items():
+            if info and info.get("spoke_id") \
+                    and self._primary_key(info.get("spoke_id")) == spoke_pk:
+                agents.add(apk)
+        hb_last = getattr(getattr(self, "heartbeat", None), "last_seen", None) or {}
+        for key in hb_last:
+            if isinstance(key, str) and ":" in key:
+                s_pk, a_pk = key.split(":", 1)
+                if self._primary_key(s_pk) == spoke_pk:
+                    agents.add(a_pk)
         if not agents:
             return {spoke_tid} if spoke_tid else set()
         effs = set()
