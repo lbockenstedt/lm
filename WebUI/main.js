@@ -16913,6 +16913,7 @@ function _renderConsolePorts(el, data) {
         const label = p.alias || identHost || p.product || p.device;
         const baud = (p.settings && p.settings.baud) || '—';
         const inUse = p.in_use ? ` <span class="text-[10px] px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-bold uppercase">In use</span>` : '';
+        const staleBadge = p.stale ? ` <span title="Console agent offline — showing last-known data (names/settings restored from cache). Live status resumes when the agent reconnects." class="text-[10px] px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 font-bold uppercase">offline</span>` : '';
         const monDot = (p.monitoring && !p.in_use)
             ? ` <span title="Passively monitoring — capturing console output while idle" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 font-bold uppercase">● monitoring</span>` : '';
         const bootBadge = _consoleBootBadge(p.boot);
@@ -16927,7 +16928,7 @@ function _renderConsolePorts(el, data) {
         const dpaBadge = (p.dpa && p.dpa.telnet_port)
             ? `<div class="text-[11px] mt-0.5"><span class="font-mono px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 border border-sky-200" title="Direct Port Access — connect a terminal straight to this serial line (unencrypted telnet; bound to ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))})">🔌 ${escapeHtml(String(p.dpa.proto || 'telnet'))} ${escapeHtml(String(p.dpa.bind || '127.0.0.1'))}:${escapeHtml(String(p.dpa.telnet_port))}</span></div>` : '';
         return `<tr class="hover:bg-slate-50">
-            <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${monDot}${bootBadge}</div>
+            <td class="px-4 py-3"><div class="font-semibold text-slate-700">${escapeHtml(label)}${inUse}${staleBadge}${monDot}${bootBadge}</div>
               <div class="text-xs font-mono text-slate-400" title="${escapeHtml(p.spoke_id || '')}">${escapeHtml(tenantId)}:${escapeHtml(agentName)}:${escapeHtml(p.device)}:${escapeHtml(String(baud))}</div>
               ${dpaBadge}
               ${_consoleIdentityBlock(p)}</td>

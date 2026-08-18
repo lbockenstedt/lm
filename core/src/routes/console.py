@@ -671,7 +671,16 @@ def register(app, hub, ctx):
         spokes = hub.get_all_spokes_by_type("console") or []
         await _console_seed_credentials(hub, spokes)  # ensure new console spokes have creds
         ports, errors, visible_spokes = [], {}, set()
-        for sid in spokes:
+        stale_spokes: set = set()
+
+        def _emit_ports(sid, raw_ports, stale):
+            """Enrich + tenant-gate one spoke's raw port list into ``ports``.
+
+            Shared by the live path and the warm-cache (spoke-offline) path so the
+            visibility/masking rules are identical. ``stale=True`` tags ports
+            served from the last-known snapshot. Each port dict is COPIED before
+            enrichment so the persisted warm-cache list is never mutated in place
+            (it's reused across requests)."""
             stenant = hub.state.get_spoke_tenant(sid) or ""
             agent_name = hub.state.get_module_name(sid)  # friendly name, not the UUID
             # A dedicated agent bound to the selected tenant is "present" for it
@@ -679,12 +688,8 @@ def register(app, hub, ctx):
             # unassigned agents only count once a port actually passes below.
             if sel is None or (stenant == sel and not access.tenant_is_shared(stenant)):
                 visible_spokes.add(sid)
-            try:
-                r = await hub.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=15.0)
-            except Exception as e:  # noqa: BLE001 - one dead console shouldn't blank the rest
-                errors[sid] = str(e)
-                continue
-            for p in (_console_unwrap(r).get("ports") or []):
+            for src in (raw_ports or []):
+                p = dict(src)
                 override = p.get("tenant_id") or ""
                 eff = override or stenant
                 p["spoke_id"] = sid
@@ -692,6 +697,8 @@ def register(app, hub, ctx):
                 p["tenant_id"] = eff            # effective (what scoping/NetBox uses)
                 p["tenant_override"] = override  # per-port override, if any
                 p["agent_tenant"] = stenant      # the whole-agent binding
+                if stale:
+                    p["stale"] = True            # served from warm cache (spoke offline)
                 shared = access.tenant_is_shared(eff)
                 visible = access.spoke_visible_to_session(sess, eff)
                 disp = _console_port_disposition(admin, visible, eff, sel, shared)
@@ -709,8 +716,42 @@ def register(app, hub, ctx):
                             continue
                 ports.append(p)
                 visible_spokes.add(sid)
-        consoles = spokes if sel is None else [s for s in spokes if s in visible_spokes]
-        return {"consoles": consoles, "ports": ports, "errors": errors}
+
+        for sid in spokes:
+            try:
+                r = await hub.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=15.0)
+                raw_ports = _console_unwrap(r).get("ports") or []
+                # Persist the last-known port list (aliases + fingerprint identity)
+                # so the page warm-starts after a hub restart / brief disconnect
+                # instead of blanking until the spoke re-answers — mirrors the
+                # pxmx/netbox warm cache. Raw (pre tenant-filter) per the cache
+                # contract; _emit_ports re-applies visibility per reader.
+                await hub.warm_set("console_ports", sid, raw_ports)
+                _emit_ports(sid, raw_ports, stale=False)
+            except Exception as e:  # noqa: BLE001 - one dead console shouldn't blank the rest
+                cached = hub.warm_get("console_ports", sid)
+                if cached:
+                    stale_spokes.add(sid)
+                    _emit_ports(sid, cached, stale=True)  # names survive the outage
+                else:
+                    errors[sid] = str(e)
+
+        # Known console spokes that are fully DISCONNECTED (not in the live list)
+        # but have a warm-cached port list: surface their last-known device names
+        # marked stale, so a hub reboot while a console host is also down still
+        # shows the fleet instead of an empty page.
+        for sid in list((getattr(hub, "warm_cache", {}) or {}).get("console_ports", {})):
+            if sid in spokes:
+                continue
+            cached = hub.warm_get("console_ports", sid)
+            if cached:
+                stale_spokes.add(sid)
+                _emit_ports(sid, cached, stale=True)
+
+        all_spokes = list(spokes) + [s for s in stale_spokes if s not in spokes]
+        consoles = all_spokes if sel is None else [s for s in all_spokes if s in visible_spokes]
+        return {"consoles": consoles, "ports": ports, "errors": errors,
+                "stale_spokes": sorted(stale_spokes)}
 
     @app.get("/api/console/ports")
     async def console_ports(request: Request):
