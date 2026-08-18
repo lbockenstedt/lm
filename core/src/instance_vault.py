@@ -36,9 +36,16 @@ logger = logging.getLogger(__name__)
 # are never sourced from the vault. Keyed by the ``global_config`` list name.
 SECRET_FIELDS = {
     "nac_instances": {
-        # ClearPass OAuth2 client secret (primary) + optional fallback password.
-        "client_secret": ("client_secret", "secret", "apikey", "api_key",
-                          "token", "password", "key", "value"),
+        # A ClearPass connection authenticates EITHER as an OAuth2 API client
+        # (client_id + client_secret, grant_type=client_credentials) OR with a
+        # username/password fallback login (grant_type=password). A vault
+        # "Login" secret marked as an OAuth account (Credential Vault checkbox)
+        # carries client_secret; a plain login carries user/username + password.
+        # Only the field(s) the resolved secret actually carries are overlaid, so
+        # the spoke picks the grant from what is present. client_id stays inline
+        # on the instance (non-secret) and is never sourced/stripped here.
+        "client_secret": ("client_secret", "secret", "apikey", "api_key", "token"),
+        "user":          ("user", "username"),
         "password":      ("password", "fallback_password"),
     },
     "nw_devices": {

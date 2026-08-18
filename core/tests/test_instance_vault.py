@@ -53,13 +53,27 @@ def test_overlay_fills_nac_client_secret(monkeypatch):
     assert "vault_credential" in inst              # original untouched
 
 
-def test_overlay_nac_accepts_login_shape(monkeypatch):
-    # A generic login secret (password field) can back the client secret.
-    _patch_get(monkeypatch, {"password": "pw"})
+def test_overlay_nac_oauth_fills_client_secret(monkeypatch):
+    # An OAuth2 account secret (client_id + client_secret) backs the client
+    # secret; client_id stays inline on the instance (non-secret, not sourced).
+    _patch_get(monkeypatch, {"client_id": "vault-cid", "client_secret": "vaulted-secret"})
+    inst = {"host": "https://cppm", "client_id": "cid",
+            "vault_credential": {"bucket": "acme", "name": "cppm"}}
+    out = _run(iv.overlay(object(), inst, "nac_instances"))
+    assert out["client_secret"] == "vaulted-secret"
+    assert out["client_id"] == "cid"               # inline preserved, not overlaid
+    assert "user" not in out and "password" not in out
+
+
+def test_overlay_nac_login_maps_user_password(monkeypatch):
+    # A username/password login secret backs the fallback user + password
+    # (password grant) — NOT the OAuth client_secret.
+    _patch_get(monkeypatch, {"username": "svc", "password": "pw"})
     inst = {"vault_credential": {"bucket": "acme", "name": "x"}}
     out = _run(iv.overlay(object(), inst, "nac_instances"))
-    assert out["client_secret"] == "pw"
+    assert out["user"] == "svc"
     assert out["password"] == "pw"
+    assert "client_secret" not in out              # login secret is NOT OAuth
 
 
 def test_overlay_nw_only_overlays_carried_fields(monkeypatch):
