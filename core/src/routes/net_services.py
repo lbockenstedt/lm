@@ -828,6 +828,44 @@ def register(app, hub, ctx):
                 continue
         return hosts, any_source
 
+    def _le_certs_holder(data):
+        """Locate the cert list inside an le-certs response.
+
+        The list lives at DIFFERENT depths depending on the caller:
+        * flat ``{"certs": [...]}`` — the already-unwrapped shape unit tests use;
+        * the spoke SUCCESS envelope ``{"status": ..., "data": {"certs": [...]}}``
+          — the REAL shape ``_relay_spoke`` returns and the warm cache stores
+          (``le_cache_get('certs')``), and the shape the WebUI unwraps via
+          ``inner(d).certs``.
+
+        Returns the list (possibly empty) or ``None`` when there is no cert list.
+        Fixes the silent-no-op bug where the tag/filter helpers read top-level
+        ``data['certs']`` (``None`` on the enveloped shape), so per-cert tenant
+        ownership / bugfixer tags / the ownership filter never reached the certs
+        the UI actually renders."""
+        if not isinstance(data, dict):
+            return None
+        if isinstance(data.get("certs"), list):
+            return data["certs"]
+        inner = data.get("data")
+        if isinstance(inner, dict) and isinstance(inner.get("certs"), list):
+            return inner["certs"]
+        return None
+
+    def _le_with_certs(data, new_certs):
+        """Return ``data`` with its cert list replaced by ``new_certs`` at the
+        SAME nesting level the originals were found (flat top-level, or nested
+        under ``data``), so a tag/filter transform reaches the list the WebUI
+        reads instead of injecting a stray, ignored top-level ``certs`` key."""
+        if not isinstance(data, dict):
+            return data
+        if isinstance(data.get("certs"), list):
+            return {**data, "certs": new_certs}
+        inner = data.get("data")
+        if isinstance(inner, dict) and isinstance(inner.get("certs"), list):
+            return {**data, "data": {**inner, "certs": new_certs}}
+        return {**data, "certs": new_certs}
+
     async def _filter_le_certs(request, data, tenant=None):
         """Tenant subnet-filter the cert list. Certs have no IP column, so a cert is
         attributed to a tenant by resolving its SANs through the internal DNS A/AAAA
@@ -897,7 +935,7 @@ def register(app, hub, ctx):
                     return True
             return False
 
-        return {**data, "certs": [c for c in (data.get("certs") or []) if _match(c)]}
+        return _le_with_certs(data, [c for c in (_le_certs_holder(data) or []) if _match(c)])
 
     def _bugfixer_pinned():
         """The set of DNS names designated as BugFixer certs (H1) —
@@ -916,7 +954,9 @@ def register(app, hub, ctx):
         if not isinstance(data, dict):
             return data
         pinned = _bugfixer_pinned()
-        certs = data.get("certs") or []
+        certs = _le_certs_holder(data)
+        if certs is None:
+            return data
         tagged = []
         for c in certs:
             if not isinstance(c, dict):
@@ -927,7 +967,7 @@ def register(app, hub, ctx):
                 names.add(str(san or "").strip().lower())
             is_bf = any(n and n in pinned for n in names)
             tagged.append({**c, "bugfixer": is_bf})
-        return {**data, "certs": tagged}
+        return _le_with_certs(data, tagged)
 
     def _tag_cert_tenants(request, data):
         """Tag each cert with its explicit owner ``tenants`` list plus the
@@ -936,9 +976,16 @@ def register(app, hub, ctx):
         if not isinstance(data, dict):
             return data
         sess = _session_user(request)
+        certs = _le_certs_holder(data)
+        if certs is None:
+            # No cert list at any known depth — nothing to tag. Log the shape so
+            # a future envelope change is obvious rather than silently untagged.
+            logger.info("LE-CERT-TENANTS LIST no cert list in response; top_keys=%r",
+                        list(data.keys()))
+            return data
         out = []
         tagged_owned = {}
-        for c in data.get("certs") or []:
+        for c in certs:
             if not isinstance(c, dict):
                 out.append(c)
                 continue
@@ -954,9 +1001,9 @@ def register(app, hub, ctx):
         # versa) = a domain-key mismatch between save + list.
         logger.info(
             "LE-CERT-TENANTS LIST cert_domains=%r tagged_with_tenants=%r store_keys=%r",
-            [c.get("domain") for c in (data.get("certs") or []) if isinstance(c, dict)],
+            [c.get("domain") for c in certs if isinstance(c, dict)],
             tagged_owned, _le_cert_tenant_store_keys())
-        return {**data, "certs": out}
+        return _le_with_certs(data, out)
 
     @app.get("/api/le/certs")
     async def le_list_certs(request: Request, tenant: str = None):
