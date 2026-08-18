@@ -14459,7 +14459,7 @@ async function _addServerGenPsk(role, tenant) {
     try {
         const r = await apiJson(`/tenant/${encodeURIComponent(tenant)}/onboarding-psk`, { method: 'POST', body: '{}' });
         if (!area) return;
-        const cmd = `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \\\n  | sudo bash -s -- --roles ${role} --onboarding-psk ${r.psk} --tenant-hint ${tenant}`;
+        const cmd = `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \\\n  | sudo bash -s -- --onboarding-psk ${r.psk} --tenant-hint ${tenant}`;
         area.innerHTML = `<p class="text-xs font-bold text-slate-600 mb-1">Run this on the new server:</p>
             <pre id="add-server-cmd" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">${escapeHtml(cmd)}</pre>
             <button onclick="_addServerCopyCmd()" class="mt-2 text-xs text-[#01A982] hover:underline">Copy command</button>
