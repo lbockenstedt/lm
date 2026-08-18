@@ -173,3 +173,17 @@ def test_invalid_ws_token_rejected():
             code = exc.code
     assert closed
     assert code == 4401  # invalid/expired console session
+
+
+def test_ws_connect_marks_session_connected():
+    """On accept, the relay marks the session ``connected`` (+ ``connected_at``)
+    so the 60s TTL no longer reaps it mid-view and the presence roster can list
+    the viewer. Regression: a VNC session with no ``connected`` flag froze the
+    screen after 60s when a live frame re-read the reaped session."""
+    sess = _session(items=[("ready",), b"RFB 003.008\n"])
+    assert not sess.get("connected")
+    client, hub = _build_client({"s1": sess})
+    with client.websocket_connect("/ws/console/s1?token=tok") as ws:
+        ws.receive_bytes()
+        assert sess.get("connected") is True
+        assert isinstance(sess.get("connected_at"), (int, float))
