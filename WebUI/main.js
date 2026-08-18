@@ -3778,8 +3778,8 @@ function _viewTemplate(viewId) {
   <div class="space-y-2">
     <div class="flex items-center gap-2 flex-nowrap">
       <button onclick="showLeIssueModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">＋ Issue certificate</button>
-      <button onclick="leRenewAll()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">↻ Renew all</button>
-      <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">⚡ Distribute now</button>
+      ${isAdmin() ? `<button onclick="leRenewAll()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">↻ Renew all</button>
+      <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">⚡ Distribute now</button>` : ''}
       <button onclick="showMtlsDebug()" class="bg-slate-600/10 hover:bg-slate-600/20 text-slate-700 border border-slate-400 px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap" title="Debug: which connected spokes/agents are ACTUALLY presenting a verified mTLS client cert vs. connected cert-less, plus the hub's trust bundle + pinned BugFixer cert check">🔒 mTLS status</button>
       <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200 whitespace-nowrap" title="Manage this tenant's DNS-01 credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-01 issuance">🔑 DNS Credentials</button>
     </div>
@@ -20663,6 +20663,38 @@ async function leDistributeNow() {
     } catch (e) { showToast('Distribute failed: ' + e.message, 'error'); }
 }
 
+// Deploy ONE certificate to all of ITS OWN targets — the per-cert "Distribute
+// now" in the targets modal. Unlike leDistributeNow() (fleet-wide /api/le/distribute,
+// Global-Admin only), this loops the cert's targets and hits the ownership-guarded
+// per-target endpoint, so a tenant-admin can (re)deploy a cert they own without
+// tripping the Global-Admin gate. No targets → the wildcard fan-out / issue path
+// handles distribution, so just nudge a reload.
+async function leDistributeCert(domain) {
+    const cert = (window._leCerts || []).find(c => c.domain === domain) || {};
+    const tgts = cert.targets || [];
+    if (!tgts.length) { showToast('No targets to distribute for ' + domain + '.', 'info'); return; }
+    showToast(`Deploying ${domain} to ${tgts.length} target(s)…`, 'info');
+    let okN = 0, failN = 0, firstErr = '';
+    for (const t of tgts) {
+        const label = `${t.module_type}${t.identifier ? '/' + t.identifier : ''}`;
+        try {
+            const body = { module_type: t.module_type };
+            if (t.identifier) body.identifier = t.identifier;
+            if (t.spoke_id) body.spoke_id = t.spoke_id;
+            const { ok, data, detail } = await _spokeFetch(
+                `/api/le/certs/${encodeURIComponent(domain)}/distribute`,
+                { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+            const inner = (data && data.data) ? data.data : (data || {});
+            const d0 = (inner.distribution || [])[0] || {};
+            if (ok && d0.status === 'SUCCESS') okN++;
+            else { failN++; if (!firstErr) firstErr = `${label}: ${d0.message || detail || 'failed'}`; }
+        } catch (e) { failN++; if (!firstErr) firstErr = `${label}: ${e.message}`; }
+    }
+    const msg = `${okN} OK` + (failN ? ` — ${failN} FAILED (${firstErr})` : '');
+    showToast(`Deploy ${domain}: ${msg}`, failN ? 'error' : 'success');
+    await loadLEData();
+}
+
 async function leDeployTarget(domain, module_type, identifier) {
     // Per-target click-to-deploy: push this cert to ONE target only (the
     // clicked spoke/agent badge). The server builds the target without
@@ -20805,7 +20837,7 @@ async function showLeTargetsModal(domain) {
                 <select id="le-tgt-id" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></select>
             </div>
             <button onclick="addLeTarget('${esc(domain)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Add target</button>
-            <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Distribute now</button>
+            <button onclick="leDistributeCert('${esc(domain)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold" title="Deploy this certificate to all of its targets">Distribute now</button>
             <button onclick="document.getElementById('le-targets-modal').remove()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
         </div>` : `<div class="flex border-t border-slate-200 pt-4">
             <button onclick="document.getElementById('le-targets-modal').remove()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
