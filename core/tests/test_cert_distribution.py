@@ -754,6 +754,7 @@ def test_available_targets_lists_each_pxmx_agent_as_per_node_target():
     per_node = {t["identifier"]: t for t in out if t["identifier"]}
     assert per_node["node-a"]["module_type"] == "hypervisor"
     assert per_node["node-a"]["label"] == "hypervisor/pve01"
+    assert per_node["node-a"]["spoke_id"] == "pxmx-1"  # stamped for tenant-scoping
     assert per_node["node-b"]["label"] == "hypervisor/pve02"  # display_name wins
     assert per_node["node-c"]["module_type"] == "simulation"
     allnodes = [t for t in out if t["module_type"] in ("hypervisor", "simulation")
@@ -907,3 +908,22 @@ def test_target_owner_tenant_agent_tenant_optional_preserves_legacy():
     # Omitting agent_tenant (default None) keeps the pre-fix spoke-only behavior.
     t = {"module_type": "hypervisor", "identifier": "node-a", "agent_id": "node-a"}
     assert cd.target_owner_tenant(t, _st, _as) == "lrb"
+
+
+def test_target_owner_tenant_per_node_prefers_stamped_spoke_id():
+    # The non-sim pxmx regression: an UNPINNED per-node target whose owning spoke
+    # is bound to "lrb" must resolve even when the live agent_info index can't
+    # (yet) resolve it (agent_spoke returns "") — the stamped spoke_id carries it.
+    t = {"module_type": "hypervisor", "identifier": "node-z",
+         "agent_id": "node-z", "spoke_id": "pxmx-1"}
+    lagging_index = lambda aid: ""  # index hasn't caught up / evicted
+    no_pin = lambda aid: ""
+    assert cd.target_owner_tenant(t, _st, lagging_index, no_pin) == "lrb"
+
+
+def test_target_owner_tenant_pin_still_wins_over_stamped_spoke_id():
+    # A node pinned to "acme" under an "lrb" spoke resolves to the pin even when
+    # the stamped spoke_id would otherwise say "lrb".
+    t = {"module_type": "hypervisor", "identifier": "node-z",
+         "agent_id": "node-z", "spoke_id": "pxmx-1"}
+    assert cd.target_owner_tenant(t, _st, _as, lambda aid: "acme") == "acme"
