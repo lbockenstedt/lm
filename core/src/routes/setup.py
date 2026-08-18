@@ -168,6 +168,25 @@ async def _maybe_refresh_spokes(hub, force=False):
             _SPOKES_CACHE["refreshing"] = False
 
 
+def _is_stuck_never_keyed(approved, connected, has_key, is_relayed_agent, seen):
+    """True when a registration is stuck in the "approve → never reports in"
+    state: it is APPROVED yet has NEVER been seen, holds NO session key, is NOT
+    connected and is NOT a relayed agent.
+
+    Approval only mints + pushes a session key while the spoke is in
+    ``active_connections`` (``approve_spoke`` / ``handle_connection`` zero-touch
+    branch). Approve a spoke that was offline at the time — or a host-only
+    registration that never opens its own socket — and nothing is keyed, so the
+    row sits at offline / no key / never with only a Delete action and clicking
+    Approve never makes it report in. The only recovery is to delete it
+    everywhere so the box can re-present for approval while connected.
+
+    Module-level + pure so it is unit-testable with plain values (mirrors
+    ``_aggregate_spokes``)."""
+    return bool(approved) and not connected and not has_key \
+        and not is_relayed_agent and not seen
+
+
 def _bust_spokes_cache():
     """Debounced invalidation of the spokes cache. Called from setup mutation
     endpoints (approve/revoke/delete/purge/ack/metadata rename). Rather than
@@ -1508,6 +1527,22 @@ def register(app, hub, ctx):
                 # of its own to be "connected" on.
                 connected = connected or (_now - _agent_last) < _RELAY_LIVE_S
             has_key = sid in keys or pk in keys
+            # "Approve → never reports in": an APPROVED registration that has
+            # NEVER been seen, holds NO session key, is NOT connected and is NOT
+            # a relayed agent is stuck. Approval only mints + pushes a session
+            # key when the spoke is in active_connections (setup.approve_spoke /
+            # main.handle_connection zero-touch branch); approve a spoke that was
+            # not connected at the time and nothing is keyed, and a host-only
+            # registration (module_type "—", never its own socket) has no
+            # zero-touch reconnect to re-key on either. The row then sits at
+            # offline / no key / never with only a Delete action, and the ONLY
+            # way out is to delete it everywhere so the box can re-present for
+            # approval while connected — exactly the operator report. The
+            # duplicate/visibility checks never covered this, so the page
+            # (mis)reported "no problems detected".
+            stuck_never_keyed = _is_stuck_never_keyed(
+                approved.get(sid, False), connected, has_key,
+                is_relayed_agent, seen)
             reasons = []
             if not connected:
                 reasons.append("not connected")
@@ -1517,6 +1552,9 @@ def register(app, hub, ctx):
                 reasons.append("no session key")
             if not approved.get(sid, False):
                 reasons.append("not approved")
+            if stuck_never_keyed:
+                reasons.append("approved but never seen / never keyed — "
+                               "delete everywhere and re-approve while connected")
             rows.append({
                 "spoke_id": sid,
                 "module_type": types.get(sid) or meta.get("module_type") or "",
@@ -1530,6 +1568,9 @@ def register(app, hub, ctx):
                 # read as a fault.
                 "is_relayed_agent": is_relayed_agent,
                 "has_key": has_key,
+                # Stuck "approve → never reports in" signature (see above). The
+                # WebUI can surface a "Delete & re-approve" hint on these rows.
+                "stuck_never_keyed": stuck_never_keyed,
                 "last_seen": seen,
                 "last_seen_age_s": int(now - seen) if seen else None,
                 # The exact rule the Spokes list applies: no tenant_id → only an
@@ -1619,6 +1660,16 @@ def register(app, hub, ctx):
                 "of these is the SAME box as the id on the right, registered twice. The old "
                 "record still holds host/USB telemetry, so hosts show up under a spoke that "
                 "no longer runs them. Delete the '-spoke' side once its twin is connected.")
+        stuck = [r["spoke_id"] for r in rows if r.get("stuck_never_keyed")]
+        if stuck:
+            findings.append(
+                f"{len(stuck)} registration(s) are approved but have NEVER been seen, hold no "
+                f"session key and are not connected: " + ", ".join(stuck) + ". Approval only "
+                f"mints and pushes a session key while the spoke is connected, so approving one "
+                f"that was offline (or a host-only registration with no socket of its own) keys "
+                f"nothing and it stays offline / no key / never — clicking Approve never makes it "
+                f"report in. Delete each one everywhere, then let the box reconnect and approve it "
+                f"WHILE it is connected.")
         if not findings:
             findings.append("No duplicate-registration or visibility problems detected.")
 
