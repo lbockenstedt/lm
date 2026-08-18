@@ -19544,6 +19544,14 @@ function _leLegend() {
     </div>`;
 }
 
+// Friendly challenge-type label for the Certificates table. The le spoke stores
+// the ACME challenge (e.g. "dns"/"dns-01"); show DNS-01 variants as just "DNS".
+function _leChallengeLabel(v) {
+    const s = String(v || '').toLowerCase();
+    if (s === 'dns' || s === 'dns-01' || s === 'dns01') return 'DNS';
+    return v || '—';
+}
+
 async function loadLEData(subMenu) {
     if (window._leLoading) return;  // don't overlap the inflight poller
     const container = document.getElementById('le-content');
@@ -19768,7 +19776,7 @@ async function loadLEData(subMenu) {
             return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                 <td class="px-4 py-2 font-mono font-medium">${issueDot(c.domain)}${c.domain || '—'}${bfBadge}${caBadge}${profBadge}${tenChips}</td>
                 <td class="px-4 py-2 text-xs">${c.email || '—'}</td>
-                <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">${c.challenge || '—'}</span></td>
+                <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">${escapeHtml(_leChallengeLabel(c.challenge))}</span></td>
                 <td class="px-4 py-2 text-center text-xs">${c.staging ? 'yes' : 'no'}</td>
                 <td class="px-4 py-2 whitespace-nowrap">
                     <span class="px-2 py-0.5 rounded-full text-xs font-medium ${exp.cls} whitespace-nowrap">${exp.text}</span>
@@ -20740,7 +20748,7 @@ async function showLeIssueModal(prefill) {
                     <select id="le-issue-challenge" onchange="leIssueToggleChallenge()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                         <option value="http">HTTP-01 (standalone)</option>
                         <option value="http-webroot">HTTP-01 (webroot)</option>
-                        <option value="dns">DNS-01</option>
+                        <option value="dns">DNS</option>
                         <option value="tls-alpn">TLS-ALPN-01</option>
                     </select>
                 </div>
