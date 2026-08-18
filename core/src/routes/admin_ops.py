@@ -24,12 +24,35 @@ These are privileged, side-effecting operations, so they are intentionally NOT
 session/cookie gated (no CSRF surface — there's no browser session) and NOT
 reachable off-box.
 """
+import asyncio
 import os
+import re
 import time
 import stat
 import secrets
 
 from api import HTTPException, Request, logger
+
+# Argument-shape guard for the diagnostic bundle's unit / repo / log / lines
+# parameters. Deliberately strict: letters, digits, and the handful of path /
+# unit punctuation we need — NO shell metacharacters (the command_runner
+# allowlist re-checks, but validating here keeps a malformed value from ever
+# reaching a spoke). ``re.fullmatch`` so the WHOLE value must match.
+_DIAG_ARG_RE = re.compile(r"^[A-Za-z0-9._/@:-]{1,200}$")
+# The curated read-only diagnostic bundle. Each entry is (key, argv-template).
+# Every binary is already in command_runner.ALLOWED_BINARIES and no template
+# contains a shell metacharacter, so the whole bundle runs in allowlist mode
+# (allow_shell is NEVER set on this path). ``{unit}``/``{repo}``/``{log}``/
+# ``{lines}`` are substituted from the (validated) request body.
+_DIAG_BUNDLE = (
+    ("is_active",     "systemctl is-active {unit}"),
+    ("service_state", "systemctl show {unit} -p ActiveState -p SubState "
+                      "-p NRestarts -p ExecMainStatus -p ActiveEnterTimestamp"),
+    ("git_head",      "git -C {repo} rev-parse --short HEAD"),
+    ("uptime",        "uptime"),
+    ("journal",       "journalctl -u {unit} -n {lines} --no-pager"),
+    ("log_tail",      "tail -n {lines} {log}"),
+)
 
 # Loopback peers we accept. IPv4, IPv6, and the IPv4-mapped-IPv6 form uvicorn
 # may report. Nothing else — and X-Forwarded-* is ignored on purpose.
@@ -193,3 +216,138 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
         logger.warning("admin_ops: self-update driven via loopback")
         return {"status": "ok", "result": result}
+
+    # ── Diagnostics fan-out ──────────────────────────────────────────────────
+    # Run a READ-ONLY diagnostic on the hub, any connected spoke, or a relayed
+    # node-agent, from the hub box itself. Reuses the same HMAC-signed
+    # RUN_COMMAND / AGENT_RUN_COMMAND relay the WebUI Remote Console uses, but
+    # exposed on the loopback+token surface so this can be driven from a hub
+    # shell — and, unlike Remote Console, ``allow_shell`` is ALWAYS False here,
+    # so only command_runner's ALLOWED_BINARIES (systemctl, journalctl, tail,
+    # git, ip, ss, …) can run and shell metacharacters are rejected. Three gates
+    # therefore hold on every call: loopback peer, root-minted token, and the
+    # spoke-side command allowlist. It never requires the ``remote_exec``
+    # feature toggle (that toggle only gates the browser/arbitrary-shell path).
+    def _unwrap_run_result(resp) -> dict:
+        """{"payload":{"data":{"result": {...}}}} → the command_runner dict."""
+        payload = (resp or {}).get("payload", {}) or {}
+        inner = payload.get("data", resp) or {}
+        r = inner.get("result") if isinstance(inner, dict) else None
+        if not isinstance(r, dict):
+            return {"ok": False, "rc": None, "stdout": "", "stderr": "",
+                    "truncated": False, "error": "no result (offline / timed out?)"}
+        return r
+
+    async def _relay_exec(target: str, command: str, timeout: float) -> dict:
+        """Run one ALLOWLISTED command on ``target`` and return the runner dict.
+
+        ``target`` is ``hub``, a connected ``spoke_id``, or
+        ``agent:<owning_spoke_id>:<agent_id>``. ``allow_shell`` is never set."""
+        conns = getattr(hub, "active_connections", {}) or {}
+        if target == "hub":
+            try:
+                from command_runner import run_local_command
+            except ImportError:  # test/bare-package path
+                from core.src.command_runner import run_local_command  # type: ignore
+            return await asyncio.to_thread(run_local_command, command, False, timeout)
+        if target.startswith("agent:"):
+            _, _, rest = target.partition(":")
+            sid, _, aid = rest.partition(":")
+            if not sid or not aid:
+                raise HTTPException(status_code=400, detail="bad agent target (want agent:<spoke>:<agent_id>)")
+            if hub._primary_key(sid) not in conns:
+                raise HTTPException(status_code=404, detail=f"agent's spoke '{sid}' not connected")
+            resp = await hub.request_response(
+                sid, "AGENT_RUN_COMMAND",
+                {"agent_id": aid, "command": command, "allow_shell": False, "timeout": timeout},
+                timeout=timeout + 20.0)
+            return _unwrap_run_result(resp)
+        if hub._primary_key(target) not in conns:
+            raise HTTPException(status_code=404, detail=f"spoke '{target}' not connected")
+        resp = await hub.request_response(
+            target, "RUN_COMMAND",
+            {"command": command, "allow_shell": False, "timeout": timeout},
+            timeout=timeout + 10.0)
+        return _unwrap_run_result(resp)
+
+    @app.post("/admin/ops/exec")
+    async def admin_ops_exec(request: Request):
+        """Run a single READ-ONLY (allowlisted) command on a target and return
+        the command_runner result ``{ok, rc, stdout, stderr, truncated, error}``.
+
+        Body: ``{"target": "hub"|"<spoke_id>"|"agent:<spoke>:<agent_id>",
+        "command": "<allowlisted cmd>", "timeout": <sec, optional>}``. The
+        command must use a binary in command_runner.ALLOWED_BINARIES and contain
+        no shell metacharacters — otherwise the spoke rejects it. Use this to
+        query live log/service state from any connected spoke during this
+        session (e.g. ``journalctl -u lm-agent -n 60 --no-pager``)."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        target = str((body or {}).get("target") or "hub").strip()
+        command = str((body or {}).get("command") or "").strip()
+        if not command:
+            raise HTTPException(status_code=400, detail="command required")
+        try:
+            timeout = float((body or {}).get("timeout") or 30.0)
+        except (TypeError, ValueError):
+            timeout = 30.0
+        timeout = max(1.0, min(timeout, 120.0))
+        logger.warning("admin_ops: exec via loopback target=%s cmd=%r", target, command[:300])
+        try:
+            res = await _relay_exec(target, command, timeout)
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception("admin_ops: exec failed for target=%s", target)
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "ok", "target": target, "result": res}
+
+    @app.post("/admin/ops/spoke-diag")
+    async def admin_ops_spoke_diag(request: Request):
+        """Run the curated read-only diagnostic BUNDLE on a target and return a
+        per-check map — the service state (is-active / NRestarts), running git
+        HEAD, uptime, recent journal, and a log tail — in one round-trip.
+
+        Body: ``{"target": "hub"|"<spoke_id>"|"agent:<spoke>:<agent_id>",
+        "unit": "lm-agent", "repo": "/opt/lm", "log": "/var/log/lm/lm-agent.log",
+        "lines": 40}``. ``unit``/``repo``/``log`` are validated to a strict
+        charset (no shell metacharacters); ``lines`` is clamped to 1..200. Each
+        bundled command runs in allowlist mode, so this is safe to fan at a
+        flapping spoke to see WHY it is restarting without opening a shell."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        target = str((body or {}).get("target") or "hub").strip()
+        unit = str((body or {}).get("unit") or "lm-agent").strip()
+        repo = str((body or {}).get("repo") or "/opt/lm").strip()
+        log = str((body or {}).get("log") or "/var/log/lm/lm-agent.log").strip()
+        try:
+            lines = int((body or {}).get("lines") or 40)
+        except (TypeError, ValueError):
+            lines = 40
+        lines = max(1, min(lines, 200))
+        for label, val in (("unit", unit), ("repo", repo), ("log", log)):
+            if not _DIAG_ARG_RE.fullmatch(val):
+                raise HTTPException(status_code=400,
+                                    detail=f"invalid {label!r}: letters, digits, and . _ / @ : - only")
+        subs = {"unit": unit, "repo": repo, "log": log, "lines": str(lines)}
+        logger.warning("admin_ops: spoke-diag via loopback target=%s unit=%s", target, unit)
+        checks: dict = {}
+        for key, tmpl in _DIAG_BUNDLE:
+            command = tmpl.format(**subs)
+            try:
+                checks[key] = await _relay_exec(target, command, 30.0)
+            except HTTPException:
+                # Target unreachable — surface once and stop (every check would
+                # 404 the same way).
+                raise
+            except Exception as e:  # noqa: BLE001
+                checks[key] = {"ok": False, "rc": None, "stdout": "", "stderr": "",
+                               "truncated": False, "error": str(e)}
+        return {"status": "ok", "target": target, "unit": unit,
+                "repo": repo, "log": log, "lines": lines, "checks": checks}
