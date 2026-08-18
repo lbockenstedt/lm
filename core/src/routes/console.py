@@ -1051,11 +1051,33 @@ def register(app, hub, ctx):
         # agent) is obvious at a glance. Credentials are reported as COUNTS only —
         # never values.
         seeded = getattr(hub, "_console_creds_seeded", None) or set()
-        try:
-            saved_creds = _console_load_credentials(hub)
-        except Exception:  # noqa: BLE001 - debug must never blank the report
-            saved_creds = []
-        if _console_creds_keyvault_backed(hub):
+        # Credential inventory the seeder ACTUALLY uses — resolved per visible
+        # spoke's tenant, Credential-Vault (``console``-typed) secrets first and
+        # then the legacy hub-state / keyvault-ref list, de-duped. Mirrors
+        # _console_seed_credentials so the banner reflects vault-managed console
+        # logins instead of falsely warning "0 saved / factory defaults only"
+        # whenever the creds live in the vault rather than the legacy store.
+        saved_creds, _seen_c, vault_present = [], set(), False
+        for sid in spokes:
+            stn = hub.state.get_spoke_tenant(sid) or ""
+            try:
+                if await _console_creds_for_tenant(hub, stn):
+                    vault_present = True
+            except Exception:  # noqa: BLE001 - debug must never blank the report
+                pass
+            try:
+                for c in await _console_load_credentials_resolved(hub, stn):
+                    k = (c.get("username"), c.get("password"))
+                    if k not in _seen_c:
+                        _seen_c.add(k)
+                        saved_creds.append(c)
+            except Exception:  # noqa: BLE001
+                pass
+        if vault_present:
+            legacy = _console_creds_keyvault_backed(hub) or bool(
+                hub.state.system_state.get("console_credentials_enc"))
+            cred_source = "credential vault" + (" + legacy" if legacy else "")
+        elif _console_creds_keyvault_backed(hub):
             cred_source = "keyvault:" + _console_credentials_ref(hub)
         elif hub.state.system_state.get("console_credentials_enc"):
             cred_source = "hub-state (encrypted)"
