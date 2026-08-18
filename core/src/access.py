@@ -927,6 +927,53 @@ def hypervisor_owned_by_caller(hub, sess, spoke_id: str) -> bool:
     return spoke_tenant in allowed
 
 
+async def tenant_admin_console_allowed(hub, sess, spoke_id: str) -> bool:
+    """True iff a TENANT ADMIN may console/control any VM on hypervisor
+    ``spoke_id`` because the operator has explicitly opted that hypervisor into
+    tenant-admin access.
+
+    WHY THIS EXISTS: the console/control gates attribute a VM to a tenant by
+    Proxmox TAG or IP∈prefix (:func:`vm_in_tenant_scope`). A SHARED/unbound
+    hypervisor whose VMs are neither tagged for the tenant nor covered by the
+    tenant's NetBox prefixes CANNOT be attributed, so a tenant admin who
+    legitimately manages that lab was denied ("not authorized for this VM's
+    tenant") even though a Global Admin consoles it fine — the reported bug on a
+    flat/untagged lab where per-VM tenant scoping was never configured.
+
+    Mirrors the host-shell trust model (``pxmx_create_shell``): on an UNBOUND
+    hypervisor (shared infra) — or one bound to the caller's OWN tenant — a
+    Tenant Admin is granted whole-host VM access when the hypervisor's Setup →
+    Hypervisors config OPTS IN, via either the dedicated ``tenant_console_enabled``
+    flag or ``host_shell_enabled`` (a root shell on the host is strictly MORE
+    powerful than a single VM's VNC console, so enabling it implies console
+    access). Both default OFF → SAFE for a genuinely multi-tenant shared
+    hypervisor, whose isolation still relies on per-VM attribution until an
+    operator deliberately flattens it. A hypervisor bound to a DIFFERENT tenant
+    is NEVER opened this way. Global Admin is handled by the callers (bypass)."""
+    if not is_tenant_admin(sess):
+        return False
+    try:
+        spoke_tenant = hub.state.get_spoke_tenant(spoke_id) or ""
+    except Exception:  # noqa: BLE001
+        spoke_tenant = ""
+    if spoke_tenant:
+        # Bound host → only the OWNING tenant's admin (a different tenant is
+        # denied; the own-tenant case is already allowed by
+        # hypervisor_owned_by_caller, so this opt-in mainly covers unbound hosts).
+        user = (sess or {}).get("user", {}) or {}
+        allowed = [str(t).strip() for t in (user.get("tenants") or []) if str(t).strip()]
+        if not allowed:
+            primary = str(user.get("tenant_id") or "").strip()
+            allowed = [primary] if primary else []
+        if spoke_tenant not in allowed:
+            return False
+    try:
+        hv = await hub.simulations_store.get_hypervisors_config(spoke_tenant) or {}
+    except Exception:  # noqa: BLE001
+        hv = {}
+    return bool(hv.get("tenant_console_enabled") or hv.get("host_shell_enabled"))
+
+
 def last_known_vm_record(hub, unique_id="", vmid=None, node="") -> dict:
     """Best-effort last-known ``{ips, tags, pool}`` for a VM from the ``pxmx_vms``
     warm cache — the same raw VM lists ``get_pxmx_vms`` writes on every live fetch.

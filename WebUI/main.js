@@ -16439,6 +16439,7 @@ async function renderPxmxSettings(container) {
         <div class="hpe-card rounded-lg p-5 shadow-sm space-y-3">
           <label class="flex items-center gap-2 text-sm text-slate-700"><input id="hv-confirm" type="checkbox" ${cfg.confirm_destructive !== false ? 'checked' : ''} class="rounded"/> Confirm before destructive VM actions (stop / restart / reboot)</label>
           ${isAdmin() ? `<label class="flex items-start gap-2 text-sm text-slate-700"><input id="hv-host-shell" type="checkbox" ${cfg.host_shell_enabled ? 'checked' : ''} class="rounded mt-0.5"/> <span>Enable <b>host terminal</b> (root shell on the Proxmox host via VM Server → Terminal). <span class="text-amber-600">Off by default</span> — a live root shell on this tenant's hypervisor. Global Admin (any host) + Tenant Admin (own tenant). Every session is audited.</span></label>` : ''}
+          ${isAdmin() ? `<label class="flex items-start gap-2 text-sm text-slate-700"><input id="hv-tenant-console" type="checkbox" ${cfg.tenant_console_enabled ? 'checked' : ''} class="rounded mt-0.5"/> <span>Allow <b>Tenant Admins</b> to open VM consoles &amp; lifecycle actions on this hypervisor. <span class="text-amber-600">Off by default</span> — turn on for a hypervisor dedicated to one tenant (or a flat lab) whose VMs aren't tagged or subnet-scoped. On a <b>shared</b> hypervisor leave OFF: tenant admins are then limited to VMs attributable to their tenant by Proxmox tag or subnet. (Enabling host terminal above also grants console.)</span></label>` : ''}
         </div>
         ${isAdmin() ? `<div class="hpe-card rounded-lg p-5 shadow-sm">
           <p class="text-sm font-bold text-[#263040] mb-1">Delete protection ${helpIcon('pxmx', null, 'Hypervisor help')}</p>
@@ -16478,6 +16479,9 @@ async function savePxmxSettings() {
     const _hostShellEl = document.getElementById('hv-host-shell');
     if (_hostShellEl) cfg.host_shell_enabled = !!_hostShellEl.checked;
     else if (window._pxmxHvConfig) cfg.host_shell_enabled = !!window._pxmxHvConfig.host_shell_enabled;  // preserve for non-admins
+    const _tenantConsoleEl = document.getElementById('hv-tenant-console');
+    if (_tenantConsoleEl) cfg.tenant_console_enabled = !!_tenantConsoleEl.checked;
+    else if (window._pxmxHvConfig) cfg.tenant_console_enabled = !!window._pxmxHvConfig.tenant_console_enabled;  // preserve for non-admins
     // Delete-protection list (Global Admin only renders the checkboxes). Collect
     // the checked unique_ids; for non-admins (no checkboxes) preserve the
     // existing list so a non-admin Save doesn't wipe the safeguard.

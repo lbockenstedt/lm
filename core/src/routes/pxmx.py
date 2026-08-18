@@ -342,6 +342,13 @@ def register(app, hub, ctx):
         # through to strict per-VM tag/subnet attribution below.
         if access.hypervisor_owned_by_caller(hub, sess, spoke):
             return
+        # Operator opt-in: on a SHARED/unbound (or own) hypervisor a Tenant Admin
+        # may console any VM when Setup → Hypervisors enables it (tenant_console_
+        # enabled, or host_shell_enabled which is strictly more powerful). Covers a
+        # flat lab whose VMs aren't tagged / subnet-attributed to the tenant, so
+        # per-VM attribution below can't prove ownership. OFF by default (safe).
+        if await access.tenant_admin_console_allowed(hub, sess, spoke):
+            return
         info = {}
         if spoke:
             try:
@@ -368,6 +375,19 @@ def register(app, hub, ctx):
         # Toggle-independent, fail-closed ownership (subnet or tenant tag) — NOT
         # _filter_tenant, which fails OPEN when the hypervisor display filter is off.
         if not await access.vm_in_tenant_scope(hub, sess, vm_record):
+            try:
+                _u = (sess or {}).get("user", {}) or {}
+                logger.warning(
+                    "pxmx console DENY vm=%s user=%s role=%s tenants=%s spoke=%s "
+                    "spoke_tenant=%s vm_tags=%s vm_ips=%s — enable Setup→Hypervisors "
+                    "tenant console, tag the VM, or add the tenant's subnet",
+                    unique_id, _u.get("username") or _u.get("user_id"),
+                    (_u.get("permissions") or {}).get("role"),
+                    _u.get("tenants") or _u.get("tenant_id"), spoke,
+                    (hub.state.get_spoke_tenant(spoke) or "") if spoke else "",
+                    vm_record["tags"], vm_record["ips"])
+            except Exception:  # noqa: BLE001
+                pass
             raise HTTPException(status_code=403, detail="not authorized for this VM's tenant")
 
     @app.get("/vm/{vm_id}/details")
