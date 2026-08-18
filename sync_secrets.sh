@@ -38,6 +38,10 @@ chmod 755 "$LOG_DIR"
 
 # Hub API base URL. Allow override via environment variable for non-localhost deployments.
 HUB_API="${HUB_API:-http://localhost:8000}"
+INSTALL_TOKEN="${LM_INSTALL_SECRET:-${LM_SETUP_TOKEN:-}}"
+if [[ -z "$INSTALL_TOKEN" && -f "$BASE_DIR/.env" ]]; then
+    INSTALL_TOKEN=$(grep -E '^(LM_INSTALL_SECRET|LM_SETUP_TOKEN)=' "$BASE_DIR/.env" 2>/dev/null | head -n1 | cut -d= -f2-)
+fi
 
 # Unified agent-spoke model: this box runs ONE agent (which hosts every
 # module as a role), so there is a single id to sync a secret for. Its role
@@ -87,6 +91,7 @@ for mod in "${!SPOKE_IDS[@]}"; do
     set +e
     RESPONSE=$(curl -s -X POST "$HUB_API/setup/generate-secret" \
         -H "Content-Type: application/json" \
+        -H "X-Install-Token: $INSTALL_TOKEN" \
         -d "{\"spoke_id\": \"$SPOKE_ID\"}" --max-time 10 2>/dev/null)
     CURL_EXIT=$?
     set -e

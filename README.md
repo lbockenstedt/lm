@@ -32,7 +32,7 @@ same core flags: `--hub`, `--id`/`--name`, `--secret`, `--hub-secret`,
 | **qa** (auditor) | `qa/install_qa.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/qa/main/install_qa.sh \| sudo bash -s -- --hub ws://HUB:8765` |
 | **bugfixer** | `bugfixer/install.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh \| bash -s -- wss://HUB` |
 | **tsa** | `tsa/install.sh` | `curl -fsSL https://raw.githubusercontent.com/lbockenstedt/tsa/main/install.sh \| bash -s -- azure` |
-| **dns**, **dhcp**, **henet** | *(no installer required)* | Agent roles `dns` / `dhcp` / `henet`, or `/opt/lm/<mod>/install_<mod>.sh` |
+| **dns**, **dhcp**, **henet** | Agent roles with host-prep installers | Standard path is loading the agent roles `dns` / `dhcp` / `henet`; DNS/DHCP host prep is provided by `dns/install_dns.sh` and `dhcp/install_dhcp.sh` when a direct role install is needed. |
 
 `kvm` and `qa` are the two exceptions: they do **not** normalize a bare hostname,
 so give them a full `ws://`/`wss://` URL.

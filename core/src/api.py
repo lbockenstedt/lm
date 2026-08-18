@@ -346,6 +346,46 @@ def _ip_in_trusted(ip: str) -> bool:
     return any(addr in net for net in _TRUSTED_PROXY_NETS)
 
 
+def _install_secret_token() -> str:
+    """Local install token for loopback-only setup mutations."""
+    tok = (os.environ.get("LM_INSTALL_SECRET") or os.environ.get("LM_SETUP_TOKEN") or "").strip()
+    if tok:
+        return tok
+    env_path = os.environ.get("LM_ENV_FILE", "/opt/lm/.env")
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k in ("LM_INSTALL_SECRET", "LM_SETUP_TOKEN") and v.strip():
+                    return v.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return ""
+
+
+def _is_loopback_peer(request: Request) -> bool:
+    peer = (request.client.host if request.client else "") or ""
+    try:
+        return ipaddress.ip_address(peer).is_loopback
+    except ValueError:
+        return peer in ("localhost", "::1")
+
+
+def _is_loopback_install_request(request: Request) -> bool:
+    """Allow only hub-local install scripts carrying the install/setup token."""
+    if not _is_loopback_peer(request):
+        return False
+    expected = _install_secret_token()
+    supplied = (request.headers.get("x-install-token")
+                or request.headers.get("x-setup-token")
+                or request.headers.get("x-lm-install-token")
+                or "")
+    return bool(expected and supplied and secrets.compare_digest(supplied, expected))
+
+
 def _client_ip(request: Request) -> str:
     """Best-effort real client IP for security decisions (login throttling).
 
@@ -1218,6 +1258,16 @@ def create_app(hub):
         # loopback + token check is the real access control here.
         if path.startswith("/admin/ops/"):
             return await call_next(request)
+
+        # Hub install scripts run before a browser admin session exists. Permit
+        # only the two install-time setup mutations, only from a loopback TCP
+        # peer, and only when they carry the local install/setup token. Remote
+        # callers and all other /setup/* routes still fall through to the normal
+        # session + admin gates below.
+        _LOCAL_INSTALL_SETUP_POSTS = {"/setup/approve_spoke", "/setup/generate-secret"}
+        if request.method == "POST" and path in _LOCAL_INSTALL_SETUP_POSTS:
+            if _is_loopback_install_request(request):
+                return await call_next(request)
 
         sess = _session_user(request)
         if not sess:

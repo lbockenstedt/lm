@@ -4,7 +4,7 @@ DNS spoke managing a local Unbound resolver. Repo: `dns`. `module_type = "dns"`.
 
 ## Role & module_type
 
-Manages a local **Unbound** resolver via the `unbound-control` CLI. Minimal repo — no installer, no API_SPEC, no README.
+Manages a local **Unbound** resolver via the `unbound-control` CLI. Includes the role code plus `install_dns.sh` for Unbound host prep/direct role deployment; no API_SPEC or standalone README.
 
 ## What it does
 
@@ -14,9 +14,9 @@ In the WebUI, open a node's **DNS** module from the sidebar to reach the **Recor
 
 ## Entrypoints
 
-`python3 -m src.main` (`DNSControlPlane`); spoke `DNSSpoke(BaseSpoke)`. **No install script** in this repo.
+`python3 -m src.main` (`DNSControlPlane`); spoke `DNSSpoke(BaseSpoke)`. `install_dns.sh` performs Unbound host prep for direct installs; the agent role loader uses the same deployment path when loading the `dns` role.
 
-> **Primarily a role now.** DNS runs mainly as the **`dns`** role hosted by the agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-dns` (module_type `dns`, parent-auto-approved) and loads it in-process via `agent/src/agent_spoke.py::_install_role` (this repo is bundled in-tree; the role loader also does the Unbound host prep). There is no dedicated `lm-dns` unit — the agent role is the standard path; a hand-rolled unit is the only standalone alternative. Config (`UNBOUND_CONTROL` etc.) comes from the hub push (WebUI), not a per-module `.env`.
+> **Primarily a role now.** DNS runs mainly as the **`dns`** role hosted by the agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-dns` (module_type `dns`, parent-auto-approved) and loads it in-process via `agent/src/agent_spoke.py::_install_role` (this repo is bundled in-tree; the role loader also does the Unbound host prep). `install_dns.sh` can create a direct role deployment when needed, but the agent role remains the standard path. Config (`UNBOUND_CONTROL` etc.) comes from the hub push (WebUI), not a per-module `.env`.
 
 ## Ports / backends
 

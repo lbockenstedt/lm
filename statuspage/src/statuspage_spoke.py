@@ -23,11 +23,12 @@ lm-spoke pattern) is started lazily on the first hub frame. TLS is optional: a
 cert delivered via the ``le`` role (or configured paths) enables HTTPS on :443;
 without one it serves plain HTTP (dev mode).
 
-AUTH: in dev mode both views are open. The Clients view + demo endpoint sit
-behind a single auth SEAM (``web.require_clients_access``) that is a no-op today
-so switching auth on later is a one-line change, not a re-plumb.
+AUTH: the read-only status page is public. The Clients view + demo endpoint
+require the configured status-page clients token (``clients_token`` config or
+``LM_STATUS_CLIENTS_TOKEN``).
 """
 import asyncio
+import contextlib
 import logging
 import os
 import time
@@ -80,6 +81,7 @@ class StatusPageSpoke(BaseSpoke):
         self.web_port = int(cfg.get("web_port") or os.environ.get("LM_STATUS_PORT", "443"))
         self.tls_cert = cfg.get("tls_cert") or os.environ.get("LM_STATUS_TLS_CERT") or ""
         self.tls_key = cfg.get("tls_key") or os.environ.get("LM_STATUS_TLS_KEY") or ""
+        self.clients_token = cfg.get("clients_token") or os.environ.get("LM_STATUS_CLIENTS_TOKEN") or ""
 
         # The latest redacted snapshot the hub pushed (what the page renders).
         self._snapshot: Dict[str, Any] = {
@@ -97,7 +99,28 @@ class StatusPageSpoke(BaseSpoke):
         self._server_bind = None  # (host, port, cert, key) the running server used
 
     # ── web server lifecycle ─────────────────────────────────────────────────
-    def _ensure_web_server(self) -> None:
+    async def _stop_web_server(self) -> None:
+        task = self._server_task
+        server = self._server
+        if task is None or task.done():
+            self._server_task = None
+            return
+        try:
+            if server is not None:
+                server.should_exit = True
+            await asyncio.wait_for(task, timeout=10.0)
+        except asyncio.TimeoutError:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        except Exception as e:  # noqa: BLE001
+            logger.debug("status page web server shutdown failed: %s", e)
+        finally:
+            self._server_task = None
+            self._server = None
+            self._server_bind = None
+
+    async def _ensure_web_server(self) -> None:
         """Start the public web server once we're on the event loop. Re-binds if
         the host/port/cert changed (UPDATE_CONFIG / cert delivery)."""
         self._loop = asyncio.get_event_loop()
@@ -105,12 +128,7 @@ class StatusPageSpoke(BaseSpoke):
         if self._server_task is not None and not self._server_task.done():
             if bind == self._server_bind:
                 return  # already serving the right bind
-            # Bind changed — tear the old server down and re-create below.
-            try:
-                self._server.should_exit = True
-            except Exception:  # noqa: BLE001
-                pass
-            self._server_task = None
+            await self._stop_web_server()
 
         try:
             import uvicorn
@@ -139,19 +157,19 @@ class StatusPageSpoke(BaseSpoke):
 
     # ── command dispatch (hub → spoke) ───────────────────────────────────────
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        self._ensure_web_server()
+        await self._ensure_web_server()
         cmd = (command_type or "").upper()
         data = data or {}
         if cmd == "STATUS_SNAPSHOT":
             return self._apply_snapshot(data)
         if cmd == "UPDATE_CONFIG":
-            return self._apply_config(data)
+            return await self._apply_config(data)
         # INSTALL_CERT is what the le cert-distribution pipeline pushes to every
         # cert-capable target (statuspage is registered in CERT_CAPABLE_MODULES);
         # STATUS_SET_CERT is an equivalent direct alias. Both carry
         # {fullchain, privkey} which _apply_cert wires into the uvicorn TLS bind.
         if cmd in ("INSTALL_CERT", "STATUS_SET_CERT"):
-            return self._apply_cert(data)
+            return await self._apply_cert(data)
         return {"status": "ERROR", "message": f"unknown command {command_type}"}
 
     def _apply_snapshot(self, data: Dict[str, Any]) -> Dict[str, Any]:
@@ -172,19 +190,19 @@ class StatusPageSpoke(BaseSpoke):
             logger.debug("history record failed: %s", e)
         return {"status": "SUCCESS"}
 
-    def _apply_config(self, data: Dict[str, Any]) -> Dict[str, Any]:
+    async def _apply_config(self, data: Dict[str, Any]) -> Dict[str, Any]:
         changed = False
         for key, attr in (("web_host", "web_host"), ("tls_cert", "tls_cert"),
-                          ("tls_key", "tls_key")):
+                          ("tls_key", "tls_key"), ("clients_token", "clients_token")):
             if key in data and data[key] is not None and getattr(self, attr) != data[key]:
                 setattr(self, attr, data[key]); changed = True
         if data.get("web_port") is not None and int(data["web_port"]) != self.web_port:
             self.web_port = int(data["web_port"]); changed = True
         if changed:
-            self._ensure_web_server()  # re-bind
+            await self._ensure_web_server()  # re-bind
         return {"status": "SUCCESS", "rebound": changed}
 
-    def _apply_cert(self, data: Dict[str, Any]) -> Dict[str, Any]:
+    async def _apply_cert(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Persist delivered TLS material (le role) and re-bind HTTPS."""
         cert_pem = data.get("fullchain") or data.get("cert")
         key_pem = data.get("privkey") or data.get("key")
@@ -197,7 +215,7 @@ class StatusPageSpoke(BaseSpoke):
             cp.write_text(cert_pem); kp.write_text(key_pem)
             os.chmod(kp, 0o600)
             self.tls_cert, self.tls_key = str(cp), str(kp)
-            self._ensure_web_server()  # re-bind HTTPS
+            await self._ensure_web_server()  # re-bind HTTPS
             return {"status": "SUCCESS"}
         except Exception as e:  # noqa: BLE001
             return {"status": "ERROR", "message": str(e)}
@@ -225,7 +243,7 @@ class StatusPageSpoke(BaseSpoke):
             return {"status": "ERROR", "message": str(e)}
 
     async def get_status(self) -> Dict[str, Any]:
-        self._ensure_web_server()
+        await self._ensure_web_server()
         snap = self._snapshot
         return {
             "role": "statuspage",

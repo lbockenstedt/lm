@@ -46,13 +46,16 @@ if [ -f "requirements.txt" ]; then
     ./venv/bin/python3 -m pip install -r requirements.txt -q
 fi
 
-# 3. Env Configuration
-cat <<EOF > .env
+# 3. Env Configuration (systemd reads this before dropping to svc_lm)
+ENV_FILE="$INSTALL_DIR/.env"
+cat <<EOF > "$ENV_FILE"
 SPOKE_ID=$SPOKE_ID
 SPOKE_SECRET=$SPOKE_SECRET
 HUB_SECRET=$HUB_SECRET
 HUB_WS=$HUB_WS
 EOF
+chmod 600 "$ENV_FILE"
+chown root:root "$ENV_FILE"
 
 # 4. Systemd Service Setup
 cat <<EOF > /etc/systemd/system/lm-kea.service
@@ -62,8 +65,9 @@ After=network.target
 
 [Service]
 User=svc_lm
+EnvironmentFile=$INSTALL_DIR/.env
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/src/main.py --id $SPOKE_ID --secret $SPOKE_SECRET --hub-secret $HUB_SECRET --hub $HUB_WS
+ExecStart=$INSTALL_DIR/venv/bin/python3 $INSTALL_DIR/src/main.py --id $SPOKE_ID --hub $HUB_WS
 Restart=always
 RestartSec=10
 

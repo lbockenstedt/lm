@@ -9,11 +9,12 @@ Routes:
   /static/*              — page assets
 
 AUTH SEAM: ``require_clients_access`` gates the Clients view + demo endpoint.
-In dev mode it is a NO-OP (open). To turn auth on later, implement the check in
-ONE place here (token/session) — no route changes needed. The read-only status
-surface (/, /api/status) is ALWAYS public by design.
+It accepts the status-page clients token via Bearer, X-Status-Token, query token,
+or lm_status_token cookie. The read-only status surface (/, /api/status) is
+ALWAYS public by design.
 """
 import logging
+import secrets
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Depends, HTTPException
@@ -26,18 +27,27 @@ _STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
 async def require_clients_access(request: Request):
-    """Auth seam for the Clients view + demo trigger.
+    """Require the configured clients/demo token; fail closed if absent."""
+    spoke = getattr(request.app.state, "spoke", None)
+    expected = (getattr(spoke, "clients_token", "") or "").strip()
+    if not expected:
+        raise HTTPException(status_code=401, detail="clients access token is not configured")
 
-    DEV MODE: open — returns None (no gate). LATER: enforce here (e.g. a signed
-    token cookie / query param) and raise HTTPException(401) to lock the Clients
-    page while leaving the public status page untouched. This is the single point
-    to flip auth on; do not scatter checks across routes.
-    """
+    auth = request.headers.get("authorization", "")
+    supplied = ""
+    if auth.lower().startswith("bearer "):
+        supplied = auth.split(None, 1)[1].strip()
+    supplied = (supplied or request.headers.get("x-status-token")
+                or request.query_params.get("token")
+                or request.cookies.get("lm_status_token") or "").strip()
+    if not supplied or not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="clients access required")
     return None
 
 
 def build_status_app(spoke) -> FastAPI:
     app = FastAPI(title="Simulation Status", docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.spoke = spoke
 
     @app.get("/")
     async def index():

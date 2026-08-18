@@ -903,6 +903,21 @@ else
 fi
 export LM_FERNET_KEY=$(grep "^LM_FERNET_KEY=" "$HUB_ENV" | cut -d'=' -f2-)
 
+# Local-only install token for pre-session setup mutations. This is never
+# printed; it lets hub-local install scripts call the two install-time /setup
+# endpoints while remote callers still require a browser admin session.
+if ! grep -q "^LM_INSTALL_SECRET=.\+" "$HUB_ENV" 2>/dev/null; then
+    INSTALL_SECRET_VAL=$("$BASE_DIR/core/venv/bin/python3" -c 'import secrets; print(secrets.token_urlsafe(32))')
+    if grep -q "^LM_INSTALL_SECRET=" "$HUB_ENV" 2>/dev/null; then
+        sed -i "s|^LM_INSTALL_SECRET=.*|LM_INSTALL_SECRET=$INSTALL_SECRET_VAL|" "$HUB_ENV"
+    else
+        echo "LM_INSTALL_SECRET=$INSTALL_SECRET_VAL" >> "$HUB_ENV"
+    fi
+    log_c "✅ Generated LM_INSTALL_SECRET (local install API gate)"
+else
+    log_c "✅ LM_INSTALL_SECRET already set — preserving existing token"
+fi
+
 # --- Step B2b: First-run setup token (LM_SETUP_TOKEN) ---
 # Gates POST /auth/setup (bootstrap-admin creation): when set, the first-run
 # request must carry a matching X-Setup-Token header. Closes the race where
@@ -1103,6 +1118,10 @@ recovery_prune_backups "$RECOVERY_KEEP_BACKUPS"
 # inherits at the final restart). HUB_WS is the REAL unified spoke-WS URL baked
 # into every spoke unit — spokes reconnect-loop until the :443 hub lands.
 HUB_API="http://localhost:8000"
+INSTALL_TOKEN="${LM_INSTALL_SECRET:-${LM_SETUP_TOKEN:-}}"
+if [[ -z "$INSTALL_TOKEN" && -f "$BASE_DIR/.env" ]]; then
+    INSTALL_TOKEN=$(grep -E '^(LM_INSTALL_SECRET|LM_SETUP_TOKEN)=' "$BASE_DIR/.env" 2>/dev/null | head -n1 | cut -d= -f2-)
+fi
 HUB_WS="wss://localhost:443/ws/spoke"
 
 # Anti-lockout: ensure the first admin account always retains admin + protected status.
@@ -1193,6 +1212,7 @@ ROLES_CSV="$(IFS=,; printf '%s' "${ROLES[*]}")"
 log_c "✅ Pre-approving agent '$AGENT_ID'..."
 curl -sf -X POST "$HUB_API/setup/approve_spoke" \
     -H "Content-Type: application/json" \
+    -H "X-Install-Token: $INSTALL_TOKEN" \
     -d "{\"spoke_id\":\"$AGENT_ID\",\"action\":\"approve\"}" > /dev/null \
     || log_w "Pre-approval failed for $AGENT_ID (agent will need manual approval)"
 

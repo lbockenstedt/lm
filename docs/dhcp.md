@@ -4,7 +4,7 @@ Thin Kea DHCP4 management spoke. Repo: `dhcp`. `module_type = "dhcp"`. See [arch
 
 ## Role & module_type
 
-Wraps the Kea Control Agent REST API for subnet/lease/reservation listing and CRUD, plus a NetBox→Kea reservation sync. Minimal/stub-style repo — no installer, no API_SPEC, no README.
+Wraps the Kea Control Agent REST API for subnet/lease/reservation listing and CRUD, plus a NetBox→Kea reservation sync. Includes the role code plus `install_dhcp.sh` for Kea host prep/direct role deployment; no API_SPEC or standalone README.
 
 ## What it does
 
@@ -14,9 +14,9 @@ In the WebUI, open a node's **DHCP** module from the sidebar to reach the **Over
 
 ## Entrypoints
 
-`python3 -m src.main` (`DHCPControlPlane`); spoke `DHCPSpoke(BaseSpoke)`. **No install script** in this repo; no systemd unit shipped here.
+`python3 -m src.main` (`DHCPControlPlane`); spoke `DHCPSpoke(BaseSpoke)`. `install_dhcp.sh` performs Kea host prep and can install the direct `lm-dhcp` unit when needed; the agent role loader uses the same deployment path when loading the `dhcp` role.
 
-> **Primarily a role now.** DHCP runs mainly as the **`dhcp`** role hosted by the agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-dhcp` (module_type `dhcp`, parent-auto-approved) and loads it in-process via `agent/src/agent_spoke.py::_install_role` (this repo is bundled in-tree; the role loader also does the Kea host prep). There is no dedicated `lm-dhcp` unit — the agent role is the standard path; a hand-rolled unit is the only standalone alternative. Config (`KEA_URL`) comes from the hub push (WebUI), not a per-module `.env`. (This module's Kea is the ctrl-agent :8001 instance — distinct from the cs `simulation` role's cs-owned `kea-dhcp4-sim` at :8002.)
+> **Primarily a role now.** DHCP runs mainly as the **`dhcp`** role hosted by the agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-dhcp` (module_type `dhcp`, parent-auto-approved) and loads it in-process via `agent/src/agent_spoke.py::_install_role` (this repo is bundled in-tree; the role loader also does the Kea host prep). `install_dhcp.sh` can create a direct `lm-dhcp` deployment when needed, but the agent role remains the standard path. Config (`KEA_URL`) comes from the hub push (WebUI), not a per-module `.env`. (This module's Kea is the ctrl-agent :8001 instance — distinct from the cs `simulation` role's cs-owned `kea-dhcp4-sim` at :8002.)
 
 ## Ports / backends
 

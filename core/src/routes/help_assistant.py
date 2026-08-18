@@ -16,7 +16,12 @@ from api import HTTPException, Request, logger, os, json, asyncio
 
 def register(app, hub, ctx):
 
-    _DOCS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../docs"))
+    _DOCS_DIR = next(
+        (d for d in (
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../docs")),
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "../../docs")),
+        ) if os.path.isdir(d)),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../docs")))
 
     def _bugfixer_agent():
         """The connected bugfixer agent's spoke_id, or None. bugfixer registers
