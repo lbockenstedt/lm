@@ -79,3 +79,40 @@ def register(app, hub, ctx):
         if removed:
             logger.info("onboarding-psk: revoked for tenant %s", tenant)
         return {"removed": removed}
+
+    @app.get("/tenant/{tenant}/spokes", operation_id="tenant_list_own_spokes")
+    async def list_tenant_spokes(request: Request, tenant: str):
+        """Every spoke/agent bound to ``tenant`` — approved AND pending,
+        connected AND offline — so a tenant-admin can see and onboard their own
+        fleet from My Devices without the Global-Admin-only ``/setup`` spoke
+        screens, and without needing an already-approved Simulations spoke to
+        unlock the nav (the onboarding chicken/egg). Tenant-scoped: a
+        tenant-admin sees only registrations bound to a tenant they own; a
+        Global Admin may pass any tenant. Module-agnostic (nac/dns/dhcp/nw/
+        certificates/simulation/…), mirroring the tenant-agnostic PSK the same
+        file mints."""
+        _require_owns_tenant(request, tenant)
+        st = hub.state.system_state
+        known = st.get("known_modules", []) or []
+        names = st.get("module_names", {}) or {}
+        meta = st.get("module_metadata", {}) or {}
+        conns = getattr(hub, "active_connections", {}) or {}
+        live_types = getattr(hub, "spoke_module_types", {}) or {}
+        out = []
+        for sid in known:
+            # Tenant binding is the ownership signal — never a client claim.
+            if (hub.state.get_spoke_tenant(sid) or "") != tenant:
+                continue
+            pk = hub._primary_key(sid)
+            m = meta.get(sid, {}) or {}
+            out.append({
+                "spoke_id": sid,
+                "display_name": names.get(sid) or m.get("hostname") or sid,
+                "hostname": m.get("hostname") or "",
+                "module_type": live_types.get(pk) or m.get("module_type") or "",
+                "connected": pk in conns,
+                "approved": bool(hub.approved_modules.get(pk, False)),
+                "tenant_id": tenant,
+            })
+        out.sort(key=lambda s: (s["module_type"], s["spoke_id"]))
+        return {"tenant_id": tenant, "spokes": out}

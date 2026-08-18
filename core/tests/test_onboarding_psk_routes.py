@@ -30,6 +30,27 @@ class _FakeSimStore:
 class FakeHub:
     def __init__(self):
         self.simulations_store = _FakeSimStore()
+        self.active_connections = {}
+        self.approved_modules = {}
+        self.spoke_module_types = {}
+        self.state = SimpleNamespace(
+            system_state={"known_modules": [], "module_names": {}, "module_metadata": {}},
+            get_spoke_tenant=lambda sid: self._tenants.get(sid, ""),
+        )
+        self._tenants = {}
+
+    def _primary_key(self, sid):
+        return sid
+
+    def add_spoke(self, sid, tenant, *, module_type="nac", approved=True, connected=True, name=None):
+        self.state.system_state["known_modules"].append(sid)
+        if name:
+            self.state.system_state["module_names"][sid] = name
+        self.state.system_state["module_metadata"][sid] = {"module_type": module_type, "hostname": name or sid}
+        self._tenants[sid] = tenant
+        self.approved_modules[sid] = approved
+        if connected:
+            self.active_connections[sid] = object()
 
 
 def _build(sess):
@@ -120,4 +141,35 @@ def test_plain_user_is_rejected():
     """No admin/tenant-admin flag at all."""
     c, _ = _build({"user": {"is_admin": False, "tenants": []}})
     r = c.post("/tenant/tenantA/onboarding-psk")
+    assert r.status_code == 403
+
+
+def test_list_spokes_returns_only_that_tenants_fleet():
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.add_spoke("s-a1", "tenantA", module_type="nac", approved=True, connected=True, name="box-a1")
+    hub.add_spoke("s-a2", "tenantA", module_type="dns", approved=False, connected=True, name="box-a2")
+    hub.add_spoke("s-b1", "tenantB", module_type="nac", approved=True, connected=True, name="box-b1")
+    r = c.get("/tenant/tenantA/spokes")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["tenant_id"] == "tenantA"
+    ids = {s["spoke_id"] for s in body["spokes"]}
+    assert ids == {"s-a1", "s-a2"}  # tenantB's box is never leaked
+
+
+def test_list_spokes_includes_pending_and_offline():
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.add_spoke("s-pending", "tenantA", approved=False, connected=True, name="new-box")
+    hub.add_spoke("s-offline", "tenantA", approved=True, connected=False, name="old-box")
+    r = c.get("/tenant/tenantA/spokes")
+    by_id = {s["spoke_id"]: s for s in r.json()["spokes"]}
+    assert by_id["s-pending"]["approved"] is False
+    assert by_id["s-pending"]["connected"] is True
+    assert by_id["s-offline"]["approved"] is True
+    assert by_id["s-offline"]["connected"] is False
+
+
+def test_tenant_admin_cannot_list_another_tenants_spokes():
+    c, _ = _build(_tenant_admin(["tenantA"]))
+    r = c.get("/tenant/tenantB/spokes")
     assert r.status_code == 403

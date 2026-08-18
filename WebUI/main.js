@@ -3582,6 +3582,25 @@ function _viewTemplate(viewId) {
     <p class="text-xs text-slate-400 mb-3">Firewalls, network devices, NAC, IPAM, directory, DNS, and DHCP instances bound to your tenant. Click <strong>Add Device</strong>, choose the module type, and bind it to one of your tenant's spokes.</p>
     <div id="all-devices-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
   </div>
+
+  <div class="${card}">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spokes &amp; Agents</h3>
+      <button onclick="loadMyDeviceSpokes()" class="text-xs text-[#01A982] hover:underline">Refresh</button>
+    </div>
+    <p class="text-xs text-slate-400 mb-3">Every spoke and agent bound to your tenant — approved or awaiting approval, connected or offline. Your first spoke can onboard itself with an onboarding key below (no admin approval needed).</p>
+    <div id="my-spokes-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+  </div>
+
+  <div class="${card}">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Onboarding Keys</h3>
+      <button onclick="_myDevGenPsk()" class="${btn}">+ Generate Key</button>
+    </div>
+    <p class="text-xs text-slate-400 mb-3">A one-time onboarding key lets a new spoke register and bind to your tenant automatically, without an admin. Generate a key, run the install command on the new server, then revoke the key once it has connected.</p>
+    <div id="my-psk-cmd" class="hidden mb-3"></div>
+    <div id="my-psk-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+  </div>
 </div>`;
 
         case 'console':
@@ -4220,6 +4239,8 @@ function initView(viewId, subView) {
             break;
         case 'mydevices':
             loadAllDevices();
+            loadMyDeviceSpokes();
+            loadMyDevicePsks();
             break;
         case 'cppm':
             loadCPPMNACStatus();
@@ -14455,6 +14476,104 @@ function _addServerCopyCmd() {
     if (!el) return;
     navigator.clipboard.writeText(el.textContent || '');
     if (typeof showToast === 'function') showToast('Copied', 'success');
+}
+
+// --- My Devices: tenant-admin self-service spokes/agents list + onboarding keys.
+// Solves the onboarding chicken/egg: a tenant-admin with no approved spoke can't
+// reach the Global-Admin spoke screens (the Simulations nav only lights once a cs
+// spoke is approved), so these two cards live in the always-visible My Devices
+// view. Backend is tenant-scoped (routes/onboarding.py); the client only ever
+// passes its own currentTenant, which the server re-checks against session tenants.
+function _myDevTenant() {
+    return currentTenant && currentTenant !== 'default' ? currentTenant : null;
+}
+
+async function loadMyDeviceSpokes() {
+    const el = document.getElementById('my-spokes-list');
+    if (!el) return;
+    const tenant = _myDevTenant();
+    if (!tenant) { el.innerHTML = '<p class="text-xs text-slate-400 italic">Select a tenant first.</p>'; return; }
+    try {
+        const r = await apiJson(`/tenant/${encodeURIComponent(tenant)}/spokes`);
+        const rows = (r && r.spokes) || [];
+        if (!rows.length) {
+            el.innerHTML = '<p class="text-xs text-slate-400 italic">No spokes or agents onboarded yet. Generate an onboarding key below to add your first one.</p>';
+            return;
+        }
+        el.innerHTML = rows.map((s) => {
+            const conn = s.connected
+                ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-700">connected</span>'
+                : '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500">offline</span>';
+            const appr = s.approved
+                ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700">approved</span>'
+                : '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700">pending</span>';
+            return `<div class="flex items-center justify-between border border-slate-100 rounded-md px-3 py-2">
+                <div><span class="text-sm font-medium text-slate-700">${escapeHtml(s.display_name || s.spoke_id)}</span>
+                <span class="ml-2 text-[11px] text-slate-400 font-mono">${escapeHtml(s.module_type || '—')}</span></div>
+                <div class="flex items-center gap-2">${appr}${conn}</div></div>`;
+        }).join('');
+    } catch (e) {
+        console.error('loadMyDeviceSpokes failed', e);
+        el.innerHTML = `<p class="text-xs text-red-500 italic">Failed to load spokes: ${escapeHtml(e.message || 'error')}</p>`;
+    }
+}
+
+async function loadMyDevicePsks() {
+    const el = document.getElementById('my-psk-list');
+    if (!el) return;
+    const tenant = _myDevTenant();
+    if (!tenant) { el.innerHTML = '<p class="text-xs text-slate-400 italic">Select a tenant first.</p>'; return; }
+    try {
+        const r = await apiJson(`/tenant/${encodeURIComponent(tenant)}/onboarding-psk`);
+        const keys = (r && r.psks) || [];
+        if (!keys.length) { el.innerHTML = '<p class="text-xs text-slate-400 italic">No active onboarding keys.</p>'; return; }
+        el.innerHTML = keys.map((k) => `<div class="flex items-center justify-between border border-slate-100 rounded-md px-3 py-2">
+            <code class="text-[11px] font-mono text-slate-600 break-all">${escapeHtml(k)}</code>
+            <button onclick="_myDevRevokePsk('${escapeHtml(k)}')" class="ml-3 text-xs text-red-500 hover:underline shrink-0">Revoke</button></div>`).join('');
+    } catch (e) {
+        console.error('loadMyDevicePsks failed', e);
+        el.innerHTML = `<p class="text-xs text-red-500 italic">Failed to load keys: ${escapeHtml(e.message || 'error')}</p>`;
+    }
+}
+
+async function _myDevGenPsk() {
+    const tenant = _myDevTenant();
+    if (!tenant) { if (typeof showToast === 'function') showToast('Select a tenant first', 'error'); return; }
+    const area = document.getElementById('my-psk-cmd');
+    try {
+        const r = await apiJson(`/tenant/${encodeURIComponent(tenant)}/onboarding-psk`, { method: 'POST', body: '{}' });
+        if (area) {
+            const cmd = `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \\\n  | sudo bash -s -- --roles <MODULE> --onboarding-psk ${r.psk} --tenant-hint ${tenant}`;
+            area.classList.remove('hidden');
+            area.innerHTML = `<p class="text-xs font-bold text-slate-600 mb-1">Run this on the new spoke (replace <code>&lt;MODULE&gt;</code>, e.g. <code>simulation</code>):</p>
+                <pre id="my-psk-cmd-text" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">${escapeHtml(cmd)}</pre>
+                <button onclick="_myDevCopyCmd()" class="mt-2 text-xs text-[#01A982] hover:underline">Copy command</button>
+                <p class="mt-2 text-[11px] text-slate-400">Single-use for onboarding; it does not expire on its own. Revoke it once the spoke has connected.</p>`;
+        }
+        loadMyDevicePsks();
+    } catch (e) {
+        console.error('_myDevGenPsk failed', e);
+        if (typeof showToast === 'function') showToast(e.message, 'error');
+    }
+}
+
+function _myDevCopyCmd() {
+    const el = document.getElementById('my-psk-cmd-text');
+    if (!el) return;
+    navigator.clipboard.writeText(el.textContent || '');
+    if (typeof showToast === 'function') showToast('Copied', 'success');
+}
+
+async function _myDevRevokePsk(psk) {
+    const tenant = _myDevTenant();
+    if (!tenant) return;
+    try {
+        await apiJson(`/tenant/${encodeURIComponent(tenant)}/onboarding-psk`, { method: 'DELETE', body: JSON.stringify({ psk }) });
+        loadMyDevicePsks();
+    } catch (e) {
+        console.error('_myDevRevokePsk failed', e);
+        if (typeof showToast === 'function') showToast(e.message, 'error');
+    }
 }
 
 // Watchdog recovery badge for a spoke. The hub's run_spoke_recovery_loop
