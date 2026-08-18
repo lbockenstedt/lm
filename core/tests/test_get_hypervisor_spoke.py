@@ -115,3 +115,86 @@ def test_for_tenant_skips_unapproved_and_disconnected_spokes():
     hub2 = _TenantHub(["pxmx-1"], {"pxmx-1": {"tenant_id": "tenantA"}},
                      approved={"pxmx-1": False})
     assert LabManagerHub.get_hypervisor_spoke_for_tenant(hub2, "tenantA") is None
+
+
+# ── mixed-topology: a CS/simulation spoke also hosts Proxmox ──────────────────
+
+class _MixedHub:
+    """Fake hub with BOTH hypervisor and simulation agent-hosting spokes bound
+    to (possibly different) tenants — the mixed deployment where a CS-enabled
+    box's Proxmox host is reached via a simulation spoke, not a pxmx one."""
+
+    def __init__(self, hypervisors, simulations, metadata,
+                 approved=None, active=None, global_hypervisor=None):
+        self._hyp = list(hypervisors)
+        self._sim = list(simulations)
+        self._metadata = metadata
+        allsids = self._hyp + self._sim
+        self.approved_modules = approved or {sid: True for sid in allsids}
+        self.active_connections = active or set(allsids)
+        self.state = _FakeState(metadata)
+        self._global_hypervisor = global_hypervisor
+
+    def get_all_spokes_by_type(self, module_type):
+        if module_type == "hypervisor":
+            return list(self._hyp)
+        if module_type == "simulation":
+            return list(self._sim)
+        return []
+
+    def get_hypervisor_spoke(self):
+        return self._global_hypervisor
+
+
+def test_for_tenant_returns_a_simulation_spoke_even_when_a_hypervisor_exists():
+    """The mixed-deployment fix: a tenant whose only Proxmox host is reached via
+    a SIMULATION spoke still resolves it — the old ``hypervisor or simulation``
+    short-circuit hid every sim spoke as soon as ANY hypervisor spoke existed."""
+    hub = _MixedHub(
+        hypervisors=["pxmx-1"],           # bound to a DIFFERENT tenant
+        simulations=["cs-06"],            # bound to tenantLRB
+        metadata={"pxmx-1": {"tenant_id": "tenantOther"},
+                  "cs-06": {"tenant_id": "tenantLRB"}})
+    assert LabManagerHub.get_hypervisor_spoke_for_tenant(hub, "tenantLRB") == "cs-06"
+
+
+def test_spokes_for_tenant_unions_hypervisor_and_simulation_bound():
+    """Plural resolver: EVERY agent-hosting spoke bound to the tenant (a tenant
+    can host Proxmox on both a pxmx AND a cs spoke — a mix of infra + sim VMs)."""
+    hub = _MixedHub(
+        hypervisors=["pxmx-1"],
+        simulations=["cs-06"],
+        metadata={"pxmx-1": {"tenant_id": "tenantLRB"},
+                  "cs-06": {"tenant_id": "tenantLRB"}})
+    got = LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantLRB")
+    assert sorted(got) == ["cs-06", "pxmx-1"]
+
+
+def test_spokes_for_tenant_is_strictly_tenant_scoped():
+    """No cross-tenant host leak: only spokes bound to the asking tenant."""
+    hub = _MixedHub(
+        hypervisors=["pxmx-1"],
+        simulations=["cs-06"],
+        metadata={"pxmx-1": {"tenant_id": "tenantA"},
+                  "cs-06": {"tenant_id": "tenantB"}})
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantA") == ["pxmx-1"]
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantB") == ["cs-06"]
+
+
+def test_spokes_for_tenant_skips_unapproved_and_disconnected():
+    hub = _MixedHub(
+        hypervisors=["pxmx-1"],
+        simulations=["cs-06", "cs-07"],
+        metadata={"pxmx-1": {"tenant_id": "t"},
+                  "cs-06": {"tenant_id": "t"},
+                  "cs-07": {"tenant_id": "t"}},
+        approved={"pxmx-1": True, "cs-06": True, "cs-07": False},
+        active={"pxmx-1", "cs-06"})   # cs-07 disconnected
+    assert sorted(LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "t")) == ["cs-06", "pxmx-1"]
+
+
+def test_spokes_for_tenant_empty_for_default_or_none():
+    hub = _MixedHub(hypervisors=["pxmx-1"], simulations=["cs-06"],
+                    metadata={"pxmx-1": {"tenant_id": "t"}, "cs-06": {"tenant_id": "t"}})
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "default") == []
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, None) == []

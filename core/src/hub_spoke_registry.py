@@ -292,7 +292,8 @@ class SpokeRegistryMixin:
         """
         if not tenant_id or tenant_id == "default":
             return self.get_hypervisor_spoke()
-        cands = self.get_all_spokes_by_type("hypervisor") or self.get_all_spokes_by_type("simulation")
+        cands = (list(self.get_all_spokes_by_type("hypervisor") or [])
+                 + list(self.get_all_spokes_by_type("simulation") or []))
         cands = [sid for sid in cands if sid in self.active_connections
                  and self.approved_modules.get(sid, False)]
         if not cands:
@@ -300,6 +301,30 @@ class SpokeRegistryMixin:
         md = self.state.system_state.get("module_metadata", {})
         bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
         return bound[0] if bound else None
+
+    def get_hypervisor_spokes_for_tenant(self, tenant_id: str = None) -> list:
+        """PLURAL sibling of ``get_hypervisor_spoke_for_tenant``: EVERY connected,
+        approved agent-hosting spoke (hypervisor=pxmx AND simulation=cs) bound to
+        ``tenant_id``.
+
+        A single tenant can legitimately host Proxmox on more than one spoke — a
+        dedicated pxmx hypervisor AND a CS-enabled box whose agent dials a cs
+        spoke's ``/ws/agent`` (a mix of infra + sim-client VMs). The Overview /
+        node list must aggregate across ALL of them, not just the one
+        ``bound[0]`` the singular resolver returns, or the sim-hosted host
+        silently drops off the Hypervisors page. Still strictly tenant-scoped —
+        ONLY spokes bound to this tenant — so no cross-tenant host/node leak.
+        Empty (not a global fallback) when nothing is bound: the caller decides
+        whether to fall back, exactly as it does with the singular resolver."""
+        if not tenant_id or tenant_id == "default":
+            return []
+        cands = (list(self.get_all_spokes_by_type("hypervisor") or [])
+                 + list(self.get_all_spokes_by_type("simulation") or []))
+        md = self.state.system_state.get("module_metadata", {})
+        return [sid for sid in cands
+                if sid in self.active_connections
+                and self.approved_modules.get(sid, False)
+                and md.get(sid, {}).get("tenant_id") == tenant_id]
 
     def get_nw_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
         """Tenant-aware network-devices (nw) spoke — mirrors
