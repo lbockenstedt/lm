@@ -850,3 +850,60 @@ def test_target_owner_tenant_unresolvable_agent_is_shared():
     # An agent that resolves to no spoke → "" (fail-closed, never leaks access).
     t = {"module_type": "hypervisor", "identifier": "ghost"}
     assert cd.target_owner_tenant(t, _st, _as) == ""
+
+
+# ── per-node agent PIN overrides the spoke tenant (VM-console parity) ─────────
+# A Proxmox node pinned to a tenant (per-agent Tenant button) must resolve to
+# that pin even when its owning pxmx spoke is shared / other-tenant, so a
+# tenant-admin can pick their own node as an LE cert destination.
+_AGENT_TENANT = {"node-a": "lrb", "node-b": "", "node-shared": "acme"}
+
+
+def _at(aid):
+    return _AGENT_TENANT.get(aid, "")
+
+
+def test_target_owner_tenant_agent_pin_wins_over_spoke():
+    # node-b's spoke (pxmx-1) is bound to "lrb", but the node is pinned to "acme"
+    # → the pin wins (single authoritative owner, mirrors the VM console).
+    t = {"module_type": "hypervisor", "identifier": "node-b", "agent_id": "node-b"}
+    at = {"node-b": "acme"}.get
+    assert cd.target_owner_tenant(t, _st, _as, at) == "acme"
+
+
+def test_target_owner_tenant_agent_pin_grants_under_shared_spoke():
+    # The regression this fixes: node under a SHARED/unbound spoke (tenant "") but
+    # pinned to "lrb" → resolves to "lrb" so the tenant-admin can target it.
+    t = {"module_type": "hypervisor", "identifier": "node-x", "agent_id": "node-x"}
+    spoke_tenant = {"pxmx-shared": ""}.get
+    agent_spoke = {"node-x": "pxmx-shared"}.get
+    agent_tenant = {"node-x": "lrb"}.get
+    assert cd.target_owner_tenant(t, lambda s: spoke_tenant(s) or "",
+                                  lambda a: agent_spoke(a) or "",
+                                  lambda a: agent_tenant(a) or "") == "lrb"
+
+
+def test_target_owner_tenant_unpinned_agent_falls_back_to_spoke():
+    # node-b has no pin ("") → fall back to its owning spoke's tenant ("lrb").
+    t = {"module_type": "hypervisor", "identifier": "node-b", "agent_id": "node-b"}
+    assert cd.target_owner_tenant(t, _st, _as, _at) == "lrb"
+
+
+def test_target_owner_tenant_agent_pin_ignored_for_spoke_level_target():
+    # A spoke-level (firewall) target has no agent — agent_tenant is never
+    # consulted, resolution stays the spoke's tenant.
+    t = {"module_type": "firewall", "identifier": "opn-1", "spoke_id": "opn-1"}
+    assert cd.target_owner_tenant(t, _st, _as, lambda a: "hacker") == "acme"
+
+
+def test_target_owner_tenant_all_nodes_broadcast_ignores_agent_pin():
+    # The "all nodes" broadcast carries spoke_id (no agent_id) → spoke tenant,
+    # regardless of any agent pin.
+    t = {"module_type": "hypervisor", "identifier": "", "spoke_id": "pxmx-1"}
+    assert cd.target_owner_tenant(t, _st, _as, lambda a: "other") == "lrb"
+
+
+def test_target_owner_tenant_agent_tenant_optional_preserves_legacy():
+    # Omitting agent_tenant (default None) keeps the pre-fix spoke-only behavior.
+    t = {"module_type": "hypervisor", "identifier": "node-a", "agent_id": "node-a"}
+    assert cd.target_owner_tenant(t, _st, _as) == "lrb"
