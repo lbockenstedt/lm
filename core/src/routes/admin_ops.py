@@ -150,12 +150,67 @@ def register(app, hub, ctx):
                 "is_shared": lca.is_shared(hub, d),
             }
 
+        # End-to-end: call the REAL GET /api/le/certs route in-process with a
+        # minted bearer session (admin + non-admin, with tenant variants), so we
+        # see exactly what the WebUI receives — the full _tag_bugfixer /
+        # _filter_le_certs / _tag_cert_tenants chain, live relay + all.
+        import httpx
+        import api_tokens
+
+        def _certs_of(b):
+            if isinstance(b, dict):
+                if isinstance(b.get("certs"), list):
+                    return b["certs"]
+                inner = b.get("data")
+                if isinstance(inner, dict) and isinstance(inner.get("certs"), list):
+                    return inner["certs"]
+            return []
+
+        async def _call(user, label, tenant=None):
+            uid = "diag-" + label
+            at, _rt, _ttl = api_tokens.issue_pair(hub, uid, user, "le-diag")
+            try:
+                url = "/api/le/certs" + (("?tenant=" + tenant) if tenant else "")
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport,
+                                             base_url="https://loop") as c:
+                    r = await c.get(url, headers={"Authorization": "Bearer " + at})
+                try:
+                    body = r.json()
+                except Exception:
+                    body = None
+                cs = _certs_of(body)
+                return {
+                    "status": r.status_code,
+                    "domains": [c.get("domain") for c in cs if isinstance(c, dict)],
+                    "tagged": {c.get("domain"): c.get("tenants")
+                               for c in cs if isinstance(c, dict) and c.get("tenants")},
+                    "body_type": (list(body.keys()) if isinstance(body, dict)
+                                  else str(type(body))),
+                }
+            finally:
+                try:
+                    api_tokens.invalidate_user(hub, uid)
+                except Exception:
+                    pass
+
+        admin_user = {"id": "diag-admin", "permissions": {"admin": True}, "tenants": []}
+        non_admin_user = {"id": "diag-lrb", "permissions": {}, "tenants": ["lrb"]}
+        end_to_end = {
+            "admin_no_tenant": await _call(admin_user, "admin"),
+            "admin_tenant_shared": await _call(admin_user, "admin", "shared"),
+            "admin_tenant_default": await _call(admin_user, "admin", "default"),
+            "nonadmin_no_tenant": await _call(non_admin_user, "lrb"),
+            "nonadmin_tenant_lrb": await _call(non_admin_user, "lrb", "lrb"),
+        }
+
         return {
             "shared_tenant_id_runtime": access.shared_tenant_id(),
             "le_filter_enabled": access.filter_enabled(hub, "le"),
             "cert_domains": domains,
             "store_keys": sorted(store.keys()),
             "per_domain": per_domain,
+            "end_to_end": end_to_end,
         }
 
     @app.get("/admin/ops/connections")
