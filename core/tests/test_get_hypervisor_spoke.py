@@ -36,8 +36,9 @@ def test_none_when_neither_type_is_connected():
 # ── get_hypervisor_spoke_for_tenant — per-tenant VM-count isolation ──────────
 
 class _FakeState:
-    def __init__(self, metadata, tenant_state=None):
-        self.system_state = {"module_metadata": metadata}
+    def __init__(self, metadata, tenant_state=None, agent_config=None):
+        self.system_state = {"module_metadata": metadata,
+                             "agent_config": agent_config or {}}
         self.tenant_state = tenant_state or {}
 
 
@@ -127,15 +128,23 @@ class _MixedHub:
 
     def __init__(self, hypervisors, simulations, metadata,
                  approved=None, active=None, global_hypervisor=None,
-                 tenant_state=None):
+                 tenant_state=None, agent_info=None, agent_config=None):
         self._hyp = list(hypervisors)
         self._sim = list(simulations)
         self._metadata = metadata
         allsids = self._hyp + self._sim
         self.approved_modules = approved or {sid: True for sid in allsids}
         self.active_connections = active or set(allsids)
-        self.state = _FakeState(metadata, tenant_state)
+        self.state = _FakeState(metadata, tenant_state, agent_config)
         self._global_hypervisor = global_hypervisor
+        self.agent_info = agent_info or {}
+
+    def _primary_key(self, x):
+        return x
+
+    def _spoke_effective_tenants(self, sid):
+        # Exercise the REAL implementation with this fake's state.
+        return LabManagerHub._spoke_effective_tenants(self, sid)
 
     def get_all_spokes_by_type(self, module_type):
         if module_type == "hypervisor":
@@ -256,3 +265,65 @@ def test_spokes_for_tenant_no_shared_flag_stays_strict():
                   "cs-06": {"tenant_id": "tenantLRB"}},
         tenant_state={"tenants": {"tenantLRB": {}}})   # nothing marked shared
     assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantLRB") == ["cs-06"]
+
+
+# ── per-AGENT tenant scope wins over the SPOKE binding (reported leak) ────────
+#
+# The host stayed on a SHARED spoke but the operator pinned its Proxmox agent to
+# LRB (per-agent Tenant button → agent_config.client_simulation.tenant_id). The
+# node must show ONLY on LRB's Overview, never on every other tenant's — the
+# spoke's shared binding must NOT make a tenant-pinned host cross-visible.
+
+def test_pinned_agent_on_shared_spoke_is_visible_only_to_its_tenant():
+    hub = _MixedHub(
+        hypervisors=["pxmx-shared"],
+        simulations=[],
+        metadata={"pxmx-shared": {"tenant_id": "shared"}},
+        tenant_state=_SHARED_TS,
+        agent_info={"ag-1": {"spoke_id": "pxmx-shared"}},
+        agent_config={"ag-1": {"client_simulation": {"tenant_id": "tenantLRB"}}})
+    # LRB sees the host it pinned…
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantLRB") == ["pxmx-shared"]
+    # …but another real tenant does NOT (the reported cross-tenant leak).
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantRA") == []
+
+
+def test_unpinned_agent_on_shared_spoke_stays_visible_to_all():
+    """An UNPINNED agent inherits the shared spoke's tenant, so a genuinely
+    shared host still shows on every tenant's Overview (f96a02a5 preserved)."""
+    hub = _MixedHub(
+        hypervisors=["pxmx-shared"],
+        simulations=[],
+        metadata={"pxmx-shared": {"tenant_id": "shared"}},
+        tenant_state=_SHARED_TS,
+        agent_info={"ag-1": {"spoke_id": "pxmx-shared"}},
+        agent_config={"ag-1": {"client_simulation": {}}})  # no pin
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantLRB") == ["pxmx-shared"]
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantRA") == ["pxmx-shared"]
+
+
+def test_pinned_agent_makes_a_shared_spoke_show_for_a_tenant_with_no_binding():
+    """The pin alone (no spoke binding to the tenant) makes the host visible to
+    that tenant — the operator's assignment is honored even though the spoke
+    itself is shared."""
+    hub = _MixedHub(
+        hypervisors=["pxmx-shared"],
+        simulations=[],
+        metadata={"pxmx-shared": {"tenant_id": "shared"}},
+        tenant_state=_SHARED_TS,
+        agent_info={"ag-1": {"spoke_id": "pxmx-shared"}},
+        agent_config={"ag-1": {"client_simulation": {"tenant_id": "tenantLRB"}}})
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantLRB") == ["pxmx-shared"]
+
+
+def test_no_indexed_agents_falls_back_to_spoke_binding():
+    """agent_info lags connect ~30s; until an agent is indexed, a freshly-bound
+    spoke still resolves via its own module_metadata binding (no regression)."""
+    hub = _MixedHub(
+        hypervisors=["pxmx-1"],
+        simulations=[],
+        metadata={"pxmx-1": {"tenant_id": "tenantLRB"}},
+        tenant_state=_SHARED_TS,
+        agent_info={})  # nothing indexed yet
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantLRB") == ["pxmx-1"]
+    assert LabManagerHub.get_hypervisor_spokes_for_tenant(hub, "tenantRA") == []

@@ -730,15 +730,24 @@ def register(app, hub, ctx):
         live_ids |= {a.get("agent_id") for a in live.get("pending_agents", []) if a.get("agent_id")}
         out = dict(live)
         out["offline_agents"] = _offline_relay_agents(hub, live_ids)
-        # Tenant scope (picker): an explicit tenant shows ONLY agents whose owning
-        # spoke is bound to it (module_metadata tenant_id — same source
-        # get_hypervisor_spoke_for_tenant uses). Admin with none selected ("All")
-        # or a tenantless resolve → unchanged (full roster). The SWR cache stays the
-        # full roster; we filter this per-request copy.
+        # Tenant scope (picker): an explicit tenant shows ONLY agents EFFECTIVELY
+        # scoped to it — the agent's OWN pinned tenant (per-agent Tenant button →
+        # agent_config.client_simulation.tenant_id, the same value the tile
+        # DISPLAYS via _tenantOf) wins over its owning spoke's module_metadata
+        # binding. A Proxmox agent pinned to LRB on a SHARED spoke must appear
+        # under LRB (matching its shown tenant), not under the shared spoke's
+        # tenant — otherwise the roster filtered by the spoke binding disagreed
+        # with the tenant label rendered next to each agent. Admin with none
+        # selected ("All") or a tenantless resolve → unchanged (full roster). The
+        # SWR cache stays the full roster; we filter this per-request copy.
         tid = _resolve_tenant(request, tenant)
         if tid and tid != "default":
             md = hub.state.system_state.get("module_metadata", {}) or {}
             def _agent_tid(a):
+                pin = str(((a.get("client_simulation") or {})
+                           .get("tenant_id")) or "").strip()
+                if pin:
+                    return pin
                 return (md.get(a.get("spoke_id"), {}) or {}).get("tenant_id")
             for _k in ("agents", "pending_agents", "offline_agents"):
                 if isinstance(out.get(_k), list):

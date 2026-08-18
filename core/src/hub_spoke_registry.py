@@ -302,10 +302,45 @@ class SpokeRegistryMixin:
         bound = [sid for sid in cands if md.get(sid, {}).get("tenant_id") == tenant_id]
         return bound[0] if bound else None
 
+    def _spoke_effective_tenants(self, spoke_id: str) -> set:
+        """The set of tenant_ids an agent-hosting spoke is EFFECTIVELY scoped to
+        — driven by its AGENTS' own tenant scope, NOT just the spoke's
+        ``module_metadata`` binding.
+
+        A single Proxmox host can dial a SHARED spoke yet be PINNED (per-agent
+        Tenant button → ``agent_config[agent].client_simulation.tenant_id``,
+        ``tenant_pinned``) to one specific tenant. That pin — not the shared
+        spoke's binding — must decide who sees the host's node on their Overview,
+        or the pinned host leaks onto EVERY tenant's Overview (the reported
+        cross-tenant leak: a Proxmox pinned to LRB on a shared spoke showed up in
+        RA). Each connected agent contributes its PINNED tenant when set, else
+        the spoke's own binding (an unpinned agent inherits the spoke tenant —
+        mirrors ``_inherit_agent_tenant``). A spoke with no indexed agents yet
+        (``agent_info`` lags connect ~30s) falls back to its own binding so a
+        freshly-bound spoke still resolves. Empty set = no scope (unbound)."""
+        md = self.state.system_state.get("module_metadata", {}) or {}
+        spoke_pk = self._primary_key(spoke_id)
+        spoke_tid = str((md.get(spoke_id, {}) or md.get(spoke_pk, {}) or {})
+                        .get("tenant_id") or "").strip()
+        agent_cfg = self.state.system_state.get("agent_config", {}) or {}
+        agents = [apk for apk, info in (getattr(self, "agent_info", {}) or {}).items()
+                  if info and info.get("spoke_id")
+                  and self._primary_key(info.get("spoke_id")) == spoke_pk]
+        if not agents:
+            return {spoke_tid} if spoke_tid else set()
+        effs = set()
+        for apk in agents:
+            pin = str(((agent_cfg.get(apk, {}) or {}).get("client_simulation") or {})
+                      .get("tenant_id") or "").strip()
+            eff = pin or spoke_tid
+            if eff:
+                effs.add(eff)
+        return effs
+
     def get_hypervisor_spokes_for_tenant(self, tenant_id: str = None) -> list:
         """PLURAL sibling of ``get_hypervisor_spoke_for_tenant``: EVERY connected,
         approved agent-hosting spoke (hypervisor=pxmx AND simulation=cs) VISIBLE to
-        ``tenant_id`` — i.e. bound to it OR to the SHARED tenant.
+        ``tenant_id`` — i.e. EFFECTIVELY scoped to it OR to the SHARED tenant.
 
         A single tenant can legitimately host Proxmox on more than one spoke — a
         dedicated pxmx hypervisor AND a CS-enabled box whose agent dials a cs
@@ -318,14 +353,20 @@ class SpokeRegistryMixin:
         host's VMs still list (get_pxmx_vms fans every spoke + subnet-filters) but
         its node dropped off the per-tenant Overview once the tenant gained any
         bound spoke, so the fallback stopped firing (the reported regression).
-        Still no cross-tenant leak — a spoke bound to a DIFFERENT real tenant is
-        excluded. Empty (not a global fallback) when nothing is visible: the
-        caller decides whether to fall back, as with the singular resolver."""
+
+        Visibility is by the spoke's EFFECTIVE tenant scope
+        (``_spoke_effective_tenants``), NOT its raw ``module_metadata`` binding:
+        a Proxmox agent PINNED to a real tenant on a SHARED spoke is visible ONLY
+        to that tenant, never to every other tenant (the reported leak — the host
+        stayed on the shared spoke but was assigned to LRB, yet showed in RA).
+        Still no cross-tenant leak — a spoke effectively scoped to a DIFFERENT
+        real tenant is excluded. Empty (not a global fallback) when nothing is
+        visible: the caller decides whether to fall back, as with the singular
+        resolver."""
         if not tenant_id or tenant_id == "default":
             return []
         cands = (list(self.get_all_spokes_by_type("hypervisor") or [])
                  + list(self.get_all_spokes_by_type("simulation") or []))
-        md = self.state.system_state.get("module_metadata", {})
         try:
             _tenants = (getattr(self.state, "tenant_state", {}) or {}).get("tenants", {}) or {}
             shared = next((tid for tid, cfg in _tenants.items()
@@ -335,10 +376,15 @@ class SpokeRegistryMixin:
         want = {tenant_id}
         if shared:
             want.add(shared)
-        return [sid for sid in cands
-                if sid in self.active_connections
-                and self.approved_modules.get(sid, False)
-                and md.get(sid, {}).get("tenant_id") in want]
+        out = []
+        for sid in cands:
+            if sid not in self.active_connections:
+                continue
+            if not self.approved_modules.get(sid, False):
+                continue
+            if self._spoke_effective_tenants(sid) & want:
+                out.append(sid)
+        return out
 
     def get_nw_spoke_for_tenant(self, tenant_id: str = None) -> Optional[str]:
         """Tenant-aware network-devices (nw) spoke — mirrors
