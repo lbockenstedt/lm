@@ -37,13 +37,15 @@ class _Hub:
     """Minimal hub: records which spoke GET_NODE_STATS was relayed to."""
 
     def __init__(self, bound_spoke=None, global_spoke="pxmx-global",
-                 nodes=None):
+                 nodes=None, raise_on_relay=False):
         self.state = _State()
         self._bound = bound_spoke
         self._global = global_spoke
         self._nodes = nodes if nodes is not None else [
             {"node": "pve1", "status": "online", "cluster": "lab"}]
         self.relayed_to = None
+        self.raise_on_relay = raise_on_relay
+        self.warm_cache = {}
 
     def get_hypervisor_spoke_for_tenant(self, tid=None):
         return self._bound
@@ -51,9 +53,17 @@ class _Hub:
     def get_hypervisor_spoke(self):
         return self._global
 
+    def warm_get(self, ns, key):
+        return (self.warm_cache.get(ns) or {}).get(key)
+
+    async def warm_set(self, ns, key, data):
+        self.warm_cache.setdefault(ns, {})[key] = data
+
     async def request_response(self, sid, cmd, payload, timeout=30.0,
                                signing_secret=None):
         self.relayed_to = sid
+        if self.raise_on_relay:
+            raise RuntimeError("spoke timeout")
         return {"payload": {"data": {"nodes": self._nodes}}}
 
 
@@ -112,3 +122,38 @@ def test_no_spoke_at_all_returns_empty_not_error():
     body = r.json()
     assert body["nodes"] == []
     assert body["spoke_connected"] is False
+
+
+def test_live_nodes_populate_warm_cache():
+    """A successful live fetch seeds the warm cache keyed by tenant scope."""
+    hub = _Hub(bound_spoke="pxmx-acme", global_spoke="pxmx-global")
+    c = _build(hub, admin=True, tenant="acme")
+    r = c.get("/api/pxmx/nodes?tenant=acme")
+    assert r.status_code == 200 and len(r.json()["nodes"]) == 1
+    assert hub.warm_cache.get("pxmx_nodes", {}).get("acme")  # cached raw
+
+
+def test_spoke_down_serves_stale_warm_cache():
+    """Overview warm-starts after a hub restart: with the spoke unresolved,
+    last-known nodes are served (stale) instead of an empty list — mirroring the
+    VM tab so the Overview doesn't blank while VMs render from their cache."""
+    hub = _Hub(bound_spoke=None, global_spoke=None)
+    hub.warm_cache["pxmx_nodes"] = {"acme": {"nodes": [{"node": "pve1", "status": "online"}]}}
+    c = _build(hub, admin=True, tenant="acme")
+    r = c.get("/api/pxmx/nodes?tenant=acme")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["nodes"]) == 1
+    assert body["stale"] is True
+    assert body["spoke_connected"] is False
+
+
+def test_live_fetch_failure_falls_back_to_warm_cache():
+    """A live GET_NODE_STATS timeout serves stale nodes rather than a 500."""
+    hub = _Hub(bound_spoke="pxmx-acme", raise_on_relay=True)
+    hub.warm_cache["pxmx_nodes"] = {"acme": {"nodes": [{"node": "pve1", "status": "online"}]}}
+    c = _build(hub, admin=True, tenant="acme")
+    r = c.get("/api/pxmx/nodes?tenant=acme")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["nodes"]) == 1 and body["stale"] is True
