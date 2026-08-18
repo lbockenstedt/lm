@@ -1359,14 +1359,15 @@ def create_app(hub):
                                     content={"detail": "DNS module access required"})
 
         # /api/henet/* (HE.NET / Hurricane Electric public DNS) lives UNDER the
-        # DNS module ("all things DNS"). READS require the ``dns`` right (a DNS
-        # viewer sees HE.NET records too) OR the explicit ``henet`` right OR
-        # admin; WRITES stay Global-Admin-only via _ADMIN_INFRA_WRITE_PREFIXES
-        # below (public-address-space infra, no per-object tenant model).
+        # DNS module ("all things DNS"), but External DNS manages PUBLIC
+        # address-space records with no per-object tenant model, so BOTH reads
+        # and writes are Global-Admin-only (writes are additionally covered by
+        # _ADMIN_INFRA_WRITE_PREFIXES below). A DNS-view / tenant-admin user does
+        # NOT see External DNS — it is infrastructure, not tenant data.
         if path.startswith("/api/henet/"):
-            if not (_is_admin(sess) or _has_dns_access(sess) or _has_henet_access(sess)):
+            if not _is_admin(sess):
                 return JSONResponse(status_code=403,
-                                    content={"detail": "DNS module access required"})
+                                    content={"detail": "Admin access required for External DNS"})
 
         # /api/dhcp/* (DHCP module) requires the ``dhcp`` right OR admin. Writes
         # stay Global-Admin-only (shared Kea); GET reads are subnet-filtered.
@@ -1611,9 +1612,6 @@ def create_app(hub):
 
     def _has_dns_access(sess):
         return access.has_dns_access(sess)
-
-    def _has_henet_access(sess):
-        return access.has_module_access(sess, "henet")
 
     def _has_dhcp_access(sess):
         return access.has_dhcp_access(sess)

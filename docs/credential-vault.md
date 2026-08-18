@@ -14,7 +14,7 @@ and the hub resolves the plaintext unattended at use-time. Canonical code:
 Each **bucket** holds one tenant's secrets. A tenant-admin can reach only their
 own tenant buckets; a **Global Admin** can reach every tenant bucket **plus** the
 special `__admin__` slot ("Global Admin slot") for cross-tenant / infrastructure
-credentials (e.g. the HE.NET DDNS key, the shared console login). `__admin__` is
+credentials (e.g. the shared Hurricane Electric credential, the shared console login). `__admin__` is
 excluded from tenant-admin reach. (`cred_vault.py:1-15, 62-68`;
 `routes/cred_vault.py:68-83`.)
 
