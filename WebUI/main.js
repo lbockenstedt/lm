@@ -3412,11 +3412,13 @@ function renderTopNav(viewId) {
     const rawSubmenus = (viewId === 'logs') ? logsSubmenu() : (VIEW_SUBMENUS[viewId] || []);
     const subMenus = rawSubmenus.filter(m => {
         if (m === 'Simulations' && !isAdmin()) return false;
-        // The External DNS subtab (under DNS) appears once ANY internet-facing
-        // DNS provider spoke (HE.NET, …) is connected — the DNS module is "all
-        // things DNS", internal and external. Anyone who can see the DNS view
-        // can VIEW external-DNS records; add/edit/delete/sync stay admin-only
-        // (enforced per-provider loader + server). See EXTERNAL_DNS_PROVIDERS.
+        // The External DNS subtab (under DNS) manages PUBLIC address-space DNS
+        // (HE.NET, …) — infrastructure, not tenant data — so it is Global-Admin
+        // ONLY (view + add/edit/delete/sync). A DNS-view / tenant-admin user
+        // does not see it. The server enforces the same on /api/henet/*.
+        if (m === 'External DNS' && !isAdmin()) return false;
+        // It also only appears once ANY internet-facing DNS provider spoke
+        // (HE.NET, …) is connected. See EXTERNAL_DNS_PROVIDERS.
         if (m === 'External DNS' && _externalDnsConnected().length === 0) return false;
         return true;
     });

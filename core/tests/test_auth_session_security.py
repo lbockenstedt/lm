@@ -545,6 +545,33 @@ def test_dns_dhcp_write_requires_admin(tmp_path):
                   cookies={"lm_session": admin_tok}).status_code != 403
 
 
+# ── 8a. External DNS (HE.NET) reads AND writes are Global-Admin-only ─────────
+# External DNS manages PUBLIC address-space records (no per-object tenant
+# model), so — unlike internal DNS where a dns-right user can READ — even READS
+# on /api/henet/* require Global Admin. A dns-right user and a tenant Admin are
+# both 403'd; the UI hides the External DNS subtab for them to match.
+
+def test_henet_read_requires_global_admin(tmp_path):
+    c, hub = _build({}, tmp_path)
+    # A user holding the internal-DNS right cannot read External DNS.
+    dns_tok = _mint_tenant_session(hub, "alice", "tA", rights=("dns",))
+    assert c.get("/api/henet/records",
+                 cookies={"lm_session": dns_tok}).status_code == 403
+    assert c.get("/api/henet/status",
+                 cookies={"lm_session": dns_tok}).status_code == 403
+    # A tenant Admin (even with ?tenant=) is likewise blocked — External DNS is
+    # infrastructure, not tenant data.
+    tadm_tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
+    assert c.get("/api/henet/records",
+                 cookies={"lm_session": tadm_tok}).status_code == 403
+    assert c.get("/api/henet/records?tenant=tA",
+                 cookies={"lm_session": tadm_tok}).status_code == 403
+    # Global Admin passes the gate (handler then runs — not 403).
+    admin_tok = _mint_session(hub, "admin")
+    assert c.get("/api/henet/records",
+                 cookies={"lm_session": admin_tok}).status_code != 403
+
+
 # ── 8b. Shared-infrastructure writes: tenant-Admin tier (Phase 3) ─────────────
 # A tenant Admin may write firewall/DNS/DHCP ONLY for an explicit ?tenant= it
 # owns. Without ?tenant= the write is ambiguous and rejected; a ?tenant= for a
