@@ -1464,16 +1464,34 @@ def create_app(hub):
         # record/reservation/cert belongs to that tenant. Locked to Global Admin
         # until per-object subnet ownership is enforced on the bodies (dns/dhcp/le
         # phases). GET reads stay right-gated (method-gated here).
-        # le + dns/dhcp SYNC (fleet-wide rebuild) have no per-object tenant model → admin-only.
+        # dns/dhcp SYNC (fleet-wide rebuild) have no per-object tenant model → admin-only.
         # henet (Hurricane Electric public DNS) is public-address-space infra with
-        # no per-object tenant model → admin-only writes, same as le/dns/dhcp.
-        _ADMIN_INFRA_WRITE_PREFIXES = ("/api/le/", "/api/dns/", "/api/dhcp/", "/api/henet/")
+        # no per-object tenant model → admin-only writes, same as dns/dhcp.
+        _ADMIN_INFRA_WRITE_PREFIXES = ("/api/dns/", "/api/dhcp/", "/api/henet/")
+        # LE (Certificate Management) writes: unlike the shared single-server infra
+        # above, a managed cert carries an explicit per-tenant OWNER list
+        # (global_config['le_cert_tenants'], see le_cert_access), so ownership is a
+        # per-object fact the handlers enforce. Every mutating LE handler gates on
+        # ownership in-handler — _le_guard_change (issue-of-an-owned-domain, renew,
+        # revoke, clientauth, targets add/remove, per-cert distribute, tenant-edit)
+        # or can_deploy (device deploy); issuing a NEW domain auto-assigns the
+        # caller's tenant as owner. FLEET-WIDE LE ops with no per-object tenant
+        # (renew-all, distribute-all, the BugFixer identity) self-gate to Global
+        # Admin in their handlers. So the middleware floor for LE is the
+        # tenant-admin tier (can_edit_shared) — a tenant-admin manages their OWN
+        # certs; the per-object guards keep them out of other tenants' certs.
+        _LE_TENANT_WRITE_PREFIXES = ("/api/le/",)
         if request.method in ("POST", "PUT", "DELETE", "PATCH"):
             if any(path.startswith(p) for p in _SHARED_CONSTRAINED_WRITE_PREFIXES):
                 if not _can_edit_shared(sess):
                     return JSONResponse(
                         status_code=403,
                         content={"detail": "Tenant-admin (or admin) required for shared DNS/DHCP writes"})
+            elif any(path.startswith(p) for p in _LE_TENANT_WRITE_PREFIXES):
+                if not _can_edit_shared(sess):
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Tenant-admin (or admin) required for certificate changes"})
             elif any(path.startswith(p) for p in _ADMIN_INFRA_WRITE_PREFIXES):
                 if not _is_admin(sess):
                     return JSONResponse(

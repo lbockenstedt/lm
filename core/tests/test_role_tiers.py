@@ -31,6 +31,7 @@ from access import (
     has_cs_access,
     has_nw_access,
     has_module_access,
+    can_edit_shared,
     resolve_effective_permissions,
 )
 from simulations.routes import register_simulations_routes
@@ -132,6 +133,41 @@ def test_plain_cs_user_only_has_cs():
     assert has_nw_access(u) is False
     assert has_module_access(u, "ipam") is False
     assert has_module_access(u, "console") is False
+
+
+# ── LE (Certificate Management) write-gate floor ─────────────────────────────
+# The /api/le/* write middleware (core/src/api.py) admits the tenant-admin tier
+# (access.can_edit_shared) because each LE handler enforces per-cert ownership;
+# fleet-wide LE ops (renew-all / distribute-all / add-target / BugFixer) self-
+# gate to Global Admin in-handler. These tests pin that floor so a future refactor
+# can't silently drop a tenant-admin below it or let a plain module user through.
+def test_le_write_floor_admits_tenant_admin():
+    assert can_edit_shared(_tenant_admin()) is True
+
+
+def test_le_write_floor_admits_global_admin():
+    assert can_edit_shared(_global_admin()) is True
+
+
+def test_le_write_floor_blocks_plain_module_user():
+    # A user with only the ``le`` module right (view) is NOT a shared-write tier
+    # user, so the LE write gate blocks their mutations (issue/renew/etc).
+    le_view = _sess(tenants=["acme"], tenant_id="acme", rights={"le": True})
+    assert can_edit_shared(le_view) is False
+
+
+def test_le_write_floor_blocks_write_user_without_admin():
+    # Even a global-``edit`` write user is below the shared-write tier.
+    write_user = _sess(tenants=["acme"], tenant_id="acme",
+                       rights={"le": True, "edit": True})
+    assert can_edit_shared(write_user) is False
+
+
+def test_le_fleetwide_ops_require_global_admin():
+    # Fleet-wide LE handlers (renew-all / distribute-all) gate on is_admin, which
+    # a tenant-admin never satisfies — so they stay Global-Admin-only.
+    assert is_admin(_tenant_admin()) is False
+    assert is_admin(_global_admin()) is True
 
 
 # ── resolve_effective_permissions precedence ───────────────────────────────

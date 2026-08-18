@@ -1250,10 +1250,15 @@ def register(app, hub, ctx):
         renew_body = await request.json()
         renew_body = dict(renew_body) if isinstance(renew_body, dict) else {}
         # A single-domain renew is a change op → require ownership. A renew-all
-        # (no domain) keeps its prior behavior (the spoke renews what it holds;
-        # per-cert visibility still governs what a non-admin ever sees).
+        # (no domain) is a FLEET-WIDE op across every tenant's certs → Global
+        # Admin only; a tenant-admin must name a domain they own.
         if renew_body.get("domain"):
             _le_guard_change(request, renew_body["domain"])
+        elif not _is_admin(_session_user(request)):
+            raise HTTPException(
+                status_code=403,
+                detail="Renewing all certificates is a Global Admin action. "
+                       "Specify a domain you own to renew just that certificate.")
         # Re-seed DNS-01 hook creds from the vault for this renew, so an on-demand
         # renew succeeds even if the spoke's local he-login.ini was lost.
         try:
@@ -1292,6 +1297,10 @@ def register(app, hub, ctx):
         domain = (body or {}).get("domain") if isinstance(body, dict) else None
         if domain:
             _le_guard_change(request, domain)
+        elif not _is_admin(_session_user(request)):
+            raise HTTPException(
+                status_code=403,
+                detail="Revoking requires naming a domain you own.")
         result = await _relay_spoke(_get_le_spoke(app.state.hub), "LE_REVOKE_CERT",
                                     body, log_name="le_revoke_cert",
                                     timeout=_LE_CERTBOT_TIMEOUT)
@@ -1308,7 +1317,7 @@ def register(app, hub, ctx):
         return result
 
     @app.post("/api/le/distribute")
-    async def le_distribute():
+    async def le_distribute(request: Request):
         """Re-push any stale cert material to its targets now (no certbot
         invocation — just LE_GET_CERT → INSTALL_CERT for targets whose
         last_pushed_hash differs). Returns the refreshed cert list (for the
@@ -1316,6 +1325,14 @@ def register(app, hub, ctx):
         show a per-target toast — mirrors /api/le/issue. Without the summary,
         Distribute now gave the UI zero feedback (results were only in
         Logs/Certificates, which needs a manual refresh)."""
+        # Fleet-wide redistribute across every tenant's certs → Global Admin only.
+        # A tenant-admin re-deploys a cert they own via
+        # POST /api/le/certs/{domain}/distribute (ownership-guarded).
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(
+                status_code=403,
+                detail="Distributing all certificates is a Global Admin action. "
+                       "Use per-certificate deploy for a certificate you own.")
         hub = app.state.hub
         le_sid = _get_le_spoke(hub)
         try:
@@ -1354,6 +1371,15 @@ def register(app, hub, ctx):
         body = await request.json()
         if not isinstance(body, dict) or not body.get("module_type"):
             raise HTTPException(status_code=400, detail="module_type required")
+        # Re-pushing to a shared install target (hub/spoke) is Global Admin only,
+        # symmetric with le_add_target. Own-device (nw) re-deploy is available via
+        # the per-device deploy endpoint (can_deploy scoped).
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(
+                status_code=403,
+                detail="Deploying a certificate to a shared install target "
+                       "(the hub or a spoke) is a Global Admin action. Use the "
+                       "per-device deploy for your own devices instead.")
         _le_guard_change(request, domain)
         target = {"module_type": body["module_type"],
                   "identifier": body.get("identifier") or ""}
@@ -1460,6 +1486,17 @@ def register(app, hub, ctx):
         body = await request.json()
         if not isinstance(body, dict) or not body.get("module_type"):
             raise HTTPException(status_code=400, detail="module_type required")
+        # Attaching a cert to a SHARED install target (the hub's own serving cert,
+        # or a whole spoke/module) is shared-infrastructure work with no per-target
+        # tenant model → Global Admin only. A tenant-admin deploys their cert to
+        # their OWN nw devices via POST /api/le/certs/{domain}/devices/{id}/deploy
+        # (ownership + device-tenant scoped by can_deploy).
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(
+                status_code=403,
+                detail="Attaching a certificate to a shared install target "
+                       "(the hub or a spoke) is a Global Admin action. Deploy the "
+                       "certificate to your own devices instead.")
         _le_guard_change(request, domain)
         hub = app.state.hub
         mt = str(body.get("module_type") or "").strip()
@@ -1819,6 +1856,13 @@ def register(app, hub, ctx):
 
     @app.delete("/api/le/certs/{domain}/targets/{idx}")
     async def le_remove_target(domain: str, idx: int, request: Request):
+        # Symmetric with le_add_target: shared install-target management is
+        # Global Admin only.
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(
+                status_code=403,
+                detail="Managing a certificate's shared install targets is a "
+                       "Global Admin action.")
         _le_guard_change(request, domain)
         return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_REMOVE_TARGET",
                                   {"domain": domain, "idx": idx},
