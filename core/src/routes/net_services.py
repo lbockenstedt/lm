@@ -6,6 +6,7 @@ from api import (
     logger, spoke_or_503,
 )
 from cert_distribution import build_available_targets
+import le_cert_access as _lca
 
 
 def register(app, hub, ctx):
@@ -599,6 +600,67 @@ def register(app, hub, ctx):
         sess = _session_user(request)
         return ((sess.get("user", {}).get("tenant_id") if sess else None) or "default")
 
+    # ── Per-cert tenant ownership + shared-tenant deploy authorization ────────
+    # A managed cert carries an explicit owner-tenant list in
+    # global_config['le_cert_tenants'][domain] (see le_cert_access). Change ops
+    # (renew/revoke/targets/tenant-edit) require ownership; a shared cert is
+    # deployable by any user to their own devices but not changeable.
+    def _le_guard_change(request, domain):
+        """403 unless the caller may CHANGE this cert (admin, an owner, or a
+        legacy ownerless cert). Shared-but-not-owned → deploy only, so blocked."""
+        sess = _session_user(request)
+        if not _lca.can_change(hub, sess, domain):
+            raise HTTPException(
+                status_code=403,
+                detail="This certificate belongs to another tenant. You can "
+                       "deploy a shared certificate to your own devices, but not "
+                       "change it.")
+
+    async def _le_persist(context):
+        try:
+            await app.state.hub.state.save_state_now()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("persist le cert tenants (%s) failed: %s", context, e)
+
+    def _nw_device_tenant(device_id):
+        """The owning tenant_id of an nw device (from global_config.nw_devices),
+        used to authorize a shared-cert deploy to the caller's own device."""
+        gc = app.state.hub.state.system_state.get("global_config", {}) or {}
+        for d in gc.get("nw_devices", []) or []:
+            if isinstance(d, dict) and str(d.get("id")) == str(device_id):
+                return (d.get("tenant_id") or "").strip()
+        return ""
+
+    def _tenant_exists(tid):
+        tenants = (getattr(app.state.hub.state, "tenant_state", {}) or {}).get("tenants", {}) or {}
+        return tid in tenants
+
+    @app.get("/api/le/certs/{domain}/tenants")
+    async def le_get_cert_tenants(domain: str, request: Request):
+        """The cert's explicit owner-tenant list + the caller's rights."""
+        sess = _session_user(request)
+        return {"status": "ok", "domain": domain, **_lca.meta(hub, sess, domain)}
+
+    @app.put("/api/le/certs/{domain}/tenants")
+    async def le_set_cert_tenants(domain: str, request: Request):
+        """Replace the cert's owner-tenant list. Admin → any existing-tenant set.
+        A non-admin owner may add/remove OTHER tenants but never their own (their
+        active tenant must remain). Adding the shared tenant makes the cert
+        deployable by every tenant to their own devices."""
+        _le_guard_change(request, domain)
+        sess = _session_user(request)
+        body = await request.json()
+        want = body.get("tenants") if isinstance(body, dict) else None
+        if not isinstance(want, list):
+            raise HTTPException(status_code=400, detail="'tenants' must be a list")
+        try:
+            clean = _lca.validate_tenant_edit(hub, sess, domain, want, _tenant_exists)
+        except _lca.TenantEditError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        _lca.set_tenants(hub, domain, clean)
+        await _le_persist("set_tenants")
+        return {"status": "ok", "domain": domain, **_lca.meta(hub, sess, domain)}
+
     @app.get("/api/le/dns-credentials")
     async def le_list_dns_creds(request: Request):
         """This tenant's saved DNS-01 credentials (names + providers; NO secrets),
@@ -714,17 +776,25 @@ def register(app, hub, ctx):
             return data
         sess = _session_user(request)
         tid = _effective_tenant(request, tenant) if tenant else None
+        # Tenant set the caller is scoped to (an explicit picker tenant, else the
+        # session user's own tenants) — used by the explicit-ownership visibility
+        # test below.
+        want_tenants = ([tid] if (tenant and tid)
+                        else _lca.user_tenants(sess))
         if tenant and tid:
             # Explicit tenant selected → scope by its prefixes (admins included).
             prefixes = await access.resolve_prefixes_for_tenant(hub, tid)
             if not prefixes:
-                return {**data, "certs": []}   # fail CLOSED for an explicit tenant
+                # No DNS prefixes for the tenant — but explicit cert OWNERSHIP
+                # (own or shared) must still surface certs, so don't fail closed
+                # unconditionally; fall through with an empty prefix set.
+                prefixes = []
         else:
             if not sess or _is_admin(sess):
                 return data
             prefixes = await access.resolve_prefixes(hub, sess)
             if not prefixes:
-                return data
+                prefixes = []
         import ipaddress
         nets = []
         for p in prefixes:
@@ -732,13 +802,20 @@ def register(app, hub, ctx):
                 nets.append(ipaddress.ip_network(p, strict=False))
             except ValueError:
                 continue
-        tenant_hosts, any_source = await _dns_hosts(nets)
-        if not any_source:
+        tenant_hosts, any_source = await _dns_hosts(nets) if nets else (set(), True)
+        if nets and not any_source:
             return data  # both DNS sources unreachable → fail open
-        if not tenant_hosts:
-            return {**data, "certs": []}
 
         def _match(cert):
+            # Explicit per-cert tenant ownership takes precedence: an owned or
+            # shared cert is always visible; a cert owned by OTHER tenants only
+            # is hidden — regardless of DNS. Certs with no explicit owners fall
+            # back to the legacy DNS-subnet match below (backward compatible).
+            own = _lca.visible_to(hub, sess, cert.get("domain"), want_tenants)
+            if own is not None:
+                return own
+            if not tenant_hosts:
+                return False
             for san in (cert.get("domains") or []):
                 s = str(san).strip().rstrip(".").lower()
                 if not s:
@@ -783,6 +860,21 @@ def register(app, hub, ctx):
             tagged.append({**c, "bugfixer": is_bf})
         return {**data, "certs": tagged}
 
+    def _tag_cert_tenants(request, data):
+        """Tag each cert with its explicit owner ``tenants`` list plus the
+        caller's rights (``shared``/``owned``/``can_edit``) so the LE UI can show
+        tenant chips and enable/disable the change actions."""
+        if not isinstance(data, dict):
+            return data
+        sess = _session_user(request)
+        out = []
+        for c in data.get("certs") or []:
+            if not isinstance(c, dict):
+                out.append(c)
+                continue
+            out.append({**c, **_lca.meta(hub, sess, c.get("domain"))})
+        return {**data, "certs": out}
+
     @app.get("/api/le/certs")
     async def le_list_certs(request: Request, tenant: str = None):
         """List managed certificates from the le spoke.
@@ -793,7 +885,8 @@ def register(app, hub, ctx):
         successful live fetch refreshes + persists the cache. Tenant subnet
         filtering (``_filter_le_certs``) runs per request on the UNFILTERED cache.
         Each cert is also tagged ``bugfixer: bool`` (H1) from the pinned
-        ``global_config['bugfixer_cert_identities']`` list."""
+        ``global_config['bugfixer_cert_identities']`` list, and with its explicit
+        owner ``tenants`` + the caller's rights (``_tag_cert_tenants``)."""
         logger.debug("relay GET /api/le/certs")
         hub = app.state.hub
         le_sid = hub.get_spoke_by_type("certificates")
@@ -802,18 +895,18 @@ def register(app, hub, ctx):
             if cached is not None:
                 out = dict(cached) if isinstance(cached, dict) else {"certs": cached}
                 out["stale"] = True
-                return await _filter_le_certs(request, _tag_bugfixer(out), tenant)
+                return _tag_cert_tenants(request, await _filter_le_certs(request, _tag_bugfixer(out), tenant))
             raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             data = await _relay_spoke(le_sid, "LE_LIST_CERTS", log_name="le_list_certs")
             await hub.le_cache_set("certs", data)
-            return await _filter_le_certs(request, _tag_bugfixer(data), tenant)
+            return _tag_cert_tenants(request, await _filter_le_certs(request, _tag_bugfixer(data), tenant))
         except HTTPException:
             cached = hub.le_cache_get("certs")
             if cached is not None:
                 out = dict(cached) if isinstance(cached, dict) else {"certs": cached}
                 out["stale"] = True
-                return await _filter_le_certs(request, _tag_bugfixer(out), tenant)
+                return _tag_cert_tenants(request, await _filter_le_certs(request, _tag_bugfixer(out), tenant))
             raise
 
     @app.get("/api/le/eligible-domains")
@@ -865,6 +958,13 @@ def register(app, hub, ctx):
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
         body["tenant_id"] = _le_tenant(request)  # server-derived; scopes dns_credential
+        # Re-issuing an existing cert owned by ANOTHER tenant is a change op —
+        # block it (a shared cert is deploy-only for non-owners).
+        _req_domain = (body.get("domain")
+                       or (body.get("domains") or [None])[0]
+                       if isinstance(body, dict) else None)
+        if _req_domain and _lca.has_owners(app.state.hub, _req_domain):
+            _le_guard_change(request, _req_domain)
         await _le_resolve_vault_dns_cred(request, body)  # {bucket,name} → inline creds
         vault_ref = body.get("dns_vault_credential") if isinstance(body, dict) else None
         hub, le_sid, payload = await _le_request("LE_ISSUE_CERT", body,
@@ -872,6 +972,11 @@ def register(app, hub, ctx):
         inner = _le_inner(payload)
         domain = inner.get("domain")
         targets = inner.get("targets") or []
+        # Auto-assign the creator's current tenant as an owner of the new cert so
+        # it is scoped to (and manageable by) their tenant from the start.
+        if domain:
+            _lca.add_tenant(hub, domain, _le_tenant(request))
+            await _le_persist("issue add_tenant")
         # Persist the vault DNS-01 reference hub-side (durable across a spoke
         # reinstall) and re-seed the spoke's DNS hook creds from the vault now.
         if domain and isinstance(vault_ref, dict):
@@ -983,6 +1088,7 @@ def register(app, hub, ctx):
         material to the cert's targets, like /api/le/issue."""
         body = await request.json()
         enabled = bool(body.get("enabled", body.get("client_auth", False))) if isinstance(body, dict) else False
+        _le_guard_change(request, domain)
         data = {"domain": domain, "client_auth": enabled, "tenant_id": _le_tenant(request)}
         hub, le_sid, payload = await _le_request("LE_SET_CLIENTAUTH", data,
                                                   timeout=_LE_CERTBOT_TIMEOUT)
@@ -1007,6 +1113,11 @@ def register(app, hub, ctx):
         hub = app.state.hub
         renew_body = await request.json()
         renew_body = dict(renew_body) if isinstance(renew_body, dict) else {}
+        # A single-domain renew is a change op → require ownership. A renew-all
+        # (no domain) keeps its prior behavior (the spoke renews what it holds;
+        # per-cert visibility still governs what a non-admin ever sees).
+        if renew_body.get("domain"):
+            _le_guard_change(request, renew_body["domain"])
         # Re-seed DNS-01 hook creds from the vault for this renew, so an on-demand
         # renew succeeds even if the spoke's local he-login.ini was lost.
         try:
@@ -1043,6 +1154,8 @@ def register(app, hub, ctx):
     async def le_revoke_cert(request: Request):
         body = await request.json()
         domain = (body or {}).get("domain") if isinstance(body, dict) else None
+        if domain:
+            _le_guard_change(request, domain)
         result = await _relay_spoke(_get_le_spoke(app.state.hub), "LE_REVOKE_CERT",
                                     body, log_name="le_revoke_cert",
                                     timeout=_LE_CERTBOT_TIMEOUT)
@@ -1053,6 +1166,9 @@ def register(app, hub, ctx):
                 await app.state.hub.state.save_state_now()
             except Exception as e:  # noqa: BLE001
                 logger.warning("prune le vault ref for %s failed: %s", domain, e)
+        # Ownership metadata is no longer meaningful once the cert is gone.
+        if domain and _lca.forget(hub, domain):
+            await _le_persist("revoke forget")
         return result
 
     @app.post("/api/le/distribute")
@@ -1102,6 +1218,7 @@ def register(app, hub, ctx):
         body = await request.json()
         if not isinstance(body, dict) or not body.get("module_type"):
             raise HTTPException(status_code=400, detail="module_type required")
+        _le_guard_change(request, domain)
         target = {"module_type": body["module_type"],
                   "identifier": body.get("identifier") or ""}
         hub = app.state.hub
@@ -1207,6 +1324,7 @@ def register(app, hub, ctx):
         body = await request.json()
         if not isinstance(body, dict) or not body.get("module_type"):
             raise HTTPException(status_code=400, detail="module_type required")
+        _le_guard_change(request, domain)
         hub = app.state.hub
         mt = str(body.get("module_type") or "").strip()
         # Defense-in-depth: reject a target the UI would never offer. The UI
@@ -1535,6 +1653,15 @@ def register(app, hub, ctx):
         material from le and sends INSTALL_CERT to the nw spoke with the device's
         id, then records that device's per-device status."""
         hub = app.state.hub
+        # A shared cert may be deployed by any tenant to THEIR OWN devices; an
+        # owned cert only by an owner/admin. Reject a deploy to a device that
+        # isn't the caller's (unless they can change the cert outright).
+        dev_tenant = _nw_device_tenant(device_id)
+        if not _lca.can_deploy(hub, _session_user(request), domain, dev_tenant):
+            raise HTTPException(
+                status_code=403,
+                detail="You may only deploy this certificate to devices in your "
+                       "own tenant, and only if the certificate is shared.")
         spoke_id = get_spoke_or_503(hub, "nw", "Network Devices")
         le_spoke = _get_le_spoke(hub)
         mat = await hub.request_response(le_spoke, "LE_GET_CERT", {"domain": domain}, timeout=15.0)
@@ -1555,7 +1682,8 @@ def register(app, hub, ctx):
                 "result_status": r.get("status", ""), "message": r.get("message", "")}
 
     @app.delete("/api/le/certs/{domain}/targets/{idx}")
-    async def le_remove_target(domain: str, idx: int):
+    async def le_remove_target(domain: str, idx: int, request: Request):
+        _le_guard_change(request, domain)
         return await _relay_spoke(_get_le_spoke(app.state.hub), "LE_REMOVE_TARGET",
                                   {"domain": domain, "idx": idx},
                                   log_name="le_remove_target")
