@@ -21,6 +21,7 @@ actually changes pending_ack/spoke_queues.
 import asyncio
 import json
 import os
+import tempfile
 import time
 import logging
 from dataclasses import asdict
@@ -159,16 +160,36 @@ class Mailbox:
             }
             json_data = json.dumps(data, indent=2, default=str)
             encrypted = hub_encryption.encrypt(json_data)
-            tmp_path = self._path + ".tmp"
-            with open(tmp_path, "wb") as f:
-                f.write(encrypted)
-                f.flush()
-                os.fsync(f.fileno())
+            # Unique temp file per write. ``_save`` is offloaded to a thread
+            # (``_asave``) and fired on every ack/push/retry/flush, so two
+            # concurrent saves used to share the SAME ``mailbox.json.tmp``: the
+            # first ``os.replace`` consumed it, the second then failed with
+            # ENOENT ("mailbox.json.tmp -> mailbox.json: No such file or
+            # directory") and that persist was LOST — silently dropping the
+            # durability guarantee for a queued approval across a hub restart.
+            # A mkstemp-unique temp in the same dir makes each writer's atomic
+            # replace independent; a stray temp on crash is cleaned in finally.
+            fd, tmp_path = tempfile.mkstemp(
+                dir=os.path.dirname(self._path) or ".",
+                prefix=".mailbox.", suffix=".tmp")
             try:
-                os.chmod(tmp_path, 0o600)  # encrypted mailbox state: not world-readable
-            except OSError:
-                pass
-            os.replace(tmp_path, self._path)
+                with os.fdopen(fd, "wb") as f:
+                    f.write(encrypted)
+                    f.flush()
+                    os.fsync(f.fileno())
+                try:
+                    os.chmod(tmp_path, 0o600)  # encrypted mailbox state: not world-readable
+                except OSError:
+                    pass
+                os.replace(tmp_path, self._path)
+            finally:
+                # os.replace consumes tmp_path on success; only a pre-replace
+                # failure leaves it behind — clean it so temps don't accumulate.
+                if os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Mailbox persist failed ({self._path}): {e}")
 
