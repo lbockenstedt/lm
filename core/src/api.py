@@ -2006,6 +2006,16 @@ def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
     # materially delayed. Mirrored on the spoke side in control_plane.run().
     cfg_kwargs["ws_ping_interval"] = _ws_keepalive_env("LM_WS_PING_INTERVAL_S", 30.0)
     cfg_kwargs["ws_ping_timeout"] = _ws_keepalive_env("LM_WS_PING_TIMEOUT_S", 90.0)
+    # HTTP keep-alive: uvicorn's default reaps an idle HTTP connection after just
+    # 5s. The WebUI holds a connection idle while the operator fills in a modal
+    # (e.g. picking a cert's owner tenants) for well over 5s, then submits — the
+    # browser tries to REUSE the connection the hub already closed, and the write
+    # fails at the transport layer. Browsers silently retry idempotent GETs on a
+    # dead reused connection, but NEVER retry a POST/PUT/DELETE, so it surfaces
+    # as an opaque ``TypeError: Load failed`` on save while reads keep working.
+    # Widen the idle window (env-overridable) so a normal think-time edit reuses a
+    # still-open connection. The client also retries the save once (main.js).
+    cfg_kwargs["timeout_keep_alive"] = int(_ws_keepalive_env("LM_HTTP_KEEPALIVE_S", 75.0))
     # H1: use the peer-cert-capturing WS protocol so the /ws/spoke route can read
     # which client cert a connection presented (gates HUB_REQUEST to a pinned
     # BugFixer cert). Best-effort: if the uvicorn internal API moved on upgrade,
@@ -2050,6 +2060,9 @@ def run_api_server(hub, port=443):
     _ws_kw = {
         "ws_ping_interval": _ws_keepalive_env("LM_WS_PING_INTERVAL_S", 30.0),
         "ws_ping_timeout": _ws_keepalive_env("LM_WS_PING_TIMEOUT_S", 90.0),
+        # Widen HTTP keep-alive too (default 5s) so a think-time WebUI edit reuses
+        # a still-open connection instead of failing the save on a dead one.
+        "timeout_keep_alive": int(_ws_keepalive_env("LM_HTTP_KEEPALIVE_S", 75.0)),
     }
     # H1: peer-cert-capturing WS protocol (see build_server()). Best-effort;
     # falls back to the default protocol if the uvicorn internal API moved.

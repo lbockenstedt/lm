@@ -20528,15 +20528,24 @@ async function _leSaveTenants() {
         showToast("You cannot remove your own tenant.", 'error');
         return;
     }
+    // The tenant list is an idempotent full REPLACE, so it is safe to retry.
+    // A stale reused keep-alive connection (the hub reaps idle HTTP conns) fails
+    // the very first POST with a transport-level "TypeError: Load failed";
+    // browsers auto-retry GETs on a dead connection but never a POST, so we do
+    // it ourselves — the retry opens a fresh connection and succeeds.
+    const _post = () => _spokeFetch('/api/le/cert-tenants', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain: st.domain, tenants })
+    });
     try {
-        // POST the domain in the BODY (not the URL path): a wildcard cert domain
-        // (*.example.com → %2A.example.com) or other reserved chars in the path
-        // can be reset by a proxy/WAF, surfacing as an opaque "TypeError: Load
-        // failed". A static path avoids that entirely.
-        const { ok, detail } = await _spokeFetch('/api/le/cert-tenants', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ domain: st.domain, tenants })
-        });
+        let res;
+        try {
+            res = await _post();
+        } catch (e1) {
+            if (!(e1 instanceof TypeError)) throw e1;  // not a transport error
+            res = await _post();  // one retry on a fresh connection
+        }
+        const { ok, detail } = res;
         if (!ok) { showToast(detail || 'Failed to save tenants', 'error'); return; }
         showToast('Tenants updated', 'success');
         // Reflect the change locally so the modal + row badges update on reload.
