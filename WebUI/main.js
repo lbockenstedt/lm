@@ -19741,6 +19741,23 @@ async function loadLEData(subMenu) {
             const bfBadge = c.bugfixer ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-700 align-middle" title="Pinned as the BugFixer mTLS identity (Manage → ★ BugFixer)">★ BugFixer</span>` : '';
             const caBadge = '';
             const profBadge = (c.profile && String(c.profile).toLowerCase() !== 'classic') ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700 align-middle" title="ACME profile: ${escapeHtml(String(c.profile))} (lifetime set by the CA profile)">${escapeHtml(String(c.profile))}</span>` : '';
+            // Owner-tenant chips + a shared badge. A cert is owned by one or more
+            // tenants (auto-assigned to the issuer's tenant); a "Shared" cert may
+            // be deployed by any tenant to their own devices but only changed by
+            // an owner/admin. Legacy certs (no owners) show nothing here.
+            const _tenChips = (c.tenants || []).map(t =>
+                `<span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium bg-slate-100 text-slate-600 align-middle" title="Owner tenant">${escapeHtml(String(t))}</span>`).join(' ');
+            const sharedBadge = c.shared ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-teal-100 text-teal-700 align-middle" title="Shared certificate — any tenant may deploy it to their own devices, but only an owner/admin may change it">Shared</span>` : '';
+            const roBadge = (c.can_edit === false) ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-200 text-slate-500 align-middle" title="Read-only — this certificate belongs to another tenant. You can deploy it to your own devices but not change it.">read-only</span>` : '';
+            const tenChips = _tenChips ? ` ${_tenChips}${sharedBadge}${roBadge}` : (sharedBadge + roBadge);
+            // Change ops (Renew/Revoke) require ownership; a read-only (shared,
+            // not-owned) cert only exposes Manage (→ deploy to your own devices).
+            const canEdit = (c.can_edit !== false);
+            const manageBtn = `<button onclick="showLeTargetsModal('${dEsc}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="${canEdit ? 'Manage distribution targets, BugFixer identity + clientAuth' : 'Deploy this shared certificate to your own devices'}">${canEdit ? 'Manage' : 'Deploy'}</button>`;
+            const changeBtns = canEdit
+                ? `<button onclick="leRenewCert('${dEsc}')" class="bg-slate-700/10 hover:bg-slate-700/20 text-slate-700 border border-slate-700 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Renew this cert">Renew</button>
+                            <button onclick="leRevokeCert('${dEsc}')" class="bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Revoke + remove from managed list">Revoke</button>`
+                : '';
             // 2-row group per cert: row 1 = the data (domain, email, challenge,
             // staging, expiry+renew-window) WITH the Manage/Renew/Revoke actions
             // stacked vertically in a pinned-right Actions cell on that same row
@@ -19749,7 +19766,7 @@ async function loadLEData(subMenu) {
             // Targets moved out of the data row so each badge has room to be a
             // click-to-deploy button (mirrors the CS spoke-clients click-to-act).
             return `<tr class="border-b border-slate-100 hover:bg-slate-50">
-                <td class="px-4 py-2 font-mono font-medium">${issueDot(c.domain)}${c.domain || '—'}${bfBadge}${caBadge}${profBadge}</td>
+                <td class="px-4 py-2 font-mono font-medium">${issueDot(c.domain)}${c.domain || '—'}${bfBadge}${caBadge}${profBadge}${tenChips}</td>
                 <td class="px-4 py-2 text-xs">${c.email || '—'}</td>
                 <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">${c.challenge || '—'}</span></td>
                 <td class="px-4 py-2 text-center text-xs">${c.staging ? 'yes' : 'no'}</td>
@@ -19761,9 +19778,8 @@ async function loadLEData(subMenu) {
                     <div class="flex flex-col items-end gap-1.5">
                         ${retryBtn ? `<div>${retryBtn}</div>` : ''}
                         <div class="flex flex-row items-center justify-end gap-1.5">
-                            <button onclick="showLeTargetsModal('${dEsc}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Manage distribution targets, BugFixer identity + clientAuth">Manage</button>
-                            <button onclick="leRenewCert('${dEsc}')" class="bg-slate-700/10 hover:bg-slate-700/20 text-slate-700 border border-slate-700 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Renew this cert">Renew</button>
-                            <button onclick="leRevokeCert('${dEsc}')" class="bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Revoke + remove from managed list">Revoke</button>
+                            ${manageBtn}
+                            ${changeBtns}
                         </div>
                     </div>
                 </td>
@@ -20145,6 +20161,7 @@ async function showLeTargetsModal(domain) {
     const tgts = cert.targets || [];
     const isBfCert = !!cert.bugfixer;
     const isCA = !!cert.client_auth;
+    const canEdit = (cert.can_edit !== false);  // owner/admin (or legacy cert)
     const esc = s => String(s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
     const row = (t, i) => {
         const ok = t.last_status === 'SUCCESS';
@@ -20154,28 +20171,16 @@ async function showLeTargetsModal(domain) {
             <td class="px-3 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${cls}">${t.last_status || 'pending'}</span></td>
             <td class="px-3 py-2 text-xs text-slate-500">${(t.last_pushed_at || '—').slice(0, 19).replace('T', ' ')}</td>
             <td class="px-3 py-2 text-xs text-slate-500">${t.last_message ? `<span title="${escapeHtml(t.last_message)}">${escapeHtml(t.last_message)}</span>` : ''}</td>
-            <td class="px-3 py-2"><button onclick="removeLeTarget('${esc(domain)}', ${i})" class="text-xs text-red-600 hover:text-red-700 font-medium">remove</button></td>
+            <td class="px-3 py-2">${canEdit ? `<button onclick="removeLeTarget('${esc(domain)}', ${i})" class="text-xs text-red-600 hover:text-red-700 font-medium">remove</button>` : ''}</td>
         </tr>`;
     };
     const mtOpts = leModuleOptions();
-    const modal = openModal('le-targets-modal', `
-        <h3 class="text-lg font-bold mb-1">Distribution targets — <span class="font-mono">${esc(domain)}</span></h3>
-        <p class="text-xs text-slate-500 mb-4">Each target is a spoke (by module type) the hub pushes this cert to; that spoke installs it on its device. Only installed modules with at least one device are listed.</p>
-        <label class="flex items-start gap-2 mb-4 p-3 rounded-md border ${isBfCert ? 'bg-purple-50 border-purple-200' : 'bg-slate-50 border-slate-200'} cursor-pointer" title="Tag this cert as the BugFixer mTLS identity — the gate for hub log reads + fleet update commands. Then add a bugfixer target below so the cert is deployed to the bugfixer agent.">
+    const roNote = canEdit ? '' : `<div class="mb-4 p-3 rounded-md bg-slate-50 border border-slate-200 text-xs text-slate-600">This is a <b>shared</b> certificate owned by another tenant. You can <b>deploy</b> it to devices in your own tenant (below), but you cannot change its targets, identity, or tenants.</div>`;
+    const bfBlock = canEdit ? `<label class="flex items-start gap-2 mb-4 p-3 rounded-md border ${isBfCert ? 'bg-purple-50 border-purple-200' : 'bg-slate-50 border-slate-200'} cursor-pointer" title="Tag this cert as the BugFixer mTLS identity — the gate for hub log reads + fleet update commands. Then add a bugfixer target below so the cert is deployed to the bugfixer agent.">
             <input type="checkbox" id="le-bugfixer-chk" ${isBfCert ? 'checked' : ''} onchange="leToggleBugfixerChk(this, '${esc(domain)}')" class="mt-0.5 accent-purple-600" />
             <span class="text-xs text-slate-700"><span class="font-bold text-purple-700">★ BugFixer identity</span> — pin this cert's name as the BugFixer mTLS identity (hub logs + fleet updates). <span class="text-slate-500">The hub mints bugfixer's clientAuth mTLS cert from its Local CA for this SAN automatically; also add a <span class="font-mono">bugfixer</span> target below (★) to deploy this cert as bugfixer's WebUI/server cert.</span></span>
-        </label>
-        <div class="overflow-x-auto mb-3"><table class="w-full text-sm">
-            <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>
-                <th class="px-3 py-2 text-left font-medium">Target</th>
-                <th class="px-3 py-2 text-left font-medium">Status</th>
-                <th class="px-3 py-2 text-left font-medium">Last push</th>
-                <th class="px-3 py-2 text-left font-medium">Message</th>
-                <th></th>
-            </tr></thead>
-            <tbody>${tgts.length ? tgts.map(row).join('') : '<tr><td colspan="5" class="px-3 py-3 text-xs text-slate-400 italic">No targets yet — add one below.</td></tr>'}</tbody>
-        </table></div>
-        <div class="flex flex-wrap items-end gap-2 border-t border-slate-200 pt-4">
+        </label>` : '';
+    const addBlock = canEdit ? `<div class="flex flex-wrap items-end gap-2 border-t border-slate-200 pt-4">
             <div class="flex flex-col">
                 <label class="text-xs text-slate-500 mb-1">Module type</label>
                 <select id="le-tgt-mt" onchange="leTgtMtChange('le-tgt-mt','le-tgt-id')" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${mtOpts}</select>
@@ -20187,8 +20192,143 @@ async function showLeTargetsModal(domain) {
             <button onclick="addLeTarget('${esc(domain)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Add target</button>
             <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Distribute now</button>
             <button onclick="document.getElementById('le-targets-modal').remove()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
-        </div>`, { card: 'max-w-2xl w-full p-6 max-h-[90vh] overflow-y-auto' });
-    leTgtMtChange('le-tgt-mt', 'le-tgt-id');  // seed the device list for the first module
+        </div>` : `<div class="flex border-t border-slate-200 pt-4">
+            <button onclick="document.getElementById('le-targets-modal').remove()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
+        </div>`;
+    const modal = openModal('le-targets-modal', `
+        <h3 class="text-lg font-bold mb-1">Distribution targets — <span class="font-mono">${esc(domain)}</span></h3>
+        <p class="text-xs text-slate-500 mb-4">Each target is a spoke (by module type) the hub pushes this cert to; that spoke installs it on its device. Only installed modules with at least one device are listed.</p>
+        ${roNote}
+        <div id="le-tenants-box" class="mb-4"></div>
+        ${bfBlock}
+        <div class="overflow-x-auto mb-3"><table class="w-full text-sm">
+            <thead class="bg-slate-50 text-xs text-slate-500 uppercase"><tr>
+                <th class="px-3 py-2 text-left font-medium">Target</th>
+                <th class="px-3 py-2 text-left font-medium">Status</th>
+                <th class="px-3 py-2 text-left font-medium">Last push</th>
+                <th class="px-3 py-2 text-left font-medium">Message</th>
+                <th></th>
+            </tr></thead>
+            <tbody>${tgts.length ? tgts.map(row).join('') : '<tr><td colspan="5" class="px-3 py-3 text-xs text-slate-400 italic">No targets yet — add one below.</td></tr>'}</tbody>
+        </table></div>
+        ${addBlock}`, { card: 'max-w-2xl w-full p-6 max-h-[90vh] overflow-y-auto' });
+    if (canEdit) leTgtMtChange('le-tgt-mt', 'le-tgt-id');  // seed the device list for the first module
+    _leRenderTenantsSection(domain, cert, canEdit);
+}
+
+// ── Per-cert tenant ownership editor (Manage modal) ──────────────────────────
+// A cert is owned by one or more tenants; owners/admins may add or remove other
+// tenants (and add the SHARED tenant to let every tenant deploy it to their own
+// devices) but a non-admin owner may never remove their own tenant. Renders the
+// "le-tenants-box" section from the cert's tagged {tenants,shared} + the tenant
+// list at /setup/tenants; PUTs the new list to /api/le/certs/{domain}/tenants.
+async function _leRenderTenantsSection(domain, cert, canEdit) {
+    const box = document.getElementById('le-tenants-box');
+    if (!box) return;
+    const owners = Array.isArray(cert.tenants) ? cert.tenants.slice() : [];
+    const sharedId = window._sharedTenantId || null;
+    const myTenant = currentTenant || 'default';
+    const admin = (typeof isAdmin === 'function') && isAdmin();
+    if (!canEdit) {
+        // Read-only viewers just see who owns it + the shared flag.
+        const chips = owners.map(t => `<span class="inline-block px-2 py-0.5 rounded text-xs font-medium bg-slate-100 text-slate-600">${escapeHtml(t)}${sharedId && t === sharedId ? ' (shared)' : ''}</span>`).join(' ');
+        box.innerHTML = `<div class="p-3 rounded-md border border-slate-200 bg-white">
+            <div class="text-xs font-semibold text-slate-500 uppercase mb-1.5">Owner tenants</div>
+            <div class="flex flex-wrap gap-1.5">${chips || '<span class="text-xs text-slate-400 italic">—</span>'}</div></div>`;
+        return;
+    }
+    // Load the full tenant list so an owner can add another tenant / the shared one.
+    let all = [];
+    try {
+        const r = await _spokeFetch('/setup/tenants');
+        const d = (r && r.ok) ? r.data : null;
+        all = (d && Array.isArray(d.tenants)) ? d.tenants : [];
+    } catch (e) { all = []; }
+    // Build the selectable universe: every known tenant id + the shared tenant.
+    const known = new Map();
+    all.forEach(t => { if (t && t.id) known.set(String(t.id), t.name || t.id); });
+    owners.forEach(t => { if (!known.has(t)) known.set(t, t); });
+    if (sharedId && !known.has(sharedId)) known.set(sharedId, 'Shared (all tenants)');
+    window._leTenantEdit = { domain, owners: new Set(owners), myTenant, admin, sharedId };
+    _leRenderTenantChips();
+    const opts = Array.from(known.entries())
+        .filter(([id]) => !owners.includes(id))
+        .map(([id, name]) => `<option value="${escapeHtml(id)}">${escapeHtml(name)}${sharedId && id === sharedId ? ' — makes cert shared' : ''}</option>`).join('');
+    box.insertAdjacentHTML('beforeend', `
+        <div class="flex flex-wrap items-end gap-2 mt-2">
+            <div class="flex flex-col flex-1 min-w-[180px]">
+                <label class="text-xs text-slate-500 mb-1">Add a tenant (or the shared tenant to share)</label>
+                <select id="le-tenant-add" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">— select —</option>${opts}</select>
+            </div>
+            <button onclick="_leAddTenantChip()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 px-3 py-2 rounded-md text-sm font-medium">Add</button>
+            <button onclick="_leSaveTenants()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold">Save tenants</button>
+        </div>`);
+}
+
+function _leRenderTenantChips() {
+    const box = document.getElementById('le-tenants-box');
+    const st = window._leTenantEdit;
+    if (!box || !st) return;
+    let holder = document.getElementById('le-tenant-chips-holder');
+    if (!holder) {
+        box.innerHTML = `<div class="p-3 rounded-md border border-slate-200 bg-white">
+            <div class="text-xs font-semibold text-slate-500 uppercase mb-1.5">Owner tenants</div>
+            <div id="le-tenant-chips-holder" class="flex flex-wrap gap-1.5"></div>
+            <p class="text-[11px] text-slate-400 mt-1.5">Add the shared tenant so any tenant can deploy this cert to their own devices. You cannot remove your own tenant.</p>
+        </div>`;
+        holder = document.getElementById('le-tenant-chips-holder');
+    }
+    const chips = Array.from(st.owners).map(t => {
+        const isSelf = (!st.admin && t === st.myTenant);
+        const isShared = st.sharedId && t === st.sharedId;
+        const rm = isSelf ? '' : `<button onclick="_leRemoveTenantChip('${escJsAttr(t)}')" class="ml-1 text-slate-400 hover:text-red-600" title="Remove">×</button>`;
+        return `<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${isShared ? 'bg-teal-100 text-teal-700' : 'bg-slate-100 text-slate-600'}">${escapeHtml(t)}${isShared ? ' (shared)' : ''}${isSelf ? ' (you)' : ''}${rm}</span>`;
+    }).join(' ');
+    holder.innerHTML = chips || '<span class="text-xs text-slate-400 italic">—</span>';
+}
+
+function _leAddTenantChip() {
+    const sel = document.getElementById('le-tenant-add');
+    const st = window._leTenantEdit;
+    if (!sel || !st || !sel.value) return;
+    st.owners.add(sel.value);
+    const opt = sel.querySelector(`option[value="${CSS.escape(sel.value)}"]`);
+    if (opt) opt.remove();
+    sel.value = '';
+    _leRenderTenantChips();
+}
+
+function _leRemoveTenantChip(tid) {
+    const st = window._leTenantEdit;
+    if (!st) return;
+    if (!st.admin && tid === st.myTenant) { showToast("You cannot remove your own tenant.", 'error'); return; }
+    st.owners.delete(tid);
+    _leRenderTenantChips();
+}
+
+async function _leSaveTenants() {
+    const st = window._leTenantEdit;
+    if (!st) return;
+    const tenants = Array.from(st.owners);
+    if (!st.admin && !tenants.includes(st.myTenant)) {
+        showToast("You cannot remove your own tenant.", 'error');
+        return;
+    }
+    try {
+        const { ok, detail } = await _spokeFetch(`/api/le/certs/${encodeURIComponent(st.domain)}/tenants`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tenants })
+        });
+        if (!ok) { showToast(detail || 'Failed to save tenants', 'error'); return; }
+        showToast('Tenants updated', 'success');
+        // Reflect the change locally so the modal + row badges update on reload.
+        const c = (window._leCerts || []).find(x => x.domain === st.domain);
+        if (c) { c.tenants = tenants; c.shared = !!(st.sharedId && tenants.includes(st.sharedId)); }
+        if (typeof loadLEData === 'function') loadLEData();
+        const m = document.getElementById('le-targets-modal'); if (m) m.remove();
+    } catch (e) {
+        showToast('Failed to save tenants: ' + e, 'error');
+    }
 }
 
 // Agent-hosting cert targets (simulation/hypervisor) can be added as a GROUP
