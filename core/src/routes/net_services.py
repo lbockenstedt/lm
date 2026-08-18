@@ -658,7 +658,20 @@ def register(app, hub, ctx):
         except _lca.TenantEditError as e:
             raise HTTPException(status_code=400, detail=str(e))
         _lca.set_tenants(hub, domain, clean)
-        await _le_persist("set_tenants")
+        # Durability-critical: the assignment IS the operation, so a failed
+        # persist must surface as an error — never a false "saved" toast that
+        # silently loses the tenant list on the next hub restart. (Sibling LE
+        # change ops — add/remove target, client-auth — persist the same way.)
+        try:
+            await app.state.hub.state.save_state_now()
+        except Exception as e:  # noqa: BLE001
+            logger.error("persist le cert tenants (set_tenants) failed: %s", e)
+            raise HTTPException(
+                status_code=500,
+                detail="The tenant assignment was applied in memory but could "
+                       "not be saved to disk, so it would be lost on restart. "
+                       "Check the hub state-storage location and permissions, "
+                       "then try again.")
         return {"status": "ok", "domain": domain, **_lca.meta(hub, sess, domain)}
 
     @app.get("/api/le/dns-credentials")
