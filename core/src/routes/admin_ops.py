@@ -109,6 +109,55 @@ def register(app, hub, ctx):
         return {"status": "ok", "time": time.time(),
                 "hub_pid": os.getpid()}
 
+    @app.get("/admin/ops/le-diag")
+    async def admin_ops_le_diag(request: Request):
+        """TEMPORARY diagnostic: report the runtime shared-tenant id, the le
+        filter flag, and per-cert-domain tenant ownership / visibility for a
+        synthesized ADMIN and NON-admin session — all in the RUNNING process,
+        so it reflects the live _SHARED_TENANT_ID and hub state. Used to root
+        cause why assigned tenants don't surface on GET /api/le/certs."""
+        _guard(request)
+        import access
+        import le_cert_access as lca
+
+        def _extract_certs(env):
+            if not isinstance(env, dict):
+                return []
+            if isinstance(env.get("certs"), list):
+                return env["certs"]
+            inner = env.get("data")
+            if isinstance(inner, dict) and isinstance(inner.get("certs"), list):
+                return inner["certs"]
+            return []
+
+        env = hub.le_cache_get("certs")
+        certs = _extract_certs(env)
+        domains = [c.get("domain") for c in certs if isinstance(c, dict)]
+
+        admin_sess = {"user": {"permissions": {"admin": True}, "tenants": []}}
+        non_admin_sess = {"user": {"permissions": {}, "tenants": ["lrb"]}}
+
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        store = gc.get(getattr(lca, "STORE_KEY", "le_cert_tenants"), {}) or {}
+
+        per_domain = {}
+        for d in domains:
+            per_domain[d] = {
+                "owners": lca.get_tenants(hub, d),
+                "meta_admin": lca.meta(hub, admin_sess, d),
+                "visible_admin": lca.visible_to(hub, admin_sess, d, []),
+                "visible_nonadmin_lrb": lca.visible_to(hub, non_admin_sess, d, ["lrb"]),
+                "is_shared": lca.is_shared(hub, d),
+            }
+
+        return {
+            "shared_tenant_id_runtime": access.shared_tenant_id(),
+            "le_filter_enabled": access.filter_enabled(hub, "le"),
+            "cert_domains": domains,
+            "store_keys": sorted(store.keys()),
+            "per_domain": per_domain,
+        }
+
     @app.get("/admin/ops/connections")
     async def admin_ops_connections(request: Request):
         """Hub-side connection telemetry (no spoke fan-out, always instant):
