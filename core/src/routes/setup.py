@@ -772,7 +772,13 @@ def register(app, hub, ctx):
             # heard of this agent_id, leaving it pending forever). Falls back
             # to the path param when agent_info has no entry yet (e.g.
             # approving before the first relayed frame has arrived).
-            target_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) or spoke_id
+            _resolved = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
+            target_spoke = _resolved or spoke_id
+            logger.info(
+                "approve_agent_under_spoke: agent=%s → target_spoke=%s (%s; path spoke_id=%s)",
+                agent_id, target_spoke,
+                "agent_info index" if _resolved else "fallback to path spoke_id",
+                spoke_id)
 
             # Inherit the parent spoke's tenant binding (Setup → Spokes &
             # Agents' "Tenant" button / Simulations → Spoke Management) so an
@@ -800,8 +806,23 @@ def register(app, hub, ctx):
                     "payload": {}
                 })
                 await hub.send_to_spoke(msg)
-
-            return {"status": "ok", "message": f"Agent {agent_id} approved under spoke {target_spoke}"}
+                logger.info(
+                    "approve_agent_under_spoke: relayed APPROVAL_SUCCESS for agent=%s "
+                    "to spoke=%s", agent_id, target_spoke)
+            else:
+                # Silent dead-end guard: the approval flag is persisted above, but
+                # WITHOUT this relay the pending node-agent never receives its
+                # provisioned secret — it stays in APPROVAL_REQUIRED and shows
+                # offline ("approve, then it goes offline again"), with nothing
+                # logged. Surface it so a misresolved / disconnected owning spoke
+                # is diagnosable instead of a silent no-op.
+                logger.warning(
+                    "approve_agent_under_spoke: owning spoke '%s' for agent '%s' is "
+                    "NOT connected (active=%s) — APPROVAL_SUCCESS was NOT relayed, so "
+                    "the agent will stay pending. Verify the agent-hosting spoke "
+                    "(hypervisor/simulation) that owns this agent is online.",
+                    target_spoke, agent_id,
+                    hub._primary_key(target_spoke) in hub.active_connections)
         except Exception as e:
             logger.exception("approve_agent_under_spoke failed")
             raise HTTPException(status_code=500, detail=str(e))
