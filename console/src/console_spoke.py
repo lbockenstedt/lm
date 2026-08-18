@@ -14,6 +14,7 @@ thread, so it schedules that coroutine back onto the event loop.
 import asyncio
 import base64
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -520,13 +521,13 @@ class ConsoleSpoke(BaseSpoke):
         # Tell the browser leg the stream is live (relay consumes CONSOLE_READY).
         if self.control_plane is not None:
             await self.control_plane.send_to_hub("CONSOLE_READY", {"session_id": sid})
-        # Streaming handoff: replay the recent passive-capture tail so a user who
-        # connects mid-stream immediately sees the context the monitor already
-        # captured (banner/prompt/output) instead of a blank screen. The hub
-        # buffers these CONSOLE_DATA_UP frames in the session queue until the
-        # browser WS drains them, so nothing is lost to the connect race.
-        if info.get("had_capture"):
-            await self._replay_capture(sid, pid)
+        # Streaming handoff: replay the recent persistent-capture tail so a user
+        # who connects mid-stream (or after a spoke restart) immediately sees the
+        # context the monitor already recorded (banner/prompt/output) instead of a
+        # blank screen. The hub buffers these CONSOLE_DATA_UP frames in the session
+        # queue until the browser WS drains them, so nothing is lost to the connect
+        # race. No-ops when there is nothing recorded for this port.
+        await self._replay_capture(sid, pid)
         return {"status": "SUCCESS", "session_id": sid, "port_id": pid,
                 "settings": settings, "writer": info.get("writer"),
                 "read_only": bool(info.get("busy"))}
@@ -548,8 +549,21 @@ class ConsoleSpoke(BaseSpoke):
             await cp.send_to_hub("CONSOLE_DATA_UP", payload)
 
     async def _replay_capture(self, sid: str, pid: str) -> None:
+        """Warm-start a connecting user with the recorded scrollback. Replays the
+        tail of the persistent per-device capture (up to ``console_replay_bytes``,
+        default 1 MiB, override via LM_CONSOLE_REPLAY_BYTES) so a user — or a
+        second concurrent viewer — sees the device's recent history instead of a
+        blank screen. The full log is retained/persisted; the replay is capped to
+        keep the connect burst light for the browser terminal."""
         chan = self.sessions.channel(pid)
-        tail = chan.capture_tail(8192) if chan else b""
+        if not chan:
+            return
+        try:
+            cap = int(os.environ.get("LM_CONSOLE_REPLAY_BYTES", "")
+                      or self.config.get("console_replay_bytes", 1 << 20))
+        except Exception:  # noqa: BLE001
+            cap = 1 << 20
+        tail = chan.persisted_tail(cap) if cap > 0 else chan.persisted_tail(8192)
         if not tail:
             return
         header = b"\r\n\x1b[2m--- recent console capture (replayed) ---\x1b[0m\r\n"
