@@ -953,14 +953,18 @@ def register(app, hub, ctx):
         hub = app.state.hub
         sess = _session_user(request)
         # Node stats are per-SPOKE (the whole cluster behind the hypervisor spoke).
-        # Scope by the tenant picker: an explicit/own tenant → ONLY that tenant's
-        # BOUND hypervisor spoke (its own host's nodes), so the Overview honors the
-        # picker like the VM list already does; an admin with no tenant selected
-        # ("All") → the global spoke (every node). A non-admin with no bound spoke
-        # sees nothing (fail-closed) rather than the old flat 403.
+        # Scope by the tenant picker: prefer that tenant's BOUND hypervisor spoke
+        # (isolation when one exists), but fall back to the GLOBAL hypervisor spoke
+        # — exactly what get_pxmx_vms does — instead of returning an empty node
+        # list. The per-tenant VM list scopes by proxmox_tag + subnet filter, NOT
+        # by refusing an unbound spoke, so a connected-but-unbound Proxmox host
+        # still lists its VMs; the Overview must match that or the page shows VMs
+        # with an empty Overview (the reported bug). An admin with no tenant
+        # selected ("All") → the global spoke (every node). A non-admin with no
+        # resolvable tenant still fails closed rather than the old flat 403.
         tid = _resolve_tenant(request, tenant)
         if tid and tid != "default":
-            pxmx_spoke = hub.get_hypervisor_spoke_for_tenant(tid)
+            pxmx_spoke = hub.get_hypervisor_spoke_for_tenant(tid) or hub.get_hypervisor_spoke()
         elif _is_admin(sess):
             pxmx_spoke = hub.get_hypervisor_spoke()
         else:
