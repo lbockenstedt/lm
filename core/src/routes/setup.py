@@ -187,6 +187,128 @@ def _is_stuck_never_keyed(approved, connected, has_key, is_relayed_agent, seen):
         and not is_relayed_agent and not seen
 
 
+async def _deliver_agent_approval(hub, target_spoke: str, agent_id: str) -> str:
+    """Durably deliver ``APPROVAL_SUCCESS`` for a relayed node-agent to the
+    agent-hosting (hypervisor/simulation) spoke that owns it. Returns the
+    disposition — ``"pushed"`` (spoke online) or ``"queued"`` (spoke offline,
+    parked for the reconnect flush) — for the caller's log line and tests.
+
+    Goes through the MAILBOX, not the low-level fire-and-forget
+    ``send_to_spoke`` the approve path used before. The owning spoke FLAPS
+    (periodic self-update reconnects — see the ``Spoke <id> is not connected``
+    mailbox warnings), so a raw send that raced with a disconnect was silently
+    lost and NEVER redelivered, leaving the agent pending forever even though
+    the hub logged "relayed". The mailbox fixes both legs:
+
+    * online → ``mailbox.push`` writes immediately AND records in
+      ``pending_ack``; the retry loop resends with backoff until the spoke's
+      ``COMMAND_RESULT`` acks it (or re-queues it offline if the socket drops
+      mid-flight), so a reconnect can't drop it.
+    * offline → ``mailbox.queue_for_spoke`` parks it under the spoke's primary
+      key so ``flush_mailbox`` delivers it the instant the spoke returns —
+      instead of the old warn-and-drop dead-end.
+
+    Redelivery is safe: ``approve_pending_agent`` is idempotent (an already
+    approved/connected agent no-ops), and an admin deny/delete calls
+    ``mailbox.clear_spoke`` which purges any still-queued approval."""
+    pk = hub._primary_key(target_spoke)
+    msg = _hub_msg(target_spoke, "SPOKE_RELAY", {
+        "target_agent_id": hub._agent_relay_name(agent_id),
+        "command": "APPROVAL_SUCCESS",
+        "payload": {},
+    })
+    if pk in hub.active_connections:
+        await hub.mailbox.push(msg, hub.send_to_spoke)
+        return "pushed"
+    await hub.mailbox.queue_for_spoke(pk, msg)
+    return "queued"
+
+
+async def _perform_agent_approval(hub, spoke_id: str, agent_id: str) -> dict:
+    """Approve a relayed node-agent (persist the flag + durably relay
+    ``APPROVAL_SUCCESS`` to its owning agent-hosting spoke). The single source
+    of truth shared by the WebUI approve route and the loopback admin ops API
+    so both behave identically. Returns a summary dict for the caller."""
+    # A Proxmox node agent connects THROUGH the pxmx hypervisor spoke,
+    # not directly to the hub, so it must NOT be registered as a
+    # hub-direct spoke (known_modules). Doing so made /setup/diagnostics
+    # render a bogus OFFLINE spoke row for it — the hub has no
+    # WebSocket for the agent, so get_diagnostics() emitted
+    # connection_state="OFFLINE"/authenticated=False even though the
+    # agent was genuinely connected (its real state lives in the
+    # spoke's GET_AGENTS response, shown in the Agents table). Persist
+    # the approval flag only, and clean up any prior leak so an
+    # already-registered agent stops showing as an offline spoke.
+    hub.approved_modules[agent_id] = True
+    approved_map = hub.state.system_state.setdefault("approved_modules", {})
+    approved_map[agent_id] = True
+    known = hub.state.system_state.get("known_modules", [])
+    if agent_id in known:
+        known.remove(agent_id)
+    await hub.state.save_state_now()
+
+    # Resolve the spoke that actually owns this agent rather than
+    # trusting the path's spoke_id blindly — the WebUI's approve
+    # button doesn't always know which spoke a given agent is
+    # connected through (a cs-dialed agent in the split-topology case
+    # is not on the pxmx spoke), so a caller-supplied wrong spoke_id
+    # would silently no-op (relay sent to a spoke that has never
+    # heard of this agent_id, leaving it pending forever). Falls back
+    # to the path param when agent_info has no entry yet (e.g.
+    # approving before the first relayed frame has arrived).
+    _resolved = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
+    target_spoke = _resolved or spoke_id
+    logger.info(
+        "approve_agent: agent=%s → target_spoke=%s (%s; requested spoke_id=%s)",
+        agent_id, target_spoke,
+        "agent_info index" if _resolved else "fallback to requested spoke_id",
+        spoke_id)
+
+    # Inherit the parent spoke's tenant binding (Setup → Spokes &
+    # Agents' "Tenant" button / Simulations → Spoke Management) so an
+    # agent connecting to a tenant-bound spoke is assigned to that
+    # tenant automatically — no per-agent config needed. Only seeds
+    # when the agent has no explicit tenant of its own yet (an
+    # existing override, e.g. set via the Agent Configuration modal,
+    # is left alone) and the spoke actually has a tenant to inherit.
+    spoke_tenant = hub.state.get_spoke_tenant(target_spoke)
+    if spoke_tenant:
+        agent_cfg_store = hub.state.system_state.setdefault("agent_config", {})
+        agent_pk = hub._agent_primary_key(agent_id)
+        entry = dict(agent_cfg_store.get(agent_pk, {}))
+        cs_cfg = dict(entry.get("client_simulation") or {})
+        if not cs_cfg.get("tenant_id"):
+            cs_cfg["tenant_id"] = spoke_tenant
+            entry["client_simulation"] = cs_cfg
+            agent_cfg_store[agent_pk] = entry
+            hub.state._mark_dirty()
+
+    connected = hub._primary_key(target_spoke) in hub.active_connections
+    _disp = await _deliver_agent_approval(hub, target_spoke, agent_id)
+    if connected:
+        logger.info(
+            "approve_agent: durably relayed APPROVAL_SUCCESS for "
+            "agent=%s to spoke=%s (mailbox %s — retried until acked, "
+            "survives a reconnect flap)", agent_id, target_spoke, _disp)
+    else:
+        # No longer a silent dead-end: the owning spoke is offline right
+        # now (it flaps on self-update), so QUEUE the approval for the
+        # reconnect flush instead of dropping it. The approval flag is
+        # already persisted above; _deliver_agent_approval parks the
+        # relay under the spoke's primary key so flush_mailbox delivers
+        # it the moment the spoke comes back — the agent then leaves
+        # pending without another admin click.
+        logger.warning(
+            "approve_agent: owning spoke '%s' for agent '%s' is "
+            "NOT connected — APPROVAL_SUCCESS was %s for the reconnect flush "
+            "(no longer dropped). If the agent stays pending, verify the "
+            "agent-hosting spoke (hypervisor/simulation) comes back online.",
+            target_spoke, agent_id, _disp)
+    return {"agent_id": agent_id, "target_spoke": target_spoke,
+            "spoke_connected": connected, "disposition": _disp,
+            "tenant_inherited": spoke_tenant or None}
+
+
 def _bust_spokes_cache():
     """Debounced invalidation of the spokes cache. Called from setup mutation
     endpoints (approve/revoke/delete/purge/ack/metadata rename). Rather than
@@ -745,84 +867,7 @@ def register(app, hub, ctx):
     async def approve_agent_under_spoke(spoke_id: str, agent_id: str):
         hub = app.state.hub
         try:
-            # A Proxmox node agent connects THROUGH the pxmx hypervisor spoke,
-            # not directly to the hub, so it must NOT be registered as a
-            # hub-direct spoke (known_modules). Doing so made /setup/diagnostics
-            # render a bogus OFFLINE spoke row for it — the hub has no
-            # WebSocket for the agent, so get_diagnostics() emitted
-            # connection_state="OFFLINE"/authenticated=False even though the
-            # agent was genuinely connected (its real state lives in the
-            # spoke's GET_AGENTS response, shown in the Agents table). Persist
-            # the approval flag only, and clean up any prior leak so an
-            # already-registered agent stops showing as an offline spoke.
-            hub.approved_modules[agent_id] = True
-            approved_map = hub.state.system_state.setdefault("approved_modules", {})
-            approved_map[agent_id] = True
-            known = hub.state.system_state.get("known_modules", [])
-            if agent_id in known:
-                known.remove(agent_id)
-            await hub.state.save_state_now()
-
-            # Resolve the spoke that actually owns this agent rather than
-            # trusting the path's spoke_id blindly — the WebUI's approve
-            # button doesn't always know which spoke a given agent is
-            # connected through (a cs-dialed agent in the split-topology case
-            # is not on the pxmx spoke), so a caller-supplied wrong spoke_id
-            # would silently no-op (relay sent to a spoke that has never
-            # heard of this agent_id, leaving it pending forever). Falls back
-            # to the path param when agent_info has no entry yet (e.g.
-            # approving before the first relayed frame has arrived).
-            _resolved = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False)
-            target_spoke = _resolved or spoke_id
-            logger.info(
-                "approve_agent_under_spoke: agent=%s → target_spoke=%s (%s; path spoke_id=%s)",
-                agent_id, target_spoke,
-                "agent_info index" if _resolved else "fallback to path spoke_id",
-                spoke_id)
-
-            # Inherit the parent spoke's tenant binding (Setup → Spokes &
-            # Agents' "Tenant" button / Simulations → Spoke Management) so an
-            # agent connecting to a tenant-bound spoke is assigned to that
-            # tenant automatically — no per-agent config needed. Only seeds
-            # when the agent has no explicit tenant of its own yet (an
-            # existing override, e.g. set via the Agent Configuration modal,
-            # is left alone) and the spoke actually has a tenant to inherit.
-            spoke_tenant = hub.state.get_spoke_tenant(target_spoke)
-            if spoke_tenant:
-                agent_cfg_store = hub.state.system_state.setdefault("agent_config", {})
-                agent_pk = hub._agent_primary_key(agent_id)
-                entry = dict(agent_cfg_store.get(agent_pk, {}))
-                cs_cfg = dict(entry.get("client_simulation") or {})
-                if not cs_cfg.get("tenant_id"):
-                    cs_cfg["tenant_id"] = spoke_tenant
-                    entry["client_simulation"] = cs_cfg
-                    agent_cfg_store[agent_pk] = entry
-                    hub.state._mark_dirty()
-
-            if hub._primary_key(target_spoke) in hub.active_connections:
-                msg = _hub_msg(target_spoke, "SPOKE_RELAY", {
-                    "target_agent_id": hub._agent_relay_name(agent_id),
-                    "command": "APPROVAL_SUCCESS",
-                    "payload": {}
-                })
-                await hub.send_to_spoke(msg)
-                logger.info(
-                    "approve_agent_under_spoke: relayed APPROVAL_SUCCESS for agent=%s "
-                    "to spoke=%s", agent_id, target_spoke)
-            else:
-                # Silent dead-end guard: the approval flag is persisted above, but
-                # WITHOUT this relay the pending node-agent never receives its
-                # provisioned secret — it stays in APPROVAL_REQUIRED and shows
-                # offline ("approve, then it goes offline again"), with nothing
-                # logged. Surface it so a misresolved / disconnected owning spoke
-                # is diagnosable instead of a silent no-op.
-                logger.warning(
-                    "approve_agent_under_spoke: owning spoke '%s' for agent '%s' is "
-                    "NOT connected (active=%s) — APPROVAL_SUCCESS was NOT relayed, so "
-                    "the agent will stay pending. Verify the agent-hosting spoke "
-                    "(hypervisor/simulation) that owns this agent is online.",
-                    target_spoke, agent_id,
-                    hub._primary_key(target_spoke) in hub.active_connections)
+            await _perform_agent_approval(hub, spoke_id, agent_id)
         except Exception as e:
             logger.exception("approve_agent_under_spoke failed")
             raise HTTPException(status_code=500, detail=str(e))
