@@ -439,6 +439,31 @@ class AgentHostingControlPlane(BaseControlPlane):
         if not pending:
             logger.warning(f"Approval for unknown/already-connected agent '{agent_id}'")
             return
+        # A falsy agent_secret here is the silent "approve → straight back to
+        # pending/offline" flap: the node-agent only saves a TRUTHY provisioned
+        # secret (pxmx agent _save_secret), so a {"secret": null} APPROVED makes
+        # it reconnect zero-touch → re-enter APPROVAL_REQUIRED forever. This
+        # happens on a generic/unified agent whose agent-hosting role
+        # (proxmox/simulation) has no install-written /etc/lm-agent/config.json.
+        # Self-heal by provisioning one now via the role's _ensure_agent_secret
+        # hook (RoleConnection); if we STILL have nothing, refuse rather than
+        # ship a null secret that can only loop.
+        if not self.agent_secret:
+            ensure = getattr(self, "_ensure_agent_secret", None)
+            if callable(ensure):
+                try:
+                    ensure()
+                except Exception as e:  # noqa: BLE001
+                    logger.error(
+                        f"approve_pending_agent('{agent_id}'): _ensure_agent_secret "
+                        f"failed: {e}")
+        if not self.agent_secret:
+            logger.error(
+                f"Cannot approve agent '{agent_id}': this spoke has no agent_secret "
+                "to provision — the agent would reconnect unauthenticated and "
+                "re-enter pending (the 'approve → offline' flap). Ensure the "
+                "/ws/agent listener owns a secret (/etc/lm-agent/config.json).")
+            return
         try:
             await pending["ws"].send(json.dumps({
                 "status": "APPROVED",
