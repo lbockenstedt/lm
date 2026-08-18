@@ -1,4 +1,5 @@
 """Network-devices routes + multi-instance product CRUD (_instance_crud)."""
+import instance_vault
 from api import (
     HTTPException, Request, _hub_msg, _unwrap_spoke, access, get_spoke_or_503,
     logger, uuid,
@@ -54,7 +55,12 @@ def register(app, hub, ctx):
         """Re-push the bound device slice to a connected nw spoke."""
         if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
             return False
-        payload = {"devices": _project_nw_devices_for_push(_nw_devices_for_spoke(hub, spoke_id)),
+        # Overlay any per-device Credential Vault secret (password / enable
+        # secret / API token / SNMP community) just before the push, so the
+        # plaintext lives only in the vault, not in global_config.
+        slice_ = await instance_vault.overlay_many(
+            hub, _nw_devices_for_spoke(hub, spoke_id), "nw_devices")
+        payload = {"devices": _project_nw_devices_for_push(slice_),
                    "shared_tenant_id": access.shared_tenant_id() or "",
                    "default_poll_interval":
                        (hub.state.system_state.get("global_config", {}) or {})
@@ -459,6 +465,10 @@ def register(app, hub, ctx):
                                                    "ex_switch", "gateway"):
                 raise HTTPException(status_code=400, detail="Invalid object_type")
             _enforce_tenant_bind(request, new_dev, "network device")
+            await instance_vault.validate_ref(
+                hub, new_dev, _session_user(request),
+                is_admin=_is_admin(_session_user(request)), storage_key="nw_devices")
+            instance_vault.strip_inline_secrets(new_dev, "nw_devices")
             if "id" not in new_dev:
                 new_dev["id"] = str(uuid.uuid4())
             # A manually-added device is nw-owned (not a NetBox import) — tag it so
@@ -509,6 +519,10 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=404, detail="Network device not found")
 
             devices[idx].update(update_data)
+            await instance_vault.validate_ref(
+                hub, devices[idx], _session_user(request),
+                is_admin=_is_admin(_session_user(request)), storage_key="nw_devices")
+            instance_vault.strip_inline_secrets(devices[idx], "nw_devices")
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
 
@@ -551,7 +565,7 @@ def register(app, hub, ctx):
     # (one per bound spoke) instead of a single config object, so the Setup
     # page can show a table with Add / Edit / Delete like Firewalls.
 
-    async def _push_instance_config(hub, instance: dict, payload_fn):
+    async def _push_instance_config(hub, instance: dict, payload_fn, storage_key=None):
         """Send UPDATE_CONFIG to the instance's bound spoke, if connected.
         `payload_fn(instance)` returns the spoke-side config dict (or None for
         save-only products like DNS/DHCP). Returns True when a message was sent."""
@@ -560,6 +574,11 @@ def register(app, hub, ctx):
         spoke_id = instance.get("spoke_id")
         if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
             return False
+        # Overlay a Credential Vault secret (e.g. ClearPass client secret) onto a
+        # copy just before projecting the spoke payload — the plaintext is never
+        # persisted in global_config, only resolved on demand at push time.
+        if storage_key:
+            instance = await instance_vault.overlay(hub, instance, storage_key)
         payload = payload_fn(instance)
         if not payload:
             return False
@@ -625,6 +644,12 @@ def register(app, hub, ctx):
                 if not new_inst.get("name"):
                     raise HTTPException(status_code=400, detail="Missing instance name")
                 _enforce_tenant_bind(request, new_inst, route_prefix.split("-")[0])
+                # Validate any Credential Vault reference up-front, then strip
+                # inline secrets so only the {bucket,name} reference is stored.
+                await instance_vault.validate_ref(
+                    hub, new_inst, _session_user(request),
+                    is_admin=_is_admin(_session_user(request)), storage_key=storage_key)
+                instance_vault.strip_inline_secrets(new_inst, storage_key)
                 if "id" not in new_inst:
                     new_inst["id"] = str(uuid.uuid4())
                 global_config = hub.state.system_state.get("global_config", {})
@@ -633,7 +658,7 @@ def register(app, hub, ctx):
                 global_config[storage_key] = instances
                 hub.state.system_state["global_config"] = global_config
                 hub.state._mark_dirty()
-                pushed = await _push_instance_config(hub, new_inst, payload_fn)
+                pushed = await _push_instance_config(hub, new_inst, payload_fn, storage_key)
                 status = "ok" if pushed else "partial_success"
                 msg = "Instance added and pushed to spoke." if pushed else "Instance added; spoke not connected."
                 return {"status": status, "message": msg, "pushed": pushed, "instance": new_inst}
@@ -655,9 +680,14 @@ def register(app, hub, ctx):
                 if idx is None:
                     raise HTTPException(status_code=404, detail="Instance not found")
                 instances[idx].update(update_data)
+                # Validate/strip a Credential Vault reference on the merged record.
+                await instance_vault.validate_ref(
+                    hub, instances[idx], _session_user(request),
+                    is_admin=_is_admin(_session_user(request)), storage_key=storage_key)
+                instance_vault.strip_inline_secrets(instances[idx], storage_key)
                 hub.state.system_state["global_config"] = global_config
                 hub.state._mark_dirty()
-                pushed = await _push_instance_config(hub, instances[idx], payload_fn)
+                pushed = await _push_instance_config(hub, instances[idx], payload_fn, storage_key)
                 if pushed:
                     return {"status": "ok", "message": "Instance updated and pushed to spoke.", "pushed": True}
                 return {"status": "partial_success", "message": "Instance saved; associated spoke not connected.", "pushed": False}

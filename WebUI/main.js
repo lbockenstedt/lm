@@ -22005,6 +22005,74 @@ async function _henetVaultCredOptions() {
     } catch (e) { return []; }
 }
 
+// ── Credential Vault picker for module connection secrets (NAC / NW device) ──
+// Lets an operator BACK a connection's secret (ClearPass client secret, device
+// password / enable secret / API token / SNMP community) with a Credential Vault
+// entry instead of typing it inline. Selecting one stores a NON-secret
+// {bucket,name} reference on the instance/device; the hub resolves the value
+// server-side at push time (instance_vault.overlay), so the plaintext never
+// lives in global_config nor returns to the browser. Same automation-readable
+// source the LE/HE.NET pickers use, so admin-slot secrets show up too.
+async function _instanceVaultCredOptions() {
+    try {
+        const v = await apiJson('/tenant/cred-vault/automation-secrets');
+        return ((v && v.secrets) || []).map(s => ({
+            bucket: s.bucket, name: s.name,
+            label: `${s.is_admin_slot ? 'Global Admin' : s.bucket} › ${s.name}${s.type ? ' (' + s.type + ')' : ''}`,
+        }));
+    } catch (e) { return []; }
+}
+
+// The <select> markup for a Vault-credential picker (options filled async by
+// _fillVaultCredSelect). The accompanying inline secret inputs stay optional —
+// when a credential is picked they may be left blank.
+function _vaultCredSelectHtml(elId) {
+    const cls = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
+    return `<div class="space-y-1">
+        <label class="text-xs text-slate-500 uppercase font-bold" title="Optionally back this connection's secret with a Credential Vault entry instead of typing it inline. The hub resolves the value at push time and never stores the plaintext.">Credential Vault (optional)</label>
+        <select id="${elId}" title="Pick a Vault secret to supply this connection's password/secret, or leave as “— none —” to enter it inline." class="${cls}"><option value="">Loading…</option></select>
+        <p class="text-[11px] text-slate-400 leading-snug">When set, the secret field(s) below may be left blank — the hub fills them from the Vault at push time and never stores the plaintext.</p>
+    </div>`;
+}
+
+// Populate a Vault-credential <select> and preselect the record's existing
+// {bucket,name} reference (if any). Options are cached on the element so the
+// save handler can map the chosen index back to a {bucket,name}.
+async function _fillVaultCredSelect(elId, current) {
+    const el = document.getElementById(elId);
+    if (!el) return;
+    const opts = await _instanceVaultCredOptions();
+    el._opts = opts;
+    const cur = current && current.bucket && current.name ? current : null;
+    let curIdx = '';
+    el.innerHTML = '<option value="">— none (enter secret inline) —</option>' +
+        opts.map((o, i) => {
+            if (cur && o.bucket === cur.bucket && o.name === cur.name) curIdx = String(i);
+            return `<option value="${i}">${escapeHtml(o.label)}</option>`;
+        }).join('');
+    // A stored reference that isn't automation-listable (e.g. reach changed) is
+    // still shown "(current)" so the operator sees it's set and doesn't silently
+    // clear it just by saving.
+    if (cur && curIdx === '') {
+        el.innerHTML += `<option value="keep" selected>🔐 ${escapeHtml(cur.bucket)} › ${escapeHtml(cur.name)} (current)</option>`;
+        el._keep = cur;
+    } else {
+        el.value = curIdx;
+    }
+}
+
+// Resolve a Vault-credential <select> to the value to send: a {bucket,name}
+// when one is picked/kept, or null to explicitly clear it (switch back to
+// inline). Returns undefined when the picker isn't present.
+function _collectVaultCred(elId) {
+    const el = document.getElementById(elId);
+    if (!el) return undefined;
+    if (el.value === 'keep' && el._keep) return el._keep;
+    if (el.value === '') return null;
+    const o = (el._opts || [])[+el.value];
+    return o ? { bucket: o.bucket, name: o.name } : null;
+}
+
 function _henetPushBadge(r) {
     if (!r.last_push_status) return '<span class="text-slate-400">—</span>';
     const ok = r.last_push_status === 'ok';
@@ -23807,7 +23875,7 @@ function closeFirewallModal() {
 // Fields: name, object_type (AOS/CX/EX/Gateway), transport (ssh/rest/snmp/auto),
 // address, port, username, password, enable_secret, api_token, snmp_community,
 // spoke (filtered to nw spokes). Creds are stored in runtime system.json only.
-function showAddNwDeviceModal() {
+function showAddNwDeviceModal(prefillDevice) {
     const modal = document.createElement('div');
     modal.id = 'nw-device-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
@@ -23837,6 +23905,7 @@ function showAddNwDeviceModal() {
                     <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">API Token</label><input type="password" id="nw-api-token" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 </div>
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">SNMP Community</label><input type="text" id="nw-snmp-community" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                ${_vaultCredSelectHtml('nw-vaultcred')}
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Auto-Poll Interval</label>
                     <select id="nw-poll-interval" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
@@ -23872,6 +23941,7 @@ function showAddNwDeviceModal() {
                 : '<option value="">No network spokes found</option>';
         }
     });
+    _fillVaultCredSelect('nw-vaultcred', prefillDevice && prefillDevice.vault_credential);
 }
 
 async function editNwDevice(id) {
@@ -23879,7 +23949,7 @@ async function editNwDevice(id) {
     const d = devices.find(x => x.id === id);
     if (!d) return;
 
-    showAddNwDeviceModal();
+    showAddNwDeviceModal(d);
     document.getElementById('nw-modal-title').textContent = 'Edit Network Device';
     document.getElementById('nw-name').value = d.name || '';
     document.getElementById('nw-object-type').value = d.object_type || 'aos_switch';
@@ -23925,6 +23995,8 @@ async function saveNwDevice() {
             return (pv === 'inherit' || pv === '') ? null : (parseInt(pv, 10) || 0);
         })(),
     };
+    const _vc = _collectVaultCred('nw-vaultcred');
+    if (_vc !== undefined) config.vault_credential = _vc;
     if (!config.name || !config.object_type) {
         showToast('Device name and object type are required.', 'error');
         return;
@@ -24173,6 +24245,7 @@ const INSTANCE_PRODUCTS = {
         endpoint: '/setup/nac-instances',
         listId: 'nac-instances-list',
         moduleType: 'nac',
+        vaultPicker: true,
         rowSummary: inst => `${inst.host || '—'}`,
         fields: [
             { id: 'host', label: 'CPPM Host', placeholder: 'https://clearpass.example.com' },
@@ -24274,6 +24347,7 @@ const DEVICE_TYPES = {
         spokeFilter: s => s.module_type === 'nw' || /^(nw|network)/.test(s.spoke_id),
         payloadKey: 'device',
         badgeLabel: 'Network',
+        vaultPicker: true,
         rowSummary: d => `${d.address || '—'}${d.port ? ':' + d.port : ''}`,
         fields: [
             { id: 'object_type', label: 'Object Type', type: 'select', options: [['aos_switch','AOS Switch'],['cx_switch','CX Switch'],['ex_switch','EX Switch'],['gateway','Gateway']] },
@@ -24309,7 +24383,7 @@ async function loadInstances(productKey) {
         }
         listEl.innerHTML = instances.map(inst => `
             <div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
-                <div><span class="text-sm font-medium text-slate-700">${inst.name || inst.id}</span><span class="ml-2 text-xs text-slate-400">${p.rowSummary(inst)}${inst.spoke_id ? ' · ' + inst.spoke_id : ''}</span></div>
+                <div><span class="text-sm font-medium text-slate-700">${inst.name || inst.id}</span><span class="ml-2 text-xs text-slate-400">${p.rowSummary(inst)}${inst.spoke_id ? ' · ' + inst.spoke_id : ''}</span>${(inst.vault_credential && inst.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(inst.vault_credential.bucket)} › ${escapeHtml(inst.vault_credential.name)}">🔐 vault</span>` : ''}</div>
                 <div class="flex gap-2">
                     <button onclick="editInstance('${productKey}','${inst.id}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
                     <button onclick="deleteInstance('${productKey}','${inst.id}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
@@ -24346,6 +24420,10 @@ function showAddInstanceModal(productKey, editItem) {
                 <p class="text-[11px] text-slate-400 leading-snug">Provisions the Lab Manager custom fields used by the Proxmox, OPNsense, and ClearPass syncs on the connected NetBox. Idempotent — safe to run as many times as needed; existing fields are left in place.</p>
             </div>`
         : '';
+    // Optional Credential Vault picker (products that carry a connection secret,
+    // e.g. NAC/ClearPass). Backs the secret field(s) with a Vault entry so the
+    // plaintext never persists on the hub — see instance_vault.py.
+    const vaultHtml = p.vaultPicker ? _vaultCredSelectHtml('inst-vaultcred') : '';
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
@@ -24356,6 +24434,7 @@ function showAddInstanceModal(productKey, editItem) {
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Instance Name</label><input type="text" id="inst-name" placeholder="e.g. Primary ${p.title.replace(' Instance', '')}" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Spoke</label><select id="inst-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
 ${fieldHtml}
+${vaultHtml}
 ${schemaBtnHtml}
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
@@ -24366,6 +24445,7 @@ ${schemaBtnHtml}
     document.body.appendChild(modal);
     modal.dataset.product = productKey;
     if (editItem) modal.dataset.instanceId = editItem.id;
+    if (p.vaultPicker) _fillVaultCredSelect('inst-vaultcred', editItem && editItem.vault_credential);
 
     loadApprovedSpokes().then(spokes => {
         const selector = document.getElementById('inst-spoke');
@@ -24409,6 +24489,10 @@ async function saveInstance(productKey) {
         spoke_id: document.getElementById('inst-spoke').value,
     };
     p.fields.forEach(f => { config[f.id] = document.getElementById('inst-' + f.id).value; });
+    if (p.vaultPicker) {
+        const vc = _collectVaultCred('inst-vaultcred');
+        if (vc !== undefined) config.vault_credential = vc;
+    }
     try {
         const method = id ? 'PUT' : 'POST';
         const url = id ? `${p.endpoint}/${id}` : p.endpoint;
@@ -24538,7 +24622,7 @@ async function loadAllDevices() {
             : '';
         const eId = String(d._id).replace(/'/g, "\\'");
         return `<div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
-            <div><span class="text-sm font-medium text-slate-700">${escapeHtml(name)}</span><span class="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">${t.badgeLabel}</span><span class="ml-2 text-xs text-slate-400">${escapeHtml(summary)}${spoke}</span></div>
+            <div><span class="text-sm font-medium text-slate-700">${escapeHtml(name)}</span><span class="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">${t.badgeLabel}</span><span class="ml-2 text-xs text-slate-400">${escapeHtml(summary)}${spoke}</span>${(d.vault_credential && d.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(d.vault_credential.bucket)} › ${escapeHtml(d.vault_credential.name)}">🔐 vault</span>` : ''}</div>
             <div class="flex gap-2">
                 <button onclick="editDevice('${d._typeKey}','${eId}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
                 <button onclick="deleteDevice('${d._typeKey}','${eId}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
@@ -24601,6 +24685,13 @@ function _renderDeviceModalFields(typeKey, values) {
     if (!t) return;
     const wrap = document.getElementById('dev-fields');
     if (wrap) wrap.innerHTML = t.fields.map(f => _deviceFieldHtml(t, f, values)).join('\n');
+    // Optional Credential Vault picker for products with a connection secret
+    // (NAC / network device) — spans both grid columns; filled + preselected
+    // async from the record's existing {bucket,name} reference.
+    if (wrap && t.vaultPicker) {
+        wrap.innerHTML += `<div class="md:col-span-2">${_vaultCredSelectHtml('dev-vaultcred')}</div>`;
+        _fillVaultCredSelect('dev-vaultcred', values && values.vault_credential);
+    }
     // Name is only auto-filled from the edit item (top-level field), not fields.
     if (values && values.name) {
         const nameEl = document.getElementById('dev-name');
@@ -24649,6 +24740,10 @@ async function saveDevice() {
         if (f.coerce === 'int') v = parseInt(v, 10) || (f.default != null ? f.default : null);
         config[f.id] = v;
     });
+    if (t.vaultPicker) {
+        const vc = _collectVaultCred('dev-vaultcred');
+        if (vc !== undefined) config.vault_credential = vc;
+    }
     // IPAM Apply-schema is product-specific; keep it on the IPAM instance modal.
     // The unified modal handles the common add/edit path only.
     try {
