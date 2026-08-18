@@ -2250,7 +2250,34 @@ function _spokeName(o) {
     if (!o) return '';
     const id = o.spoke_id || o.id || o.agent_id || '';
     const dn = o.display_name;
-    return (dn && dn !== id) ? dn : (o.hostname || id);
+    const base = (dn && dn !== id) ? dn : (o.hostname || id);
+    return _nodeLabel(base, _tenantOf(o));
+}
+
+// Tenant of a spoke/agent object for display labelling. Spoke-kind rows carry
+// it on tenant_id; Proxmox node agents carry it in client_simulation.tenant_id.
+function _tenantOf(o) {
+    if (!o) return '';
+    return String(o.tenant_id || (o.client_simulation && o.client_simulation.tenant_id) || '').trim();
+}
+
+// Tenant-qualified, UPPERCASE display label for a spoke/agent — e.g. base
+// "pxmx-svr-cs-06" bound to tenant "lrb" renders "LRB-PXMX-SVR-CS-06". Keeps
+// generic node names from colliding across tenants in the UI.
+// DISPLAY ONLY: the stored spoke_id/agent_id (identity — keys, approval,
+// routing, and every action) is NEVER changed; callers keep passing the raw id
+// as the <option> value / sid / idTitle. Idempotent: a base that already starts
+// with the tenant prefix isn't doubled, so it's safe to apply more than once
+// along a render path (e.g. a name already run through _spokeName).
+function _nodeLabel(base, tenant) {
+    let label = String(base == null ? '' : base).trim();
+    const t = String(tenant == null ? '' : tenant).trim();
+    if (t && label) {
+        const T = t.toUpperCase();
+        const U = label.toUpperCase();
+        if (U !== T && !U.startsWith(T + '-')) label = `${t}-${label}`;
+    }
+    return label.toUpperCase();
 }
 
 function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant, idTitle) {
@@ -2285,8 +2312,13 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant, idTitle)
     //   • backlog — hub-side queued/unacked messages for this id (amber; hidden
     //     when zero). A rising backlog = messages not draining to that spoke.
     const _m = window.__lmHubMetrics || {};
-    const _mps = _m.spoke_mps ? _m.spoke_mps[label] : undefined;
-    const _bk = (_m.backlog_stats && _m.backlog_stats.by_spoke) ? _m.backlog_stats.by_spoke[label] : undefined;
+    // Metrics/backpressure are keyed by the raw hub spoke/agent id, NOT the
+    // (now tenant-prefixed, uppercased) display label — look them up by idTitle
+    // (the raw id every caller passes) so a friendly/qualified label never
+    // silently drops the msg/s, backlog, and throttle chips.
+    const _key = idTitle || label;
+    const _mps = _m.spoke_mps ? _m.spoke_mps[_key] : undefined;
+    const _bk = (_m.backlog_stats && _m.backlog_stats.by_spoke) ? _m.backlog_stats.by_spoke[_key] : undefined;
     const mpsChip = (_mps !== undefined && _mps !== null)
         ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-semibold bg-sky-50 text-sky-700" title="Inbound message rate">${Number(_mps).toFixed(1)}/s</span>`
         : '';
@@ -2298,7 +2330,7 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant, idTitle)
     // (level 2, "throttled"). The badged node is being asked to coalesce its
     // updates LOCALLY and slow down. spoke_levels is keyed by hub spoke id.
     const _bp = _m.backpressure || {};
-    const _lvl = (_bp.spoke_levels && _bp.spoke_levels[label]) || 0;
+    const _lvl = (_bp.spoke_levels && _bp.spoke_levels[_key]) || 0;
     const throttleChip = _lvl === 1
         ? `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase bg-red-100 text-red-700 animate-pulse" title="Offending — this ${spokeVariant ? 'spoke' : 'agent'} is over its message rate; the hub asked it to slow down &amp; coalesce updates locally">⚠ Offending</span>`
         : (_lvl >= 2
@@ -3120,7 +3152,7 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
                 const mod = moduleLabel(spoke.module_type);
                 const status = !spoke.approved ? 'pending'
                     : (connections.includes(id) ? 'online' : 'offline');
-                return _renderSpokeAgentRow(name, mod, status, true, spoke.tenant_id, id);
+                return _renderSpokeAgentRow(_nodeLabel(name, spoke.tenant_id), mod, status, true, spoke.tenant_id, id);
             }).join('');
         }
     }
@@ -3130,8 +3162,8 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
     if (!agentList) return;
     // Generic Hub-direct agents (module_type "agent") from /setup/pending_spokes.
     const hubAgentRows = [
-        ...approvedHubAgents.map(a => ({ id: a.spoke_id, label: (a.display_name && a.display_name !== a.spoke_id) ? a.display_name : (a.hostname || a.spoke_id), status: connections.includes(a.spoke_id) ? 'online' : 'offline', mod: moduleLabel(a.module_type) })),
-        ...pendingHubAgents.map(a => ({ id: a.spoke_id, label: (a.display_name && a.display_name !== a.spoke_id) ? a.display_name : (a.hostname || a.spoke_id), status: 'pending', mod: moduleLabel(a.module_type) })),
+        ...approvedHubAgents.map(a => ({ id: a.spoke_id, label: _nodeLabel((a.display_name && a.display_name !== a.spoke_id) ? a.display_name : (a.hostname || a.spoke_id), a.tenant_id), status: connections.includes(a.spoke_id) ? 'online' : 'offline', mod: moduleLabel(a.module_type) })),
+        ...pendingHubAgents.map(a => ({ id: a.spoke_id, label: _nodeLabel((a.display_name && a.display_name !== a.spoke_id) ? a.display_name : (a.hostname || a.spoke_id), a.tenant_id), status: 'pending', mod: moduleLabel(a.module_type) })),
     ];
     // Proxmox node agents relayed through the pxmx hypervisor spoke
     // (best-effort). This runs on every 10s updateStatus() poll, so cache the
@@ -3149,7 +3181,7 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
             if (agentRes.ok) {
                 const agentData = await agentRes.json();
                 pxmxRows = [
-                    ...(agentData.agents || []).map(a => ({ id: a.agent_id, label: a.display_name || a.hostname || a.agent_id, status: 'online', mod: 'Proxmox' })),
+                    ...(agentData.agents || []).map(a => ({ id: a.agent_id, label: _nodeLabel(a.display_name || a.hostname || a.agent_id, _tenantOf(a)), status: 'online', mod: 'Proxmox' })),
                     ...(agentData.pending_agents || []).map(a => ({ id: a.agent_id, label: _spokeName(a), status: 'pending', mod: 'Proxmox' })),
                 ];
                 _pxmxAgentsCache = { ts: now, rows: pxmxRows };
@@ -12598,7 +12630,7 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
     } else {
         agentsWrap.innerHTML = `<div class="space-y-1.5">${all.map(a => {
             const aid = a.agent_id;
-            const label = a.display_name || a.hostname || aid;
+            const label = _nodeLabel(a.display_name || a.hostname || aid, _tenantOf(a));
             const isPending = a._status === 'pending';
             const isOffline = a._status === 'offline';
             const isSpokeKind = a._kind === 'spoke';
@@ -14520,7 +14552,7 @@ async function loadMyDeviceSpokes() {
                 ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700">approved</span>'
                 : '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700">pending</span>';
             return `<div class="flex items-center justify-between border border-slate-100 rounded-md px-3 py-2">
-                <div><span class="text-sm font-medium text-slate-700">${escapeHtml(s.display_name || s.spoke_id)}</span>
+                <div><span class="text-sm font-medium text-slate-700">${escapeHtml(_nodeLabel(s.display_name || s.spoke_id, s.tenant_id || tenant))}</span>
                 <span class="ml-2 text-[11px] text-slate-400 font-mono">${escapeHtml(s.module_type || '—')}</span></div>
                 <div class="flex items-center gap-2">${appr}${conn}</div></div>`;
         }).join('');
