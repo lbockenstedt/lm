@@ -1,16 +1,21 @@
-"""Regression: the per-cert tenant-assignment PUT (``le_set_cert_tenants`` in
-``routes/net_services.py``) must SURFACE a failed durable write instead of
-returning a false ``{"status":"ok"}``.
+"""Regression: the per-cert tenant-assignment core (``_le_apply_cert_tenants``
+in ``routes/net_services.py``, shared by the body-based ``POST
+/api/le/cert-tenants`` and the legacy path ``PUT /api/le/certs/{domain}/
+tenants``) must SURFACE a failed durable write instead of returning a false
+``{"status":"ok"}``.
 
 Bug: the handler persisted via a helper that swallowed a ``save_state_now``
 failure and logged a warning, so the WebUI showed a green "Tenants updated"
 toast even though the assignment never reached disk — and it was silently lost
 on the next hub restart ("I get a success toast but when I go back in the cert
 is not assigned to the tenant"). The fix persists like its sibling LE change
-ops and raises HTTP 500 when the durable write fails.
+ops and raises HTTP 500 when the durable write fails. The save path was also
+moved off a URL-path domain onto a JSON body so a wildcard domain
+(``*.example.com`` → ``%2A.example.com``) can't be reset by a proxy/WAF (opaque
+``TypeError: Load failed`` in the browser).
 
-The route is a decorated closure inside ``register``; we lift it with ``ast``
-(dropping the decorator) and exec it in a namespace wired with fakes + the real
+The core is a closure inside ``register``; we lift it with ``ast`` (dropping any
+decorator) and exec it in a namespace wired with fakes + the real
 ``le_cert_access`` module.
 """
 import ast
@@ -52,14 +57,6 @@ class _Hub:
         self.state = _State(save_raises)
 
 
-class _Req:
-    def __init__(self, tenants):
-        self._tenants = tenants
-
-    async def json(self):
-        return {"tenants": self._tenants}
-
-
 @pytest.fixture(autouse=True)
 def _access(monkeypatch):
     # le_cert_access calls access.is_admin / shared_tenant_id; force admin so
@@ -72,7 +69,9 @@ def _access(monkeypatch):
 
 
 def _load(hub):
-    """Lift ``le_set_cert_tenants`` out of net_services with fakes injected."""
+    """Lift ``_le_apply_cert_tenants`` (the shared core used by both the
+    body-based POST and the legacy path PUT) out of net_services with fakes
+    injected."""
     src = open(_NS).read()
     tree = ast.parse(src)
     ns = {
@@ -90,10 +89,10 @@ def _load(hub):
         "_tenant_exists": lambda tid: tid in hub.state.tenant_state["tenants"],
     }
     for node in ast.walk(tree):
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "le_set_cert_tenants":
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_le_apply_cert_tenants":
             node.decorator_list = []
             exec(compile(ast.Module(body=[node], type_ignores=[]), _NS, "exec"), ns)
-    return ns["le_set_cert_tenants"]
+    return ns["_le_apply_cert_tenants"]
 
 
 def _run(coro):
@@ -103,7 +102,7 @@ def _run(coro):
 def test_persist_success_returns_ok_and_stores():
     hub = _Hub(save_raises=False)
     fn = _load(hub)
-    out = _run(fn("a.example.com", _Req(["t1", "t2"])))
+    out = _run(fn(object(), "a.example.com", ["t1", "t2"]))
     assert out["status"] == "ok"
     assert hub.state.saved == 1
     assert lca.get_tenants(hub, "a.example.com") == ["t1", "t2"]
@@ -113,6 +112,24 @@ def test_failed_persist_raises_500_not_false_ok():
     hub = _Hub(save_raises=True)
     fn = _load(hub)
     with pytest.raises(_HTTPError) as ei:
-        _run(fn("a.example.com", _Req(["t1", "t2"])))
+        _run(fn(object(), "a.example.com", ["t1", "t2"]))
     assert ei.value.status_code == 500
     assert "saved" in ei.value.detail.lower() or "disk" in ei.value.detail.lower()
+
+
+def test_wildcard_domain_in_body_stores_under_raw_domain():
+    # The body-based path carries the wildcard domain verbatim (no URL-encoding),
+    # so it must store/read under the exact "*.example.com" key.
+    hub = _Hub(save_raises=False)
+    fn = _load(hub)
+    out = _run(fn(object(), "*.example.com", ["t1"]))
+    assert out["domain"] == "*.example.com"
+    assert lca.get_tenants(hub, "*.example.com") == ["t1"]
+
+
+def test_missing_domain_is_rejected():
+    hub = _Hub(save_raises=False)
+    fn = _load(hub)
+    with pytest.raises(_HTTPError) as ei:
+        _run(fn(object(), "", ["t1"]))
+    assert ei.value.status_code == 400

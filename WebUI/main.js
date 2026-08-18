@@ -20435,7 +20435,7 @@ async function showLeTargetsModal(domain) {
 // tenants (and add the SHARED tenant to let every tenant deploy it to their own
 // devices) but a non-admin owner may never remove their own tenant. Renders the
 // "le-tenants-box" section from the cert's tagged {tenants,shared} + the tenant
-// list at /setup/tenants; PUTs the new list to /api/le/certs/{domain}/tenants.
+// list at /setup/tenants; POSTs the new list to /api/le/cert-tenants.
 async function _leRenderTenantsSection(domain, cert, canEdit) {
     const box = document.getElementById('le-tenants-box');
     if (!box) return;
@@ -20529,9 +20529,13 @@ async function _leSaveTenants() {
         return;
     }
     try {
-        const { ok, detail } = await _spokeFetch(`/api/le/certs/${encodeURIComponent(st.domain)}/tenants`, {
-            method: 'PUT', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ tenants })
+        // POST the domain in the BODY (not the URL path): a wildcard cert domain
+        // (*.example.com → %2A.example.com) or other reserved chars in the path
+        // can be reset by a proxy/WAF, surfacing as an opaque "TypeError: Load
+        // failed". A static path avoids that entirely.
+        const { ok, detail } = await _spokeFetch('/api/le/cert-tenants', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ domain: st.domain, tenants })
         });
         if (!ok) { showToast(detail || 'Failed to save tenants', 'error'); return; }
         showToast('Tenants updated', 'success');
@@ -20541,7 +20545,12 @@ async function _leSaveTenants() {
         if (typeof loadLEData === 'function') loadLEData();
         const m = document.getElementById('le-targets-modal'); if (m) m.remove();
     } catch (e) {
-        showToast('Failed to save tenants: ' + e, 'error');
+        // A TypeError from fetch() (e.g. WebKit "Load failed") is a transport
+        // failure — the request never reached the hub — not an app error.
+        const net = (e instanceof TypeError);
+        showToast(net
+            ? 'Could not reach the hub to save tenants — check your connection / the certificates service and try again.'
+            : ('Failed to save tenants: ' + e), 'error');
     }
 }
 

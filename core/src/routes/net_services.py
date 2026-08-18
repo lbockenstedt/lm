@@ -641,16 +641,16 @@ def register(app, hub, ctx):
         sess = _session_user(request)
         return {"status": "ok", "domain": domain, **_lca.meta(hub, sess, domain)}
 
-    @app.put("/api/le/certs/{domain}/tenants")
-    async def le_set_cert_tenants(domain: str, request: Request):
-        """Replace the cert's owner-tenant list. Admin → any existing-tenant set.
-        A non-admin owner may add/remove OTHER tenants but never their own (their
-        active tenant must remain). Adding the shared tenant makes the cert
-        deployable by every tenant to their own devices."""
+    async def _le_apply_cert_tenants(request, domain, want):
+        """Shared core for the cert owner-tenant replace op: authorize, validate,
+        set + durably persist, and return the tagging meta. Raises HTTPException
+        (400/403/500) on any failure so the caller never reports a false
+        success."""
+        if not (isinstance(domain, str) and domain.strip()):
+            raise HTTPException(status_code=400, detail="'domain' is required")
+        domain = domain.strip()
         _le_guard_change(request, domain)
         sess = _session_user(request)
-        body = await request.json()
-        want = body.get("tenants") if isinstance(body, dict) else None
         if not isinstance(want, list):
             raise HTTPException(status_code=400, detail="'tenants' must be a list")
         try:
@@ -673,6 +673,36 @@ def register(app, hub, ctx):
                        "Check the hub state-storage location and permissions, "
                        "then try again.")
         return {"status": "ok", "domain": domain, **_lca.meta(hub, sess, domain)}
+
+    # Domain in the BODY, not the URL path: a cert domain can be a WILDCARD
+    # (``*.example.com`` → ``%2A.example.com`` once URL-encoded) or otherwise
+    # carry reserved characters, and some reverse proxies / WAFs RESET the
+    # connection on encoded reserved chars in the path — which surfaces in the
+    # browser as an opaque ``TypeError: Load failed`` (a transport-level fetch
+    # rejection, not an HTTP error). Keeping the domain out of the path makes the
+    # request URL a static, always-safe string. This is the WebUI's save path.
+    @app.post("/api/le/cert-tenants")
+    async def le_set_cert_tenants_body(request: Request):
+        """Replace a cert's owner-tenant list (domain + tenants in the JSON body).
+        See :func:`_le_apply_cert_tenants` for the authorization/validation
+        semantics."""
+        body = await request.json()
+        body = body if isinstance(body, dict) else {}
+        return await _le_apply_cert_tenants(
+            request, body.get("domain"), body.get("tenants"))
+
+    # Backward-compatible alias (domain in the path). Retained so an older WebUI
+    # bundle keeps working; new clients POST /api/le/cert-tenants (body) to dodge
+    # proxy/WAF path-encoding resets on wildcard domains.
+    @app.put("/api/le/certs/{domain}/tenants")
+    async def le_set_cert_tenants(domain: str, request: Request):
+        """Replace the cert's owner-tenant list. Admin → any existing-tenant set.
+        A non-admin owner may add/remove OTHER tenants but never their own (their
+        active tenant must remain). Adding the shared tenant makes the cert
+        deployable by every tenant to their own devices."""
+        body = await request.json()
+        want = body.get("tenants") if isinstance(body, dict) else None
+        return await _le_apply_cert_tenants(request, domain, want)
 
     @app.get("/api/le/dns-credentials")
     async def le_list_dns_creds(request: Request):
