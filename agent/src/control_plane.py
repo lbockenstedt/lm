@@ -432,7 +432,14 @@ class RoleConnection(AgentHostingControlPlane):
         by self.role_name (the module is registered under the role name, not the
         hardcoded "pxmx" the standalone PxmxControlPlane uses)."""
         mod = self.modules.get(self.role_name)
-        stored_cfg = mod.agent_configs.get(agent_id) if mod else None
+        # Only proxmox-style role modules carry per-agent PVE creds in
+        # ``agent_configs``. Non-proxmox hosting roles (e.g. the "simulation"
+        # CSSpoke) have no such attribute — tolerate its absence so this
+        # post-register hook no-ops instead of raising an AttributeError that
+        # the agent handler would treat as connection-fatal (tight reconnect
+        # flap → hosted agent never finishes provisioning).
+        cfg_map = getattr(mod, "agent_configs", None) if mod else None
+        stored_cfg = cfg_map.get(agent_id) if cfg_map else None
         if stored_cfg:
             try:
                 await self.send_to_agent("UPDATE_CONFIG", stored_cfg,

@@ -241,6 +241,29 @@ def test_on_agent_registered_repushes_stored_config(monkeypatch, tmp_path):
     asyncio.run(conn._on_agent_registered("agent-unknown"))
     assert len(sent) == 1
 
+def test_on_agent_registered_tolerates_module_without_agent_configs(monkeypatch, tmp_path):
+    """Regression: a non-proxmox hosting role module (e.g. the "simulation"
+    CSSpoke) has no ``agent_configs`` attribute. The post-register hook must
+    no-op instead of raising AttributeError — otherwise the agent handler treats
+    it as connection-fatal and the hosted agent hot-reconnect-flaps, never
+    finishing provisioning."""
+    monkeypatch.setattr(cp_module.RoleConnection, "AGENT_CONFIG_PATH",
+                       str(tmp_path / "agent-config.json"))
+    # Role module deliberately lacks agent_configs (only telemetry_cache).
+    inst = types.SimpleNamespace(telemetry_cache={})
+    conn = cp_module.RoleConnection(
+        "simulation", "lm-agent", "wss://127.0.0.1:443", inst)
+    sent = []
+
+    async def fake_send(cmd, data, agent_id=None):
+        sent.append((cmd, data, agent_id))
+
+    conn.send_to_agent = fake_send
+    import asyncio
+    # Must NOT raise, and must NOT push any config (nothing stored).
+    asyncio.run(conn._on_agent_registered("pxmx-cs-svr-06"))
+    assert sent == []
+
 def test_role_connection_persists_session_secret_per_role(monkeypatch, tmp_path):
     """H4: a RoleConnection persists its session secret under a per-role .env
     key (SPOKE_SECRET_<ROLE>) — NOT SPOKE_SECRET (the base agent's line in the
