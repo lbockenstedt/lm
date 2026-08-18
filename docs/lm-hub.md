@@ -42,7 +42,7 @@ It owns the state that ties the lab together — which spokes/agents exist and w
 
 ## Install flags
 
-`install_all.sh`: `--reinstall`, `--reset-secrets`, `--reset-users`, `--exclude <csv>`, `--tls-verify` (optional `--tls-ca-cert <path>`; defaults CA to the hub's own `$TLS_CERT`). `install_menu.sh`: top menu `1) Hub` (spoke checklist → `install_all.sh --exclude …`) or `2) Agent` (→ `agent/install_agent.sh`). Env `LM_BRANCH` (default `main`).
+`install_all.sh`: `--reinstall`, `--reset-secrets`, `--reset-users`, `--exclude <csv>`, `--tls-verify` (optional `--tls-ca-cert <path>`; defaults CA to the hub's own `$TLS_CERT`). `install_menu.sh`: top menu `1) Hub` (spoke checklist → `install_all.sh --exclude …`), `2) Agent` (role checklist → `agent/install_agent.sh --roles …`), `3) Proxmox Host Agent` (→ `pxmx/agent/install_agent.sh`), `4) Uninstall` (→ `uninstall.sh`). Env `LM_BRANCH` (default `main`).
 
 ## Mutual TLS (mTLS)
 

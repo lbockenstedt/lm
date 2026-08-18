@@ -73,6 +73,16 @@ role's live status.
   `ipam`, `firewall`, `directory`, `simulation`, `nac`, `hypervisor`, `certificates`,
   `console`, `storage`). The hub routes commands to that role purely by `module_type`/spoke id,
   exactly as it would to any dedicated spoke.
+- **Role-hosted `/ws/agent` listener (node-agents).** Two roles can host their own
+  node-agent listener on their `RoleConnection` (`_agent_listener_enabled`): **`proxmox`**
+  always (a Proxmox host agent dials the box running the proxmox role), and **`simulation`**
+  opt-in via `LM_CS_AGENT_LISTENER=1` (set automatically by `install_agent.sh` for a
+  non-colocated `--roles simulation`). With the simulation listener on, a Proxmox host
+  agent (`pxmx/agent/install_agent.sh --spoke-ip <this-box>`) reports to the *agent box
+  running the simulation role* directly and the hub relays `CS_COMMAND`s to it — so one
+  unified agent with the simulation role replaces a dedicated cs/pxmx spoke. The cs
+  listener uses its own ports (`:443` / fallback `:8767`) so it can't collide with a
+  co-loaded proxmox role (`:8443` / `:8766`); every other role never binds a port.
 - **Parent-auto-approve.** A `RoleConnection` sends `parent_spoke_id` (the base agent's
   id) in its auth frame instead of an install UUID. Because the base agent is already
   admin-approved, the hub auto-approves the sub-spoke and binds it to the parent's
