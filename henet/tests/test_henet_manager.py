@@ -165,3 +165,48 @@ def test_status_unreachable_when_probe_raises(tmp_path):
             raise OSError("no network")
     mgr = HENetManager(state_path=str(tmp_path / "r.json"), http_post=Boom())
     assert mgr.status()["reachable"] is False
+
+
+# ── import_records: merge scraped zone records without pushing ────────────────
+
+def test_import_records_adds_new_a_aaaa_without_pushing(tmp_path):
+    poster = FakePoster()
+    mgr = HENetManager(state_path=str(tmp_path / "r.json"), http_post=poster)
+    res = mgr.import_records([
+        {"name": "www.example.com", "type": "A", "value": "203.0.113.10", "ttl": 300},
+        {"name": "home.example.com", "type": "AAAA", "value": "2001:db8::1", "ttl": 600},
+    ])
+    assert res["status"] == "SUCCESS"
+    assert res["imported"] == 2
+    # imported records are registered but NEVER pushed (no dyndns round-trip)
+    assert poster.calls == []
+    recs = {r["name"]: r for r in mgr.list_records()}
+    assert recs["www.example.com"]["last_push_status"] == "imported"
+    assert recs["www.example.com"]["source"] == "he-import"
+
+
+def test_import_records_skips_already_managed(tmp_path):
+    poster = FakePoster()
+    mgr = HENetManager(state_path=str(tmp_path / "r.json"), http_post=poster)
+    mgr.add_record("www.example.com", "A", "203.0.113.5", ddns_key="K")
+    res = mgr.import_records([
+        {"name": "www.example.com", "type": "A", "value": "203.0.113.10"},
+        {"name": "new.example.com", "type": "A", "value": "203.0.113.11"},
+    ])
+    assert res["imported"] == 1 and res["skipped"] == 1
+    recs = {r["name"]: r for r in mgr.list_records()}
+    # LM's existing copy (and its pushed value) is untouched by the import
+    assert recs["www.example.com"]["value"] == "203.0.113.5"
+    assert recs["www.example.com"]["last_push_status"] == "ok"
+    assert recs["new.example.com"]["last_push_status"] == "imported"
+
+
+def test_import_records_skips_non_a_aaaa_and_bad_rows(tmp_path):
+    mgr = HENetManager(state_path=str(tmp_path / "r.json"), http_post=FakePoster())
+    res = mgr.import_records([
+        {"name": "example.com", "type": "MX", "value": "10 mail.example.com"},
+        {"name": "", "type": "A", "value": "203.0.113.1"},
+        {"name": "ok.example.com", "type": "A", "value": "203.0.113.2"},
+    ])
+    assert res["imported"] == 1 and res["skipped"] == 2
+    assert [r["name"] for r in mgr.list_records()] == ["ok.example.com"]

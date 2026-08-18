@@ -44,6 +44,11 @@ class FakeMgr:
         self.calls.append(("delete_record", name, rtype)); self._tid()
         return {"status": "SUCCESS", "records_written": 0}
 
+    def import_records(self, records):
+        self.calls.append(("import_records", len(records))); self._tid()
+        return {"status": "SUCCESS", "imported": len(records), "skipped": 0,
+                "records_written": len(records)}
+
     def status(self):
         self.calls.append(("status",)); self._tid()
         return {"reachable": True, "record_count": 1, "endpoint": "x", "state_path": "y"}
@@ -99,6 +104,23 @@ def test_add_requires_name_and_value():
 def test_delete_requires_name():
     s = _spoke()
     res = _run(s.handle_command("HENET_DELETE", {"type": "A"}))
+    assert res["status"] == "ERROR"
+    assert not s.mgr.calls
+
+
+def test_import_dispatch_offloads_to_manager():
+    s = _spoke()
+    loop_tid = threading.get_ident()
+    res = _run(s.handle_command("HENET_IMPORT", {"records": [
+        {"name": "www.example.com", "type": "A", "value": "203.0.113.1"}]}))
+    assert res["status"] == "SUCCESS" and res["imported"] == 1
+    assert s.mgr.calls == [("import_records", 1)]
+    assert s.mgr.thread_ids and all(t != loop_tid for t in s.mgr.thread_ids)
+
+
+def test_import_requires_list():
+    s = _spoke()
+    res = _run(s.handle_command("HENET_IMPORT", {"records": "nope"}))
     assert res["status"] == "ERROR"
     assert not s.mgr.calls
 

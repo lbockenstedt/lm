@@ -329,6 +329,49 @@ def register(app, hub, ctx):
                                        "or missing a usable HE DDNS key / password")
         body["ddns_key"] = key
 
+    async def _henet_resolve_account_login(request: Request):
+        """Resolve the HE **account** login (email + password) for reading the
+        dns.he.net web panel — the import path needs the full web login, not the
+        per-record dyndns key. Precedence mirrors :func:`_henet_resolve_vault_cred`:
+        the module-level assigned credential (a ``dns`` "Hurricane Electric
+        (account login)" vault secret with ``he_username``/``he_password``).
+
+        Returns ``(username, password)``. Raises 400 when no credential is
+        assigned, 404 when the secret can't be read, and 422 when the assigned
+        secret is only a bare DDNS key (no account login to scrape with)."""
+        ref = _henet_get_assigned_cred(app.state.hub)
+        if not isinstance(ref, dict):
+            raise HTTPException(
+                status_code=400,
+                detail="No HE.NET credential assigned. Assign the Credential Vault "
+                       "'Hurricane Electric (account login)' secret (email + password) "
+                       "under DNS → External DNS → HE.NET.")
+        bucket = (ref.get("bucket") or "").strip()
+        name = (ref.get("name") or "").strip()
+        sess = _session_user(request) or {}
+        if not _is_admin(sess):
+            reach = set((sess.get("user", {}) or {}).get("tenants") or [])
+            if bucket not in reach:
+                raise HTTPException(status_code=404, detail="vault credential not found")
+        import cred_vault as _cv
+        try:
+            val = await _cv.automation_get(app.state.hub, bucket, name)
+        except Exception as e:  # noqa: BLE001 — vault/network
+            logger.warning("henet: account-login resolve failed: %s", e)
+            raise HTTPException(status_code=502,
+                                detail=f"could not resolve vault credential: {e}")
+        if not isinstance(val, dict):
+            raise HTTPException(status_code=404, detail="vault credential not found")
+        username = (val.get("he_username") or val.get("username") or val.get("email") or "").strip()
+        password = val.get("he_password") or val.get("password") or ""
+        if not username or not password:
+            raise HTTPException(
+                status_code=422,
+                detail="the assigned HE.NET credential has no account login — importing "
+                       "existing records needs a 'Hurricane Electric (account login)' "
+                       "vault secret (email + password), not a bare DDNS key.")
+        return username, password
+
     @app.get("/api/henet/credential")
     async def henet_get_credential(request: Request):
         """The module-level assigned HE DDNS credential reference (or null). A
@@ -426,6 +469,51 @@ def register(app, hub, ctx):
         await _henet_resolve_vault_cred(request, body)
         return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_SYNC", body,
                                   log_name="henet_sync")
+
+    @app.post("/api/henet/import")
+    async def henet_import(request: Request):
+        """Import the records that already exist in the HE.NET zone into local
+        management, so records added directly at dns.he.net (not by LM) become
+        visible + manageable.
+
+        HE's dyndns API cannot list records, so the hub logs into the dns.he.net
+        **web panel** with the assigned account-login credential (resolved from
+        the Credential Vault — the SAME HE account the certificate DNS-01 flow
+        uses) and reads each zone's record table. The scrape runs on the HUB (it
+        has outbound access to dns.he.net and the vault key); the discovered
+        A/AAAA records are then handed to the henet spoke via HENET_IMPORT to
+        merge into its managed state WITHOUT re-pushing them. Non-A/AAAA records
+        are reported as skipped (HE dyndns can only manage A/AAAA).
+
+        Optional body ``{"zone": "example.com"}`` restricts the import to one
+        zone; omitted, every zone on the account is imported."""
+        hub = app.state.hub
+        spoke_id = _get_henet_spoke(hub)  # 503 early if the spoke is offline
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        zone_filter = (body or {}).get("zone") if isinstance(body, dict) else None
+        username, password = await _henet_resolve_account_login(request)
+
+        import henet_scrape
+        scraper = henet_scrape.HENetScraper()
+        result = await asyncio.to_thread(scraper.import_all, username, password, zone_filter)
+        if result.get("status") != "SUCCESS":
+            raise HTTPException(status_code=502,
+                                detail=result.get("message") or "HE.NET import failed")
+
+        records = result.get("records", [])
+        merged = await _relay_spoke(spoke_id, "HENET_IMPORT", {"records": records},
+                                    log_name="henet_import")
+        return {
+            "status": "SUCCESS",
+            "imported": merged.get("imported", 0),
+            "skipped_existing": merged.get("skipped", 0),
+            "discovered": len(records),
+            "zones": [z.get("name") for z in result.get("zones", [])],
+            "skipped_types": result.get("skipped_types", {}),
+        }
 
     # ─── Certificate Management (le) API ──────────────────────────────────────
     # Relays LE_* commands to the certificates spoke via _relay_spoke (same

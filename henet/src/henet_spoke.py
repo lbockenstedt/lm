@@ -33,6 +33,8 @@ class HENetSpoke(BaseSpoke):
       HENET_ADD       — upsert a single record and push it
       HENET_UPDATE    — re-push an existing record with a new IP
       HENET_DELETE    — remove a record from local management (HE zone untouched)
+      HENET_IMPORT    — merge existing zone A/AAAA records (scraped by the hub)
+                        into local management without pushing them
       HENET_STATUS    — HE dyndns endpoint reachability + record count
     """
 
@@ -78,6 +80,12 @@ class HENetSpoke(BaseSpoke):
             if not name:
                 return {"status": "ERROR", "message": "name is required"}
             return await asyncio.to_thread(self.mgr.delete_record, name, rtype)
+
+        if cmd == "HENET_IMPORT":
+            records = data.get("records", [])
+            if not isinstance(records, list):
+                return {"status": "ERROR", "message": "records must be a list"}
+            return await asyncio.to_thread(self.mgr.import_records, records)
 
         if cmd == "HENET_STATUS":
             s = await asyncio.to_thread(self.mgr.status)

@@ -104,6 +104,45 @@ class HENetManager:
         # push of the new IP for the same hostname.
         return self.add_record(name, rtype, value, ttl, ddns_key=ddns_key, key=key)
 
+    def import_records(self, records: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Merge externally-discovered A/AAAA records into local management
+        WITHOUT pushing them to HE (they already exist in the zone).
+
+        Used by the hub's "Import from HE.NET" action: the hub scrapes the
+        dns.he.net web panel and hands the zone's existing A/AAAA records here so
+        they become visible + manageable. A record LM already manages is left
+        untouched (LM's copy — and its last-push status — wins); only records not
+        already under management are added, tagged ``imported`` so the UI can
+        show they came from the zone rather than a LM push."""
+        managed = self._load()
+        index = {(r.get("name"), str(r.get("type", "")).upper()) for r in managed}
+        imported = 0
+        skipped = 0
+        for r in records:
+            entry = self._normalize(r)
+            if not entry:
+                skipped += 1
+                continue
+            if entry["type"] not in ("A", "AAAA"):
+                skipped += 1
+                continue
+            key = (entry["name"], entry["type"])
+            if key in index:
+                skipped += 1
+                continue
+            entry["last_push_status"] = "imported"
+            entry["last_push_detail"] = "imported from HE.NET zone (not pushed by LM)"
+            entry["last_pushed_at"] = None
+            entry["source"] = "he-import"
+            managed.append(entry)
+            index.add(key)
+            imported += 1
+        self._save(managed)
+        logger.info("Imported %d HE.NET record(s) into management (%d skipped)",
+                    imported, skipped)
+        return {"status": "SUCCESS", "imported": imported, "skipped": skipped,
+                "records_written": len(managed)}
+
     def delete_record(self, name: str, rtype: Optional[str] = None) -> Dict[str, Any]:
         """Drop a record from LOCAL management. HE's dyndns API has no delete
         verb, so the zone entry itself remains at HE — remove it in the dns.he.net

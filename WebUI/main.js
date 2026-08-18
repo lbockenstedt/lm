@@ -22704,6 +22704,10 @@ function _collectVaultCred(elId) {
 
 function _henetPushBadge(r) {
     if (!r.last_push_status) return '<span class="text-slate-400">—</span>';
+    if (r.last_push_status === 'imported') {
+        const detail = r.last_push_detail ? ` title="${escapeHtml(String(r.last_push_detail))}"` : '';
+        return `<span class="px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700"${detail}>imported</span>`;
+    }
     const ok = r.last_push_status === 'ok';
     const cls = ok ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700';
     const detail = r.last_push_detail ? ` title="${escapeHtml(String(r.last_push_detail))}"` : '';
@@ -22754,6 +22758,7 @@ async function loadHenet() {
         <div class="flex gap-2">
           ${admin ? `<button onclick="showHenetCredModal()" class="${btnCls}" title="${assignedCred ? 'Change the assigned HE DDNS credential' : 'Assign an HE DDNS credential from the Credential Vault'}">🔐 ${assignedCred ? 'Change credential' : 'Assign credential'}</button>` : ''}
           ${admin && assignedCred ? `<button onclick="showHenetRecordModal()" class="${btnCls}">+ Add Record</button>` : ''}
+          ${admin && assignedCred ? `<button onclick="importHenet()" class="${btnCls}" title="Read the existing records already in your HE.NET zone (via the account login) and bring them under management">⇩ Import existing</button>` : ''}
           ${admin && assignedCred ? `<button onclick="syncHenet()" class="${btnCls}" title="Re-push every managed A/AAAA record to HE.NET">↻ Sync all</button>` : ''}
         </div>
       </div>`;
@@ -22916,10 +22921,30 @@ async function deleteHenetRecord(name, type) {
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
+async function importHenet() {
+    if (!window._henetAssignedCred) { showToast('Assign an HE.NET credential first', 'error'); return showHenetCredModal(); }
+    if (!await showConfirmToast('Read the existing records in your HE.NET zone(s) and bring any A/AAAA records not already managed under management? (Reads the dns.he.net web panel with the assigned account login — nothing is pushed or changed at HE.)')) return;
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/henet/import', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({}),
+        });
+        if (ok && d.status === 'SUCCESS') {
+            const skipped = d.skipped_types && Object.keys(d.skipped_types).length
+                ? ` · skipped ${Object.entries(d.skipped_types).map(([t, n]) => `${n} ${t}`).join(', ')} (HE dyndns manages A/AAAA only)`
+                : '';
+            const already = d.skipped_existing ? `, ${d.skipped_existing} already managed` : '';
+            showToast(`Imported ${d.imported || 0} record(s)${already}${skipped}`, 'success');
+            loadHenet();
+        } else showToast('Error: ' + (detail || d?.message || 'Import failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
 async function syncHenet() {
     const records = (window._henetRecords || []).filter(r => r.type === 'A' || r.type === 'AAAA')
         .map(r => ({ name: r.name, type: r.type, value: r.value, ttl: r.ttl }));
-    if (!records.length) { showToast('No A/AAAA records under management to sync', 'error'); return; }
+    if (!records.length) { showToast('No A/AAAA records under management yet — use “⇩ Import existing” to pull in the records already in your HE.NET zone.', 'error'); return; }
     if (!window._henetAssignedCred) { showToast('Assign an HE.NET DDNS credential first', 'error'); return showHenetCredModal(); }
     if (!await showConfirmToast(`Re-push all ${records.length} managed A/AAAA record(s) to HE.NET using the assigned DDNS credential?`)) return;
     try {
