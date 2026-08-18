@@ -435,9 +435,22 @@ class AgentHostingControlPlane(BaseControlPlane):
         """Called when the LM hub approves a pending agent. Sends the
         provisioned secret (this spoke's ``agent_secret``) so the agent can
         reconnect authenticated + sign its frames."""
+        logger.info(
+            "approve_pending_agent: ENTER agent=%r — pending_agents=%s "
+            "connected_agents=%s have_agent_secret=%s",
+            agent_id, list(self.pending_agents.keys()),
+            list(self.connected_agents.keys()), bool(self.agent_secret))
         pending = self.pending_agents.get(agent_id)
         if not pending:
-            logger.warning(f"Approval for unknown/already-connected agent '{agent_id}'")
+            logger.warning(
+                "Approval for unknown/already-connected agent %r — no matching "
+                "pending entry. pending_agents=%s connected_agents=%s. If the "
+                "relayed target name differs from a pending key, the hub sent a "
+                "mismatched target_agent_id (agent registered under a different "
+                "id than the hub's _agent_relay_name), so the pending agent "
+                "never gets its secret and stays offline.",
+                agent_id, list(self.pending_agents.keys()),
+                list(self.connected_agents.keys()))
             return
         # A falsy agent_secret here is the silent "approve → straight back to
         # pending/offline" flap: the node-agent only saves a TRUTHY provisioned
@@ -450,9 +463,17 @@ class AgentHostingControlPlane(BaseControlPlane):
         # ship a null secret that can only loop.
         if not self.agent_secret:
             ensure = getattr(self, "_ensure_agent_secret", None)
+            logger.info(
+                "approve_pending_agent(%r): no agent_secret yet — attempting "
+                "self-heal via _ensure_agent_secret (callable=%s)",
+                agent_id, callable(ensure))
             if callable(ensure):
                 try:
                     ensure()
+                    logger.info(
+                        "approve_pending_agent(%r): _ensure_agent_secret ran — "
+                        "agent_secret now %s", agent_id,
+                        "present" if self.agent_secret else "STILL MISSING")
                 except Exception as e:  # noqa: BLE001
                     logger.error(
                         f"approve_pending_agent('{agent_id}'): _ensure_agent_secret "
@@ -644,7 +665,12 @@ class AgentHostingControlPlane(BaseControlPlane):
 
             # ── Zero-touch / pending-approval path ───────────────────────────
             if not agent_secret:
-                logger.info(f"Agent '{agent_id}' connected without credentials — pending approval")
+                logger.info(
+                    "Agent '%s' connected without credentials — pending approval "
+                    "(pending_agents key=%r hostname=%r install_uuid=%r). The hub "
+                    "must relay APPROVAL_SUCCESS with target_agent_id matching "
+                    "this key to provision it.",
+                    agent_id, agent_id, agent_hostname, agent_install_uuid)
                 event = asyncio.Event()
                 self.pending_agents[agent_id] = {"ws": websocket, "event": event}
                 await websocket.send(json.dumps({"status": "APPROVAL_REQUIRED"}))
