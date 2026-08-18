@@ -110,6 +110,56 @@ Valid roles: `dns`, `dhcp`, `henet`, `network`, `netbox`, `opnsense`, `ldap`,
 | `scripts/install-lm-watchdog.sh` | The hub auto-heal watchdog. Idempotent; run as root on the hub box: `sudo bash install-lm-watchdog.sh`. |
 | `dns/install_dns.sh`, `dhcp/install_dhcp.sh` | Co-located Unbound DNS / Kea DHCP spokes. Flags: `--hub`, `--id`, `--secret`, `--infra-only`. |
 | `henet/install_henet.sh` | Hurricane Electric public-DNS (`henet`) spoke — pure HE dyndns API client (no local server). Flags: `--hub`, `--id`, `--secret`. |
+
+### Proxmox host agent — `pxmx/agent/install_agent.sh`
+
+Runs on each Proxmox host. It reports to the **pxmx spoke** (not the hub
+directly): pass the spoke's IP with `--spoke-ip` and the agent works out the
+scheme/port/`/ws/agent` path by probing; omit it to auto-discover the box via
+DNS (`lm-hub.<suffix>`) then mDNS. The id defaults to the hostname, so a
+cloned+renamed node reconnects under its new name (correlated to the old id by
+its install UUID).
+
+```bash
+curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install_agent.sh \
+  | sudo bash -s -- --spoke-ip <pxmx-spoke-ip>
+```
+
+| Flag | Purpose |
+| :--- | :--- |
+| `--spoke-ip IP` | Address of the pxmx spoke this agent serves (preferred — agent auto-determines scheme/port/path). |
+| `--spoke-url URL` | Fully-pinned `ws(s)://host:port/ws/agent` (legacy/advanced; wins over `--spoke-ip`). |
+| `--id` | Pin the agent id (default: OS hostname). |
+| `--secret` | Pre-shared agent secret. |
+
+### Uninstall — `uninstall.sh` (master uninstaller)
+
+Removes **every** LM-owned component on this box — hub, watchdog, generic agent,
+all spoke roles, the pxmx host agent, the client-sim agents/dashboard, collab
+sink, and BugFixer — plus their dirs, `/usr/local/bin` helpers, sudoers,
+systemd drop-ins, and LM env values. Discovery-first and guarded: it prints
+exactly what it will remove and requires a typed `REMOVE` confirmation. Shared
+infrastructure (postgresql/redis/nginx/unbound/kea/slapd/certbot/ollama/…) and
+host networking are **never** touched unless you opt in below. Destructive and
+irreversible.
+
+```bash
+curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/uninstall.sh | sudo bash -s -- --yes
+```
+
+| Flag | Purpose |
+| :--- | :--- |
+| `--yes` / `-y` | Non-interactive — skip the typed confirmation (required when piped, no TTY). |
+| `--dry-run` / `-n` | Preview only — change nothing. |
+| `--ollama` | Also remove `ollama.service` + its override (BugFixer). |
+| `--letsencrypt` | Also remove `/etc/letsencrypt` + its `var/lib`/`var/log` dirs. |
+| `--netbox-db` | Also DROP the NetBox Postgres database + role. |
+| `--nginx-site` | Also remove the NetBox nginx site (LM-owned file). |
+| `--keep-bugfixer` | Do **not** remove BugFixer (it is removed by default here). |
+
+> For a full single-host identity/state wipe (so a clone can **never** reconnect
+> under an old id), `uninstall_lm.sh` is the universal per-host variant:
+> `bash uninstall_lm.sh [--yes] [--dry-run] [--keep-logs] [--keep-crontab]`.
 <!-- INSTALLERS:END -->
 
 ## 🗺️ Repository & Directory Map
