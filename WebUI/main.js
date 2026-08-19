@@ -3453,11 +3453,15 @@ function renderTopNav(viewId) {
     const rawSubmenus = (viewId === 'logs') ? logsSubmenu() : (VIEW_SUBMENUS[viewId] || []);
     const subMenus = rawSubmenus.filter(m => {
         if (m === 'Simulations' && !isAdmin()) return false;
-        // The External DNS subtab (under DNS) manages PUBLIC address-space DNS
-        // (HE.NET, …) — infrastructure, not tenant data — so it is Global-Admin
-        // ONLY (view + add/edit/delete/sync). A DNS-view / tenant-admin user
-        // does not see it. The server enforces the same on /api/henet/*.
-        if (m === 'External DNS' && !isAdmin()) return false;
+        // The External DNS subtab (under DNS) now has real per-tenant records
+        // (each carries an explicit tenant_id) — visible to anyone with the
+        // 'dns' right (DNS is "all things DNS", internal + external) OR the
+        // distinct 'henet' right (grantable on its own, e.g. a user who should
+        // manage External DNS but not the internal Unbound config). A DNS-view
+        // / tenant-admin user sees only their OWN tenant's records (the server
+        // filters /api/henet/records; write actions additionally need
+        // tenant-admin tier — see canEdit()/isTenantAdmin() gating below).
+        if (m === 'External DNS' && !(canSeeModule('DNS') || canSeeModule('HE.NET'))) return false;
         // It also only appears once ANY internet-facing DNS provider spoke
         // (HE.NET, …) is connected. See EXTERNAL_DNS_PROVIDERS.
         if (m === 'External DNS' && _externalDnsConnected().length === 0) return false;
@@ -23243,8 +23247,13 @@ function openExternalDns(id) {
 // Manages A/AAAA records at dns.he.net over HE's dynamic-DNS update API. The HE
 // DDNS key is NEVER sent from the browser — the operator picks a Credential
 // Vault secret of type 'henet' (a {bucket,name} reference) and the hub resolves
-// it unattended (net_services._henet_resolve_vault_cred). Writes are
-// Global-Admin-only (see api.py _ADMIN_INFRA_WRITE_PREFIXES).
+// it unattended (net_services._henet_resolve_vault_cred). Each record carries
+// an explicit tenant_id (global "" for Global-Admin-managed, or the owning
+// tenant's) — a Global Admin sees + manages everything; a tenant-admin (or
+// DNS-view user, read-only) sees only their own tenant's records. Record/
+// credential writes need tenant-admin tier (or admin); bulk sync/import stay
+// Global-Admin-only (see api.py _ADMIN_INFRA_WRITE_PREFIXES /
+// _HENET_TENANT_WRITE_PREFIXES).
 
 // Collect every automation-readable Credential Vault secret of type 'henet' as
 // {bucket, name, label} options for the DDNS-key picker. Uses the same
@@ -23361,12 +23370,17 @@ async function loadHenet() {
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
     const th = tableHead, tw = tableWrap;
     const admin = isAdmin();
+    // Record/credential writes need tenant-admin tier (or admin) — a plain
+    // DNS-view user sees records read-only, matching the server's
+    // _can_edit_shared gate on /api/henet/record and /api/henet/credential.
+    const canWrite = admin || isTenantAdmin();
     const backBar = _extDnsBackBar('HE.NET');
     const btnCls = 'bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold shadow-sm';
     const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
 
-    // Status line (HE dyndns reachability + record count).
+    // Status line (HE dyndns reachability + record count — fleet-wide, not
+    // per-tenant data).
     let statusHtml = '';
     try {
         const s = await _spokeFetch('/api/henet/status');
@@ -23376,29 +23390,40 @@ async function loadHenet() {
         }
     } catch (e) { /* status is best-effort */ }
 
-    // Module-level assigned DDNS credential — resolved once, reused for every
+    // Assigned DDNS credential — the caller's OWN slot (their tenant's, or the
+    // global slot for a Global Admin). Resolved once, reused for every
     // add/sync so the operator never re-picks it. Stored as a non-secret
-    // {bucket,name} reference (GET /api/henet/credential).
+    // {bucket,name} reference (GET /api/henet/credential). Admin additionally
+    // gets "tenants" — every tenant that has assigned its own — for the
+    // merged global + per-tenant overview.
     let assignedCred = null;
+    let tenantCreds = {};
     try {
         const c = await _spokeFetch('/api/henet/credential');
-        if (c.ok && c.data) assignedCred = c.data.credential || null;
+        if (c.ok && c.data) {
+            assignedCred = c.data.credential || null;
+            tenantCreds = c.data.tenants || {};
+        }
     } catch (e) { /* best-effort */ }
     window._henetAssignedCred = assignedCred;
-    const credInfo = admin
+    const credInfo = canWrite
         ? (assignedCred
-            ? ` · <span class="text-slate-600">DDNS credential: <span class="font-mono">🔐 ${escapeHtml(assignedCred.name)}</span></span>`
-            : ` · <span class="text-amber-600 font-medium">no DDNS credential assigned</span>`)
+            ? ` · <span class="text-slate-600">${admin ? 'Global ' : ''}DDNS credential: <span class="font-mono">🔐 ${escapeHtml(assignedCred.name)}</span></span>`
+            : ` · <span class="text-amber-600 font-medium">no ${admin ? 'global ' : ''}DDNS credential assigned</span>`)
+        : '';
+    const tenantCredN = Object.keys(tenantCreds).length;
+    const tenantCredInfo = admin && tenantCredN
+        ? ` · <span class="text-slate-500">${tenantCredN} tenant${tenantCredN === 1 ? '' : 's'} with ${tenantCredN === 1 ? 'its' : 'their'} own credential</span>`
         : '';
 
-    // Admin-only action bar. Writes need the assigned DDNS credential, so Add /
-    // Sync only appear once one is assigned; otherwise an Assign CTA is shown. A
-    // non-admin DNS viewer sees the records read-only (writes are admin-only).
+    // Add/Change-credential is write-tier (own slot for a tenant-admin, global
+    // slot for admin). Import/Sync are bulk, no per-object tenant model, so
+    // they stay admin-only — same as the server's _ADMIN_INFRA_WRITE_PREFIXES.
     const actionBar = `<div class="flex flex-wrap items-center justify-between gap-2 mb-3">
-        <div class="text-xs text-slate-500">${statusHtml}${credInfo}</div>
+        <div class="text-xs text-slate-500">${statusHtml}${credInfo}${tenantCredInfo}</div>
         <div class="flex gap-2">
-          ${admin ? `<button onclick="showHenetCredModal()" class="${btnCls}" title="${assignedCred ? 'Change the assigned HE DDNS credential' : 'Assign an HE DDNS credential from the Credential Vault'}">🔐 ${assignedCred ? 'Change credential' : 'Assign credential'}</button>` : ''}
-          ${admin && assignedCred ? `<button onclick="showHenetRecordModal()" class="${btnCls}">+ Add Record</button>` : ''}
+          ${canWrite ? `<button onclick="showHenetCredModal()" class="${btnCls}" title="${assignedCred ? 'Change the assigned HE DDNS credential' : 'Assign an HE DDNS credential from the Credential Vault'}">🔐 ${assignedCred ? 'Change credential' : 'Assign credential'}</button>` : ''}
+          ${canWrite ? `<button onclick="showHenetRecordModal()" class="${btnCls}">+ Add Record</button>` : ''}
           ${admin && assignedCred ? `<button onclick="importHenet()" class="${btnCls}" title="Read the existing records already in your HE.NET zone (via the account login) and bring them under management">⇩ Import existing</button>` : ''}
           ${admin && assignedCred ? `<button onclick="syncHenet()" class="${btnCls}" title="Re-push every managed A/AAAA record to HE.NET">↻ Sync all</button>` : ''}
         </div>
@@ -23410,10 +23435,13 @@ async function loadHenet() {
             container.innerHTML = backBar + actionBar + `${_spokeErrorBanner(detail, 'HE.NET spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Load the “HE.NET” role on an agent and store an HE DDNS key in the Credential Vault (secret type “HE.NET DDNS key”).</p>`;
             return;
         }
+        // A non-admin only ever gets their own tenant's records back (the
+        // server filters — see henet_list_records); a Global Admin gets
+        // everything (global + every tenant's), each tagged with tenant_id.
         const records = d.records || [];
         window._henetRecords = records;
-        const cols = ['Name', 'Type', 'Value', 'TTL', 'Last Push'].concat(admin ? [''] : []);
-        const rows = records.map(r => {
+        const cols = ['Name', 'Type', 'Value', 'TTL', 'Last Push'].concat(canWrite ? [''] : []);
+        const rowHtml = (r) => {
             const eName = String(r.name).replace(/'/g, "\\'");
             const eType = String(r.type).replace(/'/g, "\\'");
             return `<tr class="border-b border-slate-100 hover:bg-slate-50">
@@ -23422,15 +23450,35 @@ async function loadHenet() {
                 <td class="px-4 py-2 font-mono text-xs">${escapeHtml(r.value)}</td>
                 <td class="px-4 py-2 text-center text-xs">${escapeHtml(String(r.ttl))}</td>
                 <td class="px-4 py-2 text-center">${_henetPushBadge(r)}</td>
-                ${admin ? `<td class="px-4 py-2 whitespace-nowrap">
+                ${canWrite ? `<td class="px-4 py-2 whitespace-nowrap">
                     <button onclick="editHenetRecord('${eName}','${eType}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
                     <button onclick="deleteHenetRecord('${eName}','${eType}')" title="Remove from management" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
                 </td>` : ''}
             </tr>`;
-        }).join('');
+        };
+        let bodyHtml;
+        if (admin) {
+            // Group into a "Global" section + one section per tenant, so the
+            // merged union stays legible instead of one flat table repeating
+            // a Tenant column on every row.
+            const groups = new Map();  // tenant_id ("" = global) -> [records]
+            records.forEach(r => {
+                const k = r.tenant_id || '';
+                if (!groups.has(k)) groups.set(k, []);
+                groups.get(k).push(r);
+            });
+            const order = [''].concat(Array.from(groups.keys()).filter(k => k !== '').sort());
+            bodyHtml = order.filter(k => groups.has(k)).map(k => {
+                const label = k ? `Tenant: ${escapeHtml(k)}` : 'Global (Admin-managed)';
+                const grp = groups.get(k);
+                return `<div class="mb-4"><div class="text-xs font-bold text-slate-500 uppercase mb-1 px-1">${label} (${grp.length})</div>${tw(th(cols) + `<tbody>${grp.map(rowHtml).join('')}</tbody>`)}</div>`;
+            }).join('');
+        } else {
+            bodyHtml = tw(th(cols) + `<tbody>${records.map(rowHtml).join('')}</tbody>`);
+        }
         container.innerHTML = backBar + actionBar + (records.length === 0
-            ? '<p class="p-4 text-slate-400 italic text-sm">No HE.NET records under management yet.' + (admin ? ' Use “+ Add Record”.' : '') + '</p>'
-            : tw(th(cols) + `<tbody>${rows}</tbody>`));
+            ? '<p class="p-4 text-slate-400 italic text-sm">No HE.NET records under management yet.' + (canWrite ? ' Use “+ Add Record”.' : '') + '</p>'
+            : bodyHtml);
     } catch (err) {
         container.innerHTML = backBar + actionBar + `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
     }
@@ -23465,9 +23513,12 @@ async function showHenetRecordModal(editItem) {
     if (editing) { modal.dataset.editName = editItem.name; modal.dataset.editType = editItem.type; }
 }
 
-// ── Module-level HE DDNS credential assignment ──────────────────────────────
+// ── HE DDNS credential assignment ───────────────────────────────────────────
 // Pick a Credential Vault 'henet' secret once; the hub uses it for every
-// add/sync (POST /api/henet/credential). Global-Admin-only server-side.
+// add/sync (POST /api/henet/credential). Server-derives WHICH slot this
+// writes to from the caller: a Global Admin (no ?tenant=) gets the global
+// slot; a tenant-admin always gets their own tenant's slot — never
+// client-choosable, so this same modal/save path works unmodified for both.
 async function showHenetCredModal() {
     const creds = await _henetVaultCredOptions();
     const assigned = window._henetAssignedCred;

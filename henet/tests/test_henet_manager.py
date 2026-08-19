@@ -139,6 +139,33 @@ def test_update_replaces_same_name_type(tmp_path):
     assert recs[0]["value"] == "203.0.113.2"
 
 
+def test_tenant_id_persisted_on_add(tmp_path):
+    poster = FakePoster()
+    mgr = HENetManager(state_path=str(tmp_path / "r.json"), http_post=poster)
+    mgr.add_record("h.example.com", "A", "203.0.113.1", ddns_key="K", tenant_id="lrb")
+    recs = mgr.list_records()
+    assert recs[0]["tenant_id"] == "lrb"
+
+
+def test_tenant_id_defaults_to_empty_string_when_unset(tmp_path):
+    poster = FakePoster()
+    mgr = HENetManager(state_path=str(tmp_path / "r.json"), http_post=poster)
+    mgr.add_record("h.example.com", "A", "203.0.113.1", ddns_key="K")
+    recs = mgr.list_records()
+    assert recs[0]["tenant_id"] == ""
+
+
+def test_tenant_id_preserved_across_update(tmp_path):
+    poster = FakePoster()
+    mgr = HENetManager(state_path=str(tmp_path / "r.json"), http_post=poster)
+    mgr.add_record("h.example.com", "A", "203.0.113.1", ddns_key="K", tenant_id="lrb")
+    mgr.update_record("h.example.com", "A", "203.0.113.2", ddns_key="K", tenant_id="lrb")
+    recs = [r for r in mgr.list_records() if r["name"] == "h.example.com"]
+    assert len(recs) == 1
+    assert recs[0]["tenant_id"] == "lrb"
+    assert recs[0]["value"] == "203.0.113.2"
+
+
 def test_ddns_key_never_persisted(tmp_path):
     state = tmp_path / "r.json"
     mgr = HENetManager(state_path=str(state), http_post=FakePoster())

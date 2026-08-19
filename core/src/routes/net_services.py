@@ -237,22 +237,90 @@ def register(app, hub, ctx):
     # and is NEVER held on the spoke — it lives in the hub Credential Vault; the
     # write routes resolve a ``henet_vault_credential`` {bucket,name} reference
     # unattended via cred_vault.automation_get and inject ``ddns_key`` into the
-    # relayed command, mirroring LE's _le_resolve_vault_dns_cred. Writes are
-    # Global-Admin-only (see api.py _ADMIN_INFRA_WRITE_PREFIXES) — HE.NET manages
-    # shared public DNS with no per-object tenant model.
+    # relayed command, mirroring LE's _le_resolve_vault_dns_cred.
+    #
+    # Per-tenant model: each record now carries an explicit ``tenant_id`` —
+    # "" for a Global-Admin-managed (shared/global) record, or the owning
+    # tenant's id. A tenant may configure its OWN default DDNS credential
+    # (global_config['henet']['tenant_credentials'][tenant_id], a sibling of
+    # the existing global 'vault_credential' slot) and add/edit/delete only
+    # its own records; Global Admin sees + manages everything (global + every
+    # tenant's), optionally acting "as" one tenant via an explicit ``tenant``
+    # field/param. SYNC (bulk replace-the-managed-set) and IMPORT (scrape the
+    # whole HE.NET account) have no per-object scope and stay Global-Admin-only
+    # (see api.py _ADMIN_INFRA_WRITE_PREFIXES) — replacing/importing the WHOLE
+    # set would blow away other tenants' records if opened up per-tenant.
     def _get_henet_spoke(hub):
         return get_spoke_or_503(hub, "henet", "HE.NET")
 
-    def _henet_get_assigned_cred(hub):
-        """The module-level HE DDNS credential the operator assigned once (a
-        non-secret ``{bucket, name}`` vault reference), or None. Persisted in
-        global config under ``henet.vault_credential`` so add/sync don't have to
-        re-pick the credential on every write."""
+    def _henet_update_cfg(hub, **fields):
+        """Merge-safe update of global_config['henet'].
+
+        ``hub.state.update_global_config()`` only shallow-replaces the WHOLE
+        top-level key it's given — passing ``{"henet": {"tenant_credentials":
+        {...}}}`` would silently wipe the sibling ``vault_credential`` (and
+        vice versa). Read-modify-write the full sub-dict here instead."""
         gc = hub.state.get_global_config() or {}
-        ref = (gc.get("henet") or {}).get("vault_credential")
+        henet_cfg = dict(gc.get("henet") or {})
+        henet_cfg.update(fields)
+        hub.state.update_global_config({"henet": henet_cfg})
+
+    def _henet_get_assigned_cred(hub, tenant_id=None):
+        """The assigned HE DDNS credential reference for ``tenant_id`` (a
+        non-secret ``{bucket, name}`` vault reference), or the module-level
+        GLOBAL one when ``tenant_id`` is falsy. Persisted in global config
+        under ``henet.tenant_credentials[tenant_id]`` / ``henet.vault_credential``
+        respectively, so add/sync don't have to re-pick the credential on
+        every write."""
+        gc = hub.state.get_global_config() or {}
+        henet_cfg = gc.get("henet") or {}
+        if tenant_id:
+            ref = (henet_cfg.get("tenant_credentials") or {}).get(tenant_id)
+        else:
+            ref = henet_cfg.get("vault_credential")
         if isinstance(ref, dict) and (ref.get("bucket") or "").strip() and (ref.get("name") or "").strip():
             return {"bucket": ref["bucket"].strip(), "name": ref["name"].strip()}
         return None
+
+    def _henet_tenant_scope(sess, explicit_tenant=None):
+        """Server-authoritative tenant scope for a HE.NET record/credential.
+
+        A non-admin's OWN tenant always wins — never client-choosable, exactly
+        like LE's ``_le_tenant`` — so one tenant can't read or write another's
+        records by passing a different id. Global Admin may explicitly target
+        ONE tenant (managing on its behalf) via ``explicit_tenant``, or omit it
+        for the global/shared scope (``""``)."""
+        if not _is_admin(sess):
+            return (sess.get("user", {}) or {}).get("tenant_id") or "default"
+        return (explicit_tenant or "").strip()
+
+    async def _henet_find_record(hub, name, rtype):
+        """The existing managed record matching (name, type), or None. Used to
+        determine ownership before an add/update/delete touches it — there's no
+        per-record GET, so this reads the full list (spoke-local, cheap)."""
+        r = await _relay_spoke(_get_henet_spoke(hub), "HENET_LIST", log_name="henet_owner_check")
+        rt = (rtype or "").upper()
+        for rec in (r or {}).get("records") or []:
+            if rec.get("name") == name and (not rt or str(rec.get("type") or "").upper() == rt):
+                return rec
+        return None
+
+    async def _henet_assert_can_write(hub, sess, name, rtype):
+        """Verify the caller may add/update/delete this (name, type) record.
+
+        Returns the record's EXISTING ``tenant_id`` to preserve across the
+        write (``None`` if it doesn't exist yet — a brand-new record). A
+        non-admin whose tenant doesn't match the existing owner gets a 404,
+        never a 403 — a record belonging to another tenant must be
+        indistinguishable from a genuinely absent one, same convention as
+        tenant_devices.py."""
+        existing = await _henet_find_record(hub, name, rtype)
+        if existing is None:
+            return None
+        owner = existing.get("tenant_id") or ""
+        if not _is_admin(sess) and owner != _henet_tenant_scope(sess):
+            raise HTTPException(status_code=404, detail="record not found")
+        return owner
 
     # Field names, in priority order, from which the dyndns update password may
     # be pulled. This lets ONE Hurricane Electric vault secret serve BOTH the LE
@@ -275,17 +343,21 @@ def register(app, hub, ctx):
                 return v.strip()
         return None
 
-    async def _henet_resolve_vault_cred(request: Request, body: dict):
+    async def _henet_resolve_vault_cred(request: Request, body: dict, tenant_id=""):
         """Resolve the HE DDNS key into ``body['ddns_key']`` unattended.
 
         Precedence: an explicit ``henet_vault_credential`` {bucket,name} in the
-        request wins; otherwise the module-level assigned credential
-        (:func:`_henet_get_assigned_cred`) is used. The secret VALUE is read via
-        :func:`cred_vault.automation_get` and injected as ``ddns_key`` — it is
-        never returned to the browser. Reach is enforced: a tenant-admin may only
+        request wins; otherwise the credential assigned for ``tenant_id``
+        (:func:`_henet_get_assigned_cred` — that tenant's own slot, or the
+        global slot when ``tenant_id`` is falsy) is used. NO cross-fallback: a
+        tenant with no credential of its own does not silently borrow the
+        global one. The secret VALUE is read via :func:`cred_vault.automation_get`
+        and injected as ``ddns_key`` — it is never returned to the browser.
+        Reach is enforced on an EXPLICIT override: a tenant-admin may only
         reference buckets for their own tenants; a Global Admin, any bucket
-        (including the ``__admin__`` infra slot where the HE account key belongs).
-        Raises 400 when neither an explicit nor an assigned credential exists.
+        (including the ``__admin__`` infra slot where the HE account key
+        belongs). Raises 400 when neither an explicit nor an assigned
+        credential exists.
 
         The stored secret may be an ``henet`` DDNS key OR a shared LE DNS-01
         "Hurricane Electric" secret — :func:`_henet_extract_ddns_key` reformats
@@ -295,8 +367,9 @@ def register(app, hub, ctx):
             {"provider": "he-login", "he_username": "...", "he_password": "..."}
         """
         ref = body.pop("henet_vault_credential", None)
-        if not isinstance(ref, dict):
-            ref = _henet_get_assigned_cred(app.state.hub)
+        explicit = isinstance(ref, dict)
+        if not explicit:
+            ref = _henet_get_assigned_cred(app.state.hub, tenant_id or None)
         if not isinstance(ref, dict):
             raise HTTPException(
                 status_code=400,
@@ -310,7 +383,7 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=400,
                                 detail="henet_vault_credential requires bucket + name")
         sess = _session_user(request) or {}
-        if not _is_admin(sess):
+        if explicit and not _is_admin(sess):
             reach = set((sess.get("user", {}) or {}).get("tenants") or [])
             if bucket not in reach:
                 # Indistinguishable from missing so bucket existence never leaks.
@@ -374,15 +447,35 @@ def register(app, hub, ctx):
 
     @app.get("/api/henet/credential")
     async def henet_get_credential(request: Request):
-        """The module-level assigned HE DDNS credential reference (or null). A
-        non-secret {bucket,name} — the value is never returned. Readable by any
-        DNS viewer (same gate as the records list)."""
-        return {"status": "SUCCESS", "credential": _henet_get_assigned_cred(app.state.hub)}
+        """The assigned HE DDNS credential reference (or null). A non-secret
+        {bucket,name} — the value is never returned.
+
+        Non-admin: always their OWN tenant's slot (never client-choosable).
+        Global Admin: pass ``?tenant=<id>`` to read one tenant's slot; omitted,
+        returns the merged overview — the global slot under ``credential`` PLUS
+        every tenant that has assigned one under ``tenants`` — mirroring the
+        Sim-Quota admin-overview shape (global + every tenant, side by side)."""
+        sess = _session_user(request) or {}
+        hub = app.state.hub
+        if _is_admin(sess):
+            want_tenant = request.query_params.get("tenant")
+            if want_tenant is not None:
+                tid = want_tenant.strip() or None
+                return {"status": "SUCCESS", "credential": _henet_get_assigned_cred(hub, tid)}
+            gc = hub.state.get_global_config() or {}
+            tenant_creds = {
+                tid: ref for tid, ref in ((gc.get("henet") or {}).get("tenant_credentials") or {}).items()
+                if isinstance(ref, dict) and (ref.get("bucket") or "").strip() and (ref.get("name") or "").strip()
+            }
+            return {"status": "SUCCESS", "credential": _henet_get_assigned_cred(hub),
+                    "tenants": tenant_creds}
+        return {"status": "SUCCESS", "credential": _henet_get_assigned_cred(hub, _henet_tenant_scope(sess))}
 
     @app.post("/api/henet/credential")
     async def henet_set_credential(request: Request):
-        """Assign the module-level HE DDNS credential (Global-Admin-only via the
-        /api/henet/ write gate). Validates the reference resolves to an
+        """Assign a HE DDNS credential — the caller's own tenant slot, or (Global
+        Admin only) the global slot / an explicit tenant's slot via
+        ``{"tenant": "<id>"}``. Validates the reference resolves to an
         automation-readable secret carrying a usable HE DDNS key / password (an
         ``henet`` DDNS key OR a shared LE DNS-01 "Hurricane Electric" secret)
         before persisting it, so a bad reference is rejected up-front rather than
@@ -394,7 +487,10 @@ def register(app, hub, ctx):
         if not bucket or not name:
             raise HTTPException(status_code=400, detail="bucket and name are required")
         sess = _session_user(request) or {}
-        if not _is_admin(sess):
+        if _is_admin(sess):
+            tenant_id = (body.get("tenant") or "").strip()
+        else:
+            tenant_id = _henet_tenant_scope(sess)
             reach = set((sess.get("user", {}) or {}).get("tenants") or [])
             if bucket not in reach:
                 raise HTTPException(status_code=404, detail="vault credential not found")
@@ -408,57 +504,123 @@ def register(app, hub, ctx):
                                 detail="vault credential not found, not automation-readable, "
                                        "or missing a usable HE DDNS key / password")
         hub = app.state.hub
-        hub.state.update_global_config({"henet": {"vault_credential": {"bucket": bucket, "name": name}}})
+        if tenant_id:
+            gc = hub.state.get_global_config() or {}
+            tenant_creds = dict((gc.get("henet") or {}).get("tenant_credentials") or {})
+            tenant_creds[tenant_id] = {"bucket": bucket, "name": name}
+            _henet_update_cfg(hub, tenant_credentials=tenant_creds)
+        else:
+            _henet_update_cfg(hub, vault_credential={"bucket": bucket, "name": name})
         await hub.state.save_state_now()
-        logger.info("henet: DDNS credential assigned -> %s/%s", bucket, name)
-        return {"status": "SUCCESS", "credential": {"bucket": bucket, "name": name}}
+        logger.info("henet: DDNS credential assigned -> %s/%s (tenant=%s)",
+                    bucket, name, tenant_id or "global")
+        return {"status": "SUCCESS", "credential": {"bucket": bucket, "name": name},
+                "tenant": tenant_id or None}
 
     @app.delete("/api/henet/credential")
     async def henet_clear_credential(request: Request):
-        """Clear the module-level assigned HE DDNS credential (Global-Admin-only)."""
+        """Clear an assigned HE DDNS credential — the caller's own tenant slot,
+        or (Global Admin only) the global slot / an explicit ``?tenant=`` slot."""
+        sess = _session_user(request) or {}
         hub = app.state.hub
-        hub.state.update_global_config({"henet": {}})
+        if _is_admin(sess):
+            tenant_id = (request.query_params.get("tenant") or "").strip()
+        else:
+            tenant_id = _henet_tenant_scope(sess)
+        if tenant_id:
+            gc = hub.state.get_global_config() or {}
+            tenant_creds = dict((gc.get("henet") or {}).get("tenant_credentials") or {})
+            tenant_creds.pop(tenant_id, None)
+            _henet_update_cfg(hub, tenant_credentials=tenant_creds)
+        else:
+            _henet_update_cfg(hub, vault_credential=None)
         await hub.state.save_state_now()
-        logger.info("henet: DDNS credential assignment cleared")
+        logger.info("henet: DDNS credential assignment cleared (tenant=%s)", tenant_id or "global")
         return {"status": "SUCCESS", "credential": None}
 
     @app.get("/api/henet/records")
     async def henet_list_records(request: Request):
-        """List the HE.NET records this module manages (from spoke-local state)."""
+        """List the HE.NET records this module manages (from spoke-local state).
+
+        Global Admin sees every record (global + every tenant's, each tagged
+        with its ``tenant_id`` so the WebUI can group them). A non-admin sees
+        ONLY records whose ``tenant_id`` matches their own tenant — never the
+        global set nor another tenant's — filtered here, not just hidden client-
+        side, since the spoke itself has no tenant concept."""
         logger.debug("relay GET /api/henet/records")
-        return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_LIST",
-                                  log_name="henet_list_records")
+        result = await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_LIST",
+                                    log_name="henet_list_records")
+        sess = _session_user(request) or {}
+        if _is_admin(sess):
+            return result
+        scope = _henet_tenant_scope(sess)
+        records = [r for r in (result or {}).get("records") or [] if (r.get("tenant_id") or "") == scope]
+        out = dict(result or {})
+        out["records"] = records
+        return out
 
     @app.get("/api/henet/status")
     async def henet_status(request: Request):
-        """HE dyndns endpoint reachability + managed-record count."""
+        """HE dyndns endpoint reachability + managed-record count (fleet-wide —
+        the endpoint/reachability figure isn't per-tenant data)."""
         logger.debug("relay GET /api/henet/status")
         return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_STATUS",
                                   log_name="henet_status")
 
     @app.post("/api/henet/record")
     async def henet_add_record(request: Request):
+        """Add (or re-push) a record. Tenant-owned: a non-admin's new record is
+        auto-tagged with their own tenant; re-adding an EXISTING name they don't
+        own 404s (see _henet_assert_can_write). Global Admin may target a
+        specific tenant via ``{"tenant": "<id>"}``, else the record is global."""
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
-        await _henet_resolve_vault_cred(request, body)
-        return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_ADD", body,
+        sess = _session_user(request) or {}
+        hub = app.state.hub
+        name = str(body.get("name") or "").strip().rstrip(".")
+        rtype = str(body.get("type") or "A").upper()
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        existing_owner = await _henet_assert_can_write(hub, sess, name, rtype)
+        tenant_id = existing_owner if existing_owner is not None else \
+            _henet_tenant_scope(sess, body.get("tenant") if _is_admin(sess) else None)
+        body["tenant_id"] = tenant_id
+        await _henet_resolve_vault_cred(request, body, tenant_id)
+        return await _relay_spoke(_get_henet_spoke(hub), "HENET_ADD", body,
                                   log_name="henet_add_record")
 
     @app.put("/api/henet/record")
     async def henet_update_record(request: Request):
+        """Re-push an existing record with a new IP. Must already own it (or be
+        admin) — 404 otherwise, see _henet_assert_can_write."""
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
-        await _henet_resolve_vault_cred(request, body)
-        return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_UPDATE", body,
+        sess = _session_user(request) or {}
+        hub = app.state.hub
+        name = str(body.get("name") or "").strip().rstrip(".")
+        rtype = str(body.get("type") or "A").upper()
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        existing_owner = await _henet_assert_can_write(hub, sess, name, rtype)
+        tenant_id = existing_owner if existing_owner is not None else _henet_tenant_scope(sess)
+        body["tenant_id"] = tenant_id
+        await _henet_resolve_vault_cred(request, body, tenant_id)
+        return await _relay_spoke(_get_henet_spoke(hub), "HENET_UPDATE", body,
                                   log_name="henet_update_record")
 
     @app.delete("/api/henet/record")
     async def henet_delete_record(request: Request):
         """Remove a record from local management (no HE credential needed — HE's
-        dyndns API has no delete verb, so the zone entry itself is left as-is)."""
+        dyndns API has no delete verb, so the zone entry itself is left as-is).
+        Must already own it (or be admin) — 404 otherwise."""
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
-        return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_DELETE", body,
+        sess = _session_user(request) or {}
+        hub = app.state.hub
+        name = str(body.get("name") or "").strip().rstrip(".")
+        rtype = str(body.get("type") or "").strip()
+        await _henet_assert_can_write(hub, sess, name, rtype)
+        return await _relay_spoke(_get_henet_spoke(hub), "HENET_DELETE", body,
                                   log_name="henet_delete_record")
 
     @app.post("/api/henet/sync")
