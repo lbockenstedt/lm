@@ -233,7 +233,7 @@ class HubVncConsoleMixin:
             return False
         if not llm.hub_llm_identify_enabled(self):
             return False
-        agent = llm.find_bugfixer(self)
+        agent = llm.find_ab(self)
         if not agent:
             return False
         try:

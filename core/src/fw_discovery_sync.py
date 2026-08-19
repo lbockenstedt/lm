@@ -326,7 +326,7 @@ class FwDiscoverySyncMixin:
             # Hub-authoritative sync log: on a clean push keep the INFO summary,
             # but on any errors/failure emit a [sync-error] WARNING carrying the
             # sink's message (the first-error text) so the cause lands in the hub
-            # log + GET_ERROR_LOGS (bugfixer) — one place to go, no spoke-log dig.
+            # log + GET_ERROR_LOGS (ab) — one place to go, no spoke-log dig.
             if errors > 0 or rstatus == "ERROR":
                 logger.warning("[sync-error] fw-discovery tenant=%s(%s) status=%s "
                                "sent=%d pushed=%d skipped=%d deleted=%d errors=%d — %s",

@@ -53,7 +53,7 @@ role's live status.
   - `proxmox` → `pxmx/src/proxmox_spoke.py::ProxmoxSpoke` (`hypervisor`, `lbockenstedt/pxmx.git`)
   - `le` → `le/src/le_spoke.py::LESpoke` (`certificates`, `lbockenstedt/le.git`)
   - `truenas` → `truenas/src/truenas_spoke.py::TruenasSpoke` (`storage`, `lbockenstedt/truenas.git`) — manages/reports on TrueNAS appliances over the official WebSocket JSON-RPC client (`truenas_api_client`); pools, datasets, shares (SMB/NFS), disks, alerts, services, capacity + gated writes (create/delete datasets, create shares, snapshots, scrubs). Mirrors `nw` (fleet-poll spoke + cache twin) and `le` (per-tenant API-key store).
-  - `_DEPLOY_ROLES` (5 — run their own installer as a background subprocess, module_type `agent`, not hosted sub-spokes; each deploys a SERVER, and a separate `_ROLE_MAP` module sub-spoke manages it): `bugfixer` (curl|bash `lbockenstedt/bugfixer` `install.sh`), `netbox-server` (`netbox` `install.sh --infra-only` → NetBox app; managed by the `netbox`/ipam role), `ldap-server` (`ldap` `install_ldap.sh --infra-only` → OpenLDAP; managed by the `ldap`/directory role), `dns-server` (`lm` `dns/install_dns.sh --infra-only` → Unbound; managed by the `dns` role), `dhcp-server` (`lm` `dhcp/install_dhcp.sh --infra-only` → Kea; managed by the `dhcp` role). `--infra-only` stands up the server ONLY (no `lm-<x>` spoke unit).
+  - `_DEPLOY_ROLES` (5 — run their own installer as a background subprocess, module_type `agent`, not hosted sub-spokes; each deploys a SERVER, and a separate `_ROLE_MAP` module sub-spoke manages it): `ab` (curl|bash `lbockenstedt/ab` `install.sh`), `netbox-server` (`netbox` `install.sh --infra-only` → NetBox app; managed by the `netbox`/ipam role), `ldap-server` (`ldap` `install_ldap.sh --infra-only` → OpenLDAP; managed by the `ldap`/directory role), `dns-server` (`lm` `dns/install_dns.sh --infra-only` → Unbound; managed by the `dns` role), `dhcp-server` (`lm` `dhcp/install_dhcp.sh --infra-only` → Kea; managed by the `dhcp` role). `--infra-only` stands up the server ONLY (no `lm-<x>` spoke unit).
   - `_RoleAdapter` wraps non-BaseSpoke roles (e.g. cppm). `LOAD_ROLE`/`UNLOAD_ROLE`/`UPDATE_CONFIG` handling; `_load_role_class`/`_sync_load_role`/`_install_role` (git clone + venv pip install).
 
 ## Key files
@@ -103,9 +103,9 @@ role's live status.
   dispatch and status reporting stay uniform, and (4) spawns the `RoleConnection` and
   starts it as a background task. `UNLOAD_ROLE` cancels that task and closes its socket;
   the role stops appearing as a spoke but the base agent stays connected.
-  **`bugfixer` is a *deploy* role**, not a hosted role: `LOAD_ROLE {role: "bugfixer"}`
-  runs bugfixer's own `install.sh` as a background subprocess instead of hosting a
-  sub-spoke — the deployed bugfixer service then connects to the hub independently
+  **`ab` is a *deploy* role**, not a hosted role: `LOAD_ROLE {role: "ab"}`
+  runs ab's own `install.sh` as a background subprocess instead of hosting a
+  sub-spoke — the deployed ab service then connects to the hub independently
   under its own agent id.
 - **Durability.** The set of currently-loaded roles is persisted to `.env` as
   `LOADED_ROLES` (comma list) every time a role is loaded/unloaded. A self-update
@@ -132,7 +132,7 @@ role's live status.
 2. **Load a role from the WebUI** (preferred over the boot flag for a running agent):
    go to **Setup → Agents**, find the agent, choose **Load Role**, pick the role (one of
    `dns`, `dhcp`, `network`, `netbox`, `opnsense`, `ldap`, `simulation`, `cppm`,
-   `proxmox`, `le`, `console`, or the deploy role `bugfixer`). The agent installs deps
+   `proxmox`, `le`, `console`, or the deploy role `ab`). The agent installs deps
    and opens the sub-spoke; within a few seconds it shows up as a Spoke under that
    role's own module page.
 3. **Unload a role:** same **Setup → Agents** panel, **Unload Role**. The sub-spoke

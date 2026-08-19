@@ -314,7 +314,7 @@ requested.
 ### 11.2 Two preconditions to make enforcement real (not theater)
 1. **No cert-less browser may still hit the hub directly.** All WebUI access must go through a
    proxy **or** an enrolled workstation cert (§12). Verify no other legit cert-less client
-   remains on the socket (agents, bugfixer mTLS client, same-box/loopback legs).
+   remains on the socket (agents, ab mTLS client, same-box/loopback legs).
 2. **Narrow the accepted client CA to the private hub CA only.** Today
    `server_client_ca_file()` (`mtls.py:242`) loads the hub CA **plus the entire system root
    store** (~100+ roots) — `CERT_REQUIRED` against that bundle would "verify" any cert chaining

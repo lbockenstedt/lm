@@ -57,7 +57,7 @@
         le: 'le',
         certificates: 'le',
         webui: 'webui',
-        bugfixer: 'bugfixer',
+        ab: 'ab',
         console: 'console',
         agent: 'generic-agent',
         'generic-agent': 'generic-agent',
@@ -371,7 +371,7 @@
             '" onclick="openHelp(\'' + name + '\',' + sec + ');return false;">i</button>';
     }
 
-    // ── LLM "Ask AI" assistant (backed by the bugfixer agent) ────────────────
+    // ── LLM "Ask AI" assistant (backed by the ab agent) ────────────────
     function _askFormHtml(prefill) {
         return '<form id="lm-ask-form" style="display:flex;gap:.5rem;margin-bottom:1rem">' +
             '<input id="lm-ask-input" type="text" placeholder="Ask about Lab Manager…" value="' +
@@ -438,7 +438,7 @@
         _wireAskForm();
     }
     // Inject the header "Ask AI" button ONLY when the assistant is available
-    // (bugfixer connected), beside the existing "?" Help button.
+    // (ab connected), beside the existing "?" Help button.
     async function _initAsk() {
         try {
             const res = await fetch('/api/help/available');

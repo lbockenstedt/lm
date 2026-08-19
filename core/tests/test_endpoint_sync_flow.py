@@ -148,7 +148,7 @@ async def test_sync_propagates_cppm_error_counts():
 async def test_sync_error_emits_sync_error_marker_with_message(caplog):
     """A per-tenant push with errors must emit a [sync-error] WARNING carrying
     the sink's message — so the cause lands in the hub log + GET_ERROR_LOGS
-    (bugfixer) instead of an opaque "errors=N" INFO line."""
+    (ab) instead of an opaque "errors=N" INFO line."""
     with caplog.at_level(logging.WARNING, logger="Hub"):
         hub = _SyncHub(responses={
             ("netbox-spoke-1", "NETBOX_GET_IPS"): _netbox_ips_payload(),

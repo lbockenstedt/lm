@@ -467,7 +467,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # { spoke_id: {attempts, last_attempt_ts, next_retry_ts, gave_up,
         #              manual_pause, last_crash_sig, last_action, last_error,
         #              in_progress} }. Surfaced via GET_SPOKE_STATUS + the
-        # /setup/diagnostics route so the WebUI and bugfixer see recovery state.
+        # /setup/diagnostics route so the WebUI and ab see recovery state.
         self.spoke_recovery: Dict[str, Dict[str, Any]] = {}
         # Spoke out-of-contact alerting (SpokeAlertMixin). Transient runtime state —
         # never persisted/committed; re-derives within one loop cycle after a hub
@@ -497,8 +497,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # explanation + browser console + raw HTML + html2canvas screenshot to
         # /api/bug-report; the hub stores the full artifacts under data_dir/bugs/
         # <id>/ and keeps this in-memory index (id -> summary metadata) for
-        # bugfixer to enumerate via GET_BUG_REPORTS. The [bug-report] marker line
-        # in the hub log is what bugfixer filters on; the index avoids re-filing.
+        # ab to enumerate via GET_BUG_REPORTS. The [bug-report] marker line
+        # in the hub log is what ab filters on; the index avoids re-filing.
         self.bug_reports: Dict[str, Dict[str, Any]] = {}
         self.bug_report_limit = 50
         self.message_count = 0
@@ -599,7 +599,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             logging.getLogger(_sim_logger_name).addHandler(cs_bridge_handler)
 
         # Route uncaught SYNC exceptions through the "Hub" logger so they land in
-        # self.logs → Error Log tab (collect_error_logs) + BugFixer, instead of
+        # self.logs → Error Log tab (collect_error_logs) + AppBuilder, instead of
         # only local stderr. The asyncio-task counterpart is set at the top of
         # start(). See logging-observability-contract.md req 4.
         _prev_excepthook = sys.excepthook
@@ -942,7 +942,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # File-a-Bug artifact store: each report's console.log / dom.html /
         # screenshot.png / report.json live under data_dir/bugs/<id>/ so the
         # large payloads never bloat the 500-line self.logs deque or the hub
-        # log file. Bugfixer pulls them back via GET_BUG_REPORT for fix context.
+        # log file. AppBuilder pulls them back via GET_BUG_REPORT for fix context.
         self.bug_dir = os.path.join(self.state.data_dir, "bugs")
         try:
             os.makedirs(self.bug_dir, exist_ok=True)
@@ -3580,7 +3580,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Every spoke relays its captured log entries (INFO+) here every few
         seconds, plus a final flush before a self-update restart. We append them
         to ``agent_logs[spoke_id]`` so ``collect_all_logs`` /
-        ``collect_error_logs`` surface them with module = spoke_id (and BugFixer's
+        ``collect_error_logs`` surface them with module = spoke_id (and AppBuilder's
         GET_LOGS). Previously SPOKE_LOG had no handler and fell through to the
         catch-all + discard, so spoke logs never reached the WebUI Logs view.
         Called from ``handle_connection``.
@@ -3588,7 +3588,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Ephemeral by design: ``agent_logs[spoke_id]`` is an in-memory deque
         (``maxlen = max_log_size``) that is NOT persisted to disk and is lost on
         a hub restart (and dropped for a spoke by ``_evict_spoke`` when the spoke
-        is deleted). It is a rolling recent-window view for the WebUI / bugfixer,
+        is deleted). It is a rolling recent-window view for the WebUI / ab,
         not an audit log — the spoke's own journal is the durable record. Each
         entry is stamped with the hub receive time (the spoke's original timestamp
         is inside the entry text), and the deque caps total volume per spoke so a
@@ -3976,7 +3976,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """Dispatch a spoke/agent-initiated HUB_REQUEST and reply with a signed
         HUB_RESPONSE.
 
-        Used by agents that need something from the hub (e.g. BugFixer asking for
+        Used by agents that need something from the hub (e.g. AppBuilder asking for
         logs or to trigger updates). The request carries NO top-level
         correlation_id (it uses ``header.message_id``) so it isn't consumed as an
         ack in the correlation_id branch of ``handle_connection``; we reply with a
@@ -5128,7 +5128,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         continue
                 # --- End Relay Logic ---
 
-                # Agent-initiated request (e.g. BugFixer asking for logs or to
+                # Agent-initiated request (e.g. AppBuilder asking for logs or to
                 # trigger updates). See _handle_hub_request for the dispatch +
                 # signed HUB_RESPONSE reply.
                 if payload.get("type") == "HUB_REQUEST":
@@ -5208,7 +5208,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """Aggregate every log source the Hub can see.
 
         Extracted from GET /setup/logs/all so the HTTP endpoint and the
-        HUB_REQUEST GET_LOGS handler (used by the BugFixer agent) share one
+        HUB_REQUEST GET_LOGS handler (used by the AppBuilder agent) share one
         implementation. Returns {"logs": [{"module": str, "log": str}, ...]}.
         """
         all_logs = []
@@ -5239,12 +5239,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # safely under the 16 MiB max_size set on websockets.serve), trim to the
         # newest entries that fit. This keeps GET_LOGS responsive as spoke count
         # and per-module heartbeat lines grow, without ever tripping a 1009
-        # "message too big" close on the bugfixer agent.
+        # "message too big" close on the ab agent.
         #
         # The trim is a binary search over the tail length (O(log N) json.dumps
         # passes), NOT the prior `while ... pop(0)` loop which re-serialized the
         # whole list on every pop — O(N²) in log lines, which at 100s of spokes
-        # × 1000-line deques stalled the event loop on every BugFixer poll.
+        # × 1000-line deques stalled the event loop on every AppBuilder poll.
         max_bytes = getattr(self, "get_logs_max_bytes", lambda: 12 * 1024 * 1024)()
         all_logs = _fit_log_payload(all_logs, max_bytes)
 
@@ -5256,7 +5256,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         Same sources as collect_all_logs (hub deque, agent_logs, /var/log/lm/*.log)
         but filtered to lines that read as errors — ERROR / CRITICAL / Exception /
         Traceback (case-insensitive). Each line is prefixed with its source module
-        so the WebUI's Error Log tab and the BugFixer agent get one copy-pasteable
+        so the WebUI's Error Log tab and the AppBuilder agent get one copy-pasteable
         list of everything that has gone wrong across the whole stack, without
         having to comb each spoke's logs by hand.
         """
@@ -5344,7 +5344,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         (co-located on the hub box → ws://127.0.0.1, NOT wss://). Such a
         connection has NO TLS leg, so the spoke can NEVER present an mTLS client
         cert — mTLS is remote-only. This is why only remote modules (e.g.
-        bugfixer over wss://) can go mtls_active; issuing a cert to a co-located
+        ab over wss://) can go mtls_active; issuing a cert to a co-located
         spoke just writes files it can't present. remote_ip is captured at
         connect into spoke_telemetry. Unknown IP → NOT treated as loopback (don't
         suppress issuance on missing telemetry)."""
@@ -5358,8 +5358,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """Fleet mTLS: issue + deliver a Hub-Local-CA clientAuth client cert to a
         spoke so it presents a VERIFIED mTLS identity (public CAs no longer issue
         clientAuth). Idempotent — skips when the registry holds a current (>30d to
-        expiry) cert unless ``force``. BugFixer's cert SANs include the pinned
-        ``bugfixer_cert_identities`` so the HUB_REQUEST gate matches; other spokes
+        expiry) cert unless ``force``. AppBuilder's cert SANs include the pinned
+        ``ab_cert_identities`` so the HUB_REQUEST gate matches; other spokes
         get SAN=spoke_id. The hub keeps only cert METADATA (the spoke holds the
         private key) — re-issue to re-provision."""
         try:
@@ -5373,7 +5373,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Co-located spokes connect over plaintext loopback (ws://127.0.0.1) — no
         # TLS leg, so a client cert can never be presented. Skip: issuing one just
         # writes files the spoke can't use and shows a misleading "issued but never
-        # active". mTLS is remote-only (wss); this is why only bugfixer works.
+        # active". mTLS is remote-only (wss); this is why only ab works.
         if self._is_loopback_spoke(spoke_id):
             return {"status": "skipped", "reason": "loopback",
                     "message": "co-located spoke connects over loopback (ws://127.0.0.1) — "
@@ -5408,12 +5408,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     force = True
             if not force:
                 return {"status": "current", "not_after": entry.get("not_after")}
-        # SANs: bugfixer includes the pinned identities so _hub_request_authorized
+        # SANs: ab includes the pinned identities so _hub_request_authorized
         # matches its presented cert; other spokes just need a verified identity.
         sans = [spoke_id]
         gc = self.state.get_global_config() or {}
-        pinned = [str(n).strip() for n in (gc.get("bugfixer_cert_identities") or []) if str(n).strip()]
-        is_bf = module_type == "bugfixer" or spoke_id == "bugfixer" or pk == "bugfixer"
+        pinned = [str(n).strip() for n in (gc.get("ab_cert_identities") or []) if str(n).strip()]
+        is_bf = module_type == "ab" or spoke_id == "ab" or pk == "ab"
         if is_bf and pinned:
             sans = list(dict.fromkeys(pinned + [spoke_id]))
         cn = sans[0]
@@ -5447,7 +5447,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             pass
         reg[pk] = {"spoke_id": spoke_id, "module_type": module_type, "san": sans, "cn": cn,
                    "issued_at": now, "not_after": na_iso, "not_after_ts": na_ts,
-                   "serial": serial, "source": "hub-ca", "bugfixer": bool(is_bf)}
+                   "serial": serial, "source": "hub-ca", "ab": bool(is_bf)}
         self.state.system_state["mtls_client_certs"] = reg
         try:
             await self.state.save_state_now()
@@ -5554,7 +5554,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                 peer_cert_identity=None) -> bool:
         """H1: is this connection allowed to use the reverse HUB_REQUEST channel?
 
-        The channel is BugFixer's tool — it finds problems and fixes them, so it
+        The channel is AppBuilder's tool — it finds problems and fixes them, so it
         legitimately needs every tenant's logs (GET_LOGS), the full fleet roster
         (GET_SPOKE_STATUS), the bug-report handoff, and the fleet TRIGGER_*
         update actions (to push fixes). But "approved + signed" was the ONLY
@@ -5563,16 +5563,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         SPOKE_UPDATE to every spoke/agent) and cross-tenant log harvest.
 
         The gate is **cert-bound**, not ``spoke_id``-bound. ``spoke_id`` is
-        hostname-derived and spoofable (name a box ``bugfixer``), and casing is a
+        hostname-derived and spoofable (name a box ``ab``), and casing is a
         nuisance; identity is the verified TLS client cert instead. An operator
-        labels a specific Let's Encrypt-issued cert as "the BugFixer cert" (the
-        LE-module checkbox → ``global_config['bugfixer_cert_identities']``, a
+        labels a specific Let's Encrypt-issued cert as "the AppBuilder cert" (the
+        LE-module checkbox → ``global_config['ab_cert_identities']``, a
         list of DNS names); the hub pins that cert's identity; a HUB_REQUEST is
         authorized **only** when the calling connection presented that cert over
         mTLS. mTLS off / no cert / extraction failed / mismatch → denied.
 
-        Rule: ``BugFixer rights ⟺ mTLS on AND the connection's verified client
-        cert matches the pinned BugFixer cert. Anything else → denied.``
+        Rule: ``AppBuilder rights ⟺ mTLS on AND the connection's verified client
+        cert matches the pinned AppBuilder cert. Anything else → denied.``
 
         ``peer_cert_identity`` is the tuple of SAN DNS names (subject-CN fallback)
         captured for this connection by the ``/ws/spoke`` route (None when mTLS
@@ -5580,10 +5580,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         pinned cert → deny. Everything else is denied and logged so attempted
         abuse surfaces in diagnostics."""
         pinned = (self.state.get_global_config() or {}).get(
-            "bugfixer_cert_identities", []) or []
+            "ab_cert_identities", []) or []
         if not pinned:
-            # No cert designated as BugFixer → the channel is closed (fail-closed
-            # default). BugFixer is dormant until the operator issues + labels a
+            # No cert designated as AppBuilder → the channel is closed (fail-closed
+            # default). AppBuilder is dormant until the operator issues + labels a
             # dedicated cert.
             return False
         if not peer_cert_identity:
@@ -5596,25 +5596,25 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         """Dispatch a HUB_REQUEST from an approved agent and return a result dict.
 
         This is the reverse of the normal Hub->spoke command direction: an
-        approved agent (e.g. BugFixer) asks the Hub to do something and
+        approved agent (e.g. AppBuilder) asks the Hub to do something and
         receives a correlated, signed HUB_RESPONSE. Only approved, signed
         senders reach this method (the message loop drops everyone else),
-        and only a connection presenting the pinned BugFixer client cert over
+        and only a connection presenting the pinned AppBuilder client cert over
         mTLS is authorized to use the channel (H1) — see _hub_request_authorized.
         """
         req_type = req.get("type", "") if isinstance(req, dict) else ""
         # H1: the whole reverse channel (fleet RCE + cross-tenant logs + roster)
-        # is BugFixer's tool. Deny every other approved spoke before dispatch so
+        # is AppBuilder's tool. Deny every other approved spoke before dispatch so
         # a malicious/compromised spoke can't escalate to fleet-wide action.
         if not self._hub_request_authorized(spoke_id, peer_cert_identity):
             logger.warning(
                 f"[H1] denied HUB_REQUEST '{req_type}' from {spoke_id}: not "
-                f"authorized (BugFixer client cert required; label a cert in the "
+                f"authorized (AppBuilder client cert required; label a cert in the "
                 f"LE module and present it over mTLS).")
             self.record_spoke_event(spoke_id, "hub_request_denied",
-                                    f"type={req_type} — BugFixer client cert required")
+                                    f"type={req_type} — AppBuilder client cert required")
             return {"status": "error",
-                    "message": "not authorized for HUB_REQUEST (BugFixer role required)"}
+                    "message": "not authorized for HUB_REQUEST (AppBuilder role required)"}
         try:
             if req_type == "GET_LOGS":
                 return await asyncio.to_thread(self.collect_all_logs)
@@ -5642,7 +5642,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     "active_connections": list(self.active_connections.keys()),
                     "approved": {sid: bool(approved) for sid, approved in self.approved_modules.items()},
                     "module_types": dict(self.spoke_module_types),
-                    # Per-spoke recovery state for the watchdog. bugfixer reads
+                    # Per-spoke recovery state for the watchdog. ab reads
                     # this to suppress filing while the hub is recovering
                     # (in_progress) and to escalate only on give_up (so a human
                     # sees "venv/interpreter missing — needs reinstall", not a
@@ -5664,16 +5664,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     },
                 }
 
-            # "File a Bug" handoff: bugfixer enumerates filed reports, pulls the
+            # "File a Bug" handoff: ab enumerates filed reports, pulls the
             # full artifacts (console/HTML/screenshot) for AI-fix context, and
             # marks them filed so the same report is never filed twice. The
-            # short [bug-report] marker line in the hub log is what bugfixer's
+            # short [bug-report] marker line in the hub log is what ab's
             # scan_bugs filters on; these handlers carry the payload.
             if req_type == "GET_BUG_REPORTS":
                 reports = self._list_bug_reports()
-                # Feature requests are gated on admin approval: bugfixer must not
+                # Feature requests are gated on admin approval: ab must not
                 # file/work an unapproved feature. We still SEND them (annotated
-                # gated_pending_approval=True) so bugfixer can count "awaiting
+                # gated_pending_approval=True) so ab can count "awaiting
                 # approval" for its diagnostics — but scan_bugs skips filing them,
                 # and GET_BUG_REPORT (below) denies the full fetch. Bugs, and any
                 # feature already approved/filed/fixed, are not gated.
@@ -5691,7 +5691,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 rid = req.get("id", "")
                 rep = await asyncio.to_thread(self._get_bug_report, rid)
                 # Defense in depth: never hand a full unapproved-feature report to
-                # bugfixer (it would file + work it). The admin approves first.
+                # ab (it would file + work it). The admin approves first.
                 if rep and self._bug_feature_gated(rep):
                     logger.info(
                         f"[bug-report] GET_BUG_REPORT id={rid} from {spoke_id}: "
@@ -5715,7 +5715,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 return {"status": "ok" if ok else "not_found"}
 
             if req_type == "MARK_BUG_FIXED":
-                # bugfixer closed the GitHub issue for this report → the LM UI shows
+                # ab closed the GitHub issue for this report → the LM UI shows
                 # "Fixed" + the issue link.
                 rid = req.get("id", "")
                 issue_url = req.get("issue_url", "")
@@ -5738,7 +5738,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 return {"status": "ok" if ok else "not_found"}
 
             if req_type == "MARK_BUG_DUPLICATE":
-                # bugfixer matched this report to an EXISTING issue (recurrence/same
+                # ab matched this report to an EXISTING issue (recurrence/same
                 # error) instead of filing a new one → the LM UI shows "Duplicate"
                 # linking that same issue.
                 rid = req.get("id", "")
@@ -6933,13 +6933,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     async def run_pxmx_diag_loop(self):
         """Emit spoke-health diagnostics into the hub log (the logging telemetry).
 
-        The hub log flows to BOTH the WebUI (/setup/logs/all) and the BugFixer
+        The hub log flows to BOTH the WebUI (/setup/logs/all) and the AppBuilder
         agent (HUB_REQUEST GET_LOGS -> collect_all_logs) via HubLogHandler, so
         anything logged here is visible to a human in the Logs view and to
-        bugfixer over the same channel — no separate file, no CLI curl. This
+        ab over the same channel — no separate file, no CLI curl. This
         replaces hitting the auth-protected /api/pxmx/* endpoints from the
         command line (a bare curl just gets {"detail":"Authentication required"}
-        and tells you nothing) and gives bugfixer the same view it needs to fix
+        and tells you nothing) and gives ab the same view it needs to fix
         things.
 
         Snapshot each cycle (~30s) and emit a [spoke-diag] line on meaningful
@@ -7019,7 +7019,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # USB-availability telemetry: where each cached cs spoke put USB
                 # data this cycle, so a missing USB count in the tenant VM Server
                 # Overview/USB tab is diagnosable from System → Logs → hub (and
-                # bugfixer GET_LOGS) instead of CLI curl. Emits a [usb-telemetry]
+                # ab GET_LOGS) instead of CLI curl. Emits a [usb-telemetry]
                 # line on change + a ~10min heartbeat. One compact entry per cs
                 # spoke host; lengths only (a CS payload may carry Proxmox tokens
                 # in other frames, so never values).
@@ -7143,8 +7143,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         "nw": "nw", "le": "certificates", "truenas": "storage",
     }
 
-    async def analyze_logs_via_bugfixer(self, module, log_text, title):
-        """Delegate Log Analysis to the bugfixer spoke (which owns the LLM) and cache
+    async def analyze_logs_via_ab(self, module, log_text, title):
+        """Delegate Log Analysis to the ab spoke (which owns the LLM) and cache
         the result under `module`. The LM hub has no LLM of its own. Never raises —
         returns {ok, module, title, analysis, verdict, duration_s, error, at} and stores
         it in self._log_analysis_cache. Long timeout: the LLM can be slow."""
@@ -7160,11 +7160,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             cache[key] = res
             return res
 
-        sid = self.get_spoke_by_type("bugfixer")
+        sid = self.get_spoke_by_type("ab")
         if not sid:
             return _store({"ok": False, "running": False, "module": key, "title": title,
                            "analysis": "", "verdict": "unknown", "duration_s": None, "at": now,
-                           "error": "BugFixer spoke is not connected — Log Analysis needs BugFixer online + approved."})
+                           "error": "AppBuilder spoke is not connected — Log Analysis needs AppBuilder online + approved."})
         if not (log_text or "").strip():
             return _store({"ok": True, "running": False, "module": key, "title": title,
                            "analysis": "No log lines available to analyze.", "verdict": "none",
@@ -7172,14 +7172,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         t0 = _t.monotonic()
         try:
             # Generous deadline: on a CPU model the analysis is slow, and it QUEUES
-            # behind any in-flight fix on BugFixer's single LLM slot — 180s was too
+            # behind any in-flight fix on AppBuilder's single LLM slot — 180s was too
             # short and dropped completed replies. 10 min covers a fix + analysis.
             resp = await self.request_response(sid, "ANALYZE_LOGS",
                                                {"logs": log_text, "title": title}, timeout=600.0)
         except Exception as e:  # noqa: BLE001
             return _store({"ok": False, "running": False, "module": key, "title": title,
                            "analysis": "", "verdict": "unknown", "duration_s": round(_t.monotonic() - t0, 1),
-                           "at": now, "error": f"request to bugfixer failed: {e}"})
+                           "at": now, "error": f"request to ab failed: {e}"})
         dur = round(_t.monotonic() - t0, 1)
         inner = resp.get("payload", {}).get("data", resp) if isinstance(resp, dict) else {}
         ok = inner.get("status") == "ok"
@@ -7283,10 +7283,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         kws = ("ERROR", "CRITICAL", "Traceback", "Exception", "FATAL")
         return [l for l in lines if any(k in l for k in kws)]
 
-    async def _escalate_to_bugfixer(self, module, log_slice, analysis, verdict):
-        """Ship a Tier-1 'escalate' verdict to the bugfixer spoke for deep triage
+    async def _escalate_to_ab(self, module, log_slice, analysis, verdict):
+        """Ship a Tier-1 'escalate' verdict to the ab spoke for deep triage
         (ESCALATE_LOG_ISSUE → file_escalated_issue). Best-effort; logs the outcome."""
-        sid = self.get_spoke_by_type("bugfixer")
+        sid = self.get_spoke_by_type("ab")
         if not sid:
             return
         try:
@@ -7295,15 +7295,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 {"module": module, "logs": log_slice, "analysis": analysis, "verdict": verdict},
                 timeout=300.0)
             inner = resp.get("payload", {}).get("data", resp) if isinstance(resp, dict) else {}
-            logger.info(f"[log-sentinel] escalated {module} → bugfixer: "
+            logger.info(f"[log-sentinel] escalated {module} → ab: "
                         f"{inner.get('status')} {inner.get('detail', '')}")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[log-sentinel] escalation of {module} failed: {e}")
 
     async def run_log_health_loop(self):
         """Tier-1 log sentinel. Per module (hub + each connected spoke), cheaply gate on
-        NEW error-level lines; only then spend a (bugfixer-delegated) LLM analysis, cache
-        it for the WebUI panel, and — if the verdict is 'escalate' — ship it to bugfixer
+        NEW error-level lines; only then spend a (ab-delegated) LLM analysis, cache
+        it for the WebUI panel, and — if the verdict is 'escalate' — ship it to ab
         for deep triage. Configurable via global_config: log_analysis_auto (default True)
         + log_analysis_interval_min (default 15). Self-throttled so it never overlaps and
         never fires faster than a sweep takes (effective gap = max(interval, last sweep
@@ -7315,7 +7315,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self._log_sentinel_metric = getattr(self, "_log_sentinel_metric", {})
         last_sweep = 0.0
         last_dur = 0.0
-        await _aio.sleep(120)  # let startup settle + bugfixer connect
+        await _aio.sleep(120)  # let startup settle + ab connect
         while True:
             try:
                 gc = self.state.get_global_config() if hasattr(self.state, "get_global_config") else {}
@@ -7323,7 +7323,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 interval_min = int(gc.get("log_analysis_interval_min", 30) or 30)
                 interval = max(60, interval_min * 60)
                 effective = max(interval, last_dur)  # self-throttle: never fire faster than a sweep takes
-                if not auto or not self.get_spoke_by_type("bugfixer") or (_t.time() - last_sweep) < effective:
+                if not auto or not self.get_spoke_by_type("ab") or (_t.time() - last_sweep) < effective:
                     await _aio.sleep(30)
                     continue
 
@@ -7373,11 +7373,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                 sha = sha or self.spoke_commits.get(spk, "")
                             tag = (f" — v{ver}" if ver else "") + (f" @ {sha[:8]}" if sha else "")
                             title = f"{module} logs{tag}"
-                        res = await self.analyze_logs_via_bugfixer(module, "\n".join(lines), title)
+                        res = await self.analyze_logs_via_ab(module, "\n".join(lines), title)
                         if res.get("duration_s"):
                             durations.append(res["duration_s"])
                         if res.get("ok") and res.get("verdict") == "escalate":
-                            await self._escalate_to_bugfixer(
+                            await self._escalate_to_ab(
                                 module, "\n".join(errs[-60:]), res.get("analysis", ""), "escalate")
                     except Exception as me:  # noqa: BLE001
                         logger.debug(f"[log-sentinel] module {module} error: {me}")
@@ -7407,7 +7407,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         /usr/local/bin/lm-spoke-recover root helper (inspect -> reset-failed if
         SubState==failed -> restart). Backoff 60/120/180s.
 
-        Give up (and hand off to bugfixer to file an issue) on any of:
+        Give up (and hand off to ab to file an issue) on any of:
           - 3 failed restarts (still disconnected across the backoff schedule),
           - the SAME crash signature repeating (a restart structurally can't
             fix it — e.g. a missing venv — so don't burn all 3 retries),
@@ -7415,9 +7415,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
           - a manual_pause flag (set from the WebUI Diagnostics "Pause" button).
 
         Every action is recorded as a spoke_event (WebUI timeline) AND a
-        greppable [recovery] log line (hub log -> WebUI Logs + bugfixer GET_LOGS)
+        greppable [recovery] log line (hub log -> WebUI Logs + ab GET_LOGS)
         so the whole recovery is visible without CLI. Per-spoke recovery state is
-        exposed via GET_SPOKE_STATUS + /setup/diagnostics so bugfixer can suppress
+        exposed via GET_SPOKE_STATUS + /setup/diagnostics so ab can suppress
         filing while the hub is recovering and escalate only on give_up.
         """
         await asyncio.sleep(30)  # let spokes connect + first heartbeats arrive
@@ -8045,7 +8045,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
     def _asyncio_exception_relay(self, loop, context) -> None:
         """asyncio loop exception handler — logs unhandled task exceptions via
-        the Hub logger (→ self.logs → Error Log + BugFixer) then defers to the
+        the Hub logger (→ self.logs → Error Log + AppBuilder) then defers to the
         default handler. See logging-observability-contract.md req 4."""
         from messaging.log_relay import format_asyncio_context
         exc = context.get("exception")
@@ -8244,13 +8244,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         pxmx_diag_task = asyncio.create_task(self.run_pxmx_diag_loop())
         # Per-module health heartbeat for the Hub itself. Emits a greppable
         # [heartbeat] line into self.logs (module="hub" in collect_all_logs)
-        # every ~60s so BugFixer can confirm the Hub is alive and triage when
+        # every ~60s so AppBuilder can confirm the Hub is alive and triage when
         # it is not — mirrors the spoke-side _health_heartbeat_task so every
         # module in the stack, including the Hub, emits the same signal.
         hub_hb_task = asyncio.create_task(self.run_hub_heartbeat_loop())
         # Spoke-recovery watchdog: detects approved-but-stranded spokes and
         # restarts their unit (reset-failed + restart via the root helper), with
-        # backoff + give-up/escalation to bugfixer. See run_spoke_recovery_loop.
+        # backoff + give-up/escalation to ab. See run_spoke_recovery_loop.
         recovery_task = asyncio.create_task(self.run_spoke_recovery_loop())
         # Spoke out-of-contact alerting: forgiving 5 min → warning / 30 min → error
         # tiers, decoupled from the recovery watchdog above (which still acts at
@@ -8390,7 +8390,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # nothing to decompress and the link is stable across any version skew.
         # max_size: default is 1 MiB. collect_all_logs() (GET_LOGS) routinely
         # exceeds that once a few spokes + their per-module heartbeat lines are
-        # relaying, which closed the bugfixer agent with code 1009 "message too
+        # relaying, which closed the ab agent with code 1009 "message too
         # big". 16 MiB ceiling pairs with the total-char cap in collect_all_logs
         # so the serialized payload stays safely under the frame limit.
         self._start_mdns_broadcast()
@@ -8436,7 +8436,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
     async def run_hub_heartbeat_loop(self):
         """Emit a greppable [heartbeat] line into self.logs every ~60s so
-        BugFixer (which reads Hub logs via GET_LOGS) can confirm the Hub is
+        AppBuilder (which reads Hub logs via GET_LOGS) can confirm the Hub is
         alive and triage a missing/stale entry. The HubLogHandler feeds
         logger output into self.logs, which collect_all_logs returns as
         module="hub" — so this is the Hub's counterpart to the spoke-side
@@ -8452,7 +8452,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 uptime = int(time.time() - start)
                 # INFO, not DEBUG: at the default INFO level a DEBUG line is
                 # filtered before it reaches HubLogHandler → never buffered into
-                # self.logs → never returned by GET_LOGS → BugFixer never observes
+                # self.logs → never returned by GET_LOGS → AppBuilder never observes
                 # the hub's own heartbeat and its triage warm-up gate stays stuck
                 # "waiting for hub's own heartbeat" forever. Matches the spoke-side
                 # BaseControlPlane._health_heartbeat_task, which logs at INFO.

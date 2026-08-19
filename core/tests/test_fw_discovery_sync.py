@@ -292,7 +292,7 @@ async def test_run_all_returns_summary_with_dropped():
 async def test_push_with_errors_emits_sync_error_marker_with_message(caplog):
     """A per-tenant push that returns batch SUCCESS with per-record errors must
     emit a [sync-error] WARNING carrying the sink's first-error message — so the
-    cause reaches the hub log + GET_ERROR_LOGS (bugfixer). This is the LRB case
+    cause reaches the hub log + GET_ERROR_LOGS (ab). This is the LRB case
     (pushed 1, 180 errors) that previously slipped past collect_error_logs
     because ``errors=180`` doesn't match ``\\berror\\b``."""
     with caplog.at_level(logging.WARNING, logger="Hub"):

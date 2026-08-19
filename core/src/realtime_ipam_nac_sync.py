@@ -251,7 +251,7 @@ class RealtimeIpamNacSyncMixin:
             rstate = "success" if rstatus != "ERROR" else "error"
             # Hub-authoritative sync log: clean → INFO; errors/failure →
             # [sync-error] WARNING carrying the sink's message so the cause lands
-            # in the hub log + GET_ERROR_LOGS (bugfixer).
+            # in the hub log + GET_ERROR_LOGS (ab).
             if errors > 0 or rstatus == "ERROR":
                 logger.warning("[sync-error] realtime-nac tenant=%s(%s) status=%s "
                                "sent=%d pushed=%d skipped=%d deleted=%d errors=%d — %s",

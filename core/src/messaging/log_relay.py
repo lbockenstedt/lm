@@ -68,7 +68,7 @@ class LogRelayMixin:
 
         Flushes every 5 s (not 30 s) so a short-lived spoke process — which can be
         torn down ~22 s after startup — still gets several relay windows before
-        it dies, and the Hub/WebUI/BugFixer see the connect/handshake trail and
+        it dies, and the Hub/WebUI/AppBuilder see the connect/handshake trail and
         the final log line rather than losing everything in the queue.
         """
         while True:
@@ -144,7 +144,7 @@ class LogRelayMixin:
 
     def _install_uncaught_exception_relay(self) -> None:
         """Route uncaught SYNC exceptions through the module logger (→ relay
-        handler → hub Error Log + BugFixer) before the interpreter's default
+        handler → hub Error Log + AppBuilder) before the interpreter's default
         handler runs. The asyncio-task counterpart is set in run(). Without
         both, a genuine crash reaches only local stderr, never the hub — see
         logging-observability-contract.md req 4."""

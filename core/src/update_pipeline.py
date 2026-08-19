@@ -75,12 +75,12 @@ _UPDATE_SOURCE_PREFIX_MAP = {
 _IN_LM_REPO_MODULE_TYPES = {"agent", "dns", "dhcp", "henet", "console", "statuspage"}
 
 # Modules that update THEMSELVES and must not be fanned out a SPOKE_UPDATE.
-# bugfixer runs its own updater thread (bugfixer/main.py updater_worker, which
+# ab runs its own updater thread (ab/main.py updater_worker, which
 # hard-resets its checkout to origin/main), so the hub has no repo mapping for
 # it — and without this it fell through to "unknown module type" in the Module
 # Updates list, which reads as a FAILURE for something that is working exactly
 # as designed. Reported honestly as self-updating instead.
-_SELF_UPDATING_MODULE_TYPES = {"bugfixer"}
+_SELF_UPDATING_MODULE_TYPES = {"ab"}
 
 # Canonical default for the hub's own repo. Used to fall back when
 # ``global_config["update_sources"]["hub"]`` is absent OR an empty string. An
@@ -662,7 +662,7 @@ class UpdatePipelineMixin:
         # ``notices`` = benign, self-healing states that are EXPECTED and must not
         # read as failures: chiefly a stale process pending the restart window. The
         # caller logs these at plain INFO (no ``[sync-error]`` tag), so they don't
-        # land in the Error Log / BugFixer feed. They do NOT affect ``ok``.
+        # land in the Error Log / AppBuilder feed. They do NOT affect ``ok``.
         notices: List[str] = []
         checks: Dict[str, Any] = {}
         try:
@@ -1831,7 +1831,7 @@ class UpdatePipelineMixin:
     async def update_spokes_only(self):
         """Send SPOKE_UPDATE to every approved spoke without touching the Hub itself.
 
-        Called by POST /setup/update/spokes — typically triggered by BugFixer after
+        Called by POST /setup/update/spokes — typically triggered by AppBuilder after
         pushing a fix to GitHub so deployed services pick up the change before QA runs.
         """
         config = self.state.get_global_config()
@@ -1904,7 +1904,7 @@ class UpdatePipelineMixin:
         Mirrors update_spokes_only but filters to agent modules. Agents are
         generic (no per-type registry), so they all draw their repo_url from
         update_sources["agent"]; an agent is skipped if that source is unset.
-        Triggered by BugFixer (via HUB_REQUEST TRIGGER_AGENT_UPDATES) after it
+        Triggered by AppBuilder (via HUB_REQUEST TRIGGER_AGENT_UPDATES) after it
         pushes a fix, so deployed agents pick up the change before QA runs.
         """
         config = self.state.get_global_config()

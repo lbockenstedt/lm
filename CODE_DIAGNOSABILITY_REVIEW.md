@@ -113,7 +113,7 @@ These are correctness or factual issues, not stylistic preferences.
    silently. Add the guard for consistency.
 
 3. **Silent `except: pass` in `_get_bug_report`** (`main.py:1828-1829`, `:1840-1841`) —
-   artifact/screenshot read failures are swallowed with no log; bugfixer gets a
+   artifact/screenshot read failures are swallowed with no log; ab gets a
    silently-partial report with no indication why fields are missing. Replace with
    `logger.debug`.
 

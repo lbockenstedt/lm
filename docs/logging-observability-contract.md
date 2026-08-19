@@ -8,7 +8,7 @@
 - The operator **cannot always reach a box's CLI** (a module may run in an LXC
   container, on a headless Proxmox host, or a remote site). Diagnostics must be
   visible from the hub WebUI alone.
-- The **BugFixer** module reads relayed logs/errors to triage, auto-fix issues,
+- The **AppBuilder** module reads relayed logs/errors to triage, auto-fix issues,
   and open GitHub issues. A log that never reaches the hub is invisible to it.
 
 So: **once a module/agent is connected to the hub, the hub must have all of its
@@ -21,7 +21,7 @@ deque, the per-module/agent relayed deques (`agent_logs[...]`, fed by `AGENT_LOG
 / `SPOKE_LOG`), and any `/var/log/lm/*.log` files **on the hub box**:
 
 1. **Error Log** — `LabManagerHub.collect_error_logs()` → the WebUI **Error Log
-   tab** and the **BugFixer**. Aggregates errors across **all** modules, keeping
+   tab** and the **AppBuilder**. Aggregates errors across **all** modules, keeping
    only lines matching `\b(error|exception|traceback|critical)\b`
    (case-insensitive), each prefixed `[module]`.
 2. **Per-module log** — `collect_all_logs()` → the module's own log view (all
@@ -34,7 +34,7 @@ Two consequences every module must respect:
   separate host (e.g. a Proxmox node, a remote-site LXC) writes to *its own*
   `/var/log/lm` — invisible to the hub filesystem. Its **only** path into either
   hub log is the WebSocket relay. This is why the relay is mandatory, not optional.
-- **Error lines must carry the level word** so the Error-Log/BugFixer regex
+- **Error lines must carry the level word** so the Error-Log/AppBuilder regex
   matches them. The standard formatter `%(asctime)s - %(name)s - %(levelname)s -
   %(message)s` guarantees this (an ERROR record contains "ERROR"; an
   `exc_info=` traceback contains "Traceback"/"Exception"). Use it for the relay
@@ -46,7 +46,7 @@ Two consequences every module must respect:
    - Spokes: relay via the control-plane `SPOKE_LOG` / log-relay path.
    - Agents: attach a `WebSocketLogHandler` that sends `AGENT_LOG` frames (the
      spoke forwards them up via `AGENT_RELAY_UP`; the hub surfaces them in
-     **Setup → Agent/Spoke Logs** and feeds the BugFixer).
+     **Setup → Agent/Spoke Logs** and feeds the AppBuilder).
    - Relay level **INFO and above** (WARNING/ERROR always included).
 
 2. **Install the relay ONCE for the process lifetime** — at construction/startup,
@@ -65,7 +65,7 @@ Two consequences every module must respect:
    - `loop.set_exception_handler(...)` — routes unhandled asyncio-task exceptions
      through the module logger, then defers to `default_exception_handler`.
    Without these, a traceback lands only in the local file (via systemd stderr
-   capture) and never reaches the hub or the BugFixer.
+   capture) and never reaches the hub or the AppBuilder.
 
 5. **Log through the module's own named logger** (`getLogger("PxmxAgent")`,
    `getLogger("Hub")`, etc.) so the relay's prefix filter forwards it. Don't rely
@@ -80,7 +80,7 @@ Two consequences every module must respect:
 ## Normalization — consistent format & levels across every module
 
 Every module's logs must read the same way and use levels consistently, so the
-hub views and the BugFixer see one coherent stream, not a mix of chatty and
+hub views and the AppBuilder see one coherent stream, not a mix of chatty and
 terse dialects.
 
 - **Use the shared `configure_logging()`** (`core/src/logging_setup.py`) at every

@@ -1,4 +1,4 @@
-"""\"File a Bug\" report store for the LM Hub (WebUI footer → bugfixer artifacts)."""
+"""\"File a Bug\" report store for the LM Hub (WebUI footer → ab artifacts)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ logger = logging.getLogger("Hub")
 class HubBugStoreMixin:
     """Persist WebUI-submitted bug reports (explanation + console + HTML +
     screenshot) under ``<data_dir>/bugs/<id>/`` and index them in memory so
-    bugfixer can enumerate (GET_BUG_REPORTS), pull full artifacts
+    ab can enumerate (GET_BUG_REPORTS), pull full artifacts
     (GET_BUG_REPORT) and mark filed (MARK_BUG_FILED). State
     (``self.bug_dir`` / ``self.bug_reports`` / ``self.bug_report_limit``) is
     owned by ``LabManagerHub.__init__``."""
@@ -23,8 +23,8 @@ class HubBugStoreMixin:
     # ── "File a Bug" report store ────────────────────────────────────────────
     # The WebUI footer button POSTs an explanation + console + HTML + screenshot
     # to /api/bug-report. The full artifacts are written under data_dir/bugs/<id>/
-    # and a short [bug-report] marker line is logged (so bugfixer's GET_LOGS scan
-    # finds it). bugfixer enumerates via GET_BUG_REPORTS, pulls full artifacts via
+    # and a short [bug-report] marker line is logged (so ab's GET_LOGS scan
+    # finds it). ab enumerates via GET_BUG_REPORTS, pulls full artifacts via
     # GET_BUG_REPORT (for AI-fix context), and marks filed via MARK_BUG_FILED so
     # the same report is never filed twice.
     def _store_bug_report(self, payload: dict) -> str:
@@ -38,7 +38,7 @@ class HubBugStoreMixin:
         explanation = str(payload.get("explanation") or "")
         severity = str(payload.get("severity") or "medium")
         # "bug" (default, incl. all legacy reports) or "feature" — set by the
-        # WebUI "Bug/Feature Request" footer modal's checkbox. bugfixer files a
+        # WebUI "Bug/Feature Request" footer modal's checkbox. ab files a
         # feature request as a GitHub ``enhancement`` issue (no auto-fix).
         rtype = str(payload.get("type") or "bug").strip().lower() or "bug"
         if rtype not in ("bug", "feature"):
@@ -70,7 +70,7 @@ class HubBugStoreMixin:
                 report_json["screenshot_file"] = f"screenshot.{ext}"
             except Exception as e:
                 logger.warning(f"[bug-report] failed decoding screenshot for {rid}: {e}")
-        # In-memory index (capped). Holds the metadata bugfixer lists; full
+        # In-memory index (capped). Holds the metadata ab lists; full
         # artifacts are read from disk on demand by _get_bug_report.
         self.bug_reports[rid] = {
             "id": rid, "summary": explanation[:120], "severity": severity,
@@ -80,7 +80,7 @@ class HubBugStoreMixin:
         while len(self.bug_reports) > self.bug_report_limit:
             oldest = min(self.bug_reports, key=lambda k: self.bug_reports[k].get("ts", 0))
             self.bug_reports.pop(oldest, None)
-        # Authoritative "report is on disk and ready for bugfixer" trace line.
+        # Authoritative "report is on disk and ready for ab" trace line.
         logger.info(
             f"[bug-report] stored id={rid} type={rtype} severity={severity} "
             f"console={len(str(payload.get('console_logs') or ''))} "
@@ -102,7 +102,7 @@ class HubBugStoreMixin:
             "id": rid, "summary": meta.get("summary", ""), "severity": meta.get("severity", ""),
             "type": meta.get("type", "bug"), "ts": meta.get("ts", 0), "filed": meta.get("filed", False),
             "issue_url": meta.get("issue_url", ""), "context": meta.get("context", {}),
-            # status: "" (new) → "filed" (issue opened) → "fixed" (bugfixer closed it).
+            # status: "" (new) → "filed" (issue opened) → "fixed" (ab closed it).
             "status": meta.get("status", ("filed" if meta.get("filed") else "")),
             "fixed_at": meta.get("fixed_at", 0),
         }
@@ -114,7 +114,7 @@ class HubBugStoreMixin:
                         out[name.replace(".json", "_json").replace(".log", "").replace(".html", "")] = f.read()
                 except Exception:
                     logger.debug("bug-report: failed reading %s for %s", p, rid, exc_info=True)
-        # Screenshot back as a data URL so bugfixer can pass it to the AI as
+        # Screenshot back as a data URL so ab can pass it to the AI as
         # context if useful (kept out of the public GitHub issue).
         for ext in ("png", "jpg"):
             p = os.path.join(d, f"screenshot.{ext}")
@@ -132,7 +132,7 @@ class HubBugStoreMixin:
     def warm_load_bug_reports(self) -> None:
         """Rebuild the in-memory bug-report index from the artifacts already on
         disk (``<data_dir>/bugs/<id>/report.json``) at boot — otherwise
-        GET_BUG_REPORTS returns empty after a restart and bugfixer can't enumerate
+        GET_BUG_REPORTS returns empty after a restart and ab can't enumerate
         prior reports (and may re-file duplicates). Capped, most-recent first.
         Best-effort; never raises."""
         try:
@@ -167,17 +167,17 @@ class HubBugStoreMixin:
         return self._update_bug_status(rid, filed=True, issue_url=issue_url, status="filed")
 
     def _mark_bug_duplicate(self, rid: str, issue_url: str) -> bool:
-        """bugfixer detected this report is a duplicate/recurrence of an EXISTING
+        """ab detected this report is a duplicate/recurrence of an EXISTING
         GitHub issue instead of filing a fresh one → mark it 'duplicate' + link that
         same issue. filed=True so it isn't re-filed and (for features) isn't gated.
         The issue_url is recorded so the MARK_BUG_FIXED cascade later flips this
-        report to 'fixed' when bugfixer closes the shared issue."""
+        report to 'fixed' when ab closes the shared issue."""
         return self._update_bug_status(rid, filed=True, issue_url=issue_url, status="duplicate")
 
     @staticmethod
     def _bug_feature_gated(r: dict) -> bool:
         """True if this report is a feature request that an admin has NOT yet
-        approved — bugfixer must not file/work it. Bugs are never gated; a feature
+        approved — ab must not file/work it. Bugs are never gated; a feature
         that's already approved/filed/fixed is not gated."""
         if (r.get("type") or "bug") != "feature":
             return False
@@ -186,7 +186,7 @@ class HubBugStoreMixin:
 
     def _approve_bug_report(self, rid: str) -> bool:
         """Admin approved a feature request → mark it 'approved' so GET_BUG_REPORTS
-        exposes it and bugfixer may file the GitHub issue and work it. No-op-safe on
+        exposes it and ab may file the GitHub issue and work it. No-op-safe on
         bugs (they never need approval)."""
         return self._update_bug_status(rid, status="approved")
 
@@ -197,11 +197,11 @@ class HubBugStoreMixin:
                                        status="closed")
 
     def _mark_bug_fixed(self, rid: str, issue_url: str = "") -> bool:
-        """bugfixer closed the GitHub issue for this report → mark it 'fixed' so the
+        """ab closed the GitHub issue for this report → mark it 'fixed' so the
         LM bug-reports UI shows Fixed + the issue link.
 
         A recurrence dedups several reports onto ONE GitHub issue (each reopens it /
-        adds evidence), but bugfixer only passes the single report id embedded in the
+        adds evidence), but ab only passes the single report id embedded in the
         issue body. So the sibling recurrence reports would stay stuck at 'filed' even
         though the work is done. Mark every report sharing this issue_url fixed too."""
         import time as _t
@@ -253,7 +253,7 @@ class HubBugStoreMixin:
         hit OR a stale dir existed), False if the id was unknown. Best-effort
         on the rmtree: a missing/locked dir still counts as removed-from-
         index so the WebUI list refresh shows it gone. The public GitHub
-        issue (if bugfixer already filed one) is NOT touched — only the hub's
+        issue (if ab already filed one) is NOT touched — only the hub's
         local copy of the captured artifacts."""
         if not rid:
             return False

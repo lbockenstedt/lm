@@ -138,7 +138,7 @@ def test_plain_cs_user_only_has_cs():
 # ── LE (Certificate Management) write-gate floor ─────────────────────────────
 # The /api/le/* write middleware (core/src/api.py) admits the tenant-admin tier
 # (access.can_edit_shared) because each LE handler enforces per-cert ownership;
-# fleet-wide LE ops (renew-all / distribute-all / add-target / BugFixer) self-
+# fleet-wide LE ops (renew-all / distribute-all / add-target / AppBuilder) self-
 # gate to Global Admin in-handler. These tests pin that floor so a future refactor
 # can't silently drop a tenant-admin below it or let a plain module user through.
 def test_le_write_floor_admits_tenant_admin():

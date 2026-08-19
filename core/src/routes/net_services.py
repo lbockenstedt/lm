@@ -1131,7 +1131,7 @@ def register(app, hub, ctx):
         Returns the list (possibly empty) or ``None`` when there is no cert list.
         Fixes the silent-no-op bug where the tag/filter helpers read top-level
         ``data['certs']`` (``None`` on the enveloped shape), so per-cert tenant
-        ownership / bugfixer tags / the ownership filter never reached the certs
+        ownership / ab tags / the ownership filter never reached the certs
         the UI actually renders."""
         if not isinstance(data, dict):
             return None
@@ -1233,23 +1233,23 @@ def register(app, hub, ctx):
 
         return _le_with_certs(data, [c for c in (_le_certs_holder(data) or []) if _match(c)])
 
-    def _bugfixer_pinned():
-        """The set of DNS names designated as BugFixer certs (H1) —
-        ``global_config['bugfixer_cert_identities']``. The HUB_REQUEST channel
+    def _ab_pinned():
+        """The set of DNS names designated as AppBuilder certs (H1) —
+        ``global_config['ab_cert_identities']``. The HUB_REQUEST channel
         is gated to a connection presenting one of these over mTLS."""
         gc = hub.state.system_state.get("global_config", {}) or {}
-        # Lower-cased: le_set_bugfixer stores lowercase, and DNS names are
+        # Lower-cased: le_set_ab stores lowercase, and DNS names are
         # case-insensitive — so match case-insensitively (a cert whose domain
         # carries any uppercase would otherwise never show as tagged).
-        return {str(n).strip().lower() for n in (gc.get("bugfixer_cert_identities") or [])}
+        return {str(n).strip().lower() for n in (gc.get("ab_cert_identities") or [])}
 
-    def _tag_bugfixer(data):
-        """Tag each cert with ``bugfixer: bool`` (its domain / any SAN is in the
-        pinned BugFixer list) so the LE-module UI can show the BugFixer toggle's
+    def _tag_ab(data):
+        """Tag each cert with ``ab: bool`` (its domain / any SAN is in the
+        pinned AppBuilder list) so the LE-module UI can show the AppBuilder toggle's
         state. Runs on both live + cached-stale paths."""
         if not isinstance(data, dict):
             return data
-        pinned = _bugfixer_pinned()
+        pinned = _ab_pinned()
         certs = _le_certs_holder(data)
         if certs is None:
             return data
@@ -1262,7 +1262,7 @@ def register(app, hub, ctx):
             for san in (c.get("domains") or []):
                 names.add(str(san or "").strip().lower())
             is_bf = any(n and n in pinned for n in names)
-            tagged.append({**c, "bugfixer": is_bf})
+            tagged.append({**c, "ab": is_bf})
         return _le_with_certs(data, tagged)
 
     def _tag_cert_tenants(request, data):
@@ -1310,8 +1310,8 @@ def register(app, hub, ctx):
         Certificates page renders instantly instead of blocking/503-ing. A
         successful live fetch refreshes + persists the cache. Tenant subnet
         filtering (``_filter_le_certs``) runs per request on the UNFILTERED cache.
-        Each cert is also tagged ``bugfixer: bool`` (H1) from the pinned
-        ``global_config['bugfixer_cert_identities']`` list, and with its explicit
+        Each cert is also tagged ``ab: bool`` (H1) from the pinned
+        ``global_config['ab_cert_identities']`` list, and with its explicit
         owner ``tenants`` + the caller's rights (``_tag_cert_tenants``)."""
         logger.debug("relay GET /api/le/certs")
         hub = app.state.hub
@@ -1321,18 +1321,18 @@ def register(app, hub, ctx):
             if cached is not None:
                 out = dict(cached) if isinstance(cached, dict) else {"certs": cached}
                 out["stale"] = True
-                return _tag_cert_tenants(request, await _filter_le_certs(request, _tag_bugfixer(out), tenant))
+                return _tag_cert_tenants(request, await _filter_le_certs(request, _tag_ab(out), tenant))
             raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             data = await _relay_spoke(le_sid, "LE_LIST_CERTS", log_name="le_list_certs")
             await hub.le_cache_set("certs", data)
-            return _tag_cert_tenants(request, await _filter_le_certs(request, _tag_bugfixer(data), tenant))
+            return _tag_cert_tenants(request, await _filter_le_certs(request, _tag_ab(data), tenant))
         except HTTPException:
             cached = hub.le_cache_get("certs")
             if cached is not None:
                 out = dict(cached) if isinstance(cached, dict) else {"certs": cached}
                 out["stale"] = True
-                return _tag_cert_tenants(request, await _filter_le_certs(request, _tag_bugfixer(out), tenant))
+                return _tag_cert_tenants(request, await _filter_le_certs(request, _tag_ab(out), tenant))
             raise
 
     @app.get("/api/le/eligible-domains")
@@ -1509,7 +1509,7 @@ def register(app, hub, ctx):
     async def le_set_clientauth(domain: str, request: Request):
         """Toggle the clientAuth EKU on a managed cert and re-issue now. The ACME
         'classic'-style profile carries serverAuth+clientAuth; the default profile
-        is server-only. Needed for mTLS CLIENT certs (BugFixer, the mTLS wildcard) —
+        is server-only. Needed for mTLS CLIENT certs (AppBuilder, the mTLS wildcard) —
         certs that don't need it stay server-only. Re-distributes the freshly-issued
         material to the cert's targets, like /api/le/issue."""
         body = await request.json()
@@ -1836,15 +1836,15 @@ def register(app, hub, ctx):
                                   {"domain": domain, "target": body},
                                   log_name="le_add_target")
 
-    @app.post("/api/le/certs/{domain}/bugfixer")
-    async def le_set_bugfixer(domain: str, request: Request):
-        """H1: label a managed cert as the BugFixer cert. Toggles membership of
-        ``domain`` in ``global_config['bugfixer_cert_identities']`` — the pinned
+    @app.post("/api/le/certs/{domain}/ab")
+    async def le_set_ab(domain: str, request: Request):
+        """H1: label a managed cert as the AppBuilder cert. Toggles membership of
+        ``domain`` in ``global_config['ab_cert_identities']`` — the pinned
         list the HUB_REQUEST channel authorizes on (a connection must present one
         of these certs over mTLS, see ``LabManagerHub._hub_request_authorized``).
         ``enabled:true`` adds the domain (dedup, order-stable); ``false`` removes
         it. Admin-only. The cert itself is issued/managed via the normal LE flow;
-        this just records which domain's cert is the BugFixer identity."""
+        this just records which domain's cert is the AppBuilder identity."""
         hub = app.state.hub
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
@@ -1855,24 +1855,24 @@ def register(app, hub, ctx):
         if not domain:
             raise HTTPException(status_code=400, detail="domain required")
         gc = hub.state.system_state.get("global_config", {}) or {}
-        pinned = [str(n).strip().lower() for n in (gc.get("bugfixer_cert_identities") or [])]
+        pinned = [str(n).strip().lower() for n in (gc.get("ab_cert_identities") or [])]
         if enabled:
             if domain not in pinned:
                 pinned.append(domain)
         else:
             pinned = [n for n in pinned if n != domain]
-        gc["bugfixer_cert_identities"] = pinned
+        gc["ab_cert_identities"] = pinned
         hub.state.system_state["global_config"] = gc
         await hub.state.save_state_now()
-        logger.info("[H1] BugFixer cert label for %s -> %s (pinned=%s)",
+        logger.info("[H1] AppBuilder cert label for %s -> %s (pinned=%s)",
                     domain, enabled, pinned)
-        return {"status": "ok", "domain": domain, "bugfixer": enabled,
+        return {"status": "ok", "domain": domain, "ab": enabled,
                 "pinned": pinned}
 
     @app.get("/api/mtls/trust-diag")
     async def mtls_trust_diag(request: Request):
         """H1 debug: what the hub's mTLS client-verify path trusts, and whether it
-        would ACCEPT each pinned BugFixer cert. Surfaces (a) the LM_MTLS_CA chain in
+        would ACCEPT each pinned AppBuilder cert. Surfaces (a) the LM_MTLS_CA chain in
         full, (b) the combined-bundle cert count + any same-subject collisions (the
         real-vs-private 'ISRG Root X1' hazard), and (c) an openssl verify of every
         pinned cert's live chain (pulled from the le spoke) against that bundle — so
@@ -1887,7 +1887,7 @@ def register(app, hub, ctx):
             return {"error": f"mtls module unavailable: {e}"}
         diag = _mtls.trust_diagnostics()
         gc = hub.state.system_state.get("global_config", {}) or {}
-        pinned = [str(n).strip() for n in (gc.get("bugfixer_cert_identities") or []) if str(n).strip()]
+        pinned = [str(n).strip() for n in (gc.get("ab_cert_identities") or []) if str(n).strip()]
         # Per-connection mTLS status: which connected spokes/agents ACTUALLY
         # presented a verified client cert vs. connected cert-less (permissive
         # fallback). Answers "who is really using mTLS" — the whole point being that
@@ -1929,7 +1929,7 @@ def register(app, hub, ctx):
                 "subject": subj,
                 "issuer": issuer,
                 "not_after": not_after,
-                "is_bugfixer_pinned": bool(ident) and any(s.lower() in pinned_lc for s in sans),
+                "is_ab_pinned": bool(ident) and any(s.lower() in pinned_lc for s in sans),
             })
         # Sort: active first, then remote-eligible (cert-less), then loopback N/A last.
         clients.sort(key=lambda c: (not c["mtls_active"], c.get("local", False),
@@ -1941,9 +1941,9 @@ def register(app, hub, ctx):
             "cert_less": sum(1 for c in clients if not c["mtls_active"] and not c.get("local")),
             "local": sum(1 for c in clients if c.get("local")),
         }
-        # Pinned BugFixer identity — reflect the LIVE connection: is a connected
+        # Pinned AppBuilder identity — reflect the LIVE connection: is a connected
         # spoke presenting a VERIFIED cert whose SAN matches the pin? (The LE cert is
-        # no longer the mTLS cert — bugfixer presents the hub-CA clientAuth cert, so
+        # no longer the mTLS cert — ab presents the hub-CA clientAuth cert, so
         # verifying the LE cert here always failed and was misleading.)
         checks = []
         for name in pinned:

@@ -25,7 +25,7 @@ class _FakeHub:
         self.stored = None
         self.commands_sent = None
         self.credentials_sent = None
-        self.active_connections = {"bugfixer": object()}
+        self.active_connections = {"ab": object()}
 
     def _primary_key(self, sid):
         return sid
@@ -50,11 +50,11 @@ class _FakeHub:
         raise AssertionError(f"unexpected command {cmd}")
 
 
-def test_find_bugfixer_and_gate(monkeypatch):
+def test_find_ab_and_gate(monkeypatch):
     hub = _FakeHub()
-    assert m.find_bugfixer(hub) == "bugfixer"
+    assert m.find_ab(hub) == "ab"
     hub.active_connections = {"web-1": object()}
-    assert m.find_bugfixer(hub) is None
+    assert m.find_ab(hub) is None
     monkeypatch.delenv("LM_CONSOLE_LLM_IDENTIFY", raising=False)
     assert m.hub_llm_identify_enabled() is False
     monkeypatch.setenv("LM_CONSOLE_LLM_IDENTIFY", "true")
@@ -67,7 +67,7 @@ def test_orchestrate_identifies_in_one_round():
         llm_replies=['{"identified": true, "vendor": "cisco-ios", "model": "C2960", "confidence": 0.95}'],
     )
     import asyncio
-    res = asyncio.run(m.orchestrate(hub, "bugfixer", "console-1", "good"))
+    res = asyncio.run(m.orchestrate(hub, "ab", "console-1", "good"))
     assert res["status"] == "OK"
     assert res["identified"] is True
     assert res["vendor"] == "cisco-ios"
@@ -87,7 +87,7 @@ def test_orchestrate_runs_commands_then_extracts():
         collect={"logged_in": True, "outputs": {"show version": "Junos 20.4 EX4300 SN JN123"},
                  "rejected": ["reload"]},
     )
-    res = asyncio.run(m.orchestrate(hub, "bugfixer", "console-1", "good"))
+    res = asyncio.run(m.orchestrate(hub, "ab", "console-1", "good"))
     assert res["status"] == "OK"
     assert res["rounds"] == 2
     assert res["vendor"] == "juniper"
@@ -101,7 +101,7 @@ def test_orchestrate_runs_commands_then_extracts():
 def test_orchestrate_inconclusive_when_no_commands_and_no_id():
     import asyncio
     hub = _FakeHub(capture="garbage", llm_replies=['{"identified": false}'])
-    res = asyncio.run(m.orchestrate(hub, "bugfixer", "console-1", "good"))
+    res = asyncio.run(m.orchestrate(hub, "ab", "console-1", "good"))
     assert res["status"] == "INCONCLUSIVE"
     assert res["identified"] is False
     assert hub.stored is None
@@ -114,7 +114,7 @@ def test_orchestrate_collect_error_surfaces():
         llm_replies=['{"identified": false, "commands": ["show version"]}'],
         collect={"status": "ERROR", "message": "port is in use; close sessions first"},
     )
-    res = asyncio.run(m.orchestrate(hub, "bugfixer", "console-1", "good"))
+    res = asyncio.run(m.orchestrate(hub, "ab", "console-1", "good"))
     assert res["status"] == "ERROR"
     assert "in use" in res["message"]
     assert hub.stored is None
@@ -153,7 +153,7 @@ def test_orchestrate_asks_llm_for_credentials_when_login_stuck():
                             "outputs": {"show version": "ArubaOS-CX CX6300 SN AR9"},
                             "rejected": []},
     )
-    res = asyncio.run(m.orchestrate(hub, "bugfixer", "console-1", "good"))
+    res = asyncio.run(m.orchestrate(hub, "ab", "console-1", "good"))
     assert hub.credentials_sent == [{"username": "admin", "password": "aruba123"}]
     assert res["llm_credentials_tried"] == 1
     assert res["logged_in"] is True
@@ -218,7 +218,7 @@ def test_ask_llm_scrubs_before_sending(monkeypatch):
             return await super().request_response(target, cmd, payload, timeout)
 
     hub = _CapHub()
-    asyncio.run(m._ask_llm(hub, "bugfixer", "sys", "device 10.1.2.3 hostname Edge-1 password hunter2"))
+    asyncio.run(m._ask_llm(hub, "ab", "sys", "device 10.1.2.3 hostname Edge-1 password hunter2"))
     assert "10.1.2.3" not in hub.sent_user
     assert "Edge-1" not in hub.sent_user
     assert "hunter2" not in hub.sent_user
@@ -295,7 +295,7 @@ def test_orchestrate_reuses_learned_fingerprint_without_llm(tmp_path):
         collect={"logged_in": True, "outputs": {"show version": "Junos EX4300"},
                  "rejected": []},
     )
-    res1 = asyncio.run(m.orchestrate(hub1, "bugfixer", "console-1", "portA"))
+    res1 = asyncio.run(m.orchestrate(hub1, "ab", "console-1", "portA"))
     assert res1["vendor"] == "juniper"
     assert res1["rounds"] == 2
 
@@ -307,7 +307,7 @@ def test_orchestrate_reuses_learned_fingerprint_without_llm(tmp_path):
         collect={"logged_in": True, "outputs": {"show version": "Junos EX4300"},
                  "rejected": []},
     )
-    res2 = asyncio.run(m.orchestrate(hub2, "bugfixer", "console-2", "portB"))
+    res2 = asyncio.run(m.orchestrate(hub2, "ab", "console-2", "portB"))
     assert res2.get("learned") is True
     assert res2["rounds"] == 0                 # zero LLM identify rounds
     assert res2["vendor"] == "juniper"         # recalled from the local DB

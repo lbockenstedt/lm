@@ -484,7 +484,7 @@ class SimulationsService:
                 # never added — the WebUI's "no tick has ever completed" banner
                 # (csFreshnessPanel, _neverDone) reads last_tick_done_ts directly,
                 # so its permanent absence here made EVERY host show that banner
-                # unconditionally, regardless of actual agent health (bugfixer
+                # unconditionally, regardless of actual agent health (ab
                 # investigation confirmed via live agent logs: the agent side was
                 # ticking normally the whole time — only this hub-side field was
                 # ever missing).

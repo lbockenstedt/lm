@@ -46,7 +46,7 @@ log_e() {
 log_w() {
     # Warning: console + file, but NOT logged as ERROR — keeps expected
     # conditions (e.g. a spoke that runs on another host) out of the hub's
-    # Error Log / BugFixer, which key off the "error" token.
+    # Error Log / AppBuilder, which key off the "error" token.
     echo "⚠️  $1" >&2
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] WARNING: $1" >> "$LOG_FILE" 2>/dev/null || true
 }

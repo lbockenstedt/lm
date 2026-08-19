@@ -1542,7 +1542,7 @@ def create_app(hub):
         # revoke, clientauth, targets add/remove, per-cert distribute, tenant-edit)
         # or can_deploy (device deploy); issuing a NEW domain auto-assigns the
         # caller's tenant as owner. FLEET-WIDE LE ops with no per-object tenant
-        # (renew-all, distribute-all, the BugFixer identity) self-gate to Global
+        # (renew-all, distribute-all, the AppBuilder identity) self-gate to Global
         # Admin in their handlers. So the middleware floor for LE is the
         # tenant-admin tier (can_edit_shared) — a tenant-admin manages their OWN
         # certs; the per-object guards keep them out of other tenants' certs.
@@ -2087,7 +2087,7 @@ def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
         from security import mtls as _mtls
         if _mtls.mtls_enabled():
             # Combined CA = private mTLS CA + system store, so an LE-issued,
-            # SAN-pinned BugFixer cert verifies too (see server_client_ca_file).
+            # SAN-pinned AppBuilder cert verifies too (see server_client_ca_file).
             _ca = _mtls.server_client_ca_file()
             if _ca and os.path.exists(_ca):
                 cfg_kwargs["ssl_ca_certs"] = _ca
@@ -2120,7 +2120,7 @@ def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
     cfg_kwargs["timeout_keep_alive"] = int(_ws_keepalive_env("LM_HTTP_KEEPALIVE_S", 75.0))
     # H1: use the peer-cert-capturing WS protocol so the /ws/spoke route can read
     # which client cert a connection presented (gates HUB_REQUEST to a pinned
-    # BugFixer cert). Best-effort: if the uvicorn internal API moved on upgrade,
+    # AppBuilder cert). Best-effort: if the uvicorn internal API moved on upgrade,
     # _PeerCertProtocol is None → fall back to the default protocol (ws="auto"),
     # and the H1 gate simply sees no peer cert → denies HUB_REQUEST. Orthogonal
     # to ssl_ca_certs/ssl_cert_reqs (protocol class vs SSLContext).

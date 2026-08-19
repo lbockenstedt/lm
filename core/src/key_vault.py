@@ -211,7 +211,7 @@ def build_min_backup(hub) -> bytes:
 
     # Hub Local mTLS CA (mints the fleet's clientAuth client certs). DR-critical:
     # without it a rebuilt hub can't verify ANY spoke's mTLS cert until every spoke
-    # is re-provisioned, and BugFixer's HUB_REQUEST channel stays dead. Escrow the
+    # is re-provisioned, and AppBuilder's HUB_REQUEST channel stays dead. Escrow the
     # cert + key so a restore re-establishes the same CA.
     _mtls_ca_cert = _mtls_ca_key = ""
     try:

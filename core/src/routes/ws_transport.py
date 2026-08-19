@@ -29,7 +29,7 @@ def register(app, hub, ctx):
         # (None when mTLS off / no cert presented / extraction failed). Derive
         # the renewal-stable SAN-DNS identity and stash it on the adapter so the
         # HUB_REQUEST gate (``_hub_request_authorized``) can pin it to the
-        # designated BugFixer cert. ``None`` here → gate denies (fail-closed).
+        # designated AppBuilder cert. ``None`` here → gate denies (fail-closed).
         try:
             raw_peer_cert = (websocket.scope.get("extensions") or {}).get("x_peer_cert")
             adapter.peer_cert_identity = peer_cert_identity_from_getpeercert(raw_peer_cert)

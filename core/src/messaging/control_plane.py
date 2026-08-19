@@ -114,7 +114,7 @@ class _SpokeLogRelayHandler(logging.Handler):
     """Captures ALL log records (INFO+) into a queue for async relay to the Hub.
 
     Forwards every level the root logger emits (not just WARNING/ERROR) so the
-    Hub WebUI Logs view and BugFixer's GET_LOGS see the spoke's full trail —
+    Hub WebUI Logs view and AppBuilder's GET_LOGS see the spoke's full trail —
     including the INFO lines around a connect/handshake and the last line before
     a process exit, which previously never reached the Hub because only
     WARNING+ was relayed. The root logger's effective level still gates what is
@@ -189,7 +189,7 @@ class _SpokeLogRelayHandler(logging.Handler):
             except queue.Full:
                 # Ring-buffer semantics: on a full queue (a long hub outage),
                 # drop the OLDEST line to make room for the newest — the most
-                # recent lines are the ones worth keeping for the hub / BugFixer
+                # recent lines are the ones worth keeping for the hub / AppBuilder
                 # (a crash's last words), not the start of the backlog.
                 try:
                     self._queue.get_nowait()
@@ -266,7 +266,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         self._log_relay_handler = _SpokeLogRelayHandler(self._log_relay_queue)
         logging.getLogger().addHandler(self._log_relay_handler)
         # Route uncaught SYNC exceptions through the logger (→ relay handler →
-        # hub Error Log + BugFixer) before the interpreter's default handler.
+        # hub Error Log + AppBuilder) before the interpreter's default handler.
         # The asyncio-task counterpart is set at the top of run(). Without both,
         # a genuine crash / unhandled task exception reaches only local stderr,
         # never the hub — see logging-observability-contract.md req 4.
@@ -591,7 +591,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         wait for the answer — e.g. the netbox IPAM spoke (API-only, no cert
         helper) relays ``RELAY_NETBOX_CERT`` so the hub resolves the
         netbox-server agent and runs ``INSTALL_CERT`` there, then hands the
-        agent's result back to the spoke. Mirrors the HUB_REQUEST path BugFixer
+        agent's result back to the spoke. Mirrors the HUB_REQUEST path AppBuilder
         already uses; the only new piece is the spoke-side HUB_RESPONSE waiter.
 
         Best-effort transport: a missing websocket returns a clean ERROR (the
@@ -807,7 +807,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         THE fleet-mTLS bug this fixes: _client_ssl_ctx built a context that only
         verified the *server* (hub) cert and never called load_cert_chain, so a
         remote spoke connected over TLS but sent NO client cert — the hub saw it
-        cert-less and mTLS was silently inactive for every module except bugfixer
+        cert-less and mTLS was silently inactive for every module except ab
         (which has its own connect code that presents the cert).
 
         CRITICAL: present ONLY the DEDICATED hub-leg cert (mtls-hub-client.*, env
@@ -1295,7 +1295,7 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             _hb_thread.start()
             _lr_task = asyncio.create_task(self._log_relay_task(websocket))
             # Per-module health heartbeat — emits a greppable [heartbeat] line
-            # every ~60s through the log relay so BugFixer can triage a missing
+            # every ~60s through the log relay so AppBuilder can triage a missing
             # module. Inherited by every spoke via BaseControlPlane.
             _hh_task = asyncio.create_task(self._health_heartbeat_task(websocket))
             # Subclasses can attach extra long-lived per-connection tasks
@@ -1664,17 +1664,17 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             await self._send_cmd_result(websocket, corr_id, result, send_lock)
 
     async def _health_heartbeat_task(self, websocket):
-        """Emit one greppable health line on a schedule so BugFixer (which reads
+        """Emit one greppable health line on a schedule so AppBuilder (which reads
         Hub logs via GET_LOGS) can confirm this module is alive and triage when
         it is not. Unlike the transport ``heartbeat()`` frame (which only updates
         the Hub's in-memory last_seen and is never written to agent_logs), this
         line flows through the existing telemetry pipeline — the root-logger
         _SpokeLogRelayHandler captures it -> _log_relay_queue -> _log_relay_task
-        -> SPOKE_LOG -> Hub agent_logs[spoke_id] — so BugFixer actually sees it.
+        -> SPOKE_LOG -> Hub agent_logs[spoke_id] — so AppBuilder actually sees it.
         Zero Hub-side relay changes are needed. Every spoke inherits this from
         BaseControlPlane, so all modules emit the same signal uniformly."""
         # 15 min by default — the [heartbeat] line is a coarse module-alive signal
-        # for BugFixer, not liveness (the 30s transport HEARTBEAT drives the hub's
+        # for AppBuilder, not liveness (the 30s transport HEARTBEAT drives the hub's
         # spoke-down traffic light + alerting). A once-a-minute line was just log
         # noise. Override with LM_HEARTBEAT_INTERVAL_S if faster triage is wanted.
         interval = 900

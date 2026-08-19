@@ -88,7 +88,7 @@ Roles persist in `.env` `LOADED_ROLES` (durable across self-update restarts); on
 
 **No install scripts** in these repos (minimal/stub-style). Deployed via the agent-spoke role loader or a manual unit.
 
-## bugfixer
+## ab
 
 ### `install.sh`
 None (curl|bash; stdin to `/dev/null`).

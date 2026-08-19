@@ -159,7 +159,7 @@ Consolidated reference for every environment variable read across the LM system.
 | `CPPM_USER` / `CPPM_PASS` | OAuth password grant (preferred) | — | `client.py` |
 | `SPOKE_ID`, `SPOKE_SECRET`, `HUB_URL` | Spoke identity | — | `.env` |
 
-## bugfixer
+## ab
 
 | Var | Purpose | Default | Read by |
 |---|---|---|---|
@@ -167,8 +167,8 @@ Consolidated reference for every environment variable read across the LM system.
 | `LOCAL_OLLAMA_MODEL`/`CLOUD_OLLAMA_MODEL`/`LOCAL_OLLAMA_URL`/`CLOUD_OLLAMA_URL` | Ollama models/URLs | — | `.env` |
 | `POLL_INTERVAL_SECONDS` | Issue poll interval | — | `.env` |
 | `UPDATE_API_URL` | External infra notify URL | — | `.env` |
-| `LOG_FILE_PATH` | Log file | `/var/log/bugfixer.log` | `.env` |
-| `HUB_WS_URL` / `HUB_AGENT_ID` / `HUB_AGENT_SECRET` / `HUB_SECRET` | Hub agent client | `bugfixer` | `config.json` |
+| `LOG_FILE_PATH` | Log file | `/var/log/ab.log` | `.env` |
+| `HUB_WS_URL` / `HUB_AGENT_ID` / `HUB_AGENT_SECRET` / `HUB_SECRET` | Hub agent client | `ab` | `config.json` |
 | `LLM_PROVIDER_N` / `LLM_API_KEY_N` / `LLM_MODEL_N` / `LLM_BASE_URL_N` / `LLM_RPM_N` | LLM provider slots (1-based) | — | `config.json` |
 | `monitored_labels` | Issue labels to fix | `["automated-fix"]` | `config.json` |
 

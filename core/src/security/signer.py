@@ -30,7 +30,7 @@ def encode_frame(signer, msg: Dict[str, Any]) -> str:
     bootstrap heartbeats). The receiver HMACs the RECEIVED body bytes directly
     (no re-serialization, no sort_keys) — the per-frame json.dumps that dominated
     hub ingest CPU disappears. This raw-bytes frame is the deployed default across
-    the hub, cs, pxmx, and bugfixer (see docs/backpressure-throttling.md §7)."""
+    the hub, cs, pxmx, and ab (see docs/backpressure-throttling.md §7)."""
     body = json.dumps(msg, separators=(',', ':'))
     sig = signer.sign_bytes(body.encode()) if signer is not None else ""
     return sig + "." + body

@@ -89,7 +89,7 @@ log_e() {
 log_w() {
     # Warning: console + file, but NOT logged as ERROR — keeps expected/soft
     # conditions (e.g. a pre-approval that will be done manually) out of the
-    # hub's Error Log / BugFixer, which key off the "error" token.
+    # hub's Error Log / AppBuilder, which key off the "error" token.
     echo "⚠️  $1" >&2
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] WARNING: $1" >> "$INSTALL_LOG" 2>/dev/null || true
 }
@@ -1017,7 +1017,7 @@ from security.encryption import hub_encryption
 # Canonical repo URLs per module key the Hub reads (main.py update_spokes_only
 # / _type_to_source_key). `opn` is the legacy alias for opnsense kept so the
 # older reader path still resolves. `agent` is intentionally NOT seeded —
-# agents (bugfixer) self-update and skip when their source is unset.
+# agents (ab) self-update and skip when their source is unset.
 DEFAULTS = {
     "hub": "https://github.com/lbockenstedt/lm.git",
     "pxmx": "https://github.com/lbockenstedt/pxmx.git",

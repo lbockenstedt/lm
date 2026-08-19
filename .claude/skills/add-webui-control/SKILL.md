@@ -34,7 +34,7 @@ touch-points and code shapes; this file is the shape + the boundaries.
    blocking call (subprocess, another service, a slow library) goes through
    `await asyncio.to_thread(...)` — LM's single FastAPI event loop stalls
    the ENTIRE app for the duration of a blocking call otherwise, the same
-   class of bug documented in bugfixer's own history ("TypeError: Load
+   class of bug documented in ab's own history ("TypeError: Load
    failed" from a stalled request).
 2. **Config default** (only if the control needs a persisted setting) — a
    module-level `_DEFAULTS` dict + a `_cfg()` helper that merges it with
@@ -59,7 +59,7 @@ touch-points and code shapes; this file is the shape + the boundaries.
    `success`/`error` toast, then (if the control changes something visible)
    re-render/refresh the view. Never a full page reload.
 5. **State/status, if the control introduces one** — LM has no central
-   status-enum registry (unlike bugfixer's processed-issue counters). Add a
+   status-enum registry (unlike ab's processed-issue counters). Add a
    local status→badge/class mapping function in the SAME view file, shaped
    like `statusBadge`/`spokeStatusMessage` — a small closure or function
    mapping the string/bool state to a Tailwind badge class, called inline
@@ -92,7 +92,7 @@ touch-points and code shapes; this file is the shape + the boundaries.
 - **Never touch auth/transport/encryption/self-update code to add a
   control.** mTLS, the hub-spoke signing scheme, Fernet state encryption,
   and the watchdog/self-update mechanism are boundaries this skill's caller
-  (BugFixer's feature-classifier) should already have kept you away from —
+  (AppBuilder's feature-classifier) should already have kept you away from —
   if you find yourself needing to touch one of those files to make a
   "simple button" work, stop; that is no longer a bolt-on.
 - **Config always defaults via the `_cfg()`-merge shape**, never a one-time

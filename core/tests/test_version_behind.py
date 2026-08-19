@@ -1,7 +1,7 @@
 """Per-repo ".NN" behind-detection (update_pipeline).
 
 Each provisioning repo (lm, cs, pxmx, netbox, opnsense, ldap, nw, cppm, le,
-bugfixer) autobumps an INDEPENDENT ``.NN``. A spoke's ``.NN`` is only comparable
+ab) autobumps an INDEPENDENT ``.NN``. A spoke's ``.NN`` is only comparable
 to the LATEST ``.NN`` of ITS OWN repo, so the hub resolves that latest locally
 and flags a spoke "behind" only when BOTH sides are valid ``.NN`` and the spoke's
 is strictly older. The cardinal rule is NEVER false-positive: any unknown /

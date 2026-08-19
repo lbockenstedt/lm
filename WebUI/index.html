@@ -539,7 +539,7 @@
                     </div>
                 </div>
                 <span class="text-[10px] uppercase tracking-widest opacity-60 ml-2" id="footer-sys-version">v0.00</span>
-                <button onclick="fileBug()" title="Report a bug or request a feature — captures your console log, page HTML, and a screenshot, then files an issue for bugfixer to triage"
+                <button onclick="fileBug()" title="Report a bug or request a feature — captures your console log, page HTML, and a screenshot, then files an issue for ab to triage"
                     class="ml-2 text-[10px] uppercase tracking-widest opacity-60 hover:opacity-100 border border-slate-500 hover:border-white px-2 py-0.5 rounded transition-all">🐞 Bug/Feature Request</button>
                 <div id="footer-actions" class="flex items-center gap-2 ml-2"></div>
             </div>
@@ -626,15 +626,15 @@
           };
           rbEl.querySelector('.lm-rb-msg').textContent = text;
         }
-        // Auto-file a bug with BugFixer (dedup'd inside fileBugAuto so a spammy
+        // Auto-file a bug with AppBuilder (dedup'd inside fileBugAuto so a spammy
         // handler doesn't open a GitHub issue on every throw). The boundary stays
         // tiny + dependency-free: capture + POST live in main.js; we just trigger
         // it and relay status text into the banner's status span.
         if (typeof window.fileBugAuto === 'function') {
-          rbStatus('Filing Bug with BugFixer…');
+          rbStatus('Filing Bug with AppBuilder…');
           try { window.fileBugAuto(msg, where, rbStatus); } catch (_) { rbStatus(''); }
         } else {
-          rbStatus('BugFixer unavailable');
+          rbStatus('AppBuilder unavailable');
         }
       }
       // Network/transport failures are surfaced inline by the app (spoke-down

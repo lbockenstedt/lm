@@ -414,7 +414,7 @@ class VmSyncMixin:
 
         # Hub-authoritative sync log: clean run → INFO; any errors/failure →
         # [sync-error] WARNING carrying the sink's message (first-error text) so
-        # the cause lands in the hub log + GET_ERROR_LOGS (bugfixer).
+        # the cause lands in the hub log + GET_ERROR_LOGS (ab).
         if errors > 0 or overall == "error":
             logger.warning("[sync-error] vm-sync result status=%s sent=%d pushed=%d "
                            "skipped=%d deleted=%d errors=%d rows=%d — %s",

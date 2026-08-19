@@ -707,7 +707,7 @@ def test_help_ask_requires_admin(tmp_path):
     # available is NOT admin-gated — any authed user may read it.
     assert c.get("/api/help/available",
                  cookies={"lm_session": tok}).status_code == 200
-    # Admin passes the gate; with no bugfixer agent connected the handler 409s.
+    # Admin passes the gate; with no ab agent connected the handler 409s.
     admin_tok = _mint_session(hub, "admin")
     r = c.post("/api/help/ask", json={"question": "list all spokes"},
                cookies={"lm_session": admin_tok})
