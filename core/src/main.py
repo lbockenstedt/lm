@@ -168,7 +168,7 @@ from log_redaction import (_redact, _REDACT_COMMANDS, _REDACT_FIELDS,
                            _FULLY_REDACT_SUBSTRINGS, _SECRET_SUBSTRINGS,
                            _is_secret_field, _scrub_secret_fields,
                            _project_nw_devices, TokenBucket, _fit_log_payload,
-                           _request_subject)
+                           _tail_lines, _request_subject)
 
 # H4 sentinel: ``_decrypt_inbound_payload`` returns this (instead of a secret)
 # to signal "drop this frame" — an encrypted payload that won't AEAD-decrypt
@@ -5237,12 +5237,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 for filename in os.listdir(log_dir):
                     if filename.endswith(".log"):
                         module_name = filename.replace(".log", "")
-                        with open(os.path.join(log_dir, filename), "r") as f:
-                            # Stream only the tail (deque maxlen) instead of
-                            # readlines() materialising the whole file — bounds
-                            # memory as spoke count and log size grow.
-                            for line in deque(f, maxlen=500):
-                                all_logs.append({"module": module_name, "log": line.strip()})
+                        # Seek-tail the last 500 lines instead of iterating the
+                        # whole file: hub.log can reach 100s of MB / millions of
+                        # lines, and a full walk on every GET_LOGS poll pushed the
+                        # AppBuilder round-trip past its 20s timeout ("cannot read
+                        # hub logs").
+                        for line in _tail_lines(os.path.join(log_dir, filename), 500):
+                            all_logs.append({"module": module_name, "log": line})
         except Exception as e:
             logger.error(f"Error reading module logs from disk: {e}")
 
@@ -5304,10 +5305,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     if filename.endswith(".log"):
                         module_name = filename.replace(".log", "")
                         try:
-                            with open(os.path.join(log_dir, filename), "r") as f:
-                                for line in deque(f, maxlen=500):
-                                    if pat.search(line):
-                                        errs.append(f"[{module_name}] {line.strip()}")
+                            for line in _tail_lines(os.path.join(log_dir, filename), 500):
+                                if pat.search(line):
+                                    errs.append(f"[{module_name}] {line}")
                         except Exception:
                             continue
         except Exception as e:

@@ -245,6 +245,50 @@ class TokenBucket:
         return False
 
 
+def _tail_lines(path: str, n: int, _block: int = 65536) -> list:
+    """Return the last ``n`` lines of ``path`` without reading the whole file.
+
+    ``collect_all_logs`` tails every ``/var/log/lm/*.log`` on every GET_LOGS poll
+    (AppBuilder polls this ~hourly, plus the WebUI Logs page). The prior
+    ``deque(f, maxlen=n)`` iterated the ENTIRE file to keep the last ``n`` lines —
+    O(file size) per call. Once hub.log grew into the hundreds of MB / millions
+    of lines, a single poll spent seconds just walking hub.log, pushing the
+    round-trip past AppBuilder's 20s HUB_REQUEST timeout ("cannot read hub logs").
+
+    This seeks from the end and reads fixed-size blocks backward until ``n``
+    newlines are collected — O(n) regardless of file size. Returns stripped lines
+    oldest→newest, matching the old deque semantics.
+    """
+    try:
+        import os
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            end = f.tell()
+            if end == 0:
+                return []
+            data = b""
+            pos = end
+            while pos > 0 and data.count(b"\n") <= n:
+                read = min(_block, pos)
+                pos -= read
+                f.seek(pos)
+                data = f.read(read) + data
+            if data.endswith(b"\n"):
+                data = data[:-1]
+            lines = data.split(b"\n")
+            tail = lines[-n:] if len(lines) > n else lines
+            out = []
+            for raw in tail:
+                try:
+                    out.append(raw.decode("utf-8", "replace").strip())
+                except Exception:  # noqa: BLE001
+                    out.append(str(raw).strip())
+            return [ln for ln in out if ln]
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"_tail_lines({path}) failed: {e}")
+        return []
+
+
 def _fit_log_payload(all_logs: list, max_bytes: int) -> list:
     """Trim ``all_logs`` to the newest entries whose ``{"logs": …}`` JSON fits
     under ``max_bytes``. Used by ``collect_all_logs`` to cap the GET_LOGS payload
