@@ -67,7 +67,7 @@ class _Hub:
     """Minimal hub: in-memory warm cache + canned PXMX_LIST_VMS replies."""
 
     def __init__(self, vms=None, spoke_connected=True, tenants=None,
-                 system_state=None, protected=None):
+                 system_state=None, protected=None, spoke_tenant=None):
         self.state = _State(tenants=tenants, system_state=system_state)
         self.simulations_store = _Store(protected=protected)
         self._spoke = "pxmx-1" if spoke_connected else None
@@ -75,6 +75,13 @@ class _Hub:
         self.warm = {}          # {(namespace, key): raw envelope}
         self.warm_sets = []     # log of (namespace, key) writes
         self.fail_live = False  # make request_response raise
+        # The single spoke's tenant binding, for the spoke-visibility gate in
+        # get_pxmx_vms (mirrors get_pxmx_nodes' global_spoke_tenant fixture
+        # pattern) — None = unbound (visible to any tenant as the fallback).
+        self._spoke_tenant = spoke_tenant
+        if self._spoke and spoke_tenant is not None:
+            self.state.system_state.setdefault("module_metadata", {})[self._spoke] = \
+                {"tenant_id": spoke_tenant}
 
     # warm cache surface (WarmCacheMixin)
     def warm_get(self, namespace, key="_"):
@@ -86,6 +93,11 @@ class _Hub:
 
     def get_hypervisor_spoke(self):
         return self._spoke
+
+    def get_hypervisor_spokes_for_tenant(self, tid=None):
+        if self._spoke and tid and self._spoke_tenant == tid:
+            return [self._spoke]
+        return []
 
     def get_all_spokes_by_type(self, module_type):
         # Only a hypervisor spoke in these warm-cache fakes; simulation empty.
