@@ -60,6 +60,72 @@ def test_port_store_partial_settings_update_keeps_others(tmp_path):
     assert s["baud"] == 38400 and s["flow"] == "rtscts"
 
 
+# ── Writer-lock takeover (force_attach / SessionManager.takeover) ────────────
+# PortChannel.__init__ opens a real pyserial handle, which isn't available in
+# this pyserial-free test env — bypass it (object.__new__) and hand-seed just
+# the attributes attach/force_attach/write actually touch, mirroring the
+# existing "these run without pyserial installed" convention for this file.
+
+def _bare_channel():
+    chan = object.__new__(m.PortChannel)
+    chan.sessions = set()
+    chan.writer = None
+    return chan
+
+
+def test_attach_first_writable_wins():
+    chan = _bare_channel()
+    assert chan.attach("s1", writable=True) is True
+    assert chan.writer == "s1"
+    # A second writable attach does NOT steal the lock — it becomes a
+    # read-only observer instead (attach() is never forceful).
+    assert chan.attach("s2", writable=True) is False
+    assert chan.writer == "s1"
+    assert "s2" in chan.sessions
+
+
+def test_force_attach_evicts_current_writer():
+    chan = _bare_channel()
+    chan.attach("s1", writable=True)
+    chan.sessions.add("s2")
+    prev = chan.force_attach("s2")
+    assert prev == "s1"
+    assert chan.writer == "s2"
+
+
+def test_force_attach_noop_when_caller_already_writer():
+    chan = _bare_channel()
+    chan.attach("s1", writable=True)
+    assert chan.force_attach("s1") is None
+    assert chan.writer == "s1"
+
+
+def test_force_attach_with_no_prior_writer_returns_none():
+    chan = _bare_channel()
+    chan.sessions.add("s1")
+    prev = chan.force_attach("s1")
+    assert prev is None
+    assert chan.writer == "s1"
+
+
+def test_session_manager_takeover_delegates_to_channel():
+    mgr = m.SessionManager(on_data=lambda sid, data: None)
+    chan = _bare_channel()
+    chan.attach("s1", writable=True)
+    chan.sessions.add("s2")
+    mgr._channels["p1"] = chan
+    mgr._session_port["s1"] = "p1"
+    mgr._session_port["s2"] = "p1"
+    prev = mgr.takeover("s2")
+    assert prev == "s1"
+    assert chan.writer == "s2"
+
+
+def test_session_manager_takeover_unknown_session_returns_none():
+    mgr = m.SessionManager(on_data=lambda sid, data: None)
+    assert mgr.takeover("ghost-session") is None
+
+
 # ── PortChannel capture + paced writes + SessionManager monitor lifecycle ────
 # These exercise the pieces that need a serial handle, using a fake serial module
 # injected into serial_manager (pyserial isn't installed in CI).

@@ -116,6 +116,7 @@ def register(app, hub, ctx):
             return
         spoke_id = sess["spoke_id"]
         queue = sess["queue"]
+        unique_id = str(sess.get("unique_id") or "")
         # Mark connected so the 60s TTL no longer reaps this session (a viewer
         # sits on a console far longer than 60s, and each upstream frame re-reads
         # the session by id). connected_at drives the multiuser presence roster.
@@ -136,6 +137,14 @@ def register(app, hub, ctx):
                         if not text:
                             continue
                         raw = text.encode()
+                    # Write-lock gate: a read-only viewer's keyboard/mouse input
+                    # never reaches the VM. The screen keeps streaming to them
+                    # either way (QEMU multiplexes VNC_FRAME_UP to every viewer
+                    # regardless) — only this direction is gated. Re-checked live
+                    # (not just at open) so a force-takeover elsewhere downgrades
+                    # this session's input immediately, without a reconnect.
+                    if unique_id and not hub.vnc_is_writer(unique_id, session_id):
+                        continue
                     await hub.send_to_spoke_command(spoke_id, "VNC_FRAME_DOWN", {
                         "session_id": session_id,
                         "data": base64.b64encode(raw).decode(),
@@ -157,6 +166,15 @@ def register(app, hub, ctx):
                             # socket waiting for bytes that will never come.
                             await websocket.close(code=1000, reason="console closed")
                             return
+                        if kind == "downgraded":
+                            # Another viewer forced a takeover — tell the browser
+                            # to flip noVNC into view-only, without closing the
+                            # connection (the screen keeps streaming).
+                            try:
+                                await websocket.send_text(json.dumps({"type": "downgraded"}))
+                            except Exception:
+                                pass
+                            continue
                         # kind == "ready": the Proxmox WSS is open and RFB frames
                         # are about to flow. No-op — KEEP the relay loop running so
                         # later VNC_FRAME_UP bytes reach the browser. Returning here
@@ -1396,6 +1414,38 @@ def register(app, hub, ctx):
                 "relay": {"session_id": session_id, "relay_token": relay_token,
                           "spoke_id": sid, "kind": "serial"}}
 
+    @app.post("/api/console/{session_id}/takeover")
+    async def console_takeover(session_id: str, request: Request):
+        """Forcibly become the writer for an already-open, read-only serial
+        console session, evicting whoever currently holds it. Requires
+        edit-tier access — a stronger action than opening a plain ``rw``
+        session, which /api/console/open does not itself gate."""
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        hub = app.state.hub
+        csess = hub.get_console_session(session_id)
+        if not csess:
+            raise HTTPException(status_code=404, detail="console session not found or expired")
+        if not access.has_edit_access(sess):  # covers admin/tenant-admin too
+            raise HTTPException(status_code=403, detail="write access required to take over a console")
+        spoke_id = csess.get("spoke_id")
+        port_id = csess.get("port_id")
+        if not spoke_id or not port_id:
+            raise HTTPException(status_code=400, detail="console session has no port bound")
+        await _assert_port_tenant(request, spoke_id, port_id)
+        try:
+            r = await hub.request_response(spoke_id, "CONSOLE_TAKEOVER",
+                                           {"session_id": session_id}, timeout=15.0)
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"takeover failed: {e}")
+        data = _console_unwrap(r)
+        if data.get("status") not in ("SUCCESS", "OK"):
+            raise HTTPException(status_code=502,
+                                detail=data.get("message") or "console spoke refused takeover")
+        return {"status": "ok", "session_id": session_id,
+                "previous_writer": data.get("previous_writer")}
+
     @app.post("/api/console/config/get")
     async def console_config_get(request: Request):
         """Read/back up a port's running-config. Gated by console_write (middleware)."""
@@ -1485,6 +1535,15 @@ def register(app, hub, ctx):
                         if kind == "disconnect":
                             await websocket.close(code=1000, reason="console closed")
                             return
+                        if kind == "downgraded":
+                            # Another session forced a write-lock takeover on
+                            # this port — flip the browser's terminal to
+                            # read-only without closing the connection.
+                            try:
+                                await websocket.send_text(json.dumps({"type": "downgraded"}))
+                            except Exception:
+                                pass
+                            continue
                         continue  # "ready": keep the consumer alive (VNC ready-return bug)
                     else:
                         return

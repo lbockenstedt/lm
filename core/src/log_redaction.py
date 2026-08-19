@@ -58,6 +58,7 @@ _LOGSAFE_COMMANDS = frozenset({
     "LM_BACKPRESSURE", "COMMAND_RESULT", "ACK", "GET_SPOKE_STATUS",
     "GET_AGENTS", "GET_STATUS", "HEALTH_CHECK", "PING", "PONG",
     "CONSOLE_PROBE_RESULT", "CONSOLE_READY", "CONSOLE_CLOSED",
+    "CONSOLE_TAKEOVER", "CONSOLE_DOWNGRADED",
 })
 
 # Types whose ENTIRE payload is replaced with a marker (the secret is inline in

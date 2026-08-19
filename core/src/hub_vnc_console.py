@@ -89,8 +89,57 @@ class HubVncConsoleMixin:
             return None
         return sess
 
+    def _vnc_writer_map(self) -> Dict[str, str]:
+        """Lazily-initialized unique_id → writer session_id map. Lazy (like
+        ``_console_sync_status``) so hub test fixtures that predate this
+        feature don't need to know about a new ``__init__`` attribute."""
+        if not hasattr(self, "_vnc_writers"):
+            self._vnc_writers: Dict[str, str] = {}
+        return self._vnc_writers
+
     def unregister_vnc_session(self, session_id: str) -> None:
-        self.vnc_sessions.pop(session_id, None)
+        sess = self.vnc_sessions.pop(session_id, None)
+        unique_id = str((sess or {}).get("unique_id") or "")
+        # Release the write lock if the departing session held it — the VM is
+        # up for grabs again (the next opener becomes writer, or an explicit
+        # takeover claims it). Remaining read-only viewers are NOT auto-
+        # promoted, same as the serial console's PortChannel.detach().
+        writers = self._vnc_writer_map()
+        if unique_id and writers.get(unique_id) == session_id:
+            writers.pop(unique_id, None)
+
+    def vnc_attach(self, unique_id: str, session_id: str) -> bool:
+        """Register ``session_id`` as a viewer of ``unique_id``; the first
+        viewer (no current writer) becomes the writer. Returns True if this
+        session is (now) the writer."""
+        writers = self._vnc_writer_map()
+        if unique_id not in writers:
+            writers[unique_id] = session_id
+            return True
+        return writers.get(unique_id) == session_id
+
+    def vnc_is_writer(self, unique_id: str, session_id: str) -> bool:
+        return self._vnc_writer_map().get(str(unique_id or "")) == session_id
+
+    def vnc_takeover(self, unique_id: str, session_id: str) -> Optional[str]:
+        """Forcibly make ``session_id`` the writer for ``unique_id``, evicting
+        whoever currently holds it. Returns the dispossessed session_id (None
+        if there was no prior writer, or the caller already held it)."""
+        writers = self._vnc_writer_map()
+        prev = writers.get(unique_id)
+        if prev == session_id:
+            return None
+        writers[unique_id] = session_id
+        return prev
+
+    async def notify_vnc_downgraded(self, session_id: str) -> None:
+        """Push a ``("downgraded",)`` control tuple onto a still-open VNC
+        session's queue so its live /ws/console relay tells the browser to
+        drop to view-only, without closing the connection. No-op if the
+        session already closed."""
+        sess = self.vnc_sessions.get(session_id)
+        if sess is not None:
+            await sess["queue"].put(("downgraded",))
 
     def vnc_viewers(self, unique_id: str) -> list:
         """Presence: the connected VNC viewers currently attached to ``unique_id``.
@@ -109,6 +158,7 @@ class HubVncConsoleMixin:
                 "session_id": sid,
                 "username": s.get("username") or "",
                 "tenant_id": s.get("tenant_id") or "",
+                "is_writer": self._vnc_writer_map().get(str(unique_id or "")) == sid,
                 "since": s.get("connected_at") or 0,
             })
         out.sort(key=lambda v: v.get("since") or 0, reverse=True)

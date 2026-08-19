@@ -762,6 +762,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # control tuples ("ready"/"error"/"disconnect"); VNC_FRAME_DOWN sends
         # the other way via send_to_spoke_command (fire-and-forget). 60s TTL.
         self.vnc_sessions: Dict[str, Dict[str, Any]] = {}
+        # VNC write-lock: unique_id → the session_id currently allowed to send
+        # VNC_FRAME_DOWN (keyboard/mouse). Every viewer still gets their own
+        # vnc_sessions entry/queue (QEMU multiplexes the screen to everyone);
+        # this is a purely hub-side gate layered on top so only one viewer's
+        # input reaches the VM at a time, with an explicit force-takeover to
+        # hand it to someone else. First connecting viewer becomes the writer.
+        self._vnc_writers: Dict[str, str] = {}
         # Host-shell (xterm terminal) sessions: session_id → {queue, expires,
         # connected, ws_token, spoke_id, agent_id, tenant_id}. Fed by SHELL_OUT
         # via _handle_agent_relay_up; browser keystrokes go down as SHELL_IN.
@@ -4986,7 +4993,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # them from data bytes (mirrors the VNC ready/error/disconnect
                 # discipline — a bare-return there once killed the queue consumer).
                 _ctype = payload.get("type")
-                if _ctype in ("CONSOLE_DATA_UP", "CONSOLE_READY", "CONSOLE_ERROR", "CONSOLE_CLOSED"):
+                if _ctype in ("CONSOLE_DATA_UP", "CONSOLE_READY", "CONSOLE_ERROR", "CONSOLE_CLOSED", "CONSOLE_DOWNGRADED"):
                     _cdata = payload.get("data", {}) or {}
                     _csess = self.get_console_session(_cdata.get("session_id")) if _cdata.get("session_id") else None
                     if _csess:
@@ -5001,6 +5008,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             await _csess["queue"].put(("error", str(_cdata.get("error", "console error"))[:300]))
                         elif _ctype == "CONSOLE_CLOSED":
                             await _csess["queue"].put(("disconnect",))
+                        elif _ctype == "CONSOLE_DOWNGRADED":
+                            # Another session forced a write-lock takeover on
+                            # this port — tell the dispossessed browser to drop
+                            # to read-only without closing the connection.
+                            await _csess["queue"].put(("downgraded",))
                     continue
 
                 # --- Console auto-identify result → NetBox (event-driven) ---
