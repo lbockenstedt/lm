@@ -36,7 +36,7 @@ from api import (
 _NAC_PAYLOAD = lambda i: {  # noqa: E731
     "host": i.get("host"), "client_id": i.get("client_id"),
     "client_secret": i.get("client_secret"), "user": i.get("user"),
-    "password": i.get("password"),
+    "password": i.get("password"), "verify_ssl": i.get("verify_ssl", True),
 }
 _IPAM_PAYLOAD = lambda i: {  # noqa: E731
     "netbox_url": i.get("url"), "api_token": i.get("api_token"),
