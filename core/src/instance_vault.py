@@ -32,18 +32,26 @@ logger = logging.getLogger(__name__)
 
 # Per-storage-key map of the record's SECRET fields → the resolved-value field
 # names each may be pulled from (first non-empty wins). NON-secret fields (host,
-# client_id, url, user, address, port, …) always stay inline on the record and
-# are never sourced from the vault. Keyed by the ``global_config`` list name.
+# url, address, port, …) always stay inline on the record and are never sourced
+# from the vault. The one exception is ``nac_instances["client_id"]``: an
+# OAuth2 vault secret stores client_id + client_secret as one identity, so
+# client_id is sourced from the vault there too (see below). Keyed by the
+# ``global_config`` list name.
 SECRET_FIELDS = {
     "nac_instances": {
         # A ClearPass connection authenticates EITHER as an OAuth2 API client
         # (client_id + client_secret, grant_type=client_credentials) OR with a
         # username/password fallback login (grant_type=password). A vault
         # "Login" secret marked as an OAuth account (Credential Vault checkbox)
-        # carries client_secret; a plain login carries user/username + password.
-        # Only the field(s) the resolved secret actually carries are overlaid, so
-        # the spoke picks the grant from what is present. client_id stays inline
-        # on the instance (non-secret) and is never sourced/stripped here.
+        # carries client_id + client_secret together; a plain login carries
+        # user/username + password. Only the field(s) the resolved secret
+        # actually carries are overlaid, so the spoke picks the grant from
+        # what is present. client_id IS sourced from the vault like the
+        # other fields here (an OAuth secret is one identity — id and secret
+        # travel together): it is stripped from the inline record at save
+        # time and re-filled from the vault at push time, same as
+        # client_secret below.
+        "client_id":     ("client_id", "clientid"),
         "client_secret": ("client_secret", "secret", "apikey", "api_key", "token"),
         "user":          ("user", "username"),
         "password":      ("password", "fallback_password"),

@@ -53,15 +53,16 @@ def test_overlay_fills_nac_client_secret(monkeypatch):
     assert "vault_credential" in inst              # original untouched
 
 
-def test_overlay_nac_oauth_fills_client_secret(monkeypatch):
-    # An OAuth2 account secret (client_id + client_secret) backs the client
-    # secret; client_id stays inline on the instance (non-secret, not sourced).
+def test_overlay_nac_oauth_fills_client_id_and_secret(monkeypatch):
+    # An OAuth2 account secret carries client_id + client_secret together as
+    # one identity — both are overlaid from the vault, overriding whatever
+    # (possibly stale/blank) client_id sits inline on the instance.
     _patch_get(monkeypatch, {"client_id": "vault-cid", "client_secret": "vaulted-secret"})
     inst = {"host": "https://cppm", "client_id": "cid",
             "vault_credential": {"bucket": "acme", "name": "cppm"}}
     out = _run(iv.overlay(object(), inst, "nac_instances"))
     assert out["client_secret"] == "vaulted-secret"
-    assert out["client_id"] == "cid"               # inline preserved, not overlaid
+    assert out["client_id"] == "vault-cid"          # overlaid from the vault
     assert "user" not in out and "password" not in out
 
 
@@ -112,7 +113,7 @@ def test_strip_drops_inline_secrets_when_ref_present():
             "vault_credential": {"bucket": " acme ", "name": " cppm "}}
     iv.strip_inline_secrets(inst, "nac_instances")
     assert "client_secret" not in inst and "password" not in inst
-    assert inst["client_id"] == "cid"
+    assert "client_id" not in inst                 # OAuth identity: sourced from vault too
     assert inst["vault_credential"] == {"bucket": "acme", "name": "cppm"}  # normalized
 
 
