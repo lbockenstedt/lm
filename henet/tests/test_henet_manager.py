@@ -166,6 +166,40 @@ def test_tenant_id_preserved_across_update(tmp_path):
     assert recs[0]["value"] == "203.0.113.2"
 
 
+def test_set_tenant_rehomes_without_pushing(tmp_path):
+    """set_tenant changes ownership only — no HE push (poster untouched), the
+    IP/last-push status are preserved. Lets records be organised onto per-tenant
+    tabs even when the dyndns endpoint is unreachable."""
+    poster = FakePoster()
+    mgr = HENetManager(state_path=str(tmp_path / "r.json"), http_post=poster)
+    mgr.add_record("h.example.com", "A", "203.0.113.1", ddns_key="K")  # global
+    pushes_before = len(poster.calls) if hasattr(poster, "calls") else None
+    res = mgr.set_tenant("h.example.com", "A", "lrb")
+    assert res == {"status": "SUCCESS", "updated": 1, "tenant_id": "lrb"}
+    rec = [r for r in mgr.list_records() if r["name"] == "h.example.com"][0]
+    assert rec["tenant_id"] == "lrb"
+    assert rec["value"] == "203.0.113.1"  # IP untouched (no push)
+    if pushes_before is not None:
+        assert len(poster.calls) == pushes_before  # set_tenant never pushes
+
+
+def test_set_tenant_back_to_global(tmp_path):
+    poster = FakePoster()
+    mgr = HENetManager(state_path=str(tmp_path / "r.json"), http_post=poster)
+    mgr.add_record("h.example.com", "A", "203.0.113.1", ddns_key="K", tenant_id="lrb")
+    mgr.set_tenant("h.example.com", "A", "")
+    rec = [r for r in mgr.list_records() if r["name"] == "h.example.com"][0]
+    assert rec["tenant_id"] == ""
+
+
+def test_set_tenant_no_match_updates_zero(tmp_path):
+    poster = FakePoster()
+    mgr = HENetManager(state_path=str(tmp_path / "r.json"), http_post=poster)
+    mgr.add_record("h.example.com", "A", "203.0.113.1", ddns_key="K")
+    res = mgr.set_tenant("nope.example.com", "A", "lrb")
+    assert res["updated"] == 0
+
+
 def test_ddns_key_never_persisted(tmp_path):
     state = tmp_path / "r.json"
     mgr = HENetManager(state_path=str(state), http_post=FakePoster())

@@ -82,6 +82,13 @@ class HENetSpoke(BaseSpoke):
                 return {"status": "ERROR", "message": "name is required"}
             return await asyncio.to_thread(self.mgr.delete_record, name, rtype)
 
+        if cmd == "HENET_SET_TENANT":
+            name = data.get("name")
+            if not name:
+                return {"status": "ERROR", "message": "name is required"}
+            return await asyncio.to_thread(
+                self.mgr.set_tenant, name, data.get("type"), data.get("tenant_id", ""))
+
         if cmd == "HENET_IMPORT":
             records = data.get("records", [])
             if not isinstance(records, list):
