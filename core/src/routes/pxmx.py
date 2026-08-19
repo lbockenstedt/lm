@@ -1391,9 +1391,14 @@ def register(app, hub, ctx):
         # scope (tenant isolation preserved). admins / a tenant with no
         # proxmox_tag → "_all_" (the live fetch returns every VM, then
         # _filter_tenant subnet-filters per reader on the way out — same as live).
-        scoping = get_tenant_scoping(hub, _resolve_tenant(request, tenant))
+        # Keyed by tid (not tag): two different tenants can both resolve to an
+        # empty tag, which would otherwise share one warm-cache entry between
+        # them (the same class of leak as the spoke restriction below, just in
+        # the cache layer).
+        tid = _resolve_tenant(request, tenant)
+        scoping = get_tenant_scoping(hub, tid)
         tag = scoping.get("proxmox_tag") or ""
-        warm_key = f"{tag or '_all_'}|agent={agent_id or ''}"
+        warm_key = f"{tid or '_all_'}|agent={agent_id or ''}"
 
         async def _warm_or_empty():
             """Serve the last-known VM list (stale) when the spoke is down / a
@@ -1411,24 +1416,53 @@ def register(app, hub, ctx):
                 out["spoke_connected"] = False
             return _with_tpl(out)
 
+        # Which spokes this reader may query AT ALL — SPOKE-level tenant
+        # isolation, not just the post-fetch subnet/tag filter below. Without
+        # this, a tenant with no NetBox prefixes configured (or the
+        # "hypervisor" subnet-filter module toggled off) saw EVERY tenant's
+        # VMs: access.filter_tenant's hypervisor branch explicitly fails OPEN
+        # in both cases (unlike every other module, which fails closed on a
+        # prefix-less tenant) — the reported gap versus get_pxmx_nodes, which
+        # has never depended on subnet prefixes for isolation. Mirrors
+        # get_pxmx_nodes' spoke resolution exactly (tenant-bound + shared
+        # spokes; an unbound global spoke only when it's itself unbound to any
+        # tenant) so Overview and the VM list share one isolation boundary
+        # instead of VMs relying solely on the weaker subnet filter.
+        if tid and tid != "default":
+            visible_spokes = set(hub.get_hypervisor_spokes_for_tenant(tid))
+            gs = hub.get_hypervisor_spoke()
+            gs_tid = ((hub.state.system_state.get("module_metadata", {}) or {})
+                      .get(gs, {}) or {}).get("tenant_id") if gs else None
+            if gs and not gs_tid:
+                visible_spokes.add(gs)
+        elif _is_admin(sess):
+            visible_spokes = None  # no restriction — admin, no tenant selected ("All")
+        else:
+            raise HTTPException(status_code=403, detail="Select a tenant to view its hypervisor VMs")
+
         # A Proxmox host can be hosted by a hypervisor (pxmx) spoke OR a
         # simulation (cs) spoke — a CS-enabled box dials the cs spoke's
         # /ws/agent yet must still appear in the Hypervisors VM list (it can run
-        # a MIX of infra + sim-client VMs). So fan PXMX_LIST_VMS across EVERY
-        # agent-hosting spoke and merge (mirrors the Agents tile), not just the
-        # single get_hypervisor_spoke(), which preferred the pxmx spoke and hid
-        # every sim-hosted host in a mixed deployment. A ?agent_id= scopes back
-        # to that one agent's spoke. Tenant isolation is unchanged: the merged
-        # list still runs through _filter_tenant (subnet / tag) below.
+        # a MIX of infra + sim-client VMs). So fan PXMX_LIST_VMS across every
+        # agent-hosting spoke VISIBLE TO THIS TENANT and merge (mirrors the
+        # Agents tile), not just the single get_hypervisor_spoke(), which
+        # preferred the pxmx spoke and hid every sim-hosted host in a mixed
+        # deployment. A ?agent_id= scopes back to that one agent's spoke — but
+        # only if that spoke is itself visible to this tenant, so a tenant
+        # can't reach another tenant's VM list by guessing an agent_id. The
+        # merged list still runs through _filter_tenant (subnet / tag) below
+        # as a second layer, e.g. to split VMs on a SHARED spoke by tag.
         if agent_id:
             one = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
                 or hub.get_hypervisor_spoke()
-            pxmx_spokes = [one] if one else []
+            pxmx_spokes = [one] if one and (visible_spokes is None or one in visible_spokes) else []
         else:
-            pxmx_spokes = list(dict.fromkeys(
+            all_spokes = list(dict.fromkeys(
                 hub.get_all_spokes_by_type("hypervisor")
                 + hub.get_all_spokes_by_type("simulation")
             ))
+            pxmx_spokes = all_spokes if visible_spokes is None \
+                else [s for s in all_spokes if s in visible_spokes]
         if not pxmx_spokes:
             if sess:
                 tid = sess.get("user", {}).get("tenant_id")
