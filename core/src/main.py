@@ -195,10 +195,18 @@ _INSTANCE_CONFIG_SOURCES = {
         "client_secret": i.get("client_secret"),
         "user": i.get("user"),
         "password": i.get("password"),
+        # MUST mirror _NAC_PAYLOAD (tenant_devices.py): the reconnect push runs
+        # through THIS projection, so dropping verify_ssl here re-enables TLS
+        # verification on every spoke restart (the client is reconstructed at
+        # the secure default) — silently defeating the per-instance "allow
+        # self-signed" toggle until the operator re-saves. Keep the two in sync.
+        "verify_ssl": i.get("verify_ssl", True),
     }),
     "netbox": ("ipam_instances", lambda i: {
         "netbox_url": i.get("netbox_url") or i.get("url"),
         "api_token": i.get("api_token"),
+        # Mirror _IPAM_PAYLOAD — same reconnect-drops-verify hazard as cppm.
+        "netbox_verify_ssl": i.get("verify_ssl"),
     }),
     "ldap": ("ldap_instances", lambda i: {
         "LDAP_SERVER_URL": i.get("server_url"),
