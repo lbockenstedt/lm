@@ -44,8 +44,8 @@ def test_get_node_stats_telemetry_cache_hit_no_run_command():
                               "nodes": [{"node": "pve1", "status": "online"}]}})
     r = _run(agg.get_node_stats(cp, {}))
     assert r["status"] == "SUCCESS"
-    assert r["nodes"] == [{"node": "pve1", "status": "online",
-                           "agent_id": "agent-1", "cluster": "clusterA"}]
+    assert r["nodes"] == [{"node": "pve1", "status": "online", "agent_id": "agent-1",
+                           "cluster": "clusterA", "telemetry_ts": 0}]
     assert cp.calls == []  # telemetry cache hit — no RUN_COMMAND round-trip
 
 

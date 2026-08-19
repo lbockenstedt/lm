@@ -129,13 +129,19 @@ async def get_node_stats(cp, data: Dict[str, Any]) -> Dict[str, Any]:
     # regardless of which agent reported it or what stale per-agent cluster
     # name got attached — keeping whichever cluster-mate's telemetry is
     # freshest (see _freshest_by_key).
+    # telemetry_ts travels in the OUTPUT node dict too (not just used to pick
+    # the winner here) — a cs/hypervisor spoke with a single cluster-mate agent
+    # dedups to a no-op at THIS layer, so the same freshness signal is needed
+    # one level up in routes/pxmx.py's cross-SPOKE fan-out (_aggregate_pxmx_nodes),
+    # which otherwise has no idea which of several spokes' identical node
+    # reports is newest.
     def _node_rows():
         for aid, info in cp.connected_agents.items():
             cluster = info.get("cluster_name", aid)
             ts = info.get("telemetry_ts", 0) or 0
             for node in info.get("nodes", []):
                 key = node.get("node") or f"{aid}:{node.get('node', '')}"
-                yield key, ts, {**node, "agent_id": aid, "cluster": cluster}
+                yield key, ts, {**node, "agent_id": aid, "cluster": cluster, "telemetry_ts": ts}
 
     all_nodes: List[Dict] = _freshest_by_key(_node_rows())
 
@@ -172,7 +178,7 @@ async def get_node_stats(cp, data: Dict[str, Any]) -> Dict[str, Any]:
                 ts = info.get("telemetry_ts", 0) or 0
                 for node in info.get("nodes", []):
                     key = node.get("node") or f"{aid}:{node.get('node', '')}"
-                    yield key, ts, {**node, "agent_id": aid, "cluster": cluster}
+                    yield key, ts, {**node, "agent_id": aid, "cluster": cluster, "telemetry_ts": ts}
 
         all_nodes = _freshest_by_key(_disk_node_rows())
         if all_nodes:
@@ -360,6 +366,7 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
                     "agent_id":  aid,
                     "cluster":   vm.get("cluster", cluster),
                     "unique_id": vm.get("unique_id", f"{cluster}/{node}/{vmid}"),
+                    "telemetry_ts": ts,
                 }
 
     cached_vms: List[Dict] = _freshest_by_key(_vm_rows())
@@ -430,6 +437,7 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
                         "agent_id":  aid,
                         "cluster":   vm.get("cluster", cluster),
                         "unique_id": vm.get("unique_id", f"{cluster}/{node}/{vmid}"),
+                        "telemetry_ts": ts,
                     }
 
         stale_vms: List[Dict] = _freshest_by_key(_disk_vm_rows())

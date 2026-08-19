@@ -6,6 +6,22 @@ from api import (
     spoke_or_503, time, uuid,
 )
 
+# Shared freshest-wins dedup (also used inside pxmx_node_vm_aggregation to
+# collapse cluster-mate AGENTS on one spoke) — reused here to collapse
+# cluster-mate SPOKES. A Proxmox host can be hosted by its own dedicated
+# spoke (the cs/simulation split-topology case), so a real N-node PVE cluster
+# can show up as N agent-hosting spokes, each with exactly one connected
+# agent. That agent still self-reports the FULL cluster (pvesh get
+# /cluster/resources is cluster-wide), so _aggregate_pxmx_nodes/_vms fanning
+# GET_NODE_STATS/PXMX_LIST_VMS out to every such spoke and concatenating
+# unconditionally reproduced the exact N-agents x N-nodes duplication that was
+# already fixed one layer down (within a single spoke's connected_agents) —
+# just at the cross-SPOKE layer instead.
+try:
+    from messaging.pxmx_node_vm_aggregation import _freshest_by_key
+except ImportError:  # imported as part of the core.src.routes package
+    from ..messaging.pxmx_node_vm_aggregation import _freshest_by_key
+
 # ── /api/pxmx/agents cache (stale-while-revalidate) ─────────────────────────
 # The Agents tile + the Setup → Spokes & Agents page fans GET_AGENTS out to
 # EVERY agent-hosting spoke (hypervisor + simulation) with a 5s request_timeout
@@ -369,8 +385,8 @@ async def _aggregate_pxmx_vms(hub, spokes, payload, timeout=30.0):
         return res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
 
     results = await asyncio.gather(*(_one(sid) for sid in spokes), return_exceptions=True)
-    merged_vms: list = []
-    merged_nodes: list = []
+    vm_rows: list = []
+    node_rows: list = []
     extras: dict = {}
     any_ok = False
     last_err = None
@@ -383,10 +399,26 @@ async def _aggregate_pxmx_vms(hub, spokes, payload, timeout=30.0):
         if isinstance(r, dict):
             vms = r.get("vms")
             if isinstance(vms, list):
-                merged_vms.extend(vms)
+                for vm in vms:
+                    if not isinstance(vm, dict):
+                        continue
+                    # unique_id ("<cluster>/<node>/<vmid>") is stamped on every
+                    # VM one layer down and is the reliable identity — a bare
+                    # (node, vmid) key collides every VM missing BOTH fields
+                    # (e.g. minimal test/mock payloads) into one, silently
+                    # dropping genuinely distinct VMs from different hosts.
+                    key = vm.get("unique_id") or (vm.get("node"), vm.get("vmid"))
+                    vm_rows.append((key, vm.get("telemetry_ts", 0) or 0, vm))
             nodes = r.get("nodes")
             if isinstance(nodes, list):
-                merged_nodes.extend(nodes)
+                for node in nodes:
+                    if not isinstance(node, dict):
+                        continue
+                    # id() fallback: never let two distinct nodes both missing
+                    # a hostname collide into one (same hazard as the VM key
+                    # above) — a real pvesh payload always carries "node".
+                    key = node.get("node") or id(node)
+                    node_rows.append((key, node.get("telemetry_ts", 0) or 0, node))
             # Preserve any other top-level scalars (e.g. proxmox_tag echo) from
             # the first spoke that set them, without letting a later spoke clobber.
             for k, v in r.items():
@@ -396,8 +428,13 @@ async def _aggregate_pxmx_vms(hub, spokes, payload, timeout=30.0):
         # Every spoke failed → re-raise so the caller falls back to the warm cache.
         raise last_err if last_err else RuntimeError(
             "no agent-hosting spoke answered PXMX_LIST_VMS")
+    # Cluster-mate spokes (a real N-node PVE cluster split across N
+    # dedicated/cs-hosted spokes) each self-report the FULL cluster, so a
+    # naive extend() here reproduces the N-spokes x N-nodes duplication
+    # already fixed one layer down within a single spoke's own agents.
     out = dict(extras)
-    out["vms"] = merged_vms
+    out["vms"] = _freshest_by_key(vm_rows)
+    merged_nodes = _freshest_by_key(node_rows)
     if merged_nodes:
         out["nodes"] = merged_nodes
     out["spoke_connected"] = True
@@ -421,7 +458,7 @@ async def _aggregate_pxmx_nodes(hub, spokes, timeout=30.0):
         return res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
 
     results = await asyncio.gather(*(_one(sid) for sid in spokes), return_exceptions=True)
-    merged_nodes: list = []
+    node_rows: list = []
     extras: dict = {}
     any_ok = False
     last_err = None
@@ -434,15 +471,25 @@ async def _aggregate_pxmx_nodes(hub, spokes, timeout=30.0):
         if isinstance(r, dict):
             nodes = r.get("nodes")
             if isinstance(nodes, list):
-                merged_nodes.extend(nodes)
+                for node in nodes:
+                    if not isinstance(node, dict):
+                        continue
+                    # id() fallback: never let two distinct nodes both missing
+                    # a hostname collide into one (same hazard as the VM key
+                    # above) — a real pvesh payload always carries "node".
+                    key = node.get("node") or id(node)
+                    node_rows.append((key, node.get("telemetry_ts", 0) or 0, node))
             for k, v in r.items():
                 if k not in ("nodes", "spoke_connected"):
                     extras.setdefault(k, v)
     if not any_ok:
         raise last_err if last_err else RuntimeError(
             "no agent-hosting spoke answered GET_NODE_STATS")
+    # Cluster-mate spokes each self-report the FULL cluster (see
+    # _aggregate_pxmx_vms above for the full explanation) — dedup by node
+    # hostname, keeping whichever spoke's report is freshest.
     out = dict(extras)
-    out["nodes"] = merged_nodes
+    out["nodes"] = _freshest_by_key(node_rows)
     out["spoke_connected"] = True
     return out
 
