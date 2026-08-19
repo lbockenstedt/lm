@@ -17994,82 +17994,47 @@ async function openConsoleTerminal(spokeId, portId, knownLabel) {
 // of it is still hidden underneath. Give #viewport bottom padding equal to
 // whichever dock(s) are currently showing (minimized docks only cover their
 // header bar) so scrolling all the way down actually clears the drawer.
-function _consoleAdjustViewportPadding() {
-    const vp = document.getElementById('viewport');
-    if (!vp) return;
-    const MINIMIZED_PX = 40;
-    let covered = 0;
-    const serial = document.getElementById('serial-console-modal');
-    if (serial && !serial.classList.contains('hidden')) {
-        covered = Math.max(covered,
-            serial.getAttribute('data-min') === '1' ? MINIMIZED_PX : window.innerHeight * 0.45);
-    }
-    const vnc = document.getElementById('pxmx-vnc-modal');
-    if (vnc && !vnc.classList.contains('hidden')) {
-        covered = Math.max(covered,
-            vnc.getAttribute('data-min') === '1' ? MINIMIZED_PX : window.innerHeight * 0.55);
-    }
-    vp.style.paddingBottom = covered ? `${Math.ceil(covered)}px` : '';
-}
-
-// Create (or reveal) the shared serial-console dock shell. Idempotent — the tab
-// strip and bodies persist across opens; only wired once.
+// Create (or reveal) the shared serial-console dock shell. Idempotent — the
+// list and bodies persist across opens; only wired once. Full-screen panel
+// bounded by the header (top-16), footer (bottom-10), and left nav sidebar
+// (left-56, index.html) — occupies the same box <main> does. A left-side
+// search + scrollable list (serialRenderConsoleList) replaces the old
+// horizontal tab strip, which became unusable once more than a handful of
+// consoles were open (had to scroll sideways through a cramped strip).
 function serialEnsureConsoleDock() {
     let modal = document.getElementById('serial-console-modal');
     if (modal) { modal.classList.remove('hidden'); return modal; }
     modal = document.createElement('div');
     modal.id = 'serial-console-modal';
-    // Non-modal bottom drawer (no full-screen backdrop): the rest of the app —
-    // in particular the port list — stays interactive, so a user can open a
-    // second console while one is already docked. z-40 keeps it under true
-    // modals. left-56 keeps it clear of the w-56 left nav sidebar (index.html)
-    // instead of spanning the full viewport and covering the menu.
-    modal.className = 'fixed bottom-0 left-56 right-0 z-40 flex flex-col bg-[#1e1e1e] border-t border-slate-700 shadow-2xl';
-    modal.style.height = '45vh';
+    modal.className = 'fixed top-16 bottom-10 left-56 right-0 z-40 flex bg-[#1e1e1e] border-t border-slate-700 shadow-2xl';
     modal.innerHTML = `
-        <div class="flex items-center gap-3 px-4 py-2 bg-[#2d2d2d] border-b border-slate-700 text-slate-200 text-sm">
-            <strong class="font-semibold">Serial Consoles</strong>
-            <button id="serial-console-min" title="Minimize / restore the console dock" class="ml-2 px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Minimize</button>
-            <button id="serial-console-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
-            <button id="serial-console-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
-            <button id="serial-console-broadcast-btn" title="Choose which consoles to view side-by-side / include in a broadcast" class="px-2 py-0.5 text-xs rounded border border-sky-500 text-sky-400 hover:bg-sky-900/40">Consoles ▾</button>
-            <button id="serial-broadcast-toggle" title="Check 2 or more consoles in Consoles ▾ first" disabled class="opacity-40 px-2 py-0.5 text-xs rounded border border-sky-500 text-sky-400 hover:bg-sky-900/40">Broadcast: Off</button>
-            <span id="serial-console-status" class="ml-auto text-xs text-amber-400"></span>
-            <button id="serial-console-closeall" title="Close all consoles" class="ml-3 text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
+        <div class="w-72 shrink-0 flex flex-col border-r border-slate-700 bg-[#181818]">
+            <div class="p-2 border-b border-slate-700 space-y-2">
+                <div class="flex items-center justify-between">
+                    <strong class="text-sm text-slate-200">Serial Consoles</strong>
+                    <button id="serial-console-closeall" title="Close all consoles" class="text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
+                </div>
+                <input id="serial-console-search" type="text" placeholder="Search consoles…"
+                       class="w-full text-xs bg-[#1e1e1e] border border-slate-600 rounded px-2 py-1 text-slate-100 focus:outline-none focus:border-sky-500">
+                <button id="serial-broadcast-toggle" title="Check 2 or more consoles below first" disabled
+                        class="opacity-40 w-full px-2 py-1 text-xs rounded border border-sky-500 text-sky-400 hover:bg-sky-900/40">Broadcast: Off</button>
+            </div>
+            <div id="serial-console-list" class="flex-1 overflow-y-auto"></div>
         </div>
-        <div id="serial-console-tabs" class="flex items-stretch gap-1 px-2 pt-1 bg-[#2d2d2d] border-b border-slate-700 overflow-x-auto"></div>
-        <div id="serial-console-bodies" class="relative flex-1 flex bg-[#1e1e1e] overflow-hidden"></div>
-        <div id="serial-broadcast-bar" class="hidden flex items-center gap-2 px-3 py-1.5 bg-[#2d2d2d] border-t border-slate-700">
-            <span id="serial-broadcast-bar-label" class="text-xs text-sky-400 whitespace-nowrap">Broadcast to 0 consoles:</span>
-            <input id="serial-broadcast-bar-input" type="text" placeholder="Type a line and press Enter to send it to every checked console…"
-                   class="flex-1 text-xs font-mono bg-[#1e1e1e] border border-slate-600 rounded px-2 py-1 text-slate-100 focus:outline-none focus:border-sky-500">
+        <div class="flex-1 flex flex-col min-w-0">
+            <div class="flex items-center gap-3 px-4 py-2 bg-[#2d2d2d] border-b border-slate-700 text-slate-200 text-sm">
+                <button id="serial-console-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
+                <button id="serial-console-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
+                <span id="serial-console-status" class="ml-auto text-xs text-amber-400"></span>
+            </div>
+            <div id="serial-console-bodies" class="relative flex-1 flex bg-[#1e1e1e] overflow-hidden"></div>
+            <div id="serial-broadcast-bar" class="hidden flex items-center gap-2 px-3 py-1.5 bg-[#2d2d2d] border-t border-slate-700">
+                <span id="serial-broadcast-bar-label" class="text-xs text-sky-400 whitespace-nowrap">Broadcast to 0 consoles:</span>
+                <input id="serial-broadcast-bar-input" type="text" placeholder="Type a line and press Enter to send it to every checked console…"
+                       class="flex-1 text-xs font-mono bg-[#1e1e1e] border border-slate-600 rounded px-2 py-1 text-slate-100 focus:outline-none focus:border-sky-500">
+            </div>
         </div>`;
     document.body.appendChild(modal);
-    _consoleAdjustViewportPadding();
-    modal.querySelector('#serial-console-min').onclick = () => {
-        const minimized = modal.getAttribute('data-min') === '1';
-        const tabsEl = modal.querySelector('#serial-console-tabs');
-        const bodiesEl = modal.querySelector('#serial-console-bodies');
-        const btn = modal.querySelector('#serial-console-min');
-        if (minimized) {
-            modal.setAttribute('data-min', '0');
-            modal.style.height = '45vh';
-            tabsEl.classList.remove('hidden');
-            bodiesEl.classList.remove('hidden');
-            btn.textContent = 'Minimize';
-            _consoleAdjustViewportPadding();
-            try { window.dispatchEvent(new Event('resize')); } catch (e) {}
-            const c = serialActiveConsole();
-            if (c && c.term) { try { c.term.focus(); c.term.scrollToBottom(); } catch (e) {} }
-        } else {
-            modal.setAttribute('data-min', '1');
-            modal.style.height = '';
-            tabsEl.classList.add('hidden');
-            bodiesEl.classList.add('hidden');
-            btn.textContent = 'Restore';
-            _consoleAdjustViewportPadding();
-        }
-    };
     modal.querySelector('#serial-console-fs').onclick = () => {
         const c = serialActiveConsole();
         const screen = c && c.bodyEl;
@@ -18078,7 +18043,10 @@ function serialEnsureConsoleDock() {
     };
     modal.querySelector('#serial-console-closeall').onclick = () => serialCloseAllConsoles();
     modal.querySelector('#serial-console-takeover').onclick = () => serialForceTakeover();
-    modal.querySelector('#serial-console-broadcast-btn').onclick = (ev) => serialToggleBroadcastMenu(ev);
+    modal.querySelector('#serial-console-search').addEventListener('input', (ev) => {
+        window._serialConsoleFilter = ev.target.value.trim().toLowerCase();
+        serialRenderConsoleList();
+    });
     modal.querySelector('#serial-broadcast-toggle').onclick = () => {
         window._serialBroadcastOn = !window._serialBroadcastOn;
         serialUpdateBroadcastBar();
@@ -18100,63 +18068,6 @@ function serialEnsureConsoleDock() {
     });
     serialUpdateBroadcastBar();
     return modal;
-}
-
-// Shared floating checklist for picking the broadcast group — lazily created,
-// repositioned + repopulated per open (mirrors _pxmxVmActionMenuEl's
-// one-element-reused convention). Any number of consoles can be checked;
-// 2+ checked = an active broadcast group.
-function _serialBroadcastMenuEl() {
-    let menu = document.getElementById('serial-broadcast-menu');
-    if (!menu) {
-        menu = document.createElement('div');
-        menu.id = 'serial-broadcast-menu';
-        menu.className = 'hidden fixed z-50 bg-[#2d2d2d] border border-slate-600 rounded-md shadow-lg py-1 text-xs min-w-[200px] text-slate-200';
-        document.body.appendChild(menu);
-        document.addEventListener('click', (ev) => {
-            if (!menu.contains(ev.target) && ev.target.id !== 'serial-console-broadcast-btn') {
-                menu.classList.add('hidden');
-            }
-        });
-    }
-    return menu;
-}
-
-function serialToggleBroadcastMenu(evt) {
-    evt.stopPropagation();
-    const menu = _serialBroadcastMenuEl();
-    if (!menu.classList.contains('hidden')) { menu.classList.add('hidden'); return; }
-    if (!window._serialBroadcastGroup) window._serialBroadcastGroup = new Set();
-    const group = window._serialBroadcastGroup;
-    const entries = window._serialConsoles ? Array.from(window._serialConsoles.values()) : [];
-    const footerText = () => group.size >= 2 ? `Broadcasting to ${group.size} consoles`
-        : 'Check 2 or more to broadcast';
-    menu.innerHTML = (entries.length
-        ? entries.map(e => `
-            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-slate-700 cursor-pointer">
-                <input type="checkbox" data-bcast-key="${escapeHtml(e.key)}" ${group.has(e.key) ? 'checked' : ''}>
-                <span class="font-mono">${escapeHtml(e.label || e.portId || e.key)}</span>
-            </label>`).join('')
-        : '<div class="px-3 py-1.5 text-slate-500">No open consoles</div>')
-        + `<div class="broadcast-menu-footer border-t border-slate-600 mt-1 pt-1 px-3 py-1 text-slate-400">${footerText()}</div>`;
-    menu.querySelectorAll('input[data-bcast-key]').forEach(cb => {
-        cb.onclick = (ev2) => {
-            ev2.stopPropagation();
-            const k = cb.getAttribute('data-bcast-key');
-            if (cb.checked) group.add(k); else group.delete(k);
-            serialReflowBodies();
-            serialRenderConsoleTabs();
-            serialSyncSerialHeader();
-            serialUpdateBroadcastBar();
-            const footer = menu.querySelector('.broadcast-menu-footer');
-            if (footer) footer.textContent = footerText();
-        };
-    });
-    const btn = document.getElementById('serial-console-broadcast-btn');
-    const r = (btn || evt.currentTarget).getBoundingClientRect();
-    menu.style.top = (r.bottom + 4) + 'px';
-    menu.style.left = r.left + 'px';
-    menu.classList.remove('hidden');
 }
 
 // Send one line to every member of the broadcast group (from the shared
@@ -18196,7 +18107,7 @@ function serialUpdateBroadcastBar() {
     toggleBtn.classList.toggle('opacity-40', !groupActive);
     toggleBtn.title = groupActive
         ? 'Toggle a single shared input that broadcasts to every checked console'
-        : 'Check 2 or more consoles in Consoles ▾ first';
+        : 'Check 2 or more consoles below first';
     const label = bar.querySelector('#serial-broadcast-bar-label');
     if (label) label.textContent = `Broadcast to ${group ? group.size : 0} consoles:`;
 }
@@ -18257,7 +18168,7 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     // Make this tab active first so its body is visible when xterm lays out —
     // an xterm opened into a display:none container measures 0×0 and renders blank.
     serialActivateConsole(key);
-    const upd = (text, cls) => { entry.statusText = text; entry.statusCls = cls; serialRenderConsoleTabs(); serialSyncSerialHeader(); };
+    const upd = (text, cls) => { entry.statusText = text; entry.statusCls = cls; serialRenderConsoleList(); serialSyncSerialHeader(); };
     const term = new Terminal({ cursorBlink: true, fontSize: 13, scrollback: 5000,
                                 theme: { background: '#1e1e1e' } });
     term.open(bodyEl);
@@ -18293,7 +18204,7 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     // while broadcast mode is on.
     term.onData(d => { if (!entry.ro && ws.readyState === 1) ws.send(d); });
     entry.ws = ws;
-    serialRenderConsoleTabs();
+    serialRenderConsoleList();
     serialSyncSerialHeader();
 }
 
@@ -18302,43 +18213,62 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
 function serialActivateConsole(key) {
     window._serialActiveConsole = key;
     serialReflowBodies();
-    serialRenderConsoleTabs();
+    serialRenderConsoleList();
     serialSyncSerialHeader();
     const c = window._serialConsoles && window._serialConsoles.get(key);
     if (c && c.term) { try { c.term.focus(); c.term.scrollToBottom(); } catch (e) {} }
 }
 
-// Paint the tab strip from the registry (status dot + port label + per-tab close).
-function serialRenderConsoleTabs() {
+// Paint the left-side console list (status dot, label, RO badge, a broadcast
+// checkbox, and a close button per row) — filtered by the search box.
+// Replaces the old horizontal tab strip, which became unusable once more
+// than a handful of consoles were open; a scrollable vertical list + search
+// holds up at any count.
+function serialRenderConsoleList() {
     const modal = document.getElementById('serial-console-modal');
     if (!modal) return;
-    const tabs = modal.querySelector('#serial-console-tabs');
-    if (!tabs) return;
+    const list = modal.querySelector('#serial-console-list');
+    if (!list) return;
     const active = window._serialActiveConsole;
+    const group = window._serialBroadcastGroup;
+    const filter = window._serialConsoleFilter || '';
     const entries = window._serialConsoles ? Array.from(window._serialConsoles.values()) : [];
-    tabs.innerHTML = entries.map(e => {
+    const visible = filter
+        ? entries.filter(e => (e.label || e.portId || e.key || '').toLowerCase().includes(filter))
+        : entries;
+    list.innerHTML = visible.length ? visible.map(e => {
         const isA = e.key === active;
         const dot = e.statusCls === 'text-green-400' ? 'bg-green-400'
             : (e.statusCls === 'text-red-400' ? 'bg-red-400' : 'bg-amber-400');
-        const tabCls = isA ? 'bg-[#1e1e1e] text-slate-100 border-[#01A982]'
-            : 'bg-[#111] text-slate-400 border-transparent hover:text-slate-200';
+        const rowCls = isA ? 'bg-[#1e1e1e] text-slate-100' : 'text-slate-400 hover:bg-[#222] hover:text-slate-200';
         const label = escapeHtml(e.label || e.portId || e.key);
         const kAttr = escapeHtml(e.key);
         const roBadge = e.ro ? '<span class="ml-1 px-1 rounded bg-amber-600 text-white text-[9px]">RO</span>' : '';
-        const group = window._serialBroadcastGroup;
-        const groupBadge = (group && group.size >= 2 && group.has(e.key))
-            ? '<span class="ml-1 px-1 rounded bg-sky-600 text-white text-[9px]" title="In the broadcast group">⇄</span>' : '';
-        return `<div data-key="${kAttr}" class="serial-console-tab flex items-center gap-2 px-3 py-1 rounded-t border-b-2 cursor-pointer text-xs whitespace-nowrap ${tabCls}">
-            <span class="w-2 h-2 rounded-full ${dot}"></span>
-            <span class="font-mono">${label}</span>${roBadge}${groupBadge}
-            <button data-close="${kAttr}" title="Close this console" class="ml-1 text-slate-500 hover:text-red-400 text-sm leading-none">&times;</button>
+        const inGroup = !!(group && group.has(e.key));
+        return `<div data-key="${kAttr}" class="serial-console-row flex items-center gap-2 px-3 py-2 border-b border-[#232323] cursor-pointer text-xs ${rowCls}">
+            <input type="checkbox" data-bcast-key="${kAttr}" ${inGroup ? 'checked' : ''} title="Include in broadcast group" onclick="event.stopPropagation()">
+            <span class="w-2 h-2 rounded-full ${dot} shrink-0"></span>
+            <span class="font-mono truncate flex-1">${label}</span>${roBadge}
+            <button data-close="${kAttr}" title="Close this console" class="text-slate-500 hover:text-red-400 text-sm leading-none shrink-0">&times;</button>
         </div>`;
-    }).join('');
-    tabs.querySelectorAll('.serial-console-tab').forEach(el => {
+    }).join('') : `<div class="px-3 py-4 text-xs text-slate-500 italic">${entries.length ? 'No consoles match your search.' : 'No open consoles.'}</div>`;
+    list.querySelectorAll('.serial-console-row').forEach(el => {
+        const key = el.getAttribute('data-key');
         el.onclick = (ev) => {
-            const closeBtn = ev.target.closest('[data-close]');
-            if (closeBtn) { ev.stopPropagation(); serialCloseConsole(closeBtn.getAttribute('data-close')); return; }
-            serialActivateConsole(el.getAttribute('data-key'));
+            if (ev.target.closest('[data-close]') || ev.target.matches('input[type=checkbox]')) return;
+            serialActivateConsole(key);
+        };
+        const closeBtn = el.querySelector('[data-close]');
+        if (closeBtn) closeBtn.onclick = (ev) => { ev.stopPropagation(); serialCloseConsole(key); };
+        const cb = el.querySelector('input[data-bcast-key]');
+        if (cb) cb.onclick = (ev) => {
+            ev.stopPropagation();
+            if (!window._serialBroadcastGroup) window._serialBroadcastGroup = new Set();
+            if (cb.checked) window._serialBroadcastGroup.add(key); else window._serialBroadcastGroup.delete(key);
+            serialReflowBodies();
+            serialSyncSerialHeader();
+            serialUpdateBroadcastBar();
+            serialRenderConsoleList();
         };
     });
 }
@@ -18383,7 +18313,7 @@ async function serialForceTakeover() {
         c.statusText = 'Connected (you have control)';
         c.statusCls = 'text-green-400';
         showToast(`Console control taken over for ${c.label || c.portId}`, 'success');
-        serialRenderConsoleTabs();
+        serialRenderConsoleList();
         serialSyncSerialHeader();
     } catch (e) {
         showToast('Takeover failed: ' + e.message, 'error');
@@ -18409,7 +18339,7 @@ function serialCloseConsole(key) {
     if (window._serialActiveConsole === key) {
         serialActivateConsole(reg.keys().next().value);
     } else {
-        serialRenderConsoleTabs();
+        serialRenderConsoleList();
         serialReflowBodies();
     }
     serialUpdateBroadcastBar();
@@ -18425,9 +18355,9 @@ function serialCloseAllConsoles() {
     window._serialActiveConsole = null;
     window._serialBroadcastGroup = null;
     window._serialBroadcastOn = false;
+    window._serialConsoleFilter = '';
     const modal = document.getElementById('serial-console-modal');
     if (modal) modal.remove();
-    _consoleAdjustViewportPadding();
     if (typeof currentView !== 'undefined' && currentView === 'console' && typeof loadConsoleData === 'function') loadConsoleData();
 }
 
@@ -18691,58 +18621,41 @@ function pxmxLoadNoVNC() {
 // (Map<unique_id, {vm, session, rfb, bodyEl, statusText, statusCls}>);
 // window._pxmxActiveConsole holds the visible tab's key.
 
-// Create (or reveal) the shared console dock shell. Idempotent — the tab strip
-// and bodies persist across opens; only wired once.
+// Create (or reveal) the shared console dock shell. Idempotent — the list
+// and bodies persist across opens; only wired once. Full-screen panel bounded
+// by the header (top-16), footer (bottom-10), and left nav sidebar (left-56,
+// index.html) — occupies the same box <main> does. A left-side search +
+// scrollable list (pxmxRenderConsoleList) replaces the old horizontal tab
+// strip, which became unusable once more than a handful of consoles were open.
 function pxmxEnsureConsoleDock() {
     let modal = document.getElementById('pxmx-vnc-modal');
     if (modal) { modal.classList.remove('hidden'); return modal; }
     modal = document.createElement('div');
     modal.id = 'pxmx-vnc-modal';
-    // Non-modal bottom drawer (no full-screen backdrop) so the VM list behind it
-    // stays clickable and additional consoles can be opened while one is docked.
-    // left-56 keeps it clear of the w-56 left nav sidebar (index.html) instead
-    // of spanning the full viewport and covering the menu.
-    modal.className = 'fixed bottom-0 left-56 right-0 z-40 flex flex-col bg-[#1a1a2e] border-t border-slate-700 shadow-2xl';
-    modal.style.height = '55vh';
+    modal.className = 'fixed top-16 bottom-10 left-56 right-0 z-40 flex bg-[#1a1a2e] border-t border-slate-700 shadow-2xl';
     modal.innerHTML = `
-        <div class="flex items-center gap-3 px-4 py-2 bg-[#16213e] border-b border-slate-700 text-slate-200 text-sm">
-            <strong class="font-semibold">VM Consoles</strong>
-            <button id="pxmx-vnc-min" title="Minimize / restore the console dock" class="ml-2 px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Minimize</button>
-            <button id="pxmx-vnc-cad" title="Send Ctrl+Alt+Del to the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Ctrl+Alt+Del</button>
-            <button id="pxmx-vnc-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
-            <button id="pxmx-vnc-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
-            <span id="pxmx-vnc-status" class="ml-auto text-xs text-amber-400"></span>
-            <button id="pxmx-vnc-closeall" title="Close all consoles" class="ml-3 text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
+        <div class="w-72 shrink-0 flex flex-col border-r border-slate-700 bg-[#141428]">
+            <div class="p-2 border-b border-slate-700 space-y-2">
+                <div class="flex items-center justify-between">
+                    <strong class="text-sm text-slate-200">VM Consoles</strong>
+                    <button id="pxmx-vnc-closeall" title="Close all consoles" class="text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
+                </div>
+                <input id="pxmx-vnc-search" type="text" placeholder="Search consoles…"
+                       class="w-full text-xs bg-[#1a1a2e] border border-slate-600 rounded px-2 py-1 text-slate-100 focus:outline-none focus:border-sky-500">
+            </div>
+            <div id="pxmx-vnc-list" class="flex-1 overflow-y-auto"></div>
         </div>
-        <div id="pxmx-vnc-tabs" class="flex items-stretch gap-1 px-2 pt-1 bg-[#16213e] border-b border-slate-700 overflow-x-auto"></div>
-        <div id="pxmx-vnc-bodies" class="relative flex-1 bg-black overflow-hidden"></div>`;
+        <div class="flex-1 flex flex-col min-w-0">
+            <div class="flex items-center gap-3 px-4 py-2 bg-[#16213e] border-b border-slate-700 text-slate-200 text-sm">
+                <button id="pxmx-vnc-cad" title="Send Ctrl+Alt+Del to the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Ctrl+Alt+Del</button>
+                <button id="pxmx-vnc-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
+                <button id="pxmx-vnc-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
+                <span id="pxmx-vnc-status" class="ml-auto text-xs text-amber-400"></span>
+            </div>
+            <div id="pxmx-vnc-bodies" class="relative flex-1 bg-black overflow-hidden"></div>
+        </div>`;
     document.body.appendChild(modal);
-    _consoleAdjustViewportPadding();
     modal.querySelector('#pxmx-vnc-takeover').onclick = () => pxmxForceTakeover();
-    modal.querySelector('#pxmx-vnc-min').onclick = () => {
-        const minimized = modal.getAttribute('data-min') === '1';
-        const tabsEl = modal.querySelector('#pxmx-vnc-tabs');
-        const bodiesEl = modal.querySelector('#pxmx-vnc-bodies');
-        const btn = modal.querySelector('#pxmx-vnc-min');
-        if (minimized) {
-            modal.setAttribute('data-min', '0');
-            modal.style.height = '55vh';
-            tabsEl.classList.remove('hidden');
-            bodiesEl.classList.remove('hidden');
-            btn.textContent = 'Minimize';
-            _consoleAdjustViewportPadding();
-            try { window.dispatchEvent(new Event('resize')); } catch (e) {}
-            const c = pxmxActiveConsole();
-            if (c && c.rfb) { try { c.rfb.focus(); } catch (e) {} }
-        } else {
-            modal.setAttribute('data-min', '1');
-            modal.style.height = '';
-            tabsEl.classList.add('hidden');
-            bodiesEl.classList.add('hidden');
-            btn.textContent = 'Restore';
-            _consoleAdjustViewportPadding();
-        }
-    };
     modal.querySelector('#pxmx-vnc-cad').onclick = () => { const c = pxmxActiveConsole(); if (c && c.rfb) c.rfb.sendCtrlAltDel(); };
     modal.querySelector('#pxmx-vnc-fs').onclick = () => {
         const c = pxmxActiveConsole();
@@ -18751,6 +18664,10 @@ function pxmxEnsureConsoleDock() {
         else if (screen && screen.requestFullscreen) screen.requestFullscreen().catch(() => {});
     };
     modal.querySelector('#pxmx-vnc-closeall').onclick = () => pxmxCloseAllConsoles();
+    modal.querySelector('#pxmx-vnc-search').addEventListener('input', (ev) => {
+        window._pxmxConsoleFilter = ev.target.value.trim().toLowerCase();
+        pxmxRenderConsoleList();
+    });
     return modal;
 }
 
@@ -18777,7 +18694,7 @@ function pxmxAddConsoleTab(vm, RFB, session) {
     window._pxmxConsoles.set(key, entry);
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${proto}//${location.host}/ws/console/${encodeURIComponent(session.session_id)}?token=${encodeURIComponent(session.ws_token)}`;
-    const upd = (text, cls) => { entry.statusText = text; entry.statusCls = cls; pxmxRenderConsoleTabs(); pxmxSyncConsoleHeader(); };
+    const upd = (text, cls) => { entry.statusText = text; entry.statusCls = cls; pxmxRenderConsoleList(); pxmxSyncConsoleHeader(); };
     try {
         // Proxmox's vncwebsocket ticket doubles as the RFB VNC password — the
         // agent mints it and the hub returns it in the /api/pxmx/console
@@ -18833,7 +18750,7 @@ function pxmxStartViewerPoll(entry) {
             entry.viewers = entry.viewers || [];
         }
         if (window._pxmxConsoles && window._pxmxConsoles.get(entry.key)) {
-            pxmxRenderConsoleTabs();
+            pxmxRenderConsoleList();
             if (entry.key === window._pxmxActiveConsole) pxmxSyncConsoleHeader();
         }
     };
@@ -18861,7 +18778,7 @@ async function pxmxForceTakeover() {
         c.statusText = 'Connected (you have control)';
         c.statusCls = 'text-green-400';
         showToast(`Console control taken over for ${(c.vm && (c.vm.name || c.vm.vmid)) || ''}`, 'success');
-        pxmxRenderConsoleTabs();
+        pxmxRenderConsoleList();
         pxmxSyncConsoleHeader();
     } catch (e) {
         showToast('Takeover failed: ' + e.message, 'error');
@@ -18877,7 +18794,7 @@ function pxmxActivateConsole(key) {
     if (window._pxmxConsoles) {
         window._pxmxConsoles.forEach((e, k) => { if (e.bodyEl) e.bodyEl.classList.toggle('hidden', k !== key); });
     }
-    pxmxRenderConsoleTabs();
+    pxmxRenderConsoleList();
     pxmxSyncConsoleHeader();
     const c = window._pxmxConsoles && window._pxmxConsoles.get(key);
     if (c && c.rfb && c.rfb.focus) { try { c.rfb.focus(); } catch (e) {} }
@@ -18887,20 +18804,27 @@ function pxmxActivateConsole(key) {
     try { window.dispatchEvent(new Event('resize')); } catch (e) {}
 }
 
-// Paint the tab strip from the registry (status dot + name + per-tab close).
-function pxmxRenderConsoleTabs() {
+// Paint the left-side console list (status dot, name, viewer/RO badges, and a
+// close button per row) — filtered by the search box. Replaces the old
+// horizontal tab strip, which became unusable once more than a handful of
+// VM consoles were open; a scrollable vertical list + search holds up at any
+// count.
+function pxmxRenderConsoleList() {
     const modal = document.getElementById('pxmx-vnc-modal');
     if (!modal) return;
-    const tabs = modal.querySelector('#pxmx-vnc-tabs');
-    if (!tabs) return;
+    const list = modal.querySelector('#pxmx-vnc-list');
+    if (!list) return;
     const active = window._pxmxActiveConsole;
+    const filter = window._pxmxConsoleFilter || '';
     const entries = window._pxmxConsoles ? Array.from(window._pxmxConsoles.values()) : [];
-    tabs.innerHTML = entries.map(e => {
+    const visible = filter
+        ? entries.filter(e => (e.vm.name || e.vm.vmid || e.key || '').toString().toLowerCase().includes(filter))
+        : entries;
+    list.innerHTML = visible.length ? visible.map(e => {
         const isA = e.key === active;
         const dot = e.statusCls === 'text-green-400' ? 'bg-green-400'
             : (e.statusCls === 'text-red-400' ? 'bg-red-400' : 'bg-amber-400');
-        const tabCls = isA ? 'bg-[#1a1a2e] text-slate-100 border-[#01A982]'
-            : 'bg-[#0f1830] text-slate-400 border-transparent hover:text-slate-200';
+        const rowCls = isA ? 'bg-[#1a1a2e] text-slate-100' : 'text-slate-400 hover:bg-[#1a1a30] hover:text-slate-200';
         const label = escapeHtml(e.vm.name || e.vm.vmid || e.key);
         const kAttr = escapeHtml(e.key);
         const vc = (e.viewers && e.viewers.length) || 0;
@@ -18908,18 +18832,20 @@ function pxmxRenderConsoleTabs() {
             ? `<span title="${vc} viewers on this console" class="ml-1 px-1 rounded bg-[#01A982]/20 text-[#01A982] text-[10px]">👁 ${vc}</span>`
             : '';
         const roBadge = e.ro ? '<span class="ml-1 px-1 rounded bg-amber-600 text-white text-[9px]">RO</span>' : '';
-        return `<div data-key="${kAttr}" class="pxmx-vnc-tab flex items-center gap-2 px-3 py-1 rounded-t border-b-2 cursor-pointer text-xs whitespace-nowrap ${tabCls}">
-            <span class="w-2 h-2 rounded-full ${dot}"></span>
-            <span>${label}</span>${viewerBadge}${roBadge}
-            <button data-close="${kAttr}" title="Close this console" class="ml-1 text-slate-500 hover:text-red-400 text-sm leading-none">&times;</button>
+        return `<div data-key="${kAttr}" class="pxmx-vnc-row flex items-center gap-2 px-3 py-2 border-b border-[#1f1f38] cursor-pointer text-xs ${rowCls}">
+            <span class="w-2 h-2 rounded-full ${dot} shrink-0"></span>
+            <span class="truncate flex-1">${label}</span>${viewerBadge}${roBadge}
+            <button data-close="${kAttr}" title="Close this console" class="text-slate-500 hover:text-red-400 text-sm leading-none shrink-0">&times;</button>
         </div>`;
-    }).join('');
-    tabs.querySelectorAll('.pxmx-vnc-tab').forEach(el => {
+    }).join('') : `<div class="px-3 py-4 text-xs text-slate-500 italic">${entries.length ? 'No consoles match your search.' : 'No open consoles.'}</div>`;
+    list.querySelectorAll('.pxmx-vnc-row').forEach(el => {
+        const key = el.getAttribute('data-key');
         el.onclick = (ev) => {
-            const closeBtn = ev.target.closest('[data-close]');
-            if (closeBtn) { ev.stopPropagation(); pxmxCloseConsole(closeBtn.getAttribute('data-close')); return; }
-            pxmxActivateConsole(el.getAttribute('data-key'));
+            if (ev.target.closest('[data-close]')) return;
+            pxmxActivateConsole(key);
         };
+        const closeBtn = el.querySelector('[data-close]');
+        if (closeBtn) closeBtn.onclick = (ev) => { ev.stopPropagation(); pxmxCloseConsole(key); };
     });
 }
 
@@ -18958,7 +18884,7 @@ function pxmxCloseConsole(key) {
     if (window._pxmxActiveConsole === key) {
         pxmxActivateConsole(reg.keys().next().value);
     } else {
-        pxmxRenderConsoleTabs();
+        pxmxRenderConsoleList();
     }
 }
 
@@ -18970,9 +18896,9 @@ function pxmxCloseAllConsoles() {
         reg.clear();
     }
     window._pxmxActiveConsole = null;
+    window._pxmxConsoleFilter = '';
     const modal = document.getElementById('pxmx-vnc-modal');
     if (modal) modal.remove();
-    _consoleAdjustViewportPadding();
 }
 
 // Render the clickable Nodes table; the selected row is highlighted.
