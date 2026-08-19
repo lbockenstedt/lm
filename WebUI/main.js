@@ -16220,6 +16220,43 @@ function pxmxVmStatusBadge(v) {
 // list doesn't have (Backup-to-Hub, Clone, storage picker). No category tabs
 // (the cs tabs are sim-client-specific). Bulk-select checkbox stays in the VMID
 // cell (cs shape) and feeds the existing pxmxBulkBar/pxmxBulkAction path.
+// Shared floating menu for the per-row "Actions ▾" button — Start/Stop/
+// Restart/Snapshot/Backup live here now (Delete + Console stay as standalone
+// buttons, matching the delete-protection/console-availability treatment they
+// already have). One menu element reused across every row (created lazily,
+// repositioned + repopulated per open) rather than one hidden menu per row —
+// keeps the DOM light on a long VM list. Click-toggle + outside-click closes,
+// same convention as toggleTenantPicker/closeTenantPicker.
+function _pxmxVmActionMenuEl() {
+    let menu = document.getElementById('pxmx-vm-action-menu');
+    if (!menu) {
+        menu = document.createElement('div');
+        menu.id = 'pxmx-vm-action-menu';
+        menu.className = 'hidden fixed z-50 bg-white border border-slate-200 rounded-md shadow-lg py-1 text-xs min-w-[140px]';
+        document.body.appendChild(menu);
+        document.addEventListener('click', () => menu.classList.add('hidden'));
+    }
+    return menu;
+}
+window.pxmxToggleVmActionMenu = function (evt, uid, isTpl) {
+    evt.stopPropagation();
+    const menu = _pxmxVmActionMenuEl();
+    const wasOpenForThisRow = menu.dataset.forUid === uid && !menu.classList.contains('hidden');
+    menu.classList.add('hidden');
+    if (wasOpenForThisRow) return;
+    // Templates aren't runnable (no start/stop/reboot/snapshot) — only Backup
+    // applies, mirroring the prior per-row button filtering for templates.
+    const specs = PXMX_VM_ACTIONS.filter(s => s.action !== 'destroy' && (!isTpl || s.action === 'backup'));
+    menu.innerHTML = specs.map(s =>
+        `<button onclick="event.stopPropagation(); document.getElementById('pxmx-vm-action-menu').classList.add('hidden'); pxmxVmAction('${uid}','${s.action}')" class="w-full text-left px-3 py-1.5 hover:bg-slate-50 font-medium text-slate-700 flex items-center gap-1.5">${s.label}</button>`
+    ).join('');
+    const r = evt.currentTarget.getBoundingClientRect();
+    menu.style.top = (r.bottom + 4) + 'px';
+    menu.style.left = r.left + 'px';
+    menu.dataset.forUid = uid;
+    menu.classList.remove('hidden');
+};
+
 function pxmxVmTableHtml(vms) {
     const cols = ['<input type="checkbox" onclick="pxmxBulkSelectAll(this.checked)" title="Select all"/>', 'VMID', 'Name', 'OS', 'Status', 'Host', 'Actions'];
     const escJs = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
@@ -16232,17 +16269,15 @@ function pxmxVmTableHtml(vms) {
         const tpl = isTemplate(vm);
         // Cluster/Host merged: Proxmox node is the host, shown as "<cluster>/<node>".
         const host = escapeHtml(`${vm.cluster || '—'}/${vm.node || '—'}`);
-        // Inline action buttons — rendered from the SAME PXMX_VM_ACTIONS spec as
-        // the bulk bar so the row buttons match the bulk buttons exactly (icon,
-        // label, color, hover, sizing). Console is qemu-only (lxc has no VNC
-        // display; templates aren't runnable) and isn't in the bulk spec, so it's
-        // rendered separately with matching sizing. Start/Stop/Reboot/Snapshot are
-        // suppressed on templates (not runnable); Backup (vzdump) is valid on any
-        // VM so templates keep it. All route through pxmxVmAction (which confirms
-        // destructive ops per Hypervisors → Settings). Gated by canEdit() — view
-        // users get a read-only list. Clone + Backup-to-Hub stay in the
-        // click-through detail panel (they need the storage picker / template-pool
-        // affordance).
+        // act() renders a single action button from a PXMX_VM_ACTIONS spec —
+        // used here only for Delete (Start/Stop/Reboot/Snapshot/Backup moved
+        // into the "Actions ▾" menu below, same spec list, same pxmxVmAction
+        // call). Also the bulk bar's per-button renderer, so styling stays in
+        // sync there. All actions route through pxmxVmAction (which confirms
+        // destructive ops per Hypervisors → Settings). Gated by canEdit() —
+        // view users get a read-only list. Clone + Backup-to-Hub stay in the
+        // click-through detail panel (they need the storage picker / template-
+        // pool affordance).
         const act = (spec) => {
             if (!canAct) return '';
             // Delete-protection safeguard: a protected VM's Delete button is
@@ -16257,12 +16292,16 @@ function pxmxVmTableHtml(vms) {
             : (isLxc || tpl)
                 ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : 'Templates have no console'}" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-300 cursor-not-allowed">🖥 Console</button>`
                 : `<button onclick="event.stopPropagation(); pxmxOpenConsole('${uid}')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-100 hover:bg-slate-700" title="Open a noVNC console to this VM">🖥 Console</button>`;
-        // Templates: Backup + Delete are valid (start/stop/reboot/snapshot aren't).
-        // Non-templates: all 6.
-        const specs = tpl ? PXMX_VM_ACTIONS.filter(s => ['backup', 'destroy'].includes(s.action)) : PXMX_VM_ACTIONS;
+        // Start/Stop/Restart/Snapshot/Backup live behind one "Actions ▾" menu
+        // (pxmxToggleVmActionMenu) — Delete and Console stay as standalone
+        // buttons (delete-protection and console-availability need their own
+        // always-visible state, not a menu item you might miss).
+        const destroySpec = PXMX_VM_ACTIONS.find(s => s.action === 'destroy');
+        const menuBtn = !canAct ? '' : `<button onclick="event.stopPropagation(); pxmxToggleVmActionMenu(event, '${uid}', ${tpl})" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 hover:bg-slate-200">⋯ Actions ▾</button>`;
         const actions = `<div class="flex flex-wrap gap-1">
             ${consoleBtn}
-            ${specs.map(act).join('')}
+            ${menuBtn}
+            ${act(destroySpec)}
         </div>`;
         return `<tr class="border-b border-slate-100 hover:bg-slate-50 cursor-pointer" data-unique-id="${escapeHtml(vm.unique_id || '')}" onclick="openVmDetail('${uid}')">
             <td class="px-4 py-2 font-mono text-xs font-bold" onclick="event.stopPropagation()"><input type="checkbox" class="pxmx-vm-sel" value="${escapeHtml(vm.unique_id || '')}"/> ${escapeHtml(vm.vmid)}</td>
