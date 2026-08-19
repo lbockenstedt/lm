@@ -9858,6 +9858,50 @@ function csAutoProvPanel(h) {
     </div>`;
 }
 
+// Start/Stop/Reboot/Reclone live in the "⋯ Actions ▾" dropdown (mirrors the
+// Hypervisor VM table's PXMX_VM_ACTIONS/pxmxToggleVmActionMenu treatment);
+// Delete + Console stay standalone since their disabled/locked states need
+// to stay visible at a glance, not hidden inside a menu.
+const CS_VM_ACTIONS = [
+    { action: 'start_vm',   label: '▶ Start',    cls: 'bg-green-100 text-green-700 hover:bg-green-200' },
+    { action: 'stop_vm',    label: '■ Stop',     cls: 'bg-amber-100 text-amber-700 hover:bg-amber-200' },
+    { action: 'reboot_vm',  label: '↺ Reboot',   cls: 'bg-slate-200 text-slate-700 hover:bg-slate-300' },
+    { action: 'reclone_vm', label: '⎘ Reclone',  cls: 'bg-indigo-100 text-indigo-700 hover:bg-indigo-200' },
+    { action: 'delete_vm',  label: '🗑 Delete',   cls: 'bg-red-100 text-red-700 hover:bg-red-200' },
+];
+
+// Shared floating menu for the per-row "Actions ▾" button — one element
+// reused across every row (created lazily, repositioned + repopulated per
+// open) rather than one hidden menu per row, same convention as the
+// Hypervisor page's _pxmxVmActionMenuEl. Click-toggle + outside-click closes.
+function _csVmActionMenuEl() {
+    let menu = document.getElementById('cs-vm-action-menu');
+    if (!menu) {
+        menu = document.createElement('div');
+        menu.id = 'cs-vm-action-menu';
+        menu.className = 'hidden fixed z-50 bg-white border border-slate-200 rounded-md shadow-lg py-1 text-xs min-w-[140px]';
+        document.body.appendChild(menu);
+        document.addEventListener('click', () => menu.classList.add('hidden'));
+    }
+    return menu;
+}
+window.csToggleVmActionMenu = function (evt, key) {
+    evt.stopPropagation();
+    const menu = _csVmActionMenuEl();
+    const wasOpenForThisRow = menu.dataset.forKey === key && !menu.classList.contains('hidden');
+    menu.classList.add('hidden');
+    if (wasOpenForThisRow) return;
+    const specs = CS_VM_ACTIONS.filter(s => s.action !== 'delete_vm');
+    menu.innerHTML = specs.map(s =>
+        `<button onclick="event.stopPropagation(); document.getElementById('cs-vm-action-menu').classList.add('hidden'); csVmAction('${key}','${s.action}')" class="w-full text-left px-3 py-1.5 hover:bg-slate-50 font-medium text-slate-700 flex items-center gap-1.5">${s.label}</button>`
+    ).join('');
+    const r = evt.currentTarget.getBoundingClientRect();
+    menu.style.top = (r.bottom + 4) + 'px';
+    menu.style.left = r.left + 'px';
+    menu.dataset.forKey = key;
+    menu.classList.remove('hidden');
+};
+
 function csVmRow(v) {
     const vid = csEscape(v.vmid);
     const key = csEscape(v._key != null ? v._key : csVmKey(v));
@@ -9878,6 +9922,9 @@ function csVmRow(v) {
     const consoleBtn = (busy || isLxc || v.is_template)
         ? `<button disabled title="${isLxc ? 'Containers have no VNC console' : (v.is_template ? 'Templates have no console' : 'VM is being deleted')}" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-300 cursor-not-allowed">🖥 Console</button>`
         : `<button onclick="csOpenVmConsole('${key}')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-800 text-slate-100" title="Open a noVNC console to this VM">🖥 Console</button>`;
+    const menuBtn = busy
+        ? `<button disabled class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-300 cursor-not-allowed">⋯ Actions ▾</button>`
+        : `<button onclick="event.stopPropagation(); csToggleVmActionMenu(event, '${key}')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 hover:bg-slate-200">⋯ Actions ▾</button>`;
     const selCell = isPlaceholder
         ? `<span class="inline-block w-3.5"></span> ${vid}`
         : `<input type="checkbox" class="cs-vm-sel" data-vmkey="${key}" data-vmid="${vid}" onchange="csVmSelUpdateHeader()"/> ${vid}`;
@@ -9890,10 +9937,7 @@ function csVmRow(v) {
       <td class="px-3 py-2 text-xs text-slate-500">${csEscape(v._hostlabel || v._host || '—')}</td>
       <td class="px-3 py-2"><div class="flex flex-wrap gap-1">
         ${consoleBtn}
-        ${act('Start','start_vm','bg-green-100 text-green-700')}
-        ${act('Stop','stop_vm','bg-amber-100 text-amber-700')}
-        ${act('Reboot','reboot_vm','bg-slate-200 text-slate-700')}
-        ${act('Reclone','reclone_vm','bg-indigo-100 text-indigo-700')}
+        ${menuBtn}
         ${act('Delete','delete_vm','bg-red-100 text-red-700')}
       </div></td>
     </tr>`;
