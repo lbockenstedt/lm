@@ -44,6 +44,10 @@ class FakeMgr:
         self.calls.append(("delete_record", name, rtype)); self._tid()
         return {"status": "SUCCESS", "records_written": 0}
 
+    def set_tenant(self, name, rtype=None, tenant_id=""):
+        self.calls.append(("set_tenant", name, rtype, tenant_id)); self._tid()
+        return {"status": "SUCCESS", "updated": 1, "tenant_id": tenant_id}
+
     def import_records(self, records):
         self.calls.append(("import_records", len(records))); self._tid()
         return {"status": "SUCCESS", "imported": len(records), "skipped": 0,
@@ -85,6 +89,19 @@ def test_add_passes_tenant_id():
     _run(s.handle_command("HENET_ADD", {"name": "h.example.com", "type": "A",
                                         "value": "203.0.113.5", "ddns_key": "K", "tenant_id": "lrb"}))
     assert s.mgr.calls[0] == ("add_record", "h.example.com", "A", "203.0.113.5", 300, "K", "", "lrb")
+
+
+def test_set_tenant_dispatch():
+    s = _spoke()
+    res = _run(s.handle_command("HENET_SET_TENANT", {"name": "h.example.com", "type": "A", "tenant_id": "lrb"}))
+    assert res == {"status": "SUCCESS", "updated": 1, "tenant_id": "lrb"}
+    assert s.mgr.calls[0] == ("set_tenant", "h.example.com", "A", "lrb")
+
+
+def test_set_tenant_requires_name():
+    s = _spoke()
+    res = _run(s.handle_command("HENET_SET_TENANT", {"tenant_id": "lrb"}))
+    assert res["status"] == "ERROR"
 
 
 def test_update_routes_to_update_record():

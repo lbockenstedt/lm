@@ -237,3 +237,21 @@ def test_clearing_tenant_credential_leaves_global_and_other_tenants_intact(patch
     overview = c.get("/api/henet/credential").json()
     assert overview["credential"] == {"bucket": "__admin__", "name": "global-key"}
     assert overview["tenants"] == {}
+
+
+# ── POST /api/henet/record/tenant (push-free tenant re-home) ─────────────────
+def test_set_record_tenant_forbidden_for_non_admin():
+    # Moving a record between tenants is a Global-Admin-only operation; a tenant
+    # user is rejected before any spoke relay.
+    c, hub, holder = _build()
+    holder.current = _tenant_user("lrb")
+    r = c.post("/api/henet/record/tenant",
+               json={"name": "h.lrbtechnologies.com", "type": "A", "tenant": "lrb"})
+    assert r.status_code == 403
+
+
+def test_set_record_tenant_requires_name():
+    c, hub, holder = _build()
+    holder.current = _global_admin()
+    r = c.post("/api/henet/record/tenant", json={"name": "", "type": "A", "tenant": "lrb"})
+    assert r.status_code == 400

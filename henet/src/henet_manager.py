@@ -144,6 +144,31 @@ class HENetManager:
         return {"status": "SUCCESS", "imported": imported, "skipped": skipped,
                 "records_written": len(managed)}
 
+    def set_tenant(self, name: str, rtype: Optional[str] = None,
+                   tenant_id: str = "") -> Dict[str, Any]:
+        """Re-home a managed record to a tenant WITHOUT pushing to HE.
+
+        This is a METADATA-only change: the HE zone entry (and its last push
+        result) is untouched — it only changes which tenant scope/tab owns the
+        local record. Used by the hub's admin "move to tenant" action so records
+        can be organised into per-tenant tabs even when the dyndns endpoint is
+        unreachable (a push would need each record's own key and would error).
+        ``rtype`` None matches every type for ``name``. ``tenant_id`` "" = move
+        back to the Global/admin scope."""
+        target = str(name).strip().rstrip(".")
+        rt = rtype.upper() if rtype else None
+        tid = str(tenant_id or "").strip()
+        records = self._load()
+        updated = 0
+        for r in records:
+            if r.get("name") == target and (rt is None or str(r.get("type", "")).upper() == rt):
+                r["tenant_id"] = tid
+                updated += 1
+        self._save(records)
+        logger.info("Re-homed %d HE.NET record(s) for %s to tenant %r",
+                    updated, target, tid)
+        return {"status": "SUCCESS", "updated": updated, "tenant_id": tid}
+
     def delete_record(self, name: str, rtype: Optional[str] = None) -> Dict[str, Any]:
         """Drop a record from LOCAL management. HE's dyndns API has no delete
         verb, so the zone entry itself remains at HE — remove it in the dns.he.net

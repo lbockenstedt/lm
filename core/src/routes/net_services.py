@@ -629,6 +629,28 @@ def register(app, hub, ctx):
         return await _relay_spoke(_get_henet_spoke(hub), "HENET_DELETE", body,
                                   log_name="henet_delete_record")
 
+    @app.post("/api/henet/record/tenant")
+    async def henet_set_record_tenant(request: Request):
+        """Re-home a managed record to a tenant WITHOUT re-pushing to HE.
+
+        Metadata only: the HE zone entry + last-push status are untouched — this
+        just moves the record onto another tenant's tab/scope. Global Admin only
+        (moving a record between tenants is an admin operation); ``tenant`` "" or
+        omitted moves it back to the Global/admin scope. No DDNS key needed, so
+        it works even while the dyndns endpoint is unreachable."""
+        body = await request.json()
+        body = dict(body) if isinstance(body, dict) else {}
+        sess = _session_user(request) or {}
+        if not _is_admin(sess):
+            raise HTTPException(status_code=403, detail="admin only")
+        name = str(body.get("name") or "").strip().rstrip(".")
+        if not name:
+            raise HTTPException(status_code=400, detail="name is required")
+        payload = {"name": name, "type": body.get("type"),
+                   "tenant_id": _henet_tenant_scope(sess, body.get("tenant"))}
+        return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_SET_TENANT",
+                                  payload, log_name="henet_set_record_tenant")
+
     @app.post("/api/henet/sync")
     async def henet_sync(request: Request):
         """Replace the managed set and push every A/AAAA record to HE.NET."""
