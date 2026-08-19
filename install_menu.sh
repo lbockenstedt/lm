@@ -53,6 +53,9 @@ MODULES=(
     "dhcp|DHCP|address service (Kea)"
     "nw|Network Watcher|MAC/ARP discovery + switch inventory"
     "le|Let's Encrypt|ACME cert issuance/distribution"
+    "console|Console Relay|VNC/serial edge relay for remote consoles"
+    "statuspage|Status Page|public one-tenant status page"
+    "proxy|Edge Proxy|per-tenant WebUI front door (no client-cert prompt)"
 )
 
 # ── Module id → agent ROLE name (mirrors install_all.sh MODULE_ROLE). The hub
@@ -63,6 +66,7 @@ declare -A MODULE_ROLE=(
     ["cs"]="simulation" ["pxmx"]="proxmox" ["opnsense"]="opnsense"
     ["cppm"]="cppm" ["netbox"]="netbox" ["ldap"]="ldap"
     ["dns"]="dns" ["dhcp"]="dhcp" ["henet"]="henet" ["nw"]="network" ["le"]="le"
+    ["console"]="console" ["statuspage"]="statuspage" ["proxy"]="proxy"
 )
 
 # ── Colors (degrade gracefully when not a terminal) ──
