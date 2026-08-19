@@ -17236,7 +17236,7 @@ function _renderConsolePorts(el, data) {
             <td class="px-4 py-3 text-right whitespace-nowrap space-x-1">
               ${unreachable
                 ? `<button disabled title="Device not connected — reconnect it to open a session" class="text-[11px] px-2 py-1 rounded bg-slate-100 text-slate-400 border border-slate-200 font-bold cursor-not-allowed">🖥 Open</button>`
-                : `<button onclick="openConsoleTerminal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold">🖥 Open</button>`}
+                : `<button onclick="openConsoleTerminal('${eS}','${eP}','${esc(label)}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold">🖥 Open</button>`}
               ${profileBtn}
               ${captureBtn}
               <button onclick="openConsoleSettingsModal('${eS}','${eP}')" class="text-[11px] px-2 py-1 rounded border border-slate-300 hover:bg-slate-50">Settings</button>
@@ -17944,14 +17944,15 @@ async function _consoleLoadXterm() {
     return _xtermMod;
 }
 
-async function openConsoleTerminal(spokeId, portId) {
+async function openConsoleTerminal(spokeId, portId, knownLabel) {
     const key = spokeId + '::' + portId;
     // Already open? Don't mint a second session for the same port — just surface
     // the serial dock and switch to that port's existing tab.
     if (window._serialConsoles && window._serialConsoles.has(key)) {
         serialEnsureConsoleDock();
         serialActivateConsole(key);
-        showToast(`Console for ${portId} is already open`, 'info');
+        const existing = window._serialConsoles.get(key);
+        showToast(`Console for ${(existing && existing.label) || portId} is already open`, 'info');
         return;
     }
     const mod = await _consoleLoadXterm();
@@ -17966,7 +17967,7 @@ async function openConsoleTerminal(spokeId, portId) {
         session = await res.json().catch(() => ({}));
         if (!res.ok) { showToast(session.detail || 'Open failed', 'error'); return; }
     } catch (e) { showToast('Open failed: ' + e.message, 'error'); return; }
-    serialAddConsoleTab(spokeId, portId, session, mod.Terminal);
+    serialAddConsoleTab(spokeId, portId, session, mod.Terminal, knownLabel);
 }
 
 // ── Tabbed serial-console dock ──────────────────────────────────────────────
@@ -18027,16 +18028,18 @@ function serialEnsureConsoleDock() {
             <button id="serial-console-min" title="Minimize / restore the console dock" class="ml-2 px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Minimize</button>
             <button id="serial-console-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
             <button id="serial-console-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
-            <label class="flex items-center gap-1 text-xs text-slate-400">Split:
-                <select id="serial-console-split-picker" title="View a second console side-by-side; typing goes to both" class="text-xs bg-[#1e1e1e] border border-slate-600 rounded px-1 py-0.5">
-                    <option value="">Single view</option>
-                </select>
-            </label>
+            <button id="serial-console-broadcast-btn" title="Choose which consoles to view side-by-side / include in a broadcast" class="px-2 py-0.5 text-xs rounded border border-sky-500 text-sky-400 hover:bg-sky-900/40">Consoles ▾</button>
+            <button id="serial-broadcast-toggle" title="Check 2 or more consoles in Consoles ▾ first" disabled class="opacity-40 px-2 py-0.5 text-xs rounded border border-sky-500 text-sky-400 hover:bg-sky-900/40">Broadcast: Off</button>
             <span id="serial-console-status" class="ml-auto text-xs text-amber-400"></span>
             <button id="serial-console-closeall" title="Close all consoles" class="ml-3 text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
         </div>
         <div id="serial-console-tabs" class="flex items-stretch gap-1 px-2 pt-1 bg-[#2d2d2d] border-b border-slate-700 overflow-x-auto"></div>
-        <div id="serial-console-bodies" class="relative flex-1 flex bg-[#1e1e1e] overflow-hidden"></div>`;
+        <div id="serial-console-bodies" class="relative flex-1 flex bg-[#1e1e1e] overflow-hidden"></div>
+        <div id="serial-broadcast-bar" class="hidden flex items-center gap-2 px-3 py-1.5 bg-[#2d2d2d] border-t border-slate-700">
+            <span id="serial-broadcast-bar-label" class="text-xs text-sky-400 whitespace-nowrap">Broadcast to 0 consoles:</span>
+            <input id="serial-broadcast-bar-input" type="text" placeholder="Type a line and press Enter to send it to every checked console…"
+                   class="flex-1 text-xs font-mono bg-[#1e1e1e] border border-slate-600 rounded px-2 py-1 text-slate-100 focus:outline-none focus:border-sky-500">
+        </div>`;
     document.body.appendChild(modal);
     _consoleAdjustViewportPadding();
     modal.querySelector('#serial-console-min').onclick = () => {
@@ -18071,41 +18074,150 @@ function serialEnsureConsoleDock() {
     };
     modal.querySelector('#serial-console-closeall').onclick = () => serialCloseAllConsoles();
     modal.querySelector('#serial-console-takeover').onclick = () => serialForceTakeover();
-    modal.querySelector('#serial-console-split-picker').onchange = (ev) => {
-        window._serialSplitPartner = ev.target.value || null;
-        serialReflowBodies();
-        serialRenderConsoleTabs();
-        serialSyncSerialHeader();
+    modal.querySelector('#serial-console-broadcast-btn').onclick = (ev) => serialToggleBroadcastMenu(ev);
+    modal.querySelector('#serial-broadcast-toggle').onclick = () => {
+        window._serialBroadcastOn = !window._serialBroadcastOn;
+        serialUpdateBroadcastBar();
+        const bar = modal.querySelector('#serial-broadcast-bar');
+        const input = modal.querySelector('#serial-broadcast-bar-input');
+        if (window._serialBroadcastOn && bar && !bar.classList.contains('hidden') && input) input.focus();
+        modal.querySelector('#serial-broadcast-toggle').textContent =
+            window._serialBroadcastOn ? 'Broadcast: On' : 'Broadcast: Off';
     };
+    modal.querySelector('#serial-broadcast-bar-input').addEventListener('keydown', (ev) => {
+        if (ev.key !== 'Enter') return;
+        ev.preventDefault();
+        const input = ev.target;
+        const text = input.value;
+        if (!text) return;
+        const sent = serialBroadcastSend(text);
+        input.value = '';
+        if (!sent) showToast('Broadcast: no writable consoles in the group', 'warning');
+    });
+    serialUpdateBroadcastBar();
     return modal;
 }
 
-// Which OTHER pane's WS should also receive this pane's keystrokes: the two
-// halves of the active split pair broadcast to each other. Outside split view
-// (or for any console not in the pair) this is null — normal single-target typing.
-function serialBroadcastPeerKey(key) {
-    const partner = window._serialSplitPartner;
-    if (!partner) return null;
-    if (key === window._serialActiveConsole) return partner;
-    if (key === partner) return window._serialActiveConsole;
-    return null;
+// Shared floating checklist for picking the broadcast group — lazily created,
+// repositioned + repopulated per open (mirrors _pxmxVmActionMenuEl's
+// one-element-reused convention). Any number of consoles can be checked;
+// 2+ checked = an active broadcast group.
+function _serialBroadcastMenuEl() {
+    let menu = document.getElementById('serial-broadcast-menu');
+    if (!menu) {
+        menu = document.createElement('div');
+        menu.id = 'serial-broadcast-menu';
+        menu.className = 'hidden fixed z-50 bg-[#2d2d2d] border border-slate-600 rounded-md shadow-lg py-1 text-xs min-w-[200px] text-slate-200';
+        document.body.appendChild(menu);
+        document.addEventListener('click', (ev) => {
+            if (!menu.contains(ev.target) && ev.target.id !== 'serial-console-broadcast-btn') {
+                menu.classList.add('hidden');
+            }
+        });
+    }
+    return menu;
 }
 
-// Show/hide + size console bodies for the current single-view or split-view
-// layout. Split shows the active tab + its partner side-by-side (each 50%
-// width); single view gives the active tab the full body area. Fires a
-// window resize event afterward so anything watching viewport size (noVNC
-// elsewhere, etc.) notices the reflow.
+function serialToggleBroadcastMenu(evt) {
+    evt.stopPropagation();
+    const menu = _serialBroadcastMenuEl();
+    if (!menu.classList.contains('hidden')) { menu.classList.add('hidden'); return; }
+    if (!window._serialBroadcastGroup) window._serialBroadcastGroup = new Set();
+    const group = window._serialBroadcastGroup;
+    const entries = window._serialConsoles ? Array.from(window._serialConsoles.values()) : [];
+    const footerText = () => group.size >= 2 ? `Broadcasting to ${group.size} consoles`
+        : 'Check 2 or more to broadcast';
+    menu.innerHTML = (entries.length
+        ? entries.map(e => `
+            <label class="flex items-center gap-2 px-3 py-1.5 hover:bg-slate-700 cursor-pointer">
+                <input type="checkbox" data-bcast-key="${escapeHtml(e.key)}" ${group.has(e.key) ? 'checked' : ''}>
+                <span class="font-mono">${escapeHtml(e.label || e.portId || e.key)}</span>
+            </label>`).join('')
+        : '<div class="px-3 py-1.5 text-slate-500">No open consoles</div>')
+        + `<div class="broadcast-menu-footer border-t border-slate-600 mt-1 pt-1 px-3 py-1 text-slate-400">${footerText()}</div>`;
+    menu.querySelectorAll('input[data-bcast-key]').forEach(cb => {
+        cb.onclick = (ev2) => {
+            ev2.stopPropagation();
+            const k = cb.getAttribute('data-bcast-key');
+            if (cb.checked) group.add(k); else group.delete(k);
+            serialReflowBodies();
+            serialRenderConsoleTabs();
+            serialSyncSerialHeader();
+            serialUpdateBroadcastBar();
+            const footer = menu.querySelector('.broadcast-menu-footer');
+            if (footer) footer.textContent = footerText();
+        };
+    });
+    const btn = document.getElementById('serial-console-broadcast-btn');
+    const r = (btn || evt.currentTarget).getBoundingClientRect();
+    menu.style.top = (r.bottom + 4) + 'px';
+    menu.style.left = r.left + 'px';
+    menu.classList.remove('hidden');
+}
+
+// Send one line to every member of the broadcast group (from the shared
+// broadcast bar, NOT from typing into an individual pane — a pane always
+// stays single-target, see serialAddConsoleTab). Read-only members are
+// silently skipped, same as an individual pane would drop the bytes anyway.
+function serialBroadcastSend(text) {
+    const group = window._serialBroadcastGroup;
+    if (!group || group.size < 2 || !window._serialConsoles) return 0;
+    const bytes = text + '\r';
+    let sent = 0;
+    group.forEach(k => {
+        const peer = window._serialConsoles.get(k);
+        if (peer && !peer.ro && peer.ws && peer.ws.readyState === 1) { peer.ws.send(bytes); sent++; }
+    });
+    return sent;
+}
+
+// Show/hide the shared broadcast input bar + refresh its "N consoles" label.
+// Visible only when the toggle is on AND 2+ consoles are checked in the
+// group — off, or under 2 checked, each console just has its own normal
+// per-pane typing (term.onData in serialAddConsoleTab), same as before this
+// feature existed.
+function serialUpdateBroadcastBar() {
+    const modal = document.getElementById('serial-console-modal');
+    if (!modal) return;
+    const bar = modal.querySelector('#serial-broadcast-bar');
+    const toggleBtn = modal.querySelector('#serial-broadcast-toggle');
+    if (!bar || !toggleBtn) return;
+    const group = window._serialBroadcastGroup;
+    const groupActive = !!(group && group.size >= 2);
+    const on = !!window._serialBroadcastOn && groupActive;
+    bar.classList.toggle('hidden', !on);
+    toggleBtn.classList.toggle('bg-sky-600', !!window._serialBroadcastOn);
+    toggleBtn.classList.toggle('text-white', !!window._serialBroadcastOn);
+    toggleBtn.disabled = !groupActive;
+    toggleBtn.classList.toggle('opacity-40', !groupActive);
+    toggleBtn.title = groupActive
+        ? 'Toggle a single shared input that broadcasts to every checked console'
+        : 'Check 2 or more consoles in Consoles ▾ first';
+    const label = bar.querySelector('#serial-broadcast-bar-label');
+    if (label) label.textContent = `Broadcast to ${group ? group.size : 0} consoles:`;
+}
+
+// Show/hide + size console bodies. With an active broadcast group (2+
+// checked), every group member is shown side-by-side (flex-wrap, so any
+// count lays out sanely) — PLUS whichever tab is "active" even if it isn't
+// in the group, so you can still peek at another console without joining
+// the broadcast. With no active group, only the active tab shows (full
+// width), same as plain single-tab view. Fires a window resize event
+// afterward so anything watching viewport size (noVNC elsewhere) notices.
 function serialReflowBodies() {
     if (!window._serialConsoles) return;
     const activeKey = window._serialActiveConsole;
-    const partnerKey = window._serialSplitPartner;
+    const group = window._serialBroadcastGroup;
+    const groupActive = !!(group && group.size >= 2);
+    const bodies = document.getElementById('serial-console-bodies');
+    if (bodies) bodies.classList.toggle('flex-wrap', groupActive);
     window._serialConsoles.forEach((e, k) => {
         if (!e.bodyEl) return;
-        const visible = (k === activeKey) || (partnerKey && k === partnerKey);
+        const inGroup = groupActive && group.has(k);
+        const visible = inGroup || k === activeKey;
         e.bodyEl.classList.toggle('hidden', !visible);
-        e.bodyEl.classList.toggle('w-1/2', !!(visible && partnerKey));
-        e.bodyEl.classList.toggle('flex-1', !!(visible && !partnerKey));
+        e.bodyEl.classList.toggle('flex-1', visible && !inGroup);
+        e.bodyEl.style.flex = inGroup ? '1 1 320px' : '';
     });
     try { window.dispatchEvent(new Event('resize')); } catch (err) {}
 }
@@ -18118,7 +18230,7 @@ function serialActiveConsole() {
 
 // Mint a serial console tab: build its body div, attach an xterm + WebSocket,
 // register it, and make it the active tab.
-function serialAddConsoleTab(spokeId, portId, session, Terminal) {
+function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     if (!window._serialConsoles) window._serialConsoles = new Map();
     const key = spokeId + '::' + portId;
     const modal = serialEnsureConsoleDock();
@@ -18128,7 +18240,14 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal) {
     bodyEl.setAttribute('data-console-key', key);
     bodies.appendChild(bodyEl);
     const ro = !!session.read_only;
-    const entry = { key, spokeId, portId, session, ro, term: null, ws: null, bodyEl,
+    // Prefer the identified hostname/alias known at open time (same
+    // precedence as the port-list table: operator alias > auto-identified
+    // hostname) over the raw USB-derived port_id. Snapshot-only — a hostname
+    // identified WHILE this console is already open won't retroactively
+    // relabel the tab (would need a new server push; close/reopen picks it
+    // up via a fresh knownLabel).
+    const label = knownLabel || portId;
+    const entry = { key, spokeId, portId, label, session, ro, term: null, ws: null, bodyEl,
                     statusText: 'Connecting…', statusCls: 'text-amber-400' };
     window._serialConsoles.set(key, entry);
     // Make this tab active first so its body is visible when xterm lays out —
@@ -18151,7 +18270,7 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal) {
             if (ctl && ctl.type === 'downgraded') {
                 entry.ro = true;
                 upd('Connected (read-only) — control taken over', 'text-amber-400');
-                showToast(`Console control for ${portId} was taken over by another user`, 'warning');
+                showToast(`Console control for ${label} was taken over by another user`, 'warning');
                 return;
             }
             term.write(ev.data);
@@ -18163,17 +18282,12 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal) {
         upd('Disconnected' + (ev.reason ? ': ' + ev.reason : ''), 'text-red-400');
     };
     // Always attached (not gated on the initial ro) so a later force-takeover
-    // can flip entry.ro live without re-registering the handler. Also
-    // broadcasts to the active split pair's OTHER pane, if this console is
-    // one half of it (see serialBroadcastPeerKey).
-    term.onData(d => {
-        if (!entry.ro && ws.readyState === 1) ws.send(d);
-        const peerKey = serialBroadcastPeerKey(entry.key);
-        const peer = peerKey && window._serialConsoles && window._serialConsoles.get(peerKey);
-        if (peer && !peer.ro && peer.ws && peer.ws.readyState === 1 && peer.ws !== ws) {
-            peer.ws.send(d);
-        }
-    });
+    // can flip entry.ro live without re-registering the handler. Typing
+    // directly into a pane always targets just that pane — broadcasting to
+    // the whole group goes through the separate broadcast input bar instead
+    // (serialBroadcastSend), so a single pane stays individually usable even
+    // while broadcast mode is on.
+    term.onData(d => { if (!entry.ro && ws.readyState === 1) ws.send(d); });
     entry.ws = ws;
     serialRenderConsoleTabs();
     serialSyncSerialHeader();
@@ -18183,9 +18297,6 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal) {
 // tab strip + header and focuses the active terminal for keyboard input.
 function serialActivateConsole(key) {
     window._serialActiveConsole = key;
-    // Activating the current split partner as the primary tab would show the
-    // same console in both panes — drop the (now-redundant) split instead.
-    if (window._serialSplitPartner === key) window._serialSplitPartner = null;
     serialReflowBodies();
     serialRenderConsoleTabs();
     serialSyncSerialHeader();
@@ -18207,14 +18318,15 @@ function serialRenderConsoleTabs() {
             : (e.statusCls === 'text-red-400' ? 'bg-red-400' : 'bg-amber-400');
         const tabCls = isA ? 'bg-[#1e1e1e] text-slate-100 border-[#01A982]'
             : 'bg-[#111] text-slate-400 border-transparent hover:text-slate-200';
-        const label = escapeHtml(e.portId || e.key);
+        const label = escapeHtml(e.label || e.portId || e.key);
         const kAttr = escapeHtml(e.key);
         const roBadge = e.ro ? '<span class="ml-1 px-1 rounded bg-amber-600 text-white text-[9px]">RO</span>' : '';
-        const splitBadge = e.key === window._serialSplitPartner
-            ? '<span class="ml-1 px-1 rounded bg-sky-600 text-white text-[9px]" title="Second pane in split view">⇄</span>' : '';
+        const group = window._serialBroadcastGroup;
+        const groupBadge = (group && group.size >= 2 && group.has(e.key))
+            ? '<span class="ml-1 px-1 rounded bg-sky-600 text-white text-[9px]" title="In the broadcast group">⇄</span>' : '';
         return `<div data-key="${kAttr}" class="serial-console-tab flex items-center gap-2 px-3 py-1 rounded-t border-b-2 cursor-pointer text-xs whitespace-nowrap ${tabCls}">
             <span class="w-2 h-2 rounded-full ${dot}"></span>
-            <span class="font-mono">${label}</span>${roBadge}${splitBadge}
+            <span class="font-mono">${label}</span>${roBadge}${groupBadge}
             <button data-close="${kAttr}" title="Close this console" class="ml-1 text-slate-500 hover:text-red-400 text-sm leading-none">&times;</button>
         </div>`;
     }).join('');
@@ -18225,18 +18337,6 @@ function serialRenderConsoleTabs() {
             serialActivateConsole(el.getAttribute('data-key'));
         };
     });
-    // Repopulate the split picker with every OTHER open console (can't split
-    // a console with itself); preserve the current partner selection if it's
-    // still open, else fall back to "Single view".
-    const picker = modal.querySelector('#serial-console-split-picker');
-    if (picker) {
-        const partner = window._serialSplitPartner;
-        const others = entries.filter(e => e.key !== active);
-        picker.innerHTML = '<option value="">Single view</option>' + others.map(e =>
-            `<option value="${escapeHtml(e.key)}">${escapeHtml(e.portId || e.key)}</option>`).join('');
-        picker.value = (partner && others.some(e => e.key === partner)) ? partner : '';
-        if (picker.value !== partner) window._serialSplitPartner = picker.value || null;
-    }
 }
 
 // Sync the header status line to the active console's state.
@@ -18248,12 +18348,12 @@ function serialSyncSerialHeader() {
     const c = serialActiveConsole();
     let txt = '';
     if (c) {
-        txt = (c.portId || '') + ' — ' + c.statusText;
+        txt = (c.label || c.portId || '') + ' — ' + c.statusText;
         if (c.session && c.session.settings && c.session.settings.baud) txt += '  @' + c.session.settings.baud;
     }
-    if (window._serialSplitPartner) {
-        const p = window._serialConsoles && window._serialConsoles.get(window._serialSplitPartner);
-        txt += `  · ⇄ broadcasting with ${(p && p.portId) || window._serialSplitPartner}`;
+    const bgroup = window._serialBroadcastGroup;
+    if (window._serialBroadcastOn && bgroup && bgroup.size >= 2) {
+        txt += `  · ⇄ broadcasting to ${bgroup.size} consoles`;
     }
     statusEl.textContent = txt;
     statusEl.className = 'ml-auto text-xs ' + (c ? c.statusCls : 'text-slate-400');
@@ -18278,7 +18378,7 @@ async function serialForceTakeover() {
         c.ro = false;
         c.statusText = 'Connected (you have control)';
         c.statusCls = 'text-green-400';
-        showToast(`Console control taken over for ${c.portId}`, 'success');
+        showToast(`Console control taken over for ${c.label || c.portId}`, 'success');
         serialRenderConsoleTabs();
         serialSyncSerialHeader();
     } catch (e) {
@@ -18301,13 +18401,14 @@ function serialCloseConsole(key) {
         reg.delete(key);
     }
     if (reg.size === 0) { serialCloseAllConsoles(); return; }
-    if (window._serialSplitPartner === key) window._serialSplitPartner = null;
+    if (window._serialBroadcastGroup) window._serialBroadcastGroup.delete(key);
     if (window._serialActiveConsole === key) {
         serialActivateConsole(reg.keys().next().value);
     } else {
         serialRenderConsoleTabs();
         serialReflowBodies();
     }
+    serialUpdateBroadcastBar();
 }
 
 // Close every serial console and remove the dock.
@@ -18318,7 +18419,8 @@ function serialCloseAllConsoles() {
         reg.clear();
     }
     window._serialActiveConsole = null;
-    window._serialSplitPartner = null;
+    window._serialBroadcastGroup = null;
+    window._serialBroadcastOn = false;
     const modal = document.getElementById('serial-console-modal');
     if (modal) modal.remove();
     _consoleAdjustViewportPadding();
@@ -26851,7 +26953,7 @@ async function showDeviceDashboard(item) {
                 const busy = c.in_use ? `<span class="ml-2 px-1.5 py-0.5 rounded text-[9px] bg-amber-100 text-amber-700 font-bold">IN USE</span>` : '';
                 const canConnect = c.spoke_id && c.port_id;
                 const btn = canConnect
-                    ? `<button onclick="openConsoleTerminal('${escJsAttr(c.spoke_id)}','${escJsAttr(c.port_id)}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold shrink-0">🖥 Connect</button>`
+                    ? `<button onclick="openConsoleTerminal('${escJsAttr(c.spoke_id)}','${escJsAttr(c.port_id)}','${escJsAttr(c.name || '')}')" class="text-[11px] px-2 py-1 rounded bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] font-bold shrink-0">🖥 Connect</button>`
                     : '';
                 return `<div class="flex items-center justify-between gap-2 py-1.5 border-b border-slate-50 last:border-0">
                     <div class="min-w-0">
