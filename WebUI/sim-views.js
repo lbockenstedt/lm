@@ -12285,8 +12285,8 @@ window.csOpenVmConsole = async function (key) {
     // VM from its composite key (spoke|host|vmid), POSTs /sim/api/{tenant}/vm-console
     // to mint a one-shot vnc session routed to the VM's owning cs spoke (which
     // relays VNC_START to its pxmx agent), then reuses the pxmx noVNC loader +
-    // modal (main.js globals pxmxLoadNoVNC / pxmxShowVncModal) — the hub's
-    // /ws/console/{session_id} byte relay is spoke-agnostic, so only the
+    // tabbed dock (main.js globals pxmxLoadNoVNC / pxmxAddConsoleTab) — the
+    // hub's /ws/console/{session_id} byte relay is spoke-agnostic, so only the
     // registered spoke_id differs from the pxmx path. In the cs LOCAL spoke UI
     // (distributed mode) those hub globals are absent, so this degrades to a
     // "centralized mode" toast instead of a broken POST — one source file works
@@ -12298,7 +12298,7 @@ window.csOpenVmConsole = async function (key) {
         if (typeof showToast === 'function') showToast('VM not found in cache', 'error');
         return;
     }
-    if (typeof pxmxLoadNoVNC !== 'function' || typeof pxmxShowVncModal !== 'function') {
+    if (typeof pxmxLoadNoVNC !== 'function' || typeof pxmxAddConsoleTab !== 'function') {
         if (typeof showToast === 'function')
             showToast('VM console is available in centralized (hub) mode.', 'info');
         return;
@@ -12335,10 +12335,10 @@ window.csOpenVmConsole = async function (key) {
     }
     const RFB = await pxmxLoadNoVNC();
     if (!RFB) { if (typeof showToast === 'function') showToast('Failed to load noVNC (CDN unreachable)', 'error'); return; }
-    // pxmxShowVncModal expects {name, vmid, unique_id}; build the shape from the
-    // cs row (unique_id is display-only in the modal header).
+    // pxmxAddConsoleTab expects {name, vmid, unique_id}; build the shape from
+    // the cs row (unique_id is display-only in the dock's list/header).
     const vmForModal = { name: v.name || vmid, vmid: vmid, unique_id: `${v._host || 'cs'}/${vmid}` };
-    pxmxShowVncModal(vmForModal, RFB, session);
+    pxmxAddConsoleTab(vmForModal, RFB, session);
 };
 
 /* ===========================================================================
