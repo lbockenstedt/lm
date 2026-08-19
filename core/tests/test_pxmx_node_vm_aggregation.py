@@ -69,6 +69,40 @@ def test_get_node_stats_falls_back_to_disk_cache_when_no_agents():
     assert r["nodes"][0]["node"] == "pve9"
 
 
+def test_get_node_stats_dedupes_cluster_mates_by_node_hostname():
+    """4 cluster-mate agents each self-report the FULL cluster's node
+    membership (real pvesh /cluster/resources behavior) — must collapse to
+    one row per physical node, not one row per (agent, node) pair."""
+    peers = [{"node": "pve1", "status": "online"},
+             {"node": "pve2", "status": "online"},
+             {"node": "pve3", "status": "online"},
+             {"node": "pve4", "status": "online"}]
+    cp = _FakeCP({
+        f"agent-{i}": {"cluster_name": f"agent-{i}",  # stale per-agent name
+                       "telemetry_ts": 100.0 + i, "nodes": list(peers)}
+        for i in range(4)
+    })
+    r = _run(agg.get_node_stats(cp, {}))
+    assert r["status"] == "SUCCESS"
+    assert sorted(n["node"] for n in r["nodes"]) == ["pve1", "pve2", "pve3", "pve4"]
+
+
+def test_get_node_stats_freshest_cluster_mate_wins_on_conflict():
+    """When cluster-mates disagree on a node's status (telemetry timing skew),
+    the agent with the newer ``telemetry_ts`` wins — not whichever happened
+    to be first in dict-iteration order."""
+    cp = _FakeCP({
+        "agent-old": {"cluster_name": "lab", "telemetry_ts": 100.0,
+                      "nodes": [{"node": "pve1", "status": "offline"}]},
+        "agent-new": {"cluster_name": "lab", "telemetry_ts": 200.0,
+                      "nodes": [{"node": "pve1", "status": "online"}]},
+    })
+    r = _run(agg.get_node_stats(cp, {}))
+    assert len(r["nodes"]) == 1
+    assert r["nodes"][0]["status"] == "online"
+    assert r["nodes"][0]["agent_id"] == "agent-new"
+
+
 # ── list_vms ──────────────────────────────────────────────────────────────
 
 def test_list_vms_telemetry_cache_hit():
@@ -88,6 +122,33 @@ def test_list_vms_tag_filter_excludes_non_matching():
                                       {"vmid": 2, "node": "n", "tags": ["dev"]}]}})
     r = _run(agg.list_vms(cp, {"tag_filter": "dev"}))
     assert [v["vmid"] for v in r["vms"]] == [2]
+
+
+def test_list_vms_dedupes_cluster_mates_by_node_and_vmid():
+    """4 cluster-mate agents each self-report the FULL cluster's VM list —
+    must collapse to one row per (node, vmid), not one row per agent."""
+    vms = [{"vmid": 101, "node": "pve1"}, {"vmid": 102, "node": "pve2"}]
+    cp = _FakeCP({
+        f"agent-{i}": {"cluster_name": "lab", "telemetry_ts": 100.0 + i,
+                       "vms": list(vms)}
+        for i in range(4)
+    })
+    r = _run(agg.list_vms(cp, {}))
+    assert sorted((v["node"], v["vmid"]) for v in r["vms"]) == [
+        ("pve1", 101), ("pve2", 102)]
+
+
+def test_list_vms_freshest_cluster_mate_wins_on_conflict():
+    cp = _FakeCP({
+        "agent-old": {"cluster_name": "lab", "telemetry_ts": 100.0,
+                      "vms": [{"vmid": 101, "node": "pve1", "status": "stopped"}]},
+        "agent-new": {"cluster_name": "lab", "telemetry_ts": 200.0,
+                      "vms": [{"vmid": 101, "node": "pve1", "status": "running"}]},
+    })
+    r = _run(agg.list_vms(cp, {}))
+    assert len(r["vms"]) == 1
+    assert r["vms"][0]["status"] == "running"
+    assert r["vms"][0]["agent_id"] == "agent-new"
 
 
 def test_list_vms_no_control_plane():
