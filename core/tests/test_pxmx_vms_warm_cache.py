@@ -20,10 +20,23 @@ last-known snapshot marked ``stale`` instead of going empty. These lock in:
 
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routes import pxmx
+
+
+@pytest.fixture(autouse=True)
+def _reset_vms_ttl_cache():
+    """The route's fresh-TTL memo (``_VMS_CACHE``) is module-level and keyed
+    by tag+agent scope — several tests here reuse the same scope (e.g. the
+    default "_all_|agent=") with different hub fakes, so a stale entry from
+    an earlier test would be served instead of hitting the fake spoke this
+    test set up."""
+    pxmx._VMS_CACHE.clear()
+    yield
+    pxmx._VMS_CACHE.clear()
 
 
 # ── Fakes ────────────────────────────────────────────────────────────────────

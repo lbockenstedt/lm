@@ -30,6 +30,24 @@ _agents_locks: dict = {}
 # agent-hosting / opnsense / hypervisor spokes grows.
 _FANOUT_SEM = asyncio.Semaphore(8)
 
+# ── /api/pxmx/nodes + /api/pxmx/vms fresh-TTL cache ──────────────────────────
+# Both routes previously ran the full GET_NODE_STATS/PXMX_LIST_VMS fan-out
+# LIVE on every single request — each spoke's per-agent telemetry cache read
+# is fast, but the hub still pays one full WS round-trip per agent-hosting
+# spoke (30s timeout budget each) on EVERY Hypervisors → Overview navigation,
+# and falls into slow live pvesh orchestration on top of that if any spoke's
+# telemetry hasn't populated yet. Underlying node/VM telemetry itself only
+# refreshes ~60s at the agent, so a short fresh-TTL memo in front of the fetch
+# makes every navigation after the first an instant in-memory serve. Results
+# vary by tenant/agent scope (unlike the single global _AGENTS_CACHE), so this
+# is keyed per warm_key rather than one shared entry. This sits IN ADDITION TO
+# hub.warm_get/warm_set below, which stays as the stale-on-failure/spoke-down
+# fallback — this cache only ever serves data that was itself freshly fetched.
+_NODES_CACHE: dict = {}
+_VMS_CACHE: dict = {}
+_PXMX_FRESH_S = 10.0
+_ttl_locks: dict = {}
+
 
 def _agents_lock() -> "asyncio.Lock":
     loop = asyncio.get_running_loop()
@@ -38,6 +56,34 @@ def _agents_lock() -> "asyncio.Lock":
         lk = asyncio.Lock()
         _agents_locks[id(loop)] = lk
     return lk
+
+
+def _ttl_lock(cache_name: str, key: str) -> "asyncio.Lock":
+    loop = asyncio.get_running_loop()
+    lk_key = (id(loop), cache_name, key)
+    lk = _ttl_locks.get(lk_key)
+    if lk is None:
+        lk = asyncio.Lock()
+        _ttl_locks[lk_key] = lk
+    return lk
+
+
+async def _ttl_cached(cache: dict, cache_name: str, key: str, fetch):
+    """Serve ``cache[key]`` verbatim while younger than ``_PXMX_FRESH_S``;
+    otherwise fetch live (serialized per-key so concurrent requests for the
+    same scope collapse into one fan-out) and refresh the entry. Raises
+    whatever ``fetch`` raises on a cold/expired entry — callers already fall
+    back to ``hub.warm_get`` for that, same as before this cache existed."""
+    entry = cache.get(key)
+    if entry is not None and (time.time() - entry["ts"]) < _PXMX_FRESH_S:
+        return entry["data"]
+    async with _ttl_lock(cache_name, key):
+        entry = cache.get(key)
+        if entry is not None and (time.time() - entry["ts"]) < _PXMX_FRESH_S:
+            return entry["data"]
+        data = await fetch()
+        cache[key] = {"data": data, "ts": time.time()}
+        return data
 
 
 async def _aggregate_agents(hub, agent_spokes):
@@ -1219,7 +1265,9 @@ def register(app, hub, ctx):
             # covers an overrun so the Overview still renders. Matches the VM
             # list budget. Fanned across every (tenant-scoped) agent-hosting
             # spoke so a sim-hosted host's node shows alongside pxmx hosts.
-            data = await _aggregate_pxmx_nodes(hub, node_spokes, timeout=30.0)
+            data = await _ttl_cached(
+                _NODES_CACHE, "nodes", warm_key,
+                lambda: _aggregate_pxmx_nodes(hub, node_spokes, timeout=30.0))
             if isinstance(data, dict) and isinstance(data.get("nodes"), list):
                 await hub.warm_set("pxmx_nodes", warm_key, data)  # cache raw (pre hidden-filter)
             return _apply_hidden(data)
@@ -1351,7 +1399,9 @@ def register(app, hub, ctx):
             # IP annotation (QGA / lxc netns per-NIC) routinely exceeds 5s; the
             # warm cache covers an overrun so the page still renders. Matches the
             # vmid_alloc PXMX_LIST_VMS budget.
-            data = await _aggregate_pxmx_vms(hub, pxmx_spokes, payload, timeout=30.0)
+            data = await _ttl_cached(
+                _VMS_CACHE, "vms", warm_key,
+                lambda: _aggregate_pxmx_vms(hub, pxmx_spokes, payload, timeout=30.0))
             await hub.warm_set("pxmx_vms", warm_key, data)  # cache raw (pre-filter)
             return _with_tpl(await _filter_tenant(request, data, "hypervisor", ["ips"], tenant))
         except Exception as e:
