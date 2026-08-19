@@ -479,7 +479,7 @@ function updateContextActions() {
 // Roles available to load on a generic agent (matches lm/agent/src/agent_spoke.py _ROLE_MAP)
 const AGENT_ROLES = {
     'dns':        { name: 'DNS (Unbound module)',  desc: 'Manages a running Unbound. Syncs records from NetBox. Needs an Unbound server — deploy the "DNS Server" role (or install standalone).', deploy: false },
-    'henet':      { name: 'HE.NET (Hurricane Electric public DNS)', desc: 'Manages public DNS records at dns.he.net over HE\'s dynamic-DNS update API. No server to deploy — it reuses the SAME Credential Vault Hurricane Electric credential as certificates (DNS → "Hurricane Electric (account login)"), so you store one HE credential for both certs and DNS; the hub reformats and resolves it unattended when pushing records.', deploy: false },
+    'henet':      { name: 'HE.NET (Hurricane Electric public DNS)', desc: 'Manages public DNS records at dns.he.net over HE\'s dynamic-DNS update API. No server to deploy — the account login credential (shared with certificates, DNS → "Hurricane Electric (account login)") powers Import/Sync (reading the zone); pushing a record\'s IP needs THAT record\'s own per-record DDNS key, entered when you add or edit it.', deploy: false },
     'dns-server': { name: 'DNS Server (Unbound)', desc: 'Deploys Unbound itself (server + remote-control + conf.d include). Runs as its own service on this host; does NOT create a spoke. Load the "DNS (Unbound module)" role to manage it.', deploy: true },
     'dhcp':       { name: 'DHCP (Kea module)',     desc: 'Manages a running Kea DHCP4. Syncs subnets and reservations from NetBox. Needs a Kea server — deploy the "DHCP Server" role (or install standalone).', deploy: false },
     'dhcp-server':{ name: 'DHCP Server (Kea)', desc: 'Deploys Kea itself (kea-dhcp4-server + kea-ctrl-agent on :8001). Runs as its own service on this host; does NOT create a spoke. Load the "DHCP (Kea module)" role to manage it.', deploy: true },
@@ -23151,7 +23151,8 @@ async function showHenetRecordModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Type</label><select id="henet-r-type" class="${inputCls}" title="Record type: A (IPv4) or AAAA (IPv6) — HE's dyndns endpoint only updates A/AAAA" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Value (IP)</label><input id="henet-r-value" value="${val(editItem?.value)}" class="${inputCls}" placeholder="203.0.113.5" title="IP address the record resolves to (A = IPv4, AAAA = IPv6)"></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="henet-r-ttl" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}" title="Time-to-live in seconds (minimum 60; default 300)"></div>
-            <p class="text-[11px] text-slate-400">Pushed to HE.NET with the assigned DDNS credential${cred ? ` (<span class="font-mono">🔐 ${escapeHtml(cred.name)}</span>)` : ''}. The key never leaves the hub.</p>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">DDNS Key</label><input id="henet-r-ddnskey" type="password" autocomplete="off" class="${inputCls}" placeholder="paste the record's dynamic DNS key" title="HE.NET authenticates each record's push with ITS OWN per-record key — NOT the account login. In the dns.he.net UI, open this record, turn on 'Enable entry for dynamic DNS', and copy the key it generates here."></div>
+            <p class="text-[11px] text-slate-400">The assigned DDNS credential${cred ? ` (<span class="font-mono">🔐 ${escapeHtml(cred.name)}</span>)` : ''} is your HE.NET account login — it only powers Import/Sync (reading the zone). Pushing THIS record needs its own per-record key from dns.he.net, entered above. Never stored — you'll re-enter it if you edit this record later.</p>
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="saveHenetRecord()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
@@ -23228,8 +23229,13 @@ async function saveHenetRecord() {
         type: editing ? modal.dataset.editType : get('henet-r-type'),
         value: get('henet-r-value'),
         ttl: parseInt(get('henet-r-ttl')) || 300,
+        key: get('henet-r-ddnskey'),
     };
     if (!payload.name || !payload.value) { showToast('Name and Value are required', 'error'); return; }
+    // The assigned module credential is an account login (Import/Sync only) —
+    // HE's dyndns push always needs THIS record's own per-record key, or it
+    // fails "badauth" for every record pushed with the account password.
+    if (!payload.key) { showToast("This record's DDNS key is required to push it to HE.NET", 'error'); return; }
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/record', {
             method: editing ? 'PUT' : 'POST',
@@ -23283,7 +23289,7 @@ async function syncHenet() {
         .map(r => ({ name: r.name, type: r.type, value: r.value, ttl: r.ttl }));
     if (!records.length) { showToast('No A/AAAA records under management yet — use “⇩ Import existing” to pull in the records already in your HE.NET zone.', 'error'); return; }
     if (!window._henetAssignedCred) { showToast('Assign an HE.NET DDNS credential first', 'error'); return showHenetCredModal(); }
-    if (!await showConfirmToast(`Re-push all ${records.length} managed A/AAAA record(s) to HE.NET using the assigned DDNS credential?`)) return;
+    if (!await showConfirmToast(`Re-push all ${records.length} managed A/AAAA record(s) to HE.NET using the assigned DDNS credential?\n\nNote: the assigned credential is your HE.NET account login, not a per-record key — HE.NET only accepts each record's OWN key (see Add/Edit Record). Sync all will likely report "badauth" for every record until per-record keys are supported here; use Add/Edit on one record at a time in the meantime.`)) return;
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/sync', {
             method: 'POST',
