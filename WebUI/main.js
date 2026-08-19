@@ -16270,7 +16270,12 @@ window.pxmxToggleVmActionMenu = function (evt, uid, isTpl) {
 };
 
 function pxmxVmTableHtml(vms) {
-    const cols = ['<input type="checkbox" onclick="pxmxBulkSelectAll(this.checked)" title="Select all"/>', 'VMID', 'Name', 'OS', 'Status', 'Host', 'Actions'];
+    // Header must have exactly as many columns as the row below renders —
+    // the checkbox + VMID share ONE <td> in each row (see below), so they
+    // share one <th> here too. A separate 'VMID' header for the same 7-col
+    // count as the row's 6 <td>s shifted every column after it by one (OS
+    // showing Status's value, Host showing Actions, etc. — the reported bug).
+    const cols = ['<input type="checkbox" onclick="pxmxBulkSelectAll(this.checked)" title="Select all"/> VMID', 'Name', 'OS', 'Status', 'Host', 'Actions'];
     const escJs = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     const tplPools = window._pxmxTemplatePools || [];
     const isTemplate = vm => !!(vm.template || (vm.pool && tplPools.includes(String(vm.pool).toLowerCase())));
@@ -16310,7 +16315,7 @@ function pxmxVmTableHtml(vms) {
         // always-visible state, not a menu item you might miss).
         const destroySpec = PXMX_VM_ACTIONS.find(s => s.action === 'destroy');
         const menuBtn = !canAct ? '' : `<button onclick="event.stopPropagation(); pxmxToggleVmActionMenu(event, '${uid}', ${tpl})" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 hover:bg-slate-200">⋯ Actions ▾</button>`;
-        const actions = `<div class="flex flex-wrap gap-1">
+        const actions = `<div class="flex flex-wrap gap-1 justify-end">
             ${consoleBtn}
             ${menuBtn}
             ${act(destroySpec)}
