@@ -1787,6 +1787,33 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             pending = [{"agent_id": aid, "status": "pending"} for aid in pa]
             return {"status": "SUCCESS", "agents": agents, "pending_agents": pending}
 
+        # Proxmox node-stats / VM-list — answered HERE (like GET_AGENTS above)
+        # for EVERY agent-hosting spoke, not just a dedicated pxmx spoke. A cs
+        # spoke hosting its own Proxmox agent listener (the split-topology
+        # case) previously had no handler for these at all: the hub's
+        # get_all_hypervisor_spokes() fan-out (Hypervisors page) correctly
+        # included it, but the command fell through to "not supported by
+        # <module>" and that host's nodes/VMs silently never appeared, even
+        # though the spoke was connected/approved and its agent was live.
+        # Guarded on connected_agents so a non-agent-hosting spoke (dns/dhcp/
+        # nw/...) that happens to inherit this method is unaffected — it has
+        # no such attribute and falls through to the module dispatch below,
+        # same as before.
+        if cmd_type == "GET_NODE_STATS" and hasattr(self, "connected_agents"):
+            try:
+                from .pxmx_node_vm_aggregation import get_node_stats as _pxmx_get_node_stats
+            except ImportError:  # bare-module path (production: core/src/messaging on sys.path)
+                from pxmx_node_vm_aggregation import get_node_stats as _pxmx_get_node_stats  # type: ignore
+            return await _pxmx_get_node_stats(self, data)
+
+        if cmd_type in ("PXMX_LIST_VMS", "GET_VM_LIST", "AGENT_GET_VM_LIST") \
+                and hasattr(self, "connected_agents"):
+            try:
+                from .pxmx_node_vm_aggregation import list_vms as _pxmx_list_vms
+            except ImportError:  # bare-module path (production: core/src/messaging on sys.path)
+                from pxmx_node_vm_aggregation import list_vms as _pxmx_list_vms  # type: ignore
+            return await _pxmx_list_vms(self, data)
+
         if cmd_type in ("SPOKE_SET_LOG_LEVEL", "SET_LOG_LEVEL"):
             enabled = data.get("enabled", False)
             level = set_log_level(enabled)
