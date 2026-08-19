@@ -1418,15 +1418,19 @@ def create_app(hub):
                                     content={"detail": "DNS module access required"})
 
         # /api/henet/* (HE.NET / Hurricane Electric public DNS) lives UNDER the
-        # DNS module ("all things DNS"), but External DNS manages PUBLIC
-        # address-space records with no per-object tenant model, so BOTH reads
-        # and writes are Global-Admin-only (writes are additionally covered by
-        # _ADMIN_INFRA_WRITE_PREFIXES below). A DNS-view / tenant-admin user does
-        # NOT see External DNS — it is infrastructure, not tenant data.
+        # DNS module ("all things DNS"). Each record now carries an explicit
+        # per-object tenant_id (global "" for admin-managed records, or the
+        # owning tenant's id) — same shape as LE certs — so reads follow the
+        # ``dns`` right (DNS module access, same as /api/dns/) OR the distinct
+        # ``henet`` right (grantable on its own — see access.has_henet_access);
+        # the LIST handler itself filters a non-admin's response down to their
+        # own tenant's records (never global or another tenant's). Writes are
+        # tiered further below (_HENET_TENANT_WRITE_PREFIXES vs
+        # _ADMIN_INFRA_WRITE_PREFIXES).
         if path.startswith("/api/henet/"):
-            if not _is_admin(sess):
+            if not (_is_admin(sess) or _has_dns_access(sess) or _has_henet_access(sess)):
                 return JSONResponse(status_code=403,
-                                    content={"detail": "Admin access required for External DNS"})
+                                    content={"detail": "DNS module access required"})
 
         # /api/dhcp/* (DHCP module) requires the ``dhcp`` right OR admin. Writes
         # stay Global-Admin-only (shared Kea); GET reads are subnet-filtered.
@@ -1508,6 +1512,15 @@ def create_app(hub):
         # record whose IP is in the caller's tenant subnets. Checked BEFORE the
         # admin-only prefix so record/reservation aren't swept up by /api/dns/ .
         _SHARED_CONSTRAINED_WRITE_PREFIXES = ("/api/dns/record", "/api/dhcp/reservation")
+        # HE.NET record/credential writes now carry per-object tenant ownership
+        # (see the /api/henet/ read-gate comment above and net_services.py's
+        # _henet_assert_can_write / _henet_tenant_scope) — same per-object-owner
+        # shape as LE certs below, so the floor is the tenant-admin tier with
+        # ownership enforced IN-HANDLER (a tenant-admin manages only their own
+        # records; a foreign-owned record 404s, never a bare 403 that would leak
+        # its existence). Bulk/no-per-object ops (sync, import) stay in
+        # _ADMIN_INFRA_WRITE_PREFIXES below, unchanged.
+        _HENET_TENANT_WRITE_PREFIXES = ("/api/henet/record", "/api/henet/credential")
         # ADMIN-ONLY writes: these back a SINGLE shared server (one Unbound / one
         # Kea / one certbot) with no per-object constrained-write model yet, so the
         # `?tenant=` gate can prove the caller owns the query param but NOT that the
@@ -1515,9 +1528,12 @@ def create_app(hub):
         # until per-object subnet ownership is enforced on the bodies (dns/dhcp/le
         # phases). GET reads stay right-gated (method-gated here).
         # dns/dhcp SYNC (fleet-wide rebuild) have no per-object tenant model → admin-only.
-        # henet (Hurricane Electric public DNS) is public-address-space infra with
-        # no per-object tenant model → admin-only writes, same as dns/dhcp.
-        _ADMIN_INFRA_WRITE_PREFIXES = ("/api/dns/", "/api/dhcp/", "/api/henet/")
+        # henet SYNC/IMPORT (bulk replace-the-managed-set / scrape-the-whole-
+        # account) have no per-object tenant model either → admin-only, same as
+        # dns/dhcp sync. /api/henet/record and /api/henet/credential are excluded
+        # here (see _HENET_TENANT_WRITE_PREFIXES above, checked first) since they
+        # now have real per-object tenant ownership.
+        _ADMIN_INFRA_WRITE_PREFIXES = ("/api/dns/", "/api/dhcp/", "/api/henet/sync", "/api/henet/import")
         # LE (Certificate Management) writes: unlike the shared single-server infra
         # above, a managed cert carries an explicit per-tenant OWNER list
         # (global_config['le_cert_tenants'], see le_cert_access), so ownership is a
@@ -1542,6 +1558,11 @@ def create_app(hub):
                     return JSONResponse(
                         status_code=403,
                         content={"detail": "Tenant-admin (or admin) required for certificate changes"})
+            elif any(path.startswith(p) for p in _HENET_TENANT_WRITE_PREFIXES):
+                if not _can_edit_shared(sess):
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "Tenant-admin (or admin) required for External DNS changes"})
             elif any(path.startswith(p) for p in _ADMIN_INFRA_WRITE_PREFIXES):
                 if not _is_admin(sess):
                     return JSONResponse(
@@ -1689,6 +1710,9 @@ def create_app(hub):
 
     def _has_dns_access(sess):
         return access.has_dns_access(sess)
+
+    def _has_henet_access(sess):
+        return access.has_henet_access(sess)
 
     def _has_dhcp_access(sess):
         return access.has_dhcp_access(sess)

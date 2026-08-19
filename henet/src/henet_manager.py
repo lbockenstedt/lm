@@ -91,18 +91,19 @@ class HENetManager:
         return result
 
     def add_record(self, name: str, rtype: str, value: str, ttl: int = 300,
-                   ddns_key: str = "", key: str = "") -> Dict[str, Any]:
+                   ddns_key: str = "", key: str = "", tenant_id: str = "") -> Dict[str, Any]:
         existing = [r for r in self._load()
                     if not (r["name"] == name and r["type"] == rtype.upper())]
         existing.append({"name": name, "type": rtype, "value": value, "ttl": ttl,
+                         "tenant_id": tenant_id,
                          **({"key": key} if key else {})})
         return self.sync(existing, ddns_key=ddns_key)
 
     def update_record(self, name: str, rtype: str, value: str, ttl: int = 300,
-                      ddns_key: str = "", key: str = "") -> Dict[str, Any]:
+                      ddns_key: str = "", key: str = "", tenant_id: str = "") -> Dict[str, Any]:
         # Upsert semantics identical to add — HE dyndns "update" is just another
         # push of the new IP for the same hostname.
-        return self.add_record(name, rtype, value, ttl, ddns_key=ddns_key, key=key)
+        return self.add_record(name, rtype, value, ttl, ddns_key=ddns_key, key=key, tenant_id=tenant_id)
 
     def import_records(self, records: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Merge externally-discovered A/AAAA records into local management
@@ -177,7 +178,12 @@ class HENetManager:
             ttl = 300
         if not name or not value:
             return None
-        return {"name": name, "type": rtype, "value": value, "ttl": ttl}
+        # "" (unset/absent) = a Global-Admin-managed / shared record; any other
+        # value is the owning tenant's id. Opaque here — the spoke has no
+        # tenant concept of its own; the hub enforces ownership on writes and
+        # filters a non-admin's /api/henet/records read to their own tenant.
+        tenant_id = str(r.get("tenant_id") or "").strip()
+        return {"name": name, "type": rtype, "value": value, "ttl": ttl, "tenant_id": tenant_id}
 
     def _push(self, entry: Dict[str, Any], key: str) -> tuple:
         """Push one A/AAAA record to HE dyndns. Returns ``(ok, detail)``."""

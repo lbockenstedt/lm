@@ -551,25 +551,64 @@ def test_dns_dhcp_write_requires_admin(tmp_path):
 # on /api/henet/* require Global Admin. A dns-right user and a tenant Admin are
 # both 403'd; the UI hides the External DNS subtab for them to match.
 
-def test_henet_read_requires_global_admin(tmp_path):
+def test_henet_read_requires_dns_access(tmp_path):
     c, hub = _build({}, tmp_path)
-    # A user holding the internal-DNS right cannot read External DNS.
+    # No rights at all → still blocked.
+    bare_tok = _mint_tenant_session(hub, "eve", "tA", rights=())
+    assert c.get("/api/henet/records",
+                 cookies={"lm_session": bare_tok}).status_code == 403
+    # A user holding the internal-DNS right now passes the gate (External DNS
+    # is per-tenant data since each record carries an explicit tenant_id —
+    # the handler itself filters a non-admin's response to their own tenant,
+    # see test_henet_records_filtered_by_tenant).
     dns_tok = _mint_tenant_session(hub, "alice", "tA", rights=("dns",))
     assert c.get("/api/henet/records",
-                 cookies={"lm_session": dns_tok}).status_code == 403
+                 cookies={"lm_session": dns_tok}).status_code != 403
     assert c.get("/api/henet/status",
-                 cookies={"lm_session": dns_tok}).status_code == 403
-    # A tenant Admin (even with ?tenant=) is likewise blocked — External DNS is
-    # infrastructure, not tenant data.
+                 cookies={"lm_session": dns_tok}).status_code != 403
+    # A tenant Admin auto-qualifies (has_module_access grants tenant-admin any
+    # module right) and likewise passes the gate.
     tadm_tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
     assert c.get("/api/henet/records",
-                 cookies={"lm_session": tadm_tok}).status_code == 403
-    assert c.get("/api/henet/records?tenant=tA",
-                 cookies={"lm_session": tadm_tok}).status_code == 403
-    # Global Admin passes the gate (handler then runs — not 403).
+                 cookies={"lm_session": tadm_tok}).status_code != 403
+    # Global Admin passes the gate too.
     admin_tok = _mint_session(hub, "admin")
     assert c.get("/api/henet/records",
                  cookies={"lm_session": admin_tok}).status_code != 403
+
+
+def test_henet_read_via_distinct_henet_right_without_dns(tmp_path):
+    # 'henet' is a distinct, independently-grantable right (access.MODULE_RIGHTS)
+    # — a user with ONLY 'henet' (no 'dns') must still pass the gate, so External
+    # DNS can be granted without full internal-DNS/Unbound access.
+    c, hub = _build({}, tmp_path)
+    henet_tok = _mint_tenant_session(hub, "bob", "tA", rights=("henet",))
+    assert c.get("/api/henet/records",
+                 cookies={"lm_session": henet_tok}).status_code != 403
+    # ...but that alone does NOT grant the internal DNS module.
+    assert c.get("/api/dns/records",
+                 cookies={"lm_session": henet_tok}).status_code == 403
+
+
+def test_henet_record_writes_require_tenant_admin_tier(tmp_path):
+    c, hub = _build({}, tmp_path)
+    # A plain dns-right (view-tier) user — NOT a tenant-admin — is blocked from
+    # writing a record even though they can now READ External DNS: writes need
+    # the tenant-admin (or admin) floor, same tier as LE cert changes.
+    dns_tok = _mint_tenant_session(hub, "alice", "tA", rights=("dns",))
+    r = c.post("/api/henet/record", json={"name": "h.example.com", "type": "A", "value": "203.0.113.1"},
+              cookies={"lm_session": dns_tok})
+    assert r.status_code == 403
+    r = c.request("DELETE", "/api/henet/record", json={"name": "h.example.com", "type": "A"},
+                  cookies={"lm_session": dns_tok})
+    assert r.status_code == 403
+    # SYNC and IMPORT stay Global-Admin-only even for a tenant-admin — bulk,
+    # no per-object tenant model.
+    tadm_tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
+    r = c.post("/api/henet/sync", json={"records": []}, cookies={"lm_session": tadm_tok})
+    assert r.status_code == 403
+    r = c.post("/api/henet/import", json={}, cookies={"lm_session": tadm_tok})
+    assert r.status_code == 403
 
 
 # ── 8b. Shared-infrastructure writes: tenant-Admin tier (Phase 3) ─────────────

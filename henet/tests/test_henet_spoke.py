@@ -32,12 +32,12 @@ class FakeMgr:
         self.calls.append(("sync", len(records), ddns_key)); self._tid()
         return {"status": "SUCCESS", "records_written": len(records), "pushed": len(records)}
 
-    def add_record(self, name, rtype, value, ttl, ddns_key="", key=""):
-        self.calls.append(("add_record", name, rtype, value, ttl, ddns_key, key)); self._tid()
+    def add_record(self, name, rtype, value, ttl, ddns_key="", key="", tenant_id=""):
+        self.calls.append(("add_record", name, rtype, value, ttl, ddns_key, key, tenant_id)); self._tid()
         return {"status": "SUCCESS", "pushed": 1}
 
-    def update_record(self, name, rtype, value, ttl, ddns_key="", key=""):
-        self.calls.append(("update_record", name, rtype, value, ttl, ddns_key, key)); self._tid()
+    def update_record(self, name, rtype, value, ttl, ddns_key="", key="", tenant_id=""):
+        self.calls.append(("update_record", name, rtype, value, ttl, ddns_key, key, tenant_id)); self._tid()
         return {"status": "SUCCESS", "pushed": 1}
 
     def delete_record(self, name, rtype=None):
@@ -77,7 +77,14 @@ def test_add_passes_credential_fields():
     s = _spoke()
     _run(s.handle_command("HENET_ADD", {"name": "h.example.com", "type": "A",
                                         "value": "203.0.113.5", "ddns_key": "K", "key": "P"}))
-    assert s.mgr.calls[0] == ("add_record", "h.example.com", "A", "203.0.113.5", 300, "K", "P")
+    assert s.mgr.calls[0] == ("add_record", "h.example.com", "A", "203.0.113.5", 300, "K", "P", "")
+
+
+def test_add_passes_tenant_id():
+    s = _spoke()
+    _run(s.handle_command("HENET_ADD", {"name": "h.example.com", "type": "A",
+                                        "value": "203.0.113.5", "ddns_key": "K", "tenant_id": "lrb"}))
+    assert s.mgr.calls[0] == ("add_record", "h.example.com", "A", "203.0.113.5", 300, "K", "", "lrb")
 
 
 def test_update_routes_to_update_record():

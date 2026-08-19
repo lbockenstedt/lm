@@ -72,7 +72,8 @@ class HENetSpoke(BaseSpoke):
                 return {"status": "ERROR", "message": "name and value are required"}
             fn = self.mgr.update_record if cmd == "HENET_UPDATE" else self.mgr.add_record
             return await asyncio.to_thread(
-                fn, name, rtype, value, ttl, data.get("ddns_key", ""), data.get("key", ""))
+                fn, name, rtype, value, ttl, data.get("ddns_key", ""), data.get("key", ""),
+                data.get("tenant_id", ""))
 
         if cmd == "HENET_DELETE":
             name = data.get("name")

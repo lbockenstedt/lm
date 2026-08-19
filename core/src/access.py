@@ -727,6 +727,13 @@ def has_dns_access(sess) -> bool:
     return has_module_access(sess, "dns")
 
 
+def has_henet_access(sess) -> bool:
+    """External DNS / HE.NET (``henet``) module access gate — distinct from
+    ``dns`` (see ``has_module_access``) so a user can be granted External DNS
+    without full internal-DNS (Unbound) access, or vice versa."""
+    return has_module_access(sess, "henet")
+
+
 def has_dhcp_access(sess) -> bool:
     """DHCP (``dhcp``) module access gate (see ``has_module_access``)."""
     return has_module_access(sess, "dhcp")
