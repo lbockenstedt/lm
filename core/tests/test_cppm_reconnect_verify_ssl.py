@@ -49,3 +49,31 @@ def test_netbox_reconnect_projection_forwards_verify_ssl():
     out = _project("netbox", {"netbox_url": "https://nb", "api_token": "t",
                               "verify_ssl": False})
     assert out["netbox_verify_ssl"] is False
+
+
+# ── string-valued verify_ssl coercion (bool("false") is True trap) ───────────
+# verify_ssl can be persisted as a STRING ("false"/"0") — older UI, hand-edited
+# config, or a stringifying relay. Both projections must coerce to a real bool
+# so a truthy string can't be pushed and re-enable TLS verify on the spoke.
+def test_cppm_reconnect_projection_coerces_string_false():
+    for falsey in ("false", "False", "0", "no", "off"):
+        out = _project("cppm", {"host": "172.16.1.16", "verify_ssl": falsey})
+        assert out["verify_ssl"] is False, f"{falsey!r} must project to False"
+
+
+def test_cppm_reconnect_projection_coerces_string_true():
+    out = _project("cppm", {"host": "172.16.1.16", "verify_ssl": "true"})
+    assert out["verify_ssl"] is True
+
+
+def test_nac_payload_coerces_string_false():
+    from routes.tenant_devices import _NAC_PAYLOAD
+    assert _NAC_PAYLOAD({"host": "h", "verify_ssl": "false"})["verify_ssl"] is False
+    assert _NAC_PAYLOAD({"host": "h", "verify_ssl": "0"})["verify_ssl"] is False
+
+
+def test_save_and_reconnect_projections_agree_on_string_false():
+    from routes.tenant_devices import _NAC_PAYLOAD
+    rec = {"host": "h", "client_id": "c", "client_secret": "s",
+           "user": "u", "password": "p", "verify_ssl": "false"}
+    assert _NAC_PAYLOAD(rec)["verify_ssl"] == _project("cppm", rec)["verify_ssl"] is False
