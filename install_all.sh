@@ -34,7 +34,7 @@ while [[ "$#" -gt 0 ]]; do
         # machinery ONLY — no co-located module roles (cs/pxmx/opnsense/…). Those
         # run as remote spokes that onboard to this hub. Shortcut for
         # --exclude cs,pxmx,opnsense,cppm,netbox,ldap,dns,dhcp,nw,le.
-        --hub-only)        EXCLUDE=(cs pxmx opnsense cppm netbox ldap dns dhcp henet nw le) ;;
+        --hub-only)        EXCLUDE=(cs pxmx opnsense cppm netbox ldap dns dhcp henet nw le console statuspage proxy) ;;
         --tls-verify)      TLS_VERIFY=true ;;
         --tls-ca-cert)     shift; TLS_CA_CERT="$1" ;;
         --no-setup-token)  SETUP_TOKEN=false ;;  # leave first-run /auth/setup open (dev/loopback)
@@ -780,9 +780,11 @@ fi
 # checks the HEAD actually advanced) instead of the fragile download/tarball
 # fallback that reports success even when nothing changed. Relocate the clone's
 # .git into $BASE_DIR and let git materialize the whole tracked tree in place
-# (core/, WebUI/, dns/, dhcp/, henet/, root scripts, VERSION, docs). Untracked paths
-# (cs/, pxmx/, venv/, .env, certs/, data/) are left untouched by reset --hard.
-rm -rf "$BASE_DIR/core" "$BASE_DIR/WebUI" "$BASE_DIR/dns" "$BASE_DIR/dhcp" "$BASE_DIR/henet"
+# (core/, WebUI/, dns/, dhcp/, henet/, console/, statuspage/, proxy/, root
+# scripts, VERSION, docs). Untracked paths (cs/, pxmx/, venv/, .env, certs/,
+# data/) are left untouched by reset --hard.
+rm -rf "$BASE_DIR/core" "$BASE_DIR/WebUI" "$BASE_DIR/dns" "$BASE_DIR/dhcp" "$BASE_DIR/henet" \
+       "$BASE_DIR/console" "$BASE_DIR/statuspage" "$BASE_DIR/proxy"
 rm -rf "$BASE_DIR/.git"
 mv lm_tmp/.git "$BASE_DIR/.git"
 rm -rf lm_tmp
@@ -1194,9 +1196,10 @@ declare -A MODULE_ROLE=(
     ["cs"]="simulation" ["pxmx"]="proxmox" ["opnsense"]="opnsense"
     ["cppm"]="cppm" ["netbox"]="netbox" ["ldap"]="ldap"
     ["dns"]="dns" ["dhcp"]="dhcp" ["henet"]="henet" ["nw"]="network" ["le"]="le"
+    ["console"]="console" ["statuspage"]="statuspage" ["proxy"]="proxy"
 )
 ROLES=()
-for mod in cs pxmx opnsense cppm netbox ldap dns dhcp henet nw le; do
+for mod in cs pxmx opnsense cppm netbox ldap dns dhcp henet nw le console statuspage proxy; do
     skip=false
     for ex in "${EXCLUDE[@]}"; do [[ "$mod" == "$ex" ]] && skip=true && break; done
     if $skip; then

@@ -89,7 +89,7 @@ flag live in the repo-root `README.md` **Installation** block and in
 - [lm-hub.md](lm-hub.md) — the hub: `LabManagerHub`, FastAPI route groups, background loops, security, state, update pipeline, logging, dep guard.
 - [webui.md](webui.md) — the browser UI: panels/tabs, view router, HTTP+WS comms.
 - [credential-vault.md](credential-vault.md) — hub-side encrypted secret store (buckets, `psk` vs automation-readable `hub` modes, Azure Key Vault / local Fernet); the `{bucket,name}` reference + server-side resolve pattern LE / HE.NET / Console use.
-- [generic-agent.md](generic-agent.md) — the agent-spoke `_ROLE_MAP` role loader (11 hosted roles + bugfixer/netbox-server deploy roles). The legacy `GenericLeafAgent` leaf was removed.
+- [generic-agent.md](generic-agent.md) — the agent-spoke `_ROLE_MAP` role loader (15 hosted roles + bugfixer/netbox-server deploy roles). The legacy `GenericLeafAgent` leaf was removed.
 
 ## Spokes
 

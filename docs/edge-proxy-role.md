@@ -1,7 +1,9 @@
 # Edge Proxy Role — Design
 
-> Status: **DESIGN / not yet built.** Canonical design doc per the feature-docs convention.
-> Consult this before touching proxy code.
+> Status: **Phase 1 (WebUI front door) and most of Phase 2 (console relay) SHIPPED** — see
+> `git log proxy/src/proxy_*.py`. Phase 2's live-VM validation and §11/§12 (strict-mTLS
+> enforcement, workstation-cert enrollment) remain unbuilt. Canonical design doc per the
+> feature-docs convention. Consult this before touching proxy code.
 
 ## 1. Problem & goals
 
@@ -49,7 +51,9 @@ New pieces this role adds (the actual work):
 Registration:
 - Add `proxy` → `proxy/src/proxy_spoke.py::ProxySpoke` (`module_type "proxy"`, in-repo or own
   repo `lbockenstedt/proxy.git`) to `_ROLE_MAP`.
-- Add `proxy` to the `install_agent.sh` role list and `docs/generic-agent.md`.
+- Add `proxy` to the `install_agent.sh` role list and `docs/generic-agent.md`. **Done** — also
+  now selectable in the hub bootstrap installer (`install_menu.sh` / `install_all.sh`), alongside
+  `console`/`statuspage`.
 - `module_type "proxy"` is new — thread it wherever module types are enumerated
   (spoke registry, approved_modules, RBAC gating, Setup → Agents display).
 

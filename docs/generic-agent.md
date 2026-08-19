@@ -37,11 +37,13 @@ role's live status.
 
 ## Key commands / handlers
 
-- **Agent-spoke `_ROLE_MAP`** (13 hosted roles — rel_path, class, module_type, repo):
+- **Agent-spoke `_ROLE_MAP`** (15 hosted roles — rel_path, class, module_type, repo):
   - `dns` → `dns/src/dns_spoke.py::DNSSpoke` (`dns`, in-repo)
+  - `henet` → `henet/src/henet_spoke.py::HENetSpoke` (`henet`, in-repo) — manages dns.he.net records (dynamic DNS) for public-facing hostnames.
   - `dhcp` → `dhcp/src/dhcp_spoke.py::DHCPSpoke` (`dhcp`, in-repo)
   - `console` → `console/src/console_spoke.py::ConsoleSpoke` (`console`, in-repo)
   - `statuspage` → `statuspage/src/statuspage_spoke.py::StatusPageSpoke` (`statuspage`, in-repo) — one-tenant public status page; serves its own HTTPS page (fastapi/uvicorn), hub pushes the tenant's redacted `STATUS_SNAPSHOT`.
+  - `proxy` → `proxy/src/proxy_spoke.py::ProxySpoke` (`proxy`, in-repo) — per-tenant edge WebUI reverse proxy; terminates its own TLS listener with `CERT_NONE` (no client-cert prompt for browsers) and forwards HTTP/WebSocket traffic to the hub over its own spoke mTLS client cert. See [edge-proxy-role.md](edge-proxy-role.md).
   - `network` → `nw/src/nw_spoke.py::NwSpoke` (`nw`, `lbockenstedt/nw.git`)
   - `netbox` → `netbox/src/netbox_spoke.py::NetboxSpoke` (`ipam`, `lbockenstedt/netbox.git`)
   - `opnsense` → `opnsense/src/opn_spoke.py::OpnSpoke` (`firewall`, `lbockenstedt/opnsense.git`)
