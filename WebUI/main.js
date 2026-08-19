@@ -25554,6 +25554,7 @@ const INSTANCE_PRODUCTS = {
             { id: 'client_secret', label: 'OAuth2 Client Secret', type: 'password', placeholder: 'Client secret' },
             { id: 'user', label: 'Fallback Username', placeholder: 'admin' },
             { id: 'password', label: 'Fallback Password', type: 'password', placeholder: 'Password' },
+            { id: 'verify_ssl', label: 'TLS Certificate', type: 'select', options: [['true', 'Verify cert (secure)'], ['false', 'Allow untrusted / self-signed cert']] },
         ],
     },
     ipam: {
@@ -25766,8 +25767,12 @@ ${schemaBtnHtml}
             // For a <select>, only override the default (first option) when the
             // instance has a stored value — an old instance with no verify_ssl
             // then keeps the secure "Verify" default instead of going blank.
-            if (el.tagName === 'SELECT') { if (editItem[f.id]) el.value = editItem[f.id]; }
-            else el.value = editItem[f.id] || '';
+            // Checked against undefined/null/'' rather than plain truthiness so
+            // a real boolean `false` (e.g. verify_ssl disabled) still counts as
+            // "has a stored value" instead of falling back to the default.
+            const has = editItem[f.id] !== undefined && editItem[f.id] !== null && editItem[f.id] !== '';
+            if (el.tagName === 'SELECT') { if (has) el.value = String(editItem[f.id]); }
+            else el.value = has ? editItem[f.id] : '';
         });
     }
 }
@@ -25789,7 +25794,14 @@ async function saveInstance(productKey) {
         name: document.getElementById('inst-name').value,
         spoke_id: document.getElementById('inst-spoke').value,
     };
-    p.fields.forEach(f => { config[f.id] = document.getElementById('inst-' + f.id).value; });
+    p.fields.forEach(f => {
+        let v = document.getElementById('inst-' + f.id).value;
+        // A select whose options are literally true/false (e.g. verify_ssl)
+        // saves as a real boolean, not the string 'false' — which Python
+        // treats as truthy and would silently invert the setting.
+        if (f.type === 'select' && (v === 'true' || v === 'false')) v = (v === 'true');
+        config[f.id] = v;
+    });
     if (p.vaultPicker) {
         const vc = _collectVaultCred('inst-vaultcred');
         if (vc !== undefined) config.vault_credential = vc;

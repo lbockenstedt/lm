@@ -719,6 +719,7 @@ def register(app, hub, ctx):
             "client_secret": inst.get("client_secret"),
             "user": inst.get("user"),
             "password": inst.get("password"),
+            "verify_ssl": inst.get("verify_ssl", True),
         },
         legacy_key="cppm",
         legacy_to_instance=lambda c: {
@@ -730,6 +731,7 @@ def register(app, hub, ctx):
             "client_secret": c.get("client_secret"),
             "user": c.get("user"),
             "password": c.get("password"),
+            "verify_ssl": c.get("verify_ssl", True),
         },
     )
     _instance_crud(
