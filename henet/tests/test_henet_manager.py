@@ -194,6 +194,25 @@ def test_status_unreachable_when_probe_raises(tmp_path):
     assert mgr.status()["reachable"] is False
 
 
+def test_status_detail_surfaces_reason_when_unreachable(tmp_path):
+    """Regression: an unreachable endpoint must explain WHY (transport error
+    string) so the operator can tell an egress/TLS block apart from auth."""
+    class Boom:
+        def __call__(self, url, form):
+            raise OSError("no route to host")
+    mgr = HENetManager(state_path=str(tmp_path / "r.json"), http_post=Boom())
+    s = mgr.status()
+    assert s["reachable"] is False
+    assert "no route to host" in s["detail"]
+    assert "OSError" in s["detail"]
+
+
+def test_status_detail_empty_when_reachable(tmp_path):
+    poster = FakePoster()
+    mgr = HENetManager(state_path=str(tmp_path / "r.json"), http_post=poster)
+    assert mgr.status()["detail"] == ""
+
+
 # ── import_records: merge scraped zone records without pushing ────────────────
 
 def test_import_records_adds_new_a_aaaa_without_pushing(tmp_path):

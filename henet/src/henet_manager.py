@@ -157,13 +157,18 @@ class HENetManager:
                         "delete it in the dns.he.net UI if desired)"}
 
     def status(self) -> Dict[str, Any]:
-        """Reachability of the HE dyndns endpoint + managed-record count."""
-        reachable = self._endpoint_reachable()
+        """Reachability of the HE dyndns endpoint + managed-record count.
+
+        ``detail`` carries WHY the probe failed (transport/TLS/DNS error) so the
+        operator can tell an egress/network block apart from an auth problem
+        instead of an opaque "unreachable"."""
+        reachable, detail = self._endpoint_reachable()
         return {
             "reachable": reachable,
             "record_count": len(self._load()),
             "endpoint": DYN_UPDATE_URL,
             "state_path": self.state_path,
+            "detail": detail,
         }
 
     # ── Helpers ───────────────────────────────────────────────────────
@@ -206,14 +211,16 @@ class HENetManager:
         first = body.split()[0] if body else ""
         return (first in _OK_TOKENS, body or "empty response")
 
-    def _endpoint_reachable(self) -> bool:
+    def _endpoint_reachable(self) -> tuple:
+        """``(reachable, detail)``. ``detail`` is "" on success, else the
+        transport error string (surfaced by :meth:`status` for diagnostics)."""
         try:
             # A keyless GET returns HE's "badauth"/usage body with HTTP 200 — enough
             # to prove the endpoint is reachable without sending any credential.
             self._post(DYN_UPDATE_URL, {})
-            return True
-        except Exception:
-            return False
+            return (True, "")
+        except Exception as exc:  # noqa: BLE001 — surface WHY, don't swallow it
+            return (False, f"{type(exc).__name__}: {exc}")
 
     def _default_post(self, url: str, form: Dict[str, str]) -> str:
         data = urlencode(form).encode("utf-8")

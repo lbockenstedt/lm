@@ -23290,6 +23290,20 @@ function _henetPushBadge(r) {
     return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${cls}"${detail}>${ok ? 'pushed' : 'error'}</span>`;
 }
 
+// Switch the admin per-tenant record tab without re-fetching: toggle panel
+// visibility + restyle the tab buttons (records are already rendered).
+function _henetSelectTab(k) {
+    window._henetActiveTab = k;
+    document.querySelectorAll('.henet-tab-panel').forEach(p => p.classList.toggle('hidden', p.dataset.tab !== k));
+    document.querySelectorAll('.henet-tab-btn').forEach(b => {
+        const active = b.dataset.htab === k;
+        b.classList.toggle('border-[#01A982]', active);
+        b.classList.toggle('text-[#01A982]', active);
+        b.classList.toggle('border-transparent', !active);
+        b.classList.toggle('text-slate-500', !active);
+    });
+}
+
 async function loadHenet() {
     const container = document.getElementById('dns-content');
     if (!container) return;
@@ -23312,7 +23326,9 @@ async function loadHenet() {
         const s = await _spokeFetch('/api/henet/status');
         if (s.ok && s.data && s.data.status === 'SUCCESS') {
             const dot = s.data.reachable ? 'text-emerald-600' : 'text-amber-600';
-            statusHtml = `<span class="${dot} font-medium">● HE dyndns ${s.data.reachable ? 'reachable' : 'unreachable'}</span> · ${s.data.record_count} managed record(s)`;
+            const why = (!s.data.reachable && s.data.detail)
+                ? ` <span class="text-amber-500" title="${escapeHtml(String(s.data.detail))}">(${escapeHtml(String(s.data.detail))})</span>` : '';
+            statusHtml = `<span class="${dot} font-medium">● HE dyndns ${s.data.reachable ? 'reachable' : 'unreachable'}</span>${why} · ${s.data.record_count} managed record(s)`;
         }
     } catch (e) { /* status is best-effort */ }
 
@@ -23384,21 +23400,33 @@ async function loadHenet() {
         };
         let bodyHtml;
         if (admin) {
-            // Group into a "Global" section + one section per tenant, so the
-            // merged union stays legible instead of one flat table repeating
-            // a Tenant column on every row.
+            // Group into a "Global" tab + one tab per tenant, so each tenant's
+            // records live on their own tab instead of one flat admin list.
+            await ensureTenants();
+            const tName = (window._allTenantsName || {});
             const groups = new Map();  // tenant_id ("" = global) -> [records]
             records.forEach(r => {
                 const k = r.tenant_id || '';
                 if (!groups.has(k)) groups.set(k, []);
                 groups.get(k).push(r);
             });
-            const order = [''].concat(Array.from(groups.keys()).filter(k => k !== '').sort());
-            bodyHtml = order.filter(k => groups.has(k)).map(k => {
-                const label = k ? `Tenant: ${escapeHtml(k)}` : 'Global (Admin-managed)';
-                const grp = groups.get(k);
-                return `<div class="mb-4"><div class="text-xs font-bold text-slate-500 uppercase mb-1 px-1">${label} (${grp.length})</div>${tw(th(cols) + `<tbody>${grp.map(rowHtml).join('')}</tbody>`)}</div>`;
+            const tabs = [''].concat(Array.from(groups.keys()).filter(k => k !== '').sort())
+                .filter(k => groups.has(k));
+            if (window._henetActiveTab == null || !tabs.includes(window._henetActiveTab)) {
+                window._henetActiveTab = tabs[0] || '';
+            }
+            const tabLabel = k => k ? (tName[k] || k) : 'Global';
+            const tabBtns = tabs.map(k => {
+                const active = k === window._henetActiveTab;
+                const style = active ? 'border-[#01A982] text-[#01A982]' : 'border-transparent text-slate-500 hover:text-slate-700';
+                return `<button data-htab="${escapeHtml(String(k))}" onclick="_henetSelectTab('${String(k).replace(/'/g, "\\'")}')" class="henet-tab-btn px-3 py-1.5 -mb-px border-b-2 ${style} text-sm font-medium whitespace-nowrap">${escapeHtml(tabLabel(k))} <span class="text-xs text-slate-400">(${groups.get(k).length})</span></button>`;
             }).join('');
+            const panels = tabs.map(k => {
+                const hidden = k === window._henetActiveTab ? '' : ' hidden';
+                const grp = groups.get(k);
+                return `<div class="henet-tab-panel${hidden}" data-tab="${escapeHtml(String(k))}">${tw(th(cols) + `<tbody>${grp.map(rowHtml).join('')}</tbody>`)}</div>`;
+            }).join('');
+            bodyHtml = `<div class="flex gap-1 border-b border-slate-200 mb-3 overflow-x-auto">${tabBtns}</div>${panels}`;
         } else {
             bodyHtml = tw(th(cols) + `<tbody>${records.map(rowHtml).join('')}</tbody>`);
         }
@@ -23422,6 +23450,20 @@ async function showHenetRecordModal(editItem) {
     const typeOpts = ['A', 'AAAA'].map(t =>
         `<option value="${t}"${editItem && editItem.type === t ? ' selected' : ''}>${t}</option>`).join('');
     const cred = window._henetAssignedCred;
+    // Admin-only tenant selector: assign/re-home a record to a tenant (or
+    // Global). A non-admin's records are always their own tenant's (server-
+    // pinned), so they never see this field. Defaults to the active tab on add.
+    let tenantField = '';
+    if (isAdmin()) {
+        await ensureTenants();
+        const tenants = window._allTenants || [];
+        const cur = (editItem && editItem.tenant_id != null)
+            ? String(editItem.tenant_id) : String(window._henetActiveTab || '');
+        const opts = [`<option value=""${cur === '' ? ' selected' : ''}>Global (admin-managed / shared)</option>`]
+            .concat(tenants.map(t => `<option value="${escapeHtml(t.id)}"${String(t.id) === cur ? ' selected' : ''}>${escapeHtml(t.name || t.id)}</option>`))
+            .join('');
+        tenantField = `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Tenant</label><select id="henet-r-tenant" class="${inputCls}" title="Which tenant owns this record. Global = admin-managed / shared. A tenant only sees and manages its own records — pick a tenant to move this record onto their tab.">${opts}</select></div>`;
+    }
     const modal = openModal('henet-record-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} HE.NET Record</h3>
         <div class="space-y-3">
@@ -23429,6 +23471,7 @@ async function showHenetRecordModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Type</label><select id="henet-r-type" class="${inputCls}" title="Record type: A (IPv4) or AAAA (IPv6) — HE's dyndns endpoint only updates A/AAAA" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Value (IP)</label><input id="henet-r-value" value="${val(editItem?.value)}" class="${inputCls}" placeholder="203.0.113.5" title="IP address the record resolves to (A = IPv4, AAAA = IPv6)"></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="henet-r-ttl" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}" title="Time-to-live in seconds (minimum 60; default 300)"></div>
+            ${tenantField}
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">DDNS Key</label><input id="henet-r-ddnskey" type="password" autocomplete="off" class="${inputCls}" placeholder="paste the record's dynamic DNS key" title="HE.NET authenticates each record's push with ITS OWN per-record key — NOT the account login. In the dns.he.net UI, open this record, turn on 'Enable entry for dynamic DNS', and copy the key it generates here."></div>
             <p class="text-[11px] text-slate-400">The assigned DDNS credential${cred ? ` (<span class="font-mono">🔐 ${escapeHtml(cred.name)}</span>)` : ''} is your HE.NET account login — it only powers Import/Sync (reading the zone). Pushing THIS record needs its own per-record key from dns.he.net, entered above. Never stored — you'll re-enter it if you edit this record later.</p>
         </div>
@@ -23512,6 +23555,10 @@ async function saveHenetRecord() {
         ttl: parseInt(get('henet-r-ttl')) || 300,
         key: get('henet-r-ddnskey'),
     };
+    // Admin-only tenant assignment (the field is absent for non-admins, whom the
+    // server pins to their own tenant regardless).
+    const tenantSel = document.getElementById('henet-r-tenant');
+    if (tenantSel) payload.tenant = tenantSel.value;
     if (!payload.name || !payload.value) { showToast('Name and Value are required', 'error'); return; }
     // The assigned module credential is an account login (Import/Sync only) —
     // HE's dyndns push always needs THIS record's own per-record key, or it
