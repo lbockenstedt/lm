@@ -16195,10 +16195,22 @@ function pxmxReconcileVmInflight(freshVms) {
 }
 // Re-render just the VM list table (when mounted) so an optimistic badge shows
 // instantly, before the next telemetry refresh. No-op off the VM list view.
+// Per-server tab filter for the flat "Virtual Machines" list — null/'' means
+// "All" (the default on first load, since this starts unset). Persists for
+// the session, including across pxmxRerenderVmList's optimistic in-flight
+// re-renders (action clicks) and the post-bulk-action loadPxmxData refresh —
+// switching tabs shouldn't get silently undone by an unrelated background
+// refresh. A full page reload naturally resets it back to "All".
+window._pxmxVmTabFilter = window._pxmxVmTabFilter || null;
+function pxmxFilteredVms() {
+    const all = window._pxmxVms || [];
+    const key = window._pxmxVmTabFilter;
+    return key ? all.filter(v => pxmxNodeKey(v.cluster, v.node) === key) : all;
+}
 function pxmxRerenderVmList() {
     try {
         const el = document.getElementById('pxmx-vm-list');
-        if (el) el.innerHTML = pxmxVmTableHtml(window._pxmxVms || []);
+        if (el) el.innerHTML = pxmxVmTableHtml(pxmxFilteredVms());
     } catch (e) { console.warn('pxmxRerenderVmList failed', e); }
 }
 
@@ -16313,6 +16325,53 @@ function pxmxVmTableHtml(vms) {
         </tr>`;
     }).join('');
     return pxmxBulkBar() + tableWrap(tableHead(cols) + rows);
+}
+
+// "Virtual Machines" tab strip — All (default) + one tab per server (node),
+// numeric-aware sort so …svr-2/-3/-10 order naturally (mirrors the Overview
+// sort). Switching tabs is a pure client-side filter over the already-loaded
+// window._pxmxVms/_pxmxNodes — no re-fetch. Counts help spot an empty/
+// offline host at a glance. Separate from the existing Overview → click-a-
+// node → scoped node-detail-card flow (openNodeVms/pxmxNodeDetailHtml),
+// which stays as-is; this is the flat "Virtual Machines" landing view.
+function pxmxVmTabsHtml() {
+    const nodes = window._pxmxNodes || [];
+    const allVms = window._pxmxVms || [];
+    const activeKey = window._pxmxVmTabFilter || null;
+    const _cmp = (a, b) => String(a || '').localeCompare(String(b || ''), undefined,
+        { numeric: true, sensitivity: 'base' });
+    const sortedNodes = nodes.slice().sort((a, b) => _cmp(a.cluster, b.cluster) || _cmp(a.node, b.node));
+    const tabBtn = (key, label, count, active) =>
+        `<button onclick="pxmxSelectVmTab('${escJsAttr(key || '')}')" class="px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${active ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}">${escapeHtml(label)} <span class="opacity-60">(${count})</span></button>`;
+    const countFor = key => allVms.filter(v => pxmxNodeKey(v.cluster, v.node) === key).length;
+    return `<div class="flex flex-wrap gap-1.5 mb-3">
+        ${tabBtn('', 'All', allVms.length, !activeKey)}
+        ${sortedNodes.map(n => tabBtn(pxmxNodeKey(n.cluster, n.node), n.node, countFor(pxmxNodeKey(n.cluster, n.node)), activeKey === pxmxNodeKey(n.cluster, n.node))).join('')}
+    </div>`;
+}
+window.pxmxSelectVmTab = function (key) {
+    window._pxmxVmTabFilter = key || null;
+    const wrap = document.getElementById('pxmx-vm-section');
+    if (wrap) wrap.innerHTML = pxmxVmSectionHtml();
+};
+// Full section (header + tabs + table) — one shared builder so a fresh page
+// load and a tab click render identically.
+function pxmxVmSectionHtml() {
+    const nodes = window._pxmxNodes || [];
+    const activeKey = window._pxmxVmTabFilter || null;
+    const vms = pxmxFilteredVms();
+    const countLabel = activeKey ? `${vms.length} on ${escapeHtml((activeKey.split('::')[1] || activeKey))}` : `${vms.length} total`;
+    const buildBtn = nodes.length
+        ? `<button onclick="pxmxOpenCreateVm()" class="mb-3 ml-2 px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">＋ Build VM from ISO</button>`
+        : '';
+    return `<div class="flex items-center justify-between mb-1 px-1">
+            <h3 class="text-base font-semibold text-[#263040]">Virtual Machines &amp; Containers
+                <span class="text-xs text-slate-400 font-normal">(${countLabel})</span> ${helpIcon('pxmx', null, 'Hypervisor help')}</h3>
+            ${buildBtn}
+        </div>`
+        + pxmxVmTabsHtml()
+        + `<div id="pxmx-vm-list">${vms.length > 0 ? pxmxVmTableHtml(vms)
+           : '<p class="p-4 text-slate-400 italic text-sm">No VMs on this server.</p>'}</div>`;
 }
 
 // Bulk VM actions — operate on the checked rows. Reuses /api/pxmx/vm-action per
@@ -18834,18 +18893,10 @@ async function loadPxmxData(subMenu) {
                 // Node not found (vanished between fetch and click) — fall through to flat.
             }
 
-            // All VMs flat (direct tab click, or no node telemetry yet).
-            const buildBtn = (window._pxmxNodes && window._pxmxNodes.length)
-                ? `<button onclick="pxmxOpenCreateVm()" class="mb-3 ml-2 px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">＋ Build VM from ISO</button>`
-                : '';
+            // All VMs flat (direct tab click, or no node telemetry yet) — with
+            // the per-server tab strip (pxmxVmSectionHtml/pxmxSelectVmTab).
             container.innerHTML = staleBanner
-                + `<div class="flex items-center justify-between mb-1 px-1">
-                    <h3 class="text-base font-semibold text-[#263040]">Virtual Machines &amp; Containers
-                        <span class="text-xs text-slate-400 font-normal">(${vms.length} total)</span> ${helpIcon('pxmx', null, 'Hypervisor help')}</h3>
-                    ${buildBtn}
-                </div>`
-                + `<div id="pxmx-vm-list">${vms.length > 0 ? pxmxVmTableHtml(vms)
-                   : '<p class="p-4 text-slate-400 italic text-sm">No VMs found — waiting for agent telemetry.</p>'}</div>`;
+                + `<div id="pxmx-vm-section">${pxmxVmSectionHtml()}</div>`;
 
         }
     } catch (err) {
