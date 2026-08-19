@@ -200,7 +200,11 @@ _INSTANCE_CONFIG_SOURCES = {
         # verification on every spoke restart (the client is reconstructed at
         # the secure default) — silently defeating the per-instance "allow
         # self-signed" toggle until the operator re-saves. Keep the two in sync.
-        "verify_ssl": i.get("verify_ssl", True),
+        # Coerce to a real bool (mirror tenant_devices._as_bool) so a string
+        # "false"/"0" can't be pushed and read as truthy by the spoke.
+        "verify_ssl": (lambda v: True if v is None else (
+            v.strip().lower() not in {"0", "false", "no", "off", "none", "null", ""}
+            if isinstance(v, str) else bool(v)))(i.get("verify_ssl")),
     }),
     "netbox": ("ipam_instances", lambda i: {
         "netbox_url": i.get("netbox_url") or i.get("url"),

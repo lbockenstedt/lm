@@ -27,6 +27,23 @@ from api import (
 )
 
 
+_FALSEY = {"0", "false", "no", "off", "none", "null", ""}
+
+
+def _as_bool(value, default=True):
+    """Coerce a stored/relayed config flag to a real bool WITHOUT the
+    ``bool("false") is True`` trap. ``verify_ssl`` can be persisted as a string
+    ("false"/"0") by an older UI, a hand-edited config, or a stringifying relay;
+    pushing that verbatim let the cppm spoke re-enable TLS verification on a
+    self-signed ClearPass and 502 every call. Mirror of cppm ``client._as_bool``
+    — keep the two in sync. ``None``/absent → ``default``."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in _FALSEY
+    return bool(value)
+
+
 # Per-product descriptor. ``key`` is the global_config storage list; ``resp`` is
 # the JSON response key the WebUI reads; ``payload_key`` is the POST body
 # wrapper; ``kind`` is the human label for error messages; ``push`` selects the
@@ -36,7 +53,7 @@ from api import (
 _NAC_PAYLOAD = lambda i: {  # noqa: E731
     "host": i.get("host"), "client_id": i.get("client_id"),
     "client_secret": i.get("client_secret"), "user": i.get("user"),
-    "password": i.get("password"), "verify_ssl": i.get("verify_ssl", True),
+    "password": i.get("password"), "verify_ssl": _as_bool(i.get("verify_ssl"), True),
 }
 _IPAM_PAYLOAD = lambda i: {  # noqa: E731
     "netbox_url": i.get("url"), "api_token": i.get("api_token"),
