@@ -602,7 +602,13 @@ def register(app, hub, ctx):
         if not name:
             raise HTTPException(status_code=400, detail="name is required")
         existing_owner = await _henet_assert_can_write(hub, sess, name, rtype)
-        tenant_id = existing_owner if existing_owner is not None else _henet_tenant_scope(sess)
+        # Global Admin may re-home an existing record to another tenant (or back
+        # to global) by sending an explicit ``tenant``; otherwise the record
+        # keeps its current owner. A non-admin is always pinned to their own.
+        if _is_admin(sess) and "tenant" in body:
+            tenant_id = _henet_tenant_scope(sess, body.get("tenant"))
+        else:
+            tenant_id = existing_owner if existing_owner is not None else _henet_tenant_scope(sess)
         body["tenant_id"] = tenant_id
         await _henet_resolve_vault_cred(request, body, tenant_id)
         return await _relay_spoke(_get_henet_spoke(hub), "HENET_UPDATE", body,
