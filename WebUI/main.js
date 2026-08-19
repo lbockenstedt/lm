@@ -18589,11 +18589,17 @@ function pxmxClusterBadge(n) {
 function renderPxmxNodes() {
     const wrap = document.getElementById('pxmx-nodes-wrap');
     if (!wrap) return;
-    const nodes = window._pxmxNodes || [];
     const sel = window._pxmxNodeSel;
     const cols = ['Cluster', 'Node', 'Status', 'CPU %', 'Cores', 'RAM Used', 'RAM Total', 'Version', ''];
     const escAttr = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
     const escJs   = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    // Sort by Cluster then Node (numeric-aware so …svr-2/-3/-10 order
+    // naturally, not lexically) — mirrors the VM Server fleet table's host
+    // sort. Copy first — don't mutate the loaded array.
+    const _cmp = (a, b) => String(a || '').localeCompare(String(b || ''), undefined,
+        { numeric: true, sensitivity: 'base' });
+    const nodes = (window._pxmxNodes || []).slice().sort((a, b) =>
+        _cmp(a.cluster, b.cluster) || _cmp(a.node, b.node));
     const rows = nodes.map(n => {
         const key        = pxmxNodeKey(n.cluster, n.node);
         const ramUsedGb  = ((n.mem_used  || 0) / 1073741824).toFixed(1);
