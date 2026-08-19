@@ -17990,8 +17990,10 @@ function serialEnsureConsoleDock() {
     modal.id = 'serial-console-modal';
     // Non-modal bottom drawer (no full-screen backdrop): the rest of the app —
     // in particular the port list — stays interactive, so a user can open a
-    // second console while one is already docked. z-40 keeps it under true modals.
-    modal.className = 'fixed bottom-0 left-0 right-0 z-40 flex flex-col bg-[#1e1e1e] border-t border-slate-700 shadow-2xl';
+    // second console while one is already docked. z-40 keeps it under true
+    // modals. left-56 keeps it clear of the w-56 left nav sidebar (index.html)
+    // instead of spanning the full viewport and covering the menu.
+    modal.className = 'fixed bottom-0 left-56 right-0 z-40 flex flex-col bg-[#1e1e1e] border-t border-slate-700 shadow-2xl';
     modal.style.height = '45vh';
     modal.innerHTML = `
         <div class="flex items-center gap-3 px-4 py-2 bg-[#2d2d2d] border-b border-slate-700 text-slate-200 text-sm">
@@ -18447,7 +18449,9 @@ function pxmxEnsureConsoleDock() {
     modal.id = 'pxmx-vnc-modal';
     // Non-modal bottom drawer (no full-screen backdrop) so the VM list behind it
     // stays clickable and additional consoles can be opened while one is docked.
-    modal.className = 'fixed bottom-0 left-0 right-0 z-40 flex flex-col bg-[#1a1a2e] border-t border-slate-700 shadow-2xl';
+    // left-56 keeps it clear of the w-56 left nav sidebar (index.html) instead
+    // of spanning the full viewport and covering the menu.
+    modal.className = 'fixed bottom-0 left-56 right-0 z-40 flex flex-col bg-[#1a1a2e] border-t border-slate-700 shadow-2xl';
     modal.style.height = '55vh';
     modal.innerHTML = `
         <div class="flex items-center gap-3 px-4 py-2 bg-[#16213e] border-b border-slate-700 text-slate-200 text-sm">
