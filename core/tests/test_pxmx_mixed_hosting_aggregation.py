@@ -105,3 +105,47 @@ async def test_nodes_all_spokes_fail_raises_for_warm_fallback():
     hub = _Hub({"pxmx-1": {}, "cs-06": {}}, fail=["pxmx-1", "cs-06"])
     with pytest.raises(Exception):
         await pxmx._aggregate_pxmx_nodes(hub, ["pxmx-1", "cs-06"])
+
+
+@pytest.mark.asyncio
+async def test_nodes_dedupes_a_cluster_split_across_dedicated_spokes():
+    """The reported bug: a real 4-node PVE cluster where each node is hosted
+    by its OWN dedicated/cs spoke (split-topology), not one spoke with 4
+    connected agents. Each spoke's single agent still self-reports the FULL
+    cluster (pvesh get /cluster/resources is cluster-wide), so 4 spokes x 4
+    nodes must collapse to 4 rows, not 16 — the same fan-out duplication
+    already fixed one layer down (within one spoke's connected_agents), now
+    fixed at the cross-SPOKE layer too."""
+    cluster_nodes = [
+        {"node": "pxmx-cs-svr-01", "status": "online"},
+        {"node": "pxmx-cs-svr-02", "status": "online"},
+        {"node": "pxmx-cs-svr-03", "status": "online"},
+        {"node": "pxmx-cs-svr-04", "status": "online"},
+    ]
+    hub = _Hub({
+        f"cs-svr-{i:02d}": {"nodes": [dict(n) for n in cluster_nodes],
+                            "telemetry_ts": 100.0 + i}
+        for i in range(1, 5)
+    })
+    spokes = [f"cs-svr-{i:02d}" for i in range(1, 5)]
+    out = await pxmx._aggregate_pxmx_nodes(hub, spokes)
+    assert sorted(n["node"] for n in out["nodes"]) == [
+        "pxmx-cs-svr-01", "pxmx-cs-svr-02", "pxmx-cs-svr-03", "pxmx-cs-svr-04"]
+
+
+@pytest.mark.asyncio
+async def test_vms_dedupes_a_cluster_split_across_dedicated_spokes_by_unique_id():
+    """Same split-topology duplication for the VM list — must dedup by
+    unique_id, not a bare (node, vmid) tuple that collides distinct VMs
+    missing both fields (regression: a first cut of this fix used (node,
+    vmid) here and silently dropped a real VM in the mixed-hosting test)."""
+    vms = [{"unique_id": "lab/pxmx-cs-svr-01/101", "node": "pxmx-cs-svr-01", "vmid": 101},
+           {"unique_id": "lab/pxmx-cs-svr-02/102", "node": "pxmx-cs-svr-02", "vmid": 102}]
+    hub = _Hub({
+        f"cs-svr-{i:02d}": {"vms": [dict(v) for v in vms], "telemetry_ts": 100.0 + i}
+        for i in range(1, 5)
+    })
+    spokes = [f"cs-svr-{i:02d}" for i in range(1, 5)]
+    out = await pxmx._aggregate_pxmx_vms(hub, spokes, {})
+    assert sorted(v["unique_id"] for v in out["vms"]) == [
+        "lab/pxmx-cs-svr-01/101", "lab/pxmx-cs-svr-02/102"]
