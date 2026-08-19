@@ -99,11 +99,21 @@ async def get_node_stats(cp, data: Dict[str, Any]) -> Dict[str, Any]:
         # cluster}) verbatim so the hub sees the same contract.
         return await _node_stats_from_agent(cp, agent_id)
 
-    # Aggregate from all agents via telemetry cache (avoid hammering PVE API)
+    # Aggregate from all agents via telemetry cache (avoid hammering PVE API).
+    # Cluster-mate agents each report the FULL cluster's node membership (not
+    # just their own host), so naively concatenating produces N-agents x
+    # N-nodes duplicates. Dedup by the node's own hostname — the one identity
+    # that's reliable regardless of which agent reported it or what stale
+    # per-agent cluster name got attached.
     all_nodes: List[Dict] = []
+    seen_nodes: set = set()
     for aid, info in cp.connected_agents.items():
         cluster = info.get("cluster_name", aid)
         for node in info.get("nodes", []):
+            key = node.get("node") or f"{aid}:{node.get('node', '')}"
+            if key in seen_nodes:
+                continue
+            seen_nodes.add(key)
             all_nodes.append({**node, "agent_id": aid, "cluster": cluster})
 
     if not all_nodes:
@@ -117,19 +127,29 @@ async def get_node_stats(cp, data: Dict[str, Any]) -> Dict[str, Any]:
         results = await asyncio.gather(
             *[_node_stats_from_agent(cp, a) for a in aids],
             return_exceptions=True)
+        seen_nodes = set()
         for aid, res in zip(aids, results):
             if isinstance(res, Exception) or not isinstance(res, dict):
                 continue
             for node in res.get("nodes", []):
+                key = node.get("node") or f"{aid}:{node.get('node', '')}"
+                if key in seen_nodes:
+                    continue
+                seen_nodes.add(key)
                 all_nodes.append({**node, "agent_id": aid})
 
     if not all_nodes:
         # No agents connected — serve last-known data from disk cache
         # (pxmx only; a cs control plane has no disk_cache and degrades to {}).
         disk_cache = getattr(cp, "disk_cache", {})
+        seen_nodes = set()
         for aid, info in disk_cache.items():
             cluster = info.get("cluster_name", aid)
             for node in info.get("nodes", []):
+                key = node.get("node") or f"{aid}:{node.get('node', '')}"
+                if key in seen_nodes:
+                    continue
+                seen_nodes.add(key)
                 all_nodes.append({**node, "agent_id": aid, "cluster": cluster})
         if all_nodes:
             return {"status": "SUCCESS", "nodes": all_nodes, "stale": True}
@@ -299,13 +319,23 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "SUCCESS", "vms": vms, "source": "pinned_agent",
                 "agent_count": 1}
 
-    # Aggregate from telemetry cache first (fast, no PVE API call)
+    # Aggregate from telemetry cache first (fast, no PVE API call).
+    # Cluster-mate agents each report the FULL cluster's VM list, so dedup by
+    # (node, vmid) — vmid alone isn't safe across genuinely distinct standalone
+    # hypervisors that can reuse vmids, but node+vmid is unique within any one
+    # real cluster and node names differ across separate clusters. Same fix
+    # as get_node_stats above.
     cached_vms: List[Dict] = []
+    seen_vms: set = set()
     for aid, info in cp.connected_agents.items():
         cluster = info.get("cluster_name", aid)
         for vm in info.get("vms", []):
             vmid = vm.get("vmid", "?")
             node = vm.get("node", "?")
+            key = (node, vmid)
+            if key in seen_vms:
+                continue
+            seen_vms.add(key)
             cached_vms.append({
                 **vm,
                 "agent_id":  aid,
@@ -332,6 +362,7 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
     results = await asyncio.gather(
         *[_vms_from_agent(cp, a) for a in aids], return_exceptions=True)
     all_vms: List[Dict] = []
+    seen_vms = set()
     for aid, res in zip(aids, results):
         if isinstance(res, Exception) or not isinstance(res, dict):
             continue
@@ -341,6 +372,10 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
         for vm in res.get("vms", []):
             vmid = vm.get("vmid", "?")
             node = vm.get("node", "?")
+            key = (node, vmid)
+            if key in seen_vms:
+                continue
+            seen_vms.add(key)
             all_vms.append({
                 **vm,
                 "agent_id":  aid,
@@ -363,11 +398,16 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
     disk_cache = getattr(cp, "disk_cache", {})
     if disk_cache:
         stale_vms: List[Dict] = []
+        seen_vms = set()
         for aid, info in disk_cache.items():
             cluster = info.get("cluster_name", aid)
             for vm in info.get("vms", []):
                 vmid = vm.get("vmid", "?")
                 node = vm.get("node", "?")
+                key = (node, vmid)
+                if key in seen_vms:
+                    continue
+                seen_vms.add(key)
                 stale_vms.append({
                     **vm,
                     "agent_id":  aid,
