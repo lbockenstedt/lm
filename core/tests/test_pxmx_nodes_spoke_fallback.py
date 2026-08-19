@@ -19,10 +19,22 @@ spoke exists, matching the VM list. These lock in:
 
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from routes import pxmx
+
+
+@pytest.fixture(autouse=True)
+def _reset_nodes_ttl_cache():
+    """The route's fresh-TTL memo (``_NODES_CACHE``) is module-level and keyed
+    by tenant scope — several tests here reuse the same scope (e.g. "acme")
+    with different hub fakes, so a stale entry from an earlier test would be
+    served instead of hitting the fake spoke this test set up."""
+    pxmx._NODES_CACHE.clear()
+    yield
+    pxmx._NODES_CACHE.clear()
 
 
 class _State:
