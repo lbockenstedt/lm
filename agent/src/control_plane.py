@@ -321,6 +321,30 @@ class RoleConnection(AgentHostingControlPlane):
             self._start_agent_server_task()
         await super().run()
 
+    def _create_spoke_tasks(self, websocket):
+        """Surface any per-connection background tasks the hosted role module
+        contributes, on top of the base agent-hosting plane's own tasks.
+
+        A role module may expose a ``create_spoke_tasks(websocket)`` hook that
+        returns asyncio tasks to run for the life of this hub connection. This
+        is what lets a role-HOSTED simulation spoke start the CS telemetry relay
+        (and thus appear in the hub's Simulations view) exactly like the
+        standalone ``cs`` spoke — the standalone ``CSControlPlane`` calls the
+        same hook. Without this the relay never starts in role-hosting mode and
+        the sub-spoke is invisible in the Simulations UI. Best-effort: a
+        missing/broken hook must never take down the hub connection.
+        """
+        tasks = list(super()._create_spoke_tasks(websocket) or [])
+        mod = self.modules.get(self.role_name)
+        hook = getattr(mod, "create_spoke_tasks", None)
+        if callable(hook):
+            try:
+                tasks.extend(hook(websocket) or [])
+            except Exception as e:  # noqa: BLE001 - role task hook is best-effort
+                logger.debug(
+                    f"role '{self.role_name}' create_spoke_tasks hook failed: {e}")
+        return tasks
+
     # ── Disk cache (proxmox role) — mirrors PxmxControlPlane ─────────────────
 
     def _load_disk_cache(self):
