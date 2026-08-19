@@ -76,14 +76,33 @@ class ProxySpoke(BaseSpoke):
         self.upstream_verify = str(cfg.get("upstream_verify")
                                    or os.environ.get("LM_PROXY_UPSTREAM_VERIFY", "")
                                    ).strip().lower() in ("1", "true", "yes", "on")
-        # Client cert the proxy presents to the hub (its hub-issued spoke mTLS cert).
+        # Client cert the proxy presents to the hub. This MUST be the DEDICATED
+        # hub-leg cert (mtls-hub-client.*, LM_MTLS_HUB_CLIENT_CERT/KEY) — issued by
+        # the local hub mTLS CA (self-managed), written by the hub's
+        # _handle_set_mtls_client_cert. It must NEVER be the shared mtls-client.* /
+        # LM_MTLS_CLIENT_CERT that SPOKE_SET_MTLS_MATERIALS writes for the /ws/agent
+        # leg — that one is the public LE wildcard (*.orange-tme.com), which the hub
+        # REJECTS here (→ upstream 502). Mirrors core/src/messaging/control_plane.py's
+        # own hub dial, which likewise presents only the dedicated hub-leg cert (and
+        # none if absent — the hub accepts anonymous, unlike the rejected wildcard).
         self.upstream_cert = (cfg.get("upstream_cert")
-                              or os.environ.get("LM_MTLS_CLIENT_CERT") or "")
+                              or os.environ.get("LM_MTLS_HUB_CLIENT_CERT") or "")
         self.upstream_key = (cfg.get("upstream_key")
-                             or os.environ.get("LM_MTLS_CLIENT_KEY") or "")
+                             or os.environ.get("LM_MTLS_HUB_CLIENT_KEY") or "")
 
         self._data_dir = cfg.get("data_dir") or os.environ.get(
             "LM_PROXY_DATA_DIR", "/var/lib/lm/proxy")
+
+        # Rediscover a previously-installed listener cert across restarts. INSTALL_CERT
+        # persists fullchain/privkey under <data_dir>/tls, but __init__ otherwise only
+        # seeds tls_cert/tls_key from cfg/env — so a bare restart (self-update, crash,
+        # watchdog reboot) would forget the cert and silently fall back to plaintext
+        # HTTP on :443 (browsers then get a TLS handshake reset). Reload it here.
+        if not (self.tls_cert and self.tls_key):
+            _tls_dir = Path(self._data_dir) / "tls"
+            _fc, _pk = _tls_dir / "fullchain.pem", _tls_dir / "privkey.pem"
+            if _fc.exists() and _pk.exists():
+                self.tls_cert, self.tls_key = str(_fc), str(_pk)
 
         # Phase 2 console shortcut: the co-located spoke's agent-listener base
         # (where /ws/console-relay lives), e.g. wss://<spoke-ip>:443 or
