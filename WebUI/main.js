@@ -22326,6 +22326,24 @@ async function mtlsProvision(spokeId) {
     } catch (e) { showToast('Provision failed: ' + (e.message || e), 'error'); }
 }
 
+// Remove a STALE/orphaned Hub-CA mTLS client cert from the hub registry. This is
+// the only way to clear a registry entry for a spoke that is NOT connected right
+// now (e.g. a replaced or reset AppBuilder box left an orphaned cert behind — the
+// connected-spokes table can't touch it). Reuses the same revoke endpoint (which
+// also deletes the registry entry), just with wording for the orphaned-entry case.
+async function mtlsRemoveCert(pk, label) {
+    if (!confirm(`Remove the stored mTLS cert for ${label || pk}?\n\nIf that box is gone this clears the orphaned entry. If the spoke is still connected it will reconnect cert-less until reissued.`)) return;
+    try {
+        const { ok, detail } = await _spokeFetch('/api/mtls/revoke', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spoke_id: pk })
+        });
+        if (!ok) { showToast('Remove failed: ' + (detail || ''), 'error'); return; }
+        showToast(`Removed stored mTLS cert for ${label || pk}`, 'success');
+        setTimeout(() => { if (document.getElementById('mtls-debug-modal')) showMtlsDebug(); }, 1500);
+    } catch (e) { showToast('Remove failed: ' + (e.message || e), 'error'); }
+}
+
 // mTLS debug screen: which connected spokes/agents are ACTUALLY presenting a
 // verified mTLS client cert vs. connected cert-less (permissive fallback), plus the
 // hub's client-verify trust bundle + the pinned AppBuilder cert verify. Fetches
@@ -22947,6 +22965,11 @@ async function showMtlsDebug() {
                 </tr></thead><tbody>${rows}</tbody></table>
             </div>
             <div class="text-xs text-slate-500">Note: the hub is permissive (CERT_OPTIONAL) — a "cert-less" spoke still works (session-key auth). Only AppBuilder's HUB_REQUEST channel <i>requires</i> a verified, pinned client cert.</div>
+            <div class="border-t border-slate-200 pt-3">
+                <div class="font-semibold text-slate-700 mb-1">Provisioned mTLS certs (registry)</div>
+                <div class="text-xs text-slate-500 mb-2">All Hub-Local-CA mTLS client certs the hub has issued — including ones for spokes that are not connected right now (e.g. a replaced/orphaned box). Remove a stale entry here, or reissue it.</div>
+                <div id="mtls-registry-certs" class="overflow-x-auto border border-slate-200 rounded-lg"><div class="p-3 text-slate-400 italic text-sm">Loading provisioned mTLS certs…</div></div>
+            </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                 <div><div class="font-semibold text-slate-600 mb-1">Hub client-verify CA (LM_MTLS_CA)</div><div class="font-mono text-slate-700 space-y-0.5">${lmca}</div><div class="text-slate-400 mt-1">combined bundle: ${d.combined_ca_count ?? '?'} trusted cert(s)${dupes.length ? ` · <span class="text-amber-600">dup subjects: ${esc(dupes.join(', '))}</span>` : ''}</div></div>
                 <div><div class="font-semibold text-slate-600 mb-1">Pinned AppBuilder cert verify</div><div class="font-mono text-slate-700 space-y-0.5">${pin}</div></div>
@@ -22980,6 +23003,53 @@ async function showMtlsDebug() {
     } catch (e) {
         const el = document.getElementById('mtls-acme-info');
         if (el) el.textContent = 'ACME info error: ' + (e.message || e);
+    }
+    // Provisioned mTLS cert registry — EVERY Hub-Local-CA client cert the hub has
+    // issued, including entries for spokes that are NOT currently connected (a
+    // replaced/orphaned box). This is the only place a stale registry entry can be
+    // removed from the UI; the connected-spokes table above only lists live spokes.
+    try {
+        const rr = await _spokeFetch('/api/mtls/client-certs');
+        const rel = document.getElementById('mtls-registry-certs');
+        if (rel) {
+            if (!rr.ok) {
+                rel.innerHTML = `<div class="p-3 text-amber-600 italic text-sm">Could not load provisioned certs: ${esc(rr.detail || 'admin required')}</div>`;
+            } else {
+                const body = rr.data || {};
+                const certs = body.certs || (body.data && body.data.certs) || [];
+                const now = Date.now();
+                const rrows = certs.length ? certs.map(c => {
+                    const pk = (c.pk != null ? c.pk : c.spoke_id);
+                    const label = c.spoke_id || c.subject || c.pk || 'unknown';
+                    const sanList = Array.isArray(c.san) ? c.san : (Array.isArray(c.sans) ? c.sans : []);
+                    const sans = sanList.length ? esc(sanList.join(', ')) : '—';
+                    const naStr = c.not_after || '';
+                    let expired = false;
+                    if (naStr) { const t = Date.parse(naStr); if (!isNaN(t) && t < now) expired = true; }
+                    const statusBadge = c.connected
+                        ? '<span class="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700 font-bold">connected</span>'
+                        : '<span class="text-xs px-2 py-0.5 rounded-full bg-slate-200 text-slate-600 font-bold">offline</span>';
+                    const expBadge = expired ? ' <span class="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-bold">EXPIRED</span>' : '';
+                    return `
+                    <tr class="border-b border-slate-100">
+                        <td class="px-3 py-1.5 font-medium" title="pk: ${esc(pk)}${c.module_type ? ' · ' + esc(c.module_type) : ''}">${esc(label)}</td>
+                        <td class="px-3 py-1.5 text-xs">${sans}</td>
+                        <td class="px-3 py-1.5 text-xs ${expired ? 'text-red-600 font-bold' : 'text-slate-500'}">${esc(naStr || '—')}</td>
+                        <td class="px-3 py-1.5 whitespace-nowrap">${statusBadge}${expBadge}</td>
+                        <td class="px-3 py-1.5 whitespace-nowrap">
+                            <button onclick="mtlsProvision('${esc(pk)}')" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2 py-0.5 rounded font-bold" title="Re-issue/renew this Hub-Local-CA mTLS client cert from its registry entry">Reissue</button>
+                            <button onclick="mtlsRemoveCert('${esc(pk)}','${esc(label)}')" class="text-xs bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-2 py-0.5 rounded font-bold ml-1" title="Remove this stored mTLS cert from the hub registry — use for a stale/orphaned entry left by a replaced or reset box">Remove</button>
+                        </td>
+                    </tr>`;
+                }).join('') : `<tr><td colspan="5" class="px-3 py-3 text-slate-400 italic">No provisioned mTLS certs.</td></tr>`;
+                rel.innerHTML = `<table class="w-full text-sm"><thead class="bg-slate-50 text-slate-500 text-xs uppercase"><tr>
+                    <th class="px-3 py-2 text-left">Spoke / ID</th><th class="px-3 py-2 text-left">SANs</th><th class="px-3 py-2 text-left">Expires</th><th class="px-3 py-2 text-left">Status</th><th class="px-3 py-2 text-left">Actions</th>
+                </tr></thead><tbody>${rrows}</tbody></table>`;
+            }
+        }
+    } catch (e) {
+        const rel = document.getElementById('mtls-registry-certs');
+        if (rel) rel.innerHTML = `<div class="p-3 text-amber-600 italic text-sm">Provisioned certs error: ${esc(e.message || e)}</div>`;
     }
 }
 
