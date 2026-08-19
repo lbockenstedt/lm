@@ -73,7 +73,7 @@ same core flags (`--hub`, `--id`/`--name`, `--secret`, `--hub-secret`,
 | **nw** (network devices) | `nw/install_nw.sh` | `curl -sSL .../nw/main/install_nw.sh \| sudo bash -s -- --hub HUB` |
 | **le** (certificates) | `le/install_le.sh` | `curl -sSL .../le/main/install_le.sh \| sudo bash -s -- --hub HUB` |
 | **truenas** (storage) | `truenas/install_truenas.sh` | `curl -sSL .../truenas/main/install_truenas.sh \| sudo bash -s -- --hub HUB` |
-| **bugfixer** | `bugfixer/install.sh` | `curl -sSL .../bugfixer/main/install.sh \| bash -s -- wss://HUB` |
+| **ab** | `ab/install.sh` | `curl -sSL .../ab/main/install.sh \| bash -s -- wss://HUB` |
 | **dns**, **dhcp**, **henet** | *(no installer — agent roles)* | Load the `dns` / `dhcp` / `henet` role (§2), or run `/opt/lm/<mod>/install_<mod>.sh` |
 
 Full one-liners (with the complete raw.githubusercontent.com paths) and every
@@ -89,7 +89,7 @@ flag live in the repo-root `README.md` **Installation** block and in
 - [lm-hub.md](lm-hub.md) — the hub: `LabManagerHub`, FastAPI route groups, background loops, security, state, update pipeline, logging, dep guard.
 - [webui.md](webui.md) — the browser UI: panels/tabs, view router, HTTP+WS comms.
 - [credential-vault.md](credential-vault.md) — hub-side encrypted secret store (buckets, `psk` vs automation-readable `hub` modes, Azure Key Vault / local Fernet); the `{bucket,name}` reference + server-side resolve pattern LE / HE.NET / Console use.
-- [generic-agent.md](generic-agent.md) — the agent-spoke `_ROLE_MAP` role loader (15 hosted roles + bugfixer/netbox-server deploy roles). The legacy `GenericLeafAgent` leaf was removed.
+- [generic-agent.md](generic-agent.md) — the agent-spoke `_ROLE_MAP` role loader (15 hosted roles + ab/netbox-server deploy roles). The legacy `GenericLeafAgent` leaf was removed.
 
 ## Spokes
 
@@ -110,7 +110,7 @@ flag live in the repo-root `README.md` **Installation** block and in
 
 ## Agents
 
-- [bugfixer.md](bugfixer.md) — autonomous GitHub-issue fixer bot; optional hub **agent** (not a spoke); signed `GET_LOGS`/`TRIGGER_ALL_UPDATES`.
+- [ab.md](ab.md) — autonomous GitHub-issue fixer bot; optional hub **agent** (not a spoke); signed `GET_LOGS`/`TRIGGER_ALL_UPDATES`.
 - (pxmx per-host agents are documented under [pxmx.md](pxmx.md); the agent-spoke under [generic-agent.md](generic-agent.md).)
 
 ## Reference
@@ -118,7 +118,7 @@ flag live in the repo-root `README.md` **Installation** block and in
 - [backpressure-throttling.md](backpressure-throttling.md) — the hub's graceful-degradation control loop: message classification (must/coalesce/skippable), the escalation ladder (offender-first → fleet slow-down → hub-coalesce → protect shed), per-spoke TokenBucket (80% soft signal / 100% hard drop / DDoS quarantine), protect-mode pre-parse + source shed, spoke-side cooperation (`LM_BACKPRESSURE`), the `<sig>.<body>` sig-verify-over-raw-bytes ceiling raise, and the full config knob table.
 - [environment-variables.md](environment-variables.md) — every `LM_*`/`HUB_*`/`CS_*`/`KEA_*`/`NETBOX_*`/`CPPM_*`/`LDAP_*`/`UNBOUND_*` var, what it does, default, where read.
 - [install-flags.md](install-flags.md) — every installer + its flags.
-- [logging-observability-contract.md](logging-observability-contract.md) — **MANDATORY** for every module/agent: relay all logs (INFO+ and uncaught exceptions) to the hub, installed once, buffered-while-disconnected + flushed on connect, so Setup → Logs + the BugFixer see everything without CLI access.
+- [logging-observability-contract.md](logging-observability-contract.md) — **MANDATORY** for every module/agent: relay all logs (INFO+ and uncaught exceptions) to the hub, installed once, buffered-while-disconnected + flushed on connect, so Setup → Logs + the AppBuilder see everything without CLI access.
 
 ## Quick lookup
 

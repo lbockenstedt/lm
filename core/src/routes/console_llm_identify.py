@@ -1,7 +1,7 @@
 """LLM-driven console device identification (hub-orchestrated).
 
 When the built-in fingerprint profiles can't recognize a device, this pipeline
-relays its console output to the LLM (via the BugFixer agent's HELP_ASK path) and
+relays its console output to the LLM (via the AppBuilder agent's HELP_ASK path) and
 asks it to either identify the device outright or propose READ-ONLY commands to
 run. Any proposed commands are executed on the spoke through
 ``CONSOLE_LLM_COLLECT`` — which re-validates every command against the read-only
@@ -141,17 +141,17 @@ def hub_llm_identify_enabled(hub=None) -> bool:
         "1", "true", "yes", "on")
 
 
-def find_bugfixer(hub) -> Optional[str]:
-    """The connected BugFixer agent's spoke_id (the LLM relay), or None. Mirrors
-    help_assistant._bugfixer_agent."""
+def find_ab(hub) -> Optional[str]:
+    """The connected AppBuilder agent's spoke_id (the LLM relay), or None. Mirrors
+    help_assistant._ab_agent."""
     conns = getattr(hub, "active_connections", {}) or {}
     try:
-        if hub._primary_key("bugfixer") in conns:
-            return "bugfixer"
+        if hub._primary_key("ab") in conns:
+            return "ab"
     except Exception:  # noqa: BLE001
         pass
     for sid in conns:
-        if "bugfixer" in str(sid).lower():
+        if "ab" in str(sid).lower():
             return sid
     return None
 
@@ -225,7 +225,7 @@ def _unwrap(res) -> Dict[str, Any]:
 
 
 async def _ask_llm(hub, agent, system: str, user: str, timeout: float = 90.0) -> str:
-    """One tool-free LLM turn via the BugFixer HELP_ASK relay → assistant text.
+    """One tool-free LLM turn via the AppBuilder HELP_ASK relay → assistant text.
     The user content is scrubbed of site-sensitive data before it leaves the hub."""
     res = await hub.request_response(
         agent, "HELP_ASK",

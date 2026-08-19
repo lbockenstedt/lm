@@ -10,7 +10,7 @@ Not a spoke — the hub's admin/operator UI. Talks to the hub over same-origin H
 
 The WebUI is the browser app operators use to run the lab day to day: one view per module (opnsense, netbox, pxmx, dns, dhcp, cppm, ldap, cs, le, nw, agents), plus hub-wide Setup/Settings/Logs views. It's just the client — every page loads and saves data by calling the hub's own REST routes over the same origin (cookie session auth), and it never opens a connection to a spoke or agent directly.
 
-It also carries the in-app documentation experience: a Help drawer that renders the canonical `lm/docs/*.md` files verbatim, and — when the bugfixer agent is connected — an "Ask AI" LLM assistant that answers questions from those same docs plus a couple of live-state lookups. See "In-app Help & the Ask AI assistant" below.
+It also carries the in-app documentation experience: a Help drawer that renders the canonical `lm/docs/*.md` files verbatim, and — when the ab agent is connected — an "Ask AI" LLM assistant that answers questions from those same docs plus a couple of live-state lookups. See "In-app Help & the Ask AI assistant" below.
 
 ## Entrypoint
 
@@ -59,7 +59,7 @@ There are two distinct help affordances, and only one of them is an LLM:
 - **Help drawer** — pure docs viewer, no LLM involved. It renders `lm/docs/*.md` verbatim. Always available.
 - **"Ask AI"** — an LLM question-answering assistant layered on top of the same docs, plus two live-state tools.
 
-**Ask AI is backed by the bugfixer module, not the hub.** The hub only orchestrates: it picks relevant docs, defines the tools, and relays each conversation turn to the connected bugfixer agent via a `HELP_ASK` command; bugfixer owns the actual multi-provider LLM call and hands back `{content, tool_calls}`. Because of this, the feature is **hidden entirely** when bugfixer isn't connected — on page load, `help.js` calls `GET /api/help/available`, and only injects the "✨ Ask AI" button next to Help when that returns `available: true`. If you do reach the ask flow while bugfixer is disconnected (e.g. it dropped after the page loaded), `POST /api/help/ask` returns **HTTP 409**.
+**Ask AI is backed by the ab module, not the hub.** The hub only orchestrates: it picks relevant docs, defines the tools, and relays each conversation turn to the connected ab agent via a `HELP_ASK` command; ab owns the actual multi-provider LLM call and hands back `{content, tool_calls}`. Because of this, the feature is **hidden entirely** when ab isn't connected — on page load, `help.js` calls `GET /api/help/available`, and only injects the "✨ Ask AI" button next to Help when that returns `available: true`. If you do reach the ask flow while ab is disconnected (e.g. it dropped after the page loaded), `POST /api/help/ask` returns **HTTP 409**.
 
 **It answers from ONLY the docs + two live tools — never general knowledge.** `POST /api/help/ask` does lightweight RAG: it scores every canonical `lm/docs/*.md` file by keyword overlap with your question (a match on the doc's own filename counts extra), keeps the top ~4, and falls back to the overview docs (README / architecture-topology / lm-hub) if nothing scores. Those doc bodies are pasted into the model's system prompt with an explicit instruction to answer using only that material (plus any tool output) and to cite the docs it used inline as `[doc:<name>]` — the WebUI strips the raw `[doc:...]` markers from the rendered answer and shows them instead as clickable "Sources" chips that reopen that doc in the Help drawer.
 
@@ -73,9 +73,9 @@ The agentic loop allows up to 5 turns (model calls a tool → hub executes it �
 
 ## Troubleshooting / common questions
 
-- **"The ✨ Ask AI button doesn't appear."** The bugfixer agent isn't connected to the hub right now — `GET /api/help/available` returned `available: false`. This isn't a WebUI bug; check whether the bugfixer module/spoke is up and connected.
+- **"The ✨ Ask AI button doesn't appear."** The ab agent isn't connected to the hub right now — `GET /api/help/available` returned `available: false`. This isn't a WebUI bug; check whether the ab module/spoke is up and connected.
 - **"The assistant says it can't find the answer."** The RAG-lite step only feeds the model the ~4 docs that best match your question's keywords — if your phrasing doesn't overlap with the right doc's vocabulary (or the topic genuinely isn't documented anywhere), it won't be in context. Try rephrasing closer to a doc's own headings/filename, or open the Help drawer and browse the index directly.
-- **"I get an HTTP 409 when I try to ask."** Bugfixer was connected when the page loaded (so the button appeared) but disconnected before the question was submitted. Wait for it to reconnect and try again.
+- **"I get an HTTP 409 when I try to ask."** AppBuilder was connected when the page loaded (so the button appeared) but disconnected before the question was submitted. Wait for it to reconnect and try again.
 - **"A module's data looks stale or won't load."** Check the relevant `VIEW_LOADERS` entry's route in `main.js` and confirm the underlying spoke is connected — the WebUI itself has no cache of its own beyond what a given view keeps in memory; a 503 from the hub route means the spoke isn't connected, a 502 means the spoke replied with an error. When a spoke is down the module now shows a **generic "No spoke connected"** message (not a module-specific string like "No CPPM spoke connected"), so the empty-state reads the same across modules.
 
 ## Related pages

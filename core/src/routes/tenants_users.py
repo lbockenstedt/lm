@@ -79,7 +79,7 @@ def register(app, hub, ctx):
     async def trigger_spoke_updates(request: Request):
         """Send SPOKE_UPDATE to all approved spokes without restarting the Hub.
 
-        Called by BugFixer immediately after pushing a fix to GitHub so all deployed
+        Called by AppBuilder immediately after pushing a fix to GitHub so all deployed
         services pull the latest code before the QA service runs its test suite.
         Returns 200 with a summary once all SPOKE_UPDATE messages have been queued
         (spoke restarts happen asynchronously — poll GET /status for reconnection).

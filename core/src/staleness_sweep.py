@@ -144,7 +144,7 @@ class StalenessSweepMixin:
             rstate = "success" if rstatus != "ERROR" else "error"
             # Hub-authoritative sync log: clean → INFO; errors/failure →
             # [sync-error] WARNING carrying the spoke's message so the cause
-            # lands in the hub log + GET_ERROR_LOGS (bugfixer).
+            # lands in the hub log + GET_ERROR_LOGS (ab).
             if errors > 0 or rstatus == "ERROR":
                 logger.warning("[sync-error] staleness-sweep status=%s scanned=%d "
                                "decommissioned=%d deleted=%d ip_freed=%d errors=%d — %s",

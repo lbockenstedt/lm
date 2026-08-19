@@ -426,9 +426,9 @@ run_uninstall() {
     echo
     echo "${C_BOLD}${C_RED}--- Uninstall: remove ALL Lab Manager components ---${C_RESET}"
     echo "${C_DIM}Master teardown: hub + agent + every spoke/role + pxmx host agent + client-sim${C_RESET}"
-    echo "${C_DIM}+ collab sink + BugFixer, plus their dirs/helpers/sudoers/users and LM env values.${C_RESET}"
+    echo "${C_DIM}+ collab sink + AppBuilder, plus their dirs/helpers/sudoers/users and LM env values.${C_RESET}"
     echo "${C_DIM}Shared infra (postgres/nginx/redis/ollama/certbot/kea/…) is WARNED, not removed.${C_RESET}"
-    echo "${C_DIM}Asks you to type REMOVE first. Flags: --dry-run --keep-bugfixer --ollama${C_RESET}"
+    echo "${C_DIM}Asks you to type REMOVE first. Flags: --dry-run --keep-ab --ollama${C_RESET}"
     echo "${C_DIM}--letsencrypt --netbox-db --nginx-site --yes.${C_RESET}"
     reexec_root bash "$CLONE_ROOT/uninstall.sh" "$@"
 }

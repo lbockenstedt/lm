@@ -228,7 +228,7 @@ class EndpointSyncMixin:
             rstate = "success" if rstatus != "ERROR" else "error"
             # Hub-authoritative sync log: clean → INFO; errors/failure →
             # [sync-error] WARNING carrying the sink's message (first-error text)
-            # so the cause lands in the hub log + GET_ERROR_LOGS (bugfixer).
+            # so the cause lands in the hub log + GET_ERROR_LOGS (ab).
             if errors > 0 or rstatus == "ERROR":
                 logger.warning("[sync-error] endpoint-sync tenant=%s(%s) status=%s "
                                "sent=%d pushed=%d skipped=%d hub_skipped=%d errors=%d — %s",

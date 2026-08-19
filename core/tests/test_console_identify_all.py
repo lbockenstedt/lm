@@ -56,7 +56,7 @@ def _build(monkeypatch, ports, *, enabled=True, agent="bf-1", is_admin=True, has
     monkeypatch.setattr(console_routes.access, "tenant_is_shared", lambda t: False)
     monkeypatch.setattr(console_routes.access, "spoke_visible_to_session", lambda s, t: True)
     monkeypatch.setattr(llm, "hub_llm_identify_enabled", lambda hub: enabled)
-    monkeypatch.setattr(llm, "find_bugfixer", lambda hub: agent)
+    monkeypatch.setattr(llm, "find_ab", lambda hub: agent)
 
     orchestrated = []
 
@@ -104,7 +104,7 @@ def test_identify_all_runs_without_global_toggle(monkeypatch):
 
 def test_identify_all_queues_even_without_agent(monkeypatch):
     # Fingerprint-first: known devices resolve without the AI, so a missing
-    # BugFixer agent no longer blocks the bulk profile — it still queues.
+    # AppBuilder agent no longer blocks the bulk profile — it still queues.
     c, _ = _build(monkeypatch, [{"port_id": "p1", "in_use": False}], agent=None)
     r = c.post("/api/console/identify-llm-all?tenant=default", json={})
     assert r.status_code == 200

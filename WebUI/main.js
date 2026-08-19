@@ -496,7 +496,7 @@ const AGENT_ROLES = {
     'console':    { name: 'Console Server', desc: 'Serial console access to attached hardware (USB adapters + on-board UART). Auto-detects baud, auto-identifies devices, and relays an xterm.js terminal through the hub.', deploy: false },
     'truenas':    { name: 'Storage (TrueNAS)', desc: 'Polls and manages TrueNAS appliances over the official WebSocket JSON-RPC client — pools, datasets, shares (SMB/NFS), disks, alerts, services, capacity; gated management actions (create/delete datasets, create shares, take snapshots, run scrubs). Reports health + capacity and syncs into NetBox.', deploy: false },
     'statuspage': { name: 'Simulation Status Page', desc: 'Public, read-only status page for one tenant — cloud-provider style (overall banner, per-component status, 90-day uptime history) plus a Clients view whose demo dropdown lets visitors trigger a live 2h simulation. Bind it to a tenant; the hub pushes that tenant\'s redacted dashboard down. Serves its own HTTPS page (cert via the le role).', deploy: false },
-    'bugfixer':   { name: 'BugFixer', desc: 'Autonomous GitHub issue bot. Installs as a systemd service on this host and connects to the Hub as its own agent.', deploy: true },
+    'ab':   { name: 'AppBuilder', desc: 'Autonomous GitHub issue bot. Installs as a systemd service on this host and connects to the Hub as its own agent.', deploy: true },
 };
 
 const PRODUCT_MAP = {
@@ -1057,7 +1057,7 @@ function showPromptToast(message, opts = {}) {
 // browser-console buffer (window.__lmBugBuffer, installed at top of file),
 // the serialized DOM, and an html2canvas screenshot, then POSTs it to the hub
 // (/api/bug-report — auth-required, any logged-in user). The hub logs a short
-// [bug-report] marker and stores the full artifacts on disk; bugfixer then
+// [bug-report] marker and stores the full artifacts on disk; ab then
 // files a (clean-body) GitHub issue and pulls the artifacts from the hub to use
 // as AI-fix context. See plan bright-launching-thompson.md.
 async function fileBug() {
@@ -1097,7 +1097,7 @@ async function fileBug() {
                 </div>
                 <p class="text-[11px] text-slate-400 leading-relaxed">
                     Your browser console log, the current page HTML, and a screenshot will be captured and sent to the hub.
-                    BugFixer opens a GitHub issue from your explanation + context. For a <b>bug</b> it will also attempt a fix;
+                    AppBuilder opens a GitHub issue from your explanation + context. For a <b>bug</b> it will also attempt a fix;
                     a <b>feature request</b> is filed as an enhancement for triage (no auto-fix). The console/HTML/screenshot
                     stay on the hub and are used only as fix context.
                 </p>
@@ -1162,7 +1162,7 @@ function _bugContextMeta() {
 // Core submit shared by the manual File-a-Bug modal and the auto-file path
 // (the runtime-error banner). ``onStatus`` receives human-readable progress.
 // ``type`` is "bug" (default) or "feature" — from the modal's feature checkbox.
-// bugfixer files a feature request as an ``enhancement`` issue (no auto-fix).
+// ab files a feature request as an ``enhancement`` issue (no auto-fix).
 async function _submitBugReport(explanation, severity, onStatus, type = 'bug') {
     if (typeof onStatus === 'function') onStatus('Capturing console, HTML, and screenshot…');
     const { consoleLogs, html, screenshot } = await _captureBugContext();
@@ -1191,7 +1191,7 @@ async function submitBugReport() {
     try {
         const data = await _submitBugReport(explanation, severity, setBusy, rtype);
         const label = isFeature ? 'Feature request' : 'Bug report';
-        showToast(`${label} submitted (id ${data.id || ''}) — bugfixer will file an issue`, 'success');
+        showToast(`${label} submitted (id ${data.id || ''}) — ab will file an issue`, 'success');
         document.getElementById('file-bug-modal')?.remove();
     } catch (err) {
         console.error('File-a-Bug: submit failed', err);
@@ -1204,7 +1204,7 @@ async function submitBugReport() {
 // Auto-file a bug when the runtime-error banner fires (called from the
 // index.html error boundary). Dedup'd per unique message per session so a
 // spammy handler doesn't open a GitHub issue on every throw. ``onStatus``
-// updates the banner's "Filing Bug with BugFixer" status line.
+// updates the banner's "Filing Bug with AppBuilder" status line.
 const _autoFiledBugs = new Set();
 async function fileBugAuto(message, where, onStatus) {
     const sig = String(message || '').slice(0, 200);
@@ -1213,7 +1213,7 @@ async function fileBugAuto(message, where, onStatus) {
         return;
     }
     _autoFiledBugs.add(sig);
-    if (typeof onStatus === 'function') onStatus('Filing Bug with BugFixer…');
+    if (typeof onStatus === 'function') onStatus('Filing Bug with AppBuilder…');
     const whereStr = where ? ` (${where})` : '';
     const viewCtx = [currentView, currentSubView].filter(Boolean).join(' / ');
     const tenantCtx = currentTenant ? ` · tenant=${currentTenant}` : '';
@@ -1222,10 +1222,10 @@ async function fileBugAuto(message, where, onStatus) {
         + `View: ${viewCtx || '(unknown)'}${tenantCtx}\n`
         + `URL: ${location.href}\n`
         + `User agent: ${navigator.userAgent}\n`;
-    const wrap = typeof onStatus === 'function' ? (s) => onStatus('Filing Bug with BugFixer — ' + s) : null;
+    const wrap = typeof onStatus === 'function' ? (s) => onStatus('Filing Bug with AppBuilder — ' + s) : null;
     try {
         const data = await _submitBugReport(explanation, 'high', wrap, 'bug');
-        if (typeof onStatus === 'function') onStatus(`Bug filed (id ${data.id || ''}) — bugfixer will triage`);
+        if (typeof onStatus === 'function') onStatus(`Bug filed (id ${data.id || ''}) — ab will triage`);
     } catch (err) {
         console.error('Auto bug-file failed', err);
         if (typeof onStatus === 'function') onStatus('Bug filing failed: ' + (err && err.message || ''));
@@ -3010,7 +3010,7 @@ function _rebuildMainNav(allSpokes, connections) {
             <span>Bug Report</span>
         </div>`;
     // Feature Request — admin-only sibling of Bug Report. Same store, filtered
-    // to type=feature (loadBugReports('feature')); filed by bugfixer as an
+    // to type=feature (loadBugReports('feature')); filed by ab as an
     // ``enhancement`` issue (no auto-fix). See memory file-a-bug-feature.
     const _featureRequestNavHtml = () => `
         <div onclick="setView('features')" id="nav-features" class="nav-item p-3 rounded-r-lg flex items-center gap-3 text-xs font-medium">
@@ -3105,14 +3105,14 @@ function _rebuildMainNav(allSpokes, connections) {
 // Render the dashboard sidebar Spokes + Agents lists. Splits known modules by
 // module_type: infrastructure spokes (incl. the pxmx "hypervisor" spoke) stay
 // in Spokes; only generic Hub-direct agents (module_type "agent", e.g.
-// bugfixer) move to Agents. Proxmox node agents are fetched separately via
+// ab) move to Agents. Proxmox node agents are fetched separately via
 // GET /api/pxmx/agents and appended. Each row is rendered by the shared
 // _renderSpokeAgentRow() helper above. The pxmx agents fetch is best-effort —
 // on failure the generic agents still render (see catch below).
 async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
     // Split known modules by module_type: infrastructure spokes (including
     // the pxmx "hypervisor" spoke) stay in the Spokes list; only generic
-    // Hub-direct agents (module_type "agent", e.g. bugfixer) move to the
+    // Hub-direct agents (module_type "agent", e.g. ab) move to the
     // Agents list. Proxmox node agents are fetched separately via
     // /api/pxmx/agents and appended below — they are distinct from the
     // hypervisor spoke itself.
@@ -3784,7 +3784,7 @@ function _viewTemplate(viewId) {
       <button onclick="showLeIssueModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">＋ Issue certificate</button>
       ${isAdmin() ? `<button onclick="leRenewAll()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">↻ Renew all</button>
       <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">⚡ Distribute now</button>` : ''}
-      <button onclick="showMtlsDebug()" class="bg-slate-600/10 hover:bg-slate-600/20 text-slate-700 border border-slate-400 px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap" title="Debug: which connected spokes/agents are ACTUALLY presenting a verified mTLS client cert vs. connected cert-less, plus the hub's trust bundle + pinned BugFixer cert check">🔒 mTLS status</button>
+      <button onclick="showMtlsDebug()" class="bg-slate-600/10 hover:bg-slate-600/20 text-slate-700 border border-slate-400 px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap" title="Debug: which connected spokes/agents are ACTUALLY presenting a verified mTLS client cert vs. connected cert-less, plus the hub's trust bundle + pinned AppBuilder cert check">🔒 mTLS status</button>
       <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200 whitespace-nowrap" title="Manage this tenant's DNS-01 credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-01 issuance">🔑 DNS Credentials</button>
     </div>
     <div class="flex items-center gap-4 flex-wrap">
@@ -4936,7 +4936,7 @@ function _renderLogsSection(subMenu) {
     // a log source.
     const clearBtn = (isBugs || isFeatures) ? '' :
         `<button onclick="clearLogs(()=>${refreshCall})" class="text-xs text-red-500 hover:text-red-700 font-medium">Clear</button>`;
-    // AI Log Analysis — delegated to the bugfixer spoke's LLM. Not a log source, so
+    // AI Log Analysis — delegated to the ab spoke's LLM. Not a log source, so
     // it's hidden on the Bug Reports / Feature Requests tabs.
     const analysisBtn = (isBugs || isFeatures) ? '' :
         `<button id="lm-log-analysis-btn" onclick="runLmLogAnalysis('${module}')" class="text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 px-2 py-1 rounded">✨ Log Analysis</button>`;
@@ -4980,7 +4980,7 @@ function _renderLogsSection(subMenu) {
     refreshDebugButtonState();
 }
 
-// ── AI Log Analysis (delegated to the bugfixer spoke's LLM) ──
+// ── AI Log Analysis (delegated to the ab spoke's LLM) ──
 const _lmAutoRan = new Set();  // per-session guard so tab-flipping doesn't fan out LLM calls
 const _LM_VERDICT = {
     escalate: ['ESCALATE', 'bg-red-100 text-red-700'],
@@ -5022,7 +5022,7 @@ async function _lmLoadSentinelConfig() {
             + `<input type="checkbox" ${c.auto ? 'checked' : ''} onchange="_lmSetSentinel({auto:this.checked})"></label>`
             + ` every <input type="number" min="1" value="${c.interval_min}" onchange="_lmSetSentinel({interval_min:parseInt(this.value)||15})" class="w-9 text-center border border-slate-300 rounded">m`
             + `<span class="text-slate-400">${metricTxt}</span>`
-            + (c.bugfixer_online ? '' : ' · <span class="text-red-500">BugFixer offline</span>');
+            + (c.ab_online ? '' : ' · <span class="text-red-500">AppBuilder offline</span>');
     } catch (e) { /* config unavailable */ }
 }
 async function _lmSetSentinel(patch) {
@@ -5049,7 +5049,7 @@ async function _lmLoadCachedAnalysis(module) {
 async function runLmLogAnalysis(module) {
     const body = document.getElementById('lm-log-analysis-body');
     const btn = document.getElementById('lm-log-analysis-btn');
-    if (body) body.textContent = 'Asking BugFixer to read the logs… (this can take a bit)';
+    if (body) body.textContent = 'Asking AppBuilder to read the logs… (this can take a bit)';
     if (btn) btn.disabled = true;
     try {
         const r = await setupFetch('/setup/log-analysis', {
@@ -5183,7 +5183,7 @@ async function loadRecoveryLogs() {
 
 // Bug Reports / Feature Requests: the WebUI "Bug/Feature Request" footer
 // button writes each report to the hub's bug store (with a `type` of "bug" or
-// "feature"); bugfixer later files a GitHub issue (Bug → auto-fix labels;
+// "feature"); ab later files a GitHub issue (Bug → auto-fix labels;
 // feature → enhancement, no auto-fix) and flips `filed` to true with the
 // issue_url. ``typeFilter`` ('bug' | 'feature') restricts the list to one kind
 // so the Bug Report and Feature Request nav items each show only their own.
@@ -5216,26 +5216,26 @@ async function loadBugReports(typeFilter) {
             const typeBadge = isFeat
                 ? `<span class="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-purple-100 text-purple-700" title="Feature request">💡 Feature</span>`
                 : `<span class="shrink-0 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-blue-100 text-blue-700" title="Bug">🐛 Bug</span>`;
-            // Feature requests are gated: an admin must Approve before bugfixer
+            // Feature requests are gated: an admin must Approve before ab
             // may file the GitHub issue and work it. Bugs skip the gate.
             const _st = (r.status || (r.filed ? 'filed' : '')).toLowerCase();
             let status;
             if (_st === 'fixed') {
-                status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-green-600 font-semibold hover:underline" title="Closed on GitHub — fixed by BugFixer">✓ Fixed ↗</a>`;
+                status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-green-600 font-semibold hover:underline" title="Closed on GitHub — fixed by AppBuilder">✓ Fixed ↗</a>`;
             } else if (_st === 'closed') {
                 // Closed WITHOUT a fix — must NOT look like "Fixed".
                 status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-slate-500 font-semibold hover:underline" title="Issue closed on GitHub without a fix — reopen if still broken">⊘ Closed (not fixed) ↗</a>`;
             } else if (_st === 'duplicate') {
-                // Recurrence: bugfixer matched this to an existing issue instead of
+                // Recurrence: ab matched this to an existing issue instead of
                 // filing a new one — link the SAME issue (must win over r.filed).
                 status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-slate-500 font-semibold hover:underline" title="Duplicate — links the same GitHub issue">⧉ Duplicate ↗</a>`;
             } else if (r.filed) {
                 status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline">Filed ↗</a>`;
             } else if (isFeat && _st !== 'approved') {
                 // Awaiting admin approval — offer the Approve action inline.
-                status = `<button onclick="event.stopPropagation(); approveBugReport('${escapeHtml(r.id)}')" class="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700" title="Approve this feature so BugFixer can file &amp; work it">Approve</button>`;
+                status = `<button onclick="event.stopPropagation(); approveBugReport('${escapeHtml(r.id)}')" class="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700" title="Approve this feature so AppBuilder can file &amp; work it">Approve</button>`;
             } else if (isFeat && _st === 'approved') {
-                status = `<span class="text-emerald-600 font-medium" title="Approved — BugFixer will file &amp; work it">Approved</span>`;
+                status = `<span class="text-emerald-600 font-medium" title="Approved — AppBuilder will file &amp; work it">Approved</span>`;
             } else {
                 status = `<span class="text-amber-600">Pending</span>`;
             }
@@ -5331,7 +5331,7 @@ window._clientDebugStop = async function (host, tenantRaw) {
 
 async function deleteBugReport(rid) {
     if (!rid) return;
-    if (!await showConfirmToast(`Delete bug report ${rid}? This removes the stored console / HTML / screenshot artifacts on the hub. The public GitHub issue (if bugfixer already filed one) is NOT touched.`)) return;
+    if (!await showConfirmToast(`Delete bug report ${rid}? This removes the stored console / HTML / screenshot artifacts on the hub. The public GitHub issue (if ab already filed one) is NOT touched.`)) return;
     try {
         await apiJson(`/setup/bug-reports/${encodeURIComponent(rid)}`, { method: 'DELETE' });
         showToast('Bug report deleted', 'success');
@@ -5347,12 +5347,12 @@ async function deleteBugReport(rid) {
 window.deleteBugReport = deleteBugReport;
 
 async function approveBugReport(rid) {
-    // Admin approves a feature request → bugfixer may then file the GitHub issue
-    // and work it (unapproved features are hidden from bugfixer). Bugs skip this.
+    // Admin approves a feature request → ab may then file the GitHub issue
+    // and work it (unapproved features are hidden from ab). Bugs skip this.
     if (!rid) return;
     try {
         await apiJson(`/setup/bug-reports/${encodeURIComponent(rid)}/approve`, { method: 'POST' });
-        showToast('Feature approved — BugFixer will file &amp; work it', 'success');
+        showToast('Feature approved — AppBuilder will file &amp; work it', 'success');
         const c = document.getElementById('system-logs-container');
         if (c) loadBugReports(c.dataset.bugFilter || undefined);
     } catch (e) {
@@ -5405,9 +5405,9 @@ async function showBugReport(rid) {
         } else if (isFeat && _dst !== 'approved') {
             status = `<span class="text-amber-600">Awaiting approval</span> <button onclick="approveBugReport('${escapeHtml(rid)}')" class="ml-2 px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700">Approve</button>`;
         } else if (isFeat && _dst === 'approved') {
-            status = `<span class="text-emerald-600 font-medium">Approved — BugFixer will file &amp; work it</span>`;
+            status = `<span class="text-emerald-600 font-medium">Approved — AppBuilder will file &amp; work it</span>`;
         } else {
-            status = `<span class="text-amber-600">Pending — bugfixer has not filed this yet</span>`;
+            status = `<span class="text-amber-600">Pending — ab has not filed this yet</span>`;
         }
         const shot = r.screenshot_b64
             ? `<img src="${escapeHtml(r.screenshot_b64)}" class="mt-2 max-w-full rounded border border-slate-200" alt="screenshot">`
@@ -7029,7 +7029,7 @@ function _renderSetupSyncTile(content) {
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Spoke Out-of-Contact Alerts ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                 </div>
-                <p class="text-xs text-slate-400 mb-3">Forgiving liveness alerting, separate from the realtime heartbeat traffic-light. A spoke that blips for a few seconds (restart, WAN jitter) stays quiet; only once an approved spoke has been <strong>out of contact</strong> for <em>warn minutes</em> does a <strong>warning</strong> fire, and after <em>error minutes</em> it escalates to <strong>error</strong> (which also lands in the Error Log / bugfixer feed). Decoupled from the 300s recovery watchdog — that still restarts stranded spokes on its own schedule.</p>
+                <p class="text-xs text-slate-400 mb-3">Forgiving liveness alerting, separate from the realtime heartbeat traffic-light. A spoke that blips for a few seconds (restart, WAN jitter) stays quiet; only once an approved spoke has been <strong>out of contact</strong> for <em>warn minutes</em> does a <strong>warning</strong> fire, and after <em>error minutes</em> it escalates to <strong>error</strong> (which also lands in the Error Log / ab feed). Decoupled from the 300s recovery watchdog — that still restarts stranded spokes on its own schedule.</p>
                 <div class="flex flex-wrap items-end gap-4">
                     <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="spoke-alert-enabled" class="w-4 h-4 text-green-600 rounded">Enable out-of-contact alerts</label>
                     <div class="space-y-1">
@@ -12590,10 +12590,10 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
     const hubAgents = genericAgents.map(s => {
         const sid = s.spoke_id;
         const dn = _spokeName(s);
-        // The Module column names the product the agent runs. BugFixer is the
+        // The Module column names the product the agent runs. AppBuilder is the
         // canonical generic hub agent; any other generic agent falls back to
         // its display name so the column still shows something meaningful.
-        const module = /bugfixer/i.test(sid) || /bugfixer/i.test(dn) ? 'BugFixer' : dn;
+        const module = /ab/i.test(sid) || /ab/i.test(dn) ? 'AppBuilder' : dn;
         return {
             agent_id: sid,
             display_name: dn,
@@ -12808,7 +12808,7 @@ async function loadSpokesAndAgents() {
     // Fetch the full known-module list once and split it by module_type.
     // Treated as agents (shown in the Agents/Generic Agents sections, not
     // Spokes):
-    //   - module_type "agent"  : generic Hub-direct agents (e.g. bugfixer)
+    //   - module_type "agent"  : generic Hub-direct agents (e.g. ab)
     // The pxmx "hypervisor" spoke is itself a spoke, so it is shown in the
     // Spokes section (its Proxmox node agents are fetched separately into the
     // Agents section).
@@ -15183,7 +15183,7 @@ async function fetchLoadedRoles(spokeId) {
     } catch (e) { return []; }
 }
 
-// Deploy-role status for a generic agent (netbox-server, bugfixer). Returns
+// Deploy-role status for a generic agent (netbox-server, ab). Returns
 // { deploy, active_role, netbox_installed } or null. netbox_installed survives
 // an agent reload, so it's the durable gate for the reset-admin-password knob.
 async function fetchDeployStatus(spokeId) {
@@ -20473,7 +20473,7 @@ function _leLegend() {
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
           ${lbl('Cert')}
-          <span class="flex items-center gap-1.5">${pill('bg-purple-100 text-purple-700', '★ BugFixer')} pinned mTLS identity (hub mints its clientAuth cert from the Local CA)</span>
+          <span class="flex items-center gap-1.5">${pill('bg-purple-100 text-purple-700', '★ AppBuilder')} pinned mTLS identity (hub mints its clientAuth cert from the Local CA)</span>
           <span class="flex items-center gap-1.5">${pill('bg-amber-100 text-amber-700', 'shortlived')} non-default ACME profile (short-lived ~7d). mTLS client certs come from the 🔒 hub Local CA, not here.</span>
         </div>
         <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
@@ -20584,12 +20584,12 @@ async function loadLEData(subMenu) {
             const idEsc = escJsAttr(String(t.identifier || ''));
             const ifk = `${domain}|${t.module_type}|${t.identifier || ''}`;
             const since = inflightMap[ifk];
-            // Purple ★ prefix for the bugfixer target so it's visually distinct
-            // from fleet/spoke targets — this is the target the BugFixer agent
-            // presents the cert to over mTLS. (The cert's BugFixer-identity tag
+            // Purple ★ prefix for the ab target so it's visually distinct
+            // from fleet/spoke targets — this is the target the AppBuilder agent
+            // presents the cert to over mTLS. (The cert's AppBuilder-identity tag
             // itself is set via the checkbox inside Manage.)
-            const isBf = String(t.module_type || '').toLowerCase() === 'bugfixer';
-            const bfStar = isBf ? `<span class="text-purple-600 font-bold mr-0.5" title="BugFixer target — bugfixer presents this cert over mTLS">★</span>` : '';
+            const isBf = String(t.module_type || '').toLowerCase() === 'ab';
+            const bfStar = isBf ? `<span class="text-purple-600 font-bold mr-0.5" title="AppBuilder target — ab presents this cert over mTLS">★</span>` : '';
             if (since) {
                 // Yellow while we wait for deployment confirmation. The elapsed
                 // span is updated every 1s by updateLeInflightTimers. Not
@@ -20685,10 +20685,10 @@ async function loadLEData(subMenu) {
                    <button onclick="leRetryIssue('${dEsc}')" class="text-xs text-amber-700 hover:text-amber-800 font-medium" title="Retry last issue (re-uses the stored params)">Retry</button>`
                 : '';
             // Inline badges beside the domain (see the legend at the bottom of the
-            // page). ★ BugFixer = pinned mTLS identity; 🔐 clientAuth = has the
+            // page). ★ AppBuilder = pinned mTLS identity; 🔐 clientAuth = has the
             // clientAuth EKU (mTLS-client-capable); a profile chip = non-default
             // ACME profile (e.g. a short-lived cert).
-            const bfBadge = c.bugfixer ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-700 align-middle" title="Pinned as the BugFixer mTLS identity (Manage → ★ BugFixer)">★ BugFixer</span>` : '';
+            const bfBadge = c.ab ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-700 align-middle" title="Pinned as the AppBuilder mTLS identity (Manage → ★ AppBuilder)">★ AppBuilder</span>` : '';
             const caBadge = '';
             const profBadge = (c.profile && String(c.profile).toLowerCase() !== 'classic') ? ` <span class="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700 align-middle" title="ACME profile: ${escapeHtml(String(c.profile))} (lifetime set by the CA profile)">${escapeHtml(String(c.profile))}</span>` : '';
             // Owner-tenant chips + a shared badge. A cert is owned by one or more
@@ -20703,7 +20703,7 @@ async function loadLEData(subMenu) {
             // Change ops (Renew/Revoke) require ownership; a read-only (shared,
             // not-owned) cert only exposes Manage (→ deploy to your own devices).
             const canEdit = (c.can_edit !== false);
-            const manageBtn = `<button onclick="showLeTargetsModal('${dEsc}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="${canEdit ? 'Manage distribution targets, BugFixer identity + clientAuth' : 'Deploy this shared certificate to your own devices'}">${canEdit ? 'Manage' : 'Deploy'}</button>`;
+            const manageBtn = `<button onclick="showLeTargetsModal('${dEsc}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="${canEdit ? 'Manage distribution targets, AppBuilder identity + clientAuth' : 'Deploy this shared certificate to your own devices'}">${canEdit ? 'Manage' : 'Deploy'}</button>`;
             const changeBtns = canEdit
                 ? `<button onclick="leRenewCert('${dEsc}')" class="bg-slate-700/10 hover:bg-slate-700/20 text-slate-700 border border-slate-700 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Renew this cert">Renew</button>
                             <button onclick="leRevokeCert('${dEsc}')" class="bg-red-600/10 hover:bg-red-600/20 text-red-600 border border-red-600 px-3 py-1.5 rounded-md text-xs font-bold transition-all shadow-sm" title="Revoke + remove from managed list">Revoke</button>`
@@ -20781,26 +20781,26 @@ async function loadLEData(subMenu) {
                 : `${soon.length} cert(s) expiring within 30d — the le renewal loop should renew these; verify with ⚡ Distribute now.`;
             return `<div class="mx-4 mt-3 mb-1 px-3 py-2 rounded-md border text-xs ${cls}">${msg}</div>`;
         })();
-        // BugFixer identity indicator — which managed cert is pinned as the
-        // BugFixer mTLS identity (the gate for hub log reads + fleet update
+        // AppBuilder identity indicator — which managed cert is pinned as the
+        // AppBuilder mTLS identity (the gate for hub log reads + fleet update
         // commands). Only one cert should be tagged; if several are, list them
         // all so the operator can un-tag the extras. Surfaced as a persistent
         // banner ABOVE the table so you don't have to scan every row's "★
-        // BugFixer" button to find it. c.bugfixer is reconciled from the hub's
-        // authoritative pinned list in loadLEData / leToggleBugfixerChk (the
+        // AppBuilder" button to find it. c.ab is reconciled from the hub's
+        // authoritative pinned list in loadLEData / leToggleAppBuilderChk (the
         // checkbox inside the Manage modal).
-        const bfCerts = (certs || []).filter(c => c.bugfixer);
+        const bfCerts = (certs || []).filter(c => c.ab);
         const bfBanner = (() => {
             if (!bfCerts.length) {
                 return '';  // no cert tagged → no banner (guidance lives in Manage)
             }
             const names = bfCerts.map(c => `<span class="font-mono font-bold text-purple-700">${escapeHtml(c.domain || '(unnamed)')}</span>`).join(', ');
             const extra = bfCerts.length > 1 ? ` <span class="text-amber-600">— ${bfCerts.length} tagged; un-tag extras so only one is pinned.</span>` : '';
-            const deployed = bfCerts.some(c => (c.targets || []).some(t => (t.module_type || '').toLowerCase() === 'bugfixer'));
+            const deployed = bfCerts.some(c => (c.targets || []).some(t => (t.module_type || '').toLowerCase() === 'ab'));
             const depNote = deployed
-                ? ` <span class="text-green-600">— deployed to a bugfixer target ✓</span>`
-                : ` <span class="text-amber-600">— not yet deployed to a bugfixer target (Manage → add a bugfixer target)</span>`;
-            return `<div class="mx-4 mt-3 mb-1 px-3 py-2 rounded-md border text-xs bg-purple-50 border-purple-200 text-purple-800 flex items-center gap-2"><span class="text-purple-600 font-bold">★</span><span><b>BugFixer identity:</b> ${names}${depNote}${extra}</span></div>`;
+                ? ` <span class="text-green-600">— deployed to a ab target ✓</span>`
+                : ` <span class="text-amber-600">— not yet deployed to a ab target (Manage → add a ab target)</span>`;
+            return `<div class="mx-4 mt-3 mb-1 px-3 py-2 rounded-md border text-xs bg-purple-50 border-purple-200 text-purple-800 flex items-center gap-2"><span class="text-purple-600 font-bold">★</span><span><b>AppBuilder identity:</b> ${names}${depNote}${extra}</span></div>`;
         })();
         const note = body.message ? `<p class="px-4 pb-3 text-xs text-slate-400 italic">${body.message}</p>` : '';
         container.innerHTML = (certs.length === 0 && !attemptRows)
@@ -21141,7 +21141,7 @@ async function showLeTargetsModal(domain) {
     }
     const cert = (window._leCerts || []).find(c => c.domain === domain) || {};
     const tgts = cert.targets || [];
-    const isBfCert = !!cert.bugfixer;
+    const isBfCert = !!cert.ab;
     const isCA = !!cert.client_auth;
     const canEdit = (cert.can_edit !== false);  // owner/admin (or legacy cert)
     const esc = s => String(s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
@@ -21158,9 +21158,9 @@ async function showLeTargetsModal(domain) {
     };
     const mtOpts = leModuleOptions();
     const roNote = canEdit ? '' : `<div class="mb-4 p-3 rounded-md bg-slate-50 border border-slate-200 text-xs text-slate-600">This is a <b>shared</b> certificate owned by another tenant. You can <b>deploy</b> it to devices in your own tenant (below), but you cannot change its targets, identity, or tenants.</div>`;
-    const bfBlock = canEdit ? `<label class="flex items-start gap-2 mb-4 p-3 rounded-md border ${isBfCert ? 'bg-purple-50 border-purple-200' : 'bg-slate-50 border-slate-200'} cursor-pointer" title="Tag this cert as the BugFixer mTLS identity — the gate for hub log reads + fleet update commands. Then add a bugfixer target below so the cert is deployed to the bugfixer agent.">
-            <input type="checkbox" id="le-bugfixer-chk" ${isBfCert ? 'checked' : ''} onchange="leToggleBugfixerChk(this, '${esc(domain)}')" class="mt-0.5 accent-purple-600" />
-            <span class="text-xs text-slate-700"><span class="font-bold text-purple-700">★ BugFixer identity</span> — pin this cert's name as the BugFixer mTLS identity (hub logs + fleet updates). <span class="text-slate-500">The hub mints bugfixer's clientAuth mTLS cert from its Local CA for this SAN automatically; also add a <span class="font-mono">bugfixer</span> target below (★) to deploy this cert as bugfixer's WebUI/server cert.</span></span>
+    const bfBlock = canEdit ? `<label class="flex items-start gap-2 mb-4 p-3 rounded-md border ${isBfCert ? 'bg-purple-50 border-purple-200' : 'bg-slate-50 border-slate-200'} cursor-pointer" title="Tag this cert as the AppBuilder mTLS identity — the gate for hub log reads + fleet update commands. Then add a ab target below so the cert is deployed to the ab agent.">
+            <input type="checkbox" id="le-ab-chk" ${isBfCert ? 'checked' : ''} onchange="leToggleAppBuilderChk(this, '${esc(domain)}')" class="mt-0.5 accent-purple-600" />
+            <span class="text-xs text-slate-700"><span class="font-bold text-purple-700">★ AppBuilder identity</span> — pin this cert's name as the AppBuilder mTLS identity (hub logs + fleet updates). <span class="text-slate-500">The hub mints ab's clientAuth mTLS cert from its Local CA for this SAN automatically; also add a <span class="font-mono">ab</span> target below (★) to deploy this cert as ab's WebUI/server cert.</span></span>
         </label>` : '';
     const addBlock = canEdit ? `<div class="flex flex-wrap items-end gap-2 border-t border-slate-200 pt-4">
             <div class="flex flex-col">
@@ -22236,22 +22236,22 @@ async function deleteDnsCredential(name) {
     } catch (e) { showToast('Delete failed: ' + e.message, 'error'); }
 }
 
-// Tag / un-tag a managed cert as the BugFixer identity (H1), driven by the
+// Tag / un-tag a managed cert as the AppBuilder identity (H1), driven by the
 // checkbox inside the Manage modal. Only a connection presenting a tagged cert
 // over mTLS may use the reverse HUB_REQUEST channel (read every tenant's hub
 // logs + run fleet TRIGGER_* update commands). This just records which domain's
-// cert is the BugFixer identity; deploy the cert itself to a bugfixer target
-// (also in Manage) so the agent presents it. POST /api/le/certs/{domain}/bugfixer.
-async function leToggleBugfixerChk(cb, domain) {
+// cert is the AppBuilder identity; deploy the cert itself to a ab target
+// (also in Manage) so the agent presents it. POST /api/le/certs/{domain}/ab.
+async function leToggleAppBuilderChk(cb, domain) {
     const enable = cb ? cb.checked : true;
     if (cb) { cb.disabled = true; }
     try {
-        const { ok, data, detail } = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/bugfixer`, {
+        const { ok, data, detail } = await _spokeFetch(`/api/le/certs/${encodeURIComponent(domain)}/ab`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ enabled: enable })
         });
         if (!ok) {
-            showToast('BugFixer tag failed: ' + (detail || 'request rejected'), 'error');
+            showToast('AppBuilder tag failed: ' + (detail || 'request rejected'), 'error');
             if (cb) { cb.checked = !enable; cb.disabled = false; }
             return;
         }
@@ -22262,30 +22262,30 @@ async function leToggleBugfixerChk(cb, domain) {
         if (pinned && Array.isArray(window._leCerts)) {
             for (const c of window._leCerts) {
                 const names = [c.domain, ...(c.domains || [])].map(s => String(s || '').toLowerCase());
-                c.bugfixer = names.some(n => n && pinned.includes(n));
+                c.ab = names.some(n => n && pinned.includes(n));
             }
         }
         showToast(enable
-            ? `Tagged ${domain} as the BugFixer cert — add a bugfixer target (★) below so it presents over mTLS`
-            : `Removed the BugFixer tag from ${domain}`, 'success');
-        // The hub mints bugfixer's clientAuth mTLS cert from its Local CA for the
+            ? `Tagged ${domain} as the AppBuilder cert — add a ab target (★) below so it presents over mTLS`
+            : `Removed the AppBuilder tag from ${domain}`, 'success');
+        // The hub mints ab's clientAuth mTLS cert from its Local CA for the
         // pinned SAN on the next connect (public CAs can't issue clientAuth) — kick
         // a re-provision now so it takes effect immediately.
         if (enable) {
-            try { await _spokeFetch('/api/mtls/reprovision', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ spoke_id: 'bugfixer' }) }); } catch (e) { /* best-effort */ }
+            try { await _spokeFetch('/api/mtls/reprovision', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ spoke_id: 'ab' }) }); } catch (e) { /* best-effort */ }
         }
         window._leLoading = false;   // clear any stuck guard so the re-render runs
         await loadLEData();          // refresh the top banner + row target stars
         if (cb) cb.disabled = false;
     } catch (e) {
-        showToast('BugFixer tag failed: ' + (e.message || e), 'error');
+        showToast('AppBuilder tag failed: ' + (e.message || e), 'error');
         if (cb) { cb.checked = !enable; cb.disabled = false; }
     }
 }
 
 // Revoke a spoke's Hub-CA mTLS client cert — it reconnects cert-less.
 async function mtlsRevoke(spokeId, label) {
-    if (!confirm(`Revoke ${label || spokeId}'s mTLS client cert?\n\nThe spoke reconnects cert-less and (if BugFixer) loses hub-log/update access until you re-issue. Auto-provision won't re-mint until you click issue.`)) return;
+    if (!confirm(`Revoke ${label || spokeId}'s mTLS client cert?\n\nThe spoke reconnects cert-less and (if AppBuilder) loses hub-log/update access until you re-issue. Auto-provision won't re-mint until you click issue.`)) return;
     try {
         const { ok, detail } = await _spokeFetch('/api/mtls/revoke', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -22328,7 +22328,7 @@ async function mtlsProvision(spokeId) {
 
 // mTLS debug screen: which connected spokes/agents are ACTUALLY presenting a
 // verified mTLS client cert vs. connected cert-less (permissive fallback), plus the
-// hub's client-verify trust bundle + the pinned BugFixer cert verify. Fetches
+// hub's client-verify trust bundle + the pinned AppBuilder cert verify. Fetches
 // /api/mtls/trust-diag (admin) and renders a modal. Answers "is mTLS really on
 // fleet-wide, and who's using it" — since CERT_OPTIONAL lets a spoke work either way.
 // Hub Health & Connectivity — inline card on System → Hub Status. Renders the
@@ -22912,7 +22912,7 @@ async function showMtlsDebug() {
             <td class="px-3 py-1.5 font-medium" title="${esc(c.spoke_id)}">${esc(c.label || c.spoke_id)}</td>
             <td class="px-3 py-1.5">${esc(c.module_type || '—')}</td>
             <td class="px-3 py-1.5 font-bold ${c.local ? 'text-slate-400' : (c.mtls_active ? 'text-[#01A982]' : 'text-amber-600')}" title="${c.local ? 'Co-located spoke — connects over plaintext loopback (ws://127.0.0.1). No TLS leg, so mTLS does not apply. mTLS is remote-only (wss).' : (c.mtls_active ? 'Presenting a verified Hub-CA client cert' : 'Remote spoke connected without presenting a client cert — issue one')}">${c.local ? 'local · N/A' : (c.mtls_active ? 'mTLS ✓' : 'cert-less')}</td>
-            <td class="px-3 py-1.5 text-xs">${c.sans && c.sans.length ? esc(c.sans.join(', ')) : '—'}${c.is_bugfixer_pinned ? ' <span class="text-purple-700 font-bold">★ BugFixer</span>' : ''}</td>
+            <td class="px-3 py-1.5 text-xs">${c.sans && c.sans.length ? esc(c.sans.join(', ')) : '—'}${c.is_ab_pinned ? ' <span class="text-purple-700 font-bold">★ AppBuilder</span>' : ''}</td>
             <td class="px-3 py-1.5 text-xs text-slate-500">${esc(c.not_after || '')}</td>
             <td class="px-3 py-1.5 whitespace-nowrap">
                 ${c.local
@@ -22922,7 +22922,7 @@ async function showMtlsDebug() {
             </td>
         </tr>`).join('') : `<tr><td colspan="6" class="px-3 py-3 text-slate-400 italic">No connected spokes.</td></tr>`;
     const lmca = (d.lm_mtls_ca_certs || []).map(c => `<div>${esc(c.subject)} <span class="text-slate-400">← ${esc(c.issuer)}</span></div>`).join('') || '<div class="text-slate-400">— none —</div>';
-    const pin = (d.pinned_cert_checks || []).map(p => `<div>${esc(p.domain)}: <span class="font-bold ${p.ok ? 'text-[#01A982]' : 'text-red-600'}">${p.ok ? 'accepted' : 'REJECTED'}</span> <span class="text-slate-400">${esc(p.detail || '')}</span></div>`).join('') || '<div class="text-slate-400">no cert tagged BugFixer</div>';
+    const pin = (d.pinned_cert_checks || []).map(p => `<div>${esc(p.domain)}: <span class="font-bold ${p.ok ? 'text-[#01A982]' : 'text-red-600'}">${p.ok ? 'accepted' : 'REJECTED'}</span> <span class="text-slate-400">${esc(p.detail || '')}</span></div>`).join('') || '<div class="text-slate-400">no cert tagged AppBuilder</div>';
     const dupes = (d.duplicate_subjects || []);
     openModal('mtls-debug-modal', `
         <div class="p-6 space-y-4">
@@ -22946,10 +22946,10 @@ async function showMtlsDebug() {
                     <th class="px-3 py-2 text-left">Spoke</th><th class="px-3 py-2 text-left">Type</th><th class="px-3 py-2 text-left">mTLS</th><th class="px-3 py-2 text-left">Cert SANs</th><th class="px-3 py-2 text-left">Expires</th><th class="px-3 py-2 text-left"></th>
                 </tr></thead><tbody>${rows}</tbody></table>
             </div>
-            <div class="text-xs text-slate-500">Note: the hub is permissive (CERT_OPTIONAL) — a "cert-less" spoke still works (session-key auth). Only BugFixer's HUB_REQUEST channel <i>requires</i> a verified, pinned client cert.</div>
+            <div class="text-xs text-slate-500">Note: the hub is permissive (CERT_OPTIONAL) — a "cert-less" spoke still works (session-key auth). Only AppBuilder's HUB_REQUEST channel <i>requires</i> a verified, pinned client cert.</div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
                 <div><div class="font-semibold text-slate-600 mb-1">Hub client-verify CA (LM_MTLS_CA)</div><div class="font-mono text-slate-700 space-y-0.5">${lmca}</div><div class="text-slate-400 mt-1">combined bundle: ${d.combined_ca_count ?? '?'} trusted cert(s)${dupes.length ? ` · <span class="text-amber-600">dup subjects: ${esc(dupes.join(', '))}</span>` : ''}</div></div>
-                <div><div class="font-semibold text-slate-600 mb-1">Pinned BugFixer cert verify</div><div class="font-mono text-slate-700 space-y-0.5">${pin}</div></div>
+                <div><div class="font-semibold text-slate-600 mb-1">Pinned AppBuilder cert verify</div><div class="font-mono text-slate-700 space-y-0.5">${pin}</div></div>
             </div>
             <div id="mtls-acme-info" class="border-t border-slate-200 pt-3 text-xs text-slate-500">Loading certbot / ACME profile info…</div>
             <div class="flex justify-end"><button onclick="document.getElementById('mtls-debug-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button></div>

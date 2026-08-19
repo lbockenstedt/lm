@@ -52,7 +52,7 @@ def _run(coro):
 @pytest.fixture(autouse=True)
 def _stub_llm(monkeypatch):
     monkeypatch.setattr(llm, "hub_llm_identify_enabled", lambda hub: True)
-    monkeypatch.setattr(llm, "find_bugfixer", lambda hub: "bugfixer-1")
+    monkeypatch.setattr(llm, "find_ab", lambda hub: "ab-1")
 
     async def _fake_orchestrate(hub, agent, sid, port_id):
         hub.orchestrated.append((agent, sid, port_id))
@@ -67,7 +67,7 @@ def test_unidentified_port_escalates_to_llm_and_skips_sync():
         "port_id": "usb-067b:2303@6-2.4", "vendor": None, "identity": {},
         "banner": "MIA-SW-AOSS> \r\nInvalid input: get", "method": "login",
     }))
-    assert hub.orchestrated == [("bugfixer-1", "console-1", "usb-067b:2303@6-2.4")]
+    assert hub.orchestrated == [("ab-1", "console-1", "usb-067b:2303@6-2.4")]
     assert hub.synced == []  # placeholder device NOT created
 
 
@@ -82,7 +82,7 @@ def test_gleaned_hostname_without_vendor_still_escalates():
         "identity": {"hostname": "edge-core"},
         "banner": "edge-core> ", "method": "login",
     }))
-    assert hub.orchestrated == [("bugfixer-1", "console-1", "usb-1")]
+    assert hub.orchestrated == [("ab-1", "console-1", "usb-1")]
     assert hub.synced == []
 
 

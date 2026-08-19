@@ -221,7 +221,7 @@ def apply_server_client_auth(ctx: ssl.SSLContext):
     try:
         ctx.load_verify_locations(cafile=ca)
         # Also trust the system store (LE/ISRG roots) so an LE-issued, SAN-pinned
-        # identity (the BugFixer cert deployed from the LE module) verifies without
+        # identity (the AppBuilder cert deployed from the LE module) verifies without
         # having to live in the private mTLS CA — mirrors the client leg, which
         # already trusts system+CA via create_default_context. See
         # server_client_ca_file() for the rationale (widening trust is safe: the
@@ -243,13 +243,13 @@ def server_client_ca_file():
     """CA bundle path for VERIFYING presented client certs on a server leg
     (the hub's :443 listener). It is ``LM_MTLS_CA`` (the private mTLS wildcard
     chain that authenticates ordinary spokes) concatenated with the system trust
-    store, so an LE-issued, SAN-pinned identity — the BugFixer cert deployed from
+    store, so an LE-issued, SAN-pinned identity — the AppBuilder cert deployed from
     the LE module — also verifies without having to live in the private mTLS CA.
 
     Why widening trust here is safe: under the permissive model the TLS handshake
     is NOT the gate (see server_verify_mode). CERT_OPTIONAL only decides whether a
     presented cert is *readable*; actual authority is app-layer — ordinary spokes
-    by session key, and the reverse HUB_REQUEST channel by BugFixer SAN pinning
+    by session key, and the reverse HUB_REQUEST channel by AppBuilder SAN pinning
     (``_hub_request_authorized``). A peer presenting any publicly-trusted cert
     therefore passes TLS but gains nothing unless it is explicitly pinned. This
     also restores the symmetry the client leg already has (create_default_context
@@ -262,7 +262,7 @@ def server_client_ca_file():
     try:
         parts = []
         # Hub Local mTLS CA — the internal CA that mints the clientAuth client certs
-        # every spoke (incl. BugFixer) presents for mTLS (public CAs no longer issue
+        # every spoke (incl. AppBuilder) presents for mTLS (public CAs no longer issue
         # clientAuth). ALWAYS trusted so hub-issued certs verify, even when LM_MTLS_CA
         # (the legacy LE wildcard chain) is unset. Generated on first use.
         try:
@@ -332,7 +332,7 @@ def server_client_ca_file():
     except Exception as e:  # noqa: BLE001 - fall back to the private CA only
         logger.warning("[mtls] combined client-verify CA build failed (%s) — "
                        "falling back to LM_MTLS_CA only; LE-issued client certs "
-                       "(e.g. BugFixer) will be REJECTED", e)
+                       "(e.g. AppBuilder) will be REJECTED", e)
         return ca
 
 
@@ -392,7 +392,7 @@ def verify_chain(fullchain_pem: str):
     """Verify a leaf+intermediates PEM against the hub's combined client-verify CA
     — the EXACT trust the mTLS listener uses — via ``openssl verify``. Returns
     ``(ok: bool, detail: str)`` so the UI can show whether the hub would accept a
-    given cert (e.g. the pinned BugFixer cert) and, if not, openssl's reason."""
+    given cert (e.g. the pinned AppBuilder cert) and, if not, openssl's reason."""
     combined = server_client_ca_file()
     if not combined or not os.path.exists(combined):
         return False, "no client-verify CA configured (mTLS off or LM_MTLS_CA unset)"

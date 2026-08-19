@@ -65,57 +65,57 @@ def _cert(san=None, cn=None):
 
 
 def test_single_dns_san():
-    d = _cert(san=[("DNS", "bugfixer.lm.io")])
-    assert peer_cert_identity_from_getpeercert(d) == ("bugfixer.lm.io",)
+    d = _cert(san=[("DNS", "ab.lm.io")])
+    assert peer_cert_identity_from_getpeercert(d) == ("ab.lm.io",)
 
 
 def test_multiple_dns_sans_preserve_order():
-    san = [("DNS", "bugfixer.lm.io"), ("DNS", "fixer.lm.io"), ("DNS", "bf.lm.io")]
+    san = [("DNS", "ab.lm.io"), ("DNS", "fixer.lm.io"), ("DNS", "bf.lm.io")]
     assert peer_cert_identity_from_getpeercert(_cert(san=san)) == (
-        "bugfixer.lm.io", "fixer.lm.io", "bf.lm.io")
+        "ab.lm.io", "fixer.lm.io", "bf.lm.io")
 
 
 def test_ip_san_entries_are_dropped():
     """Only DNS names are identity — IP-address SANs are not renewal-stable
     (and not what the LE checkbox pins). They're skipped, not fatal."""
-    san = [("DNS", "bugfixer.lm.io"), ("IP Address", "10.0.0.5"),
+    san = [("DNS", "ab.lm.io"), ("IP Address", "10.0.0.5"),
            ("DNS", "fixer.lm.io"), ("IP Address", "::1")]
     assert peer_cert_identity_from_getpeercert(_cert(san=san)) == (
-        "bugfixer.lm.io", "fixer.lm.io")
+        "ab.lm.io", "fixer.lm.io")
 
 
 def test_other_san_types_dropped():
-    san = [("DNS", "bugfixer.lm.io"), ("email", "ops@lm.io"), ("URI", "https://x")]
-    assert peer_cert_identity_from_getpeercert(_cert(san=san)) == ("bugfixer.lm.io",)
+    san = [("DNS", "ab.lm.io"), ("email", "ops@lm.io"), ("URI", "https://x")]
+    assert peer_cert_identity_from_getpeercert(_cert(san=san)) == ("ab.lm.io",)
 
 
 def test_empty_dns_value_skipped():
-    san = [("DNS", "bugfixer.lm.io"), ("DNS", ""), ("DNS", "fixer.lm.io")]
+    san = [("DNS", "ab.lm.io"), ("DNS", ""), ("DNS", "fixer.lm.io")]
     assert peer_cert_identity_from_getpeercert(_cert(san=san)) == (
-        "bugfixer.lm.io", "fixer.lm.io")
+        "ab.lm.io", "fixer.lm.io")
 
 
 # ── subject commonName fallback ───────────────────────────────────────────────
 
 def test_cn_fallback_when_no_san():
     """Older / internal certs may carry no SAN — fall back to the subject
-    commonName so a single-CN BugFixer cert still yields an identity."""
-    d = _cert(cn="bugfixer.lm.io")
-    assert peer_cert_identity_from_getpeercert(d) == ("bugfixer.lm.io",)
+    commonName so a single-CN AppBuilder cert still yields an identity."""
+    d = _cert(cn="ab.lm.io")
+    assert peer_cert_identity_from_getpeercert(d) == ("ab.lm.io",)
 
 
 def test_san_preferred_over_cn():
     """When both SAN and CN are present, SAN wins (SAN is the renewal-stable
     identity; CN is deprecated in modern LE certs)."""
-    d = _cert(san=[("DNS", "bugfixer.lm.io")], cn="old-name.lm.io")
-    assert peer_cert_identity_from_getpeercert(d) == ("bugfixer.lm.io",)
+    d = _cert(san=[("DNS", "ab.lm.io")], cn="old-name.lm.io")
+    assert peer_cert_identity_from_getpeercert(d) == ("ab.lm.io",)
 
 
 def test_cn_fallback_skips_non_commonname_attrs():
     """Subject RDNs carry org/OU/etc; only commonName is identity."""
     d = {"subject": ((("countryName", "US"),), (("organizationName", "LM"),),
-                     (("commonName", "bugfixer.lm.io"),))}
-    assert peer_cert_identity_from_getpeercert(d) == ("bugfixer.lm.io",)
+                     (("commonName", "ab.lm.io"),))}
+    assert peer_cert_identity_from_getpeercert(d) == ("ab.lm.io",)
 
 
 def test_malformed_subject_does_not_raise():

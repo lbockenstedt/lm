@@ -172,7 +172,7 @@ class FleetHealthAlertMixin:
         self._fleet_alerts[tid] = {"tier": target, "since_ts": since,
                                    "duration_s": dur, "detail": detail}
         if current != target:
-            # ERROR (critical) surfaces in the error-log feed / bugfixer; WARNING
+            # ERROR (critical) surfaces in the error-log feed / ab; WARNING
             # is dashboard/log only.
             (logger.error if target == _TIER_ERROR else logger.warning)(
                 "[fleet-alert] %s fleet availability %s: %s (persisted %.0fs)",

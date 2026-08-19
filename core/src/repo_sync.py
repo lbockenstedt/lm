@@ -201,7 +201,7 @@ class RepoSyncMixin:
         # Verify the hub's OWN git/update machinery is functional so a broken
         # updater is LOUD, not silent (the failure mode behind a hub quietly
         # serving stale code). Each warning → [sync-error] so it lands in the
-        # hub error log + GET_ERROR_LOGS (bugfixer) and the repo-sync status.
+        # hub error log + GET_ERROR_LOGS (ab) and the repo-sync status.
         try:
             update_health = await self.check_update_health()
         except Exception as e:  # noqa: BLE001 — never fatal to the loop
@@ -214,7 +214,7 @@ class RepoSyncMixin:
         self._update_health = update_health
         for e in update_health.get("errors", []):
             # BROKEN update/self-heal infrastructure -> ERROR so it lands in the
-            # hub error view (GET_ERROR_LOGS / bugfixer), not just a warning.
+            # hub error view (GET_ERROR_LOGS / ab), not just a warning.
             logger.error("[sync-error] update-health CRITICAL: %s", e)
         # Dedup update-health warnings across cycles. A persistent mis-config
         # (e.g. update_sources.hub empty) would otherwise log a WARNING every
@@ -236,7 +236,7 @@ class RepoSyncMixin:
         self._prev_update_warnings = cur_warnings
         # Benign self-healing notices (e.g. a stale process pending the restart
         # window) — INFO only, NO [sync-error] tag, so they stay observable in the
-        # hub log WITHOUT landing in the Error Log / BugFixer feed. Deduped across
+        # hub log WITHOUT landing in the Error Log / AppBuilder feed. Deduped across
         # cycles like warnings (the stale state persists from pull → 2am restart,
         # so log it once per state change, not every 15-min cycle).
         cur_notices = set(update_health.get("notices", []))
@@ -260,7 +260,7 @@ class RepoSyncMixin:
                       f"{len(update_health.get('warnings', []))} warning(s)"))
 
         # Hub-authoritative sync log: errors → [sync-error] WARNING so the
-        # cause lands in the hub log + GET_ERROR_LOGS (bugfixer).
+        # cause lands in the hub log + GET_ERROR_LOGS (ab).
         if err_count or hub_status == "error" or not update_health.get("ok"):
             logger.warning("[sync-error] repo_sync — %s", message)
         else:
@@ -309,7 +309,7 @@ class RepoSyncMixin:
                     await asyncio.wait_for(self.run_repo_sync_all(), timeout=600)
                 except asyncio.TimeoutError:
                     # ERROR (not WARNING) so it lands in the hub error view
-                    # (GET_ERROR_LOGS / bugfixer keys off [sync-error] ERROR),
+                    # (GET_ERROR_LOGS / ab keys off [sync-error] ERROR),
                     # and persist a timeout status so the WebUI Sync card
                     # shows the stall (the abandoned run_repo_sync_all was
                     # cancelled BEFORE it could set_repo_sync_status, so

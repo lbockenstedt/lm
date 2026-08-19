@@ -174,7 +174,7 @@ async def _aggregate_diagnostics(hub):
 
         # Watchdog recovery state (run_spoke_recovery_loop). Empty dict when
         # the spoke has never been stranded/recovered. The WebUI renders a
-        # badge + attempt counter + last action/error from this; bugfixer
+        # badge + attempt counter + last action/error from this; ab
         # also reads it via GET_SPOKE_STATUS to suppress/escalate.
         rec = hub.spoke_recovery.get(hub._primary_key(sid), {}) or {}
 
@@ -253,7 +253,7 @@ async def _aggregate_diagnostics(hub):
             # Watchdog recovery (see run_spoke_recovery_loop). in_progress =
             # hub is actively restarting the unit (backoff); gave_up = a
             # restart structurally can't fix it (e.g. venv missing) and
-            # bugfixer has/will be handed off; manual_pause = admin paused.
+            # ab has/will be handed off; manual_pause = admin paused.
             "recovery": {
                 "attempts": rec.get("attempts", 0),
                 "in_progress": bool(rec.get("in_progress", False)),
@@ -597,9 +597,9 @@ def register(app, hub, ctx):
         hub = app.state.hub
         # collect_all_logs does os.listdir + per-file open + deque over
         # /var/log/lm then an inline json.dumps binary search to fit the
-        # payload — off the hub loop so BugFixer's periodic poll can't stall
+        # payload — off the hub loop so AppBuilder's periodic poll can't stall
         # heartbeats / request_response (the in-code comment notes a prior
-        # version "stalled the event loop on every BugFixer poll").
+        # version "stalled the event loop on every AppBuilder poll").
         return await asyncio.to_thread(hub.collect_all_logs)
 
     @app.get("/setup/logs")
@@ -740,7 +740,7 @@ def register(app, hub, ctx):
     @app.post("/setup/log-analysis")
     async def run_log_analysis(request: Request):
         """AI Log Analysis: gather this module's logs (same lines the Logs UI shows)
-        and delegate to the bugfixer spoke's LLM. The hub has no LLM of its own.
+        and delegate to the ab spoke's LLM. The hub has no LLM of its own.
         Blocks until the analysis returns (long — the LLM can be slow); admin-gated
         by the /setup/* middleware."""
         hub = app.state.hub
@@ -764,7 +764,7 @@ def register(app, hub, ctx):
         windowed = hub._window_log_lines(lines, win)
         log_text = "\n".join(windowed[-400:])
         label = f"Lab Manager (hub) logs (last {win} min)" if is_hub else f"{module} logs (last {win} min)"
-        return await hub.analyze_logs_via_bugfixer(module, log_text, label)
+        return await hub.analyze_logs_via_ab(module, log_text, label)
 
     @app.get("/setup/log-analysis")
     async def get_log_analysis(module: str = "hub"):
@@ -786,7 +786,7 @@ def register(app, hub, ctx):
             "auto": gc.get("log_analysis_auto", True),
             "interval_min": int(gc.get("log_analysis_interval_min", 30) or 30),
             "metric": getattr(hub, "_log_sentinel_metric", {}) or {},
-            "bugfixer_online": bool(hub.get_spoke_by_type("bugfixer")),
+            "ab_online": bool(hub.get_spoke_by_type("ab")),
         }
 
     @app.post("/setup/log-analysis/config")
@@ -935,10 +935,10 @@ def register(app, hub, ctx):
         Body: {explanation, severity, console_logs, html, screenshot, context}.
         The hub stores the full artifacts (console/HTML/screenshot) under
         data_dir/bugs/<id>/ and logs a short greppable [bug-report] marker so
-        bugfixer's scan_bugs finds it. The marker line carries only the id +
+        ab's scan_bugs finds it. The marker line carries only the id +
         a summary — the large payloads never go into the hub log. Any
         authenticated user can file (the /api/ prefix is auth-gated but not
-        admin-only, unlike /setup/). bugfixer later files a clean-body GitHub
+        admin-only, unlike /setup/). ab later files a clean-body GitHub
         issue and pulls these artifacts from the hub for fix context.
         """
         hub = app.state.hub
@@ -973,7 +973,7 @@ def register(app, hub, ctx):
             ctx = data.get("context") or {}
             view = ctx.get("currentView") if isinstance(ctx, dict) else ""
             # Short marker — flows through HubLogHandler -> self.logs ->
-            # /var/log/lm/hub.log -> GET_LOGS -> bugfixer scan_bugs. No base64.
+            # /var/log/lm/hub.log -> GET_LOGS -> ab scan_bugs. No base64.
             logger.info(
                 f"[bug-report] id={rid} type={rtype} severity={sev} view={view} "
                 f"summary={explanation[:80]!r}"
@@ -988,7 +988,7 @@ def register(app, hub, ctx):
     # Bug Reports log view (admin-only, like the rest of /setup/): lists filed
     # reports and serves the full artifacts (console/HTML/screenshot) for an
     # expandable detail modal. Reuses the hub's _list_bug_reports /
-    # _get_bug_report helpers so the UI and bugfixer see the same data.
+    # _get_bug_report helpers so the UI and ab see the same data.
     @app.get("/setup/bug-reports")
     async def list_bug_reports():
         hub = app.state.hub
@@ -1009,7 +1009,7 @@ def register(app, hub, ctx):
         """Delete a stored bug report (admin-only, like the rest of /setup/).
         Removes the in-memory index entry + the on-disk artifacts
         (console/HTML/screenshot) under data_dir/bugs/<id>/. The public GitHub
-        issue bugfixer may already have filed is NOT touched — only the hub's
+        issue ab may already have filed is NOT touched — only the hub's
         local copy of the captured artifacts."""
         hub = app.state.hub
         ok = await asyncio.to_thread(hub._delete_bug_report, rid)
@@ -1020,7 +1020,7 @@ def register(app, hub, ctx):
     @app.post("/setup/bug-reports/{rid}/approve")
     async def approve_bug_report(rid: str):
         """Admin approves a feature request (admin-only, like the rest of /setup/).
-        Marks it 'approved' so GET_BUG_REPORTS exposes it to bugfixer, which then
+        Marks it 'approved' so GET_BUG_REPORTS exposes it to ab, which then
         files the GitHub issue and works the feature. Bugs never need this gate."""
         hub = app.state.hub
         ok = await asyncio.to_thread(hub._approve_bug_report, rid)

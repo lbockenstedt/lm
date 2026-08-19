@@ -157,10 +157,10 @@ _DNS_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dns
 _DHCP_INSTALLER_URL = "https://raw.githubusercontent.com/lbockenstedt/lm/main/dhcp/install_dhcp.sh"
 
 _DEPLOY_ROLES: Dict[str, Dict[str, Any]] = {
-    "bugfixer": {
+    "ab": {
         "cmd": ["bash", "-c",
                 "exec </dev/null; curl -sSL "
-                "https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh "
+                "https://raw.githubusercontent.com/lbockenstedt/ab/main/install.sh "
                 "| bash"],
         "module_type": "agent",
     },
@@ -283,7 +283,7 @@ class GenericAgent(BaseSpoke):
         # Set by AgentControlPlane after registration so LOAD_ROLE can read
         # hub_url + .env helpers and spawn RoleConnection sub-spokes.
         self.control_plane = None
-        # Background deployment state for deploy roles (e.g. bugfixer).
+        # Background deployment state for deploy roles (e.g. ab).
         self._deploy_role: Optional[str] = None
         self._deploy_task: Optional[asyncio.Task] = None
         self._deploy_status: Dict[str, Any] = {"state": "idle"}

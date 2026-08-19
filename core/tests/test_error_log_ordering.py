@@ -36,8 +36,8 @@ def test_collect_error_logs_newest_first_globally_across_sources():
             "2026-06-30 10:00:00,111 - Hub - ERROR - hub old MARKER_HUB_OLD",
             "2026-06-30 12:00:00,222 - Hub - ERROR - hub new MARKER_HUB_NEW",
         ],
-        agent_logs={"bugfixer": [
-            "2026-06-30 11:00:00,333 - BugFixer - ERROR - agent MARKER_AGENT",
+        agent_logs={"ab": [
+            "2026-06-30 11:00:00,333 - AppBuilder - ERROR - agent MARKER_AGENT",
         ]},
     )
     ordered = _reversed_logs(h)

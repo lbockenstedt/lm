@@ -1,12 +1,12 @@
 """Help assistant — LLM-driven docs Q&A + live-state answers.
 
-The LLM backend is the BugFixer module (it owns the multi-provider LLM layer).
+The LLM backend is the AppBuilder module (it owns the multi-provider LLM layer).
 This route only orchestrates: it selects relevant docs (RAG-lite over the ~19
 canonical lm/docs files), defines hub-side tools, and runs the agentic loop by
-relaying each model turn to the connected bugfixer agent via the HELP_ASK
-command (bugfixer runs one call_llm turn, returns {content, tool_calls}).
+relaying each model turn to the connected ab agent via the HELP_ASK
+command (ab runs one call_llm turn, returns {content, tool_calls}).
 
-HARD REQUIREMENT: the feature is only usable when bugfixer is connected —
+HARD REQUIREMENT: the feature is only usable when ab is connected —
 ``/api/help/available`` reports that, and the WebUI hides the "Ask" affordance
 otherwise. Routes live under ``/api/help/*`` so the access-control middleware
 gates them (valid session required) like every other ``/api/`` route.
@@ -23,15 +23,15 @@ def register(app, hub, ctx):
         ) if os.path.isdir(d)),
         os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../docs")))
 
-    def _bugfixer_agent():
-        """The connected bugfixer agent's spoke_id, or None. bugfixer registers
-        as spoke_id 'bugfixer' (config HUB_AGENT_ID); match that, else any
-        connected id containing 'bugfixer'."""
+    def _ab_agent():
+        """The connected ab agent's spoke_id, or None. ab registers
+        as spoke_id 'ab' (config HUB_AGENT_ID); match that, else any
+        connected id containing 'ab'."""
         conns = getattr(hub, "active_connections", {}) or {}
-        if hub._primary_key("bugfixer") in conns:
-            return "bugfixer"
+        if hub._primary_key("ab") in conns:
+            return "ab"
         for sid in conns:
-            if "bugfixer" in str(sid).lower():
+            if "ab" in str(sid).lower():
                 return sid
         return None
 
@@ -139,15 +139,15 @@ def register(app, hub, ctx):
     # ── routes ───────────────────────────────────────────────────────────────
     @app.get("/api/help/available")
     async def help_available():
-        """Whether the LLM help assistant is usable (bugfixer connected)."""
-        return {"available": _bugfixer_agent() is not None}
+        """Whether the LLM help assistant is usable (ab connected)."""
+        return {"available": _ab_agent() is not None}
 
     @app.post("/api/help/ask")
     async def help_ask(request: Request):
-        agent = _bugfixer_agent()
+        agent = _ab_agent()
         if not agent:
             raise HTTPException(status_code=409,
-                                detail="Help assistant unavailable — the BugFixer LLM "
+                                detail="Help assistant unavailable — the AppBuilder LLM "
                                        "agent is not connected.")
         try:
             body = await request.json()
@@ -249,7 +249,7 @@ def register(app, hub, ctx):
             if _degenerate(answer):
                 answer = ("I couldn't get a usable answer from the current LLM provider "
                           "(it didn't return a proper response). Try again, or switch the "
-                          "BugFixer provider in Settings.")
+                          "AppBuilder provider in Settings.")
 
         citations = [n for n in picked if f"[doc:{n}]" in answer] or picked[:2]
         return {"answer": answer, "citations": citations,

@@ -5,7 +5,7 @@
 # Removes EVERY LM-owned component across the whole ecosystem on this box —
 # hub, watchdog, generic agent, all spoke roles (dns/dhcp/nw/cppm/opnsense/
 # truenas/le/ldap/netbox/pxmx/cs/console/...), the pxmx host agent, the
-# client-sim agents/dashboard/proxmox-agent, collab sink, and BugFixer —
+# client-sim agents/dashboard/proxmox-agent, collab sink, and AppBuilder —
 # plus their dirs, /usr/local/bin helpers, sudoers, systemd drop-ins,
 # sysctl/modules/cron/logrotate entries, LM users, and LM env values.
 #
@@ -27,11 +27,11 @@
 #   sudo bash uninstall.sh --dry-run       # preview, change nothing
 #
 # Opt-in extras (shared infra — off by default):
-#   --ollama          also remove ollama.service + its override (bugfixer)
+#   --ollama          also remove ollama.service + its override (ab)
 #   --letsencrypt     also remove /etc/letsencrypt + /var/lib|log/letsencrypt
 #   --netbox-db       also DROP the netbox Postgres database + role
 #   --nginx-site      also remove the netbox nginx site (safe; LM-owned file)
-#   --keep-bugfixer   do NOT remove BugFixer (it is removed by default here)
+#   --keep-ab   do NOT remove AppBuilder (it is removed by default here)
 #
 # One-liner:
 #   curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/uninstall.sh | sudo bash -s -- --yes
@@ -39,7 +39,7 @@
 set -o pipefail    # NOT -e/-u: teardown must survive partial installs + empty arrays
 
 ASSUME_YES=0; DRY_RUN=0
-DO_OLLAMA=0; DO_LE=0; DO_NBDB=0; DO_NGINX=0; KEEP_BUGFIXER=0
+DO_OLLAMA=0; DO_LE=0; DO_NBDB=0; DO_NGINX=0; KEEP_AB=0
 
 for arg in "$@"; do
     case "$arg" in
@@ -49,7 +49,7 @@ for arg in "$@"; do
         --letsencrypt)  DO_LE=1 ;;
         --netbox-db)    DO_NBDB=1 ;;
         --nginx-site)   DO_NGINX=1 ;;
-        --keep-bugfixer) KEEP_BUGFIXER=1 ;;
+        --keep-ab) KEEP_AB=1 ;;
         -h|--help)      sed -n '2,42p' "$0"; exit 0 ;;
         *) echo "uninstall: unknown flag '$arg' (see --help)" >&2; exit 2 ;;
     esac
@@ -79,21 +79,21 @@ LM_UNITS_EXACT=(lm.service lm-watchdog.service lm-watchdog.timer lm-hub.service
                 lm-manager.service lm-manager-watchdog.service lm-generic-agent.service
                 netbox.service netbox-rq.service hub.service)
 # A unit file is LM-owned if its contents reference an LM install root / user / log.
-LM_CONTENT_RE='/opt/lm(-manager)?(/|[[:space:]]|$)|/opt/netbox-app|/opt/hub(/|[[:space:]]|$)|/opt/bugfixer|/opt/client-sim|/opt/proxmox-agent-installer|/var/log/lm|/var/log/bugfixer|/var/log/client-sim|User=svc_lm|User=svc_bg'
-BF_UNITS=(bugfixer.service bugfixer-watchdog.service)
+LM_CONTENT_RE='/opt/lm(-manager)?(/|[[:space:]]|$)|/opt/netbox-app|/opt/hub(/|[[:space:]]|$)|/opt/ab|/opt/client-sim|/opt/proxmox-agent-installer|/var/log/lm|/var/log/ab|/var/log/client-sim|User=svc_lm|User=svc_bg'
+BF_UNITS=(ab.service ab-watchdog.service)
 
 LM_DIRS=(
-    /opt/lm /opt/lm-manager /opt/netbox-app /opt/hub /opt/bugfixer
+    /opt/lm /opt/lm-manager /opt/netbox-app /opt/hub /opt/ab
     /opt/client-sim-dashboard /opt/proxmox-agent-installer
     /var/lib/lm /var/lib/pxmx /var/lib/client-sim /var/lib/hub
     /var/lib/webui-watchdog /var/lib/proxmox-watchdog
     /var/log/lm
     /etc/lm /etc/lm-le /etc/lm-agent /etc/lm-cs-agent /etc/lm-netbox-agent
-    /etc/bugfixer /etc/client-sim
+    /etc/ab /etc/client-sim
     /usr/src/wifi-drivers /usr/local/scripts /usr/scripts /etc/pve/scripts
 )
 LM_FILES=(
-    /var/log/bugfixer.log /var/log/bugfixer_watchdog.log
+    /var/log/ab.log /var/log/ab_watchdog.log
     /var/log/client-sim-sync.log /var/log/client-sim-dashboard-install.log
     /var/log/client-sim-proxmox-agent.log
     /etc/logrotate.d/lm
@@ -102,9 +102,9 @@ LM_FILES=(
     /etc/dnsmasq.d/client-sim.conf
     /etc/systemd/system/dnsmasq.service.d/wait-for-interface.conf
 )
-LM_BIN_GLOBS=(/usr/local/bin/lm-* /usr/local/bin/bugfixer-*)
+LM_BIN_GLOBS=(/usr/local/bin/lm-* /usr/local/bin/ab-*)
 LM_SUDOERS=(/etc/sudoers.d/lm /etc/sudoers.d/lm-agent /etc/sudoers.d/lm-netbox
-            /etc/sudoers.d/lm-component-update /etc/sudoers.d/bugfixer
+            /etc/sudoers.d/lm-component-update /etc/sudoers.d/ab
             /etc/sudoers.d/client-sim-dashboard)
 # svc_lm/svc_bg are LM-specific; sim-user/dashboard removed only if their units were found.
 LM_USERS_ALWAYS=(svc_lm svc_bg)
@@ -119,7 +119,7 @@ in_list() { local n="$1"; shift; local x; for x in "$@"; do [ "$x" = "$n" ] && r
 discover_units() {
     local seen=" " u f b
     _emit() { case "$seen" in *" $1 "*) return ;; esac; seen="$seen$1 "; printf '%s\n' "$1"; }
-    # Exact known units (skip bugfixer here — gated separately)
+    # Exact known units (skip ab here — gated separately)
     for u in "${LM_UNITS_EXACT[@]}"; do
         if [ -e "$UNIT_DIR/$u" ] || systemctl list-unit-files "$u" 2>/dev/null | grep -q "^$u"; then
             # Generic names (netbox/hub) only if content confirms LM ownership.
@@ -149,9 +149,9 @@ FOUND_FILES=();   collect FOUND_FILES   < <(existing_paths "${LM_FILES[@]}")
 FOUND_SUDO=();    collect FOUND_SUDO    < <(existing_paths "${LM_SUDOERS[@]}")
 FOUND_BINS=();    for f in "${LM_BIN_GLOBS[@]}"; do [ -e "$f" ] && FOUND_BINS+=("$f"); done
 
-# BugFixer (on by default; --keep-bugfixer skips)
+# AppBuilder (on by default; --keep-ab skips)
 FOUND_BF_UNITS=()
-if [ "$KEEP_BUGFIXER" -eq 0 ]; then
+if [ "$KEEP_AB" -eq 0 ]; then
     for u in "${BF_UNITS[@]}"; do
         { [ -e "$UNIT_DIR/$u" ] || systemctl list-unit-files "$u" 2>/dev/null | grep -q "^$u"; } \
             && ! in_list "$u" "${FOUND_UNITS[@]}" && FOUND_BF_UNITS+=("$u")
@@ -170,14 +170,14 @@ for f in /etc/default/lm /etc/default/lm-agent /etc/profile.d/lm.sh /etc/profile
          /etc/default/lm-* /etc/profile.d/lm-*.sh; do
     [ -e "$f" ] && FOUND_ENVFILES+=("$f")
 done
-ENV_PREFIXES='LM_|LABMANAGER_|BF_|BUGFIXER_'
+ENV_PREFIXES='LM_|LABMANAGER_|BF_|AB_'
 ENV_HAS_LM=0
 grep -qE "^[[:space:]]*($ENV_PREFIXES)[A-Z0-9_]+=" /etc/environment 2>/dev/null && ENV_HAS_LM=1
 
 # Opt-in shared-infra targets present on this box.
 OLLAMA_OVERRIDE=/etc/systemd/system/ollama.service.d
 FOUND_OLLAMA_UNIT=0; [ "$DO_OLLAMA" -eq 1 ] && { [ -e "$UNIT_DIR/ollama.service" ] || systemctl list-unit-files ollama.service 2>/dev/null | grep -q '^ollama'; } && FOUND_OLLAMA_UNIT=1
-BF_OLLAMA_OVERRIDE=0; [ "$KEEP_BUGFIXER" -eq 0 ] && [ "$DO_OLLAMA" -eq 0 ] && [ -d "$OLLAMA_OVERRIDE" ] && BF_OLLAMA_OVERRIDE=1
+BF_OLLAMA_OVERRIDE=0; [ "$KEEP_AB" -eq 0 ] && [ "$DO_OLLAMA" -eq 0 ] && [ -d "$OLLAMA_OVERRIDE" ] && BF_OLLAMA_OVERRIDE=1
 FOUND_LE_DIRS=(); [ "$DO_LE" -eq 1 ] && collect FOUND_LE_DIRS < <(existing_paths "${LE_DIRS[@]}")
 FOUND_NGINX=();   { [ "$DO_NGINX" -eq 1 ] || [ "$DO_NBDB" -eq 1 ]; } && for f in "${NGINX_SITES[@]}"; do [ -e "$f" ] && FOUND_NGINX+=("$f"); done
 
@@ -189,7 +189,7 @@ _svc_present redis-server.service "redis-server (netbox)"
 _svc_present nginx.service "nginx (netbox site)"
 _svc_present unbound.service "unbound (dns role)"
 _svc_present slapd.service "slapd/openldap (ldap role)"
-_svc_present ollama.service "ollama (bugfixer LLM)"
+_svc_present ollama.service "ollama (ab LLM)"
 _svc_present dnsmasq.service "dnsmasq (cs dashboard)"
 for k in kea-dhcp4-server kea-ctrl-agent; do systemctl list-unit-files "$k.service" 2>/dev/null | grep -q "^$k" && SHARED_PRESENT+=("$k (dhcp/cs/netbox)"); done
 [ -d /etc/letsencrypt ] && SHARED_PRESENT+=("/etc/letsencrypt (le certs)")
@@ -214,14 +214,14 @@ if [ "${#FOUND_ENVFILES[@]}" -gt 0 ] || [ "$ENV_HAS_LM" -eq 1 ] || [ "$BF_OLLAMA
     echo "${C_BOLD}Env / shared-opt-in to clear:${C_RESET}"
     [ "${#FOUND_ENVFILES[@]}" -gt 0 ] && printf '  %s\n' "${FOUND_ENVFILES[@]}"
     [ "$ENV_HAS_LM" -eq 1 ]        && echo "  ${ENV_PREFIXES//|/, }* lines in /etc/environment"
-    [ "$BF_OLLAMA_OVERRIDE" -eq 1 ] && echo "  $OLLAMA_OVERRIDE (bugfixer ollama override)"
+    [ "$BF_OLLAMA_OVERRIDE" -eq 1 ] && echo "  $OLLAMA_OVERRIDE (ab ollama override)"
     [ "$FOUND_OLLAMA_UNIT" -eq 1 ]  && echo "  ollama.service (--ollama)"
     [ "$DO_NBDB" -eq 1 ]            && echo "  ${C_RED}DROP${C_RESET} netbox Postgres database + role (--netbox-db)"
     echo
 fi
 
 echo "${C_RED}${C_BOLD}⚠  DESTROYS all LM state (encrypted state, certs, keys, logs, netbox app). Irreversible.${C_RESET}"
-[ "$KEEP_BUGFIXER" -eq 1 ] && echo "${C_DIM}   BugFixer kept (--keep-bugfixer).${C_RESET}"
+[ "$KEEP_AB" -eq 1 ] && echo "${C_DIM}   AppBuilder kept (--keep-ab).${C_RESET}"
 if [ "${#SHARED_PRESENT[@]}" -gt 0 ]; then
     echo
     echo "${C_YELLOW}${C_BOLD}Shared infrastructure detected — LEFT IN PLACE (remove manually if unused):${C_RESET}"
@@ -270,7 +270,7 @@ systemctl daemon-reload 2>/dev/null || true
 systemctl reset-failed  2>/dev/null || true
 
 # Kill stragglers still holding LM roots (best-effort).
-pkill -f '/opt/lm(-manager)?/|/opt/bugfixer/|/opt/netbox-app/|/opt/hub/|/opt/client-sim|/opt/proxmox-agent-installer/' 2>/dev/null || true
+pkill -f '/opt/lm(-manager)?/|/opt/ab/|/opt/netbox-app/|/opt/hub/|/opt/client-sim|/opt/proxmox-agent-installer/' 2>/dev/null || true
 
 for d in "${FOUND_DIRS[@]}" "${FOUND_LE_DIRS[@]}"; do
     rm -rf "$d" 2>/dev/null && echo "  ${C_GREEN}✓${C_RESET} dir  $d" || echo "  ${C_YELLOW}!${C_RESET} could not remove $d"

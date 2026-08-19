@@ -14,7 +14,7 @@
 
 ## TL;DR
 The **update delivery** is keyed on git commit SHA, not version — the spoke fan-out's
-primary gate (`last_pushed[sid] == remote_tip`) and BugFixer's self-update (`old_commit !=
+primary gate (`last_pushed[sid] == remote_tip`) and AppBuilder's self-update (`old_commit !=
 new_commit`) both ignore the version string. So versions are used only for **display
 ("out of date" chips)**, a **corrective re-push evidence override**, and a hub-self-update
 **fallback**. That makes this a **display + bump-automation** change, low-risk for the
@@ -82,7 +82,7 @@ Rewrite the increment to: **minor += 2**, output `MAJOR.MM` (2-digit minor), and
 
 Files to rewrite (identical logic in each):
 1. `lm/.github/workflows/version-bump.yml`
-2. `bugfixer/.github/workflows/version-bump.yml`
+2. `ab/.github/workflows/version-bump.yml`
 3. `cs/.github/workflows/version-bump.yml`
 4. `pxmx/.github/workflows/version-bump.yml`
 5. `nw/.github/workflows/version-bump.yml`
@@ -91,7 +91,7 @@ Files to rewrite (identical logic in each):
 8. `cppm/.github/workflows/version-bump.yml`
 9. `ldap/.github/workflows/version-bump.yml`
 10. `le/.github/workflows/version-bump.yml`
-11. `bugfixer/github_ops.py` — `bump_repo_version()` (lines 180-219), BugFixer's in-code
+11. `ab/github_ops.py` — `bump_repo_version()` (lines 180-219), AppBuilder's in-code
     reimplementation used when it pushes an AI fix. Change the same increment logic **and**
     the seed `new_version = "0.01"` (line 206) → `"1.00"`.
 
@@ -102,7 +102,7 @@ auto-bumps. Add a workflow if it should participate.
 
 ## C. VERSION files to reset to `1.00` at cutover
 
-Sibling repos (single file each): `bugfixer` (0.71), `cs` (.435), `pxmx` (.173), `nw`
+Sibling repos (single file each): `ab` (0.71), `cs` (.435), `pxmx` (.173), `nw`
 (.39), `netbox` (.72), `opnsense` (.40), `cppm` (.35), `ldap` (.26), `le` (.14),
 `truenas` (`1.0` → `1.00` — note it's one-digit today, fails the format).
 
@@ -122,13 +122,13 @@ that's a **manual pass** (or leave them — they're per-script, not the fleet ve
 
 ---
 
-## E. BugFixer specifics
+## E. AppBuilder specifics
 
 - Its self-update is **SHA-based** (`workers.py` `old_commit != new_commit`), so the
   migration does **not** break its update trigger — VERSION is display-only for it.
 - But the hub renders it "out of date" today purely because `0.72` isn't `.NN`
   (`version_skew`), and the hub never computes a "latest" for it (its module_type isn't in
-  `_MODULE_REPO_DIR` → `version_behind` always False). After migrating BugFixer to `1.00`,
+  `_MODULE_REPO_DIR` → `version_behind` always False). After migrating AppBuilder to `1.00`,
   the skew flag clears **only if the §A regexes are fixed**. Alternatively, special-case
   deploy-role module_types to suppress skew.
 - `github_ops.py` `bump_repo_version` + `"0.01"` seed must change with the workflows (§B.11).
@@ -178,6 +178,6 @@ After the release commit, each repo resumes independent `X.02`, `X.04`, … on i
 2. Roll out the **new bump workflows** (§B) and **reset VERSION files to `1.00`** (§C)
    per repo. Because delivery is SHA-based, spokes update on the commit regardless; the
    version chip is correct only once #1 is deployed.
-3. **BugFixer:** migrate its VERSION + `github_ops.py`, or suppress deploy-role skew.
+3. **AppBuilder:** migrate its VERSION + `github_ops.py`, or suppress deploy-role skew.
 4. Update tests + docs (§A) so CI is green.
 5. Majors (`2.00`) remain a **hand edit** to VERSION; the workflow never crosses a major.

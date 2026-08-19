@@ -253,7 +253,7 @@ def _fit_log_payload(all_logs: list, max_bytes: int) -> list:
     Binary-searches the tail length (O(log N) json.dumps passes) instead of the
     prior `while … pop(0)` loop, which re-serialized the whole list on every pop
     (O(N²) in log lines — at 100s of spokes × 1000-line deques this stalled the
-    event loop on every BugFixer poll). Keeps the newest entries (drops oldest).
+    event loop on every AppBuilder poll). Keeps the newest entries (drops oldest).
     """
     try:
         if len(json.dumps({"logs": all_logs})) <= max_bytes:

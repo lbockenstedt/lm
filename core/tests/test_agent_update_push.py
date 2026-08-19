@@ -1,7 +1,7 @@
 """Feature (b): the spoke-side push path. When an agent-hosting spoke receives
 ``SPOKE_UPDATE`` (hub→spoke update), it forwards ``AGENT_UPDATE`` to its
 connected device-mode agents BEFORE pulling its own repo + restarting — so the
-Update button / auto-update / BugFixer reaches the device-mode agents too, not
+Update button / auto-update / AppBuilder reaches the device-mode agents too, not
 just the spoke. Each agent then pulls its own repo + arms its rollback watchdog
 + ``os._exit(3)``s, symmetric with the spoke's own ``SPOKE_UPDATE``.
 

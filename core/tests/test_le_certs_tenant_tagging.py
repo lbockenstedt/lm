@@ -4,7 +4,7 @@
 Bug ("I assign ``*.orange-tme.com`` to SHARED, save succeeds, but re-open shows
 no tenant"): the assignment WAS stored + persisted correctly in
 ``global_config['le_cert_tenants']``, but the read-side tagger ``_tag_cert_tenants``
-(and its siblings ``_tag_bugfixer`` / ``_filter_le_certs``) read the cert list
+(and its siblings ``_tag_ab`` / ``_filter_le_certs``) read the cert list
 from TOP-LEVEL ``data['certs']``. The real relay + warm-cache shape nests it a
 level deeper — ``{"status":"SUCCESS","data":{"certs":[...]}}`` — and the WebUI
 reads it via ``inner(d).certs`` (i.e. ``d['data']['certs']``). So the tag was

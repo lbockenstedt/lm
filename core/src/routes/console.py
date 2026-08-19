@@ -630,7 +630,7 @@ def register(app, hub, ctx):
     async def _console_profile_one(hub, sid, port_id):
         """Profile one port, fingerprint-first: run the deterministic built-in
         fingerprint (spoke login-identify) and, only when it can't recognize the
-        device, fall back to the AI (scrubbed output → BugFixer). Returns an
+        device, fall back to the AI (scrubbed output → AppBuilder). Returns an
         identify-shaped result dict (adds ``source='fingerprint'`` on a DB hit).
 
         This is the explicit, on-demand profiling path — nothing calls it
@@ -647,11 +647,11 @@ def register(app, hub, ctx):
             return {"status": "OK", "identified": True, "source": "fingerprint",
                     "vendor": r.get("vendor"), "identity": r.get("identity") or {},
                     "logged_in": bool(r.get("logged_in"))}
-        # 2. Unknown device → ask the AI (requires the BugFixer relay).
-        agent = llm.find_bugfixer(hub)
+        # 2. Unknown device → ask the AI (requires the AppBuilder relay).
+        agent = llm.find_ab(hub)
         if not agent:
             return {"status": "ERROR", "identified": False, "need_agent": True,
-                    "message": "Device not in the fingerprint DB and the BugFixer LLM agent is not connected."}
+                    "message": "Device not in the fingerprint DB and the AppBuilder LLM agent is not connected."}
         await _console_push_llm_flag(hub, [sid], True)  # permit the spoke's LLM collect
         return await llm.orchestrate(hub, agent, sid, port_id)
 
@@ -949,7 +949,7 @@ def register(app, hub, ctx):
         spokes = sorted({sid for sid, _ in targets})
         await _console_seed_credentials(hub, spokes)
 
-        sem = asyncio.Semaphore(2)  # single BugFixer agent → keep it gentle
+        sem = asyncio.Semaphore(2)  # single AppBuilder agent → keep it gentle
 
         async def _run_one(sid, pid):
             async with sem:
@@ -967,14 +967,14 @@ def register(app, hub, ctx):
     @app.get("/api/console/llm-identify")
     async def console_llm_identify_get(request: Request):
         """Current state of the LLM-assisted identify toggle (admin). Reports
-        whether it's enabled and whether the BugFixer LLM agent is connected."""
+        whether it's enabled and whether the AppBuilder LLM agent is connected."""
         from routes import console_llm_identify as llm
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
         return {"enabled": llm.hub_llm_identify_enabled(hub),
-                "available": llm.find_bugfixer(hub) is not None}
+                "available": llm.find_ab(hub) is not None}
 
     @app.post("/api/console/llm-identify")
     async def console_llm_identify_set(request: Request):
@@ -993,7 +993,7 @@ def register(app, hub, ctx):
         hub.state.system_state["console_llm_identify_enabled"] = enabled
         hub.state._mark_dirty()
         await _console_push_llm_flag(hub, hub.get_all_spokes_by_type("console") or [], enabled)
-        return {"enabled": enabled, "available": llm.find_bugfixer(hub) is not None}
+        return {"enabled": enabled, "available": llm.find_ab(hub) is not None}
 
     @app.post("/api/console/capture")
     async def console_capture(request: Request):

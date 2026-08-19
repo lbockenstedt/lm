@@ -30,7 +30,7 @@ same core flags: `--hub`, `--id`/`--name`, `--secret`, `--hub-secret`,
 | **truenas** (storage) | `truenas/install_truenas.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/truenas/main/install_truenas.sh \| sudo bash -s -- --hub HUB` |
 | **kvm** | `kvm/install_kvm.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/kvm/main/install_kvm.sh \| sudo bash -s -- --hub ws://HUB:8765` |
 | **qa** (auditor) | `qa/install_qa.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/qa/main/install_qa.sh \| sudo bash -s -- --hub ws://HUB:8765` |
-| **bugfixer** | `bugfixer/install.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/bugfixer/main/install.sh \| bash -s -- wss://HUB` |
+| **ab** | `ab/install.sh` | `curl -sSL https://raw.githubusercontent.com/lbockenstedt/ab/main/install.sh \| bash -s -- wss://HUB` |
 | **tsa** | `tsa/install.sh` | `curl -fsSL https://raw.githubusercontent.com/lbockenstedt/tsa/main/install.sh \| bash -s -- azure` |
 | **dns**, **dhcp**, **henet** | Agent roles with host-prep installers | Standard path is loading the agent roles `dns` / `dhcp` / `henet`; DNS/DHCP host prep is provided by `dns/install_dns.sh` and `dhcp/install_dhcp.sh` when a direct role install is needed. |
 
@@ -138,7 +138,7 @@ curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install
 
 Removes **every** LM-owned component on this box — hub, watchdog, generic agent,
 all spoke roles, the pxmx host agent, the client-sim agents/dashboard, collab
-sink, and BugFixer — plus their dirs, `/usr/local/bin` helpers, sudoers,
+sink, and AppBuilder — plus their dirs, `/usr/local/bin` helpers, sudoers,
 systemd drop-ins, and LM env values. Discovery-first and guarded: it prints
 exactly what it will remove and requires a typed `REMOVE` confirmation. Shared
 infrastructure (postgresql/redis/nginx/unbound/kea/slapd/certbot/ollama/…) and
@@ -153,11 +153,11 @@ curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/uninstall.sh | 
 | :--- | :--- |
 | `--yes` / `-y` | Non-interactive — skip the typed confirmation (required when piped, no TTY). |
 | `--dry-run` / `-n` | Preview only — change nothing. |
-| `--ollama` | Also remove `ollama.service` + its override (BugFixer). |
+| `--ollama` | Also remove `ollama.service` + its override (AppBuilder). |
 | `--letsencrypt` | Also remove `/etc/letsencrypt` + its `var/lib`/`var/log` dirs. |
 | `--netbox-db` | Also DROP the NetBox Postgres database + role. |
 | `--nginx-site` | Also remove the NetBox nginx site (LM-owned file). |
-| `--keep-bugfixer` | Do **not** remove BugFixer (it is removed by default here). |
+| `--keep-ab` | Do **not** remove AppBuilder (it is removed by default here). |
 
 > For a full single-host identity/state wipe (so a clone can **never** reconnect
 > under an old id), `uninstall_lm.sh` is the universal per-host variant:

@@ -320,7 +320,7 @@ receiver must be byte-compatible** — all four repos must deploy together:
 | lm (hub + core spokes) | `core/src/security/signer.py` |
 | cs | via vendored `core/` |
 | pxmx (agent) | `pxmx/agent/src/security_utils.py` → `agent.py:1877` (verify) / `1242+` (encode) |
-| bugfixer (hub agent) | `bugfixer/hub_agent.py:117` (`encode_frame`) / `113` (`verify_bytes`) |
+| ab (hub agent) | `ab/hub_agent.py:117` (`encode_frame`) / `113` (`verify_bytes`) |
 
 A spoke on the old format sending to a new hub (or vice-versa) would mismatch;
 hence the atomic cutover. The agent path even accepts either raw `{…}` or

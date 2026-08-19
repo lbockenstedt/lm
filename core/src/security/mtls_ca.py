@@ -1,12 +1,12 @@
 """Internal mTLS CLIENT CA for the hub.
 
 Let's Encrypt (and public CAs generally) no longer issue the ``clientAuth`` EKU, so
-a spoke that needs a VERIFIED mTLS CLIENT identity — BugFixer, whose reverse
+a spoke that needs a VERIFIED mTLS CLIENT identity — AppBuilder, whose reverse
 HUB_REQUEST channel (hub-log reads + fleet update triggers) is gated on a pinned,
 verified client cert — cannot obtain one publicly. This module makes the HUB a tiny
 CA: a self-signed CA generated ONCE that mints short-ish ``clientAuth`` leaf certs
 for a specific SAN. The hub then (a) trusts its own CA on the client-verify leg (see
-mtls.server_client_ca_file) and (b) SAN-pins the identity (bugfixer_cert_identities),
+mtls.server_client_ca_file) and (b) SAN-pins the identity (ab_cert_identities),
 so only a cert the hub itself issued for the pinned name is accepted.
 
 Security: only the hub holds the CA private key, so a cert bearing the pinned SAN

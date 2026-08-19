@@ -46,7 +46,7 @@ logger = logging.getLogger("le.distribution")
 # other nw families (aos_switch/ex_switch/gateway) return a clear ERROR from
 # the spoke (external-key / SSH-SFTP plumbing not yet built). Both are fast
 # REST targets → 120s install tier (no pvenode wait).
-CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", "statuspage", "proxy", "ipam", "simulation", "nac", "nw", "netbox-server", "ldap-server", "bugfixer"}
+CERT_CAPABLE_MODULES: Set[str] = {"firewall", "hypervisor", "directory", "hub", "statuspage", "proxy", "ipam", "simulation", "nac", "nw", "netbox-server", "ldap-server", "ab"}
 
 
 async def distribute_cert_to_targets(rr: Callable, get_by_type: Callable,
@@ -397,7 +397,7 @@ async def distribute_mtls_materials_to_all_spokes(
     # Exclude spokes that already hold their OWN unique (non-wildcard) LE cert — a
     # dedicated cert claims that node's identity, so the wildcard's mTLS CLIENT
     # cert must NEVER overwrite it. Without this a device with a specific cert
-    # (e.g. bugfixer, SAN-pinned to bugfixer.<domain>) would be handed the wildcard
+    # (e.g. ab, SAN-pinned to ab.<domain>) would be handed the wildcard
     # client cert by this fan-out and present *.<domain> instead — breaking its
     # pinned identity (HUB_REQUEST would deny it). Mirrors the exclusion in
     # distribute_wildcard_to_all_spokes; ledger-derived + recomputed each run, so
@@ -609,7 +609,7 @@ async def distribute_wildcard_to_all_spokes(
     # Exclude spokes/agents that already hold their OWN unique (non-wildcard) LE
     # cert — a dedicated cert claims that target, so the wildcard must never be
     # pushed there (the hub is already excluded above; this generalizes it to any
-    # node with its own cert, e.g. bugfixer). Ledger-derived + recomputed each
+    # node with its own cert, e.g. ab). Ledger-derived + recomputed each
     # run: deploying a unique cert later auto-excludes the target (and its
     # INSTALL_CERT already replaced the wildcard on disk), so future wildcard
     # pushes skip it; removing that cert re-enables the wildcard. The caller

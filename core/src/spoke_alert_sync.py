@@ -26,7 +26,7 @@ Alerts surface three ways (no new polling): folded into ``/status``
 (``alert_tier``/``alert_since`` per spoke → diagnostics badge), plus a dedicated
 ``GET /setup/spoke-alerts`` route (→ the System → Sync active-alerts list). The
 ERROR tier is emitted at ``logger.error`` so it matches the ``collect_error_logs``
-regex and lands in GET_ERROR_LOGS / the Error Log tab / bugfixer; the WARNING tier
+regex and lands in GET_ERROR_LOGS / the Error Log tab / ab; the WARNING tier
 is ``logger.warning`` (hub log + UI only — deliberately NOT in the error-log feed,
 to avoid noise).
 
@@ -476,7 +476,7 @@ class SpokeAlertMixin:
                     self.record_spoke_event(sid, "spoke_out_of_contact", detail)
                     # ERROR level: matches the collect_error_logs regex
                     # (\berror\b) → surfaces in GET_ERROR_LOGS / Error Log tab /
-                    # bugfixer so a 30-min outage is actionable, not just visual.
+                    # ab so a 30-min outage is actionable, not just visual.
                     logger.error("[spoke-alert] %s out of contact %ds "
                                  "(error threshold %ds exceeded)",
                                  self._spoke_label(sid), int(duration), error_s)

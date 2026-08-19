@@ -1,7 +1,7 @@
 # Agents & Skills
 
 "Agents" here are **Claude skills** — repo-committed, self-contained procedures that
-encode tribal knowledge so both an interactive Claude session *and* BugFixer execute
+encode tribal knowledge so both an interactive Claude session *and* AppBuilder execute
 the same recipe with the same boundaries. Each skill is a folder with a `SKILL.md`
 (name + description + instructions) and optional supporting files (e.g. a
 `reference.md` with the full checklist).
@@ -41,7 +41,7 @@ out of scope.
 ## Subagents
 Beyond the skills above, a Claude Code **subagent** (`.claude/agents/<name>.md`,
 spawnable via the Agent tool) can wrap a skill to drive a whole task hands-off.
-These are a *convenience for interactive Claude* — BugFixer loads **skills**
+These are a *convenience for interactive Claude* — AppBuilder loads **skills**
 (`.claude/skills`), not subagents, so a subagent's value is the skill it follows.
 
 ### `sim-builder`
@@ -55,8 +55,8 @@ simulation" / "new traffic-or-alert generator" instead of hand-walking the recip
 1. **Interactive Claude** — invoked as `/dual-copy-guard` / `/add-simulation`, or
    auto-matched by task. (Auto-listing as slash-commands happens from the workspace
    root; when working from the LM repo they're read directly.)
-2. **BugFixer** — fetches these from `lbockenstedt/lm` `.claude/skills/` (a monitored
-   repo) and loads them to inform its fix / build / PR-review work, so a BugFixer
+2. **AppBuilder** — fetches these from `lbockenstedt/lm` `.claude/skills/` (a monitored
+   repo) and loads them to inform its fix / build / PR-review work, so a AppBuilder
    change follows the same recipe + boundaries a human invoking the skill would. This
    is the single-source-of-truth link: author the rules once, both consumers use them.
 
@@ -64,4 +64,4 @@ simulation" / "new traffic-or-alert generator" instead of hand-walking the recip
 Create `lm/.claude/skills/<name>/SKILL.md` with YAML frontmatter (`name`,
 `description`) + instructions; add a `reference.md` for a long checklist and have
 `SKILL.md` point to it. Keep it **self-contained** — no reliance on personal memory
-or "as we discussed" — so a teammate's Claude (and BugFixer) run it identically.
+or "as we discussed" — so a teammate's Claude (and AppBuilder) run it identically.

@@ -8,8 +8,8 @@ starlette's ``WebSocket`` exposes no transport. So nothing in the app can tell
 *which* cert a connection presented — only that a valid one was (or wasn't).
 
 H1 needs that identity: the reverse ``HUB_REQUEST`` channel is gated to a
-*pinned* BugFixer cert, not just "a valid fleet cert" (every spoke presents the
-same LE wildcard, so chain-validity alone can't distinguish BugFixer). This
+*pinned* AppBuilder cert, not just "a valid fleet cert" (every spoke presents the
+same LE wildcard, so chain-validity alone can't distinguish AppBuilder). This
 module bridges that gap with a thin uvicorn WS-protocol subclass that reads the
 peer cert off the transport's ``ssl_object`` and stashes the ``getpeercert()``
 dict on ``scope["extensions"]["x_peer_cert"]`` for the ``/ws/spoke`` route to
@@ -18,7 +18,7 @@ raise out of ``run_asgi`` (an exception before ``super().run_asgi()`` would skip
 the app call and drop the connection). A failed/absent extraction leaves
 ``x_peer_cert = None``; the H1 gate treats ``None`` as "no cert → deny"
 (fail-closed). Normal spokes never send ``HUB_REQUEST``, so the worst case is
-"BugFixer denied," never a fleet-wide break.
+"AppBuilder denied," never a fleet-wide break.
 
 The pure helper ``peer_cert_identity_from_getpeercert`` is the testable surface
 (the protocol subclass is transport-coupled and not unit-tested). It derives a
@@ -105,7 +105,7 @@ def peer_cert_identity_from_getpeercert(d: Any) -> Optional[Tuple[str, ...]]:
     try:
         san = d.get("subjectAltName") or ()
         for entry in san:
-            # Each entry is a (type, value) tuple, e.g. ('DNS', 'bugfixer.lm.io').
+            # Each entry is a (type, value) tuple, e.g. ('DNS', 'ab.lm.io').
             if isinstance(entry, tuple) and len(entry) == 2 and entry[0] == "DNS":
                 val = entry[1]
                 if isinstance(val, str) and val:
