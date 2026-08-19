@@ -17981,6 +17981,32 @@ async function openConsoleTerminal(spokeId, portId) {
 // bodyEl, ro, statusText, statusCls}>); window._serialActiveConsole holds the
 // visible tab's key. key = `${spokeId}::${portId}`.
 
+// Both console docks are `position: fixed` bottom drawers, so they cover the
+// bottom slice of #viewport without the page knowing — the underlying list
+// (port list / VM list) has no bottom padding to compensate, so its last rows
+// scroll to just above the drawer's covered area and then stop: the browser
+// considers the container "fully scrolled" even though a drawer-height chunk
+// of it is still hidden underneath. Give #viewport bottom padding equal to
+// whichever dock(s) are currently showing (minimized docks only cover their
+// header bar) so scrolling all the way down actually clears the drawer.
+function _consoleAdjustViewportPadding() {
+    const vp = document.getElementById('viewport');
+    if (!vp) return;
+    const MINIMIZED_PX = 40;
+    let covered = 0;
+    const serial = document.getElementById('serial-console-modal');
+    if (serial && !serial.classList.contains('hidden')) {
+        covered = Math.max(covered,
+            serial.getAttribute('data-min') === '1' ? MINIMIZED_PX : window.innerHeight * 0.45);
+    }
+    const vnc = document.getElementById('pxmx-vnc-modal');
+    if (vnc && !vnc.classList.contains('hidden')) {
+        covered = Math.max(covered,
+            vnc.getAttribute('data-min') === '1' ? MINIMIZED_PX : window.innerHeight * 0.55);
+    }
+    vp.style.paddingBottom = covered ? `${Math.ceil(covered)}px` : '';
+}
+
 // Create (or reveal) the shared serial-console dock shell. Idempotent — the tab
 // strip and bodies persist across opens; only wired once.
 function serialEnsureConsoleDock() {
@@ -18012,6 +18038,7 @@ function serialEnsureConsoleDock() {
         <div id="serial-console-tabs" class="flex items-stretch gap-1 px-2 pt-1 bg-[#2d2d2d] border-b border-slate-700 overflow-x-auto"></div>
         <div id="serial-console-bodies" class="relative flex-1 flex bg-[#1e1e1e] overflow-hidden"></div>`;
     document.body.appendChild(modal);
+    _consoleAdjustViewportPadding();
     modal.querySelector('#serial-console-min').onclick = () => {
         const minimized = modal.getAttribute('data-min') === '1';
         const tabsEl = modal.querySelector('#serial-console-tabs');
@@ -18023,6 +18050,7 @@ function serialEnsureConsoleDock() {
             tabsEl.classList.remove('hidden');
             bodiesEl.classList.remove('hidden');
             btn.textContent = 'Minimize';
+            _consoleAdjustViewportPadding();
             try { window.dispatchEvent(new Event('resize')); } catch (e) {}
             const c = serialActiveConsole();
             if (c && c.term) { try { c.term.focus(); c.term.scrollToBottom(); } catch (e) {} }
@@ -18032,6 +18060,7 @@ function serialEnsureConsoleDock() {
             tabsEl.classList.add('hidden');
             bodiesEl.classList.add('hidden');
             btn.textContent = 'Restore';
+            _consoleAdjustViewportPadding();
         }
     };
     modal.querySelector('#serial-console-fs').onclick = () => {
@@ -18292,6 +18321,7 @@ function serialCloseAllConsoles() {
     window._serialSplitPartner = null;
     const modal = document.getElementById('serial-console-modal');
     if (modal) modal.remove();
+    _consoleAdjustViewportPadding();
     if (typeof currentView !== 'undefined' && currentView === 'console' && typeof loadConsoleData === 'function') loadConsoleData();
 }
 
@@ -18581,6 +18611,7 @@ function pxmxEnsureConsoleDock() {
         <div id="pxmx-vnc-tabs" class="flex items-stretch gap-1 px-2 pt-1 bg-[#16213e] border-b border-slate-700 overflow-x-auto"></div>
         <div id="pxmx-vnc-bodies" class="relative flex-1 bg-black overflow-hidden"></div>`;
     document.body.appendChild(modal);
+    _consoleAdjustViewportPadding();
     modal.querySelector('#pxmx-vnc-takeover').onclick = () => pxmxForceTakeover();
     modal.querySelector('#pxmx-vnc-min').onclick = () => {
         const minimized = modal.getAttribute('data-min') === '1';
@@ -18593,6 +18624,7 @@ function pxmxEnsureConsoleDock() {
             tabsEl.classList.remove('hidden');
             bodiesEl.classList.remove('hidden');
             btn.textContent = 'Minimize';
+            _consoleAdjustViewportPadding();
             try { window.dispatchEvent(new Event('resize')); } catch (e) {}
             const c = pxmxActiveConsole();
             if (c && c.rfb) { try { c.rfb.focus(); } catch (e) {} }
@@ -18602,6 +18634,7 @@ function pxmxEnsureConsoleDock() {
             tabsEl.classList.add('hidden');
             bodiesEl.classList.add('hidden');
             btn.textContent = 'Restore';
+            _consoleAdjustViewportPadding();
         }
     };
     modal.querySelector('#pxmx-vnc-cad').onclick = () => { const c = pxmxActiveConsole(); if (c && c.rfb) c.rfb.sendCtrlAltDel(); };
@@ -18833,6 +18866,7 @@ function pxmxCloseAllConsoles() {
     window._pxmxActiveConsole = null;
     const modal = document.getElementById('pxmx-vnc-modal');
     if (modal) modal.remove();
+    _consoleAdjustViewportPadding();
 }
 
 // Render the clickable Nodes table; the selected row is highlighted.
