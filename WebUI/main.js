@@ -18601,8 +18601,8 @@ function renderPxmxNodes() {
         const statusCls  = n.status === 'online' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700';
         const selCls     = key === sel ? 'bg-green-50 ring-1 ring-green-300' : 'hover:bg-slate-50';
         return `<tr data-node-key="${escAttr(key)}" onclick="openNodeVms('${escJs(key)}')" class="border-b border-slate-100 cursor-pointer ${selCls}">
-            <td class="px-4 py-2 text-xs text-slate-500">${n.cluster || '—'}</td>
-            <td class="px-4 py-2 font-medium">${n.node}${pxmxClusterBadge(n)}</td>
+            <td class="px-4 py-2 text-xs text-slate-500">${n.cluster ? String(n.cluster).toUpperCase() : '—'}</td>
+            <td class="px-4 py-2 font-medium">${String(n.node || '').toUpperCase()}${pxmxClusterBadge(n)}</td>
             <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusCls}">${n.status}</span></td>
             <td class="px-4 py-2">${n.cpu_usage ?? '—'}%</td>
             <td class="px-4 py-2">${n.cpu_cores ?? '—'}</td>

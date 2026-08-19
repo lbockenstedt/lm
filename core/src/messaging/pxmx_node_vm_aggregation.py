@@ -21,7 +21,7 @@ last-known-data fallback; degrades to empty when absent, e.g. on a cs spoke).
 """
 import asyncio
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List, Tuple
 
 try:
     from .. import pve_cmd_builder
@@ -29,6 +29,31 @@ except ImportError:  # imported off a stale path (messaging.* top-level, no repo
     import pve_cmd_builder  # type: ignore
 
 logger = logging.getLogger(__name__)
+
+
+def _freshest_by_key(rows: Iterable[Tuple[Any, float, Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Collapse ``(key, ts, entry)`` rows to one entry per key, keeping the
+    entry with the HIGHEST ``ts``. A tie (including two zero/missing
+    timestamps) keeps whichever entry was seen first — stable, and matches
+    the plain first-wins behavior when no agent has genuinely fresher data
+    than another.
+
+    Cluster-mate agents each self-report their PVE cluster's FULL node/VM
+    membership, so naive concatenation across ``connected_agents`` produces
+    N-agents x N-nodes duplicates. A prior fix deduped by identity alone
+    (first-seen-in-dict-iteration-order wins), which is what THIS codebase's
+    dual-home fix (``simulations/service.py::_host_rank``) already proved
+    wrong for the sibling "same physical host reported twice" bug — the
+    tiebreak has nothing to do with which copy is actually current. Ranking
+    by each agent's own telemetry timestamp instead means a lagging/stale
+    cluster-mate can no longer silently win over a fresher one.
+    """
+    best: Dict[Any, Tuple[float, Dict[str, Any]]] = {}
+    for key, ts, entry in rows:
+        cur = best.get(key)
+        if cur is None or ts > cur[0]:
+            best[key] = (ts, entry)
+    return [v[1] for v in best.values()]
 
 
 # ── Node stats ────────────────────────────────────────────────────────────
@@ -100,21 +125,19 @@ async def get_node_stats(cp, data: Dict[str, Any]) -> Dict[str, Any]:
         return await _node_stats_from_agent(cp, agent_id)
 
     # Aggregate from all agents via telemetry cache (avoid hammering PVE API).
-    # Cluster-mate agents each report the FULL cluster's node membership (not
-    # just their own host), so naively concatenating produces N-agents x
-    # N-nodes duplicates. Dedup by the node's own hostname — the one identity
-    # that's reliable regardless of which agent reported it or what stale
-    # per-agent cluster name got attached.
-    all_nodes: List[Dict] = []
-    seen_nodes: set = set()
-    for aid, info in cp.connected_agents.items():
-        cluster = info.get("cluster_name", aid)
-        for node in info.get("nodes", []):
-            key = node.get("node") or f"{aid}:{node.get('node', '')}"
-            if key in seen_nodes:
-                continue
-            seen_nodes.add(key)
-            all_nodes.append({**node, "agent_id": aid, "cluster": cluster})
+    # Dedup by the node's own hostname — the one identity that's reliable
+    # regardless of which agent reported it or what stale per-agent cluster
+    # name got attached — keeping whichever cluster-mate's telemetry is
+    # freshest (see _freshest_by_key).
+    def _node_rows():
+        for aid, info in cp.connected_agents.items():
+            cluster = info.get("cluster_name", aid)
+            ts = info.get("telemetry_ts", 0) or 0
+            for node in info.get("nodes", []):
+                key = node.get("node") or f"{aid}:{node.get('node', '')}"
+                yield key, ts, {**node, "agent_id": aid, "cluster": cluster}
+
+    all_nodes: List[Dict] = _freshest_by_key(_node_rows())
 
     if not all_nodes:
         # Telemetry not yet received — orchestrate per-agent RUN_COMMAND
@@ -142,15 +165,16 @@ async def get_node_stats(cp, data: Dict[str, Any]) -> Dict[str, Any]:
         # No agents connected — serve last-known data from disk cache
         # (pxmx only; a cs control plane has no disk_cache and degrades to {}).
         disk_cache = getattr(cp, "disk_cache", {})
-        seen_nodes = set()
-        for aid, info in disk_cache.items():
-            cluster = info.get("cluster_name", aid)
-            for node in info.get("nodes", []):
-                key = node.get("node") or f"{aid}:{node.get('node', '')}"
-                if key in seen_nodes:
-                    continue
-                seen_nodes.add(key)
-                all_nodes.append({**node, "agent_id": aid, "cluster": cluster})
+
+        def _disk_node_rows():
+            for aid, info in disk_cache.items():
+                cluster = info.get("cluster_name", aid)
+                ts = info.get("telemetry_ts", 0) or 0
+                for node in info.get("nodes", []):
+                    key = node.get("node") or f"{aid}:{node.get('node', '')}"
+                    yield key, ts, {**node, "agent_id": aid, "cluster": cluster}
+
+        all_nodes = _freshest_by_key(_disk_node_rows())
         if all_nodes:
             return {"status": "SUCCESS", "nodes": all_nodes, "stale": True}
 
@@ -320,28 +344,25 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
                 "agent_count": 1}
 
     # Aggregate from telemetry cache first (fast, no PVE API call).
-    # Cluster-mate agents each report the FULL cluster's VM list, so dedup by
-    # (node, vmid) — vmid alone isn't safe across genuinely distinct standalone
-    # hypervisors that can reuse vmids, but node+vmid is unique within any one
-    # real cluster and node names differ across separate clusters. Same fix
-    # as get_node_stats above.
-    cached_vms: List[Dict] = []
-    seen_vms: set = set()
-    for aid, info in cp.connected_agents.items():
-        cluster = info.get("cluster_name", aid)
-        for vm in info.get("vms", []):
-            vmid = vm.get("vmid", "?")
-            node = vm.get("node", "?")
-            key = (node, vmid)
-            if key in seen_vms:
-                continue
-            seen_vms.add(key)
-            cached_vms.append({
-                **vm,
-                "agent_id":  aid,
-                "cluster":   vm.get("cluster", cluster),
-                "unique_id": vm.get("unique_id", f"{cluster}/{node}/{vmid}"),
-            })
+    # Dedup by (node, vmid) — vmid alone isn't safe across genuinely distinct
+    # standalone hypervisors that can reuse vmids, but node+vmid is unique
+    # within any one real cluster and node names differ across separate
+    # clusters — keeping whichever cluster-mate's telemetry is freshest.
+    def _vm_rows():
+        for aid, info in cp.connected_agents.items():
+            cluster = info.get("cluster_name", aid)
+            ts = info.get("telemetry_ts", 0) or 0
+            for vm in info.get("vms", []):
+                vmid = vm.get("vmid", "?")
+                node = vm.get("node", "?")
+                yield (node, vmid), ts, {
+                    **vm,
+                    "agent_id":  aid,
+                    "cluster":   vm.get("cluster", cluster),
+                    "unique_id": vm.get("unique_id", f"{cluster}/{node}/{vmid}"),
+                }
+
+    cached_vms: List[Dict] = _freshest_by_key(_vm_rows())
 
     if tag_filter:
         cached_vms = [v for v in cached_vms
@@ -397,23 +418,21 @@ async def list_vms(cp, data: Dict[str, Any]) -> Dict[str, Any]:
     # a cs control plane has no disk_cache and degrades to empty here).
     disk_cache = getattr(cp, "disk_cache", {})
     if disk_cache:
-        stale_vms: List[Dict] = []
-        seen_vms = set()
-        for aid, info in disk_cache.items():
-            cluster = info.get("cluster_name", aid)
-            for vm in info.get("vms", []):
-                vmid = vm.get("vmid", "?")
-                node = vm.get("node", "?")
-                key = (node, vmid)
-                if key in seen_vms:
-                    continue
-                seen_vms.add(key)
-                stale_vms.append({
-                    **vm,
-                    "agent_id":  aid,
-                    "cluster":   vm.get("cluster", cluster),
-                    "unique_id": vm.get("unique_id", f"{cluster}/{node}/{vmid}"),
-                })
+        def _disk_vm_rows():
+            for aid, info in disk_cache.items():
+                cluster = info.get("cluster_name", aid)
+                ts = info.get("telemetry_ts", 0) or 0
+                for vm in info.get("vms", []):
+                    vmid = vm.get("vmid", "?")
+                    node = vm.get("node", "?")
+                    yield (node, vmid), ts, {
+                        **vm,
+                        "agent_id":  aid,
+                        "cluster":   vm.get("cluster", cluster),
+                        "unique_id": vm.get("unique_id", f"{cluster}/{node}/{vmid}"),
+                    }
+
+        stale_vms: List[Dict] = _freshest_by_key(_disk_vm_rows())
         if tag_filter:
             stale_vms = [v for v in stale_vms
                          if tag_filter in [t.lower() for t in (v.get("tags") or [])]]
