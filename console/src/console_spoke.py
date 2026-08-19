@@ -468,6 +468,18 @@ class ConsoleSpoke(BaseSpoke):
             return {"status": "SUCCESS" if ok else "ERROR",
                     "written": ok, "message": "" if ok else "not the writer / no session"}
 
+        if cmd == "CONSOLE_TAKEOVER":
+            sid = data.get("session_id")
+            if not sid:
+                return {"status": "ERROR", "message": "session_id is required"}
+            prev = self.sessions.takeover(sid)
+            if prev and self.control_plane is not None:
+                try:
+                    await self.control_plane.send_to_hub("CONSOLE_DOWNGRADED", {"session_id": prev})
+                except Exception:  # noqa: BLE001
+                    pass
+            return {"status": "SUCCESS", "writer": sid, "previous_writer": prev}
+
         if cmd == "CONSOLE_SEND_BREAK":
             sid = data.get("session_id")
             ok = self.sessions.send_break(sid) if sid else False

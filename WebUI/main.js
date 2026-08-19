@@ -18000,11 +18000,17 @@ function serialEnsureConsoleDock() {
             <strong class="font-semibold">Serial Consoles</strong>
             <button id="serial-console-min" title="Minimize / restore the console dock" class="ml-2 px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Minimize</button>
             <button id="serial-console-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
+            <button id="serial-console-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
+            <label class="flex items-center gap-1 text-xs text-slate-400">Split:
+                <select id="serial-console-split-picker" title="View a second console side-by-side; typing goes to both" class="text-xs bg-[#1e1e1e] border border-slate-600 rounded px-1 py-0.5">
+                    <option value="">Single view</option>
+                </select>
+            </label>
             <span id="serial-console-status" class="ml-auto text-xs text-amber-400"></span>
             <button id="serial-console-closeall" title="Close all consoles" class="ml-3 text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
         </div>
         <div id="serial-console-tabs" class="flex items-stretch gap-1 px-2 pt-1 bg-[#2d2d2d] border-b border-slate-700 overflow-x-auto"></div>
-        <div id="serial-console-bodies" class="relative flex-1 bg-[#1e1e1e] overflow-hidden"></div>`;
+        <div id="serial-console-bodies" class="relative flex-1 flex bg-[#1e1e1e] overflow-hidden"></div>`;
     document.body.appendChild(modal);
     modal.querySelector('#serial-console-min').onclick = () => {
         const minimized = modal.getAttribute('data-min') === '1';
@@ -18035,7 +18041,44 @@ function serialEnsureConsoleDock() {
         else if (screen && screen.requestFullscreen) screen.requestFullscreen().catch(() => {});
     };
     modal.querySelector('#serial-console-closeall').onclick = () => serialCloseAllConsoles();
+    modal.querySelector('#serial-console-takeover').onclick = () => serialForceTakeover();
+    modal.querySelector('#serial-console-split-picker').onchange = (ev) => {
+        window._serialSplitPartner = ev.target.value || null;
+        serialReflowBodies();
+        serialRenderConsoleTabs();
+        serialSyncSerialHeader();
+    };
     return modal;
+}
+
+// Which OTHER pane's WS should also receive this pane's keystrokes: the two
+// halves of the active split pair broadcast to each other. Outside split view
+// (or for any console not in the pair) this is null — normal single-target typing.
+function serialBroadcastPeerKey(key) {
+    const partner = window._serialSplitPartner;
+    if (!partner) return null;
+    if (key === window._serialActiveConsole) return partner;
+    if (key === partner) return window._serialActiveConsole;
+    return null;
+}
+
+// Show/hide + size console bodies for the current single-view or split-view
+// layout. Split shows the active tab + its partner side-by-side (each 50%
+// width); single view gives the active tab the full body area. Fires a
+// window resize event afterward so anything watching viewport size (noVNC
+// elsewhere, etc.) notices the reflow.
+function serialReflowBodies() {
+    if (!window._serialConsoles) return;
+    const activeKey = window._serialActiveConsole;
+    const partnerKey = window._serialSplitPartner;
+    window._serialConsoles.forEach((e, k) => {
+        if (!e.bodyEl) return;
+        const visible = (k === activeKey) || (partnerKey && k === partnerKey);
+        e.bodyEl.classList.toggle('hidden', !visible);
+        e.bodyEl.classList.toggle('w-1/2', !!(visible && partnerKey));
+        e.bodyEl.classList.toggle('flex-1', !!(visible && !partnerKey));
+    });
+    try { window.dispatchEvent(new Event('resize')); } catch (err) {}
 }
 
 // The registry entry for the currently visible tab (or null).
@@ -18052,7 +18095,7 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal) {
     const modal = serialEnsureConsoleDock();
     const bodies = modal.querySelector('#serial-console-bodies');
     const bodyEl = document.createElement('div');
-    bodyEl.className = 'absolute inset-0 p-1 overflow-hidden bg-[#1e1e1e]';
+    bodyEl.className = 'hidden flex-1 p-1 overflow-hidden bg-[#1e1e1e] border-r border-slate-800';
     bodyEl.setAttribute('data-console-key', key);
     bodies.appendChild(bodyEl);
     const ro = !!session.read_only;
@@ -18073,14 +18116,35 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal) {
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => upd(ro ? 'Connected (read-only)' : 'Connected', 'text-green-400');
     ws.onmessage = (ev) => {
-        if (typeof ev.data === 'string') term.write(ev.data);
+        if (typeof ev.data === 'string') {
+            let ctl = null;
+            try { ctl = JSON.parse(ev.data); } catch (e) {}
+            if (ctl && ctl.type === 'downgraded') {
+                entry.ro = true;
+                upd('Connected (read-only) — control taken over', 'text-amber-400');
+                showToast(`Console control for ${portId} was taken over by another user`, 'warning');
+                return;
+            }
+            term.write(ev.data);
+        }
         else term.write(new Uint8Array(ev.data));
     };
     ws.onclose = (ev) => {
         try { term.write(`\r\n\x1b[33m[disconnected${ev.reason ? ': ' + ev.reason : ''}]\x1b[0m\r\n`); } catch (e) {}
         upd('Disconnected' + (ev.reason ? ': ' + ev.reason : ''), 'text-red-400');
     };
-    if (!ro) term.onData(d => { if (ws.readyState === 1) ws.send(d); });
+    // Always attached (not gated on the initial ro) so a later force-takeover
+    // can flip entry.ro live without re-registering the handler. Also
+    // broadcasts to the active split pair's OTHER pane, if this console is
+    // one half of it (see serialBroadcastPeerKey).
+    term.onData(d => {
+        if (!entry.ro && ws.readyState === 1) ws.send(d);
+        const peerKey = serialBroadcastPeerKey(entry.key);
+        const peer = peerKey && window._serialConsoles && window._serialConsoles.get(peerKey);
+        if (peer && !peer.ro && peer.ws && peer.ws.readyState === 1 && peer.ws !== ws) {
+            peer.ws.send(d);
+        }
+    });
     entry.ws = ws;
     serialRenderConsoleTabs();
     serialSyncSerialHeader();
@@ -18090,9 +18154,10 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal) {
 // tab strip + header and focuses the active terminal for keyboard input.
 function serialActivateConsole(key) {
     window._serialActiveConsole = key;
-    if (window._serialConsoles) {
-        window._serialConsoles.forEach((e, k) => { if (e.bodyEl) e.bodyEl.classList.toggle('hidden', k !== key); });
-    }
+    // Activating the current split partner as the primary tab would show the
+    // same console in both panes — drop the (now-redundant) split instead.
+    if (window._serialSplitPartner === key) window._serialSplitPartner = null;
+    serialReflowBodies();
     serialRenderConsoleTabs();
     serialSyncSerialHeader();
     const c = window._serialConsoles && window._serialConsoles.get(key);
@@ -18116,9 +18181,11 @@ function serialRenderConsoleTabs() {
         const label = escapeHtml(e.portId || e.key);
         const kAttr = escapeHtml(e.key);
         const roBadge = e.ro ? '<span class="ml-1 px-1 rounded bg-amber-600 text-white text-[9px]">RO</span>' : '';
+        const splitBadge = e.key === window._serialSplitPartner
+            ? '<span class="ml-1 px-1 rounded bg-sky-600 text-white text-[9px]" title="Second pane in split view">⇄</span>' : '';
         return `<div data-key="${kAttr}" class="serial-console-tab flex items-center gap-2 px-3 py-1 rounded-t border-b-2 cursor-pointer text-xs whitespace-nowrap ${tabCls}">
             <span class="w-2 h-2 rounded-full ${dot}"></span>
-            <span class="font-mono">${label}</span>${roBadge}
+            <span class="font-mono">${label}</span>${roBadge}${splitBadge}
             <button data-close="${kAttr}" title="Close this console" class="ml-1 text-slate-500 hover:text-red-400 text-sm leading-none">&times;</button>
         </div>`;
     }).join('');
@@ -18129,6 +18196,18 @@ function serialRenderConsoleTabs() {
             serialActivateConsole(el.getAttribute('data-key'));
         };
     });
+    // Repopulate the split picker with every OTHER open console (can't split
+    // a console with itself); preserve the current partner selection if it's
+    // still open, else fall back to "Single view".
+    const picker = modal.querySelector('#serial-console-split-picker');
+    if (picker) {
+        const partner = window._serialSplitPartner;
+        const others = entries.filter(e => e.key !== active);
+        picker.innerHTML = '<option value="">Single view</option>' + others.map(e =>
+            `<option value="${escapeHtml(e.key)}">${escapeHtml(e.portId || e.key)}</option>`).join('');
+        picker.value = (partner && others.some(e => e.key === partner)) ? partner : '';
+        if (picker.value !== partner) window._serialSplitPartner = picker.value || null;
+    }
 }
 
 // Sync the header status line to the active console's state.
@@ -18143,8 +18222,41 @@ function serialSyncSerialHeader() {
         txt = (c.portId || '') + ' — ' + c.statusText;
         if (c.session && c.session.settings && c.session.settings.baud) txt += '  @' + c.session.settings.baud;
     }
+    if (window._serialSplitPartner) {
+        const p = window._serialConsoles && window._serialConsoles.get(window._serialSplitPartner);
+        txt += `  · ⇄ broadcasting with ${(p && p.portId) || window._serialSplitPartner}`;
+    }
     statusEl.textContent = txt;
     statusEl.className = 'ml-auto text-xs ' + (c ? c.statusCls : 'text-slate-400');
+    const toBtn = modal.querySelector('#serial-console-takeover');
+    if (toBtn) toBtn.classList.toggle('hidden', !(c && c.ro));
+}
+
+// Force-takeover: claim the write lock for the active console's session,
+// evicting whoever currently holds it. Server-gated to edit-tier regardless
+// of what /api/console/open itself required.
+async function serialForceTakeover() {
+    const c = serialActiveConsole();
+    if (!c) return;
+    const btn = document.getElementById('serial-console-takeover');
+    if (btn) { btn.disabled = true; btn.textContent = 'Taking over…'; }
+    try {
+        const res = await fetch(`/api/console/${encodeURIComponent(c.session.session_id)}/takeover`, {
+            method: 'POST', credentials: 'same-origin',
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(data.detail || 'Takeover failed', 'error'); return; }
+        c.ro = false;
+        c.statusText = 'Connected (you have control)';
+        c.statusCls = 'text-green-400';
+        showToast(`Console control taken over for ${c.portId}`, 'success');
+        serialRenderConsoleTabs();
+        serialSyncSerialHeader();
+    } catch (e) {
+        showToast('Takeover failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Take Over'; }
+    }
 }
 
 // Close one serial console: close its WS, dispose the xterm, drop its body +
@@ -18160,10 +18272,12 @@ function serialCloseConsole(key) {
         reg.delete(key);
     }
     if (reg.size === 0) { serialCloseAllConsoles(); return; }
+    if (window._serialSplitPartner === key) window._serialSplitPartner = null;
     if (window._serialActiveConsole === key) {
         serialActivateConsole(reg.keys().next().value);
     } else {
         serialRenderConsoleTabs();
+        serialReflowBodies();
     }
 }
 
@@ -18175,6 +18289,7 @@ function serialCloseAllConsoles() {
         reg.clear();
     }
     window._serialActiveConsole = null;
+    window._serialSplitPartner = null;
     const modal = document.getElementById('serial-console-modal');
     if (modal) modal.remove();
     if (typeof currentView !== 'undefined' && currentView === 'console' && typeof loadConsoleData === 'function') loadConsoleData();
@@ -18459,12 +18574,14 @@ function pxmxEnsureConsoleDock() {
             <button id="pxmx-vnc-min" title="Minimize / restore the console dock" class="ml-2 px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Minimize</button>
             <button id="pxmx-vnc-cad" title="Send Ctrl+Alt+Del to the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Ctrl+Alt+Del</button>
             <button id="pxmx-vnc-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
+            <button id="pxmx-vnc-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
             <span id="pxmx-vnc-status" class="ml-auto text-xs text-amber-400"></span>
             <button id="pxmx-vnc-closeall" title="Close all consoles" class="ml-3 text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
         </div>
         <div id="pxmx-vnc-tabs" class="flex items-stretch gap-1 px-2 pt-1 bg-[#16213e] border-b border-slate-700 overflow-x-auto"></div>
         <div id="pxmx-vnc-bodies" class="relative flex-1 bg-black overflow-hidden"></div>`;
     document.body.appendChild(modal);
+    modal.querySelector('#pxmx-vnc-takeover').onclick = () => pxmxForceTakeover();
     modal.querySelector('#pxmx-vnc-min').onclick = () => {
         const minimized = modal.getAttribute('data-min') === '1';
         const tabsEl = modal.querySelector('#pxmx-vnc-tabs');
@@ -18516,7 +18633,8 @@ function pxmxAddConsoleTab(vm, RFB, session) {
     bodyEl.className = 'absolute inset-0 bg-black';
     bodyEl.setAttribute('data-console-key', key);
     bodies.appendChild(bodyEl);
-    const entry = { key, vm, session, rfb: null, bodyEl, statusText: 'Connecting…', statusCls: 'text-amber-400', viewers: [] };
+    const ro = !!session.read_only;
+    const entry = { key, vm, session, ro, rfb: null, bodyEl, statusText: 'Connecting…', statusCls: 'text-amber-400', viewers: [] };
     window._pxmxConsoles.set(key, entry);
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${proto}//${location.host}/ws/console/${encodeURIComponent(session.session_id)}?token=${encodeURIComponent(session.ws_token)}`;
@@ -18530,7 +18648,8 @@ function pxmxAddConsoleTab(vm, RFB, session) {
         const rfb = new RFB(bodyEl, wsUrl, { credentials: { password: vncPassword } });
         rfb.scaleViewport = true;
         rfb.resizeSession = false;
-        rfb.addEventListener('connect', () => upd('Connected', 'text-green-400'));
+        rfb.viewOnly = ro;
+        rfb.addEventListener('connect', () => upd(ro ? 'Connected (read-only)' : 'Connected', 'text-green-400'));
         rfb.addEventListener('disconnect', (e) => upd('Disconnected: ' + ((e.detail && e.detail.reason) || 'closed'), 'text-red-400'));
         rfb.addEventListener('credentialsrequired', () => {
             // Ticket already supplied above; if Proxmox still asks, re-send it
@@ -18558,6 +18677,19 @@ function pxmxStartViewerPoll(entry) {
             const r = await setupFetch(`/api/pxmx/console/viewers?${qs}`);
             const data = await r.json().catch(() => ({}));
             entry.viewers = (data && Array.isArray(data.viewers)) ? data.viewers : [];
+            // Piggyback on the presence poll to notice a takeover elsewhere:
+            // if OUR session held the write lock and no longer does, flip to
+            // view-only live (there's no separate push channel for VNC — the
+            // RFB object owns its WebSocket for the raw binary protocol, so a
+            // side-band text frame isn't an option the way it is for serial).
+            const self = entry.viewers.find(v => v.session_id === entry.session.session_id);
+            if (self && entry.rfb && !self.is_writer && !entry.ro) {
+                entry.ro = true;
+                entry.rfb.viewOnly = true;
+                entry.statusText = 'Connected (read-only) — control taken over';
+                entry.statusCls = 'text-amber-400';
+                showToast(`Console control for ${vm.name || vm.vmid || ''} was taken over by another user`, 'warning');
+            }
         } catch (e) {
             entry.viewers = entry.viewers || [];
         }
@@ -18568,6 +18700,35 @@ function pxmxStartViewerPoll(entry) {
     };
     poll();
     entry.presenceTimer = setInterval(poll, 5000);
+}
+
+// Force-takeover: claim the write lock for the active console's session,
+// evicting whoever currently holds it. Server-gated to edit-tier + VM
+// ownership regardless of what opening a read-only session required.
+async function pxmxForceTakeover() {
+    const c = pxmxActiveConsole();
+    if (!c) return;
+    const btn = document.getElementById('pxmx-vnc-takeover');
+    if (btn) { btn.disabled = true; btn.textContent = 'Taking over…'; }
+    try {
+        const res = await setupFetch(`/api/pxmx/console/${encodeURIComponent(c.session.session_id)}/takeover`, {
+            method: 'POST',
+            body: JSON.stringify({ agent_id: (c.vm && c.vm.agent_id) || '' }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(data.detail || 'Takeover failed', 'error'); return; }
+        c.ro = false;
+        if (c.rfb) c.rfb.viewOnly = false;
+        c.statusText = 'Connected (you have control)';
+        c.statusCls = 'text-green-400';
+        showToast(`Console control taken over for ${(c.vm && (c.vm.name || c.vm.vmid)) || ''}`, 'success');
+        pxmxRenderConsoleTabs();
+        pxmxSyncConsoleHeader();
+    } catch (e) {
+        showToast('Takeover failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Take Over'; }
+    }
 }
 
 // Show one tab's console, hide the rest (their WS stays open). Re-renders the
@@ -18607,9 +18768,10 @@ function pxmxRenderConsoleTabs() {
         const viewerBadge = vc > 1
             ? `<span title="${vc} viewers on this console" class="ml-1 px-1 rounded bg-[#01A982]/20 text-[#01A982] text-[10px]">👁 ${vc}</span>`
             : '';
+        const roBadge = e.ro ? '<span class="ml-1 px-1 rounded bg-amber-600 text-white text-[9px]">RO</span>' : '';
         return `<div data-key="${kAttr}" class="pxmx-vnc-tab flex items-center gap-2 px-3 py-1 rounded-t border-b-2 cursor-pointer text-xs whitespace-nowrap ${tabCls}">
             <span class="w-2 h-2 rounded-full ${dot}"></span>
-            <span>${label}</span>${viewerBadge}
+            <span>${label}</span>${viewerBadge}${roBadge}
             <button data-close="${kAttr}" title="Close this console" class="ml-1 text-slate-500 hover:text-red-400 text-sm leading-none">&times;</button>
         </div>`;
     }).join('');
@@ -18636,6 +18798,8 @@ function pxmxSyncConsoleHeader() {
     }
     statusEl.textContent = txt;
     statusEl.className = 'ml-auto text-xs ' + (c ? c.statusCls : 'text-slate-400');
+    const toBtn = modal.querySelector('#pxmx-vnc-takeover');
+    if (toBtn) toBtn.classList.toggle('hidden', !(c && c.ro));
 }
 
 // Close one console: disconnect its RFB (→ hub VNC_DISCONNECT → agent drops the

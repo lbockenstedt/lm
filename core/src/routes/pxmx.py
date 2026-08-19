@@ -1626,6 +1626,12 @@ def register(app, hub, ctx):
             "unique_id": unique_id,
             "username": sess.get("username") or sess.get("user_id") or "",
         })
+        # Write lock: first viewer of this VM becomes the writer; everyone
+        # else opens read-only (their VNC_FRAME_DOWN input is dropped by the
+        # relay below) until they force a takeover. QEMU still multiplexes
+        # the SCREEN to every viewer regardless — only mouse/keyboard input
+        # is gated.
+        is_writer = hub.vnc_attach(unique_id, session_id)
         try:
             # request_response (NOT send_to_spoke_command): the spoke→agent
             # opens the Proxmox vncwebsocket synchronously and returns the
@@ -1674,7 +1680,7 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=502, detail=f"failed to start console: {detail}")
             ticket = str(vnc_res.get("ticket") or "")
         return {"session_id": session_id, "ws_token": ws_token,
-                "ticket": ticket, "expires_in": 60,
+                "ticket": ticket, "expires_in": 60, "read_only": not is_writer,
                 # Phase 2 edge-proxy relay descriptor. A co-located proxy snoops this
                 # to relay console bytes straight to the spoke (browser↔proxy↔spoke↔
                 # agent↔Proxmox), keeping the hub out of the byte path. Ignored by the
@@ -1710,3 +1716,37 @@ def register(app, hub, ctx):
         hub = app.state.hub
         viewers = hub.vnc_viewers(unique_id)
         return {"unique_id": unique_id, "count": len(viewers), "viewers": viewers}
+
+    @app.post("/api/pxmx/console/{session_id}/takeover")
+    async def pxmx_console_takeover(session_id: str, request: Request):
+        """Forcibly become the write-lock holder for an already-open, read-only
+        VNC console session, evicting whoever currently holds it. Same
+        ownership gate as opening a console (control-tier, _assert_vm_owned) —
+        a viewer who can open the console read-only is not automatically
+        allowed to force a takeover from someone else."""
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        hub = app.state.hub
+        vsess = hub.get_vnc_session(session_id)
+        if not vsess:
+            raise HTTPException(status_code=404, detail="console session not found or expired")
+        unique_id = str(vsess.get("unique_id") or "")
+        parts = unique_id.split("/")
+        if len(parts) < 3:
+            raise HTTPException(status_code=400, detail="console session has no valid unique_id")
+        node = parts[1]
+        try:
+            vmid = int(parts[2])
+        except ValueError:
+            raise HTTPException(status_code=400, detail="invalid vmid in unique_id")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        await _assert_vm_owned(request, unique_id=unique_id, vmid=vmid, node=node,
+                               agent_id=str((body or {}).get("agent_id") or "").strip())
+        previous_writer = hub.vnc_takeover(unique_id, session_id)
+        if previous_writer:
+            await hub.notify_vnc_downgraded(previous_writer)
+        return {"status": "ok", "session_id": session_id, "previous_writer": previous_writer}

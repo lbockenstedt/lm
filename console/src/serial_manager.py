@@ -505,6 +505,17 @@ class PortChannel:
             return True
         return False
 
+    def force_attach(self, session_id: str) -> Optional[str]:
+        """Forcibly reassign the writer lock to ``session_id`` (must already
+        be an attached session), evicting whoever currently holds it. Returns
+        the PREVIOUS writer's session_id, or None if the channel had no
+        writer or ``session_id`` already held it."""
+        prev = self.writer
+        if prev == session_id:
+            return None
+        self.writer = session_id
+        return prev
+
     def detach(self, session_id: str) -> bool:
         """Detach a session. Returns True if the channel is now empty (closeable)."""
         self.sessions.discard(session_id)
@@ -612,6 +623,15 @@ class SessionManager:
         port_id = self._session_port.get(session_id)
         chan = self._channels.get(port_id) if port_id else None
         return bool(chan and chan.write(session_id, data))
+
+    def takeover(self, session_id: str) -> Optional[str]:
+        """Forcibly make an already-attached ``session_id`` the writer for its
+        port. Returns the dispossessed session_id, or None if there was no
+        prior writer / the caller already held it / the session isn't
+        attached to any port."""
+        port_id = self._session_port.get(session_id)
+        chan = self._channels.get(port_id) if port_id else None
+        return chan.force_attach(session_id) if chan else None
 
     def send_break(self, session_id: str) -> bool:
         port_id = self._session_port.get(session_id)
