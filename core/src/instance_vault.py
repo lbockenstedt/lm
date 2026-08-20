@@ -42,8 +42,9 @@ SECRET_FIELDS = {
         # "Login" secret marked as an OAuth account (Credential Vault checkbox)
         # carries client_secret; a plain login carries user/username + password.
         # Only the field(s) the resolved secret actually carries are overlaid, so
-        # the spoke picks the grant from what is present. client_id stays inline
-        # on the instance (non-secret) and is never sourced/stripped here.
+        # the spoke picks the grant from what is present. client_id is NON-secret
+        # and is overlaid via NONSECRET_VAULT_FIELDS (below) — not stripped here —
+        # so a Credential Vault "OAuth account" secret can supply it too.
         "client_secret": ("client_secret", "secret", "apikey", "api_key", "token"),
         "user":          ("user", "username"),
         "password":      ("password", "fallback_password"),
@@ -60,9 +61,33 @@ SECRET_FIELDS = {
 }
 
 
+# Per-storage-key map of NON-secret fields that a vault credential MAY also
+# carry and that should be overlaid from it when present. Unlike SECRET_FIELDS
+# these fields are NOT stripped from the inline record on save (they are not
+# secrets) — the inline value is preserved and only *overridden* when the
+# resolved vault secret actually provides the field. This lets a Credential
+# Vault "OAuth account" secret supply BOTH client_id and client_secret for a
+# ClearPass API client (grant_type=client_credentials needs both) even though
+# client_id itself is not a secret. When the referenced secret is a plain
+# username/password login (no client_id), the inline client_id is kept as-is.
+NONSECRET_VAULT_FIELDS = {
+    "nac_instances": {
+        "client_id": ("client_id", "clientid", "client"),
+    },
+}
+
+
 def secret_field_names(storage_key):
     """The record fields that a vault credential may supply for this product."""
     return tuple((SECRET_FIELDS.get(storage_key) or {}).keys())
+
+
+def _vault_overlay_fields(storage_key):
+    """Merged map of all fields (secret + non-secret) that may be overlaid from
+    a resolved vault secret for this product."""
+    merged = dict(SECRET_FIELDS.get(storage_key) or {})
+    merged.update(NONSECRET_VAULT_FIELDS.get(storage_key) or {})
+    return merged
 
 
 def _normalize_ref(record):
@@ -138,7 +163,7 @@ async def overlay(hub, record, storage_key):
     out = copy.deepcopy(record)
     out.pop("vault_credential", None)
     if isinstance(value, dict):
-        for field, aliases in (SECRET_FIELDS.get(storage_key) or {}).items():
+        for field, aliases in _vault_overlay_fields(storage_key).items():
             got = _extract(value, aliases)
             if got:
                 out[field] = got

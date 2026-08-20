@@ -54,15 +54,41 @@ def test_overlay_fills_nac_client_secret(monkeypatch):
 
 
 def test_overlay_nac_oauth_fills_client_secret(monkeypatch):
-    # An OAuth2 account secret (client_id + client_secret) backs the client
-    # secret; client_id stays inline on the instance (non-secret, not sourced).
+    # An OAuth2 account secret (client_id + client_secret) backs BOTH the client
+    # id and secret — grant_type=client_credentials needs both. The linked vault
+    # credential is the source of truth, so its client_id overlays the inline one.
     _patch_get(monkeypatch, {"client_id": "vault-cid", "client_secret": "vaulted-secret"})
     inst = {"host": "https://cppm", "client_id": "cid",
             "vault_credential": {"bucket": "acme", "name": "cppm"}}
     out = _run(iv.overlay(object(), inst, "nac_instances"))
     assert out["client_secret"] == "vaulted-secret"
-    assert out["client_id"] == "cid"               # inline preserved, not overlaid
+    assert out["client_id"] == "vault-cid"         # vault-carried client_id overlaid
     assert "user" not in out and "password" not in out
+
+
+def test_overlay_nac_oauth_fills_empty_inline_client_id(monkeypatch):
+    # Production case: the instance's inline client_id is empty because the
+    # Credential Vault OAuth secret carries it. Without sourcing client_id from
+    # the vault the spoke had no client_id → client_credentials grant skipped →
+    # "No OAuth2 credentials available" → ClearPass 403.
+    _patch_get(monkeypatch, {"client_id": "vault-cid", "client_secret": "vaulted-secret"})
+    inst = {"host": "https://cppm", "client_id": "",
+            "vault_credential": {"bucket": "lrb", "name": "Clearpass API"}}
+    out = _run(iv.overlay(object(), inst, "nac_instances"))
+    assert out["client_id"] == "vault-cid"
+    assert out["client_secret"] == "vaulted-secret"
+
+
+def test_overlay_nac_login_preserves_inline_client_id(monkeypatch):
+    # A plain username/password login secret does NOT carry client_id, so an
+    # inline client_id is preserved (not clobbered) — no regression for the
+    # password grant.
+    _patch_get(monkeypatch, {"username": "svc", "password": "pw"})
+    inst = {"host": "https://cppm", "client_id": "keep-me",
+            "vault_credential": {"bucket": "acme", "name": "x"}}
+    out = _run(iv.overlay(object(), inst, "nac_instances"))
+    assert out["client_id"] == "keep-me"
+    assert out["user"] == "svc" and out["password"] == "pw"
 
 
 def test_overlay_nac_login_maps_user_password(monkeypatch):
