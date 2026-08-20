@@ -653,10 +653,24 @@ def register(app, hub, ctx):
 
     @app.post("/api/henet/sync")
     async def henet_sync(request: Request):
-        """Replace the managed set and push every A/AAAA record to HE.NET."""
+        """Replace the managed set and push every A/AAAA record to HE.NET.
+
+        HE authenticates each dyndns push with the record's OWN per-record DDNS
+        key — the account login is NOT a valid push password. So an explicit
+        ``ddns_key`` in the body (the shared key the operator set on their HE
+        records, entered in the Sync-all dialog) is used verbatim as the push
+        password for every record; only when none is supplied do we fall back to
+        the assigned credential (which works when that credential is itself a
+        real shared DDNS key). Sending the account-login password as the key is
+        exactly what made Sync all report "badauth" for every record."""
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
-        await _henet_resolve_vault_cred(request, body)
+        typed_key = str(body.get("ddns_key") or "").strip()
+        if typed_key:
+            body["ddns_key"] = typed_key  # operator-supplied shared key wins, no vault lookup
+        else:
+            body.pop("ddns_key", None)
+            await _henet_resolve_vault_cred(request, body)
         return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_SYNC", body,
                                   log_name="henet_sync")
 

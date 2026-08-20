@@ -24356,15 +24356,44 @@ async function syncHenet() {
         .map(r => ({ name: r.name, type: r.type, value: r.value, ttl: r.ttl }));
     if (!records.length) { showToast('No A/AAAA records under management yet — use “⇩ Import existing” to pull in the records already in your HE.NET zone.', 'error'); return; }
     if (!window._henetAssignedCred) { showToast('Assign an HE.NET DDNS credential first', 'error'); return showHenetCredModal(); }
-    if (!await showConfirmToast(`Re-push all ${records.length} managed A/AAAA record(s) to HE.NET using the assigned DDNS credential?\n\nNote: the assigned credential is your HE.NET account login, not a per-record key — HE.NET only accepts each record's OWN key (see Add/Edit Record). Sync all will likely report "badauth" for every record until per-record keys are supported here; use Add/Edit on one record at a time in the meantime.`)) return;
+    // HE authenticates each push with the record's OWN dyndns key — the account
+    // login (what powers Import) is NOT a valid push password, which is why a
+    // plain "sync with the assigned credential" returned badauth for every
+    // record. Prompt for the shared DDNS key the operator set on their HE
+    // records and push all of them with it (mirrors the per-record key in
+    // Add/Edit; never stored). Left blank, fall back to the assigned credential
+    // (correct only when that credential is itself a real shared DDNS key).
+    const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
+    openModal('henet-sync-modal', `
+        <h3 class="text-lg font-bold text-[#263040]">Sync all to HE.NET</h3>
+        <p class="text-sm text-slate-500">Re-push all <b>${records.length}</b> managed A/AAAA record(s) to HE.NET.</p>
+        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Shared DDNS key</label>
+            <input id="henet-sync-key" type="password" autocomplete="off" class="${inputCls}" placeholder="the dynamic-DNS key set on these records">
+        </div>
+        <p class="text-[11px] text-slate-400">HE.NET authenticates each push with the record's <b>own</b> dynamic-DNS key — <b>not</b> the account login. Enter it once here and every record is pushed with it (works when your records share one key). Records with different keys must be pushed individually via <b>Edit</b>. The key is never stored. Leave blank to try the assigned credential (only works if it is itself a real DDNS key).</p>
+        <div class="flex justify-end gap-2 pt-2">
+            <button onclick="_henetSyncPush()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Push all</button>
+            <button onclick="document.getElementById('henet-sync-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+}
+
+async function _henetSyncPush() {
+    const records = (window._henetRecords || []).filter(r => r.type === 'A' || r.type === 'AAAA')
+        .map(r => ({ name: r.name, type: r.type, value: r.value, ttl: r.ttl }));
+    if (!records.length) { document.getElementById('henet-sync-modal')?.remove(); return; }
+    const key = document.getElementById('henet-sync-key')?.value?.trim() || '';
+    const payload = { records };
+    if (key) payload.ddns_key = key;
+    document.getElementById('henet-sync-modal')?.remove();
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/sync', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ records }),
+            body: JSON.stringify(payload),
         });
         if (ok && (d.status === 'SUCCESS' || d.status === 'PARTIAL')) {
-            showToast(`Synced — ${d.pushed || 0} pushed${d.errors ? `, ${d.errors.length} error(s)` : ''}`, d.errors ? 'error' : 'success');
+            const nErr = d.errors ? d.errors.length : 0;
+            showToast(`Synced — ${d.pushed || 0} pushed${nErr ? `, ${nErr} error(s)` : ''}`, nErr ? 'error' : 'success');
             loadHenet();
         } else showToast('Error: ' + (detail || d?.message || 'Sync failed'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
