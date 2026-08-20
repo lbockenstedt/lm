@@ -147,3 +147,26 @@ def test_vm_outside_tenant_subnet_excluded():
     )
     out = _summary(hub, _ctx(_LRB_PREFIXES))
     assert out["vms"] == 1
+
+
+def test_tag_attributed_vm_off_subnet_counted():
+    """The reported bug: on a SHARED host a tenant's VMs are attributed by
+    Proxmox TAG, and their IPs are typically OFF the tenant's NetBox subnets.
+    The Overview must count a VM tagged for the tenant even when its IP is not in
+    the tenant's prefixes (the subnet-only filter dropped these → undercount).
+    Mirrors the Hypervisors VM page (filter_hypervisor_vms tag override)."""
+    vms = [
+        _vm(401, "10.10.0.41"),                       # subnet match
+        {**_vm(402, "192.168.50.2"), "tags": ["lrb"]},   # off-subnet, tagged lrb
+        {**_vm(403, None), "tags": ["lrb"]},             # stopped/no-IP, tagged lrb
+        _vm(404, "192.168.50.9"),                     # off-subnet, untagged → excluded
+    ]
+    hub = _Hub(
+        tenants=_TENANTS,
+        module_metadata={"shared-pxmx": {"tenant_id": "shared"}},
+        plural={"lrb": ["shared-pxmx"]},
+        global_spoke=None,
+        responses={("shared-pxmx", "PXMX_LIST_VMS"): {"vms": vms}},
+    )
+    out = _summary(hub, _ctx(_LRB_PREFIXES))
+    assert out["vms"] == 3  # 401 (subnet) + 402/403 (tag) — 404 stays excluded

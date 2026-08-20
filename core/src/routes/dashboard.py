@@ -220,13 +220,24 @@ def register(app, hub, ctx):
                     _seen[_key] = _v
         all_vms  = list(_seen.values())
         sessions_list = sessions_r.get("sessions", sessions_r.get("data", []))
-        # Scope the VM + active-session counts by the tenant's subnets so the
-        # dashboard matches the (tenant-scoped) hypervisor + Access Tracker views,
-        # not the global totals. VMs filter on their ``ips`` list (a VM with no
-        # concrete IPs, e.g. stopped, is shown — can't filter, err on showing).
+        # Scope the VM + active-session counts by the tenant so the dashboard
+        # matches the (tenant-scoped) hypervisor + Access Tracker views, not the
+        # global totals.
         sess_prefixes = await _resolve_prefixes_for_tenant(hub, scoping.get("tenant_id"))
-        if sess_prefixes and _filter_enabled(hub, "hypervisor"):
-            all_vms = filter_items_by_prefixes(all_vms, sess_prefixes, ["ips"])
+        # Hypervisor VMs attribute by Proxmox TAG and template-pool too, NOT just
+        # subnet — a VM tagged for this tenant on a SHARED host (whose IPs are off
+        # the tenant's subnets, or which reports no live IP) must still count.
+        # Mirror access.filter_tenant's hypervisor branch (filter_hypervisor_vms)
+        # here; the previous subnet-only filter_items_by_prefixes dropped
+        # tag-attributed VMs and undercounted a tenant hosted on a shared spoke
+        # (e.g. LRB showing 4 VMs instead of its real count). No prefixes → count
+        # the spoke-side tag-filtered list as-is (same as the hypervisor branch,
+        # which returns unfiltered when a tenant has none).
+        if _filter_enabled(hub, "hypervisor") and sess_prefixes:
+            all_vms = access.filter_hypervisor_vms(
+                all_vms, sess_prefixes,
+                template_pools=access._template_pools(hub),
+                tenant_tags=access._tenant_tag_set(hub, scoping.get("tenant_id")))
         # NAC sessions come from the SHARED (global) nac spoke — CPPM_GET_ACCESS_TRACKER
         # returns every tenant's sessions, so subnet scoping is the ONLY isolation.
         # A tenant with no bound prefixes must therefore show 0, NOT the global list
