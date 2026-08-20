@@ -1,9 +1,10 @@
 """Per-instance Credential Vault linkage for module connection secrets.
 
-Network-device (``nw_devices``) and NAC/ClearPass (``nac_instances``) records
-may carry a **non-secret** ``vault_credential`` = ``{"bucket": ..., "name": ...}``
-reference INSTEAD of an inline plaintext secret (client secret / device
-password / API token). The hub resolves the secret VALUE unattended via
+Network-device (``nw_devices``), NAC/ClearPass (``nac_instances``) and
+NetBox/IPAM (``ipam_instances``) records may carry a **non-secret**
+``vault_credential`` = ``{"bucket": ..., "name": ...}`` reference INSTEAD of an
+inline plaintext secret (client secret / device password / NetBox API token).
+The hub resolves the secret VALUE unattended via
 :func:`cred_vault.automation_get` and overlays it onto the config **only at the
 moment it is pushed to the bound spoke**, so:
 
@@ -48,6 +49,16 @@ SECRET_FIELDS = {
         "client_secret": ("client_secret", "secret", "apikey", "api_key", "token"),
         "user":          ("user", "username"),
         "password":      ("password", "fallback_password"),
+    },
+    "ipam_instances": {
+        # A NetBox (IPAM) connection authenticates with a single API token. The
+        # token may be stored as a Credential Vault "Token" secret ({token}),
+        # an "API key" secret ({apikey}), or a "Generic" key/value secret — so
+        # accept the same aliases as the nw_devices REST token below. The
+        # NetBox URL + verify_ssl are NON-secret and always stay inline on the
+        # record. Mirrors the ipam_instances projection in nw.py/tenant_devices.py
+        # (record field `api_token`).
+        "api_token": ("api_token", "token", "apikey", "api_key", "key", "value"),
     },
     "nw_devices": {
         # Network-device login password / enable secret / REST token / SNMP

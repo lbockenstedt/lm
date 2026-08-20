@@ -111,6 +111,16 @@ value.
   `console-auto-credentials` (`type=console`, `mode=hub`); `POST
   /api/console/credentials/to-vault` migrates existing creds into the vault
   (`console.py:1107-1136`). See [console.md](console.md).
+- **Module connections (NAC / network devices / IPAM)** — a saved connection
+  instance may carry a `vault_credential` `{bucket, name}` reference instead of an
+  inline secret. `core/src/instance_vault.py` (`SECRET_FIELDS`) maps each
+  product's secret fields to the vault-secret aliases: **ClearPass**
+  (`nac_instances`) → `client_secret` / `user` / `password`; **network devices**
+  (`nw_devices`) → `password` / `enable_secret` / `api_token` / `snmp_community`;
+  **NetBox/IPAM** (`ipam_instances`) → `api_token`. On save the inline secret is
+  stripped and the ref validated; at push time `instance_vault.overlay()` fills
+  the field(s) the resolved secret carries before the config reaches the spoke.
+  See [cppm.md](cppm.md) and [netbox.md](netbox.md).
 
 ## WebUI
 

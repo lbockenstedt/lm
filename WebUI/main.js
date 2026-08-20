@@ -25784,6 +25784,7 @@ const INSTANCE_PRODUCTS = {
         endpoint: '/setup/ipam-instances',
         listId: 'ipam-instances-list',
         moduleType: 'ipam',
+        vaultPicker: true,
         rowSummary: inst => `${inst.url || '—'}`,
         fields: [
             { id: 'url', label: 'NetBox URL', placeholder: 'http://netbox.example.com' },

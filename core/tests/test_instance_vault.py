@@ -1,6 +1,6 @@
 """Unit tests for ``instance_vault`` — the per-instance Credential Vault linkage
-that overlays NAC/ClearPass and NW network-device secrets onto the spoke config
-at push time (and keeps the plaintext out of ``global_config``).
+that overlays NAC/ClearPass, NW network-device and NetBox/IPAM secrets onto the
+spoke config at push time (and keeps the plaintext out of ``global_config``).
 """
 import asyncio
 import os
@@ -122,6 +122,47 @@ def test_overlay_resolve_failure_degrades(monkeypatch):
     assert "password" not in out and "api_token" not in out
 
 
+def test_overlay_fills_ipam_api_token_from_token_secret(monkeypatch):
+    # A NetBox (IPAM) connection's API token backed by a Vault "Token" secret
+    # ({token}); the non-secret URL/verify stay inline and the marker is dropped.
+    _patch_get(monkeypatch, {"token": "nb-token"})
+    inst = {"url": "https://netbox", "verify_ssl": True,
+            "vault_credential": {"bucket": "acme", "name": "netbox"}}
+    out = _run(iv.overlay(object(), inst, "ipam_instances"))
+    assert out["api_token"] == "nb-token"
+    assert out["url"] == "https://netbox"          # non-secret preserved
+    assert "vault_credential" not in out           # marker never reaches spoke
+    assert "vault_credential" in inst              # original untouched
+
+
+def test_overlay_fills_ipam_api_token_from_apikey_secret(monkeypatch):
+    # A Vault "API key" secret ({apikey}) also supplies the NetBox api_token.
+    _patch_get(monkeypatch, {"apikey": "nb-key"})
+    inst = {"url": "https://netbox",
+            "vault_credential": {"bucket": "acme", "name": "netbox"}}
+    out = _run(iv.overlay(object(), inst, "ipam_instances"))
+    assert out["api_token"] == "nb-key"
+
+
+def test_strip_drops_ipam_api_token_when_ref_present():
+    inst = {"url": "https://netbox", "api_token": "inline",
+            "vault_credential": {"bucket": "acme", "name": "netbox"}}
+    iv.strip_inline_secrets(inst, "ipam_instances")
+    assert "api_token" not in inst                  # secret dropped from config
+    assert inst["url"] == "https://netbox"          # non-secret kept
+    assert inst["vault_credential"] == {"bucket": "acme", "name": "netbox"}
+
+
+def test_validate_ipam_unusable_secret_is_400(monkeypatch):
+    _patch_get(monkeypatch, {"unrelated": "x"})  # no usable field for ipam
+    with pytest.raises(HTTPException) as ei:
+        _run(iv.validate_ref(object(),
+                             {"vault_credential": {"bucket": "acme", "name": "n"}},
+                             {"user": {"tenants": ["acme"]}}, is_admin=False,
+                             storage_key="ipam_instances"))
+    assert ei.value.status_code == 400
+
+
 def test_overlay_many(monkeypatch):
     _patch_get(monkeypatch, {"password": "p"})
     devs = [{"address": "1", "vault_credential": {"bucket": "b", "name": "n"}},
@@ -150,14 +191,14 @@ def test_strip_noop_without_ref_keeps_inline():
 
 # ── validate_ref ─────────────────────────────────────────────────────────────
 def test_validate_noop_for_unsupported_product(monkeypatch):
-    # ipam/ldap have no vault-backed secret fields → always a no-op even with a ref.
+    # ldap has no vault-backed secret fields → always a no-op even with a ref.
     called = {"n": 0}
     async def _fake(hub, b, n):
         called["n"] += 1
         return {}
     monkeypatch.setattr(cred_vault, "automation_get", _fake)
     _run(iv.validate_ref(object(), {"vault_credential": {"bucket": "b", "name": "n"}},
-                         {"user": {"tenants": []}}, is_admin=True, storage_key="ipam_instances"))
+                         {"user": {"tenants": []}}, is_admin=True, storage_key="ldap_instances"))
     assert called["n"] == 0
 
 
