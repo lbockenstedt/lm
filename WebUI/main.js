@@ -7582,6 +7582,8 @@ function _elevTextOn(hex) {
 function _elevFaceTable(units, faceLabel) {
     // units: [{unit, device|null}] top→bottom. Merge consecutive same-device-id
     // units into one rowspan cell (multi-U device); empty units stay blank.
+    // Row height is driven by the shared `--elev-uh` CSS var set by _fitElevation
+    // so the whole rack scales to fit the viewport (see showRackElevationModal).
     const rows = [];
     let i = 0;
     while (i < units.length) {
@@ -7591,12 +7593,13 @@ function _elevFaceTable(units, faceLabel) {
         if (dev && dev.id != null) {
             while (i + span < units.length && units[i + span].device && units[i + span].device.id === dev.id) span++;
         }
-        const label = `<td class="px-2 py-1 text-[10px] text-slate-400 font-mono w-8 text-right align-middle border-b border-slate-100">${u && u.unit != null ? u.unit : ''}</td>`;
+        const rowStyle = `style="height:calc(var(--elev-uh,20px) * ${span})"`;
+        const label = `<td class="px-1 text-[9px] text-slate-400 font-mono w-7 text-right align-top border-b border-slate-100 leading-none pt-0.5">${u && u.unit != null ? u.unit : ''}</td>`;
         let cell;
         if (dev) {
             const color = dev.role_color || '9e9e9e';
             const fg = _elevTextOn(color);
-            cell = `<td rowspan="${span}" class="px-2 py-1 text-[11px] align-top border-b border-white/20" style="background:#${color};color:${fg}">
+            cell = `<td rowspan="${span}" class="px-1 text-[10px] align-top border-b border-white/20 overflow-hidden leading-tight" style="background:#${color};color:${fg}">
                 <div class="font-semibold truncate leading-tight">${escapeHtml(dev.name || '')}</div>
                 <div class="opacity-85 truncate leading-tight">${escapeHtml(dev.model || '')}${dev.role ? ' · ' + escapeHtml(dev.role) : ''}</div>
                 ${dev.primary_ip ? `<div class="font-mono opacity-85 truncate leading-tight">${escapeHtml(dev.primary_ip)}</div>` : ''}
@@ -7604,19 +7607,38 @@ function _elevFaceTable(units, faceLabel) {
         } else {
             cell = `<td rowspan="${span}" class="border-b border-slate-100 bg-slate-50/40"></td>`;
         }
-        rows.push(`<tr>${label}${cell}</tr>`);
+        rows.push(`<tr ${rowStyle}>${label}${cell}</tr>`);
         i += span;
     }
     if (!rows.length) {
-        return `<div class="flex-1 min-w-0">
+        return `<div class="elev-face flex-1 min-w-0">
             <div class="text-xs font-bold text-slate-400 uppercase mb-1">${faceLabel}</div>
             <p class="text-xs text-slate-400 italic">empty</p></div>`;
     }
-    return `<div class="flex-1 min-w-0">
+    return `<div class="elev-face flex-1 min-w-0">
         <div class="text-xs font-bold text-slate-500 uppercase mb-1">${faceLabel}</div>
-        <table class="w-full border-collapse">${rows.join('')}</table>
+        <table class="w-full table-fixed border-collapse">${rows.join('')}</table>
     </div>`;
 }
+
+// Scale the rack-elevation U-rows so the full rack fits the visible modal
+// height: per-U height = available height / u_height, clamped to a readable
+// band. Below the floor it stops shrinking and the grid scrolls instead. Runs
+// after render and on window resize while the modal is open.
+function _fitElevation() {
+    const grid = document.querySelector('#nb-rack-elev-modal .elev-grid');
+    if (!grid) return;
+    const uHeight = parseInt(grid.dataset.uheight || '0', 10);
+    if (!uHeight) return;
+    // Space the fixed chrome (modal padding, title, meta row, 0U tray) consumes
+    // outside the U-grid — kept as a conservative constant so a short window
+    // still leaves the grid a usable slice before it falls back to scrolling.
+    const chrome = 190 + (grid.nextElementSibling ? grid.nextElementSibling.offsetHeight : 0);
+    const avail = Math.max(0, Math.floor(window.innerHeight * 0.9) - chrome);
+    const rowH = Math.max(13, Math.min(24, Math.floor(avail / uHeight) || 24));
+    grid.style.setProperty('--elev-uh', rowH + 'px');
+}
+window.addEventListener('resize', _fitElevation);
 
 async function showRackElevationModal(rackId) {
     // Name comes from the cached racks list (window._nbRacks) — NOT embedded in
@@ -7651,7 +7673,11 @@ async function showRackElevationModal(rackId) {
         </div>`;
         const front = (d.faces && d.faces.front) || [];
         const rear  = (d.faces && d.faces.rear)  || [];
-        const grid = `<div class="flex gap-4 items-start">${_elevFaceTable(front, 'Front')}${_elevFaceTable(rear, 'Rear')}</div>`;
+        // Rack height drives the per-U scaling; fall back to the tallest unit
+        // present if u_height is missing so the grid still fits.
+        const maxUnit = Math.max(0, ...front.concat(rear).map(u => (u && u.unit) || 0));
+        const uHeight = (r.u_height && r.u_height > 0) ? r.u_height : maxUnit;
+        const grid = `<div class="elev-grid flex gap-4 items-start" data-uheight="${uHeight}" style="--elev-uh:20px">${_elevFaceTable(front, 'Front')}${_elevFaceTable(rear, 'Rear')}</div>`;
         const zero = d.zero_u || [];
         const zeroHtml = zero.length ? `<div class="mt-4">
             <div class="text-xs font-bold text-slate-500 uppercase mb-1">0U / side</div>
@@ -7664,6 +7690,7 @@ async function showRackElevationModal(rackId) {
             }).join('')}</div>
         </div>` : '';
         body.innerHTML = meta + grid + zeroHtml;
+        _fitElevation();
     } catch (e) {
         const body = document.getElementById('nb-rack-elev-body');
         if (body) body.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${escapeHtml(e.message || '')}</p>`;
