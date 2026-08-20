@@ -18116,6 +18116,8 @@ function serialEnsureConsoleDock() {
         if (window._serialBroadcastOn && bar && !bar.classList.contains('hidden') && input) input.focus();
         modal.querySelector('#serial-broadcast-toggle').textContent =
             window._serialBroadcastOn ? 'Broadcast: On' : 'Broadcast: Off';
+        // Toggling Broadcast is what splits (On) or collapses (Off) the panes.
+        serialReflowBodies();
     };
     modal.querySelector('#serial-broadcast-bar-input').addEventListener('keydown', (ev) => {
         if (ev.key !== 'Enter') return;
@@ -18187,7 +18189,13 @@ function serialReflowBodies() {
     if (!window._serialConsoles) return;
     const activeKey = window._serialActiveConsole;
     const group = window._serialBroadcastGroup;
-    const groupActive = !!(group && group.size >= 2);
+    // Side-by-side (split) view only when the operator has explicitly turned
+    // Broadcast ON with 2+ consoles checked. Merely checking consoles no longer
+    // splits the screen — otherwise the dock silently showed two panes while
+    // the toggle still read "Broadcast: Off", and a second (read-only) session
+    // to the same device mirrored the active pane. With Broadcast off, exactly
+    // one pane shows: the active console (full height).
+    const groupActive = !!(window._serialBroadcastOn && group && group.size >= 2);
     const bodies = document.getElementById('serial-console-bodies');
     if (bodies) bodies.classList.toggle('flex-wrap', groupActive);
     window._serialConsoles.forEach((e, k) => {
