@@ -40,6 +40,19 @@ def _friendly_title(detail: str) -> str:
     return "Sign-in couldn’t complete"
 
 
+def _is_stale_auth(detail: str) -> bool:
+    """True when a callback failure is a stale/used/expired authorization code
+    (or grant) — fixable only by restarting the flow for a FRESH code, not a
+    config/authorization problem (allowed-group, MFA, cert) where a restart just
+    loops. Matches Entra AADSTS54005 (code already redeemed) and 70008 (expired
+    code), plus the generic OAuth invalid_grant."""
+    d = (detail or "").lower()
+    return ("aadsts54005" in d or "already redeemed" in d
+            or "aadsts70008" in d or "invalid_grant" in d
+            or "invalid grant" in d
+            or ("code" in d and "expired" in d))
+
+
 def _sso_error_page(detail: str, status: int = 401, title: str | None = None) -> HTMLResponse:
     """A styled sign-in-error page (matches the LM look: HPE-green accent, card,
     light/dark aware) instead of a raw JSON ``{detail}`` — the OIDC callback is a
@@ -147,6 +160,24 @@ def register(app, hub, ctx):
         cfg = get_oidc_config(hub)
         if not cfg.enabled or not cfg.ready:
             return _sso_error_page("Single sign-on is not configured on this hub.", 404)
+        # A single-use auth code that arrives stale — e.g. the hub-down splash
+        # auto-refreshed THIS callback URL and replayed an already-redeemed or
+        # expired ``?code=`` — can never succeed on replay; it just dead-ends at
+        # "Microsoft rejected the sign-in". Instead, restart the login flow once
+        # to mint a FRESH code (seamless: the user's live Entra SSO session
+        # re-issues without re-typing). ``lm_oidc_retry`` bounds this to a SINGLE
+        # auto-restart so a genuinely broken flow shows the error, never loops.
+        _retried = request.cookies.get("lm_oidc_retry")
+
+        def _recover_or_error(detail: str, status: int):
+            if not _retried:
+                r = RedirectResponse("/auth/oidc/login", status_code=302)
+                r.set_cookie("lm_oidc_retry", "1", max_age=120, httponly=True,
+                             samesite="lax", secure=_cookie_secure())
+                return r
+            page = _sso_error_page(detail, status)
+            page.delete_cookie("lm_oidc_retry")
+            return page
         # Entra surfaces auth errors as ?error=… on the redirect.
         err = request.query_params.get("error")
         if err:
@@ -160,7 +191,7 @@ def register(app, hub, ctx):
         cookie = request.cookies.get(_STATE_COOKIE, "")
         triple = verify_state_cookie(hub, cookie)
         if not triple:
-            return _sso_error_page("Your sign-in session expired. Please start again.", 400)
+            return _recover_or_error("Your sign-in session expired. Please start again.", 400)
         c_state, nonce, code_verifier = triple
         if not hmac_eq(c_state, qstate):
             return _sso_error_page("The sign-in request could not be verified. Please try again.", 400)
@@ -204,6 +235,7 @@ def register(app, hub, ctx):
                 max_age=_SESSION_TTL, secure=_cookie_secure(),
             )
             resp.delete_cookie(_STATE_COOKIE)
+            resp.delete_cookie("lm_oidc_retry")
             for tid in user_data["tenants"]:
                 _start_cache_for_tenant(hub, tid)
             logger.info("OIDC login ok for %s (groups=%s tenants=%s)",
@@ -211,6 +243,8 @@ def register(app, hub, ctx):
             return resp
         except OidcError as e:
             logger.warning("OIDC callback refused: %s", e)
+            if _is_stale_auth(str(e)):
+                return _recover_or_error(str(e), 401)
             return _sso_error_page(str(e), 401)
         except HTTPException as he:
             return _sso_error_page(str(he.detail), he.status_code)

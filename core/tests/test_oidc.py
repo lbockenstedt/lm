@@ -333,13 +333,14 @@ def _mount_oidc_config(hub, **kw):
 
 
 def _mock_transport(rsa_key, jwks, *, id_token_factory, access_token="at",
-                    token_status=200):
+                    token_status=200, token_json=None):
     """MockTransport handling discovery + token endpoint + JWKS.
 
     ``id_token_factory`` is a callable returning the id_token string, invoked
     at token-endpoint time so the test can bake in the nonce captured from the
     login redirect (the route generates a random nonce). A mutable holder lets
-    the test set the factory AFTER the login request."""
+    the test set the factory AFTER the login request. ``token_json`` overrides
+    the token-endpoint body (e.g. an Entra AADSTS error) when non-None."""
     disc = {
         "issuer": "https://login.microsoftonline.com/tid/v2.0",
         "authorization_endpoint": "https://login.microsoftonline.com/tid/oauth2/v2.0/authorize",
@@ -354,6 +355,8 @@ def _mock_transport(rsa_key, jwks, *, id_token_factory, access_token="at",
         if u.endswith("/discovery/v2.0/keys"):
             return httpx.Response(200, json={"keys": jwks})
         if u.endswith("/oauth2/v2.0/token"):
+            if token_json is not None:
+                return httpx.Response(token_status, json=token_json)
             return httpx.Response(token_status, json={"id_token": id_token_factory(),
                                                        "access_token": access_token})
         return httpx.Response(404)
@@ -442,31 +445,86 @@ def test_callback_succeeds_without_mfa_claim(rsa_key, rsa_cert, jwks, tmp_path, 
     assert r2.cookies.get("lm_session")
 
 
-def test_callback_rejects_state_mismatch(rsa_key, jwks, tmp_path, monkeypatch):
-    key_path = tmp_path / "client.key"
-    key_path.write_bytes(rsa_key.private_bytes(
-        serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
-        serialization.NoEncryption()))
+def test_callback_rejects_state_mismatch(rsa_key, rsa_cert, jwks, tmp_path, monkeypatch):
+    # A PRESENT-but-mismatched state (cookie valid, ?state= differs) is a hard
+    # 400 reject (possible CSRF) — NOT the benign auto-restart the missing/expired
+    # cookie gets. Mock discovery so login mints a real state cookie, then replay
+    # the callback with a wrong ?state.
+    key_path, cert_path = _write_keypair(tmp_path, rsa_key, rsa_cert)
     client, hub = _build({"permission_groups": _groups_state()})
-    _mount_oidc_config(hub, key_path=str(key_path))
-    # No transport needed — state check fires before token exchange.
+    _mount_oidc_config(hub, key_path=key_path, cert_path=cert_path)
+    transport = _mock_transport(rsa_key, jwks, id_token_factory=lambda: "")
+
+    class _PatchedClient(httpx.AsyncClient):
+        def __init__(self, *a, **k):
+            k["transport"] = transport
+            super().__init__(*a, **k)
+    monkeypatch.setattr(oidc.httpx, "AsyncClient", _PatchedClient)
+
     r1 = client.get("/auth/oidc/login", follow_redirects=False)
     state_cookie = r1.cookies.get("lm_oidc_state")
+    assert state_cookie, "login must mint a state cookie"
     r2 = client.get("/auth/oidc/callback", params={"code": "ac", "state": "WRONG"},
                     cookies={"lm_oidc_state": state_cookie}, follow_redirects=False)
     assert r2.status_code == 400
 
 
-def test_callback_rejects_missing_state_cookie(rsa_key, jwks, tmp_path):
+def test_callback_missing_state_cookie_auto_restarts_then_errors(rsa_key, jwks, tmp_path):
+    # An expired/missing state cookie (e.g. the hub-down splash sat on the
+    # callback URL past the 300s cookie TTL) auto-restarts the login flow ONCE
+    # to mint a fresh state+code, then — guarded by lm_oidc_retry — shows the
+    # error rather than looping.
     key_path = tmp_path / "client.key"
     key_path.write_bytes(rsa_key.private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.TraditionalOpenSSL,
         serialization.NoEncryption()))
     client, hub = _build({"permission_groups": _groups_state()})
     _mount_oidc_config(hub, key_path=str(key_path))
-    r2 = client.get("/auth/oidc/callback", params={"code": "ac", "state": "x"},
+    # First hit, no retry guard → 302 back into the login flow + guard cookie.
+    r1 = client.get("/auth/oidc/callback", params={"code": "ac", "state": "x"},
                     follow_redirects=False)
+    assert r1.status_code == 302
+    assert r1.headers["location"] == "/auth/oidc/login"
+    assert r1.cookies.get("lm_oidc_retry") == "1"
+    # Second hit WITH the guard → error page (no infinite loop).
+    r2 = client.get("/auth/oidc/callback", params={"code": "ac", "state": "x"},
+                    cookies={"lm_oidc_retry": "1"}, follow_redirects=False)
     assert r2.status_code == 400
+
+
+def test_callback_stale_code_auto_restarts_then_errors(rsa_key, rsa_cert, jwks, tmp_path, monkeypatch):
+    # A replayed single-use code (Entra AADSTS54005 "already redeemed") must
+    # auto-restart the flow once — not dead-end at "Microsoft rejected the
+    # sign-in" — then show the error on the second failure.
+    key_path, cert_path = _write_keypair(tmp_path, rsa_key, rsa_cert)
+    client, hub = _build({"permission_groups": _groups_state()})
+    _mount_oidc_config(hub, key_path=key_path, cert_path=cert_path)
+    transport = _mock_transport(rsa_key, jwks, id_token_factory=lambda: "",
+        token_status=400,
+        token_json={"error": "invalid_grant",
+                    "error_description": "AADSTS54005: OAuth2 Authorization "
+                                         "code was already redeemed."})
+
+    class _PatchedClient(httpx.AsyncClient):
+        def __init__(self, *a, **k):
+            k["transport"] = transport
+            super().__init__(*a, **k)
+    monkeypatch.setattr(oidc.httpx, "AsyncClient", _PatchedClient)
+
+    r1 = client.get("/auth/oidc/login", follow_redirects=False)
+    state_cookie = r1.cookies.get("lm_oidc_state")
+    st, _nonce, _cv = oidc.verify_state_cookie(hub, state_cookie)
+    # First replay → auto-restart to /auth/oidc/login + guard cookie.
+    r2 = client.get("/auth/oidc/callback", params={"code": "ac", "state": st},
+                    cookies={"lm_oidc_state": state_cookie}, follow_redirects=False)
+    assert r2.status_code == 302
+    assert r2.headers["location"] == "/auth/oidc/login"
+    assert r2.cookies.get("lm_oidc_retry") == "1"
+    # Second replay WITH guard → error page, guard cleared.
+    r3 = client.get("/auth/oidc/callback", params={"code": "ac", "state": st},
+                    cookies={"lm_oidc_state": state_cookie, "lm_oidc_retry": "1"},
+                    follow_redirects=False)
+    assert r3.status_code == 401
 
 
 def test_oidc_enabled_endpoint_reports_enabled(tmp_path):
