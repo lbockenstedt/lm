@@ -1496,14 +1496,18 @@ def register(app, hub, ctx):
         token = websocket.query_params.get("token") or ""
         hub = app.state.hub
         sess = hub.get_console_session(session_id)
+        logger.info("CONSOLE-DIAG ws attach sid=%s found=%s token_match=%s",
+                    session_id, bool(sess), bool(sess) and sess.get("ws_token") == token)
         if not sess or sess.get("ws_token") != token:
             await websocket.accept()
             await websocket.close(code=4401, reason="invalid or expired console session")
+            logger.info("CONSOLE-DIAG ws REJECTED sid=%s (invalid/expired) — closed 4401", session_id)
             return
         spoke_id = sess["spoke_id"]
         queue = sess["queue"]
         sess["connected"] = True  # long-lived interactive session; TTL no longer applies
         await websocket.accept()
+        logger.info("CONSOLE-DIAG ws ACCEPTED sid=%s spoke=%s qsize=%s", session_id, spoke_id, queue.qsize())
         relay_tasks: list = []
         try:
             async def browser_to_spoke():
@@ -1531,9 +1535,11 @@ def register(app, hub, ctx):
                         kind = item[0]
                         if kind == "error":
                             await websocket.close(code=1011, reason=str(item[1]))
+                            logger.info("CONSOLE-DIAG ws sid=%s CLOSING 1011 — spoke CONSOLE_ERROR: %s", session_id, item[1])
                             return
                         if kind == "disconnect":
                             await websocket.close(code=1000, reason="console closed")
+                            logger.info("CONSOLE-DIAG ws sid=%s CLOSING 1000 — spoke CONSOLE_CLOSED", session_id)
                             return
                         if kind == "downgraded":
                             # Another session forced a write-lock takeover on
@@ -1556,6 +1562,7 @@ def register(app, hub, ctx):
             await asyncio.gather(*relay_tasks, return_exceptions=True)
             for task in done:
                 exc = task.exception()
+                logger.info("CONSOLE-DIAG ws sid=%s first-done exc=%r", session_id, exc)
                 if exc and not isinstance(exc, (WebSocketDisconnect, asyncio.CancelledError)):
                     raise exc
         except WebSocketDisconnect:
