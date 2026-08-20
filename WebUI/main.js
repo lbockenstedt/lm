@@ -18015,7 +18015,7 @@ async function openConsoleTerminal(spokeId, portId, knownLabel) {
 // consoles were open (had to scroll sideways through a cramped strip).
 function serialEnsureConsoleDock() {
     let modal = document.getElementById('serial-console-modal');
-    if (modal) { modal.classList.remove('hidden'); return modal; }
+    if (modal) { modal.classList.remove('hidden'); serialRefreshAvailablePorts(); return modal; }
     modal = document.createElement('div');
     modal.id = 'serial-console-modal';
     modal.className = 'fixed top-16 bottom-10 left-56 right-0 z-40 flex bg-[#1e1e1e] border-t border-slate-700 shadow-2xl';
@@ -18024,7 +18024,10 @@ function serialEnsureConsoleDock() {
             <div class="p-2 border-b border-slate-700 space-y-2">
                 <div class="flex items-center justify-between">
                     <strong class="text-sm text-slate-200">Serial Consoles</strong>
-                    <button id="serial-console-closeall" title="Close all consoles" class="text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
+                    <div class="flex items-center gap-2">
+                        <button id="serial-console-refresh" title="Refresh the list of available consoles" class="text-slate-400 hover:text-sky-400 text-sm leading-none">⟳</button>
+                        <button id="serial-console-closeall" title="Close all open consoles" class="text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
+                    </div>
                 </div>
                 <input id="serial-console-search" type="text" placeholder="Search consoles…"
                        class="w-full text-xs bg-[#1e1e1e] border border-slate-600 rounded px-2 py-1 text-slate-100 focus:outline-none focus:border-sky-500">
@@ -18054,6 +18057,7 @@ function serialEnsureConsoleDock() {
         else if (screen && screen.requestFullscreen) screen.requestFullscreen().catch(() => {});
     };
     modal.querySelector('#serial-console-closeall').onclick = () => serialCloseAllConsoles();
+    modal.querySelector('#serial-console-refresh').onclick = () => serialRefreshAvailablePorts();
     modal.querySelector('#serial-console-takeover').onclick = () => serialForceTakeover();
     modal.querySelector('#serial-console-search').addEventListener('input', (ev) => {
         window._serialConsoleFilter = ev.target.value.trim().toLowerCase();
@@ -18079,6 +18083,9 @@ function serialEnsureConsoleDock() {
         if (!sent) showToast('Broadcast: no writable consoles in the group', 'warning');
     });
     serialUpdateBroadcastBar();
+    // Populate the left menu with EVERY console the user has rights to (not just
+    // the ones already open) so it acts as a click-to-open directory.
+    serialRefreshAvailablePorts();
     return modal;
 }
 
@@ -18231,11 +18238,39 @@ function serialActivateConsole(key) {
     if (c && c.term) { try { c.term.focus(); c.term.scrollToBottom(); } catch (e) {} }
 }
 
-// Paint the left-side console list (status dot, label, RO badge, a broadcast
-// checkbox, and a close button per row) — filtered by the search box.
-// Replaces the old horizontal tab strip, which became unusable once more
-// than a handful of consoles were open; a scrollable vertical list + search
-// holds up at any count.
+// Build the display label for an available console port — same precedence as
+// the Console port table: operator alias > auto-identified hostname > USB
+// product string > raw device node.
+function _serialPortLabel(p) {
+    const identHost = (p.probe && p.probe.identity && p.probe.identity.hostname) || '';
+    return p.alias || identHost || p.product || p.device || p.port_id || '';
+}
+
+// Pull the full set of console ports the current user has rights to (tenant-
+// scoped + rights-filtered server-side) into `_consolePorts`, then repaint the
+// dock's left menu. This is what lets the left menu act as a directory of
+// EVERY console you can connect to — not just the ones already open. Silently
+// keeps the last-known list on error (the menu still shows open sessions).
+async function serialRefreshAvailablePorts() {
+    try {
+        const res = await fetch(`/api/console/ports?tenant=${encodeURIComponent(currentTenant || 'default')}`,
+                                { credentials: 'same-origin' });
+        if (res.ok) {
+            const data = await res.json();
+            _consolePorts = data.ports || [];
+        }
+    } catch (e) { /* keep last-known list */ }
+    serialRenderConsoleList();
+}
+
+// Paint the left-side console menu. It lists EVERY console the user has rights
+// to (from `_consolePorts`), merged with the OPEN sessions
+// (window._serialConsoles) so open ones are flagged connected — colored status
+// dot, RO badge, broadcast checkbox, and a close button — while the rest are
+// click-to-open (a "+" affordance). Filtered by the search box, which now
+// searches the whole available directory, not just what's already open.
+// Replaces the old open-only strip so an operator can browse and connect to
+// any authorized console from here.
 function serialRenderConsoleList() {
     const modal = document.getElementById('serial-console-modal');
     if (!modal) return;
@@ -18244,31 +18279,82 @@ function serialRenderConsoleList() {
     const active = window._serialActiveConsole;
     const group = window._serialBroadcastGroup;
     const filter = window._serialConsoleFilter || '';
-    const entries = window._serialConsoles ? Array.from(window._serialConsoles.values()) : [];
-    const visible = filter
-        ? entries.filter(e => (e.label || e.portId || e.key || '').toLowerCase().includes(filter))
-        : entries;
-    list.innerHTML = visible.length ? visible.map(e => {
-        const isA = e.key === active;
-        const dot = e.statusCls === 'text-green-400' ? 'bg-green-400'
-            : (e.statusCls === 'text-red-400' ? 'bg-red-400' : 'bg-amber-400');
-        const rowCls = isA ? 'bg-[#1e1e1e] text-slate-100' : 'text-slate-400 hover:bg-[#222] hover:text-slate-200';
-        const label = escapeHtml(e.label || e.portId || e.key);
-        const kAttr = escapeHtml(e.key);
-        const roBadge = e.ro ? '<span class="ml-1 px-1 rounded bg-amber-600 text-white text-[9px]">RO</span>' : '';
-        const inGroup = !!(group && group.has(e.key));
-        return `<div data-key="${kAttr}" class="serial-console-row flex items-center gap-2 px-3 py-2 border-b border-[#232323] cursor-pointer text-xs ${rowCls}">
-            <input type="checkbox" data-bcast-key="${kAttr}" ${inGroup ? 'checked' : ''} title="Include in broadcast group" onclick="event.stopPropagation()">
+    const open = window._serialConsoles || new Map();
+
+    // Merge available ports (the directory) with open sessions, keyed by
+    // spoke::port. Available ports seed the rows; open sessions overlay their
+    // live state onto the matching row (or add a row of their own if the port
+    // isn't in the available list yet — e.g. ports not loaded / other tenant).
+    const byKey = new Map();
+    (_consolePorts || []).forEach(p => {
+        const key = (p.spoke_id || '') + '::' + p.port_id;
+        byKey.set(key, {
+            key, spokeId: p.spoke_id || '', portId: p.port_id,
+            label: _serialPortLabel(p), reachable: !(p.present === false || p.stale),
+            inUse: !!p.in_use, open: false, entry: null,
+        });
+    });
+    open.forEach((e, key) => {
+        const row = byKey.get(key) || { key, spokeId: e.spokeId, portId: e.portId,
+            label: e.label, reachable: true, inUse: false };
+        row.open = true; row.entry = e; row.label = e.label || row.label;
+        byKey.set(key, row);
+    });
+
+    let rows = Array.from(byKey.values());
+    const total = rows.length;
+    if (filter) rows = rows.filter(r => (r.label || r.portId || r.key || '').toLowerCase().includes(filter));
+    // Connected consoles first (keep active sessions at the top), then the rest,
+    // each alphabetized by label.
+    rows.sort((a, b) => ((b.open ? 1 : 0) - (a.open ? 1 : 0)) || (a.label || '').localeCompare(b.label || ''));
+
+    list.innerHTML = rows.length ? rows.map(r => {
+        const e = r.entry;
+        const isA = r.open && r.key === active;
+        const dot = r.open
+            ? (e.statusCls === 'text-green-400' ? 'bg-green-400'
+               : (e.statusCls === 'text-red-400' ? 'bg-red-400' : 'bg-amber-400'))
+            : (r.reachable ? 'bg-slate-500' : 'bg-slate-700');
+        const rowCls = isA ? 'bg-[#1e1e1e] text-slate-100'
+            : (r.open || r.reachable ? 'text-slate-400 hover:bg-[#222] hover:text-slate-200'
+                                     : 'text-slate-600');
+        const label = escapeHtml(r.label || r.portId || r.key);
+        const kAttr = escapeHtml(r.key);
+        const sAttr = escapeHtml(r.spokeId);
+        const pAttr = escapeHtml(r.portId);
+        const roBadge = (r.open && e.ro) ? '<span class="ml-1 px-1 rounded bg-amber-600 text-white text-[9px]">RO</span>' : '';
+        const stateBadge = r.open ? ''
+            : (r.reachable
+                ? (r.inUse ? '<span class="ml-1 px-1 rounded bg-amber-700 text-amber-100 text-[9px]">IN USE</span>' : '')
+                : '<span class="ml-1 px-1 rounded bg-slate-700 text-slate-300 text-[9px]">OFFLINE</span>');
+        const inGroup = !!(group && group.has(r.key));
+        const lead = r.open
+            ? `<input type="checkbox" data-bcast-key="${kAttr}" ${inGroup ? 'checked' : ''} title="Include in broadcast group" onclick="event.stopPropagation()">`
+            : `<span class="w-[13px] shrink-0 text-center ${r.reachable ? 'text-slate-500' : 'text-slate-700'}" title="${r.reachable ? 'Click to open' : 'Device offline'}">+</span>`;
+        const closeBtn = r.open
+            ? `<button data-close="${kAttr}" title="Close this console" class="text-slate-500 hover:text-red-400 text-sm leading-none shrink-0">&times;</button>`
+            : '';
+        const cursor = (r.open || r.reachable) ? 'cursor-pointer' : 'cursor-not-allowed';
+        return `<div data-key="${kAttr}" data-open="${r.open ? '1' : '0'}" data-reachable="${r.reachable ? '1' : '0'}" data-spoke="${sAttr}" data-port="${pAttr}" data-label="${label}"
+            class="serial-console-row flex items-center gap-2 px-3 py-2 border-b border-[#232323] ${cursor} text-xs ${rowCls}">
+            ${lead}
             <span class="w-2 h-2 rounded-full ${dot} shrink-0"></span>
-            <span class="font-mono truncate flex-1">${label}</span>${roBadge}
-            <button data-close="${kAttr}" title="Close this console" class="text-slate-500 hover:text-red-400 text-sm leading-none shrink-0">&times;</button>
+            <span class="font-mono truncate flex-1">${label}</span>${roBadge}${stateBadge}
+            ${closeBtn}
         </div>`;
-    }).join('') : `<div class="px-3 py-4 text-xs text-slate-500 italic">${entries.length ? 'No consoles match your search.' : 'No open consoles.'}</div>`;
+    }).join('') : `<div class="px-3 py-4 text-xs text-slate-500 italic">${total ? 'No consoles match your search.' : 'No consoles available.'}</div>`;
+
     list.querySelectorAll('.serial-console-row').forEach(el => {
         const key = el.getAttribute('data-key');
+        const isOpen = el.getAttribute('data-open') === '1';
         el.onclick = (ev) => {
             if (ev.target.closest('[data-close]') || ev.target.matches('input[type=checkbox]')) return;
-            serialActivateConsole(key);
+            if (isOpen) { serialActivateConsole(key); return; }
+            if (el.getAttribute('data-reachable') !== '1') {
+                showToast('Device not connected — reconnect it to open a session', 'warning');
+                return;
+            }
+            openConsoleTerminal(el.getAttribute('data-spoke'), el.getAttribute('data-port'), el.getAttribute('data-label'));
         };
         const closeBtn = el.querySelector('[data-close]');
         if (closeBtn) closeBtn.onclick = (ev) => { ev.stopPropagation(); serialCloseConsole(key); };
