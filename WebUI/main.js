@@ -18270,6 +18270,14 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     term.open(bodyEl);
     serialFitConsole(entry);
     term.focus();
+    // Clicking anywhere in this console's body focuses its terminal so the
+    // operator can type immediately — no need to reselect it from the left
+    // menu. If it isn't the active tab (e.g. a broadcast-group pane), clicking
+    // makes it active first.
+    bodyEl.addEventListener('mousedown', () => {
+        if (window._serialActiveConsole !== key) serialActivateConsole(key);
+        try { term.focus(); } catch (e) {}
+    });
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws/console-serial/${session.session_id}?token=${encodeURIComponent(session.ws_token)}`);
     ws.binaryType = 'arraybuffer';
