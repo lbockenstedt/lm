@@ -97,6 +97,26 @@ except ImportError:  # bare-module layout (messaging.* top-level, no repo root)
 
 logger = logging.getLogger("BaseControlPlane")
 
+# Commands whose handler may run long enough to blow the hub's request_response
+# timeout on a busy backend (a big Proxmox cluster with many VMs answers
+# GET_NODE_STATS/PXMX_LIST_VMS slowly). While one of these is being handled the
+# spoke emits periodic SPOKE_PROGRESS keepalives so the hub extends its deadline
+# instead of killing a genuinely-working request. Fast commands finish before
+# the first keepalive interval, so they never emit a frame.
+_KEEPALIVE_CMDS = {
+    "GET_NODE_STATS", "PXMX_LIST_VMS", "GET_VM_LIST", "GET_VM_INFO",
+    "GET_SYSTEM_STATS", "GET_AGENTS", "RUN_COMMAND", "SPOKE_RELAY",
+}
+
+# Seconds between SPOKE_PROGRESS keepalive frames while a slow command runs.
+# Env-overridable; clamped to >=1s. Kept well under the hub's base timeout so at
+# least one keepalive lands before the base deadline would otherwise fire.
+try:
+    _KEEPALIVE_INTERVAL_S = max(
+        1.0, float(os.environ.get("LM_SPOKE_PROGRESS_INTERVAL_S", "8") or 8))
+except (TypeError, ValueError):
+    _KEEPALIVE_INTERVAL_S = 8.0
+
 
 def _ws_keepalive_env(name: str, default: float) -> float:
     """Env-overridable WebSocket keepalive knob (seconds) for the spoke's
@@ -1573,6 +1593,34 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         except Exception as e:  # noqa: BLE001 — socket closed mid-handle
             logger.debug("failed to send COMMAND_RESULT for %s: %s", corr_id, e)
 
+    async def _emit_spoke_progress(self, websocket, corr_id, cmd_type, send_lock) -> None:
+        """Emit periodic SPOKE_PROGRESS keepalives for a long-running command so
+        the hub's request_response extends its deadline instead of timing out at
+        the base window. Correlation_id == the hub's original request msg_id, so
+        the hub matches it to the outstanding waiter. Serialized by ``send_lock``
+        (same lock as the COMMAND_RESULT ack) so frames don't interleave. Runs as
+        a background task; cancelled the instant the handler returns."""
+        try:
+            while True:
+                await asyncio.sleep(_KEEPALIVE_INTERVAL_S)
+                frame = {
+                    "correlation_id": corr_id,
+                    "header": {"message_id": str(uuid.uuid4()),
+                               "timestamp": round(time.time(), 6),
+                               "sender_id": self.spoke_id, "destination_id": "hub"},
+                    "payload": {"type": "SPOKE_PROGRESS",
+                                "data": {"command": cmd_type, "state": "working"}},
+                }
+                _wire = self._encode_frame(frame)
+                async with send_lock:
+                    await websocket.send(_wire)
+                logger.debug("SPOKE_PROGRESS keepalive sent for %s (%s)",
+                             cmd_type, str(corr_id)[:8])
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:  # noqa: BLE001 — socket closed mid-handle
+            logger.debug("spoke progress emitter stopped for %s: %s", cmd_type, e)
+
     async def _handle_one_command(self, websocket, cmd_type, data, corr_id,
                                   send_lock, sem) -> None:
         """Handle one hub command concurrently and send its COMMAND_RESULT ack.
@@ -1587,6 +1635,15 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         async with sem:
             result: Optional[Dict[str, Any]] = None
             handled_by_module = None
+            # Keepalive: for potentially-slow commands, spawn a background task
+            # that emits SPOKE_PROGRESS frames to the hub while this handler runs
+            # so the hub's request_response deadline is extended (see
+            # _emit_spoke_progress). Cancelled in the finally the moment the
+            # handler returns; fast commands finish before the first interval.
+            _prog_task = None
+            if cmd_type in _KEEPALIVE_CMDS:
+                _prog_task = asyncio.create_task(
+                    self._emit_spoke_progress(websocket, corr_id, cmd_type, send_lock))
             try:
                 # First, try handling as a system command
                 result = await self.handle_system_command(cmd_type, data)
@@ -1661,6 +1718,11 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             except Exception as e:
                 logger.exception("Unhandled error dispatching %s", cmd_type)
                 result = {"status": "ERROR", "message": f"{type(e).__name__}: {e}"}
+            finally:
+                # Stop the keepalive before the final ack so no SPOKE_PROGRESS
+                # frame races the COMMAND_RESULT (which resolves the waiter).
+                if _prog_task is not None:
+                    _prog_task.cancel()
             await self._send_cmd_result(websocket, corr_id, result, send_lock)
 
     async def _health_heartbeat_task(self, websocket):

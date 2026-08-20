@@ -111,6 +111,18 @@ class AgentHostingControlPlane(BaseControlPlane):
 
         # Correlated agent command/response futures (corr_id → Future).
         self.pending_responses: Dict[str, asyncio.Future] = {}
+        # corr_id → {"soft","hard","grace"} — keepalive-extendable deadlines for
+        # in-flight send_to_agent waiters. A busy agent emits AGENT_PROGRESS
+        # frames (correlation_id == the command's corr_id) while it works; each
+        # pushes "soft" forward by another "grace" window (capped at "hard") so a
+        # slow-but-alive agent isn't killed at the base timeout.
+        self.pending_progress: Dict[str, Dict[str, float]] = {}
+        # Hard-ceiling multiplier for the above. Env-overridable (default 6×).
+        try:
+            self._agent_progress_hard_mult = max(
+                1.0, float(os.environ.get("LM_AGENT_PROGRESS_HARD_MULT", "6") or 6))
+        except (TypeError, ValueError):
+            self._agent_progress_hard_mult = 6.0
         # agent_id → {ws, hostname, cluster_name, last_seen, nodes, vms, ...}
         self.connected_agents: Dict[str, Dict[str, Any]] = {}
         # agent_id → {ws, event} for agents awaiting admin approval.
@@ -838,6 +850,18 @@ class AgentHostingControlPlane(BaseControlPlane):
                         if not fut.done():
                             fut.set_result(data)
 
+                elif msg_type == "AGENT_PROGRESS":
+                    # Keepalive from a busy agent: it's still working on the
+                    # command correlated by corr_id. Push the send_to_agent soft
+                    # deadline forward (capped at the hard ceiling) so the waiter
+                    # doesn't time out on a slow-but-alive agent. Carries no
+                    # result — never resolves the future.
+                    _pd = self.pending_progress.get(corr_id)
+                    if _pd is not None:
+                        _pd["soft"] = min(time.time() + _pd["grace"], _pd["hard"])
+                        logger.debug("AGENT_PROGRESS keepalive from %s (%s) — "
+                                     "deadline extended", agent_id, str(corr_id)[:8])
+
                 elif msg_type == "AGENT_LOG":
                     # Relay to hub so it appears in Setup → Agent Logs.
                     await self._relay_agent_msg_up(agent_id, "AGENT_LOG", data)
@@ -990,15 +1014,42 @@ class AgentHostingControlPlane(BaseControlPlane):
 
         fut = asyncio.get_running_loop().create_future()
         self.pending_responses[corr_id] = fut
+        now = time.time()
+        prog = {"soft": now + timeout,
+                "hard": now + timeout * self._agent_progress_hard_mult,
+                "grace": timeout}
+        self.pending_progress[corr_id] = prog
         try:
             await ws.send(wire)
-            return await asyncio.wait_for(fut, timeout=timeout)
+            # Extendable-deadline wait: normally resolves at `soft` (== base
+            # timeout). An AGENT_PROGRESS frame for corr_id bumps `soft` forward
+            # (see the AGENT_PROGRESS receive branch), so a slow-but-working
+            # agent keeps the request alive up to the `hard` ceiling. With no
+            # progress this is identical to the old fixed wait_for(timeout).
+            while True:
+                remaining = min(prog["soft"], prog["hard"]) - time.time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                try:
+                    return await asyncio.wait_for(asyncio.shield(fut), timeout=remaining)
+                except asyncio.TimeoutError:
+                    # Slice elapsed — re-check the (possibly-extended) deadline
+                    # rather than giving up, unless we've hit the hard ceiling.
+                    if fut.done():
+                        return fut.result()
+                    if time.time() >= prog["hard"]:
+                        raise
+                    continue
         except asyncio.TimeoutError:
             self.pending_responses.pop(corr_id, None)
+            self.pending_progress.pop(corr_id, None)
             return {"status": "ERROR", "message": "Agent response timeout"}
         except Exception as e:
             self.pending_responses.pop(corr_id, None)
+            self.pending_progress.pop(corr_id, None)
             return {"status": "ERROR", "message": str(e)}
+        finally:
+            self.pending_progress.pop(corr_id, None)
 
     async def send_raw_to_agent(self, agent_id: str, cmd_type: str,
                                 data: Dict[str, Any]) -> bool:

@@ -684,6 +684,21 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # instead of leaking an entry that is never popped (unbounded growth at
         # scale with periodic commands + occasional spoke slowness).
         self._outstanding_requests: set = set()
+        # { msg_id: {"soft","hard","grace"} } — keepalive-extendable deadlines
+        # for in-flight request_response waiters. A spoke servicing a slow
+        # command emits SPOKE_PROGRESS frames (correlation_id == the request's
+        # msg_id); each one pushes "soft" forward by another "grace" window so a
+        # genuinely-working spoke isn't killed at the base timeout, capped by the
+        # absolute "hard" ceiling so a truly-hung spoke still fails on schedule.
+        self._progress_deadlines: Dict[str, Any] = {}
+        # Hard-ceiling multiplier for the above (base timeout × this). Env-
+        # overridable so an operator can widen the window for a very large
+        # cluster without a code change. Default 6× (e.g. 30s base → up to 180s).
+        try:
+            self._request_progress_hard_mult = max(
+                1.0, float(os.environ.get("LM_REQUEST_PROGRESS_HARD_MULT", "6") or 6))
+        except (TypeError, ValueError):
+            self._request_progress_hard_mult = 6.0
         # request_response msg_ids whose waiter already returned without a reply
         # (timeout or cancel), retained briefly (TTL below) so a late ack arriving
         # after the waiter left can be recognized + logged as "late" (DEBUG) rather
@@ -1354,9 +1369,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Wait for the response in the mailbox
         self._outstanding_requests.add(msg_id)
         start_time = time.time()
+        # Keepalive-extendable deadline (see _progress_deadlines init): the base
+        # window is `timeout`; a SPOKE_PROGRESS frame for this msg_id pushes the
+        # soft deadline forward, capped at the hard ceiling. With no progress the
+        # behavior is identical to the old fixed `timeout` wait.
+        prog = {"soft": start_time + timeout,
+                "hard": start_time + timeout * self._request_progress_hard_mult,
+                "grace": timeout}
+        self._progress_deadlines[msg_id] = prog
         settled = False
         try:
-            while time.time() - start_time < timeout:
+            while True:
+                now = time.time()
+                if now >= prog["soft"] or now >= prog["hard"]:
+                    break
                 await asyncio.sleep(0.1)
                 if msg_id in getattr(self, "response_cache", {}):
                     result = self.response_cache.pop(msg_id)
@@ -1370,7 +1396,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # correlation with the DEBUG request/response lines (full msg_id
             # stays there) when no subject is derivable from the payload.
             _subject = _request_subject(command_type, data) or f"req={msg_id[:8]}"
-            logger.error(f"Request Timeout: [{command_type}] {_subject} from {self._spoke_label(spoke_id)} after {timeout}s")
+            _elapsed = round(time.time() - start_time, 1)
+            logger.error(f"Request Timeout: [{command_type}] {_subject} from {self._spoke_label(spoke_id)} after {_elapsed}s")
             try:
                 self._request_timeouts_total += 1
             except Exception:  # noqa: BLE001
@@ -1379,6 +1406,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         finally:
             # Drop the waiter so a late ack can't leak a response_cache entry.
             self._outstanding_requests.discard(msg_id)
+            self._progress_deadlines.pop(msg_id, None)
             if not settled:
                 # Waiter returned without a reply (timeout or cancel). A late ack
                 # may still arrive from the spoke; remember the id briefly so the
@@ -4805,6 +4833,21 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # Process Acknowledgement
                 if "correlation_id" in msg_data:
                     corr_id = msg_data["correlation_id"]
+                    # Keepalive: a spoke servicing a slow request emits
+                    # SPOKE_PROGRESS frames (correlation_id == the request's
+                    # msg_id) so this hub extends the request_response deadline
+                    # instead of killing a genuinely-working spoke at the base
+                    # timeout. Bump the soft deadline (capped at the hard
+                    # ceiling) and drop the frame — it carries no result.
+                    if payload.get("type") == "SPOKE_PROGRESS":
+                        _pd = self._progress_deadlines.get(corr_id)
+                        if _pd is not None:
+                            _pd["soft"] = min(time.time() + _pd["grace"], _pd["hard"])
+                            logger.debug(
+                                "SPOKE_PROGRESS keepalive for %s from %s — deadline extended",
+                                corr_id, spoke_id)
+                        self.message_count += 1
+                        continue
                     # App-layer liveness probe reply (HUB_PING → COMMAND_RESULT
                     # whose correlation_id is the ping's message_id). Resolve the
                     # sending adapter's ping waiter BEFORE the mailbox/unknown-ack
