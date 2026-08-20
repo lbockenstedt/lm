@@ -409,7 +409,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
             cfg = hc.get("hub_config") or {}
             rows.append({
                 "id": tid,
-                "name": t.get("name") or tid,
+                "name": "ADMIN" if tid == "default" else (t.get("name") or tid),
                 "certified": _normalize_usb_vidpids(cfg.get("usb_vidpids")),
                 "ignored": _normalize_usb_ignored(cfg.get("usb_ignored_vidpids")),
             })
@@ -435,8 +435,8 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         _require_admin(request)
         rows = []
         for tid in _all_tenant_ids():
-            tname = ((hub.state.tenant_state or {}).get("tenants", {}) or {}) \
-                .get(tid, {}).get("name") or tid
+            tname = "ADMIN" if tid == "default" else (((hub.state.tenant_state or {}).get("tenants", {}) or {}) \
+                .get(tid, {}).get("name") or tid)
             spokes = []
             for sid, data in _tenant_cache(tid).items():
                 spokes.append({
@@ -3142,7 +3142,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         """Tenants selectable as a report's dashboard (admin: all; else own only)."""
         sess = session_user_fn(request)
         tenants = hub.state.tenant_state.get("tenants", {}) or {}
-        out = [{"id": tid, "name": (cfg or {}).get("name") or tid} for tid, cfg in tenants.items()]
+        out = [{"id": tid, "name": "ADMIN" if tid == "default" else ((cfg or {}).get("name") or tid)} for tid, cfg in tenants.items()]
         if "default" not in [t["id"] for t in out]:
             out.insert(0, {"id": "default", "name": "ADMIN"})
         if not is_admin_fn(sess):
