@@ -1453,6 +1453,25 @@ def create_app(hub):
             if not (_is_admin(sess) or _has_pxmx_access(sess)):
                 return JSONResponse(status_code=403,
                                     content={"detail": "Hypervisor module access required"})
+            # SERVER + per-agent CONFIG management stay Global-Admin-only (a
+            # server/agent is a cross-tenant object; its per-agent config even
+            # sets the agent's OWNING tenant, so managing it is inherently an
+            # admin operation — a tenant-scoped pxmx user must never revoke /
+            # rename / reconfigure / delete / send fast-commands to an agent, or
+            # reveal the install command for adding a new server). This is the
+            # single chokepoint enforcing the "/api/pxmx/agents/* stay Global-
+            # Admin-only" rule; the individual handlers also self-gate (defense
+            # in depth). The BARE roster GET /api/pxmx/agents is deliberately NOT
+            # caught (note the trailing slash) — it is tenant-filtered in-handler
+            # so a tenant user still sees only their own scoped agents.
+            _pxmx_admin_only = (
+                path.startswith("/api/pxmx/agents/")      # revoke/rename/config/cs-command/delete/decommission/restore/ack-change
+                or path == "/api/pxmx/agent-install-cmd"  # reveals the add-a-server install command
+                or path == "/api/pxmx/server"             # delete a hypervisor host
+            )
+            if _pxmx_admin_only and not _is_admin(sess):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "Global Admin required to manage hypervisor servers/agents"})
 
         # /api/ldap/* (Directory module). The directory is ONE OpenLDAP mirror
         # partitioned per tenant: TENANT == OU (1:1), ``ou=<slug>,<base_dn>``.

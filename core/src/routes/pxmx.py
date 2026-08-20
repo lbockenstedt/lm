@@ -755,6 +755,8 @@ def register(app, hub, ctx):
         + port + path (see the pxmx agent's discovery.resolve_agent_url). We
         still compute the expected URL below for the modal to display.
         """
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
         import socket as _socket
         host = request.headers.get("host", "").split(":")[0] or _socket.gethostbyname(_socket.gethostname())
         hub = app.state.hub
@@ -848,7 +850,9 @@ def register(app, hub, ctx):
         return out
 
     @app.post("/api/pxmx/agents/{agent_id}/revoke")
-    async def revoke_pxmx_agent(agent_id: str):
+    async def revoke_pxmx_agent(agent_id: str, request: Request):
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
         # Resolve the spoke that actually owns this agent (may be a cs spoke
         # in the split-topology case, not necessarily pxmx) rather than
@@ -873,8 +877,10 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/pxmx/agents/{agent_id}/ack-change")
-    async def ack_agent_identity_change(agent_id: str):
+    async def ack_agent_identity_change(agent_id: str, request: Request):
         """Dismiss the amber "renamed" banner for a pxmx node agent (idempotent)."""
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
         try:
             agent_pk = hub._agent_primary_key(agent_id)
@@ -888,6 +894,8 @@ def register(app, hub, ctx):
 
     @app.post("/api/pxmx/agents/{agent_id}/rename")
     async def rename_pxmx_agent(agent_id: str, request: Request):
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
         data = await request.json()
         display_name = (data.get("display_name") or "").strip()
@@ -898,8 +906,10 @@ def register(app, hub, ctx):
         return {"status": "ok", "message": f"Agent '{agent_id}' renamed to '{display_name}'"}
 
     @app.get("/api/pxmx/agents/{agent_id}/config")
-    async def get_pxmx_agent_config(agent_id: str):
+    async def get_pxmx_agent_config(agent_id: str, request: Request):
         """Return the stored per-agent config (display name + Client Simulation mode)."""
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
         agent_pk = hub._agent_primary_key(agent_id)
         cfg = hub.state.system_state.get("agent_config", {}).get(agent_pk, {})
@@ -917,6 +927,8 @@ def register(app, hub, ctx):
         the client_simulation config down to the agent via the pxmx spoke.
         Reuses the spoke's SET_AGENT_CONFIG command, which persists in the spoke and
         re-pushes UPDATE_CONFIG to the agent on reconnect (see proxmox_spoke.py:55-64)."""
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
         try:
             data = await request.json()
@@ -1027,6 +1039,8 @@ def register(app, hub, ctx):
         90000 floor or a protected container — comes back as ERROR with the
         guard's message). Sync only: long ops (delete/reclone/reseed/backup) are
         not exposed here (they'd exceed the spoke's 15s relay window)."""
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
         try:
             body = await request.json()
@@ -1048,11 +1062,13 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=502, detail=f"CS command relay failed: {e}")
 
     @app.delete("/api/pxmx/agents/{agent_id}")
-    async def delete_pxmx_agent(agent_id: str):
+    async def delete_pxmx_agent(agent_id: str, request: Request):
         """Remove a Proxmox node agent: best-effort disconnect of a live agent
         (relayed through the hypervisor spoke) plus removal of any persisted
         display-name override. If the agent is already dead / the hypervisor
         spoke is offline, the relay is skipped and we still clear the override."""
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
         hub = app.state.hub
         relayed = False
         pxmx_spoke = hub.get_hypervisor_spoke()
