@@ -18065,6 +18065,7 @@ function serialEnsureConsoleDock() {
         </div>
         <div class="flex-1 flex flex-col min-w-0">
             <div class="flex items-center gap-3 px-4 py-2 bg-[#2d2d2d] border-b border-slate-700 text-slate-200 text-sm">
+                <button id="serial-console-min" title="Minimize to the footer — keeps every session connected so you can browse the rest of the UI" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">▁ Minimize</button>
                 <button id="serial-console-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
                 <button id="serial-console-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
                 <span id="serial-console-status" class="ml-auto text-xs text-amber-400"></span>
@@ -18084,6 +18085,7 @@ function serialEnsureConsoleDock() {
         else if (screen && screen.requestFullscreen) screen.requestFullscreen().catch(() => {});
     };
     modal.querySelector('#serial-console-closeall').onclick = () => serialCloseAllConsoles();
+    modal.querySelector('#serial-console-min').onclick = () => serialSetDockCollapsed(true);
     modal.querySelector('#serial-console-refresh').onclick = () => serialRefreshAvailablePorts();
     modal.querySelector('#serial-console-takeover').onclick = () => serialForceTakeover();
     modal.querySelector('#serial-console-search').addEventListener('input', (ev) => {
@@ -18195,6 +18197,9 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     if (!window._serialConsoles) window._serialConsoles = new Map();
     const key = spokeId + '::' + portId;
     const modal = serialEnsureConsoleDock();
+    // A newly opened console always expands the dock (so it's visible), even if
+    // the operator had minimized it to the footer.
+    serialSetDockCollapsed(false);
     const bodies = modal.querySelector('#serial-console-bodies');
     const bodyEl = document.createElement('div');
     bodyEl.className = 'hidden flex-1 p-1 overflow-hidden bg-[#1e1e1e] border-r border-slate-800';
@@ -18418,6 +18423,7 @@ function serialSyncSerialHeader() {
     statusEl.className = 'ml-auto text-xs ' + (c ? c.statusCls : 'text-slate-400');
     const toBtn = modal.querySelector('#serial-console-takeover');
     if (toBtn) toBtn.classList.toggle('hidden', !(c && c.ro));
+    serialRenderDockPill();
 }
 
 // Force-takeover: claim the write lock for the active console's session,
@@ -18445,6 +18451,57 @@ async function serialForceTakeover() {
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Take Over'; }
     }
+}
+
+// Collapse (minimize) or restore the whole console dock WITHOUT closing any
+// session: every WebSocket + xterm stays live in the DOM, the dock is just
+// hidden and replaced by a small footer pill so the operator can browse the
+// rest of the UI while their consoles keep streaming. Restoring re-lays-out
+// the active terminal (an xterm that was display:none can measure 0×0).
+function serialSetDockCollapsed(collapsed) {
+    window._serialDockCollapsed = !!collapsed;
+    const modal = document.getElementById('serial-console-modal');
+    if (modal) modal.classList.toggle('hidden', !!collapsed);
+    serialRenderDockPill();
+    if (!collapsed && modal) {
+        serialReflowBodies();
+        const c = serialActiveConsole();
+        if (c && c.term) { try { c.term.focus(); c.term.scrollToBottom(); } catch (e) {} }
+        try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+    }
+}
+
+// Paint (or remove) the minimized-dock footer pill. Shown only while the dock
+// is collapsed AND at least one console is open; it surfaces the live count +
+// active console + an aggregate status dot, restores the dock on click, and
+// carries its own close-all affordance. Kept in its own fixed element (not
+// #footer-actions, which updateContextActions() rebuilds on every view change).
+function serialRenderDockPill() {
+    let pill = document.getElementById('serial-console-dock-pill');
+    const reg = window._serialConsoles;
+    const count = reg ? reg.size : 0;
+    if (!window._serialDockCollapsed || count === 0) { if (pill) pill.remove(); return; }
+    if (!pill) {
+        pill = document.createElement('div');
+        pill.id = 'serial-console-dock-pill';
+        pill.className = 'fixed bottom-2 right-4 z-50 flex items-center gap-2 px-3 py-1.5 rounded-full ' +
+                         'bg-[#181818] border border-slate-600 shadow-2xl text-xs text-slate-200';
+        document.body.appendChild(pill);
+    }
+    let anyGreen = false, anyRed = false;
+    reg.forEach(e => { if (e.statusCls === 'text-green-400') anyGreen = true; else if (e.statusCls === 'text-red-400') anyRed = true; });
+    const dot = anyGreen ? 'bg-green-400' : (anyRed ? 'bg-red-400' : 'bg-amber-400');
+    const active = serialActiveConsole();
+    const activeTxt = active ? escapeHtml(active.label || active.portId || '') : '';
+    pill.innerHTML = `
+        <button data-expand title="Restore the serial console dock" class="flex items-center gap-2 hover:text-white">
+            <span class="w-2 h-2 rounded-full ${dot}"></span>
+            <span>🖥 ${count} console${count > 1 ? 's' : ''}${activeTxt ? ' · ' + activeTxt : ''}</span>
+            <span class="text-slate-400 leading-none">▴</span>
+        </button>
+        <button data-closeall title="Close all consoles" class="text-slate-500 hover:text-red-400 text-sm leading-none">&times;</button>`;
+    pill.querySelector('[data-expand]').onclick = () => serialSetDockCollapsed(false);
+    pill.querySelector('[data-closeall]').onclick = (ev) => { ev.stopPropagation(); serialCloseAllConsoles(); };
 }
 
 // Close one serial console: close its WS, dispose the xterm, drop its body +
@@ -18481,6 +18538,9 @@ function serialCloseAllConsoles() {
     window._serialBroadcastGroup = null;
     window._serialBroadcastOn = false;
     window._serialConsoleFilter = '';
+    window._serialDockCollapsed = false;
+    const pill = document.getElementById('serial-console-dock-pill');
+    if (pill) pill.remove();
     const modal = document.getElementById('serial-console-modal');
     if (modal) modal.remove();
     if (typeof currentView !== 'undefined' && currentView === 'console' && typeof loadConsoleData === 'function') loadConsoleData();
