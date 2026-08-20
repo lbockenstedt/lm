@@ -616,7 +616,8 @@ _cache_semaphore = None    # asyncio.Semaphore — gates concurrent tenant prelo
 # on-disk reads are RBAC-correct. Non-proxied tenants are UNCHANGED (RAM-first,
 # no disk fallback). Set LM_PROXIED_TENANT_DISK_CACHE=0 to force legacy RAM
 # behaviour for every tenant regardless of proxy assignment.
-_proxied_tenants: set = set()   # tenant_ids currently served by a (non-shared) proxy
+_proxied_tenants: set = set()   # tenant_ids served by a specific (non-shared) edge proxy
+_proxied_all: bool = False      # True when a SHARED proxy fronts every tenant → all disk-backed
 _shard_micro: dict = {}         # tenant_id -> (loaded_at, {module_key: entry}) — short-TTL read cache
 _SHARD_MICRO_TTL = 3.0          # seconds; a dashboard read-burst decrypts once, RAM-free at rest
 _MODULE_HUB = None              # hub ref for module-level shard reads (set by create_app)
@@ -634,19 +635,35 @@ def _proxied_disk_cache_enabled() -> bool:
 
 
 def _is_proxied_tenant(tenant_id: str) -> bool:
-    return bool(tenant_id) and _proxied_disk_cache_enabled() and tenant_id in _proxied_tenants
+    # A SHARED proxy fronts EVERY tenant (it caches them all locally — see
+    # set_proxied_tenants), so _proxied_all disk-backs all of them; otherwise a
+    # tenant is disk-backed only if it has its own dedicated (non-shared) proxy.
+    return bool(tenant_id) and _proxied_disk_cache_enabled() and (
+        _proxied_all or tenant_id in _proxied_tenants)
 
 
-def set_proxied_tenants(tenants) -> None:
-    """Update the set of tenants served by an edge proxy (called by the hub when
-    proxy spokes connect/disconnect). Newly-proxied tenants have their resident
-    RAM cache evicted immediately so they go disk-backed at once (covers the
-    boot warm-load that ran before any proxy connected)."""
-    global _proxied_tenants
+def set_proxied_tenants(tenants, all_tenants: bool = False) -> None:
+    """Update which tenants are fronted by an edge proxy (called by the hub when
+    proxy spokes connect/disconnect). A tenant with a dedicated (non-shared)
+    proxy goes in ``tenants``; ``all_tenants=True`` marks that a SHARED proxy is
+    connected, which fronts the whole fleet — so EVERY tenant becomes disk-backed
+    (the shared proxy has the memory to cache them all locally, so nothing stays
+    resident in hub RAM). Newly-proxied tenants have their resident RAM evicted
+    immediately so they go disk-backed at once (covers the boot warm-load that
+    ran before any proxy connected)."""
+    global _proxied_tenants, _proxied_all
+    was_all = _proxied_all
     new = set(t for t in (tenants or []) if t)
     newly = new - _proxied_tenants
     _proxied_tenants = new
-    if _proxied_disk_cache_enabled():
+    _proxied_all = bool(all_tenants)
+    if not _proxied_disk_cache_enabled():
+        return
+    if _proxied_all and not was_all:
+        # A shared proxy just fronted the fleet → drop every resident tenant.
+        for t in list(_tenant_cache):
+            _evict_tenant_ram(t)
+    else:
         for t in newly:
             _evict_tenant_ram(t)
 
@@ -656,6 +673,8 @@ def _evict_tenant_ram(tenant_id: str) -> None:
     on-disk encrypted shard remains the source of truth for a proxied tenant."""
     _tenant_cache.pop(tenant_id, None)
     _shard_micro.pop(tenant_id, None)
+
+
 
 
 def _load_tenant_shard(tenant_id: str) -> dict:

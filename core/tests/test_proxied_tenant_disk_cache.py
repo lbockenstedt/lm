@@ -138,3 +138,29 @@ def test_evict_tenant_ram_clears_ram_and_micro(tmp_path):
     api._evict_tenant_ram("acme")
     assert "acme" not in api._tenant_cache
     assert "acme" not in api._shard_micro
+
+
+def test_shared_proxy_disk_backs_all_tenants(tmp_path):
+    """A SHARED proxy fronts the whole fleet → EVERY tenant is disk-backed, even
+    one never listed explicitly (it caches all tenants locally)."""
+    _write_shard(str(tmp_path), "gamma",
+                 {"pxmx_vms": {"data": {"vms": [7]}, "fetched_at": 3.0}})
+    api.set_proxied_tenants(set(), all_tenants=True)
+    entry = api._cache_entry("gamma", "pxmx_vms")
+    assert entry is not None and entry["data"] == {"vms": [7]}
+
+
+def test_shared_proxy_evicts_all_resident_ram(tmp_path):
+    api._tenant_cache["a"] = {"m": {"data": 1, "fetched_at": 1.0}}
+    api._tenant_cache["b"] = {"m": {"data": 2, "fetched_at": 1.0}}
+    api.set_proxied_tenants(set(), all_tenants=True)
+    # Becoming fleet-wide disk-backed drops every resident tenant at once.
+    assert api._tenant_cache == {}
+
+
+def test_shared_proxy_kill_switch_forces_ram(tmp_path):
+    _write_shard(str(tmp_path), "gamma",
+                 {"pxmx_vms": {"data": {"vms": [7]}, "fetched_at": 3.0}})
+    os.environ["LM_PROXIED_TENANT_DISK_CACHE"] = "0"
+    api.set_proxied_tenants(set(), all_tenants=True)
+    assert api._cache_entry("gamma", "pxmx_vms") is None

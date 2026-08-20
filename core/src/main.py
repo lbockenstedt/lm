@@ -7621,23 +7621,30 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             await asyncio.sleep(30)
 
     def _recompute_proxied_tenants(self) -> None:
-        """Rebuild the api module's set of proxied tenants from the live spoke
-        registry and push it to the hub cache layer. A tenant assigned a
-        connected (non-shared) edge proxy is served disk-backed (RAM-free at
-        rest) instead of resident in _tenant_cache. Recomputed on every proxy
+        """Rebuild the api module's proxied-tenant set from the live spoke
+        registry and push it to the hub cache layer. A tenant with its own
+        dedicated (non-shared) connected edge proxy is served disk-backed
+        (RAM-free at rest) instead of resident in _tenant_cache. A connected
+        SHARED proxy fronts the whole fleet (it caches every tenant locally), so
+        it disk-backs EVERY tenant (all_tenants=True). Recomputed on every proxy
         (re)connect/disconnect so the set can never drift or leak a stale entry.
         """
         try:
             import access as _access
             from api import set_proxied_tenants
             tenants = set()
+            shared_present = False
             for pk, mtype in list(self.spoke_module_types.items()):
                 if mtype != "proxy":
                     continue
                 t = self.state.get_spoke_tenant(pk) or ""
-                if t and not _access.tenant_is_shared(t):
+                if not t:
+                    continue
+                if _access.tenant_is_shared(t):
+                    shared_present = True
+                else:
                     tenants.add(t)
-            set_proxied_tenants(tenants)
+            set_proxied_tenants(tenants, all_tenants=shared_present)
         except Exception as e:  # noqa: BLE001 — best-effort optimisation
             logger.debug(f"recompute proxied tenants failed: {e}")
 
