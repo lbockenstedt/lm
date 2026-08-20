@@ -119,3 +119,96 @@ def test_list_zones_parses_domain_and_id():
     s.login("me@example.com", "secret")
     zones = s.list_zones()
     assert zones == [{"name": "example.com", "zone_id": "784067"}]
+
+
+def test_find_zone_for_picks_longest_matching_zone():
+    zones = [{"name": "example.com", "zone_id": "1"},
+             {"name": "sub.example.com", "zone_id": "2"}]
+    assert henet_scrape._find_zone_for("a.b.example.com", zones)["zone_id"] == "1"
+    # a record inside the more-specific hosted zone prefers that zone
+    assert henet_scrape._find_zone_for("x.sub.example.com", zones)["zone_id"] == "2"
+    assert henet_scrape._find_zone_for("sub.example.com", zones)["zone_id"] == "2"
+    assert henet_scrape._find_zone_for("other.net", zones) is None
+
+
+class _StatefulFetch:
+    """A fake HE panel that actually applies create/update POSTs, so a write is
+    reflected in the next edit-zone read (as the real verify step relies on)."""
+
+    def __init__(self, login_ok=True):
+        self.login_ok = login_ok
+        self.posts = []
+        self._next_id = 100
+        # (name, type) -> dict(id,name,type,ttl,value,dynamic)
+        self.state = {
+            ("www.example.com", "A"): dict(id="2", name="www.example.com", type="A",
+                                           ttl="300", value="203.0.113.10", dynamic="0"),
+        }
+
+    def _zone_html(self):
+        rows = "".join(_rec_row(r["id"], r["name"], r["type"], r["ttl"], r["value"], r["dynamic"])
+                       for r in self.state.values())
+        return f'<table id="dns_main_content"><tbody>{rows}</tbody></table>'
+
+    def __call__(self, method, url, data=None):
+        if method == "POST":
+            self.posts.append((url, data))
+            if data and data.get("hosted_dns_editrecord") in ("Submit", "Update"):
+                key = (data["Name"].rstrip("."), data["Type"].upper())
+                rid = data.get("hosted_dns_recordid") or str(self._next_id)
+                if not data.get("hosted_dns_recordid"):
+                    self._next_id += 1
+                self.state[key] = dict(id=rid, name=key[0], type=key[1],
+                                       ttl=str(data.get("TTL", "300")),
+                                       value=data.get("Content", ""), dynamic="0")
+                return 200, '<div id="dns_status">updated</div>'
+            return 200, (_ACCOUNT_PAGE if self.login_ok else _LOGIN_PAGE)
+        if "menu=edit_zone" in url:
+            return 200, self._zone_html()
+        return 200, _ACCOUNT_PAGE
+
+
+def test_set_records_creates_new_record():
+    fetch = _StatefulFetch()
+    s = henet_scrape.HENetScraper(fetch=fetch)
+    res = s.set_records("me@example.com", "secret",
+                        [{"name": "new.example.com", "type": "A", "value": "198.51.100.7", "ttl": 120}])
+    assert res["status"] == "SUCCESS", res
+    assert res["results"][0]["ok"] is True
+    # create → empty record id + Submit, carrying the account-login session
+    write = next(p for p in fetch.posts if isinstance(p[1], dict) and p[1].get("Name") == "new.example.com")
+    assert write[1]["hosted_dns_editrecord"] == "Submit"
+    assert write[1]["hosted_dns_recordid"] == ""
+    assert write[1]["Content"] == "198.51.100.7" and write[1]["TTL"] == "120"
+
+
+def test_set_records_updates_existing_in_place():
+    fetch = _StatefulFetch()
+    s = henet_scrape.HENetScraper(fetch=fetch)
+    res = s.set_records("me@example.com", "secret",
+                        [{"name": "www.example.com", "type": "A", "value": "203.0.113.99"}])
+    assert res["status"] == "SUCCESS", res
+    write = next(p for p in fetch.posts if isinstance(p[1], dict) and p[1].get("Name") == "www.example.com")
+    # existing record → Update carrying its real record id (2)
+    assert write[1]["hosted_dns_editrecord"] == "Update"
+    assert write[1]["hosted_dns_recordid"] == "2"
+
+
+def test_set_records_rejects_non_a_aaaa_and_unknown_zone():
+    fetch = _StatefulFetch()
+    s = henet_scrape.HENetScraper(fetch=fetch)
+    res = s.set_records("me@example.com", "secret", [
+        {"name": "mail.example.com", "type": "MX", "value": "10 mx.example.com"},
+        {"name": "host.other.net", "type": "A", "value": "1.2.3.4"},
+    ])
+    assert res["status"] == "ERROR"  # nothing applied
+    details = {r["name"]: r["detail"] for r in res["results"]}
+    assert "A/AAAA" in details["mail.example.com"]
+    assert "zone" in details["host.other.net"]
+
+
+def test_set_records_login_failure_is_error():
+    s = henet_scrape.HENetScraper(fetch=_StatefulFetch(login_ok=False))
+    res = s.set_records("me@example.com", "wrong",
+                        [{"name": "www.example.com", "type": "A", "value": "1.1.1.1"}])
+    assert res["status"] == "ERROR" and "login failed" in res["message"].lower()

@@ -24090,15 +24090,13 @@ async function showHenetRecordModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Value (IP)</label><input id="henet-r-value" value="${val(editItem?.value)}" class="${inputCls}" placeholder="203.0.113.5" title="IP address the record resolves to (A = IPv4, AAAA = IPv6)"></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="henet-r-ttl" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}" title="Time-to-live in seconds (minimum 60; default 300)"></div>
             ${tenantField}
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">DDNS Key</label><input id="henet-r-ddnskey" type="password" autocomplete="off" class="${inputCls}" placeholder="paste the record's dynamic DNS key" title="HE.NET authenticates each record's push with ITS OWN per-record key — NOT the account login. In the dns.he.net UI, open this record, turn on 'Enable entry for dynamic DNS', and copy the key it generates here."></div>
-            <p class="text-[11px] text-slate-400">The assigned DDNS credential${cred ? ` (<span class="font-mono">🔐 ${escapeHtml(cred.name)}</span>)` : ''} is your HE.NET account login — it only powers Import/Sync (reading the zone). Pushing THIS record needs its own per-record key from dns.he.net, entered above. Never stored — you'll re-enter it if you edit this record later.</p>
-            ${editing && isAdmin() ? `<p class="text-[11px] text-slate-400">To just move this record to another tenant's tab, change <b>Tenant</b> and leave <b>DDNS Key</b> blank — it's re-homed without re-pushing to HE.NET.</p>` : ''}
+            <p class="text-[11px] text-slate-400">Records are created/updated directly in your HE.NET zone using the assigned account login${cred ? ` (<span class="font-mono">🔐 ${escapeHtml(cred.name)}</span>)` : ''} — no per-record DDNS key needed.${editing && isAdmin() ? ` To just move this record to another tenant's tab, change <b>Tenant</b> and leave <b>Value</b> unchanged — it's re-homed without touching HE.NET.` : ''}</p>
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="saveHenetRecord()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
             <button onclick="document.getElementById('henet-record-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
-    if (editing) { modal.dataset.editName = editItem.name; modal.dataset.editType = editItem.type; modal.dataset.editTenant = String(editItem.tenant_id || ''); }
+    if (editing) { modal.dataset.editName = editItem.name; modal.dataset.editType = editItem.type; modal.dataset.editTenant = String(editItem.tenant_id || ''); modal.dataset.editValue = String(editItem.value || ''); }
 }
 
 // ── HE DDNS credential assignment ───────────────────────────────────────────
@@ -24178,7 +24176,6 @@ async function saveHenetRecord() {
         type: editing ? modal.dataset.editType : get('henet-r-type'),
         value: get('henet-r-value'),
         ttl: parseInt(get('henet-r-ttl')) || 300,
-        key: get('henet-r-ddnskey'),
     };
     // Admin-only tenant assignment (the field is absent for non-admins, whom the
     // server pins to their own tenant regardless).
@@ -24186,39 +24183,31 @@ async function saveHenetRecord() {
     if (tenantSel) payload.tenant = tenantSel.value;
     if (!payload.name || !payload.value) { showToast('Name and Value are required', 'error'); return; }
 
-    // Push-free tenant re-home: when editing and NO new DDNS key is given, don't
-    // re-push to HE (which needs the per-record key and would error while the
-    // endpoint is unreachable) — if the tenant changed, just move the record to
-    // that tenant's tab (metadata only). This is how records get organised onto
-    // per-tenant tabs without touching the HE zone.
-    if (editing && tenantSel && !payload.key) {
+    // Push-free tenant re-home: when editing, an admin who only changes the
+    // Tenant (leaving the Value unchanged) is re-organising tabs, not editing the
+    // zone — move the record's tab (metadata only) without touching HE.NET.
+    if (editing && tenantSel && get('henet-r-value') === (modal.dataset.editValue || '')) {
         const origTenant = modal.dataset.editTenant || '';
-        if (String(tenantSel.value) === String(origTenant)) {
-            showToast("This record's DDNS key is required to re-push it to HE.NET", 'error');
+        if (String(tenantSel.value) !== String(origTenant)) {
+            try {
+                const { ok, data: d, detail } = await _spokeFetch('/api/henet/record/tenant', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: payload.name, type: payload.type, tenant: tenantSel.value }),
+                });
+                if (ok && d.status === 'SUCCESS') {
+                    modal.remove();
+                    window._henetActiveTab = tenantSel.value;  // jump to the destination tab
+                    const dest = tenantSel.value ? ((window._allTenantsName || {})[tenantSel.value] || tenantSel.value) : 'Admin';
+                    showToast(`Record moved to ${dest}`, 'success');
+                    loadHenet();
+                } else showToast('Error: ' + (detail || d?.message || 'Move failed'), 'error');
+            } catch (e) { showToast('Error: ' + e.message, 'error'); }
             return;
         }
-        try {
-            const { ok, data: d, detail } = await _spokeFetch('/api/henet/record/tenant', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: payload.name, type: payload.type, tenant: tenantSel.value }),
-            });
-            if (ok && d.status === 'SUCCESS') {
-                modal.remove();
-                window._henetActiveTab = tenantSel.value;  // jump to the destination tab
-                const dest = tenantSel.value ? ((window._allTenantsName || {})[tenantSel.value] || tenantSel.value) : 'Admin';
-                showToast(`Record moved to ${dest}`, 'success');
-                loadHenet();
-            } else showToast('Error: ' + (detail || d?.message || 'Move failed'), 'error');
-        } catch (e) { showToast('Error: ' + e.message, 'error'); }
-        return;
     }
 
-    if (!window._henetAssignedCred) { showToast('Assign an HE.NET DDNS credential first', 'error'); return; }
-    // The assigned module credential is an account login (Import/Sync only) —
-    // HE's dyndns push always needs THIS record's own per-record key, or it
-    // fails "badauth" for every record pushed with the account password.
-    if (!payload.key) { showToast("This record's DDNS key is required to push it to HE.NET", 'error'); return; }
+    if (!window._henetAssignedCred) { showToast('Assign an HE.NET account credential first', 'error'); return; }
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/record', {
             method: editing ? 'PUT' : 'POST',
@@ -24228,7 +24217,7 @@ async function saveHenetRecord() {
         if (ok && (d.status === 'SUCCESS' || d.status === 'PARTIAL')) {
             modal.remove();
             if (d.status === 'PARTIAL') showToast('HE.NET reported: ' + (d.errors || []).join('; '), 'error');
-            else showToast('Record pushed to HE.NET', 'success');
+            else showToast('Record saved at HE.NET', 'success');
             loadHenet();
         } else showToast('Error: ' + (detail || d?.message || 'Operation failed'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
@@ -24355,45 +24344,17 @@ async function syncHenet() {
     const records = (window._henetRecords || []).filter(r => r.type === 'A' || r.type === 'AAAA')
         .map(r => ({ name: r.name, type: r.type, value: r.value, ttl: r.ttl }));
     if (!records.length) { showToast('No A/AAAA records under management yet — use “⇩ Import existing” to pull in the records already in your HE.NET zone.', 'error'); return; }
-    if (!window._henetAssignedCred) { showToast('Assign an HE.NET DDNS credential first', 'error'); return showHenetCredModal(); }
-    // HE authenticates each push with the record's OWN dyndns key — the account
-    // login (what powers Import) is NOT a valid push password, which is why a
-    // plain "sync with the assigned credential" returned badauth for every
-    // record. Prompt for the shared DDNS key the operator set on their HE
-    // records and push all of them with it (mirrors the per-record key in
-    // Add/Edit; never stored). Left blank, fall back to the assigned credential
-    // (correct only when that credential is itself a real shared DDNS key).
-    const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
-    openModal('henet-sync-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">Sync all to HE.NET</h3>
-        <p class="text-sm text-slate-500">Re-push all <b>${records.length}</b> managed A/AAAA record(s) to HE.NET.</p>
-        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Shared DDNS key</label>
-            <input id="henet-sync-key" type="password" autocomplete="off" class="${inputCls}" placeholder="the dynamic-DNS key set on these records">
-        </div>
-        <p class="text-[11px] text-slate-400">HE.NET authenticates each push with the record's <b>own</b> dynamic-DNS key — <b>not</b> the account login. Enter it once here and every record is pushed with it (works when your records share one key). Records with different keys must be pushed individually via <b>Edit</b>. The key is never stored. Leave blank to try the assigned credential (only works if it is itself a real DDNS key).</p>
-        <div class="flex justify-end gap-2 pt-2">
-            <button onclick="_henetSyncPush()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Push all</button>
-            <button onclick="document.getElementById('henet-sync-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
-}
-
-async function _henetSyncPush() {
-    const records = (window._henetRecords || []).filter(r => r.type === 'A' || r.type === 'AAAA')
-        .map(r => ({ name: r.name, type: r.type, value: r.value, ttl: r.ttl }));
-    if (!records.length) { document.getElementById('henet-sync-modal')?.remove(); return; }
-    const key = document.getElementById('henet-sync-key')?.value?.trim() || '';
-    const payload = { records };
-    if (key) payload.ddns_key = key;
-    document.getElementById('henet-sync-modal')?.remove();
+    if (!window._henetAssignedCred) { showToast('Assign an HE.NET account credential first', 'error'); return showHenetCredModal(); }
+    if (!await showConfirmToast(`Re-apply all ${records.length} managed A/AAAA record(s) at HE.NET using your account login?\n\nEach record is create/updated in the dns.he.net control panel — no per-record DDNS key needed.`)) return;
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/sync', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
+            body: JSON.stringify({ records }),
         });
         if (ok && (d.status === 'SUCCESS' || d.status === 'PARTIAL')) {
             const nErr = d.errors ? d.errors.length : 0;
-            showToast(`Synced — ${d.pushed || 0} pushed${nErr ? `, ${nErr} error(s)` : ''}`, nErr ? 'error' : 'success');
+            showToast(`Synced — ${d.pushed || 0} applied${nErr ? `, ${nErr} error(s)` : ''}`, nErr ? 'error' : 'success');
             loadHenet();
         } else showToast('Error: ' + (detail || d?.message || 'Sync failed'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }

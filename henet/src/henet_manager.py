@@ -145,6 +145,41 @@ class HENetManager:
         return {"status": "SUCCESS", "imported": imported, "skipped": skipped,
                 "records_written": len(managed)}
 
+    def record_web_writes(self, records: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Upsert local management state to reflect writes the HUB already made
+        via the HE.NET web panel (account-login path) — this NEVER pushes to HE
+        itself (the hub did the write); it only records the outcome so the UI
+        lists the record with its new value + status.
+
+        Each item: ``{name, type, value, ttl?, tenant_id?, ok?, detail?}``. An
+        existing record of the same name+type is replaced (its tenant is kept
+        when the item doesn't set one, so a re-push doesn't silently un-home a
+        tenant record)."""
+        managed = self._load()
+        by_key = {(r.get("name"), str(r.get("type", "")).upper()): r for r in managed}
+        written = 0
+        for r in records:
+            entry = self._normalize(r)
+            if not entry:
+                continue
+            key = (entry["name"], entry["type"])
+            prior = by_key.get(key)
+            if prior and not str(r.get("tenant_id") or "").strip():
+                entry["tenant_id"] = prior.get("tenant_id", "") or ""
+            ok = bool(r.get("ok", True))
+            entry["last_push_status"] = "ok" if ok else "error"
+            entry["last_push_detail"] = r.get("detail") or (
+                "updated via HE.NET web panel" if ok else "HE.NET web update failed")
+            entry["last_pushed_at"] = int(time.time())
+            entry["source"] = "he-web"
+            managed = [m for m in managed if (m.get("name"), str(m.get("type", "")).upper()) != key]
+            managed.append(entry)
+            by_key[key] = entry
+            written += 1
+        self._save(managed)
+        logger.info("Recorded %d HE.NET web-panel write(s) into management", written)
+        return {"status": "SUCCESS", "records_written": len(managed), "written": written}
+
     def set_tenant(self, name: str, rtype: Optional[str] = None,
                    tenant_id: str = "") -> Dict[str, Any]:
         """Re-home a managed record to a tenant WITHOUT pushing to HE.

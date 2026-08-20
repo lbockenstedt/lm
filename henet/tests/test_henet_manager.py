@@ -210,6 +210,36 @@ def test_ddns_key_never_persisted(tmp_path):
     assert "password" not in json.loads(raw)[0]
 
 
+def test_record_web_writes_upserts_without_pushing(tmp_path):
+    """The hub writes to HE via the web panel; record_web_writes only reflects
+    that in local state — no dyndns push (the FakePoster is never called)."""
+    poster = FakePoster()
+    mgr = HENetManager(state_path=str(tmp_path / "r.json"), http_post=poster)
+    res = mgr.record_web_writes([
+        {"name": "a.example.com", "type": "A", "value": "1.2.3.4", "ttl": 300,
+         "tenant_id": "t1", "ok": True},
+    ])
+    assert res["status"] == "SUCCESS" and res["written"] == 1
+    recs = mgr.list_records()
+    assert len(recs) == 1
+    assert recs[0]["value"] == "1.2.3.4" and recs[0]["tenant_id"] == "t1"
+    assert recs[0]["last_push_status"] == "ok"
+    assert recs[0]["source"] == "he-web"
+    assert poster.calls == []  # no HE dyndns push was made
+
+
+def test_record_web_writes_updates_value_and_keeps_tenant(tmp_path):
+    mgr = HENetManager(state_path=str(tmp_path / "r.json"), http_post=FakePoster())
+    mgr.record_web_writes([{"name": "a.example.com", "type": "A", "value": "1.2.3.4",
+                            "tenant_id": "t1", "ok": True}])
+    # a later write that omits tenant must not un-home the record
+    mgr.record_web_writes([{"name": "a.example.com", "type": "A", "value": "5.6.7.8",
+                            "ok": True}])
+    recs = mgr.list_records()
+    assert len(recs) == 1
+    assert recs[0]["value"] == "5.6.7.8" and recs[0]["tenant_id"] == "t1"
+
+
 def test_status_reports_reachable(tmp_path):
     poster = FakePoster()
     mgr = HENetManager(state_path=str(tmp_path / "r.json"), http_post=poster)

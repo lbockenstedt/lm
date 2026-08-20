@@ -567,40 +567,92 @@ def register(app, hub, ctx):
         return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_STATUS",
                                   log_name="henet_status")
 
+    async def _henet_web_write(request: Request, records: list):
+        """Create/update records at HE.NET via the **account-login web panel**
+        (hub-side) — NO per-record DDNS key needed — then record the outcome in
+        the spoke's local management state.
+
+        ``records``: ``[{name,type,value,ttl?,tenant_id?}]``. The scrape/write
+        runs on the HUB (it has outbound access to dns.he.net + the vault key,
+        which the spoke may not); only records HE actually accepted are persisted
+        locally (so a failed write never leaves a phantom managed record).
+        Returns a WebUI-shaped ``{status, pushed, errors?}``."""
+        hub = app.state.hub
+        spoke_id = _get_henet_spoke(hub)  # 503 early if the spoke is offline
+        username, password = await _henet_resolve_account_login(request)
+        import henet_scrape
+        scraper = henet_scrape.HENetScraper()
+        result = await asyncio.to_thread(scraper.set_records, username, password, records)
+        if result.get("status") == "ERROR" and not result.get("results"):
+            raise HTTPException(status_code=502,
+                                detail=result.get("message") or "HE.NET web update failed")
+        by_key = {(str(r.get("name", "")).strip().rstrip("."),
+                   str(r.get("type", "A")).upper()): r for r in records}
+        local = []
+        for res in result.get("results", []):
+            if not res.get("ok"):
+                continue
+            src = by_key.get((res["name"], res["type"]), {})
+            local.append({"name": res["name"], "type": res["type"],
+                          "value": src.get("value", ""), "ttl": src.get("ttl", 300),
+                          "tenant_id": src.get("tenant_id", ""),
+                          "ok": True, "detail": res.get("detail", "")})
+        if local:
+            await _relay_spoke(spoke_id, "HENET_WEB_RECORD", {"records": local},
+                               log_name="henet_web_record")
+        errors = [f'{r["name"]}: {r.get("detail")}'
+                  for r in result.get("results", []) if not r.get("ok")]
+        out = {"status": "SUCCESS" if not errors else "PARTIAL",
+               "pushed": result.get("applied", len(local))}
+        if errors:
+            out["errors"] = errors
+        return out
+
     @app.post("/api/henet/record")
     async def henet_add_record(request: Request):
-        """Add (or re-push) a record. Tenant-owned: a non-admin's new record is
-        auto-tagged with their own tenant; re-adding an EXISTING name they don't
-        own 404s (see _henet_assert_can_write). Global Admin may target a
-        specific tenant via ``{"tenant": "<id>"}``, else the record is global."""
+        """Add/update a record at HE.NET using the account login (web panel).
+        Tenant-owned: a non-admin's new record is auto-tagged with their own
+        tenant; re-adding an EXISTING name they don't own 404s (see
+        _henet_assert_can_write). Global Admin may target a specific tenant via
+        ``{"tenant": "<id>"}``, else the record is global."""
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
         sess = _session_user(request) or {}
         hub = app.state.hub
         name = str(body.get("name") or "").strip().rstrip(".")
         rtype = str(body.get("type") or "A").upper()
+        value = str(body.get("value") or "").strip()
         if not name:
             raise HTTPException(status_code=400, detail="name is required")
+        if not value:
+            raise HTTPException(status_code=400, detail="value is required")
         existing_owner = await _henet_assert_can_write(hub, sess, name, rtype)
         tenant_id = existing_owner if existing_owner is not None else \
             _henet_tenant_scope(sess, body.get("tenant") if _is_admin(sess) else None)
-        body["tenant_id"] = tenant_id
-        await _henet_resolve_vault_cred(request, body, tenant_id)
-        return await _relay_spoke(_get_henet_spoke(hub), "HENET_ADD", body,
-                                  log_name="henet_add_record")
+        try:
+            ttl = int(body.get("ttl", 300))
+        except (TypeError, ValueError):
+            ttl = 300
+        return await _henet_web_write(request, [{
+            "name": name, "type": rtype, "value": value,
+            "ttl": ttl, "tenant_id": tenant_id}])
 
     @app.put("/api/henet/record")
     async def henet_update_record(request: Request):
-        """Re-push an existing record with a new IP. Must already own it (or be
-        admin) — 404 otherwise, see _henet_assert_can_write."""
+        """Update an existing record at HE.NET with a new value via the account
+        login (web panel). Must already own it (or be admin) — 404 otherwise,
+        see _henet_assert_can_write."""
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
         sess = _session_user(request) or {}
         hub = app.state.hub
         name = str(body.get("name") or "").strip().rstrip(".")
         rtype = str(body.get("type") or "A").upper()
+        value = str(body.get("value") or "").strip()
         if not name:
             raise HTTPException(status_code=400, detail="name is required")
+        if not value:
+            raise HTTPException(status_code=400, detail="value is required")
         existing_owner = await _henet_assert_can_write(hub, sess, name, rtype)
         # Global Admin may re-home an existing record to another tenant (or back
         # to global) by sending an explicit ``tenant``; otherwise the record
@@ -609,10 +661,13 @@ def register(app, hub, ctx):
             tenant_id = _henet_tenant_scope(sess, body.get("tenant"))
         else:
             tenant_id = existing_owner if existing_owner is not None else _henet_tenant_scope(sess)
-        body["tenant_id"] = tenant_id
-        await _henet_resolve_vault_cred(request, body, tenant_id)
-        return await _relay_spoke(_get_henet_spoke(hub), "HENET_UPDATE", body,
-                                  log_name="henet_update_record")
+        try:
+            ttl = int(body.get("ttl", 300))
+        except (TypeError, ValueError):
+            ttl = 300
+        return await _henet_web_write(request, [{
+            "name": name, "type": rtype, "value": value,
+            "ttl": ttl, "tenant_id": tenant_id}])
 
     @app.delete("/api/henet/record")
     async def henet_delete_record(request: Request):
@@ -653,26 +708,24 @@ def register(app, hub, ctx):
 
     @app.post("/api/henet/sync")
     async def henet_sync(request: Request):
-        """Replace the managed set and push every A/AAAA record to HE.NET.
-
-        HE authenticates each dyndns push with the record's OWN per-record DDNS
-        key — the account login is NOT a valid push password. So an explicit
-        ``ddns_key`` in the body (the shared key the operator set on their HE
-        records, entered in the Sync-all dialog) is used verbatim as the push
-        password for every record; only when none is supplied do we fall back to
-        the assigned credential (which works when that credential is itself a
-        real shared DDNS key). Sending the account-login password as the key is
-        exactly what made Sync all report "badauth" for every record."""
+        """Re-apply every managed A/AAAA record at HE.NET via the account-login
+        web panel — NO per-record DDNS key needed. Each record in the body is
+        create/updated at HE with the account login (the same credential Import
+        uses), then the spoke's local state is refreshed with the outcome."""
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
-        typed_key = str(body.get("ddns_key") or "").strip()
-        if typed_key:
-            body["ddns_key"] = typed_key  # operator-supplied shared key wins, no vault lookup
-        else:
-            body.pop("ddns_key", None)
-            await _henet_resolve_vault_cred(request, body)
-        return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_SYNC", body,
-                                  log_name="henet_sync")
+        records = body.get("records")
+        if not isinstance(records, list) or not records:
+            raise HTTPException(status_code=400, detail="records must be a non-empty list")
+        clean = []
+        for r in records:
+            if not isinstance(r, dict):
+                continue
+            clean.append({"name": str(r.get("name") or "").strip().rstrip("."),
+                          "type": str(r.get("type") or "A").upper(),
+                          "value": str(r.get("value") or "").strip(),
+                          "ttl": r.get("ttl", 300)})
+        return await _henet_web_write(request, clean)
 
     @app.post("/api/henet/import")
     async def henet_import(request: Request):

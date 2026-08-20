@@ -95,6 +95,12 @@ class HENetSpoke(BaseSpoke):
                 return {"status": "ERROR", "message": "records must be a list"}
             return await asyncio.to_thread(self.mgr.import_records, records)
 
+        if cmd == "HENET_WEB_RECORD":
+            records = data.get("records", [])
+            if not isinstance(records, list):
+                return {"status": "ERROR", "message": "records must be a list"}
+            return await asyncio.to_thread(self.mgr.record_web_writes, records)
+
         if cmd == "HENET_STATUS":
             s = await asyncio.to_thread(self.mgr.status)
             return {"status": "SUCCESS", **s}

@@ -37,6 +37,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 logger = logging.getLogger("HENetScrape")
 
 BASE_URL = "https://dns.he.net/"
+# Writes (create/update/delete) POST to the CGI endpoint; reads GET the root.
+EDIT_URL = "https://dns.he.net/index.cgi"
 # HE's dyndns endpoint only updates A/AAAA, so those are the only record types
 # the henet module can actually manage — the scraper surfaces the rest as a
 # skipped-count so the operator knows why a CNAME/MX/TXT wasn't imported.
@@ -45,6 +47,23 @@ MANAGEABLE_TYPES = ("A", "AAAA")
 # A fetcher takes (method, url, data|None) and returns (status, body_text),
 # transparently carrying cookies across calls.
 Fetch = Callable[[str, str, Optional[Dict[str, str]]], Tuple[int, str]]
+
+
+def _find_zone_for(name: str, zones: List[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """The hosted zone that owns ``name`` — the LONGEST zone that equals the
+    record name or is a dot-suffix of it (so ``a.b.example.com`` matches
+    ``example.com``, and ``sub.example.com`` prefers ``sub.example.com`` over
+    ``example.com`` when both are hosted). ``None`` when no zone matches."""
+    n = (name or "").strip().rstrip(".").lower()
+    best = None
+    for z in zones:
+        zn = (z.get("name") or "").strip().rstrip(".").lower()
+        if not zn:
+            continue
+        if n == zn or n.endswith("." + zn):
+            if best is None or len(zn) > len(best.get("name", "")):
+                best = z
+    return best
 
 
 class _ZoneListParser(HTMLParser):
@@ -122,6 +141,7 @@ class _RecordTableParser(HTMLParser):
         # raising — this is best-effort enumeration of a live third-party page.
         if len(cells) < 7:
             return
+        rec_id = html.unescape(cells[1]["text"]).strip()
         name = html.unescape(cells[2]["text"]).strip().rstrip(".")
         rtype = (self._rtype or html.unescape(cells[3]["text"])).strip().upper()
         # The value's full form is in the cell's ``data`` attr (text may be
@@ -136,8 +156,8 @@ class _RecordTableParser(HTMLParser):
             ttl_i = 300
         if not name or not rtype or not value:
             return
-        self.records.append({"name": name, "type": rtype, "value": value,
-                             "ttl": ttl_i, "is_dynamic": is_dynamic})
+        self.records.append({"id": rec_id, "name": name, "type": rtype,
+                             "value": value, "ttl": ttl_i, "is_dynamic": is_dynamic})
 
 
 class HENetScraper:
@@ -190,6 +210,131 @@ class HENetScraper:
         p = _RecordTableParser()
         p.feed(body)
         return p.records
+
+    # ── writes (account-login web panel; no per-record DDNS key needed) ──
+    # HE's dyndns *push* endpoint needs each record's own DDNS key, but the web
+    # control panel lets the ACCOUNT holder create/update any record directly.
+    # These emulate the panel's edit-zone form (create = ``Submit`` with an empty
+    # record id; update = ``Update`` carrying the existing record id) so records
+    # can be managed with only the account login the import path already uses.
+
+    def _post_record(self, zone_id: str, name: str, rtype: str, value: str,
+                     ttl: int, record_id: str = "") -> Tuple[int, str]:
+        form = {
+            "account": "",
+            "menu": "edit_zone",
+            "Type": rtype,
+            "hosted_dns_zoneid": str(zone_id),
+            "hosted_dns_recordid": str(record_id or ""),
+            "hosted_dns_editzone": "1",
+            "Priority": "",
+            "Name": name,
+            "Content": value,
+            "TTL": str(int(ttl or 300)),
+            # 'Update' edits the existing record in place (needs a record id);
+            # 'Submit' creates a new one (empty record id).
+            "hosted_dns_editrecord": "Update" if record_id else "Submit",
+        }
+        return self._fetch("POST", EDIT_URL, form)
+
+    def set_records(self, username: str, password: str,
+                    records: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Create/update each A/AAAA record in HE via the web panel using the
+        account login — NO per-record DDNS key required.
+
+        ``records`` items: ``{name, type, value, ttl?}``. Logs in once, resolves
+        each record's zone from the account's hosted zones, then upserts it
+        (updating the existing row in place when present, else creating one) and
+        verifies the change by re-reading the zone. Returns
+        ``{status, results:[{name,type,ok,detail}]}`` — ``status`` is SUCCESS
+        when every record applied, PARTIAL when some failed, ERROR when login/
+        zone resolution failed before any record could be attempted."""
+        if not username or not password:
+            return {"status": "ERROR",
+                    "message": "HE.NET account login (email + password) is required"}
+        try:
+            if not self.login(username, password):
+                return {"status": "ERROR",
+                        "message": "HE.NET login failed — check the account email/"
+                                   "password in the Credential Vault (2-factor auth "
+                                   "must be disabled for the web panel)"}
+            zones = self.list_zones()
+        except Exception as exc:  # noqa: BLE001 — network/transport
+            logger.warning("henet scrape: write login/zone list failed: %s", exc)
+            return {"status": "ERROR", "message": f"could not reach dns.he.net: {exc}"}
+        if not zones:
+            return {"status": "ERROR",
+                    "message": "no HE.NET zones found on the account (is 2-factor "
+                               "auth enabled, or the account empty?)"}
+
+        # Cache each zone's current records so a batch (Sync all) reads a zone
+        # once, and so we can find an existing record's id (update-in-place) and
+        # verify the write afterward without re-fetching per record.
+        cache: Dict[str, List[Dict[str, Any]]] = {}
+
+        def _zone_rows(zid: str) -> List[Dict[str, Any]]:
+            if zid not in cache:
+                try:
+                    cache[zid] = self.list_zone_records(zid)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("henet scrape: records for zone %s failed: %s", zid, exc)
+                    cache[zid] = []
+            return cache[zid]
+
+        results: List[Dict[str, Any]] = []
+        for r in records:
+            name = str(r.get("name", "")).strip().rstrip(".")
+            rtype = str(r.get("type", "A")).strip().upper()
+            value = str(r.get("value", "")).strip()
+            try:
+                ttl = int(r.get("ttl", 300))
+            except (TypeError, ValueError):
+                ttl = 300
+            if not name or not value:
+                results.append({"name": name, "type": rtype, "ok": False,
+                                "detail": "name and value are required"})
+                continue
+            if rtype not in MANAGEABLE_TYPES:
+                results.append({"name": name, "type": rtype, "ok": False,
+                                "detail": f"HE.NET web update manages A/AAAA only, not {rtype}"})
+                continue
+            zone = _find_zone_for(name, zones)
+            if not zone:
+                results.append({"name": name, "type": rtype, "ok": False,
+                                "detail": "no hosted HE.NET zone matches this name"})
+                continue
+            zid = zone["zone_id"]
+            existing = next((x for x in _zone_rows(zid)
+                             if x.get("name", "").lower() == name.lower()
+                             and str(x.get("type", "")).upper() == rtype), None)
+            try:
+                self._post_record(zid, name, rtype, value, ttl,
+                                   record_id=(existing or {}).get("id", ""))
+            except Exception as exc:  # noqa: BLE001 — network/transport
+                results.append({"name": name, "type": rtype, "ok": False,
+                                "detail": f"request failed: {exc}"})
+                continue
+            # Verify against a fresh read of the zone (the panel gives no clean
+            # machine-readable status; the authoritative check is that the row
+            # now carries the value we set).
+            cache.pop(zid, None)
+            applied = next((x for x in _zone_rows(zid)
+                            if x.get("name", "").lower() == name.lower()
+                            and str(x.get("type", "")).upper() == rtype
+                            and x.get("value", "") == value), None)
+            if applied:
+                results.append({"name": name, "type": rtype, "ok": True,
+                                "detail": "updated via HE.NET web panel"})
+            else:
+                results.append({"name": name, "type": rtype, "ok": False,
+                                "detail": "HE.NET did not accept the update (check the "
+                                          "account login / that the zone is on this account)"})
+
+        ok_n = sum(1 for x in results if x["ok"])
+        status = "SUCCESS" if ok_n == len(results) and results else (
+            "PARTIAL" if ok_n else "ERROR")
+        return {"status": status, "results": results, "applied": ok_n,
+                "total": len(results)}
 
     # ── orchestration ─────────────────────────────────────────────────
 
