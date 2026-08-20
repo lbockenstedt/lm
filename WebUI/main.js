@@ -23967,6 +23967,26 @@ async function loadHenet() {
         }
     } catch (e) { /* status is best-effort */ }
 
+    // Scheduled-sync badge (admin only) — shows the current schedule so it's
+    // discoverable without opening the modal. Best-effort; config route is
+    // read-only + authed.
+    let scheduleHtml = '';
+    if (admin) {
+        try {
+            const sc = await _spokeFetch('/api/henet/sync-config');
+            if (sc.ok && sc.data && sc.data.config) {
+                window._henetScheduleCfg = sc.data.config;
+                const cfg = sc.data.config;
+                if (cfg.enabled) {
+                    const when = cfg.mode === 'daily'
+                        ? `daily at ${escapeHtml(String(cfg.daily_time || '02:00'))}`
+                        : `every ${_henetFmtInterval(cfg.interval_seconds)}`;
+                    scheduleHtml = ` · <span class="text-slate-600" title="Automatic HE.NET re-sync is on">⏱ auto-sync ${when}</span>`;
+                }
+            }
+        } catch (e) { /* best-effort */ }
+    }
+
     // Assigned DDNS credential — the slot for the CURRENT scope. A non-admin
     // gets their own tenant's slot. A Global Admin gets the selected tenant's
     // slot when a tenant is picked, or the Admin (global) slot — plus the
@@ -24002,12 +24022,13 @@ async function loadHenet() {
     // slot for admin). Import/Sync are bulk, no per-object tenant model, so
     // they stay admin-only — same as the server's _ADMIN_INFRA_WRITE_PREFIXES.
     const actionBar = `<div class="flex flex-wrap items-center justify-between gap-2 mb-3">
-        <div class="text-xs text-slate-500">${statusHtml}${credInfo}${tenantCredInfo}</div>
+        <div class="text-xs text-slate-500">${statusHtml}${credInfo}${tenantCredInfo}${scheduleHtml}</div>
         <div class="flex gap-2">
           ${canWrite ? `<button onclick="showHenetCredModal()" class="${btnCls}" title="${assignedCred ? 'Change the assigned HE DDNS credential' : 'Assign an HE DDNS credential from the Credential Vault'}">🔐 ${assignedCred ? 'Change credential' : 'Assign credential'}</button>` : ''}
           ${canWrite ? `<button onclick="showHenetRecordModal()" class="${btnCls}">+ Add Record</button>` : ''}
           ${admin && assignedCred ? `<button onclick="importHenet()" class="${btnCls}" title="Read the existing records already in your HE.NET zone (via the account login) and bring them under management">⇩ Import existing</button>` : ''}
           ${admin && assignedCred ? `<button onclick="syncHenet()" class="${btnCls}" title="Re-push every managed A/AAAA record to HE.NET">↻ Sync all</button>` : ''}
+          ${admin ? `<button onclick="showHenetScheduleModal()" class="${btnCls}" title="Schedule an automatic re-sync of every managed HE.NET record">⏱ Schedule…</button>` : ''}
           ${admin ? `<button onclick="showHenetMoveAllModal()" class="${btnCls}" title="Re-home every record in the current view to another tenant (metadata only — the HE.NET zone is untouched)">➡ Move all…</button>` : ''}
           ${canWrite ? `<button onclick="deconfigureHenetScope()" class="${btnClsDanger}" title="Remove every record in the current view from management (the HE.NET zone is left unchanged)">🧹 Deconfigure</button>` : ''}
         </div>
@@ -24164,6 +24185,90 @@ async function _henetClearCred() {
             showToast('HE.NET DDNS credential cleared', 'success');
             loadHenet();
         } else showToast('Error: ' + (detail || d?.message || 'Failed to clear credential'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+// Human-friendly "every N" for a seconds interval (used by the schedule badge).
+function _henetFmtInterval(secs) {
+    const n = parseInt(secs, 10) || 3600;
+    if (n % 86400 === 0) { const d = n / 86400; return d === 1 ? 'day' : `${d} days`; }
+    if (n % 3600 === 0) { const h = n / 3600; return h === 1 ? 'hour' : `${h} hours`; }
+    const m = Math.round(n / 60); return m === 1 ? 'minute' : `${m} minutes`;
+}
+
+// Scheduled auto-sync config (Global Admin only). Re-applies every managed
+// HE.NET record on a schedule — the automatic twin of "Sync all". Opt-in.
+async function showHenetScheduleModal() {
+    const inputCls = 'w-full px-3 py-2 border border-slate-300 rounded-md text-sm focus:ring-2 focus:ring-[#01A982] focus:border-[#01A982]';
+    let cfg = window._henetScheduleCfg || null;
+    if (!cfg) {
+        try {
+            const { ok, data } = await _spokeFetch('/api/henet/sync-config');
+            if (ok && data && data.config) cfg = data.config;
+        } catch (e) { /* fall back to defaults */ }
+    }
+    cfg = cfg || { enabled: false, mode: 'interval', interval_seconds: 3600, daily_time: '02:00' };
+    const intMin = Math.max(5, Math.round((parseInt(cfg.interval_seconds, 10) || 3600) / 60));
+    const isDaily = cfg.mode === 'daily';
+    openModal('henet-schedule-modal', `
+        <h3 class="text-lg font-bold text-[#263040]">Scheduled HE.NET re-sync</h3>
+        <p class="text-sm text-slate-500">Automatically re-apply every managed HE.NET record at Hurricane Electric (via the account-login web panel) on a schedule — the hands-off twin of <b>Sync all</b>. Records are written per tenant using each tenant's assigned credential. Off by default.</p>
+        <label class="flex items-center gap-2 text-sm font-medium text-slate-700">
+          <input type="checkbox" id="henet-sched-enabled" ${cfg.enabled ? 'checked' : ''} class="rounded border-slate-300 text-[#01A982] focus:ring-[#01A982]">
+          Enable scheduled auto-sync
+        </label>
+        <div class="space-y-1">
+          <label class="text-xs text-slate-500 font-bold uppercase">Schedule</label>
+          <select id="henet-sched-mode" class="${inputCls}">
+            <option value="interval" ${isDaily ? '' : 'selected'}>Every N minutes</option>
+            <option value="daily" ${isDaily ? 'selected' : ''}>Once daily at a set time</option>
+          </select>
+        </div>
+        <div class="space-y-1" id="henet-sched-interval-wrap" style="${isDaily ? 'display:none' : ''}">
+          <label class="text-xs text-slate-500 font-bold uppercase">Interval (minutes)</label>
+          <input type="number" id="henet-sched-interval" min="5" value="${intMin}" class="${inputCls}" title="Minimum 5 minutes">
+        </div>
+        <div class="space-y-1" id="henet-sched-daily-wrap" style="${isDaily ? '' : 'display:none'}">
+          <label class="text-xs text-slate-500 font-bold uppercase">Daily time (24h, HH:MM)</label>
+          <input type="time" id="henet-sched-daily" value="${escapeHtml(String(cfg.daily_time || '02:00'))}" class="${inputCls}">
+        </div>
+        <div class="flex justify-end gap-2 pt-2">
+          <button onclick="_henetSaveSchedule()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Save</button>
+          <button onclick="document.getElementById('henet-schedule-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+    const modeSel = document.getElementById('henet-sched-mode');
+    if (modeSel) modeSel.onchange = () => {
+        const daily = modeSel.value === 'daily';
+        document.getElementById('henet-sched-interval-wrap').style.display = daily ? 'none' : '';
+        document.getElementById('henet-sched-daily-wrap').style.display = daily ? '' : 'none';
+    };
+}
+
+async function _henetSaveSchedule() {
+    const mode = document.getElementById('henet-sched-mode')?.value || 'interval';
+    const payload = {
+        enabled: !!document.getElementById('henet-sched-enabled')?.checked,
+        mode,
+    };
+    if (mode === 'daily') {
+        payload.daily_time = document.getElementById('henet-sched-daily')?.value || '02:00';
+    } else {
+        const mins = parseInt(document.getElementById('henet-sched-interval')?.value, 10);
+        if (!mins || mins < 5) { showToast('Interval must be at least 5 minutes', 'error'); return; }
+        payload.interval_seconds = mins * 60;
+    }
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/henet/sync-config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (ok && d.status === 'SUCCESS') {
+            window._henetScheduleCfg = d.config;
+            document.getElementById('henet-schedule-modal')?.remove();
+            showToast(payload.enabled ? 'HE.NET auto-sync scheduled' : 'HE.NET auto-sync disabled', 'success');
+            loadHenet();
+        } else showToast('Error: ' + (detail || d?.message || 'Failed to save schedule'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 

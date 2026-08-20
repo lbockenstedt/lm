@@ -84,6 +84,7 @@ from truenas_cache import TruenasCacheMixin
 from le_cache import LeCacheMixin
 from warm_cache import WarmCacheMixin
 from dns_dhcp_sync import DnsDhcpSyncMixin
+from henet_sync import HenetSyncMixin
 from realtime_ipam_nac_sync import RealtimeIpamNacSyncMixin
 from search_index import SearchIndexMixin
 from staleness_sweep import StalenessSweepMixin
@@ -296,7 +297,7 @@ def _mdns_hub_properties(version_str: str, agent_port: int,
     return props
 
 
-class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, RealtimeIpamNacSyncMixin, SearchIndexMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, FleetHealthAlertMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
+class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, HenetSyncMixin, RealtimeIpamNacSyncMixin, SearchIndexMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, FleetHealthAlertMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -8264,6 +8265,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # loop and the button can't diverge. See run_dns_dhcp_sync_loop
         # (DnsDhcpSyncMixin).
         dns_dhcp_sync_task = asyncio.create_task(self.run_dns_dhcp_sync_loop())
+        # HE.NET (External DNS) scheduled re-sync: on a schedule (interval or a
+        # daily HH:MM, global_config.henet_sync) re-apply every managed A/AAAA
+        # record to Hurricane Electric via the account-login web panel — the
+        # scheduled twin of the manual "Sync all" button. Opt-in (disabled by
+        # default); skips quietly when the henet spoke is offline. See
+        # run_henet_sync_loop (HenetSyncMixin).
+        henet_sync_task = asyncio.create_task(self.run_henet_sync_loop())
         # Global-search index warm-up: keeps every observed (leg, scope) result
         # set fresh in memory so interactive search serves from RAM with a live
         # fan-out fallback. See run_search_index_refresh_loop (SearchIndexMixin).

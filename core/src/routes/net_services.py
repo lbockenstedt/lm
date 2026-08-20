@@ -795,6 +795,61 @@ def register(app, hub, ctx):
             "skipped_types": result.get("skipped_types", {}),
         }
 
+    @app.get("/api/henet/sync-config")
+    async def henet_sync_config_get(request: Request):
+        """Scheduled HE.NET re-sync config + last-run status (fuels the External
+        DNS schedule control + status line). Read-only, authed under /api/."""
+        hub = app.state.hub
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        cfg = gc.get("henet_sync", {}) or {}
+        try:
+            interval = int(cfg.get("interval_seconds", 3600) or 3600)
+        except (TypeError, ValueError):
+            interval = 3600
+        return {
+            "status": "SUCCESS",
+            "config": {
+                "enabled":          bool(cfg.get("enabled", False)),
+                "mode":             str(cfg.get("mode", "interval")).strip().lower() or "interval",
+                "interval_seconds": max(300, interval),
+                "daily_time":       str(cfg.get("daily_time", "02:00")).strip() or "02:00",
+            },
+            "last_run": dict(getattr(hub, "henet_sync_status", {}) or {}),
+        }
+
+    @app.post("/api/henet/sync-config")
+    async def henet_sync_config_set(request: Request):
+        """Update the scheduled HE.NET re-sync config. Global-Admin-only (the
+        whole /api/henet/ write surface is admin-gated in api.py). Partial: only
+        the provided fields are changed. ``interval_seconds`` is clamped to the
+        5-minute floor so a bad value can't hammer HE."""
+        import re as _re
+        body = await request.json()
+        body = dict(body) if isinstance(body, dict) else {}
+        hub = app.state.hub
+        gc = hub.state.get_global_config() or {}
+        cur = dict(gc.get("henet_sync") or {})
+        if "enabled" in body:
+            cur["enabled"] = bool(body.get("enabled"))
+        if "mode" in body:
+            mode = str(body.get("mode") or "interval").strip().lower()
+            cur["mode"] = "daily" if mode == "daily" else "interval"
+        if "interval_seconds" in body:
+            try:
+                cur["interval_seconds"] = max(300, int(body.get("interval_seconds")))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400,
+                                    detail="interval_seconds must be an integer >= 300")
+        if "daily_time" in body:
+            dt = str(body.get("daily_time") or "").strip()
+            if dt and not _re.match(r"^\d{1,2}:\d{2}$", dt):
+                raise HTTPException(status_code=400, detail="daily_time must be HH:MM")
+            cur["daily_time"] = dt or "02:00"
+        hub.state.update_global_config({"henet_sync": cur})
+        await hub.state.save_state_now()
+        logger.info("henet: scheduled sync config updated -> %s", cur)
+        return {"status": "SUCCESS", "config": cur}
+
     # ─── Certificate Management (le) API ──────────────────────────────────────
     # Relays LE_* commands to the certificates spoke via _relay_spoke (same
     # SUCCESS/ERROR contract + 502-on-spoke-error as DNS/DHCP). The le spoke
