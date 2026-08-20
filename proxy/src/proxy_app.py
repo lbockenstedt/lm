@@ -11,6 +11,7 @@ dumb forwarding front door. See docs/edge-proxy-role.md.
 """
 import asyncio
 import base64
+import html
 import json
 import logging
 
@@ -28,6 +29,120 @@ _CONSOLE_OPEN_PATHS = ("/api/pxmx/console", "/api/pxmx/shell")
 
 # Streaming chunk size for request/response bodies.
 _CHUNK = 64 * 1024
+
+# How often the friendly "hub unavailable" page reloads itself (seconds).
+_REFRESH_SECS = 60
+
+# Self-contained "Hub is not accessible" splash — styled to match the hub login
+# page (WebUI/index.html): dark #1F2531 canvas, #263040 card, HPE-green accent,
+# HPE wordmark. Served by the edge proxy when the hub upstream is unreachable
+# (e.g. rebooting) so the browser sees a branded, auto-refreshing page instead of
+# a raw gateway error. Placeholders: __SECS__ (countdown) and __DETAIL__ (escaped
+# technical detail shown in the footer). No external assets (offline-safe).
+_HUB_DOWN_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="__SECS__">
+<title>Lab Manager | Hub unavailable</title>
+<style>
+  :root { --accent:#01A982; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; }
+  body {
+    background-color:#1F2531;
+    color:#e2e8f0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    min-height:100vh; padding:24px;
+  }
+  .brand { text-align:center; margin-bottom:32px; }
+  .brand svg { height:32px; width:auto; display:block; margin:0 auto 16px; color:#fff; }
+  .brand h1 { font-size:1.5rem; font-weight:700; letter-spacing:-.01em; color:#fff; margin:0; }
+  .brand p { color:#94a3b8; font-size:.875rem; margin:.25rem 0 0; }
+  .card {
+    width:100%; max-width:24rem; background:#263040;
+    border:1px solid #334155; border-radius:.75rem;
+    box-shadow:0 25px 50px -12px rgba(0,0,0,.5);
+    padding:2rem; text-align:center;
+  }
+  .spinner {
+    width:40px; height:40px; margin:0 auto 20px;
+    border:3px solid rgba(1,169,130,.25); border-top-color:var(--accent);
+    border-radius:50%; animation:spin 1s linear infinite;
+  }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .card h2 { font-size:1.05rem; font-weight:700; color:#fff; margin:0 0 .5rem; }
+  .card .sub { color:#94a3b8; font-size:.85rem; margin:0; }
+  .card .countdown { color:var(--accent); font-weight:700; }
+  .retry {
+    display:inline-block; margin-top:1.25rem; padding:.55rem 1.1rem;
+    background:var(--accent); color:#fff; font-weight:700; font-size:.8rem;
+    border:none; border-radius:.5rem; text-decoration:none; cursor:pointer;
+  }
+  .retry:hover { background:#008c6a; }
+  footer {
+    margin-top:1.5rem; max-width:36rem; width:100%; text-align:center;
+  }
+  footer .label {
+    color:#64748b; font-size:.65rem; text-transform:uppercase;
+    letter-spacing:.08em; font-weight:700; margin-bottom:.4rem;
+  }
+  footer .detail {
+    color:#94a3b8; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:.72rem; word-break:break-word; line-height:1.4;
+    background:rgba(0,0,0,.2); border:1px solid #334155; border-radius:.4rem;
+    padding:.6rem .75rem;
+  }
+</style>
+</head>
+<body>
+  <div class="brand">
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 180 504 144" role="img" aria-label="HPE"><path fill="#01A982" d="M391.2 261.27v35.46H504V324H362.4v-90H504v27.27H391.2Z"/><path fill="currentColor" d="M276.67 180h-89.25v144h28.8v-36.6h60c37.92 0 59.7-21.6 59.7-53.4 0-32.01-21.78-54-59.25-54Zm-1.88 79.8h-58.57v-52.54h58.57c22.68 0 31.28 10.48 31.28 26.73 0 16.08-8.6 25.8-31.28 25.8Zm116.41-39.18h-28.8V180H504v27.27H391.2v13.36ZM151.2 180v144h-28.8v-59.02H28.8V324H0V180h28.8v57.38h93.6V180h28.8Z"/></svg>
+    <h1>Lab Manager</h1>
+    <p>Hub</p>
+  </div>
+  <div class="card">
+    <div class="spinner"></div>
+    <h2>LabManager Hub is not accessible</h2>
+    <p class="sub">Refreshing in <span class="countdown" id="cd">__SECS__</span> seconds&hellip;</p>
+    <a class="retry" href="javascript:location.reload()">Retry now</a>
+  </div>
+  <footer>
+    <div class="label">Technical detail</div>
+    <div class="detail">__DETAIL__</div>
+  </footer>
+<script>
+  (function () {
+    var n = __SECS__;
+    var el = document.getElementById('cd');
+    setInterval(function () {
+      n -= 1;
+      if (n <= 0) { location.reload(); return; }
+      if (el) el.textContent = n;
+    }, 1000);
+  })();
+</script>
+</body>
+</html>"""
+
+
+def _hub_unavailable(request: web.BaseRequest, detail: str) -> web.Response:
+    """503 response for an unreachable hub upstream. Browser navigations (Accept:
+    text/html) get the branded auto-refreshing splash; API/XHR/other callers get a
+    short text body. Both carry Retry-After so clients back off politely."""
+    secs = _REFRESH_SECS
+    headers = {"Retry-After": str(secs), "Cache-Control": "no-store"}
+    accepts_html = "text/html" in (request.headers.get("Accept") or "")
+    if accepts_html and request.method in ("GET", "HEAD"):
+        body = (_HUB_DOWN_HTML
+                .replace("__SECS__", str(secs))
+                .replace("__DETAIL__", html.escape(detail or "connection refused")))
+        return web.Response(status=503, text=body, content_type="text/html",
+                            headers=headers)
+    return web.Response(status=503, headers=headers,
+                        text=f"LabManager Hub is not accessible: {detail}")
 
 
 def build_proxy_app(spoke) -> web.Application:
@@ -76,7 +191,7 @@ async def _dispatch(request: web.Request) -> web.StreamResponse:
     spoke = request.app["spoke"]
     upstream = spoke.upstream_url
     if not upstream:
-        return web.Response(status=502, text="proxy: no upstream configured")
+        return _hub_unavailable(request, "no upstream configured")
     target = upstream.rstrip("/") + request.rel_url.raw_path_qs
     if request.headers.get("Upgrade", "").lower() == "websocket":
         # Phase 2: an edge-relayed console session (browser opened /ws/console/{id}
@@ -145,7 +260,10 @@ async def _proxy_http(request: web.Request, spoke, target: str) -> web.StreamRes
             return resp
     except client_exceptions.ClientError as e:
         logger.warning("proxy upstream error %s %s: %s", request.method, target, e)
-        return web.Response(status=502, text=f"proxy upstream error: {e}")
+        return _hub_unavailable(request, f"{type(e).__name__}: {e}")
+    except asyncio.TimeoutError:
+        logger.warning("proxy upstream timeout %s %s", request.method, target)
+        return _hub_unavailable(request, "upstream connect timed out")
 
 
 async def _proxy_ws(request: web.Request, spoke, target: str) -> web.StreamResponse:
