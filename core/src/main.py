@@ -2290,6 +2290,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     logger.debug(f"Pushed tenant ({ptenant or 'unassigned'}) to proxy {spoke_id}")
                 except Exception as e:
                     logger.warning(f"Failed to push tenant to proxy {spoke_id}: {e}")
+                # Refresh the hub's proxied-tenant set: this proxy's assigned
+                # tenant (if non-shared) is now served disk-backed, RAM-free.
+                self._recompute_proxied_tenants()
 
             module_key = _PUSH_CONFIG_MODULE_KEY.get(mtype)
             if not module_key:
@@ -5263,7 +5266,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 pk = self._primary_key(spoke_id)
                 del self.active_connections[pk]
                 self.active_connection_key_ids.pop(pk, None)
-                self.spoke_module_types.pop(pk, None)
+                disc_mtype = self.spoke_module_types.pop(pk, None)
                 self.spoke_parent_map.pop(pk, None)
                 self.netbox_server_agents.discard(pk)
                 self.ldap_server_agents.discard(pk)
@@ -5280,6 +5283,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 for aid in list(self.agent_info):
                     if self._primary_key(self.agent_info.get(aid, {}).get("spoke_id")) == pk:
                         self.agent_info.pop(aid, None)
+                # A disconnected proxy no longer serves its tenant disk-backed;
+                # recompute so that tenant reverts to resident RAM caching (or
+                # stays disk-backed if another proxy still serves it).
+                if disc_mtype == "proxy":
+                    self._recompute_proxied_tenants()
 
     # ── Update pipeline (extracted) ───────────────────────────────────────
     # get_local_version / get_remote_version / _is_git_repo / _download_update /
@@ -7611,6 +7619,27 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             except Exception as e:
                 logger.warning(f"[recovery] loop error: {e}")
             await asyncio.sleep(30)
+
+    def _recompute_proxied_tenants(self) -> None:
+        """Rebuild the api module's set of proxied tenants from the live spoke
+        registry and push it to the hub cache layer. A tenant assigned a
+        connected (non-shared) edge proxy is served disk-backed (RAM-free at
+        rest) instead of resident in _tenant_cache. Recomputed on every proxy
+        (re)connect/disconnect so the set can never drift or leak a stale entry.
+        """
+        try:
+            import access as _access
+            from api import set_proxied_tenants
+            tenants = set()
+            for pk, mtype in list(self.spoke_module_types.items()):
+                if mtype != "proxy":
+                    continue
+                t = self.state.get_spoke_tenant(pk) or ""
+                if t and not _access.tenant_is_shared(t):
+                    tenants.add(t)
+            set_proxied_tenants(tenants)
+        except Exception as e:  # noqa: BLE001 — best-effort optimisation
+            logger.debug(f"recompute proxied tenants failed: {e}")
 
     def record_spoke_event(self, spoke_id: str, event: str, detail: str = "") -> None:
         """

@@ -607,6 +607,86 @@ _cache_tasks: dict = {}    # {tenant_id: asyncio.Task}
 _cache_status: dict = {}   # {tenant_id: {module_key: "loading"|"ready"|"error"}}
 _cache_semaphore = None    # asyncio.Semaphore — gates concurrent tenant preloads
 
+# ── Proxied-tenant disk-backed cache ─────────────────────────────────────────
+# A tenant that has an edge proxy assigned does NOT keep its module cache
+# resident in the hub's RAM (_tenant_cache). Instead the hub keeps that tenant's
+# encrypted api_cache shard fresh on disk (the refresh loop still runs) and reads
+# it on demand on a cache miss, evicting the tenant's RAM entries after every
+# persist. RBAC filtering stays hub-side (the shard stores RAW module data), so
+# on-disk reads are RBAC-correct. Non-proxied tenants are UNCHANGED (RAM-first,
+# no disk fallback). Set LM_PROXIED_TENANT_DISK_CACHE=0 to force legacy RAM
+# behaviour for every tenant regardless of proxy assignment.
+_proxied_tenants: set = set()   # tenant_ids currently served by a (non-shared) proxy
+_shard_micro: dict = {}         # tenant_id -> (loaded_at, {module_key: entry}) — short-TTL read cache
+_SHARD_MICRO_TTL = 3.0          # seconds; a dashboard read-burst decrypts once, RAM-free at rest
+_MODULE_HUB = None              # hub ref for module-level shard reads (set by create_app)
+
+
+def set_module_hub(hub) -> None:
+    """Record the hub instance for module-level shard reads (data_dir/encryption)."""
+    global _MODULE_HUB
+    _MODULE_HUB = hub
+
+
+def _proxied_disk_cache_enabled() -> bool:
+    return os.environ.get("LM_PROXIED_TENANT_DISK_CACHE", "1").strip().lower() not in (
+        "0", "false", "no", "off")
+
+
+def _is_proxied_tenant(tenant_id: str) -> bool:
+    return bool(tenant_id) and _proxied_disk_cache_enabled() and tenant_id in _proxied_tenants
+
+
+def set_proxied_tenants(tenants) -> None:
+    """Update the set of tenants served by an edge proxy (called by the hub when
+    proxy spokes connect/disconnect). Newly-proxied tenants have their resident
+    RAM cache evicted immediately so they go disk-backed at once (covers the
+    boot warm-load that ran before any proxy connected)."""
+    global _proxied_tenants
+    new = set(t for t in (tenants or []) if t)
+    newly = new - _proxied_tenants
+    _proxied_tenants = new
+    if _proxied_disk_cache_enabled():
+        for t in newly:
+            _evict_tenant_ram(t)
+
+
+def _evict_tenant_ram(tenant_id: str) -> None:
+    """Drop a tenant's resident module data (RAM) and its shard micro-cache. The
+    on-disk encrypted shard remains the source of truth for a proxied tenant."""
+    _tenant_cache.pop(tenant_id, None)
+    _shard_micro.pop(tenant_id, None)
+
+
+def _load_tenant_shard(tenant_id: str) -> dict:
+    """Read ONE proxied tenant's encrypted api_cache shard directly from disk,
+    memoised for _SHARD_MICRO_TTL so a dashboard's burst of per-module reads
+    decrypts once and the tenant holds nothing in RAM at rest. Returns
+    ``{module_key: {data, fetched_at}}`` (``{}`` on any miss/error)."""
+    now = time.time()
+    hit = _shard_micro.get(tenant_id)
+    if hit and now - hit[0] < _SHARD_MICRO_TTL:
+        return hit[1]
+    modules: dict = {}
+    hub = _MODULE_HUB
+    if hub is not None:
+        try:
+            from security.encryption import hub_encryption
+            path = os.path.join(hub.state.data_dir, "tenants", str(tenant_id),
+                                _TENANT_CACHE_MODULE, _TENANT_CACHE_NAME)
+            if os.path.exists(path):
+                with open(path, "rb") as f:
+                    blob = f.read()
+                content = json.loads(hub_encryption.decrypt(blob))
+                got = content.get(str(tenant_id)) if isinstance(content, dict) else None
+                if isinstance(got, dict):
+                    modules = got
+        except Exception as e:  # noqa: BLE001 — disk-backed read is best-effort
+            logger.debug("tenant_cache shard read failed for %s: %s", tenant_id, e)
+    _shard_micro[tenant_id] = (now, modules)
+    return modules
+
+
 _DEFAULT_CACHE_CONFIG = {
     "rules":           {"enabled": True, "interval": 300, "label": "Firewall Rules"},
     "nat":             {"enabled": True, "interval": 300, "label": "NAT Policies"},
@@ -663,7 +743,14 @@ def _get_max_concurrent(hub) -> int:
     return int(hub.state.system_state.get("cache_config", {}).get("max_concurrent_tenants", 3))
 
 def _cache_entry(tenant_id: str, key: str):
-    return _tenant_cache.get(tenant_id, {}).get(key)
+    ram = _tenant_cache.get(tenant_id, {}).get(key)
+    if ram is not None:
+        return ram
+    # Proxied tenants keep no resident RAM cache — fall back to the on-disk
+    # encrypted shard (the refresh loop keeps it fresh; RBAC stays hub-side).
+    if _is_proxied_tenant(tenant_id):
+        return _load_tenant_shard(tenant_id).get(key)
+    return None
 
 def _set_cache_entry(tenant_id: str, key: str, data):
     _tenant_cache.setdefault(tenant_id, {})[key] = {"data": data, "fetched_at": time.time()}
@@ -830,6 +917,10 @@ async def _cache_refresh_loop(hub, tenant_id: str):
             await asyncio.to_thread(_persist_tenant_cache_sync, hub, tenant_id)
         except Exception:  # noqa: BLE001
             pass
+        # Proxied tenants: after persisting, drop the resident RAM copy so the
+        # tenant is served from disk on demand (RAM-free at rest).
+        if _is_proxied_tenant(tenant_id):
+            _evict_tenant_ram(tenant_id)
         while True:
             await asyncio.sleep(30)
             config = _get_cache_config(hub)
@@ -855,6 +946,8 @@ async def _cache_refresh_loop(hub, tenant_id: str):
                     await asyncio.to_thread(_persist_tenant_cache_sync, hub, tenant_id)
                 except Exception:  # noqa: BLE001
                     pass
+                if _is_proxied_tenant(tenant_id):
+                    _evict_tenant_ram(tenant_id)
     except asyncio.CancelledError:
         pass
     except Exception as e:
@@ -1143,6 +1236,9 @@ def create_app(hub):
 
     # Attach hub instance to app state for access in routes
     app.state.hub = hub
+    # Also record it at module scope so the module-level cache helpers
+    # (_load_tenant_shard for proxied tenants) can reach data_dir/encryption.
+    set_module_hub(hub)
 
     # Rehydrate login sessions from disk so a user who was logged in before a
     # triggered update/restart stays logged in (the lm_session cookie already
