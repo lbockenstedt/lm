@@ -19746,7 +19746,7 @@ async function loadPxmxData(subMenu) {
                 if (nodes.length === 0 && vms.length === 0) {
                     container.innerHTML = `<div class="py-10 text-center space-y-3">
                         <p class="text-slate-400 italic text-sm">No Proxmox agents connected.</p>
-                        <button onclick="showPxmxInstallModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Show Install Command</button>
+                        ${isAdmin() ? `<button onclick="showPxmxInstallModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Show Install Command</button>` : ''}
                     </div>`;
                     return;
                 }
@@ -19774,7 +19774,7 @@ async function loadPxmxData(subMenu) {
             if (vms.length === 0 && nodes.length === 0) {
                 container.innerHTML = `<div class="py-10 text-center space-y-3">
                     <p class="text-slate-400 italic text-sm">No Proxmox agents connected.</p>
-                    <button onclick="showPxmxInstallModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Show Install Command</button>
+                    ${isAdmin() ? `<button onclick="showPxmxInstallModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Show Install Command</button>` : ''}
                 </div>`;
                 return;
             }
