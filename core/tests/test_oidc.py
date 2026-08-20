@@ -14,6 +14,7 @@ import base64
 import json
 import os
 import sys
+import tempfile
 import time
 
 import httpx
@@ -108,7 +109,11 @@ class _FakeState:
         self.system_state = system_state or {}
         self.tenant_state = {"tenants": {"t-tenant-a": {"id": "t-tenant-a"},
                                           "t-tenant-b": {"id": "t-tenant-b"}}}
-        self.data_dir = None
+        # A REAL writable dir, not None: admin_ops.register (reached on the
+        # callback happy path) derives its token path from data_dir, so None
+        # raised "expected str, bytes or os.PathLike object, not NoneType" and
+        # every _build-based test failed before its assertions.
+        self.data_dir = tempfile.mkdtemp(prefix="lm-oidc-test-")
 
     def save_state(self):
         pass
@@ -162,8 +167,13 @@ def _isolate(monkeypatch):
               "LM_OIDC_TENANT_ID", "LM_OIDC_CLIENT_ID", "LM_OIDC_CLIENT_KEY",
               "LM_OIDC_ENABLED", "LM_FERNET_KEY"):
         monkeypatch.delenv(v, raising=False)
-    # _FakeHub.key_manager provides the state secret; no Fernet key needed.
-    monkeypatch.setenv("LM_FERNET_KEY", "z" * 44)  # placeholder so encryption import OK
+    # A VALID throwaway Fernet key, not a placeholder: create_app now builds the
+    # at-rest Fernet eagerly from LM_FERNET_KEY, so a structurally-invalid value
+    # ("z"*44 decodes to 24 bytes) makes create_app raise before any test logic
+    # runs. Generated per test so no literal key is committed (secret scanners
+    # flag structurally-valid keys); tests only round-trip within one run.
+    from cryptography.fernet import Fernet as _Fernet
+    monkeypatch.setenv("LM_FERNET_KEY", _Fernet.generate_key().decode())
 
 
 def _build(system_state):
