@@ -228,6 +228,22 @@ def test_status_unreachable_when_probe_raises(tmp_path):
     assert mgr.status()["reachable"] is False
 
 
+def test_status_reachable_when_probe_returns_http_401(tmp_path):
+    """Regression: HE now answers the keyless probe with HTTP 401 (Authorization
+    Required) instead of a 200 ``badauth`` body. A 401 is a response FROM the
+    endpoint — it's reachable, only the (absent) credential was rejected — so the
+    status line must NOT read "unreachable (HTTP Error 401 …)"."""
+    from urllib.error import HTTPError
+
+    class Unauthorized:
+        def __call__(self, url, form):
+            raise HTTPError(url, 401, "Authorization Required", {}, None)
+    mgr = HENetManager(state_path=str(tmp_path / "r.json"), http_post=Unauthorized())
+    s = mgr.status()
+    assert s["reachable"] is True
+    assert s["detail"] == ""
+
+
 def test_status_detail_surfaces_reason_when_unreachable(tmp_path):
     """Regression: an unreachable endpoint must explain WHY (transport error
     string) so the operator can tell an egress/TLS block apart from auth."""

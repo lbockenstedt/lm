@@ -27,6 +27,7 @@ import logging
 import os
 import time
 from typing import Any, Callable, Dict, List, Optional
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -240,9 +241,19 @@ class HENetManager:
         """``(reachable, detail)``. ``detail`` is "" on success, else the
         transport error string (surfaced by :meth:`status` for diagnostics)."""
         try:
-            # A keyless GET returns HE's "badauth"/usage body with HTTP 200 — enough
-            # to prove the endpoint is reachable without sending any credential.
+            # A keyless GET returns HE's "badauth"/usage body — enough to prove
+            # the endpoint is reachable without sending any credential.
             self._post(DYN_UPDATE_URL, {})
+            return (True, "")
+        except HTTPError as exc:
+            # HE now answers a keyless/empty probe with an HTTP-level auth error
+            # (401 Authorization Required) instead of a 200 "badauth" body. That
+            # is still a response FROM the endpoint — it's reachable; only the
+            # (absent) credential was rejected. Treating it as unreachable made
+            # the status line read "HE dyndns unreachable (HTTP Error 401 …)"
+            # even though the endpoint is fine. Any HTTP status = reachable;
+            # only genuine transport failures below count as unreachable.
+            logger.debug("henet: keyless probe returned HTTP %s (endpoint reachable)", exc.code)
             return (True, "")
         except Exception as exc:  # noqa: BLE001 — surface WHY, don't swallow it
             return (False, f"{type(exc).__name__}: {exc}")
