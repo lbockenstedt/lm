@@ -23963,7 +23963,7 @@ async function loadHenet() {
             const dot = s.data.reachable ? 'text-emerald-600' : 'text-amber-600';
             const why = (!s.data.reachable && s.data.detail)
                 ? ` <span class="text-amber-500" title="${escapeHtml(String(s.data.detail))}">(${escapeHtml(String(s.data.detail))})</span>` : '';
-            statusHtml = `<span class="${dot} font-medium">● HE dyndns ${s.data.reachable ? 'reachable' : 'unreachable'}</span>${why} · ${s.data.record_count} managed record(s)`;
+            statusHtml = `<span class="${dot} font-medium">● HE DNS ${s.data.reachable ? 'reachable' : 'unreachable'}</span>${why} · ${s.data.record_count} managed record(s)`;
         }
     } catch (e) { /* status is best-effort */ }
 
@@ -24010,8 +24010,8 @@ async function loadHenet() {
     const credScope = (admin && !adminScope) ? 'Admin ' : '';
     const credInfo = canWrite
         ? (assignedCred
-            ? ` · <span class="text-slate-600">${credScope}DDNS credential: <span class="font-mono">🔐 ${escapeHtml(assignedCred.name)}</span></span>`
-            : ` · <span class="text-amber-600 font-medium">no ${credScope.toLowerCase()}DDNS credential assigned</span>`)
+            ? ` · <span class="text-slate-600">${credScope}DNS credential: <span class="font-mono">🔐 ${escapeHtml(assignedCred.name)}</span></span>`
+            : ` · <span class="text-amber-600 font-medium">no ${credScope.toLowerCase()}DNS credential assigned</span>`)
         : '';
     const tenantCredN = Object.keys(tenantCreds).length;
     const tenantCredInfo = admin && tenantCredN
