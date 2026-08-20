@@ -18278,6 +18278,29 @@ function serialFitVisibleConsoles() {
     if (!window._serialConsoles) return;
     window._serialConsoles.forEach(e => serialFitConsole(e));
 }
+
+// Passive liveness watchdog. The relay sends a keepalive frame every ~20s (and
+// device output resets the timer too), so an OPEN console that has received
+// nothing for the stale window has a dead tunnel that no close frame reached —
+// the "still looks connected but dropped" case. Flip it to Disconnected and
+// close the socket so its onclose runs. Purely passive (reads timestamps, sends
+// nothing) — the browser can't safely send keepalives, since anything it writes
+// on the serial leg would be injected as bytes to the device.
+function serialEnsureHeartbeatWatch() {
+    if (window._serialHeartbeatTimer) return;
+    const STALE_MS = 75000;  // 3+ missed 20s keepalives
+    window._serialHeartbeatTimer = setInterval(() => {
+        const reg = window._serialConsoles;
+        if (!reg || reg.size === 0) return;
+        const now = Date.now();
+        reg.forEach(e => {
+            if (!e.ws || e.ws.readyState !== 1) return;  // only live sockets
+            if (now - (e._lastRx || now) <= STALE_MS) return;
+            e.statusText = 'Disconnected: no heartbeat'; e.statusCls = 'text-red-400';
+            try { e.ws.close(4408, 'no heartbeat'); } catch (err) {}
+        });
+    }, 15000);
+}
 function serialActiveConsole() {
     return (window._serialConsoles && window._serialActiveConsole)
         ? window._serialConsoles.get(window._serialActiveConsole) : null;
@@ -18362,11 +18385,18 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws/console-serial/${session.session_id}?token=${encodeURIComponent(session.ws_token)}`);
     ws.binaryType = 'arraybuffer';
-    ws.onopen = () => upd(ro ? 'Connected (read-only)' : 'Connected', 'text-green-400');
+    entry._lastRx = Date.now();
+    ws.onopen = () => { entry._lastRx = Date.now(); upd(ro ? 'Connected (read-only)' : 'Connected', 'text-green-400'); };
     ws.onmessage = (ev) => {
+        // Any frame — device bytes OR a keepalive control frame — proves the
+        // tunnel is alive; refresh the liveness timestamp the watchdog reads.
+        entry._lastRx = Date.now();
         if (typeof ev.data === 'string') {
             let ctl = null;
             try { ctl = JSON.parse(ev.data); } catch (e) {}
+            // Server keepalive ping (relay idle heartbeat) — consume it, never
+            // write it to the terminal.
+            if (ctl && ctl.type === 'ping') return;
             if (ctl && ctl.type === 'downgraded') {
                 entry.ro = true;
                 upd('Connected (read-only) — control taken over', 'text-amber-400');
@@ -18381,6 +18411,7 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
         try { term.write(`\r\n\x1b[33m[disconnected${ev.reason ? ': ' + ev.reason : ''}]\x1b[0m\r\n`); } catch (e) {}
         upd('Disconnected' + (ev.reason ? ': ' + ev.reason : ''), 'text-red-400');
     };
+    serialEnsureHeartbeatWatch();
     // Always attached (not gated on the initial ro) so a later force-takeover
     // can flip entry.ro live without re-registering the handler. Typing
     // directly into a pane always targets just that pane — broadcasting to
@@ -18684,6 +18715,7 @@ function serialCloseAllConsoles() {
     window._serialBroadcastOn = false;
     window._serialConsoleFilter = '';
     window._serialDockCollapsed = false;
+    if (window._serialHeartbeatTimer) { clearInterval(window._serialHeartbeatTimer); window._serialHeartbeatTimer = null; }
     const pill = document.getElementById('serial-console-dock-pill');
     if (pill) pill.remove();
     const modal = document.getElementById('serial-console-modal');

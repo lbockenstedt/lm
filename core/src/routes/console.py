@@ -6,6 +6,13 @@ from api import (
     base64, json, logger, secrets, uuid,
 )
 
+# Idle keepalive cadence for the browser console WS relays. When no device
+# output flows for this many seconds, the relay sends a control "ping" frame so
+# every hop of the tunnel (browser↔proxy↔hub, plus any LB/nginx) keeps the
+# connection alive and the browser can tell a quiet-but-live console apart from a
+# dropped tunnel. Well under common idle timeouts (nginx 60s, Azure LB 4min).
+_CONSOLE_WS_PING_SECS = 20.0
+
 
 def _console_port_disposition(admin: bool, visible: bool, eff: str, sel, shared: bool) -> str:
     """How a console port should be treated for the requesting session.
@@ -1528,7 +1535,21 @@ def register(app, hub, ctx):
 
             async def spoke_to_browser():
                 while True:
-                    item = await queue.get()
+                    # Idle keepalive: if no device output arrives for the ping
+                    # interval, send a control "ping" frame to the browser. A
+                    # visible frame every ~20s resets the idle timers on every
+                    # hop of the tunnel (browser↔proxy↔hub, plus any LB/nginx in
+                    # front) so a quiet serial session is not silently dropped —
+                    # and it feeds the browser's liveness watchdog so a
+                    # live-but-quiet console is told apart from a dead tunnel.
+                    # Sent from THIS coroutine (the sole writer) so it can't race
+                    # the byte/downgraded sends below. A failed send means the
+                    # browser leg is gone → let the exception unwind to cleanup.
+                    try:
+                        item = await asyncio.wait_for(queue.get(), timeout=_CONSOLE_WS_PING_SECS)
+                    except asyncio.TimeoutError:
+                        await websocket.send_text(json.dumps({"type": "ping"}))
+                        continue
                     if isinstance(item, (bytes, bytearray)):
                         await websocket.send_bytes(bytes(item))
                     elif isinstance(item, tuple) and item:

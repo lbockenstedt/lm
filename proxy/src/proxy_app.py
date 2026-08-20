@@ -40,6 +40,20 @@ _CONSOLE_OPEN_PATHS = ("/api/pxmx/console", "/api/pxmx/shell")
 # Streaming chunk size for request/response bodies.
 _CHUNK = 64 * 1024
 
+# WebSocket keepalive cadence (seconds) for the console/sim relays. Enables
+# aiohttp's protocol PING/PONG on every leg the proxy terminates so idle
+# tunnels are not dropped by an intermediary's idle timeout, and a dead peer is
+# detected (aiohttp closes the leg → the browser sees a clean disconnect). Well
+# under common idle timeouts (nginx 60s, Azure LB 4min).
+_WS_HEARTBEAT = 25.0
+
+# App-level idle ping cadence (seconds) for the edge console relay, where the
+# hub is OUT of the byte path and so can't send its own control "ping". A quiet
+# session still gets a visible frame the browser can see, feeding its liveness
+# watchdog. Kept just under the protocol heartbeat so a live tunnel never looks
+# idle to the browser.
+_WS_APP_PING_SECS = 20.0
+
 # How often the friendly "hub unavailable" page reloads itself (seconds).
 _REFRESH_SECS = 60
 
@@ -294,7 +308,7 @@ async def _proxy_http(request: web.Request, spoke, target: str) -> web.StreamRes
 
 async def _proxy_ws(request: web.Request, spoke, target: str) -> web.StreamResponse:
     """Full-duplex WebSocket proxy (browser ↔ hub). Covers /ws/console*, /sim/ws."""
-    ws_client = web.WebSocketResponse(heartbeat=None, max_msg_size=0)
+    ws_client = web.WebSocketResponse(heartbeat=_WS_HEARTBEAT, max_msg_size=0)
     await ws_client.prepare(request)
     ws_target = target.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
     sess = _session(spoke)
@@ -305,7 +319,7 @@ async def _proxy_ws(request: web.Request, spoke, target: str) -> web.StreamRespo
     headers = {k: v for k, v in headers.items() if k.lower() not in _WS_HANDSHAKE}
     try:
         async with sess.ws_connect(ws_target, headers=headers, max_msg_size=0,
-                                   autoping=True) as ws_up:
+                                   heartbeat=_WS_HEARTBEAT) as ws_up:
             async def pump(src, dst):
                 async for msg in src:
                     if msg.type == WSMsgType.TEXT:
@@ -361,7 +375,8 @@ async def _proxy_console_relay(request: web.Request, spoke, session_id: str,
     # Connect to the spoke FIRST (before committing the browser WS) so an
     # unavailable relay endpoint falls back to the hub proxy (return None).
     try:
-        ws_sp = await sess.ws_connect(relay_url, ssl=ssl_ctx, max_msg_size=0, autoping=True)
+        ws_sp = await sess.ws_connect(relay_url, ssl=ssl_ctx, max_msg_size=0,
+                                      heartbeat=_WS_HEARTBEAT)
     except (client_exceptions.ClientError, OSError, asyncio.TimeoutError) as e:
         logger.info("console relay to spoke unavailable (%s): %s — hub fallback", relay_url, e)
         return None
@@ -374,7 +389,7 @@ async def _proxy_console_relay(request: web.Request, spoke, session_id: str,
         if not ok:
             return None  # relay refused → hub fallback (finally closes ws_sp)
 
-        ws_browser = web.WebSocketResponse(max_msg_size=0)
+        ws_browser = web.WebSocketResponse(heartbeat=_WS_HEARTBEAT, max_msg_size=0)
         await ws_browser.prepare(request)
 
         async def browser_to_spoke():
@@ -394,7 +409,21 @@ async def _proxy_console_relay(request: web.Request, spoke, session_id: str,
                 pass
 
         async def spoke_to_browser():
-            async for msg in ws_sp:
+            while True:
+                # Idle app-ping: in this edge path the hub is out of the byte
+                # stream, so it can't send its own control "ping". When the spoke
+                # side is quiet, emit one ourselves so the browser still sees a
+                # frame within its watchdog window (and idle timers stay reset).
+                # This coroutine is the sole writer to ws_browser, so the ping
+                # can't race the byte sends below.
+                try:
+                    msg = await asyncio.wait_for(ws_sp.receive(), timeout=_WS_APP_PING_SECS)
+                except asyncio.TimeoutError:
+                    try:
+                        await ws_browser.send_json({"type": "ping"})
+                        continue
+                    except Exception:  # noqa: BLE001
+                        break
                 if msg.type != WSMsgType.TEXT:
                     if msg.type in (WSMsgType.CLOSE, WSMsgType.CLOSING,
                                     WSMsgType.CLOSED, WSMsgType.ERROR):
