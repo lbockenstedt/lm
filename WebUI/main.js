@@ -24324,10 +24324,11 @@ async function importHenet() {
     if (!window._henetAssignedCred) { showToast('Assign an HE.NET credential first', 'error'); return showHenetCredModal(); }
     if (!await showConfirmToast('Read the existing records in your HE.NET zone(s) and bring any A/AAAA records not already managed under management? (Reads the dns.he.net web panel with the assigned account login — nothing is pushed or changed at HE.)')) return;
     try {
+        const scope = _henetScope();
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/import', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
+            body: JSON.stringify(scope ? { tenant: scope } : {}),
         });
         if (ok && d.status === 'SUCCESS') {
             const skipped = d.skipped_types && Object.keys(d.skipped_types).length
@@ -24347,10 +24348,11 @@ async function syncHenet() {
     if (!window._henetAssignedCred) { showToast('Assign an HE.NET account credential first', 'error'); return showHenetCredModal(); }
     if (!await showConfirmToast(`Re-apply all ${records.length} managed A/AAAA record(s) at HE.NET using your account login?\n\nEach record is create/updated in the dns.he.net control panel — no per-record DDNS key needed.`)) return;
     try {
+        const scope = _henetScope();
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/sync', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ records }),
+            body: JSON.stringify(scope ? { records, tenant: scope } : { records }),
         });
         if (ok && (d.status === 'SUCCESS' || d.status === 'PARTIAL')) {
             const nErr = d.errors ? d.errors.length : 0;

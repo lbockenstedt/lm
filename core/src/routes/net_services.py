@@ -402,17 +402,24 @@ def register(app, hub, ctx):
                                        "or missing a usable HE DDNS key / password")
         body["ddns_key"] = key
 
-    async def _henet_resolve_account_login(request: Request):
-        """Resolve the HE **account** login (email + password) for reading the
-        dns.he.net web panel — the import path needs the full web login, not the
-        per-record dyndns key. Precedence mirrors :func:`_henet_resolve_vault_cred`:
-        the module-level assigned credential (a ``dns`` "Hurricane Electric
-        (account login)" vault secret with ``he_username``/``he_password``).
+    async def _henet_resolve_account_login(request: Request, tenant_id: str = ""):
+        """Resolve the HE **account** login (email + password) for reading/writing
+        the dns.he.net web panel — the import/write paths need the full web login,
+        not the per-record dyndns key.
+
+        Tenant-aware: when ``tenant_id`` is given, its OWN assigned credential
+        wins (so a tenant that connected its own HE.NET account reads/writes THAT
+        account's zone), falling back to the module-level GLOBAL credential when
+        the tenant hasn't assigned one. Both are ``dns`` "Hurricane Electric
+        (account login)" vault secrets with ``he_username``/``he_password``.
 
         Returns ``(username, password)``. Raises 400 when no credential is
         assigned, 404 when the secret can't be read, and 422 when the assigned
         secret is only a bare DDNS key (no account login to scrape with)."""
-        ref = _henet_get_assigned_cred(app.state.hub)
+        tid = (tenant_id or "").strip()
+        ref = _henet_get_assigned_cred(app.state.hub, tid) if tid else None
+        if not isinstance(ref, dict):
+            ref = _henet_get_assigned_cred(app.state.hub)
         if not isinstance(ref, dict):
             raise HTTPException(
                 status_code=400,
@@ -567,19 +574,21 @@ def register(app, hub, ctx):
         return await _relay_spoke(_get_henet_spoke(app.state.hub), "HENET_STATUS",
                                   log_name="henet_status")
 
-    async def _henet_web_write(request: Request, records: list):
+    async def _henet_web_write(request: Request, records: list, tenant_id: str = ""):
         """Create/update records at HE.NET via the **account-login web panel**
         (hub-side) — NO per-record DDNS key needed — then record the outcome in
         the spoke's local management state.
 
-        ``records``: ``[{name,type,value,ttl?,tenant_id?}]``. The scrape/write
+        ``records``: ``[{name,type,value,ttl?,tenant_id?}]``. ``tenant_id`` picks
+        WHICH HE account to log into (the tenant's own assigned credential, else
+        the global one) so a tenant writes to its own zone. The scrape/write
         runs on the HUB (it has outbound access to dns.he.net + the vault key,
         which the spoke may not); only records HE actually accepted are persisted
         locally (so a failed write never leaves a phantom managed record).
         Returns a WebUI-shaped ``{status, pushed, errors?}``."""
         hub = app.state.hub
         spoke_id = _get_henet_spoke(hub)  # 503 early if the spoke is offline
-        username, password = await _henet_resolve_account_login(request)
+        username, password = await _henet_resolve_account_login(request, tenant_id)
         import henet_scrape
         scraper = henet_scrape.HENetScraper()
         result = await asyncio.to_thread(scraper.set_records, username, password, records)
@@ -635,7 +644,7 @@ def register(app, hub, ctx):
             ttl = 300
         return await _henet_web_write(request, [{
             "name": name, "type": rtype, "value": value,
-            "ttl": ttl, "tenant_id": tenant_id}])
+            "ttl": ttl, "tenant_id": tenant_id}], tenant_id=tenant_id)
 
     @app.put("/api/henet/record")
     async def henet_update_record(request: Request):
@@ -667,7 +676,7 @@ def register(app, hub, ctx):
             ttl = 300
         return await _henet_web_write(request, [{
             "name": name, "type": rtype, "value": value,
-            "ttl": ttl, "tenant_id": tenant_id}])
+            "ttl": ttl, "tenant_id": tenant_id}], tenant_id=tenant_id)
 
     @app.delete("/api/henet/record")
     async def henet_delete_record(request: Request):
@@ -714,6 +723,8 @@ def register(app, hub, ctx):
         uses), then the spoke's local state is refreshed with the outcome."""
         body = await request.json()
         body = dict(body) if isinstance(body, dict) else {}
+        sess = _session_user(request) or {}
+        scope = _henet_tenant_scope(sess, body.get("tenant") if _is_admin(sess) else None)
         records = body.get("records")
         if not isinstance(records, list) or not records:
             raise HTTPException(status_code=400, detail="records must be a non-empty list")
@@ -724,8 +735,9 @@ def register(app, hub, ctx):
             clean.append({"name": str(r.get("name") or "").strip().rstrip("."),
                           "type": str(r.get("type") or "A").upper(),
                           "value": str(r.get("value") or "").strip(),
-                          "ttl": r.get("ttl", 300)})
-        return await _henet_web_write(request, clean)
+                          "ttl": r.get("ttl", 300),
+                          "tenant_id": scope})
+        return await _henet_web_write(request, clean, tenant_id=scope)
 
     @app.post("/api/henet/import")
     async def henet_import(request: Request):
@@ -743,15 +755,23 @@ def register(app, hub, ctx):
         are reported as skipped (HE dyndns can only manage A/AAAA).
 
         Optional body ``{"zone": "example.com"}`` restricts the import to one
-        zone; omitted, every zone on the account is imported."""
+        zone; omitted, every zone on the account is imported. Tenant-aware: the
+        imported records are tagged with the caller's tenant scope (a non-admin's
+        own tenant; a Global Admin's selected ``tenant`` or the global scope) and
+        the matching account login is used, so importing under a tenant reads
+        THAT tenant's HE account and the records land on that tenant's tab."""
         hub = app.state.hub
         spoke_id = _get_henet_spoke(hub)  # 503 early if the spoke is offline
         try:
             body = await request.json()
         except Exception:
             body = {}
-        zone_filter = (body or {}).get("zone") if isinstance(body, dict) else None
-        username, password = await _henet_resolve_account_login(request)
+        if not isinstance(body, dict):
+            body = {}
+        zone_filter = body.get("zone")
+        sess = _session_user(request) or {}
+        scope = _henet_tenant_scope(sess, body.get("tenant") if _is_admin(sess) else None)
+        username, password = await _henet_resolve_account_login(request, scope)
 
         import henet_scrape
         scraper = henet_scrape.HENetScraper()
@@ -761,6 +781,9 @@ def register(app, hub, ctx):
                                 detail=result.get("message") or "HE.NET import failed")
 
         records = result.get("records", [])
+        for r in records:
+            if isinstance(r, dict):
+                r["tenant_id"] = scope
         merged = await _relay_spoke(spoke_id, "HENET_IMPORT", {"records": records},
                                     log_name="henet_import")
         return {
