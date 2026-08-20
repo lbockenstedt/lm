@@ -391,7 +391,13 @@ const CRUD_ROUTES = {
             if (orig) orig(...args);
         };
     });
-    window.addEventListener('error', e => push('error', [e.message + ' (' + (e.filename || '') + ':' + (e.lineno || 0) + ')']));
+    // Chrome's "ResizeObserver loop completed with undelivered notifications."
+    // is a benign frame-deferral notice, not a fault — keep it out of the
+    // captured buffer so it can't dominate a bug report's console log.
+    window.addEventListener('error', e => {
+        if (/resizeobserver loop/i.test(String((e && e.message) || ''))) return;
+        push('error', [e.message + ' (' + (e.filename || '') + ':' + (e.lineno || 0) + ')']);
+    });
     window.addEventListener('unhandledrejection', e => push('error', ['Unhandled rejection: ' + (e.reason && e.reason.stack ? e.reason.stack : String(e.reason))]));
 })();
 

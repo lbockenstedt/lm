@@ -643,6 +643,16 @@
       function isNetworkNoise(msg) {
         return /\b(failed to fetch|networkerror when attempting to fetch resource|load failed|err_network)\b/i.test(String(msg || ''));
       }
+      // Benign browser-internal noise. "ResizeObserver loop completed with
+      // undelivered notifications." is a Chrome diagnostic emitted when an
+      // observer callback changes layout and the browser defers the remaining
+      // notifications to the next frame — nothing is broken and the layout
+      // settles. It arrives as an uncaught window 'error' event with an empty
+      // filename and lineno 0, so without this it flashed the red runtime
+      // banner AND auto-filed a bug on every occurrence.
+      function isBenignNoise(msg) {
+        return /resizeobserver loop/i.test(String(msg || ''));
+      }
 
       window.addEventListener('error', function (e) {
         // Script parse/exec failures surface here with no column/line on the
@@ -660,7 +670,7 @@
         // cross-origin script errors (no message, can't act on) and network
         // noise (shown inline by the app already).
         var msg = e && e.message;
-        if (!msg || isNetworkNoise(msg)) return;
+        if (!msg || isNetworkNoise(msg) || isBenignNoise(msg)) return;
         var where = f ? f.split('/').pop() + ':' + (e.lineno || 0) : '';
         runtimeBanner(msg, where);
       }, true);
@@ -669,7 +679,7 @@
         // just surface it non-destructively. Prefer the Error's message.
         var r = e && e.reason;
         var msg = (r && (r.message || r.stack)) || String(r || 'A background request failed.');
-        if (isNetworkNoise(msg)) return;
+        if (isNetworkNoise(msg) || isBenignNoise(msg)) return;
         runtimeBanner(msg, '');
       });
       // If the app never initialized (core script failed to parse/run), the
