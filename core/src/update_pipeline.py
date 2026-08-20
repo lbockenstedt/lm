@@ -72,7 +72,7 @@ _UPDATE_SOURCE_PREFIX_MAP = {
 # tree (the class of bug that broke lm-opnsense). Role sub-spokes that DO have
 # their own repo (firewall→opnsense, ipam→netbox, …) resolve via
 # _UPDATE_SOURCE_MODULE_KEY above and are unaffected.
-_IN_LM_REPO_MODULE_TYPES = {"agent", "dns", "dhcp", "henet", "console", "statuspage"}
+_IN_LM_REPO_MODULE_TYPES = {"agent", "dns", "dhcp", "henet", "console", "statuspage", "proxy"}
 
 # Modules that update THEMSELVES and must not be fanned out a SPOKE_UPDATE.
 # ab runs its own updater thread (ab/main.py updater_worker, which
