@@ -18295,6 +18295,28 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     } catch (e) {}
     term.open(bodyEl);
     serialFitConsole(entry);
+    // The FitAddon can no-op on the very first synchronous fit (the renderer
+    // hasn't measured its cell size yet), leaving the grid at the default 80×24
+    // so the terminal only fills the top of a tall pane. A ResizeObserver on
+    // the body refits whenever the pane actually gets (or changes) its real
+    // size — the reliable way to make the grid always fill the dock, whether on
+    // first open, dock resize, or the broadcast split. rAF-debounced to dodge
+    // the "ResizeObserver loop" warning.
+    try {
+        if (typeof ResizeObserver !== 'undefined') {
+            let raf = 0;
+            const ro2 = new ResizeObserver(() => {
+                if (raf) return;
+                raf = requestAnimationFrame(() => { raf = 0; serialFitConsole(entry); });
+            });
+            ro2.observe(bodyEl);
+            entry.resizeObserver = ro2;
+        }
+    } catch (e) {}
+    // Belt-and-suspenders initial refits for the first paint (covers the case
+    // where the observer hasn't fired yet before the pane is laid out).
+    requestAnimationFrame(() => serialFitConsole(entry));
+    setTimeout(() => serialFitConsole(entry), 120);
     term.focus();
     // Clicking anywhere in this console's body focuses its terminal so the
     // operator can type immediately — no need to reselect it from the left
@@ -18600,6 +18622,7 @@ function serialCloseConsole(key) {
     if (!reg) return;
     const e = reg.get(key);
     if (e) {
+        try { if (e.resizeObserver) e.resizeObserver.disconnect(); } catch (err) {}
         try { if (e.ws) e.ws.close(); } catch (err) {}
         try { if (e.term) e.term.dispose(); } catch (err) {}
         if (e.bodyEl) e.bodyEl.remove();
@@ -18620,7 +18643,7 @@ function serialCloseConsole(key) {
 function serialCloseAllConsoles() {
     const reg = window._serialConsoles;
     if (reg) {
-        reg.forEach(e => { try { if (e.ws) e.ws.close(); } catch (err) {} try { if (e.term) e.term.dispose(); } catch (err) {} });
+        reg.forEach(e => { try { if (e.resizeObserver) e.resizeObserver.disconnect(); } catch (err) {} try { if (e.ws) e.ws.close(); } catch (err) {} try { if (e.term) e.term.dispose(); } catch (err) {} });
         reg.clear();
     }
     window._serialActiveConsole = null;
