@@ -18212,12 +18212,15 @@ function serialReflowBodies() {
 }
 
 // Resize one console's xterm to fill its (visible) body — removes the dead
-// space below/right of the terminal grid. No-op when the fit addon is
-// unavailable or the body is hidden (fit needs a laid-out, non-zero container).
+// space below/right of the terminal grid — then repaint it. The repaint is
+// what keeps side-by-side (broadcast) panes correct: without it, resizing or
+// focusing one terminal can leave another pane showing a stale/mirrored view.
+// No-op when the body is hidden (fit/measure needs a laid-out, non-zero box).
 function serialFitConsole(entry) {
-    if (!entry || !entry.fitAddon || !entry.bodyEl) return;
+    if (!entry || !entry.bodyEl || !entry.term) return;
     if (entry.bodyEl.classList.contains('hidden') || !entry.bodyEl.offsetParent) return;
-    try { entry.fitAddon.fit(); } catch (e) {}
+    try { if (entry.fitAddon) entry.fitAddon.fit(); } catch (e) {}
+    try { entry.term.refresh(0, entry.term.rows - 1); } catch (e) {}
 }
 
 // Refit every currently-visible console (window resize / fullscreen change).
@@ -18241,7 +18244,7 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     serialSetDockCollapsed(false);
     const bodies = modal.querySelector('#serial-console-bodies');
     const bodyEl = document.createElement('div');
-    bodyEl.className = 'hidden flex-1 p-1 overflow-hidden bg-[#1e1e1e] border-r border-slate-800';
+    bodyEl.className = 'hidden relative flex-1 min-w-0 min-h-0 p-1 overflow-hidden bg-[#1e1e1e] border-r border-slate-800';
     bodyEl.setAttribute('data-console-key', key);
     bodies.appendChild(bodyEl);
     const ro = !!session.read_only;
