@@ -1289,6 +1289,29 @@ def create_app(hub):
         # next _save_sessions, e.g. login/logout, persists it).
         if isinstance(sess, dict):
             sess["last_seen"] = time.time()
+            # Diagnostic (non-blocking): flag when the SAME lm_session cookie is
+            # presented from a second client IP. A single session token used from
+            # two different clients means one identity is shared across browsers
+            # — the fingerprint of the "two users kick each other out / see each
+            # other's WebUI" report (a synced/shared cookie or a shared account).
+            # We DON'T reject on IP change (would break VPN/NAT/mobile roaming);
+            # we log once per new IP so a real occurrence is captured with hard
+            # evidence (user_id + both IPs + UA) instead of staying invisible.
+            try:
+                _ip = _client_ip(request)
+                _known = sess.get("client_ip")
+                if _known is None:
+                    sess["client_ip"] = _ip
+                elif _ip and _ip != _known and _ip not in sess.get("alt_ips", ()):
+                    sess.setdefault("alt_ips", []).append(_ip)
+                    logger.warning(
+                        "SESSION-IP-CHANGE user=%s sid=%s first_ip=%s new_ip=%s "
+                        "ua=%r path=%s — one lm_session cookie used from a second "
+                        "client (shared/synced cookie or shared account)",
+                        sess.get("user_id"), sess.get("sid"), _known, _ip,
+                        (request.headers.get("user-agent") or "")[:80], path)
+            except Exception:  # noqa: BLE001 — diagnostic must never break a request
+                pass
 
         # /setup/* and /admin/* are admin-only
         if path.startswith("/setup/") or path.startswith("/admin/"):
