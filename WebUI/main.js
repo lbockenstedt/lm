@@ -23622,6 +23622,15 @@ function _collectVaultCred(elId) {
     return o ? { bucket: o.bucket, name: o.name } : null;
 }
 
+// The current HE.NET tenant scope for a Global Admin, derived from the top
+// tenant selector: a specific tenant id, or "" for the Admin (global) slot. A
+// non-admin is always server-pinned to their own tenant, so this returns null
+// and callers omit any tenant hint.
+function _henetScope() {
+    if (!isAdmin()) return null;
+    return (currentTenant && currentTenant !== 'default') ? currentTenant : '';
+}
+
 function _henetPushBadge(r) {
     if (!r.last_push_status) return '<span class="text-slate-400">—</span>';
     if (r.last_push_status === 'imported') {
@@ -23634,20 +23643,6 @@ function _henetPushBadge(r) {
     return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${cls}"${detail}>${ok ? 'pushed' : 'error'}</span>`;
 }
 
-// Switch the admin per-tenant record tab without re-fetching: toggle panel
-// visibility + restyle the tab buttons (records are already rendered).
-function _henetSelectTab(k) {
-    window._henetActiveTab = k;
-    document.querySelectorAll('.henet-tab-panel').forEach(p => p.classList.toggle('hidden', p.dataset.tab !== k));
-    document.querySelectorAll('.henet-tab-btn').forEach(b => {
-        const active = b.dataset.htab === k;
-        b.classList.toggle('border-[#01A982]', active);
-        b.classList.toggle('text-[#01A982]', active);
-        b.classList.toggle('border-transparent', !active);
-        b.classList.toggle('text-slate-500', !active);
-    });
-}
-
 async function loadHenet() {
     const container = document.getElementById('dns-content');
     if (!container) return;
@@ -23658,6 +23653,11 @@ async function loadHenet() {
     // DNS-view user sees records read-only, matching the server's
     // _can_edit_shared gate on /api/henet/record and /api/henet/credential.
     const canWrite = admin || isTenantAdmin();
+    // Global Admin honors the top tenant selector (like nw/ipam/firewall/dns):
+    // a specific tenant scopes the view to that tenant; the default/Admin
+    // selection ("" scope) shows the global/admin-managed set. A non-admin is
+    // always pinned to their own tenant server-side, so scope is irrelevant.
+    const adminScope = admin ? ((currentTenant && currentTenant !== 'default') ? currentTenant : '') : null;
     const backBar = _extDnsBackBar('HE.NET');
     const btnCls = 'bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold shadow-sm';
     const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
@@ -23676,26 +23676,31 @@ async function loadHenet() {
         }
     } catch (e) { /* status is best-effort */ }
 
-    // Assigned DDNS credential — the caller's OWN slot (their tenant's, or the
-    // global slot for a Global Admin). Resolved once, reused for every
-    // add/sync so the operator never re-picks it. Stored as a non-secret
-    // {bucket,name} reference (GET /api/henet/credential). Admin additionally
-    // gets "tenants" — every tenant that has assigned its own — for the
-    // merged global + per-tenant overview.
+    // Assigned DDNS credential — the slot for the CURRENT scope. A non-admin
+    // gets their own tenant's slot. A Global Admin gets the selected tenant's
+    // slot when a tenant is picked, or the Admin (global) slot — plus the
+    // "tenants with their own credential" overview — on the default selection.
+    // Stored as a non-secret {bucket,name} reference (GET /api/henet/credential).
     let assignedCred = null;
     let tenantCreds = {};
     try {
-        const c = await _spokeFetch('/api/henet/credential');
+        const credUrl = (admin && adminScope)
+            ? '/api/henet/credential?tenant=' + encodeURIComponent(adminScope)
+            : '/api/henet/credential';
+        const c = await _spokeFetch(credUrl);
         if (c.ok && c.data) {
             assignedCred = c.data.credential || null;
             tenantCreds = c.data.tenants || {};
         }
     } catch (e) { /* best-effort */ }
     window._henetAssignedCred = assignedCred;
+    // Label the scope: "Admin" for the global slot, nothing for a tenant slot
+    // (the record list already makes the selected tenant obvious).
+    const credScope = (admin && !adminScope) ? 'Admin ' : '';
     const credInfo = canWrite
         ? (assignedCred
-            ? ` · <span class="text-slate-600">${admin ? 'Global ' : ''}DDNS credential: <span class="font-mono">🔐 ${escapeHtml(assignedCred.name)}</span></span>`
-            : ` · <span class="text-amber-600 font-medium">no ${admin ? 'global ' : ''}DDNS credential assigned</span>`)
+            ? ` · <span class="text-slate-600">${credScope}DDNS credential: <span class="font-mono">🔐 ${escapeHtml(assignedCred.name)}</span></span>`
+            : ` · <span class="text-amber-600 font-medium">no ${credScope.toLowerCase()}DDNS credential assigned</span>`)
         : '';
     const tenantCredN = Object.keys(tenantCreds).length;
     const tenantCredInfo = admin && tenantCredN
@@ -23723,9 +23728,16 @@ async function loadHenet() {
         }
         // A non-admin only ever gets their own tenant's records back (the
         // server filters — see henet_list_records); a Global Admin gets
-        // everything (global + every tenant's), each tagged with tenant_id.
-        const records = d.records || [];
+        // everything (global + every tenant's), each tagged with tenant_id, and
+        // we scope it here to the tenant picked in the top selector.
+        const allRecords = d.records || [];
+        const records = admin
+            ? allRecords.filter(r => (r.tenant_id || '') === adminScope)
+            : allRecords;
         window._henetRecords = records;
+        // Keep the record modal's tenant default + push-free re-home target in
+        // step with the selector (the modal reads _henetActiveTab).
+        if (admin) window._henetActiveTab = adminScope;
         const cols = ['Name', 'Type', 'Value', 'TTL', 'Last Push'].concat(canWrite ? [''] : []);
         const rowHtml = (r) => {
             const eName = String(r.name).replace(/'/g, "\\'");
@@ -23742,38 +23754,7 @@ async function loadHenet() {
                 </td>` : ''}
             </tr>`;
         };
-        let bodyHtml;
-        if (admin) {
-            // Group into a "Global" tab + one tab per tenant, so each tenant's
-            // records live on their own tab instead of one flat admin list.
-            await ensureTenants();
-            const tName = (window._allTenantsName || {});
-            const groups = new Map();  // tenant_id ("" = global) -> [records]
-            records.forEach(r => {
-                const k = r.tenant_id || '';
-                if (!groups.has(k)) groups.set(k, []);
-                groups.get(k).push(r);
-            });
-            const tabs = [''].concat(Array.from(groups.keys()).filter(k => k !== '').sort())
-                .filter(k => groups.has(k));
-            if (window._henetActiveTab == null || !tabs.includes(window._henetActiveTab)) {
-                window._henetActiveTab = tabs[0] || '';
-            }
-            const tabLabel = k => k ? (tName[k] || k) : 'Global';
-            const tabBtns = tabs.map(k => {
-                const active = k === window._henetActiveTab;
-                const style = active ? 'border-[#01A982] text-[#01A982]' : 'border-transparent text-slate-500 hover:text-slate-700';
-                return `<button data-htab="${escapeHtml(String(k))}" onclick="_henetSelectTab('${String(k).replace(/'/g, "\\'")}')" class="henet-tab-btn px-3 py-1.5 -mb-px border-b-2 ${style} text-sm font-medium whitespace-nowrap">${escapeHtml(tabLabel(k))} <span class="text-xs text-slate-400">(${groups.get(k).length})</span></button>`;
-            }).join('');
-            const panels = tabs.map(k => {
-                const hidden = k === window._henetActiveTab ? '' : ' hidden';
-                const grp = groups.get(k);
-                return `<div class="henet-tab-panel${hidden}" data-tab="${escapeHtml(String(k))}">${tw(th(cols) + `<tbody>${grp.map(rowHtml).join('')}</tbody>`)}</div>`;
-            }).join('');
-            bodyHtml = `<div class="flex gap-1 border-b border-slate-200 mb-3 overflow-x-auto">${tabBtns}</div>${panels}`;
-        } else {
-            bodyHtml = tw(th(cols) + `<tbody>${records.map(rowHtml).join('')}</tbody>`);
-        }
+        const bodyHtml = tw(th(cols) + `<tbody>${records.map(rowHtml).join('')}</tbody>`);
         container.innerHTML = backBar + actionBar + (records.length === 0
             ? '<p class="p-4 text-slate-400 italic text-sm">No HE.NET records under management yet.' + (canWrite ? ' Use “+ Add Record”.' : '') + '</p>'
             : bodyHtml);
@@ -23803,10 +23784,10 @@ async function showHenetRecordModal(editItem) {
         const tenants = window._allTenants || [];
         const cur = (editItem && editItem.tenant_id != null)
             ? String(editItem.tenant_id) : String(window._henetActiveTab || '');
-        const opts = [`<option value=""${cur === '' ? ' selected' : ''}>Global (admin-managed / shared)</option>`]
+        const opts = [`<option value=""${cur === '' ? ' selected' : ''}>Admin (admin-managed / shared)</option>`]
             .concat(tenants.map(t => `<option value="${escapeHtml(t.id)}"${String(t.id) === cur ? ' selected' : ''}>${escapeHtml(t.name || t.id)}</option>`))
             .join('');
-        tenantField = `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Tenant</label><select id="henet-r-tenant" class="${inputCls}" title="Which tenant owns this record. Global = admin-managed / shared. A tenant only sees and manages its own records — pick a tenant to move this record onto their tab.">${opts}</select></div>`;
+        tenantField = `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Tenant</label><select id="henet-r-tenant" class="${inputCls}" title="Which tenant owns this record. Admin = admin-managed / shared. A tenant only sees and manages its own records — pick a tenant to move this record to that tenant.">${opts}</select></div>`;
     }
     const modal = openModal('henet-record-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} HE.NET Record</h3>
@@ -23864,10 +23845,13 @@ async function _henetSaveCred() {
     const [bucket, name] = String(sel).split('|');
     if (!bucket || !name) { showToast('Add a Hurricane Electric credential to the Credential Vault first', 'error'); return; }
     try {
+        const payload = { bucket, name };
+        const scope = _henetScope();
+        if (scope !== null) payload.tenant = scope;  // admin: selected tenant, or "" = Admin slot
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/credential', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ bucket, name }),
+            body: JSON.stringify(payload),
         });
         if (ok && d.status === 'SUCCESS') {
             document.getElementById('henet-cred-modal')?.remove();
@@ -23879,7 +23863,11 @@ async function _henetSaveCred() {
 
 async function _henetClearCred() {
     try {
-        const { ok, data: d, detail } = await _spokeFetch('/api/henet/credential', { method: 'DELETE' });
+        const scope = _henetScope();
+        const url = scope
+            ? '/api/henet/credential?tenant=' + encodeURIComponent(scope)
+            : '/api/henet/credential';
+        const { ok, data: d, detail } = await _spokeFetch(url, { method: 'DELETE' });
         if (ok && d.status === 'SUCCESS') {
             document.getElementById('henet-cred-modal')?.remove();
             showToast('HE.NET DDNS credential cleared', 'success');
@@ -23925,7 +23913,7 @@ async function saveHenetRecord() {
             if (ok && d.status === 'SUCCESS') {
                 modal.remove();
                 window._henetActiveTab = tenantSel.value;  // jump to the destination tab
-                const dest = tenantSel.value ? ((window._allTenantsName || {})[tenantSel.value] || tenantSel.value) : 'Global';
+                const dest = tenantSel.value ? ((window._allTenantsName || {})[tenantSel.value] || tenantSel.value) : 'Admin';
                 showToast(`Record moved to ${dest}`, 'success');
                 loadHenet();
             } else showToast('Error: ' + (detail || d?.message || 'Move failed'), 'error');
