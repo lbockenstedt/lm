@@ -169,6 +169,32 @@ def register(app, hub, ctx):
             hv_spokes = [_gs] if _gs else []
         spoke_nac        = hub.get_spoke_by_type("nac")
 
+        # Whole-host PINNED-agent ownership. A Proxmox host can dial a SHARED
+        # spoke yet be PINNED to one tenant (per-agent Tenant button →
+        # agent_config[agent].client_simulation.tenant_id). ALL of that host's
+        # VMs belong to the tenant regardless of subnet/tag — mirror
+        # _spoke_effective_tenants' whole-host model. Subnet/tag scoping alone
+        # undercounts such a tenant badly: e.g. LRB has 6 Proxmox hosts pinned
+        # to it on shared spokes but only the handful of VMs sitting on its 1
+        # NetBox prefix were counted (4 instead of its real fleet). For each
+        # agent pinned to this tenant on a VISIBLE spoke, fan PXMX_LIST_VMS
+        # scoped to that agent (?agent_id=) — every returned VM is owned and is
+        # merged in below UNCONDITIONALLY (no subnet/tag filter). Same-spoke
+        # pinned agents each need their own scoped call (one shared spoke hosts
+        # several distinct pinned hosts).
+        owned_agent_reqs = []  # (agent_pk, spoke)
+        if _tid and _tid != "default":
+            _acfg = hub.state.system_state.get("agent_config", {}) or {}
+            _hv_set = set(hv_spokes)
+            for _apk, _cfg in _acfg.items():
+                _pin = str(((_cfg or {}).get("client_simulation") or {})
+                           .get("tenant_id") or "").strip()
+                if _pin != _tid:
+                    continue
+                _sp = hub.get_spoke_for_agent(_apk, fallback_hypervisor=False)
+                if _sp and _sp in _hv_set:
+                    owned_agent_reqs.append((_apk, _sp))
+
         async def _req(spoke, cmd, payload=None):
             if not spoke:
                 return {}
@@ -201,9 +227,16 @@ def register(app, hub, ctx):
             # by the shared ``failed_spokes`` skip; results are merged below.
             *[_req(s, "PXMX_LIST_VMS", {"tag_filter": pxmx_tag} if pxmx_tag else {})
               for s in hv_spokes],
+            # Whole-host owned VMs: one PXMX_LIST_VMS per pinned agent, scoped to
+            # that agent's host (see owned_agent_reqs above). Appended AFTER the
+            # per-spoke fan-out so slicing stays deterministic.
+            *[_req(sp, "PXMX_LIST_VMS", {"agent_id": apk})
+              for apk, sp in owned_agent_reqs],
         )
         devices_r, prefixes_r, ips_r, sessions_r = _core[:4]
-        _vm_envelopes = _core[4:]
+        _n_hv = len(hv_spokes)
+        _vm_envelopes   = _core[4:4 + _n_hv]
+        _owned_envelopes = _core[4 + _n_hv:]
 
         devices  = len(devices_r.get("devices",   []))
         prefixes = len(prefixes_r.get("prefixes", []))
@@ -238,6 +271,22 @@ def register(app, hub, ctx):
                 all_vms, sess_prefixes,
                 template_pools=access._template_pools(hub),
                 tenant_tags=access._tenant_tag_set(hub, scoping.get("tenant_id")))
+        # Union in the whole-host PINNED-agent VMs UNCONDITIONALLY (they were
+        # fetched scoped to an agent pinned to THIS tenant, so every one is owned
+        # regardless of subnet/tag). Deduped by unique_id against the filtered
+        # set so a VM already attributed by subnet/tag isn't double-counted.
+        if _owned_envelopes:
+            _owned: dict = {}
+            for _env in _owned_envelopes:
+                for _v in (_env.get("vms") or []):
+                    if isinstance(_v, dict):
+                        _k = _v.get("unique_id") or (_v.get("node"), _v.get("vmid"))
+                        _owned[_k] = _v
+            if _owned:
+                _merged = {(v.get("unique_id") or (v.get("node"), v.get("vmid"))): v
+                           for v in all_vms}
+                _merged.update(_owned)
+                all_vms = list(_merged.values())
         # NAC sessions come from the SHARED (global) nac spoke — CPPM_GET_ACCESS_TRACKER
         # returns every tenant's sessions, so subnet scoping is the ONLY isolation.
         # A tenant with no bound prefixes must therefore show 0, NOT the global list

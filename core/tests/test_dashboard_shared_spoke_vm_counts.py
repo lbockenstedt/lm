@@ -25,9 +25,10 @@ from routes.dashboard import register
 
 
 class _State:
-    def __init__(self, tenants, module_metadata):
+    def __init__(self, tenants, module_metadata, agent_config=None):
         self.system_state = {"active_tenant": "default",
-                             "module_metadata": module_metadata}
+                             "module_metadata": module_metadata,
+                             "agent_config": agent_config or {}}
         self._tenants = tenants
 
     def get_tenant(self, tid):
@@ -35,14 +36,19 @@ class _State:
 
 
 class _Hub:
-    def __init__(self, tenants, module_metadata, plural, global_spoke, responses):
-        self.state = _State(tenants, module_metadata)
+    def __init__(self, tenants, module_metadata, plural, global_spoke, responses,
+                 agent_config=None, agent_spokes=None):
+        self.state = _State(tenants, module_metadata, agent_config)
         self._plural = plural
         self._global = global_spoke
         self._responses = responses
+        self._agent_spokes = agent_spokes or {}
 
     def get_spoke_by_type(self, t):
         return {"ipam": "ipam-1", "nac": "nac-1"}.get(t)
+
+    def get_spoke_for_agent(self, agent_id, fallback_hypervisor=True):
+        return self._agent_spokes.get(agent_id)
 
     def get_hypervisor_spokes_for_tenant(self, tid):
         return list(self._plural.get(tid, []))
@@ -51,6 +57,12 @@ class _Hub:
         return self._global
 
     async def request_response(self, spoke, cmd, payload=None, timeout=None):
+        payload = payload or {}
+        # A pinned-agent (whole-host) query is keyed by (spoke, cmd, agent_id).
+        if payload.get("agent_id"):
+            return self._responses.get(
+                (spoke, cmd, payload["agent_id"]),
+                self._responses.get((spoke, cmd), {}))
         return self._responses.get((spoke, cmd), {})
 
 
@@ -170,3 +182,48 @@ def test_tag_attributed_vm_off_subnet_counted():
     )
     out = _summary(hub, _ctx(_LRB_PREFIXES))
     assert out["vms"] == 3  # 401 (subnet) + 402/403 (tag) — 404 stays excluded
+
+
+def test_pinned_agent_whole_host_vms_counted_off_subnet_untagged():
+    """The LRB case: a Proxmox host is PINNED to the tenant on a SHARED spoke
+    (agent_config[agent].client_simulation.tenant_id == 'lrb'). EVERY VM on that
+    host is owned by LRB — even off-subnet AND untagged — via whole-host
+    ownership. The per-spoke fan-out (subnet/tag filtered) keeps only the
+    on-subnet VM; the agent-scoped query adds the rest unconditionally."""
+    # Shared-spoke general fan-out: mixed VMs, only 501 is on LRB's subnet.
+    spoke_vms = [_vm(501, "10.10.0.51"),
+                 _vm(502, "192.168.7.2"),   # off-subnet, untagged
+                 _vm(503, "192.168.7.3")]   # off-subnet, untagged
+    # Agent-scoped (pinned host) query: all three are on LRB's pinned host.
+    host_vms = [_vm(501, "10.10.0.51"), _vm(502, "192.168.7.2"), _vm(503, "192.168.7.3")]
+    hub = _Hub(
+        tenants=_TENANTS,
+        module_metadata={"shared-pxmx": {"tenant_id": "shared"}},
+        plural={"lrb": ["shared-pxmx"]},
+        global_spoke=None,
+        responses={("shared-pxmx", "PXMX_LIST_VMS"): {"vms": spoke_vms},
+                   ("shared-pxmx", "PXMX_LIST_VMS", "agent-lrb-1"): {"vms": host_vms}},
+        agent_config={"agent-lrb-1": {"client_simulation": {"tenant_id": "lrb"}},
+                      "agent-ra-1": {"client_simulation": {"tenant_id": "ra"}}},
+        agent_spokes={"agent-lrb-1": "shared-pxmx", "agent-ra-1": "shared-pxmx"},
+    )
+    out = _summary(hub, _ctx(_LRB_PREFIXES))
+    assert out["vms"] == 3  # 501 (subnet) + 502/503 (whole-host pinned) — all counted
+
+
+def test_pinned_agent_stopped_vm_not_counted():
+    """Whole-host ownership still only counts RUNNING VMs (Overview semantics).
+    A stopped VM on the pinned host is owned but not counted as running."""
+    host_vms = [_vm(601, "192.168.7.10"), _vm(602, "192.168.7.11", status="stopped")]
+    hub = _Hub(
+        tenants=_TENANTS,
+        module_metadata={"shared-pxmx": {"tenant_id": "shared"}},
+        plural={"lrb": ["shared-pxmx"]},
+        global_spoke=None,
+        responses={("shared-pxmx", "PXMX_LIST_VMS"): {"vms": []},
+                   ("shared-pxmx", "PXMX_LIST_VMS", "agent-lrb-1"): {"vms": host_vms}},
+        agent_config={"agent-lrb-1": {"client_simulation": {"tenant_id": "lrb"}}},
+        agent_spokes={"agent-lrb-1": "shared-pxmx"},
+    )
+    out = _summary(hub, _ctx(_LRB_PREFIXES))
+    assert out["vms"] == 1  # only the running one
