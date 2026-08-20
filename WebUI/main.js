@@ -18914,8 +18914,12 @@ function pxmxEnsureConsoleDock() {
                     <strong class="text-sm text-slate-200">VM Consoles</strong>
                     <button id="pxmx-vnc-closeall" title="Close all consoles" class="text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
                 </div>
-                <input id="pxmx-vnc-search" type="text" placeholder="Search consoles…"
-                       class="w-full text-xs bg-[#1a1a2e] border border-slate-600 rounded px-2 py-1 text-slate-100 focus:outline-none focus:border-sky-500">
+                <div class="flex items-center gap-1">
+                    <input id="pxmx-vnc-search" type="text" placeholder="Search VMs to open…"
+                           class="flex-1 min-w-0 text-xs bg-[#1a1a2e] border border-slate-600 rounded px-2 py-1 text-slate-100 focus:outline-none focus:border-sky-500">
+                    <button id="pxmx-vnc-refresh" title="Refresh the searchable VM directory (only VMs you have rights to)" class="shrink-0 text-slate-400 hover:text-sky-400 text-sm leading-none px-1">⟳</button>
+                </div>
+                <p class="text-[10px] text-slate-500 leading-tight">Type to search any VNC-capable VM you can access; empty shows only open consoles.</p>
             </div>
             <div id="pxmx-vnc-list" class="flex-1 overflow-y-auto"></div>
         </div>
@@ -18940,8 +18944,14 @@ function pxmxEnsureConsoleDock() {
     modal.querySelector('#pxmx-vnc-closeall').onclick = () => pxmxCloseAllConsoles();
     modal.querySelector('#pxmx-vnc-search').addEventListener('input', (ev) => {
         window._pxmxConsoleFilter = ev.target.value.trim().toLowerCase();
+        // Lazily pull the rights-scoped VM directory the first time the operator
+        // actually types — the empty state deliberately stays "open consoles
+        // only", so there's no reason to fetch the (potentially huge) inventory
+        // until they search for something to open.
+        if (window._pxmxConsoleFilter) pxmxRefreshConsoleDir(false);
         pxmxRenderConsoleList();
     });
+    modal.querySelector('#pxmx-vnc-refresh').onclick = () => pxmxRefreshConsoleDir(true);
     return modal;
 }
 
@@ -19078,11 +19088,66 @@ function pxmxActivateConsole(key) {
     try { window.dispatchEvent(new Event('resize')); } catch (e) {}
 }
 
-// Paint the left-side console list (status dot, name, viewer/RO badges, and a
-// close button per row) — filtered by the search box. Replaces the old
-// horizontal tab strip, which became unusable once more than a handful of
-// VM consoles were open; a scrollable vertical list + search holds up at any
-// count.
+// Is this VM one that can actually have a noVNC console? Mirrors the VM-table
+// gating (pxmxVmTableHtml): LXC containers and templates have no VNC console,
+// so the search picker must not offer to "open" one for them. Template
+// membership uses the same pool set the directory fetch cached.
+function pxmxVmIsVncCapable(vm) {
+    if (!vm) return false;
+    if (String(vm.type || '').toLowerCase() === 'lxc') return false;
+    const pools = window._pxmxConsoleDirTemplatePools || window._pxmxTemplatePools || [];
+    const isTpl = !!(vm.template || (vm.pool && pools.includes(String(vm.pool).toLowerCase())));
+    return !isTpl;
+}
+
+// Lazily fetch + cache the rights-scoped VM directory that powers the console
+// search picker. Reuses the SAME endpoint loadPxmxData uses — /api/pxmx/vms is
+// already tenant-scoped + rights-filtered server-side, so the client never sees
+// a VM the caller can't access (and the console-open itself is separately
+// authorized server-side; this is just the UX affordance). Cached on
+// window._pxmxConsoleDirVms; `force` bypasses the cache (the ⟳ button).
+async function pxmxRefreshConsoleDir(force) {
+    if (window._pxmxConsoleDirLoading) return;
+    if (window._pxmxConsoleDirVms && !force) return;
+    window._pxmxConsoleDirLoading = true;
+    const btn = document.getElementById('pxmx-vnc-refresh');
+    if (btn) btn.classList.add('animate-spin');
+    try {
+        const res = await fetch(`/api/pxmx/vms?tenant=${encodeURIComponent(currentTenant)}`,
+                                { credentials: 'same-origin' });
+        if (res.ok) {
+            const data = await res.json();
+            window._pxmxConsoleDirVms = data.vms || [];
+            window._pxmxConsoleDirTemplatePools = (data.template_pools || []).map(p => String(p).toLowerCase());
+        }
+    } catch (e) { /* keep last-known directory */ }
+    finally {
+        window._pxmxConsoleDirLoading = false;
+        if (btn) btn.classList.remove('animate-spin');
+    }
+    pxmxRenderConsoleList();
+}
+
+// Open a console for a VM chosen from the search picker (a directory row that
+// isn't open yet). pxmxOpenConsole resolves the VM from window._pxmxVms, which
+// may not have been populated if the operator opened the dock without visiting
+// the VM table first — so seed the chosen VM into that cache before delegating.
+function pxmxOpenConsoleFromDir(key) {
+    const vm = (window._pxmxConsoleDirVms || []).find(v => (v.unique_id || String(v.vmid)) === key);
+    if (!vm) { showToast('VM not found', 'error'); return; }
+    if (!window._pxmxVms) window._pxmxVms = [];
+    if (!window._pxmxVms.some(v => v.unique_id === vm.unique_id)) window._pxmxVms.push(vm);
+    pxmxOpenConsole(vm.unique_id || key);
+}
+
+// Paint the left-side console list. When the search box is EMPTY it lists ONLY
+// the open console sessions (status dot, name, viewer/RO badges, close button) —
+// deliberately NOT the whole VM inventory (unlike the serial dock, which lists
+// its full directory by default; the user asked for search-only here because
+// there are too many VMs to enumerate). When the operator TYPES a query it also
+// folds in the rights-scoped, VNC-capable VM directory (window._pxmxConsoleDirVms)
+// as click-to-open rows (a "+" affordance) so they can search for and connect to
+// any VM they can access. Replaces the old horizontal tab strip.
 function pxmxRenderConsoleList() {
     const modal = document.getElementById('pxmx-vnc-modal');
     if (!modal) return;
@@ -19090,33 +19155,84 @@ function pxmxRenderConsoleList() {
     if (!list) return;
     const active = window._pxmxActiveConsole;
     const filter = window._pxmxConsoleFilter || '';
-    const entries = window._pxmxConsoles ? Array.from(window._pxmxConsoles.values()) : [];
-    const visible = filter
-        ? entries.filter(e => (e.vm.name || e.vm.vmid || e.key || '').toString().toLowerCase().includes(filter))
-        : entries;
-    list.innerHTML = visible.length ? visible.map(e => {
-        const isA = e.key === active;
-        const dot = e.statusCls === 'text-green-400' ? 'bg-green-400'
-            : (e.statusCls === 'text-red-400' ? 'bg-red-400' : 'bg-amber-400');
-        const rowCls = isA ? 'bg-[#1a1a2e] text-slate-100' : 'text-slate-400 hover:bg-[#1a1a30] hover:text-slate-200';
-        const label = escapeHtml(e.vm.name || e.vm.vmid || e.key);
-        const kAttr = escapeHtml(e.key);
-        const vc = (e.viewers && e.viewers.length) || 0;
-        const viewerBadge = vc > 1
-            ? `<span title="${vc} viewers on this console" class="ml-1 px-1 rounded bg-[#01A982]/20 text-[#01A982] text-[10px]">👁 ${vc}</span>`
-            : '';
-        const roBadge = e.ro ? '<span class="ml-1 px-1 rounded bg-amber-600 text-white text-[9px]">RO</span>' : '';
-        return `<div data-key="${kAttr}" class="pxmx-vnc-row flex items-center gap-2 px-3 py-2 border-b border-[#1f1f38] cursor-pointer text-xs ${rowCls}">
-            <span class="w-2 h-2 rounded-full ${dot} shrink-0"></span>
-            <span class="truncate flex-1">${label}</span>${viewerBadge}${roBadge}
-            <button data-close="${kAttr}" title="Close this console" class="text-slate-500 hover:text-red-400 text-sm leading-none shrink-0">&times;</button>
+    const open = window._pxmxConsoles || new Map();
+
+    // Merge open sessions with (only when searching) the VM directory, keyed by
+    // VM unique_id. Open sessions always seed rows; directory rows are added
+    // only under an active search and never override an already-open row.
+    const byKey = new Map();
+    open.forEach((e, key) => { byKey.set(key, { key, open: true, entry: e, vm: e.vm || {} }); });
+    if (filter) {
+        (window._pxmxConsoleDirVms || []).forEach(vm => {
+            if (!pxmxVmIsVncCapable(vm)) return;
+            const key = vm.unique_id || String(vm.vmid);
+            if (byKey.has(key)) return;   // already open — the open row wins
+            byKey.set(key, { key, open: false, entry: null, vm });
+        });
+    }
+
+    let rows = Array.from(byKey.values());
+    if (filter) {
+        rows = rows.filter(r => {
+            const vm = r.vm || {};
+            return [vm.name, vm.vmid, vm.node, vm.cluster, r.key]
+                .some(f => String(f == null ? '' : f).toLowerCase().includes(filter));
+        });
+    }
+    // Open consoles first (keep live sessions at the top), then click-to-open
+    // directory rows; each group alphabetized by display name.
+    const nameOf = r => String((r.vm && (r.vm.name || r.vm.vmid)) || r.key || '');
+    rows.sort((a, b) => ((b.open ? 1 : 0) - (a.open ? 1 : 0)) || nameOf(a).localeCompare(nameOf(b)));
+
+    let emptyMsg;
+    if (filter) {
+        emptyMsg = (window._pxmxConsoleDirLoading && !window._pxmxConsoleDirVms)
+            ? 'Searching…' : 'No consoles match your search.';
+    } else {
+        emptyMsg = 'No open consoles. Type above to search VMs to open.';
+    }
+
+    list.innerHTML = rows.length ? rows.map(r => {
+        const vm = r.vm || {};
+        const kAttr = escapeHtml(r.key);
+        const label = escapeHtml(vm.name || vm.vmid || r.key);
+        if (r.open) {
+            const e = r.entry;
+            const isA = r.key === active;
+            const dot = e.statusCls === 'text-green-400' ? 'bg-green-400'
+                : (e.statusCls === 'text-red-400' ? 'bg-red-400' : 'bg-amber-400');
+            const rowCls = isA ? 'bg-[#1a1a2e] text-slate-100' : 'text-slate-400 hover:bg-[#1a1a30] hover:text-slate-200';
+            const vc = (e.viewers && e.viewers.length) || 0;
+            const viewerBadge = vc > 1
+                ? `<span title="${vc} viewers on this console" class="ml-1 px-1 rounded bg-[#01A982]/20 text-[#01A982] text-[10px]">👁 ${vc}</span>`
+                : '';
+            const roBadge = e.ro ? '<span class="ml-1 px-1 rounded bg-amber-600 text-white text-[9px]">RO</span>' : '';
+            return `<div data-key="${kAttr}" data-open="1" class="pxmx-vnc-row flex items-center gap-2 px-3 py-2 border-b border-[#1f1f38] cursor-pointer text-xs ${rowCls}">
+                <span class="w-2 h-2 rounded-full ${dot} shrink-0"></span>
+                <span class="truncate flex-1">${label}</span>${viewerBadge}${roBadge}
+                <button data-close="${kAttr}" title="Close this console" class="text-slate-500 hover:text-red-400 text-sm leading-none shrink-0">&times;</button>
+            </div>`;
+        }
+        // Directory row — not open yet, click to open. Stopped VMs still open a
+        // console fine, so keep them clickable and just flag the power state.
+        const running = String(vm.status || '').toLowerCase() === 'running';
+        const stateBadge = running
+            ? '<span class="ml-1 px-1 rounded bg-green-900/50 text-green-300 text-[9px]">RUNNING</span>'
+            : '<span class="ml-1 px-1 rounded bg-slate-700 text-slate-300 text-[9px]">STOPPED</span>';
+        return `<div data-key="${kAttr}" data-open="0" title="Open a noVNC console to this VM" class="pxmx-vnc-row flex items-center gap-2 px-3 py-2 border-b border-[#1f1f38] cursor-pointer text-xs text-slate-400 hover:bg-[#1a1a30] hover:text-slate-200">
+            <span class="w-[13px] shrink-0 text-center text-slate-500">+</span>
+            <span class="w-2 h-2 rounded-full ${running ? 'bg-green-500' : 'bg-slate-600'} shrink-0"></span>
+            <span class="truncate flex-1">${label}</span>${stateBadge}
         </div>`;
-    }).join('') : `<div class="px-3 py-4 text-xs text-slate-500 italic">${entries.length ? 'No consoles match your search.' : 'No open consoles.'}</div>`;
+    }).join('') : `<div class="px-3 py-4 text-xs text-slate-500 italic">${emptyMsg}</div>`;
+
     list.querySelectorAll('.pxmx-vnc-row').forEach(el => {
         const key = el.getAttribute('data-key');
+        const isOpen = el.getAttribute('data-open') === '1';
         el.onclick = (ev) => {
             if (ev.target.closest('[data-close]')) return;
-            pxmxActivateConsole(key);
+            if (isOpen) { pxmxActivateConsole(key); return; }
+            pxmxOpenConsoleFromDir(key);
         };
         const closeBtn = el.querySelector('[data-close]');
         if (closeBtn) closeBtn.onclick = (ev) => { ev.stopPropagation(); pxmxCloseConsole(key); };
