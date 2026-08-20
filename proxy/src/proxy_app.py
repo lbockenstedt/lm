@@ -15,8 +15,8 @@ import html
 import json
 import logging
 
-from aiohttp import (ClientSession, ClientTimeout, TCPConnector, WSMsgType,
-                     client_exceptions, web)
+from aiohttp import (ClientSession, ClientTimeout, DummyCookieJar, TCPConnector,
+                     WSMsgType, client_exceptions, web)
 
 logger = logging.getLogger("ProxySpoke")
 
@@ -191,8 +191,18 @@ def _session(spoke) -> ClientSession:
     sess = app.get("_session")
     if sess is None or sess.closed:
         connector = TCPConnector(ssl=spoke.upstream_ssl(), limit=0)
+        # DummyCookieJar: a reverse proxy MUST be cookie-stateless. aiohttp's
+        # default ClientSession carries a shared CookieJar — with ONE session
+        # reused for every browser, the hub's Set-Cookie (lm_session) from user
+        # A would be stored in that jar and then injected onto EVERY other user's
+        # upstream request, so whoever logged in first "owns" the jar and all
+        # users behind the proxy become that identity (and each new login flips
+        # the jar, logging the others out). The browser's own Cookie header is
+        # already forwarded verbatim (_fwd_headers) and Set-Cookie flows back
+        # verbatim, so the proxy must hold NO cookie state of its own.
         sess = ClientSession(connector=connector,
                              timeout=ClientTimeout(total=None, sock_connect=15),
+                             cookie_jar=DummyCookieJar(),
                              auto_decompress=False)  # pass bytes through verbatim
         app["_session"] = sess
     return sess
