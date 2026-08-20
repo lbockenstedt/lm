@@ -3144,7 +3144,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         tenants = hub.state.tenant_state.get("tenants", {}) or {}
         out = [{"id": tid, "name": (cfg or {}).get("name") or tid} for tid, cfg in tenants.items()]
         if "default" not in [t["id"] for t in out]:
-            out.insert(0, {"id": "default", "name": "Default"})
+            out.insert(0, {"id": "default", "name": "ADMIN"})
         if not is_admin_fn(sess):
             mine = _user_tenant(sess)
             out = [t for t in out if t["id"] == mine]

@@ -1245,8 +1245,14 @@ function userAllowedTenants() {
 
 function canAccessTenant(tenantId) {
     if (isAdmin()) return true;
-    const allowed = userAllowedTenants();
-    return allowed.length === 0 || allowed.includes(tenantId);
+    // Deny-by-default — exact parity with the backend access.check_tenant_access:
+    // a non-admin may access ONLY tenants explicitly in their user.tenants list.
+    // An empty list means NO tenant assignment (NOT "sees all"). The previous
+    // `allowed.length === 0` branch waved a tenantless user through to EVERY
+    // tenant — including the built-in 'default' ("Admin") scope — which the
+    // backend then denied, stranding them on a data-less view (the "no tenant
+    // assigned" bug). Now the UI agrees: no assignment → no accessible tenant.
+    return userAllowedTenants().includes(tenantId);
 }
 
 // Can the CURRENT user bind a NEW device/instance to `spoke`? Mirrors the
@@ -3974,7 +3980,7 @@ async function editReport(id) {
     modal.className = 'fixed inset-0 bg-black/50 flex items-center justify-center z-50';
     const s = (existing && existing.schedule) || { freq: 'weekly', dow: 0, dom: 1, hour: 7 };
     const sec = (existing && existing.sections) || { checks: true, clients: true };
-    const tOpts = tenants.map(t => `<option value="${escapeHtml(t.id)}" ${existing && existing.tenant === t.id ? 'selected' : ''}>${escapeHtml(t.name)} (${escapeHtml(t.id)})</option>`).join('') || '<option value="default">Default (default)</option>';
+    const tOpts = tenants.map(t => `<option value="${escapeHtml(t.id)}" ${existing && existing.tenant === t.id ? 'selected' : ''}>${escapeHtml(t.name)} (${escapeHtml(t.id)})</option>`).join('') || '<option value="default">ADMIN (default)</option>';
     const freqOpts = ['daily', 'weekly', 'monthly'].map(f => `<option value="${f}" ${s.freq === f ? 'selected' : ''}>${f}</option>`).join('');
     const dowOpts = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((d, i) => `<option value="${i}" ${s.dow == i ? 'selected' : ''}>${d}</option>`).join('');
     const hourOpts = Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${s.hour == h ? 'selected' : ''}>${String(h).padStart(2, '0')}:00</option>`).join('');
@@ -5865,7 +5871,7 @@ function _renderSetupSpokesTile(content) {
             <div class="flex items-center gap-2 text-xs mb-1">
                 <label for="sa-tenant-filter" class="font-bold text-slate-500 uppercase tracking-wider">Tenant</label>
                 <select id="sa-tenant-filter" onchange="_onSaTenantFilterChange()" class="bg-white border border-slate-300 rounded-md px-2 py-1 text-sm text-slate-700 outline-none focus:ring-2 focus:ring-green-500">
-                    <option value="default">Default</option>
+                    <option value="default">ADMIN</option>
                     <option value="__unassigned__">Unassigned</option>
                     <option value="__all__" selected>All tenants</option>
                 </select>

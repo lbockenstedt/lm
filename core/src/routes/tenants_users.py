@@ -231,7 +231,7 @@ def register(app, hub, ctx):
             for tid, cfg in tenants.items()
         ]
         if "default" not in [t["id"] for t in tenant_list]:
-            tenant_list.insert(0, {"id": "default", "name": "Default", "slug": "default", "netbox_id": None, "description": "", "shared": False})
+            tenant_list.insert(0, {"id": "default", "name": "ADMIN", "slug": "default", "netbox_id": None, "description": "", "shared": False})
         # Keep the shared-tenant cache fresh whenever the list is loaded.
         shared_id = refresh_shared_tenant(hub)
         return {"tenants": tenant_list, "shared_tenant_id": shared_id}
