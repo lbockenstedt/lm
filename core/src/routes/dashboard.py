@@ -143,13 +143,30 @@ def register(app, hub, ctx):
         pxmx_tag = scoping["proxmox_tag"]        or None
 
         spoke_ipam       = hub.get_spoke_by_type("ipam")
-        # Tenant-aware: only count VMs from a hypervisor BOUND to this tenant.
-        # The global get_hypervisor_spoke() returned tenant 1's pxmx spoke for
-        # every tenant, and a tagless tenant's unfiltered PXMX_LIST_VMS then
-        # returned the whole hypervisor's VM list — so all tenants showed the
-        # one bound tenant's VMs. Now a tenant with no bound hypervisor → 0 VMs.
-        # The admin's unscoped/default view still falls back to any hypervisor.
-        spoke_hypervisor = hub.get_hypervisor_spoke_for_tenant(scoping.get("tenant_id"))
+        # Tenant-aware VM counting. Count VMs from EVERY hypervisor spoke VISIBLE
+        # to this tenant, not just the single one directly BOUND to it — the
+        # singular get_hypervisor_spoke_for_tenant() misses SHARED spokes and
+        # per-agent-PINNED hosts, so a tenant whose Proxmox host dials a shared
+        # pxmx spoke (pinned to it) showed ~0 VMs here while its VMs were
+        # attributed to the shared tenant's row. Mirror the Hypervisors VM page
+        # (get_pxmx_vms / get_hypervisor_spokes_for_tenant): fan PXMX_LIST_VMS
+        # across the plural visible set + the unbound-global spoke, merge/dedupe,
+        # then subnet/tag-filter (below) so shared-spoke VMs land on the right
+        # tenant. admin/default → the single global hypervisor (legacy behavior).
+        _tid = scoping.get("tenant_id")
+        if _tid and _tid != "default":
+            hv_spokes = list(hub.get_hypervisor_spokes_for_tenant(_tid))
+            # Include a hypervisor bound to NO tenant (global/unassigned) — the
+            # same fallback get_pxmx_vms adds — so an unbound lab hypervisor's
+            # VMs still count. A spoke bound to a DIFFERENT tenant is excluded.
+            _gs = hub.get_hypervisor_spoke()
+            if _gs and _gs not in hv_spokes:
+                _md = hub.state.system_state.get("module_metadata", {}) or {}
+                if not (_md.get(_gs, {}) or {}).get("tenant_id"):
+                    hv_spokes.append(_gs)
+        else:
+            _gs = hub.get_hypervisor_spoke()
+            hv_spokes = [_gs] if _gs else []
         spoke_nac        = hub.get_spoke_by_type("nac")
 
         async def _req(spoke, cmd, payload=None):
@@ -174,19 +191,34 @@ def register(app, hub, ctx):
                     failed_spokes.add(spoke)
                 return {}
 
-        devices_r, prefixes_r, ips_r, vms_r, sessions_r = await _asyncio.gather(
+        _core = await _asyncio.gather(
             _req(spoke_ipam, "NETBOX_GET_DEVICES", {"tenant": nb_slug}),
             _req(spoke_ipam, "NETBOX_GET_PREFIXES", {"tenant": nb_slug}),
             _req(spoke_ipam, "NETBOX_GET_IPS",     {"tenant": nb_slug}),
-            _req(spoke_hypervisor, "PXMX_LIST_VMS",
-                 {"tag_filter": pxmx_tag} if pxmx_tag else {}),
             _req(spoke_nac, "CPPM_GET_ACCESS_TRACKER", {}),
+            # One PXMX_LIST_VMS per visible hypervisor spoke, concurrently. The
+            # same spoke shared by several tenants is de-duped across the fan-out
+            # by the shared ``failed_spokes`` skip; results are merged below.
+            *[_req(s, "PXMX_LIST_VMS", {"tag_filter": pxmx_tag} if pxmx_tag else {})
+              for s in hv_spokes],
         )
+        devices_r, prefixes_r, ips_r, sessions_r = _core[:4]
+        _vm_envelopes = _core[4:]
 
         devices  = len(devices_r.get("devices",   []))
         prefixes = len(prefixes_r.get("prefixes", []))
         ips_used = len(ips_r.get("ip_addresses",  []))
-        all_vms  = vms_r.get("vms", [])
+        # Merge VMs across all visible spokes, de-duped by unique_id
+        # ("<cluster>/<node>/<vmid>") so a cluster-mate spoke self-reporting the
+        # full cluster (or the unbound-global spoke overlapping a visible one)
+        # can't double-count. Falls back to (node, vmid) when unique_id is absent.
+        _seen: dict = {}
+        for _env in _vm_envelopes:
+            for _v in (_env.get("vms") or []):
+                if isinstance(_v, dict):
+                    _key = _v.get("unique_id") or (_v.get("node"), _v.get("vmid"))
+                    _seen[_key] = _v
+        all_vms  = list(_seen.values())
         sessions_list = sessions_r.get("sessions", sessions_r.get("data", []))
         # Scope the VM + active-session counts by the tenant's subnets so the
         # dashboard matches the (tenant-scoped) hypervisor + Access Tracker views,
