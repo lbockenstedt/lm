@@ -196,13 +196,15 @@ async def _dispatch(request: web.Request) -> web.StreamResponse:
     if request.headers.get("Upgrade", "").lower() == "websocket":
         # Phase 2: an edge-relayed console session (browser opened /ws/console/{id}
         # after the hub returned a `relay` descriptor we snooped) is relayed
-        # straight to the spoke, keeping the hub out of the byte path. Anything
-        # without a cached descriptor (or no relay_spoke_url) falls back to the
-        # Phase-1 hub WS proxy.
+        # straight to the spoke, keeping the hub out of the byte path — but ONLY
+        # when this proxy is tenant-local to the target (see
+        # _tenant_allows_shortcut). Anything without a cached descriptor, no
+        # relay_spoke_url, or a cross-tenant/shared/unassigned proxy falls back to
+        # the Phase-1 hub WS proxy.
         sid = _console_ws_session(request.path)
         if sid and spoke.relay_spoke_url:
             cached = (spoke._console_relay_cache or {}).get(sid)
-            if cached and cached.get("relay"):
+            if cached and cached.get("relay") and _tenant_allows_shortcut(spoke, cached["relay"]):
                 relayed = await _proxy_console_relay(request, spoke, sid, cached)
                 # None → the spoke relay leg was unavailable (e.g. the console
                 # role's listener is off): fall through to the hub WS proxy so the
@@ -220,6 +222,20 @@ def _console_ws_session(path: str):
         if path.startswith(pfx):
             return path[len(pfx):].split("/", 1)[0] or None
     return None
+
+
+def _tenant_allows_shortcut(spoke, desc: dict) -> bool:
+    """Tenant gate for the Phase-2 console shortcut. A proxy relays a console
+    locally (hub out of the byte path) ONLY when it is assigned to a specific,
+    non-shared tenant AND the target spoke belongs to that same tenant. A shared
+    or unassigned proxy — and any cross-tenant target — falls through to the hub.
+    All tenant assignment is authored on the hub; the proxy just compares the
+    tenant it was told it owns against the tenant the hub stamped on the
+    descriptor."""
+    my_tenant = getattr(spoke, "tenant_id", "") or ""
+    if not my_tenant or getattr(spoke, "tenant_shared", False):
+        return False
+    return (desc.get("tenant_id") or "") == my_tenant
 
 
 async def _proxy_http(request: web.Request, spoke, target: str) -> web.StreamResponse:

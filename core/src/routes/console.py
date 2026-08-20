@@ -1411,8 +1411,12 @@ def register(app, hub, ctx):
                 # A proxy relay only works when the console role runs its listener
                 # (LM_CONSOLE_RELAY_LISTENER=1); otherwise the proxy falls back to
                 # the hub relay.
+                # ``tenant_id`` is the TARGET console spoke's owning tenant. A
+                # tenant-local edge proxy shortcuts only when this matches its own
+                # assigned (non-shared) tenant; otherwise it relays via the hub.
                 "relay": {"session_id": session_id, "relay_token": relay_token,
-                          "spoke_id": sid, "kind": "serial"}}
+                          "spoke_id": sid, "kind": "serial",
+                          "tenant_id": hub.state.get_spoke_tenant(sid) or ""}}
 
     @app.post("/api/console/{session_id}/takeover")
     async def console_takeover(session_id: str, request: Request):

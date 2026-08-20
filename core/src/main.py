@@ -2234,6 +2234,34 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # space — NOT the update-source config-key space).
             pk = self._primary_key(spoke_id)
             mtype = self.spoke_module_types.get(pk, "")
+
+            # Edge proxy: push its OWN assigned tenant (+ whether that tenant is
+            # shared) so it can gate the Phase-2 console shortcut — a proxy only
+            # relays a console locally when the target spoke's tenant matches its
+            # own non-shared tenant. Runs on every (re)connect (proxy has no
+            # module_key, so this must precede the early-return below) so the
+            # proxy always reflects its current assignment after a restart.
+            if mtype == "proxy":
+                try:
+                    import access as _access
+                    ptenant = self.state.get_spoke_tenant(pk) or ""
+                    cfg_msg = Message(
+                        header=MessageHeader(
+                            message_id=str(uuid.uuid4()),
+                            timestamp=time.time(),
+                            sender_id="hub",
+                            destination_id=spoke_id,
+                        ),
+                        payload=MessagePayload(type="UPDATE_CONFIG", data={
+                            "tenant_id": ptenant,
+                            "tenant_shared": bool(ptenant) and _access.tenant_is_shared(ptenant),
+                        }),
+                    )
+                    await self.send_to_spoke(cfg_msg)
+                    logger.debug(f"Pushed tenant ({ptenant or 'unassigned'}) to proxy {spoke_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to push tenant to proxy {spoke_id}: {e}")
+
             module_key = _PUSH_CONFIG_MODULE_KEY.get(mtype)
             if not module_key:
                 # Legacy prefix-based fallback: module_key = the matching KEY in

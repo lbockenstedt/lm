@@ -1563,7 +1563,8 @@ def register(app, hub, ctx):
                 "ws_url": f"/ws/console-shell/{session_id}",
                 # Phase 2 edge-proxy relay descriptor (shell reuses the VNC relay path).
                 "relay": {"session_id": session_id, "relay_token": relay_token,
-                          "spoke_id": pxmx_spoke, "agent_id": agent_id, "kind": "shell"}}
+                          "spoke_id": pxmx_spoke, "agent_id": agent_id, "kind": "shell",
+                          "tenant_id": hub.state.get_spoke_tenant(pxmx_spoke) or ""}}
 
     @app.post("/api/pxmx/console")
     async def pxmx_create_console(request: Request):
@@ -1687,6 +1688,7 @@ def register(app, hub, ctx):
                 # default WebUI (which relays through the hub).
                 "relay": {"session_id": session_id, "relay_token": relay_token,
                           "spoke_id": pxmx_spoke, "agent_id": agent_id, "kind": "vnc",
+                          "tenant_id": hub.state.get_spoke_tenant(pxmx_spoke) or "",
                           "ticket": ticket}}
 
     @app.get("/api/pxmx/console/viewers")

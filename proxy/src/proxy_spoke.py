@@ -114,6 +114,15 @@ class ProxySpoke(BaseSpoke):
                                 or os.environ.get("LM_PROXY_RELAY_SPOKE_URL") or "")
         self._console_relay_cache = {}  # session_id → relay descriptor
 
+        # Tenant awareness for the Phase-2 console shortcut. The hub pushes this
+        # proxy's OWN assigned tenant (+ whether that tenant is shared) via
+        # UPDATE_CONFIG on every (re)connect. The shortcut is taken ONLY for a
+        # target whose tenant matches this proxy's non-shared tenant; a shared or
+        # unassigned proxy never shortcuts (all console traffic via the hub).
+        self.tenant_id = (cfg.get("tenant_id")
+                          or os.environ.get("LM_PROXY_TENANT_ID") or "")
+        self.tenant_shared = bool(cfg.get("tenant_shared"))
+
         self._proxy_app = None
         self._runner = None
         self._site = None
@@ -195,6 +204,10 @@ class ProxySpoke(BaseSpoke):
         changed = False
         if "relay_spoke_url" in data and data["relay_spoke_url"] is not None:
             self.relay_spoke_url = data["relay_spoke_url"]  # hot — no re-bind needed
+        if "tenant_id" in data and data["tenant_id"] is not None:
+            self.tenant_id = str(data["tenant_id"] or "")  # hot — gates the shortcut
+        if "tenant_shared" in data and data["tenant_shared"] is not None:
+            self.tenant_shared = bool(data["tenant_shared"])
         for key in ("web_host", "tls_cert", "tls_key", "upstream_url",
                     "upstream_cert", "upstream_key"):
             if key in data and data[key] is not None and getattr(self, key) != data[key]:
@@ -241,6 +254,8 @@ class ProxySpoke(BaseSpoke):
             "upstream_verify": self.upstream_verify,
             "upstream_mtls": bool(self.upstream_cert and self.upstream_key),
             "console_relay": bool(self.relay_spoke_url),
+            "tenant_id": self.tenant_id or None,
+            "tenant_shared": self.tenant_shared,
             "relay_sessions": len(self._console_relay_cache),
         }
 
