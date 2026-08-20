@@ -1672,6 +1672,24 @@ def create_app(hub):
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
         resp.headers.setdefault("X-Frame-Options", "DENY")
         resp.headers.setdefault("Referrer-Policy", "no-referrer")
+        # Cross-user identity bleed guard: dynamic responses (``/auth/*``,
+        # ``/api/*`` — every per-cookie identity/tenant payload, including the
+        # recurring ``/auth/me`` poll) MUST NOT be stored by any shared or
+        # intermediary cache (a corporate forward proxy, an edge-proxy front
+        # door, a CDN). Without this, one user's cached ``/auth/me`` is replayed
+        # to the next user behind the same cache — they'd see each other's WebUI
+        # and log each other out. Static assets in ``serve_ui`` set their own
+        # ``Cache-Control`` (long-lived immutable for versioned assets), so they
+        # already carry the header and are left untouched here — only responses
+        # that arrive with NO cache directive (i.e. the dynamic API/auth ones)
+        # get ``no-store`` + ``Vary: Cookie``.
+        if "cache-control" not in (k.lower() for k in resp.headers.keys()):
+            resp.headers["Cache-Control"] = "no-store"
+            _existing_vary = resp.headers.get("Vary")
+            _parts = [p.strip() for p in (_existing_vary or "").split(",") if p.strip()]
+            if not any(p.lower() == "cookie" for p in _parts):
+                _parts.append("Cookie")
+            resp.headers["Vary"] = ", ".join(_parts)
         return resp
 
 

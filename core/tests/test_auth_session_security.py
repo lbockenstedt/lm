@@ -289,6 +289,49 @@ def test_cookie_secure_env_override(monkeypatch, tmp_path):
     assert "Secure" in r.headers.get("set-cookie", "")
 
 
+# ── 3b. Shared-cache identity-bleed guard ────────────────────────────────────
+# Dynamic (auth/api) responses must be no-store + Vary: Cookie so no shared or
+# intermediary cache replays one user's per-cookie payload (esp. /auth/me) to
+# another user — the "two users see each other's WebUI / kick each other out"
+# bug. Static assets keep their own long-lived Cache-Control.
+
+def test_auth_me_is_no_store_and_varies_on_cookie(tmp_path):
+    users = {"admin": _admin_user()}
+    c, hub = _build(users, tmp_path)
+    tok = _mint_session(hub, "admin")
+    r = c.get("/auth/me", cookies={"lm_session": tok})
+    assert r.status_code == 200
+    assert "no-store" in (r.headers.get("cache-control", "").lower())
+    assert "cookie" in (r.headers.get("vary", "").lower())
+
+
+def test_auth_me_unauth_is_no_store(tmp_path):
+    # Even the 401 (first-run/unauthenticated) identity response must not be
+    # cached and replayed to a different user by a shared cache.
+    c, hub = _build({}, tmp_path)
+    r = c.get("/auth/me")
+    assert r.status_code == 401
+    assert "no-store" in (r.headers.get("cache-control", "").lower())
+
+
+def test_status_endpoint_is_no_store(tmp_path):
+    c, hub = _build({}, tmp_path)
+    r = c.get("/status")
+    assert "no-store" in (r.headers.get("cache-control", "").lower())
+
+
+def test_static_asset_keeps_its_own_cache_control(tmp_path):
+    # The no-store guard must NOT clobber the long-lived immutable caching that
+    # serve_ui sets on versioned static assets (that caching is a perf win and
+    # is per-URL, not per-user).
+    c, hub = _build({}, tmp_path)
+    r = c.get("/main.js?v=1.00.test")
+    if r.status_code == 200:
+        cc = r.headers.get("cache-control", "").lower()
+        assert "immutable" in cc or "max-age=31536000" in cc
+        assert "no-store" not in cc
+
+
 # ── 4. LM_CORS_ORIGINS (no wildcard+credentials) ─────────────────────────────
 
 def test_cors_default_reflects_no_origin(tmp_path):
