@@ -17984,6 +17984,15 @@ async function _consoleLoadXterm() {
         console.error('xterm load failed', e);
         return null;
     }
+    // Optional fit addon: lets each terminal grow to fill its body so there is
+    // no dead space below/right of the console grid. Non-fatal if the CDN
+    // blocks it — consoles just fall back to the default 80×24 grid.
+    if (!_xtermMod.FitAddon) {
+        try {
+            const fitMod = await import('https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/+esm');
+            _xtermMod.FitAddon = fitMod.FitAddon;
+        } catch (e) { console.warn('xterm fit addon load failed (non-fatal)', e); }
+    }
     return _xtermMod;
 }
 
@@ -18078,6 +18087,13 @@ function serialEnsureConsoleDock() {
             </div>
         </div>`;
     document.body.appendChild(modal);
+    // Refit visible terminals when the window resizes or fullscreen toggles so
+    // the console grid always fills its body (registered once).
+    if (!window._serialFitHooked) {
+        window.addEventListener('resize', serialFitVisibleConsoles);
+        document.addEventListener('fullscreenchange', serialFitVisibleConsoles);
+        window._serialFitHooked = true;
+    }
     modal.querySelector('#serial-console-fs').onclick = () => {
         const c = serialActiveConsole();
         const screen = c && c.bodyEl;
@@ -18183,9 +18199,32 @@ function serialReflowBodies() {
         e.bodyEl.style.flex = inGroup ? '1 1 320px' : '';
     });
     try { window.dispatchEvent(new Event('resize')); } catch (err) {}
+    // Refit the now-visible terminals after the browser applies the layout
+    // above (an xterm only measures correctly once its body is visible + sized).
+    try {
+        requestAnimationFrame(() => {
+            window._serialConsoles.forEach((e, k) => {
+                const inGroup = groupActive && group.has(k);
+                if (inGroup || k === activeKey) serialFitConsole(e);
+            });
+        });
+    } catch (err) {}
 }
 
-// The registry entry for the currently visible tab (or null).
+// Resize one console's xterm to fill its (visible) body — removes the dead
+// space below/right of the terminal grid. No-op when the fit addon is
+// unavailable or the body is hidden (fit needs a laid-out, non-zero container).
+function serialFitConsole(entry) {
+    if (!entry || !entry.fitAddon || !entry.bodyEl) return;
+    if (entry.bodyEl.classList.contains('hidden') || !entry.bodyEl.offsetParent) return;
+    try { entry.fitAddon.fit(); } catch (e) {}
+}
+
+// Refit every currently-visible console (window resize / fullscreen change).
+function serialFitVisibleConsoles() {
+    if (!window._serialConsoles) return;
+    window._serialConsoles.forEach(e => serialFitConsole(e));
+}
 function serialActiveConsole() {
     return (window._serialConsoles && window._serialActiveConsole)
         ? window._serialConsoles.get(window._serialActiveConsole) : null;
@@ -18222,9 +18261,15 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     const upd = (text, cls) => { entry.statusText = text; entry.statusCls = cls; serialRenderConsoleList(); serialSyncSerialHeader(); };
     const term = new Terminal({ cursorBlink: true, fontSize: 13, scrollback: 5000,
                                 theme: { background: '#1e1e1e' } });
-    term.open(bodyEl);
-    term.focus();
     entry.term = term;
+    // Grow the terminal grid to fill its body (no dead space below/right).
+    try {
+        const FitAddon = (typeof _xtermMod !== 'undefined' && _xtermMod) ? _xtermMod.FitAddon : null;
+        if (FitAddon) { entry.fitAddon = new FitAddon(); term.loadAddon(entry.fitAddon); }
+    } catch (e) {}
+    term.open(bodyEl);
+    serialFitConsole(entry);
+    term.focus();
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws/console-serial/${session.session_id}?token=${encodeURIComponent(session.ws_token)}`);
     ws.binaryType = 'arraybuffer';
@@ -18471,22 +18516,32 @@ function serialSetDockCollapsed(collapsed) {
     }
 }
 
-// Paint (or remove) the minimized-dock footer pill. Shown only while the dock
-// is collapsed AND at least one console is open; it surfaces the live count +
+// Paint (or remove) the minimized-dock pill. Shown only while the dock is
+// collapsed AND at least one console is open; it surfaces the live count +
 // active console + an aggregate status dot, restores the dock on click, and
-// carries its own close-all affordance. Kept in its own fixed element (not
-// #footer-actions, which updateContextActions() rebuilds on every view change).
+// carries its own close-all affordance. Rendered inline in the footer slot
+// (#footer-console-slot, between "Enterprise Edition" and the Hub Status
+// icon); if that slot is missing (e.g. a stale cached index.html) it falls
+// back to a floating fixed pill so the feature still works.
 function serialRenderDockPill() {
-    let pill = document.getElementById('serial-console-dock-pill');
+    const slot = document.getElementById('footer-console-slot');
     const reg = window._serialConsoles;
     const count = reg ? reg.size : 0;
+    let pill = document.getElementById('serial-console-dock-pill');
     if (!window._serialDockCollapsed || count === 0) { if (pill) pill.remove(); return; }
+    const inFooterCls = 'flex items-center gap-2 px-2 py-0.5 rounded-full border border-slate-500 ' +
+                        'text-[11px] text-white/90 hover:border-white transition-all';
+    const floatCls = 'fixed bottom-2 right-4 z-50 flex items-center gap-2 px-3 py-1.5 rounded-full ' +
+                     'bg-[#181818] border border-slate-600 shadow-2xl text-xs text-slate-200';
     if (!pill) {
         pill = document.createElement('div');
         pill.id = 'serial-console-dock-pill';
-        pill.className = 'fixed bottom-2 right-4 z-50 flex items-center gap-2 px-3 py-1.5 rounded-full ' +
-                         'bg-[#181818] border border-slate-600 shadow-2xl text-xs text-slate-200';
-        document.body.appendChild(pill);
+    }
+    // (Re)home the pill into the footer slot when present, else float it.
+    if (slot) {
+        if (pill.parentElement !== slot) { pill.className = inFooterCls; slot.appendChild(pill); }
+    } else if (pill.parentElement !== document.body) {
+        pill.className = floatCls; document.body.appendChild(pill);
     }
     let anyGreen = false, anyRed = false;
     reg.forEach(e => { if (e.statusCls === 'text-green-400') anyGreen = true; else if (e.statusCls === 'text-red-400') anyRed = true; });
