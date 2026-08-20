@@ -2,7 +2,90 @@
 from api import (
     HTTPException, Request, logger,
 )
-from access import valid_display_name, valid_identifier
+from access import valid_display_name, valid_identifier, can_bind_spoke
+
+
+def _agent_role_preflight(hub, spoke_id):
+    """Shared connected + authenticated preflight for the role-management routes
+    (admin ``/api/agent/*`` and tenant ``/tenant/agent/*``). Raises 503 with an
+    actionable hint when the agent is offline or a legacy/incompatible node that
+    connects but never adopts a session key (so LOAD_ROLE would hang to the 120s
+    timeout)."""
+    if hub._primary_key(spoke_id) not in hub.active_connections:
+        raise HTTPException(status_code=503, detail=f"Agent {spoke_id} not connected")
+    _ok, reason = hub.spoke_can_accept_commands(spoke_id)
+    if reason == hub._CMD_UNAUTHENTICATED:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Agent {spoke_id} is connected but not authenticated — it has "
+                f"not adopted a session key, so it cannot load roles. This is a "
+                f"legacy/incompatible agent: reinstall it via install_menu.sh "
+                f"(agent/install_agent.sh), approve the base generic node, then retry."
+            ),
+        )
+
+
+async def _load_roles_impl(hub, spoke_id, data):
+    """Core LOAD_ROLE dispatch shared by the admin + tenant role routes. Accepts
+    either a batch (``{"roles": [...]}`` loaded sequentially) or a single
+    ``{"role": ..., "config": ...}``. Returns the agent's payload/results. The
+    caller MUST run :func:`_agent_role_preflight` first."""
+    roles = data.get("roles")
+    if isinstance(roles, list) and roles:
+        results = []
+        for r in roles:
+            rname = (r.get("role") if isinstance(r, dict) else r)
+            rcfg = (r.get("config", {}) if isinstance(r, dict) else {})
+            if not rname:
+                results.append({"role": None, "status": "ERROR",
+                                "message": "role is required"})
+                continue
+            if rname == "ldap-server":
+                rcfg = _enrich_ldap_server_config(hub, rcfg)
+            try:
+                res = await hub.request_response(spoke_id, "LOAD_ROLE",
+                                                 {"role": rname, "config": rcfg},
+                                                 timeout=120.0)
+                pl = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
+                if isinstance(pl, dict) and pl.get("status") == "SUCCESS" \
+                        and pl.get("morph") is True and pl.get("module_type"):
+                    hub.spoke_module_types[hub._primary_key(spoke_id)] = pl["module_type"]
+                    logger.info("Agent %s morphed to module_type %s",
+                                spoke_id, pl["module_type"])
+                results.append({"role": rname,
+                                **(pl if isinstance(pl, dict) else {"result": pl})})
+            except Exception as e:  # noqa: BLE001 — one role's failure ≠ batch fail
+                logger.exception("load_agent_role[%s] failed", rname)
+                results.append({"role": rname, "status": "ERROR", "message": str(e)})
+        return {"status": "SUCCESS", "results": results}
+    role   = data.get("role")
+    config = data.get("config", {})
+    if not role:
+        raise HTTPException(status_code=400, detail="role is required")
+    if role == "ldap-server":
+        config = _enrich_ldap_server_config(hub, config)
+    # LOAD_ROLE on the multi-role agent shallow-clones the role's sibling repo on
+    # first load — a network git clone that routinely exceeds the 5s default.
+    result = await hub.request_response(spoke_id, "LOAD_ROLE",
+                                        {"role": role, "config": config},
+                                        timeout=120.0)
+    payload = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+    # Multi-role agent: the base stays module_type "agent" and HOSTS the role as
+    # a new sub-spoke; only a legacy single-role morph (explicit ``morph: true``)
+    # rewrites the base's module_type.
+    if isinstance(payload, dict) and payload.get("status") == "SUCCESS":
+        if payload.get("morph") is True:
+            new_mtype = payload.get("module_type")
+            if new_mtype:
+                hub.spoke_module_types[hub._primary_key(spoke_id)] = new_mtype
+                logger.info("Agent %s morphed to module_type %s", spoke_id, new_mtype)
+        else:
+            sub_id = payload.get("sub_spoke_id")
+            if sub_id:
+                logger.info("Agent %s hosting role sub-spoke %s (module_type=%s)",
+                            spoke_id, sub_id, payload.get("module_type"))
+    return payload
 
 
 def _enrich_ldap_server_config(hub, cfg):
@@ -159,96 +242,82 @@ def register(app, hub, ctx):
         its module_type so hub APIs can route to it.
         """
         hub = app.state.hub
-        if hub._primary_key(spoke_id) not in hub.active_connections:
-            raise HTTPException(status_code=503, detail=f"Agent {spoke_id} not connected")
-        # Fail fast on a connected-but-unauthenticated agent (see
-        # LabManagerHub.spoke_can_accept_commands). A protocol-incompatible
-        # legacy GenericLeafAgent connects + heartbeats but never adopts a
-        # session key, so LOAD_ROLE would otherwise hang to the 120s
-        # request_response timeout with a generic "Timed out waiting for spoke
-        # response". Surface an actionable reinstall hint instead.
-        _ok, reason = hub.spoke_can_accept_commands(spoke_id)
-        if reason == hub._CMD_UNAUTHENTICATED:
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    f"Agent {spoke_id} is connected but not authenticated — it has "
-                    f"not adopted a session key, so it cannot load roles. This is a "
-                    f"legacy/incompatible agent: reinstall it via install_menu.sh "
-                    f"(agent/install_agent.sh), approve the base generic node, then retry."
-                ),
-            )
+        _agent_role_preflight(hub, spoke_id)
         try:
-            data   = await request.json()
-            # Batch path: a ``roles`` list loads several roles on the SAME agent in
-            # one call. Loaded SEQUENTIALLY — LOAD_ROLE shallow-clones sibling repos
-            # + installs packages, which must not run concurrently on one host. The
-            # spoke-level auth/connected checks above ran once for the whole batch.
-            roles = data.get("roles")
-            if isinstance(roles, list) and roles:
-                results = []
-                for r in roles:
-                    rname = (r.get("role") if isinstance(r, dict) else r)
-                    rcfg = (r.get("config", {}) if isinstance(r, dict) else {})
-                    if not rname:
-                        results.append({"role": None, "status": "ERROR",
-                                        "message": "role is required"})
-                        continue
-                    if rname == "ldap-server":
-                        rcfg = _enrich_ldap_server_config(hub, rcfg)
-                    try:
-                        res = await hub.request_response(spoke_id, "LOAD_ROLE",
-                                                         {"role": rname, "config": rcfg},
-                                                         timeout=120.0)
-                        pl = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
-                        if isinstance(pl, dict) and pl.get("status") == "SUCCESS" \
-                                and pl.get("morph") is True and pl.get("module_type"):
-                            hub.spoke_module_types[hub._primary_key(spoke_id)] = pl["module_type"]
-                            logger.info("Agent %s morphed to module_type %s",
-                                        spoke_id, pl["module_type"])
-                        results.append({"role": rname,
-                                        **(pl if isinstance(pl, dict) else {"result": pl})})
-                    except Exception as e:  # noqa: BLE001 — one role's failure ≠ batch fail
-                        logger.exception("load_agent_role[%s] failed", rname)
-                        results.append({"role": rname, "status": "ERROR", "message": str(e)})
-                return {"status": "SUCCESS", "results": results}
-            role   = data.get("role")
-            config = data.get("config", {})
-            if not role:
-                raise HTTPException(status_code=400, detail="role is required")
-            if role == "ldap-server":
-                config = _enrich_ldap_server_config(hub, config)
-            # LOAD_ROLE on the multi-role agent shallow-clones the role's sibling
-            # repo (e.g. github.com/lbockenstedt/opnsense.git) on first load — a
-            # network git clone that routinely exceeds the 5s request_response
-            # default and surfaced as "Timed out waiting for spoke response".
-            # 120s mirrors the long-op timeout used elsewhere (api.py:2536).
-            result = await hub.request_response(spoke_id, "LOAD_ROLE",
-                                                {"role": role, "config": config},
-                                                timeout=120.0)
-            payload = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
-            # Multi-role agent: the base stays module_type "agent" and HOSTS the
-            # role as a new sub-spoke ({base}-{role}) that registers its own
-            # module_type on connect — so do NOT overwrite the base's type here.
-            # Legacy single-role morph (base BECAME the role) is gated on an
-            # explicit `morph: true` in the response, which the multi-role agent
-            # never sends; only then do we update spoke_module_types[base].
-            if isinstance(payload, dict) and payload.get("status") == "SUCCESS":
-                if payload.get("morph") is True:
-                    new_mtype = payload.get("module_type")
-                    if new_mtype:
-                        hub.spoke_module_types[hub._primary_key(spoke_id)] = new_mtype
-                        logger.info("Agent %s morphed to module_type %s", spoke_id, new_mtype)
-                else:
-                    sub_id = payload.get("sub_spoke_id")
-                    if sub_id:
-                        logger.info("Agent %s hosting role sub-spoke %s (module_type=%s)",
-                                    spoke_id, sub_id, payload.get("module_type"))
-            return payload
+            data = await request.json()
+            return await _load_roles_impl(hub, spoke_id, data)
         except HTTPException:
             raise
         except Exception as e:
             logger.exception("load_agent_role failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ─── Tenant-scoped role management (a tenant-admin's OWN spokes) ───────────
+    # A tenant-admin can't reach /api/agent/* (admin-only: arbitrary remote code
+    # on agents). These three routes expose ONLY role load/unload/list, gated by
+    # can_bind_spoke (Global Admin → any spoke; tenant-admin → strictly a spoke
+    # bound to one of their OWN tenants, never shared/other-tenant), so a tenant
+    # admin can morph roles on the nodes they own without the arbitrary-command
+    # surface. The /tenant/ prefix is already tenant-admin-gated by the api.py
+    # middleware; this adds the per-spoke ownership check.
+    def _tenant_role_guard(request, spoke_id):
+        sess = ctx._session_user(request)
+        if not can_bind_spoke(hub, sess, hub._primary_key(spoke_id)):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only manage roles on a spoke assigned to your tenant.")
+
+    @app.post("/tenant/agent/{spoke_id}/load-role")
+    async def tenant_load_agent_role(spoke_id: str, request: Request):
+        """Load one or more roles on a spoke the caller owns (tenant-scoped twin
+        of ``/api/agent/{spoke_id}/load-role``)."""
+        hub = app.state.hub
+        _tenant_role_guard(request, spoke_id)
+        _agent_role_preflight(hub, spoke_id)
+        try:
+            data = await request.json()
+            return await _load_roles_impl(hub, spoke_id, data)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("tenant_load_agent_role failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.post("/tenant/agent/{spoke_id}/unload-role")
+    async def tenant_unload_agent_role(spoke_id: str, request: Request):
+        """Unload a single role from a spoke the caller owns. Only UNLOAD_ROLE is
+        relayed (no arbitrary-command surface)."""
+        hub = app.state.hub
+        _tenant_role_guard(request, spoke_id)
+        _agent_role_preflight(hub, spoke_id)
+        try:
+            data = await request.json()
+            role = data.get("role")
+            if not role:
+                raise HTTPException(status_code=400, detail="role is required")
+            result = await hub.request_response(spoke_id, "UNLOAD_ROLE",
+                                                {"role": role}, timeout=60.0)
+            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("tenant_unload_agent_role failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/tenant/agent/{spoke_id}/roles")
+    async def tenant_list_agent_roles(spoke_id: str, request: Request):
+        """List the roles currently loaded on a spoke the caller owns (relays
+        GET_AVAILABLE_ROLES). Returns the agent's payload ({available, active})."""
+        hub = app.state.hub
+        _tenant_role_guard(request, spoke_id)
+        _agent_role_preflight(hub, spoke_id)
+        try:
+            result = await hub.request_response(spoke_id, "GET_AVAILABLE_ROLES", {})
+            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("tenant_list_agent_roles failed")
             raise HTTPException(status_code=500, detail=str(e))
 
     # ─── DNS API ──────────────────────────────────────────────────────────────

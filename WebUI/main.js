@@ -502,6 +502,7 @@ const AGENT_ROLES = {
     'console':    { name: 'Console Server', desc: 'Serial console access to attached hardware (USB adapters + on-board UART). Auto-detects baud, auto-identifies devices, and relays an xterm.js terminal through the hub.', deploy: false },
     'truenas':    { name: 'Storage (TrueNAS)', desc: 'Polls and manages TrueNAS appliances over the official WebSocket JSON-RPC client — pools, datasets, shares (SMB/NFS), disks, alerts, services, capacity; gated management actions (create/delete datasets, create shares, take snapshots, run scrubs). Reports health + capacity and syncs into NetBox.', deploy: false },
     'statuspage': { name: 'Simulation Status Page', desc: 'Public, read-only status page for one tenant — cloud-provider style (overall banner, per-component status, 90-day uptime history) plus a Clients view whose demo dropdown lets visitors trigger a live 2h simulation. Bind it to a tenant; the hub pushes that tenant\'s redacted dashboard down. Serves its own HTTPS page (cert via the le role).', deploy: false },
+    'proxy':      { name: 'Edge Proxy (per-tenant front door)', desc: 'Serves a local :443 WebUI front door with an LE server cert (no client-cert prompt) and reverse-proxies every request to the hub over mTLS. A dumb forwarding edge — all logic stays on the hub. Also load the "Certificate Management (Let\'s Encrypt)" role on this host so it can obtain/serve its HTTPS cert (proxy is a cert-distribution target).', deploy: false },
     'ab':   { name: 'AppBuilder', desc: 'Autonomous GitHub issue bot. Installs as a systemd service on this host and connects to the Hub as its own agent.', deploy: true },
 };
 
@@ -14605,10 +14606,19 @@ async function loadMyDeviceSpokes() {
             const appr = s.approved
                 ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700">approved</span>'
                 : '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700">pending</span>';
+            // A bare agent (module_type "agent") can host roles — offer Load/Unload
+            // via the same modal the Global-Admin Spokes & Agents view uses. The
+            // backend (/tenant/agent/*) re-checks that this spoke is bound to the
+            // caller's tenant, so a tenant-admin can only manage their own nodes.
+            const canRoles = s.connected && s.approved && (s.module_type === 'agent');
+            const eSid = String(s.spoke_id).replace(/'/g, "\\'");
+            const rolesBtn = canRoles
+                ? `<button onclick="showLoadRoleModal('${eSid}')" class="px-2.5 py-1 rounded-md text-[11px] font-bold bg-white hover:bg-slate-50 text-[#01A982] border border-[#01A982] transition-colors" title="Load or unload roles (DNS, DHCP, Edge Proxy, …) on this agent">Roles</button>`
+                : '';
             return `<div class="flex items-center justify-between border border-slate-100 rounded-md px-3 py-2">
                 <div><span class="text-sm font-medium text-slate-700">${escapeHtml(_nodeLabel(s.display_name || s.spoke_id, s.tenant_id || tenant))}</span>
                 <span class="ml-2 text-[11px] text-slate-400 font-mono">${escapeHtml(s.module_type || '—')}</span></div>
-                <div class="flex items-center gap-2">${appr}${conn}</div></div>`;
+                <div class="flex items-center gap-2">${rolesBtn}${appr}${conn}</div></div>`;
         }).join('');
     } catch (e) {
         console.error('loadMyDeviceSpokes failed', e);
@@ -15221,12 +15231,16 @@ async function loadApprovedSpokes() {
 async function fetchLoadedRoles(spokeId) {
     // Fetch the roles a generic agent is currently hosting (GET_AVAILABLE_ROLES
     // via the generic command relay). Returns the `active` list (possibly empty).
+    // A tenant-admin (non-Global-Admin) can't reach /api/agent/* — use the
+    // tenant-scoped, ownership-checked /tenant/agent/{id}/roles instead.
     try {
-        const res = await fetch(`/api/agent/${encodeURIComponent(spokeId)}/command`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: 'GET_AVAILABLE_ROLES' }),
-        });
+        const res = (typeof isAdmin === 'function' && isAdmin())
+            ? await fetch(`/api/agent/${encodeURIComponent(spokeId)}/command`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ command: 'GET_AVAILABLE_ROLES' }),
+              })
+            : await fetch(`/tenant/agent/${encodeURIComponent(spokeId)}/roles`);
         if (!res.ok) return [];
         const data = await res.json();
         return Array.isArray(data.active) ? data.active : [];
@@ -15428,7 +15442,10 @@ async function loadRole(spokeId) {
     });
     const results = [];
     try {
-        const res = await fetch(`/api/agent/${encodeURIComponent(spokeId)}/load-role`, {
+        const _admin = (typeof isAdmin === 'function') && isAdmin();
+        const res = await fetch(_admin
+                ? `/api/agent/${encodeURIComponent(spokeId)}/load-role`
+                : `/tenant/agent/${encodeURIComponent(spokeId)}/load-role`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ roles: rolesPayload }),
@@ -15460,9 +15477,10 @@ async function loadRole(spokeId) {
     document.getElementById('load-role-modal')?.remove();
     const anyFailed = results.some(r => r.startsWith('✗'));
     showToast(`Role activation on ${spokeId}:\n${results.join('\n')}`, anyFailed ? 'error' : 'success');
-    // Refresh the Spokes & Agents table so the Active Role column updates
-    // (generic nodes are now managed there, not a separate Generic Nodes tile).
+    // Refresh whichever view is showing this spoke: the Global-Admin Spokes &
+    // Agents table (Active Role column) or a tenant-admin's My Devices list.
     if (currentView === 'setup') loadSpokesAndAgents();
+    if (typeof loadMyDeviceSpokes === 'function' && document.getElementById('my-spokes-list')) loadMyDeviceSpokes();
 }
 
 async function unloadRole(spokeId, role) {
@@ -15472,15 +15490,25 @@ async function unloadRole(spokeId, role) {
     // (not from the per-role Unload action on a Spokes row).
     const modalOpen = !!document.getElementById('load-role-modal');
     try {
-        const res = await fetch(`/api/agent/${encodeURIComponent(spokeId)}/command`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ command: 'UNLOAD_ROLE', data: { role } }),
-        });
+        const _admin = (typeof isAdmin === 'function') && isAdmin();
+        // Global Admin uses the arbitrary-command relay; a tenant-admin uses the
+        // ownership-checked, role-only /tenant/agent/{id}/unload-role.
+        const res = _admin
+            ? await fetch(`/api/agent/${encodeURIComponent(spokeId)}/command`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ command: 'UNLOAD_ROLE', data: { role } }),
+              })
+            : await fetch(`/tenant/agent/${encodeURIComponent(spokeId)}/unload-role`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ role }),
+              });
         const data = await res.json();
         if (res.ok && (data.status === 'SUCCESS' || data.payload?.status === 'SUCCESS')) {
             showToast(`Role "${roleLabel}" unloaded from ${spokeId}`, 'success');
             if (currentView === 'setup') loadSpokesAndAgents();
+            if (typeof loadMyDeviceSpokes === 'function' && document.getElementById('my-spokes-list')) loadMyDeviceSpokes();
             if (modalOpen) showLoadRoleModal(spokeId);
         } else {
             const msg = res.status === 503
