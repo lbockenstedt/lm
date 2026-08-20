@@ -331,6 +331,42 @@ def _bust_spokes_cache():
         logger.debug("diag cache bust skipped (setup_admin unavailable)", exc_info=True)
 
 
+async def hard_delete_spoke(hub, spoke_id: str):
+    """Permanently remove a spoke/generic-agent registration and all of its
+    runtime state — the single source of truth shared by the Global-Admin
+    ``DELETE /setup/spokes/{id}`` route and the tenant-admin
+    ``DELETE /tenant/{tenant}/spokes/{id}`` route (routes/onboarding.py). The
+    caller is responsible for authorization (admin gate or per-tenant ownership
+    check) BEFORE invoking this — this helper does no auth.
+
+    Closes the live WebSocket if connected (its disconnect handler clears
+    active_connections / spoke_module_types / spoke_telemetry), drops the
+    in-memory approval mirror, removes the persisted registration + metadata,
+    wipes the crypto material (current key + history), clears queued mail, and
+    evicts the per-spoke runtime caches. The spoke must fully re-onboard to
+    return. Also busts the spokes cache so the change surfaces immediately.
+    """
+    pk = hub._primary_key(spoke_id)
+    ws = hub.active_connections.get(pk)
+    if ws is not None:
+        try:
+            await ws.close(code=1008, reason="Removed")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not close live WS for {spoke_id} during delete: {e}")
+    hub.approved_modules.pop(pk, None)
+    hub.state.remove_module(spoke_id)
+    hub.key_manager.delete_spoke_key(pk)
+    # Drop queued/pending messages — the key is gone, so they can no longer be
+    # signed and would retry against the keyless spoke (log flood).
+    await hub.mailbox.clear_spoke(pk)
+    # Drop per-spoke runtime caches (simulations_cache, telemetry, rate_limiters,
+    # events, recovery, agent_logs) — the disconnect handler only clears
+    # active_connections/spoke_module_types, so without this the per-spoke dicts
+    # grow unbounded as spokes are deleted/recreated over time.
+    hub._evict_spoke(spoke_id)
+    _bust_spokes_cache()
+
+
 # ── /status cache (stale-while-revalidate) ──────────────────────────────────
 # The AUTHENTICATED /status body is polled by every open WebUI tab every ~10s
 # and recomputes hub.get_system_metrics() + spokes_in_contact() +
@@ -653,29 +689,7 @@ def register(app, hub, ctx):
         """
         hub = app.state.hub
         try:
-            ws = hub.active_connections.get(hub._primary_key(spoke_id))
-            if ws is not None:
-                try:
-                    await ws.close(code=1008, reason="Removed by admin")
-                except Exception as e:
-                    logger.warning(f"Could not close live WS for {spoke_id} during delete: {e}")
-            hub.approved_modules.pop(hub._primary_key(spoke_id), None)
-            hub.state.remove_module(spoke_id)
-            hub.key_manager.delete_spoke_key(hub._primary_key(spoke_id))
-            # Drop queued/pending messages for the deleted spoke — its key is
-            # gone, so they can no longer be signed and would retry against the
-            # keyless spoke (log flood). The spoke must fully re-onboard to
-            # return, at which point new messages get a fresh key.
-            await hub.mailbox.clear_spoke(hub._primary_key(spoke_id))
-            # Drop per-spoke runtime caches (simulations_cache, telemetry,
-            # rate_limiters, events, recovery, agent_logs). The disconnect
-            # handler only clears active_connections/spoke_module_types, so
-            # without this the per-spoke dicts grow unbounded as admins
-            # delete/recreate spokes over time. Safe to evict on permanent
-            # delete (unlike a transient disconnect, which needs telemetry
-            # for the WebUI's DISCONNECTED status + recovery for the watchdog).
-            hub._evict_spoke(spoke_id)
-            _bust_spokes_cache()
+            await hard_delete_spoke(hub, spoke_id)
             return {"status": "ok", "message": f"Spoke '{spoke_id}' removed."}
         except Exception as e:
             logger.exception("delete_spoke failed")

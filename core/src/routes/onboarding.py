@@ -116,3 +116,31 @@ def register(app, hub, ctx):
             })
         out.sort(key=lambda s: (s["module_type"], s["spoke_id"]))
         return {"tenant_id": tenant, "spokes": out}
+
+    @app.delete("/tenant/{tenant}/spokes/{spoke_id}", operation_id="tenant_delete_own_spoke")
+    async def delete_tenant_spoke(request: Request, tenant: str, spoke_id: str):
+        """Permanently remove a spoke/agent bound to ``tenant`` — the tenant-admin
+        counterpart to the Global-Admin ``DELETE /setup/spokes/{id}``. Two gates
+        stack: ``_require_owns_tenant`` (caller must own ``tenant``) AND the
+        spoke's own tenant binding must equal ``tenant`` — a spoke bound to
+        another tenant (or the shared tenant, which is admin-managed) is treated
+        as not-found so existence never leaks across tenants (anti-IDOR, mirrors
+        tenant_devices.py ``_owns``). The actual teardown reuses the shared
+        ``hard_delete_spoke`` helper so admin + tenant deletes stay identical."""
+        _require_owns_tenant(request, tenant)
+        # Ownership by tenant binding — never a client claim. A tenant-admin may
+        # only delete a spoke homed to a tenant they own; the shared tenant is
+        # admin-managed and thus excluded (get_spoke_tenant returns the real
+        # binding, so a shared spoke won't match a tenant-admin's own tenant).
+        sess = _session_user(request)
+        bound = hub.state.get_spoke_tenant(spoke_id) or ""
+        if bound != tenant and not _is_admin(sess):
+            raise HTTPException(status_code=404, detail="Not found")
+        try:
+            from routes.setup import hard_delete_spoke  # lazy: avoid import cycle
+            await hard_delete_spoke(hub, spoke_id)
+            logger.info("tenant spoke delete: '%s' removed by tenant %s", spoke_id, tenant)
+            return {"status": "ok", "message": f"Spoke '{spoke_id}' removed."}
+        except Exception as e:  # noqa: BLE001
+            logger.exception("delete_tenant_spoke failed")
+            raise HTTPException(status_code=500, detail=str(e))

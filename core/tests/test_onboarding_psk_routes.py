@@ -36,11 +36,30 @@ class FakeHub:
         self.state = SimpleNamespace(
             system_state={"known_modules": [], "module_names": {}, "module_metadata": {}},
             get_spoke_tenant=lambda sid: self._tenants.get(sid, ""),
+            remove_module=self._remove_module,
         )
         self._tenants = {}
+        self.evicted = []
+        self.cleared_mail = []
+        self.deleted_keys = []
+        self.key_manager = SimpleNamespace(delete_spoke_key=lambda pk: self.deleted_keys.append(pk))
+        self.mailbox = SimpleNamespace(clear_spoke=self._clear_spoke)
 
     def _primary_key(self, sid):
         return sid
+
+    async def _clear_spoke(self, pk):
+        self.cleared_mail.append(pk)
+
+    def _evict_spoke(self, sid):
+        self.evicted.append(sid)
+
+    def _remove_module(self, sid):
+        self.state.system_state["known_modules"] = [
+            m for m in self.state.system_state["known_modules"] if m != sid]
+        self.state.system_state["module_names"].pop(sid, None)
+        self.state.system_state["module_metadata"].pop(sid, None)
+        self._tenants.pop(sid, None)
 
     def add_spoke(self, sid, tenant, *, module_type="nac", approved=True, connected=True, name=None):
         self.state.system_state["known_modules"].append(sid)
@@ -173,3 +192,54 @@ def test_tenant_admin_cannot_list_another_tenants_spokes():
     c, _ = _build(_tenant_admin(["tenantA"]))
     r = c.get("/tenant/tenantB/spokes")
     assert r.status_code == 403
+
+
+# ── DELETE /tenant/{tenant}/spokes/{spoke_id} ───────────────────────────────
+def test_tenant_admin_deletes_their_own_spoke():
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.add_spoke("s-a1", "tenantA", approved=True, connected=True, name="box-a1")
+    r = c.request("DELETE", "/tenant/tenantA/spokes/s-a1")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+    # Full teardown ran: registration gone, key wiped, mail cleared, evicted.
+    assert "s-a1" not in hub.state.system_state["known_modules"]
+    assert "s-a1" in hub.deleted_keys
+    assert "s-a1" in hub.cleared_mail
+    assert "s-a1" in hub.evicted
+    assert hub.approved_modules.get("s-a1") is None
+
+
+def test_tenant_admin_cannot_delete_another_tenants_spoke():
+    """Anti-IDOR: a spoke bound to another tenant is 404 (existence not leaked)
+    and is NOT torn down."""
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.add_spoke("s-b1", "tenantB", approved=True, connected=True, name="box-b1")
+    r = c.request("DELETE", "/tenant/tenantA/spokes/s-b1")
+    assert r.status_code == 404
+    # Untouched.
+    assert "s-b1" in hub.state.system_state["known_modules"]
+    assert "s-b1" not in hub.deleted_keys
+
+
+def test_tenant_admin_cannot_delete_via_another_tenant_path():
+    """The tenant path must be owned by the caller (middleware+route gate)."""
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.add_spoke("s-b1", "tenantB", approved=True, connected=True)
+    r = c.request("DELETE", "/tenant/tenantB/spokes/s-b1")
+    assert r.status_code == 403
+    assert "s-b1" in hub.state.system_state["known_modules"]
+
+
+def test_delete_unknown_spoke_is_404_for_tenant_admin():
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    r = c.request("DELETE", "/tenant/tenantA/spokes/ghost")
+    assert r.status_code == 404
+
+
+def test_admin_may_delete_any_tenants_spoke():
+    c, hub = _build(_admin())
+    hub.add_spoke("s-b1", "tenantB", approved=True, connected=True, name="box-b1")
+    r = c.request("DELETE", "/tenant/tenantB/spokes/s-b1")
+    assert r.status_code == 200
+    assert "s-b1" not in hub.state.system_state["known_modules"]
+    assert "s-b1" in hub.evicted
