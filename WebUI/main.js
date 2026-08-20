@@ -18197,22 +18197,31 @@ function serialReflowBodies() {
     // one pane shows: the active console (full height).
     const groupActive = !!(window._serialBroadcastOn && group && group.size >= 2);
     const bodies = document.getElementById('serial-console-bodies');
-    if (bodies) bodies.classList.toggle('flex-wrap', groupActive);
-    window._serialConsoles.forEach((e, k) => {
-        if (!e.bodyEl) return;
+    if (!bodies) return;
+    bodies.classList.toggle('flex-wrap', groupActive);
+    // Authoritative over the ACTUAL DOM, not just the registry: walk every pane
+    // currently in the bodies container and show/hide it by its own
+    // data-console-key. A registry-only loop can leave a stray or duplicate
+    // pane (one whose entry was replaced/removed) visible beside the active
+    // one — which is exactly how a second console appeared in both slots. Here
+    // any pane whose key isn't the active tab (or a broadcast-group member) is
+    // forced hidden, so at most one console shows when broadcast is off.
+    Array.from(bodies.children).forEach(el => {
+        const k = el.getAttribute('data-console-key');
         const inGroup = groupActive && group.has(k);
         const visible = inGroup || k === activeKey;
-        e.bodyEl.classList.toggle('hidden', !visible);
-        e.bodyEl.classList.toggle('flex-1', visible && !inGroup);
-        e.bodyEl.style.flex = inGroup ? '1 1 320px' : '';
+        el.classList.toggle('hidden', !visible);
+        el.classList.toggle('flex-1', visible && !inGroup);
+        el.style.flex = inGroup ? '1 1 320px' : '';
     });
     try { window.dispatchEvent(new Event('resize')); } catch (err) {}
     // Refit the now-visible terminals after the browser applies the layout
     // above (an xterm only measures correctly once its body is visible + sized).
     try {
         requestAnimationFrame(() => {
+            if (!window._serialConsoles) return;
             window._serialConsoles.forEach((e, k) => {
-                const inGroup = groupActive && group.has(k);
+                const inGroup = groupActive && group && group.has(k);
                 if (inGroup || k === activeKey) serialFitConsole(e);
             });
         });
@@ -18251,6 +18260,12 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     // the operator had minimized it to the footer.
     serialSetDockCollapsed(false);
     const bodies = modal.querySelector('#serial-console-bodies');
+    // Never leave two panes for the same console: drop any pre-existing pane
+    // for this key (a stray from a prior open/close) before adding the fresh
+    // one, so the reflow can't show a duplicate beside the active tab.
+    bodies.querySelectorAll('[data-console-key]').forEach(n => {
+        if (n.getAttribute('data-console-key') === key) n.remove();
+    });
     const bodyEl = document.createElement('div');
     bodyEl.className = 'hidden relative flex-1 min-w-0 min-h-0 p-1 overflow-hidden bg-[#1e1e1e] border-r border-slate-800';
     bodyEl.setAttribute('data-console-key', key);
