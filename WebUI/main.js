@@ -14655,8 +14655,18 @@ async function loadMyDevicePsks() {
         const r = await apiJson(`/tenant/${encodeURIComponent(tenant)}/onboarding-psk`);
         const keys = (r && r.psks) || [];
         if (!keys.length) { el.innerHTML = '<p class="text-xs text-slate-400 italic">No active onboarding keys.</p>'; return; }
+        // Prefer the configured Hub URL so the install command points spokes at
+        // the HUB, not the proxy that may be serving this WebUI (location.host).
+        let hubUrl = '';
+        try {
+            const cr = await setupFetch('/setup/config');
+            if (cr.ok) {
+                const cfg = await cr.json();
+                hubUrl = (((cfg.global_config || {}).hub || {}).url || '').trim();
+            }
+        } catch (e) { console.error('loadMyDevicePsks hub-url fetch failed', e); }
         el.innerHTML = keys.map((k, i) => {
-            const cmd = _myDevInstallCmd(k, tenant);
+            const cmd = _myDevInstallCmd(k, tenant, hubUrl);
             const uninstall = 'curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/uninstall.sh \\\n  | sudo bash -s -- --yes';
             return `<div class="border border-slate-100 rounded-md px-3 py-2">
                 <div class="flex items-center justify-between gap-3">
@@ -14681,10 +14691,26 @@ async function loadMyDevicePsks() {
 // Build the one-line installer for an onboarding key, with the hub address and
 // PSK/tenant pre-filled so it runs as-is. The spoke comes up as a bare agent and
 // loads roles later from My Devices; roles can be pre-assigned by appending
-// --roles (see the note beside the command). The hub is the very host serving
-// this WebUI (location.host) — matching install_agent.sh's `--hub wss://HOST[:port]`.
-function _myDevInstallCmd(psk, tenant) {
-    const hub = (typeof location !== 'undefined' && location.host) ? `wss://${location.host}` : 'auto';
+// --roles (see the note beside the command).
+//
+// The hub address prefers the configured Hub URL (global_config.hub.url, set in
+// Setup → Spokes & Agents) so spokes dial the HUB directly. Only when no Hub URL
+// is configured do we fall back to the host serving this WebUI (location.host) —
+// which, behind an edge proxy, is the PROXY, not the hub, so spokes would wrongly
+// dial the proxy. Matches install_agent.sh's `--hub wss://HOST[:port]`.
+function _myDevHubArg(configuredHubUrl) {
+    let u = (configuredHubUrl || '').trim();
+    if (u) {
+        // Normalize to wss://host[:port] — accept a bare host, a scheme-prefixed
+        // URL, or one carrying a /ws/... path, and keep only the authority.
+        u = u.replace(/^wss?:\/\//i, '').replace(/\/.*$/, '');
+        return `wss://${u}`;
+    }
+    return (typeof location !== 'undefined' && location.host) ? `wss://${location.host}` : 'auto';
+}
+
+function _myDevInstallCmd(psk, tenant, configuredHubUrl) {
+    const hub = _myDevHubArg(configuredHubUrl);
     return `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \\\n`
         + `  | sudo bash -s -- --hub ${hub} --onboarding-psk ${psk} --tenant-hint ${tenant}`;
 }
