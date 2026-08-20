@@ -17,6 +17,7 @@ import logging
 
 from aiohttp import (ClientSession, ClientTimeout, DummyCookieJar, TCPConnector,
                      WSMsgType, client_exceptions, web)
+from multidict import CIMultiDict
 
 logger = logging.getLogger("ProxySpoke")
 
@@ -272,6 +273,25 @@ def _tenant_allows_shortcut(spoke, desc: dict) -> bool:
     return (desc.get("tenant_id") or "") == my_tenant
 
 
+def _resp_headers(upstream_resp, *, drop_content_length: bool = False) -> CIMultiDict:
+    """Copy upstream response headers into a CIMultiDict, PRESERVING duplicate
+    headers. This is critical for Set-Cookie: the hub legitimately emits several
+    at once — e.g. the OIDC callback sets ``lm_session`` AND deletes
+    ``lm_oidc_state`` in one 302 — and building a plain ``dict`` collapses them to
+    a single entry, silently dropping the session cookie and breaking SSO. Now
+    that the proxy holds no cookie state of its own (DummyCookieJar), the browser
+    MUST receive every Set-Cookie verbatim. Hop-by-hop headers are stripped."""
+    out: CIMultiDict = CIMultiDict()
+    for k, v in upstream_resp.headers.items():
+        lk = k.lower()
+        if lk in _HOP:
+            continue
+        if drop_content_length and lk == "content-length":
+            continue
+        out.add(k, v)
+    return out
+
+
 async def _proxy_http(request: web.Request, spoke, target: str) -> web.StreamResponse:
     client_ip = request.remote or ""
     headers = _fwd_headers(request, client_ip)
@@ -298,11 +318,9 @@ async def _proxy_http(request: web.Request, spoke, target: str) -> web.StreamRes
                     pass
                 return web.Response(
                     status=upstream_resp.status, body=body,
-                    headers={k: v for k, v in upstream_resp.headers.items()
-                             if k.lower() not in _HOP and k.lower() != "content-length"})
+                    headers=_resp_headers(upstream_resp, drop_content_length=True))
             resp = web.StreamResponse(status=upstream_resp.status,
-                                      headers={k: v for k, v in upstream_resp.headers.items()
-                                               if k.lower() not in _HOP})
+                                      headers=_resp_headers(upstream_resp))
             await resp.prepare(request)
             async for chunk in upstream_resp.content.iter_chunked(_CHUNK):
                 await resp.write(chunk)

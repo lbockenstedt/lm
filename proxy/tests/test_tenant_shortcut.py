@@ -53,3 +53,49 @@ def test_missing_attrs_fail_closed():
     # A spoke lacking the tenant attributes (older config) must not shortcut.
     assert proxy_app._tenant_allows_shortcut(
         types.SimpleNamespace(), {"tenant_id": "lrb"}) is False
+
+
+# ── _resp_headers: preserve duplicate Set-Cookie (SSO fix) ────────────────────
+# The hub emits MULTIPLE Set-Cookie headers in one response (e.g. the OIDC
+# callback sets lm_session AND deletes lm_oidc_state). A plain-dict copy collapses
+# them, dropping the session cookie and breaking SSO through the proxy. Since the
+# proxy holds no cookie state (DummyCookieJar), every Set-Cookie MUST reach the
+# browser verbatim.
+def _upstream_resp(pairs):
+    from multidict import CIMultiDict
+    return types.SimpleNamespace(headers=CIMultiDict(pairs), status=302)
+
+
+def test_resp_headers_preserves_multiple_set_cookie():
+    up = _upstream_resp([
+        ("Set-Cookie", "lm_session=tok; HttpOnly; Path=/"),
+        ("Set-Cookie", 'lm_oidc_state=""; Max-Age=0; Path=/'),
+        ("Location", "/"),
+    ])
+    out = proxy_app._resp_headers(up)
+    cookies = out.getall("Set-Cookie")
+    assert len(cookies) == 2
+    assert any("lm_session=tok" in c for c in cookies)
+    assert any("lm_oidc_state" in c for c in cookies)
+    assert out["Location"] == "/"
+
+
+def test_resp_headers_strips_hop_by_hop():
+    up = _upstream_resp([
+        ("Set-Cookie", "lm_session=tok"),
+        ("Connection", "keep-alive"),
+        ("Transfer-Encoding", "chunked"),
+    ])
+    out = proxy_app._resp_headers(up)
+    assert "Connection" not in out
+    assert "Transfer-Encoding" not in out
+    assert out.getall("Set-Cookie") == ["lm_session=tok"]
+
+
+def test_resp_headers_optionally_drops_content_length():
+    up = _upstream_resp([("Content-Length", "123"), ("Set-Cookie", "a=b")])
+    keep = proxy_app._resp_headers(up)
+    assert keep["Content-Length"] == "123"
+    drop = proxy_app._resp_headers(up, drop_content_length=True)
+    assert "Content-Length" not in drop
+    assert drop.getall("Set-Cookie") == ["a=b"]
