@@ -3402,6 +3402,12 @@ async function setView(viewId) {
         typeof serialSetDockCollapsed === 'function') {
         serialSetDockCollapsed(true);
     }
+    // Same treatment for the VM (noVNC) console dock — also a fixed overlay.
+    if (prevView !== currentView && !window._pxmxDockCollapsed &&
+        document.getElementById('pxmx-vnc-modal') &&
+        typeof pxmxSetDockCollapsed === 'function') {
+        pxmxSetDockCollapsed(true);
+    }
 
     renderTopNav(currentView);
     renderView(currentView);
@@ -19042,6 +19048,7 @@ async function pxmxOpenConsole(uniqueId) {
     if (window._pxmxConsoles && window._pxmxConsoles.has(vm.unique_id)) {
         pxmxEnsureConsoleDock();
         pxmxActivateConsole(vm.unique_id);
+        pxmxSetDockCollapsed(false);
         showToast(`Console for ${vm.name || vm.vmid} is already open`, 'info');
         return;
     }
@@ -19127,6 +19134,7 @@ function pxmxEnsureConsoleDock() {
         </div>
         <div class="flex-1 flex flex-col min-w-0">
             <div class="flex items-center gap-3 px-4 py-2 bg-[#16213e] border-b border-slate-700 text-slate-200 text-sm">
+                <button id="pxmx-vnc-min" title="Minimize to the footer — keeps every session connected so you can browse the rest of the UI" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">▁ Minimize</button>
                 <button id="pxmx-vnc-cad" title="Send Ctrl+Alt+Del to the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Ctrl+Alt+Del</button>
                 <button id="pxmx-vnc-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
                 <button id="pxmx-vnc-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
@@ -19136,6 +19144,7 @@ function pxmxEnsureConsoleDock() {
         </div>`;
     document.body.appendChild(modal);
     modal.querySelector('#pxmx-vnc-takeover').onclick = () => pxmxForceTakeover();
+    modal.querySelector('#pxmx-vnc-min').onclick = () => pxmxSetDockCollapsed(true);
     modal.querySelector('#pxmx-vnc-cad').onclick = () => { const c = pxmxActiveConsole(); if (c && c.rfb) c.rfb.sendCtrlAltDel(); };
     modal.querySelector('#pxmx-vnc-fs').onclick = () => {
         const c = pxmxActiveConsole();
@@ -19180,7 +19189,7 @@ function pxmxAddConsoleTab(vm, RFB, session) {
     window._pxmxConsoles.set(key, entry);
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${proto}//${location.host}/ws/console/${encodeURIComponent(session.session_id)}?token=${encodeURIComponent(session.ws_token)}`;
-    const upd = (text, cls) => { entry.statusText = text; entry.statusCls = cls; pxmxRenderConsoleList(); pxmxSyncConsoleHeader(); };
+    const upd = (text, cls) => { entry.statusText = text; entry.statusCls = cls; pxmxRenderConsoleList(); pxmxSyncConsoleHeader(); if (window._pxmxDockCollapsed) pxmxRenderDockPill(); };
     try {
         // Proxmox's vncwebsocket ticket doubles as the RFB VNC password — the
         // agent mints it and the hub returns it in the /api/pxmx/console
@@ -19205,6 +19214,7 @@ function pxmxAddConsoleTab(vm, RFB, session) {
     }
     pxmxStartViewerPoll(entry);
     pxmxActivateConsole(key);
+    pxmxSetDockCollapsed(false);
 }
 
 // Multiuser presence: poll who else is on this VM's console. Each viewer holds
@@ -19478,6 +19488,66 @@ function pxmxCloseConsole(key) {
     } else {
         pxmxRenderConsoleList();
     }
+    pxmxRenderDockPill();
+}
+
+// Collapse the VM-console dock to a footer pill (or restore it). Non-destructive
+// — every noVNC RFB stays connected while hidden, exactly like pressing
+// Minimize; the footer pill (pxmxRenderDockPill) restores it. Mirrors
+// serialSetDockCollapsed for the serial console dock.
+function pxmxSetDockCollapsed(collapsed) {
+    window._pxmxDockCollapsed = !!collapsed;
+    const modal = document.getElementById('pxmx-vnc-modal');
+    if (modal) modal.classList.toggle('hidden', !!collapsed);
+    pxmxRenderDockPill();
+    if (!collapsed && modal) {
+        const c = pxmxActiveConsole();
+        if (c && c.rfb && c.rfb.focus) { try { c.rfb.focus(); } catch (e) {} }
+        // A body hidden while minimized can't measure itself, so noVNC's
+        // scaleViewport may be stale on restore — nudge a resize to rescale.
+        try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+    }
+}
+
+// Paint (or remove) the minimized VM-console dock pill. Shown only while the
+// dock is collapsed AND at least one console is open; surfaces the live count +
+// active VM + an aggregate status dot, restores the dock on click, and carries
+// its own close-all affordance. Rendered inline in the footer slot
+// (#footer-console-slot, shared with the serial-console pill); if that slot is
+// missing it falls back to a floating fixed pill. Mirrors serialRenderDockPill.
+function pxmxRenderDockPill() {
+    const slot = document.getElementById('footer-console-slot');
+    const reg = window._pxmxConsoles;
+    const count = reg ? reg.size : 0;
+    let pill = document.getElementById('pxmx-vnc-dock-pill');
+    if (!window._pxmxDockCollapsed || count === 0) { if (pill) pill.remove(); return; }
+    const inFooterCls = 'flex items-center gap-2 px-2 py-0.5 rounded-full border border-slate-500 ' +
+                        'text-[11px] text-white/90 hover:border-white transition-all';
+    const floatCls = 'fixed bottom-2 right-4 z-50 flex items-center gap-2 px-3 py-1.5 rounded-full ' +
+                     'bg-[#181818] border border-slate-600 shadow-2xl text-xs text-slate-200';
+    if (!pill) {
+        pill = document.createElement('div');
+        pill.id = 'pxmx-vnc-dock-pill';
+    }
+    if (slot) {
+        if (pill.parentElement !== slot) { pill.className = inFooterCls; slot.appendChild(pill); }
+    } else if (pill.parentElement !== document.body) {
+        pill.className = floatCls; document.body.appendChild(pill);
+    }
+    let anyGreen = false, anyRed = false;
+    reg.forEach(e => { if (e.statusCls === 'text-green-400') anyGreen = true; else if (e.statusCls === 'text-red-400') anyRed = true; });
+    const dot = anyGreen ? 'bg-green-400' : (anyRed ? 'bg-red-400' : 'bg-amber-400');
+    const active = pxmxActiveConsole();
+    const activeTxt = active ? escapeHtml((active.vm && (active.vm.name || active.vm.vmid)) || '') : '';
+    pill.innerHTML = `
+        <button data-expand title="Restore the VM console dock" class="flex items-center gap-2 hover:text-white">
+            <span class="w-2 h-2 rounded-full ${dot}"></span>
+            <span>🖥 ${count} VM console${count > 1 ? 's' : ''}${activeTxt ? ' · ' + activeTxt : ''}</span>
+            <span class="text-slate-400 leading-none">▴</span>
+        </button>
+        <button data-closeall title="Close all consoles" class="text-slate-500 hover:text-red-400 text-sm leading-none">&times;</button>`;
+    pill.querySelector('[data-expand]').onclick = () => pxmxSetDockCollapsed(false);
+    pill.querySelector('[data-closeall]').onclick = (ev) => { ev.stopPropagation(); pxmxCloseAllConsoles(); };
 }
 
 // Close every console and remove the dock.
@@ -19489,6 +19559,9 @@ function pxmxCloseAllConsoles() {
     }
     window._pxmxActiveConsole = null;
     window._pxmxConsoleFilter = '';
+    window._pxmxDockCollapsed = false;
+    const pill = document.getElementById('pxmx-vnc-dock-pill');
+    if (pill) pill.remove();
     const modal = document.getElementById('pxmx-vnc-modal');
     if (modal) modal.remove();
 }
