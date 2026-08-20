@@ -389,3 +389,24 @@ DR escrow in the key vault. This feature wraps it in an admin page.
 Sequence **after** the proxy front door (Phase 1) and alongside the mTLS-enforcement work
 (§11): enrollment UI + hub-CA minting/PKCS12 export + revoke → enforcement toggle with the
 enroll-first interlock → break-glass documented. Only then flip enforcement on in production.
+
+## 13. Hub-side per-proxied-tenant disk-backed cache
+
+When a tenant is fronted by an edge proxy, the hub does **not** keep that tenant's module
+cache resident in RAM (`_tenant_cache`). Instead the background refresh loop keeps the
+tenant's **encrypted `api_cache` shard fresh on disk**
+(`<data_dir>/tenants/<tenant>/api_cache/tenant_cache.json`, Fernet), and the hub reads that
+shard **on demand on a cache miss** — with a short-TTL (~3s) micro-cache so a dashboard's
+burst of per-module reads decrypts once and the tenant holds nothing in RAM at rest. RAM
+entries are evicted after every persist. RBAC filtering stays **hub-side** (the shard stores
+raw module data), so disk-backed reads are RBAC-correct.
+
+**Proxy assignment drives the scope** (`_recompute_proxied_tenants`, recomputed on every proxy
+spoke (re)connect/disconnect):
+- **Dedicated (non-shared) proxy** → only *its* assigned tenant is disk-backed.
+- **Shared proxy** (assigned the `shared` tenant — the per-tenant *shared* config flag) →
+  it fronts the **whole fleet**, so **every** tenant is disk-backed (`all_tenants=True`), and
+  the shared proxy is expected to cache them all locally. Nothing stays resident in hub RAM.
+- **No proxy** → unchanged: RAM-first, no disk fallback.
+
+Kill-switch: `LM_PROXIED_TENANT_DISK_CACHE=0` forces legacy RAM behaviour for every tenant.
