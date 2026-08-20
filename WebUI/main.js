@@ -3391,6 +3391,17 @@ async function setView(viewId) {
     const navItem = document.getElementById(`nav-${isClass ? viewId : currentView}`);
     if (navItem) navItem.classList.add('active');
 
+    // Auto-minimize the serial console dock when navigating to another view.
+    // The dock is a fixed overlay that covers the page, so clicking a left-menu
+    // item would otherwise leave the console sitting on top of the destination.
+    // Collapsing keeps every session connected (footer pill restores it), so
+    // this is non-destructive — same as pressing Minimize.
+    if (prevView !== currentView && !window._serialDockCollapsed &&
+        document.getElementById('serial-console-modal') &&
+        typeof serialSetDockCollapsed === 'function') {
+        serialSetDockCollapsed(true);
+    }
+
     renderTopNav(currentView);
     renderView(currentView);
     initView(currentView, currentSubView);
