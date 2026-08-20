@@ -32,6 +32,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import time
 from urllib.parse import quote as _url_quote
 
@@ -83,6 +84,32 @@ class OidcError(Exception):
     hub log gets the full context via ``logger.exception`` at the call site."""
 
 
+def _parse_redirect_uris(env_val, stored_val, primary: str) -> list:
+    """Build the ordered, de-duplicated allowlist of registered redirect URIs.
+
+    Accepts the default ``primary`` (always first/allowed), a stored value (list
+    or comma/whitespace-delimited string), and an env override (delimited
+    string). Used to validate the dynamically chosen per-proxy redirect_uri."""
+    out: list = []
+
+    def _add(v):
+        v = (v or "").strip()
+        if v and v not in out:
+            out.append(v)
+
+    _add(primary)
+    if isinstance(stored_val, (list, tuple)):
+        for v in stored_val:
+            _add(str(v))
+    elif isinstance(stored_val, str):
+        for v in re.split(r"[\s,]+", stored_val):
+            _add(v)
+    if env_val:
+        for v in re.split(r"[\s,]+", env_val):
+            _add(v)
+    return out
+
+
 class OidcConfig:
     """Resolved OIDC configuration (``global_config["oidc"]`` + env overrides).
 
@@ -99,6 +126,16 @@ class OidcConfig:
         self.tenant_id = (env.get("LM_OIDC_TENANT_ID") or stored.get("tenant_id") or "").strip()
         self.client_id = (env.get("LM_OIDC_CLIENT_ID") or stored.get("client_id") or "").strip()
         self.redirect_uri = (env.get("LM_OIDC_REDIRECT_URI") or stored.get("redirect_uri") or "").strip()
+        # Additional registered redirect URIs — one per edge-proxy hostname — that
+        # the login flow may dynamically select based on the ORIGINATING host, so a
+        # user who starts at their local proxy is returned to THAT proxy after
+        # Entra auth instead of the hub's default host (see _pick_redirect_uri in
+        # routes/oidc.py). Every entry MUST also be registered in the Entra app
+        # registration (Entra requires an exact redirect_uri match). Env is
+        # comma/whitespace separated; stored may be a list or a delimited string.
+        # The default redirect_uri is always included as an allowed value.
+        self.redirect_uris = _parse_redirect_uris(
+            env.get("LM_OIDC_REDIRECT_URIS"), stored.get("redirect_uris"), self.redirect_uri)
         # Paths default to the conventional /etc/lm/oidc location so an admin who
         # runs "Generate certificate" (or drops the files there) never has to type
         # a path — auto-detected. An explicit env/stored value still wins.
@@ -163,19 +200,37 @@ def _state_secret(hub) -> bytes:
     return b"lm-oidc-state-weak-fallback"
 
 
-def sign_state_cookie(hub, state: str, nonce: str, code_verifier: str) -> str:
-    """Build the ``lm_oidc_state`` cookie value: ``state:nonce:verifier:ts`` +
-    HMAC. Verified by :func:`verify_state_cookie`."""
+def sign_state_cookie(hub, state: str, nonce: str, code_verifier: str,
+                      redirect_uri: str = "") -> str:
+    """Build the ``lm_oidc_state`` cookie value:
+    ``state:nonce:verifier:ruri_b64:ts`` + HMAC. Verified by
+    :func:`verify_state_cookie`. ``redirect_uri`` (base64url, no padding — so it
+    never contains ``:`` or ``.`` and can't collide with the delimiters) is
+    carried so the callback reuses the SAME redirect_uri for the token
+    exchange."""
     ts = int(time.time())
-    payload = f"{state}:{nonce}:{code_verifier}:{ts}"
+    ruri_b64 = base64.urlsafe_b64encode((redirect_uri or "").encode()).decode().rstrip("=")
+    payload = f"{state}:{nonce}:{code_verifier}:{ruri_b64}:{ts}"
     sig = hmac.new(_state_secret(hub), payload.encode(), hashlib.sha256).hexdigest()
     return f"{payload}.{sig}"
 
 
+def _b64url_decode(s: str) -> str:
+    """Decode a padding-stripped urlsafe-base64 string back to text (best effort)."""
+    if not s:
+        return ""
+    try:
+        pad = "=" * (-len(s) % 4)
+        return base64.urlsafe_b64decode(s + pad).decode()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def verify_state_cookie(hub, cookie: str) -> tuple | None:
-    """Return ``(state, nonce, code_verifier)`` if the cookie's HMAC is valid
-    and fresh (within ``_STATE_TTL_S``); else ``None``. Accepts any key in the
-    hub_secrets history so a rotation mid-round-trip doesn't drop the login."""
+    """Return ``(state, nonce, code_verifier, redirect_uri)`` if the cookie's
+    HMAC is valid and fresh (within ``_STATE_TTL_S``); else ``None``. Accepts any
+    key in the hub_secrets history so a rotation mid-round-trip doesn't drop the
+    login. Tolerates the legacy 4-field payload (no redirect_uri)."""
     if not cookie or "." not in cookie:
         return None
     payload, _, sig = cookie.rpartition(".")
@@ -198,16 +253,23 @@ def verify_state_cookie(hub, cookie: str) -> tuple | None:
     for k in keys:
         if hmac.new(k, payload.encode(), hashlib.sha256).hexdigest() == sig:
             parts = payload.split(":")
-            if len(parts) != 4:
+            # Legacy (4): state:nonce:verifier:ts. Current (5) inserts the
+            # base64url redirect_uri before ts.
+            if len(parts) == 4:
+                state, nonce, verifier, ts_s = parts
+                redirect_uri = ""
+            elif len(parts) == 5:
+                state, nonce, verifier, ruri_b64, ts_s = parts
+                redirect_uri = _b64url_decode(ruri_b64)
+            else:
                 return None
-            state, nonce, verifier, ts_s = parts
             try:
                 ts = int(ts_s)
             except ValueError:
                 return None
             if abs(time.time() - ts) > _STATE_TTL_S:
                 return None
-            return state, nonce, verifier
+            return state, nonce, verifier, redirect_uri
     return None
 
 
@@ -234,14 +296,19 @@ async def discover(cfg: OidcConfig, http: httpx.AsyncClient | None = None) -> di
 
 
 def authorize_url(cfg: OidcConfig, discovery_doc: dict,
-                  state: str, nonce: str, code_challenge: str) -> str:
-    """Build the Entra authorize URL (Authorization Code + PKCE)."""
+                  state: str, nonce: str, code_challenge: str,
+                  redirect_uri: str | None = None) -> str:
+    """Build the Entra authorize URL (Authorization Code + PKCE).
+
+    ``redirect_uri`` overrides ``cfg.redirect_uri`` so the login flow can return
+    the browser to the originating edge proxy; it MUST be a value the token
+    exchange later reuses verbatim (Entra requires the two to match)."""
     endpoint = discovery_doc.get("authorization_endpoint") or \
         f"https://login.microsoftonline.com/{cfg.tenant_id}/oauth2/v2.0/authorize"
     params = {
         "response_type": "code",
         "client_id": cfg.client_id,
-        "redirect_uri": cfg.redirect_uri,
+        "redirect_uri": redirect_uri or cfg.redirect_uri,
         "scope": _DEFAULT_SCOPE,
         "state": state,
         "nonce": nonce,
@@ -371,10 +438,14 @@ def build_client_assertion(cfg: OidcConfig, token_endpoint: str) -> str:
 
 async def exchange_code(cfg: OidcConfig, discovery_doc: dict,
                         code: str, code_verifier: str,
-                        http: httpx.AsyncClient | None = None) -> dict:
+                        http: httpx.AsyncClient | None = None,
+                        redirect_uri: str | None = None) -> dict:
     """Exchange an authorization code for tokens. Authenticates the hub to Entra
     with the cert-signed ``client_assertion`` (no client secret). Returns the
-    token response JSON (``id_token`` + ``access_token`` + ``expires_in``)."""
+    token response JSON (``id_token`` + ``access_token`` + ``expires_in``).
+
+    ``redirect_uri`` MUST equal the value used in the authorize request (Entra
+    rejects the exchange otherwise); defaults to ``cfg.redirect_uri``."""
     token_endpoint = discovery_doc.get("token_endpoint") or \
         f"https://login.microsoftonline.com/{cfg.tenant_id}/oauth2/v2.0/token"
     assertion = build_client_assertion(cfg, token_endpoint)
@@ -382,7 +453,7 @@ async def exchange_code(cfg: OidcConfig, discovery_doc: dict,
         "grant_type": "authorization_code",
         "client_id": cfg.client_id,
         "code": code,
-        "redirect_uri": cfg.redirect_uri,
+        "redirect_uri": redirect_uri or cfg.redirect_uri,
         "code_verifier": code_verifier,
         "scope": _DEFAULT_SCOPE,
         "client_assertion_type":

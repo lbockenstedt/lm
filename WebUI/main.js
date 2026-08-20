@@ -10292,6 +10292,11 @@ function _renderSettingsSsoTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">Directory (tenant) ID</label><input id="oidc-tenant" type="text" placeholder="xxxxxxxx-xxxx-xxxx-…" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Application (client) ID</label><input id="oidc-client" type="text" placeholder="xxxxxxxx-xxxx-xxxx-…" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">Redirect URI</label><input id="oidc-redirect" type="text" placeholder="https://your-hub/auth/oidc/callback" class="${inputCls}"></div>
+                <div class="space-y-1 md:col-span-2">
+                    <label class="${labelCls}">Additional redirect URIs <span class="text-slate-400 normal-case font-normal">(optional — one per edge-proxy hostname, comma/newline separated)</span></label>
+                    <textarea id="oidc-redirect-uris" rows="2" placeholder="https://proxy-a.example.com/auth/oidc/callback&#10;https://proxy-b.example.com/auth/oidc/callback" class="${inputCls} font-mono text-xs"></textarea>
+                    <span class="text-[11px] text-slate-400">Lets SSO return users to the edge proxy they started from. Each URI must ALSO be registered as a redirect URI in the Entra app registration.</span>
+                </div>
                 <div class="space-y-1">
                     <label class="${labelCls}">Allowed groups <span class="text-slate-400 normal-case font-normal">(object IDs, optional — comma/space separated; membership in ANY grants login)</span></label>
                     <div class="flex gap-2">
@@ -10337,6 +10342,8 @@ async function loadOidcConfig() {
         chk('oidc-enabled', cfg.enabled);
         set('oidc-tenant', cfg.tenant_id); set('oidc-client', cfg.client_id);
         set('oidc-redirect', cfg.redirect_uri); set('oidc-group', cfg.allowed_group);
+        const extraUris = document.getElementById('oidc-redirect-uris');
+        if (extraUris) extraUris.value = (cfg.redirect_uris || []).join('\n');
         const pill = document.getElementById('oidc-state-pill');
         if (pill) {
             pill.textContent = cfg.enabled ? 'ENABLED' : 'DISABLED';
@@ -10416,6 +10423,7 @@ async function saveOidcConfig() {
         enabled: !!document.getElementById('oidc-enabled')?.checked,
         tenant_id: v('oidc-tenant'), client_id: v('oidc-client'),
         redirect_uri: v('oidc-redirect'), allowed_group: v('oidc-group'),
+        redirect_uris: v('oidc-redirect-uris'),
         // cert/key paths are auto-managed (hub default dir); not editable here.
     };
     if (config.enabled && (!config.tenant_id || !config.client_id)) {

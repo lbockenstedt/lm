@@ -149,6 +149,15 @@ class _FakeHub:
         return {"payload": {"data": []}}
 
 
+class _FakeRequest:
+    """Minimal stand-in for a Starlette Request exposing the case-insensitive
+    ``.headers`` and ``.url.scheme`` that _pick_redirect_uri reads."""
+    def __init__(self, headers=None, scheme="https"):
+        lower = {k.lower(): v for k, v in (headers or {}).items()}
+        self.headers = type("_H", (), {"get": lambda _s, k, d=None: lower.get(k.lower(), d)})()
+        self.url = type("_U", (), {"scheme": scheme})()
+
+
 def _groups_state():
     """permission_groups: noc → tenant-a, certs → tenant-b + tenant-a."""
     return {
@@ -187,7 +196,63 @@ def _build(system_state):
 def test_state_cookie_round_trips(hub_none=None):
     hub = _FakeHub({"permission_groups": _groups_state()})
     cookie = oidc.sign_state_cookie(hub, "st", "nc", "cv")
-    assert oidc.verify_state_cookie(hub, cookie) == ("st", "nc", "cv")
+    assert oidc.verify_state_cookie(hub, cookie) == ("st", "nc", "cv", "")
+
+
+def test_state_cookie_round_trips_with_redirect_uri():
+    hub = _FakeHub({})
+    ruri = "https://local-proxy.example.com/auth/oidc/callback"
+    cookie = oidc.sign_state_cookie(hub, "st", "nc", "cv", ruri)
+    assert oidc.verify_state_cookie(hub, cookie) == ("st", "nc", "cv", ruri)
+
+
+# ── dynamic per-proxy redirect_uri selection ────────────────────────────────
+
+def test_parse_redirect_uris_dedups_and_includes_primary():
+    got = oidc._parse_redirect_uris(
+        "https://c/cb  https://a/cb",           # env (whitespace-delimited)
+        ["https://b/cb", "https://a/cb"],        # stored (list, dup of env)
+        "https://a/cb")                          # primary/default
+    assert got == ["https://a/cb", "https://b/cb", "https://c/cb"]
+
+
+def test_parse_redirect_uris_accepts_delimited_string():
+    got = oidc._parse_redirect_uris(None, "https://b/cb, https://c/cb", "https://a/cb")
+    assert got == ["https://a/cb", "https://b/cb", "https://c/cb"]
+
+
+def test_authorize_url_uses_override_redirect():
+    cfg = oidc.OidcConfig({"tenant_id": "t", "client_id": "c",
+                           "redirect_uri": "https://hub/cb"})
+    url = oidc.authorize_url(cfg, {}, "st", "nc", "chal",
+                             redirect_uri="https://local-proxy/cb")
+    assert "redirect_uri=https%3A%2F%2Flocal-proxy%2Fcb" in url
+    # default is used when no override is passed
+    url2 = oidc.authorize_url(cfg, {}, "st", "nc", "chal")
+    assert "redirect_uri=https%3A%2F%2Fhub%2Fcb" in url2
+
+
+def test_pick_redirect_uri_honors_forwarded_host_when_allowlisted():
+    import routes.oidc as roidc
+    cfg = oidc.OidcConfig({
+        "tenant_id": "t", "client_id": "c",
+        "redirect_uri": "https://hub.example.com/auth/oidc/callback",
+        "redirect_uris": ["https://proxy.lan/auth/oidc/callback"],
+    })
+    req = _FakeRequest({"x-forwarded-host": "proxy.lan", "x-forwarded-proto": "https"})
+    assert roidc._pick_redirect_uri(cfg, req) == "https://proxy.lan/auth/oidc/callback"
+
+
+def test_pick_redirect_uri_falls_back_when_host_not_allowlisted():
+    import routes.oidc as roidc
+    cfg = oidc.OidcConfig({
+        "tenant_id": "t", "client_id": "c",
+        "redirect_uri": "https://hub.example.com/auth/oidc/callback",
+        "redirect_uris": ["https://proxy.lan/auth/oidc/callback"],
+    })
+    # A spoofed / unregistered host must NOT be honored (open-redirect guard).
+    req = _FakeRequest({"x-forwarded-host": "evil.example.com", "x-forwarded-proto": "https"})
+    assert roidc._pick_redirect_uri(cfg, req) == "https://hub.example.com/auth/oidc/callback"
 
 
 def test_state_cookie_rejects_tamper():
@@ -216,7 +281,7 @@ def test_state_cookie_accepts_rotation_history(monkeypatch):
     old_payload = f"st:nc:cv:{int(time.time())}"
     import hmac, hashlib
     sig = hmac.new(b"old-secret", old_payload.encode(), hashlib.sha256).hexdigest()
-    assert oidc.verify_state_cookie(hub, f"{old_payload}.{sig}") == ("st", "nc", "cv")
+    assert oidc.verify_state_cookie(hub, f"{old_payload}.{sig}") == ("st", "nc", "cv", "")
 
 
 def test_client_assertion_is_valid_rs256_jwt(rsa_key, rsa_cert, tmp_path):
@@ -405,7 +470,7 @@ def test_callback_happy_path_provisions_and_sets_cookie(rsa_key, rsa_cert, jwks,
     state_cookie = r1.cookies.get("lm_oidc_state")
     assert state_cookie
     # Extract the state + nonce we signed so the callback query + id_token match.
-    st, nonce, _cv = oidc.verify_state_cookie(hub, state_cookie)
+    st, nonce, _cv, _ru = oidc.verify_state_cookie(hub, state_cookie)
     holder["nonce"] = _parse_nonce_from_redirect(r1.headers["location"])
     assert holder["nonce"] == nonce
 
@@ -447,7 +512,7 @@ def test_callback_succeeds_without_mfa_claim(rsa_key, rsa_cert, jwks, tmp_path, 
 
     r1 = client.get("/auth/oidc/login", follow_redirects=False)
     state_cookie = r1.cookies.get("lm_oidc_state")
-    st, nonce, _cv = oidc.verify_state_cookie(hub, state_cookie)
+    st, nonce, _cv, _ru = oidc.verify_state_cookie(hub, state_cookie)
     holder["nonce"] = nonce
     r2 = client.get("/auth/oidc/callback", params={"code": "ac", "state": st},
                     cookies={"lm_oidc_state": state_cookie}, follow_redirects=False)
@@ -523,7 +588,7 @@ def test_callback_stale_code_auto_restarts_then_errors(rsa_key, rsa_cert, jwks, 
 
     r1 = client.get("/auth/oidc/login", follow_redirects=False)
     state_cookie = r1.cookies.get("lm_oidc_state")
-    st, _nonce, _cv = oidc.verify_state_cookie(hub, state_cookie)
+    st, _nonce, _cv, _ru = oidc.verify_state_cookie(hub, state_cookie)
     # First replay → auto-restart to /auth/oidc/login + guard cookie.
     r2 = client.get("/auth/oidc/callback", params={"code": "ac", "state": st},
                     cookies={"lm_oidc_state": state_cookie}, follow_redirects=False)

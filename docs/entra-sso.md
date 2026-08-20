@@ -28,6 +28,26 @@ Entra admin center → **Identity → Applications → App registrations → New
 In LM (**Settings → Azure → SSO**): paste the tenant ID, client ID, and set the
 **Redirect URI** to exactly the value above (it must match).
 
+### Returning users to their edge proxy (optional)
+
+If users reach LM through one or more **edge proxies** (e.g. a local proxy on
+their site), Entra SSO would otherwise always land them on the hub's default
+Redirect URI host after sign-in. To return each user to the proxy they started
+from:
+
+1. In the Entra app registration, add **one Web Redirect URI per proxy
+   hostname**, each `https://<proxy-host>/auth/oidc/callback` (Entra requires an
+   exact match; wildcards are not allowed).
+2. In LM (**Settings → Azure → SSO → Additional redirect URIs**), list those same
+   URIs (one per line). Only hostnames whose callback URL appears in this
+   allowlist are honored — a spoofed `X-Forwarded-Host` falls back to the default
+   Redirect URI, so this is safe from open-redirect.
+
+The login flow picks the Redirect URI from the originating host
+(`X-Forwarded-Host`, stamped by the edge proxy) and carries it through the token
+exchange, so the whole flow — and the resulting `lm_session` cookie — stays on
+the proxy's own hostname.
+
 ## 2. Certificate (client credential — not a secret)
 
 LM authenticates to Entra with a **certificate**, not a client secret.

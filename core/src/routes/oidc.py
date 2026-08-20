@@ -142,10 +142,13 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail=f"OIDC discovery failed: {e}")
         state, nonce, code_verifier = _triplet()
         _, code_challenge = _pair(code_verifier)
-        url = authorize_url(cfg, discovery, state, nonce, code_challenge)
+        redirect_uri = _pick_redirect_uri(cfg, request)
+        url = authorize_url(cfg, discovery, state, nonce, code_challenge,
+                            redirect_uri=redirect_uri)
         resp = RedirectResponse(url, status_code=302)
         resp.set_cookie(
-            key=_STATE_COOKIE, value=sign_state_cookie(hub, state, nonce, code_verifier),
+            key=_STATE_COOKIE,
+            value=sign_state_cookie(hub, state, nonce, code_verifier, redirect_uri),
             httponly=True, samesite="lax", max_age=_STATE_TTL_S,
             secure=_cookie_secure(),
         )
@@ -192,12 +195,13 @@ def register(app, hub, ctx):
         triple = verify_state_cookie(hub, cookie)
         if not triple:
             return _recover_or_error("Your sign-in session expired. Please start again.", 400)
-        c_state, nonce, code_verifier = triple
+        c_state, nonce, code_verifier, redirect_uri = triple
         if not hmac_eq(c_state, qstate):
             return _sso_error_page("The sign-in request could not be verified. Please try again.", 400)
         try:
             discovery = await discover(cfg)
-            tokens = await exchange_code(cfg, discovery, code, code_verifier)
+            tokens = await exchange_code(cfg, discovery, code, code_verifier,
+                                         redirect_uri=redirect_uri or None)
             id_token = tokens.get("id_token")
             if not id_token:
                 raise OidcError("token endpoint returned no id_token")
@@ -380,6 +384,10 @@ def register(app, hub, ctx):
                 "tenant_id": str(config.get("tenant_id") or "").strip(),
                 "client_id": str(config.get("client_id") or "").strip(),
                 "redirect_uri": str(config.get("redirect_uri") or "").strip(),
+                # Extra registered redirect URIs (one per edge-proxy hostname) so
+                # SSO can return users to the proxy they started from. Accepts a
+                # list or a comma/newline-delimited string; stored as a clean list.
+                "redirect_uris": _clean_uri_list(config.get("redirect_uris")),
                 "allowed_group": str(config.get("allowed_group") or "").strip(),
             }
             global_config = hub.state.system_state.get("global_config", {})
@@ -406,6 +414,46 @@ def _triplet():
     """Return (state, nonce, code_verifier) — three independent randoms."""
     import secrets as _s
     return _s.token_urlsafe(24), _s.token_urlsafe(24), _s.token_urlsafe(48)
+
+
+def _clean_uri_list(val) -> list:
+    """Normalize an admin-supplied redirect-URI allowlist (list or delimited
+    string) to an ordered, de-duplicated list of trimmed non-empty strings."""
+    import re as _re
+    items = []
+    if isinstance(val, (list, tuple)):
+        items = [str(v) for v in val]
+    elif isinstance(val, str):
+        items = _re.split(r"[\s,]+", val)
+    out = []
+    for v in items:
+        v = (v or "").strip()
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
+def _pick_redirect_uri(cfg, request) -> str:
+    """Choose the Entra ``redirect_uri`` for THIS login from the host the browser
+    actually used, so a user who started at their local edge proxy is returned to
+    that proxy after auth — not the hub's default host.
+
+    The originating host comes from ``X-Forwarded-Host``/``-Proto`` (stamped by
+    the edge proxy) or the direct ``Host``. Only hosts whose callback URL exactly
+    matches an entry in the configured allowlist (``cfg.redirect_uris`` — every
+    one also registered in Entra) are honored; anything else (incl. a spoofed
+    X-Forwarded-Host) falls back to the default ``cfg.redirect_uri``. This keeps
+    the flow safe from open-redirect and satisfies Entra's exact-match rule."""
+    fwd_proto = request.headers.get("x-forwarded-proto") or ""
+    proto = (fwd_proto.split(",")[0].strip()
+             or (request.url.scheme if request.url else "") or "https")
+    fwd_host = request.headers.get("x-forwarded-host") or request.headers.get("host") or ""
+    host = fwd_host.split(",")[0].strip()
+    if host:
+        candidate = f"{proto}://{host}/auth/oidc/callback"
+        if candidate in (cfg.redirect_uris or []):
+            return candidate
+    return cfg.redirect_uri
 
 
 def _pair(code_verifier: str):
