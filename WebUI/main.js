@@ -18077,6 +18077,7 @@ function serialEnsureConsoleDock() {
                 <button id="serial-console-min" title="Minimize to the footer — keeps every session connected so you can browse the rest of the UI" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">▁ Minimize</button>
                 <button id="serial-console-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
                 <button id="serial-console-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
+                <button id="serial-console-reconnect" title="Reconnect this console — resumes on the same terminal, keeping its scrollback" class="px-2 py-0.5 text-xs rounded border border-green-500 text-green-400 hover:bg-green-900/40 hidden">⟳ Reconnect</button>
                 <span id="serial-console-status" class="ml-auto text-xs text-amber-400"></span>
             </div>
             <div id="serial-console-bodies" class="relative flex-1 flex bg-[#1e1e1e] overflow-hidden"></div>
@@ -18104,6 +18105,10 @@ function serialEnsureConsoleDock() {
     modal.querySelector('#serial-console-min').onclick = () => serialSetDockCollapsed(true);
     modal.querySelector('#serial-console-refresh').onclick = () => serialRefreshAvailablePorts();
     modal.querySelector('#serial-console-takeover').onclick = () => serialForceTakeover();
+    modal.querySelector('#serial-console-reconnect').onclick = () => {
+        const c = serialActiveConsole();
+        if (c) serialReconnectConsole(c.key);
+    };
     modal.querySelector('#serial-console-search').addEventListener('input', (ev) => {
         window._serialConsoleFilter = ev.target.value.trim().toLowerCase();
         serialRenderConsoleList();
@@ -18340,7 +18345,6 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     // Make this tab active first so its body is visible when xterm lays out —
     // an xterm opened into a display:none container measures 0×0 and renders blank.
     serialActivateConsole(key);
-    const upd = (text, cls) => { entry.statusText = text; entry.statusCls = cls; serialRenderConsoleList(); serialSyncSerialHeader(); };
     const term = new Terminal({ cursorBlink: true, fontSize: 13, scrollback: 5000,
                                 theme: { background: '#1e1e1e' } });
     entry.term = term;
@@ -18382,11 +18386,30 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
         if (window._serialActiveConsole !== key) serialActivateConsole(key);
         try { term.focus(); } catch (e) {}
     });
+    // Keystrokes always target the CURRENT socket (entry.ws), which reconnect
+    // swaps out — so this handler is registered once and survives reconnects
+    // (re-registering per socket would leak handlers bound to dead sockets).
+    term.onData(d => { if (!entry.ro && entry.ws && entry.ws.readyState === 1) entry.ws.send(d); });
+    serialAttachWs(entry, session);
+    serialRenderConsoleList();
+    serialSyncSerialHeader();
+}
+
+// Open (or re-open) the browser↔serial WebSocket for a console entry and wire
+// its handlers. Factored out of serialAddConsoleTab so a dropped session can be
+// reconnected onto the SAME terminal (preserving scrollback) — see
+// serialReconnectConsole — instead of forcing a close/reopen.
+function serialAttachWs(entry, session) {
+    const term = entry.term, label = entry.label;
+    entry.session = session;
+    entry.ro = !!session.read_only;
+    const upd = (text, cls) => { entry.statusText = text; entry.statusCls = cls; serialRenderConsoleList(); serialSyncSerialHeader(); };
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(`${proto}://${location.host}/ws/console-serial/${session.session_id}?token=${encodeURIComponent(session.ws_token)}`);
     ws.binaryType = 'arraybuffer';
+    entry.ws = ws;
     entry._lastRx = Date.now();
-    ws.onopen = () => { entry._lastRx = Date.now(); upd(ro ? 'Connected (read-only)' : 'Connected', 'text-green-400'); };
+    ws.onopen = () => { entry._lastRx = Date.now(); upd(entry.ro ? 'Connected (read-only)' : 'Connected', 'text-green-400'); };
     ws.onmessage = (ev) => {
         // Any frame — device bytes OR a keepalive control frame — proves the
         // tunnel is alive; refresh the liveness timestamp the watchdog reads.
@@ -18408,20 +18431,57 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
         else term.write(new Uint8Array(ev.data));
     };
     ws.onclose = (ev) => {
-        try { term.write(`\r\n\x1b[33m[disconnected${ev.reason ? ': ' + ev.reason : ''}]\x1b[0m\r\n`); } catch (e) {}
+        // A reconnect deliberately closes the old socket first; don't paint a
+        // scary "[disconnected]" for that superseded socket.
+        if (ws._superseded) return;
+        try { term.write(`\r\n\x1b[33m[disconnected${ev.reason ? ': ' + ev.reason : ''}] — click Reconnect to resume\x1b[0m\r\n`); } catch (e) {}
         upd('Disconnected' + (ev.reason ? ': ' + ev.reason : ''), 'text-red-400');
     };
     serialEnsureHeartbeatWatch();
-    // Always attached (not gated on the initial ro) so a later force-takeover
-    // can flip entry.ro live without re-registering the handler. Typing
-    // directly into a pane always targets just that pane — broadcasting to
-    // the whole group goes through the separate broadcast input bar instead
-    // (serialBroadcastSend), so a single pane stays individually usable even
-    // while broadcast mode is on.
-    term.onData(d => { if (!entry.ro && ws.readyState === 1) ws.send(d); });
-    entry.ws = ws;
-    serialRenderConsoleList();
-    serialSyncSerialHeader();
+    return ws;
+}
+
+// Re-establish a dropped console onto its EXISTING terminal (keeps scrollback)
+// by minting a fresh session for the same port and re-attaching the socket —
+// the "Reconnect" affordance so a disconnect doesn't force a close/reopen.
+async function serialReconnectConsole(key) {
+    const reg = window._serialConsoles;
+    const entry = reg && reg.get(key);
+    if (!entry) return;
+    if (entry.ws && (entry.ws.readyState === 0 || entry.ws.readyState === 1)) {
+        showToast(`Console for ${entry.label || entry.portId} is still connected`, 'info');
+        return;
+    }
+    // Retire the old socket so its onclose can't repaint "[disconnected]".
+    if (entry.ws) { try { entry.ws._superseded = true; entry.ws.close(); } catch (e) {} }
+    entry.statusText = 'Reconnecting…'; entry.statusCls = 'text-amber-400';
+    serialRenderConsoleList(); serialSyncSerialHeader();
+    let session;
+    try {
+        const res = await fetch('/api/console/open', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ spoke_id: entry.spokeId, port_id: entry.portId, mode: 'rw' }),
+        });
+        session = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            entry.statusText = 'Reconnect failed: ' + (session.detail || res.status);
+            entry.statusCls = 'text-red-400';
+            serialRenderConsoleList(); serialSyncSerialHeader();
+            showToast(session.detail || 'Reconnect failed', 'error');
+            return;
+        }
+    } catch (e) {
+        entry.statusText = 'Reconnect failed';
+        entry.statusCls = 'text-red-400';
+        serialRenderConsoleList(); serialSyncSerialHeader();
+        showToast('Reconnect failed: ' + e.message, 'error');
+        return;
+    }
+    try { entry.term.write('\r\n\x1b[36m[reconnecting…]\x1b[0m\r\n'); } catch (e) {}
+    serialAttachWs(entry, session);
+    serialFitConsole(entry);
+    if (window._serialActiveConsole === key) { try { entry.term.focus(); } catch (e) {} }
 }
 
 // Show one tab's console, hide the rest (their WS stays open). Re-renders the
@@ -18531,12 +18591,18 @@ function serialRenderConsoleList() {
         const closeBtn = r.open
             ? `<button data-close="${kAttr}" title="Close this console" class="text-slate-500 hover:text-red-400 text-sm leading-none shrink-0">&times;</button>`
             : '';
+        // A dropped-but-still-open console gets an inline Reconnect on its row,
+        // so it can be resumed without switching to it first.
+        const reconnectBtn = (r.open && e.statusCls === 'text-red-400')
+            ? `<button data-reconnect="${kAttr}" title="Reconnect this console (keeps scrollback)" class="text-slate-500 hover:text-green-400 text-sm leading-none shrink-0">⟳</button>`
+            : '';
         const cursor = (r.open || r.reachable) ? 'cursor-pointer' : 'cursor-not-allowed';
         return `<div data-key="${kAttr}" data-open="${r.open ? '1' : '0'}" data-reachable="${r.reachable ? '1' : '0'}" data-spoke="${sAttr}" data-port="${pAttr}" data-label="${label}"
             class="serial-console-row flex items-center gap-2 px-3 py-2 border-b border-[#232323] ${cursor} text-xs ${rowCls}">
             ${lead}
             <span class="w-2 h-2 rounded-full ${dot} shrink-0"></span>
             <span class="font-mono truncate flex-1">${label}</span>${roBadge}${stateBadge}
+            ${reconnectBtn}
             ${closeBtn}
         </div>`;
     }).join('') : `<div class="px-3 py-4 text-xs text-slate-500 italic">${total ? 'No consoles match your search.' : 'No consoles available.'}</div>`;
@@ -18545,7 +18611,7 @@ function serialRenderConsoleList() {
         const key = el.getAttribute('data-key');
         const isOpen = el.getAttribute('data-open') === '1';
         el.onclick = (ev) => {
-            if (ev.target.closest('[data-close]') || ev.target.matches('input[type=checkbox]')) return;
+            if (ev.target.closest('[data-close]') || ev.target.closest('[data-reconnect]') || ev.target.matches('input[type=checkbox]')) return;
             if (isOpen) { serialActivateConsole(key); return; }
             if (el.getAttribute('data-reachable') !== '1') {
                 showToast('Device not connected — reconnect it to open a session', 'warning');
@@ -18555,6 +18621,8 @@ function serialRenderConsoleList() {
         };
         const closeBtn = el.querySelector('[data-close]');
         if (closeBtn) closeBtn.onclick = (ev) => { ev.stopPropagation(); serialCloseConsole(key); };
+        const reconnectBtn = el.querySelector('[data-reconnect]');
+        if (reconnectBtn) reconnectBtn.onclick = (ev) => { ev.stopPropagation(); serialReconnectConsole(key); };
         const cb = el.querySelector('input[data-bcast-key]');
         if (cb) cb.onclick = (ev) => {
             ev.stopPropagation();
@@ -18588,6 +18656,13 @@ function serialSyncSerialHeader() {
     statusEl.className = 'ml-auto text-xs ' + (c ? c.statusCls : 'text-slate-400');
     const toBtn = modal.querySelector('#serial-console-takeover');
     if (toBtn) toBtn.classList.toggle('hidden', !(c && c.ro));
+    // Offer Reconnect whenever the active console's socket is closed/closing —
+    // resumes on the same terminal instead of forcing a close/reopen.
+    const rcBtn = modal.querySelector('#serial-console-reconnect');
+    if (rcBtn) {
+        const dead = !!(c && (!c.ws || c.ws.readyState === 2 || c.ws.readyState === 3));
+        rcBtn.classList.toggle('hidden', !dead);
+    }
     serialRenderDockPill();
 }
 
