@@ -14629,10 +14629,16 @@ async function loadMyDeviceSpokes() {
             const rolesBtn = canRoles
                 ? `<button onclick="showLoadRoleModal('${eSid}')" class="px-2.5 py-1 rounded-md text-[11px] font-bold bg-white hover:bg-slate-50 text-[#01A982] border border-[#01A982] transition-colors" title="Load or unload roles (DNS, DHCP, Edge Proxy, …) on this agent">Roles</button>`
                 : '';
+            // Delete permanently removes the registration + crypto material; the
+            // spoke must fully re-onboard (a fresh key) to return. Tenant-scoped
+            // server-side (/tenant/{tenant}/spokes/{id}) — a tenant-admin can
+            // only delete a spoke bound to their own tenant.
+            const eName = String(s.display_name || s.spoke_id).replace(/'/g, "\\'");
+            const delBtn = `<button onclick="_myDevDeleteSpoke('${eSid}', '${eName}')" class="px-2.5 py-1 rounded-md text-[11px] font-bold bg-white hover:bg-red-50 text-red-600 border border-red-300 transition-colors" title="Permanently remove this spoke/agent — it must re-onboard to return">Delete</button>`;
             return `<div class="flex items-center justify-between border border-slate-100 rounded-md px-3 py-2">
                 <div><span class="text-sm font-medium text-slate-700">${escapeHtml(_nodeLabel(s.display_name || s.spoke_id, s.tenant_id || tenant))}</span>
                 <span class="ml-2 text-[11px] text-slate-400 font-mono">${escapeHtml(s.module_type || '—')}</span></div>
-                <div class="flex items-center gap-2">${rolesBtn}${appr}${conn}</div></div>`;
+                <div class="flex items-center gap-2">${rolesBtn}${appr}${conn}${delBtn}</div></div>`;
         }).join('');
     } catch (e) {
         console.error('loadMyDeviceSpokes failed', e);
@@ -14712,6 +14718,25 @@ async function _myDevRevokePsk(psk) {
         loadMyDevicePsks();
     } catch (e) {
         console.error('_myDevRevokePsk failed', e);
+        if (typeof showToast === 'function') showToast(e.message, 'error');
+    }
+}
+
+// Permanently delete a spoke/agent bound to the current tenant. Server-side the
+// DELETE /tenant/{tenant}/spokes/{id} route re-checks that the spoke is bound to
+// a tenant the caller owns (anti-IDOR), then runs the same teardown as the
+// Global-Admin delete — the spoke must re-onboard (fresh key) to return.
+async function _myDevDeleteSpoke(spokeId, label) {
+    const tenant = _myDevTenant();
+    if (!tenant) { if (typeof showToast === 'function') showToast('Select a tenant first', 'error'); return; }
+    const name = label || spokeId;
+    if (!await showConfirmToast(`Delete spoke “${name}”? This permanently removes its registration and crypto material — it must re-onboard (a new install/key) to return. Any roles it hosts are torn down.`)) return;
+    try {
+        await apiJson(`/tenant/${encodeURIComponent(tenant)}/spokes/${encodeURIComponent(spokeId)}`, { method: 'DELETE' });
+        loadMyDeviceSpokes();
+        if (typeof showToast === 'function') showToast(`Spoke “${name}” removed`, 'success');
+    } catch (e) {
+        console.error('_myDevDeleteSpoke failed', e);
         if (typeof showToast === 'function') showToast(e.message, 'error');
     }
 }
