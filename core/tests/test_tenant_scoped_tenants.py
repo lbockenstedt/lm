@@ -136,6 +136,45 @@ def _acme_record():
     }}
 
 
+# ── GET /setup/tenants display-name rename (default → ADMIN) ────────────────
+# The built-in 'default' tenant is the global-admin scope and must ALWAYS
+# render as 'ADMIN' in the header picker / tenant lists — even when a real
+# 'default' record is persisted (which shadows the fallback injection and,
+# with name=None, would otherwise fall back to the raw 'default' id).
+def test_setup_tenants_persisted_default_renders_as_admin():
+    # Persisted 'default' record with a null name (the live-hub condition).
+    c, hub, holder = _build({
+        "default": {"name": None},
+        "acme": {"name": "Acme Corp"},
+    })
+    holder.current = _global_admin()
+    r = c.get("/setup/tenants")
+    assert r.status_code == 200
+    by_id = {t["id"]: t["name"] for t in r.json()["tenants"]}
+    assert by_id["default"] == "ADMIN"
+    assert by_id["acme"] == "Acme Corp"
+
+
+def test_setup_tenants_default_named_default_still_renders_as_admin():
+    # Even a stored name of "Default" is overridden to "ADMIN".
+    c, hub, holder = _build({"default": {"name": "Default"}})
+    holder.current = _global_admin()
+    r = c.get("/setup/tenants")
+    assert r.status_code == 200
+    by_id = {t["id"]: t["name"] for t in r.json()["tenants"]}
+    assert by_id["default"] == "ADMIN"
+
+
+def test_setup_tenants_injects_admin_when_default_absent():
+    # Fallback path (no persisted default) still injects the ADMIN label.
+    c, hub, holder = _build({"acme": {"name": "Acme Corp"}})
+    holder.current = _global_admin()
+    r = c.get("/setup/tenants")
+    assert r.status_code == 200
+    by_id = {t["id"]: t["name"] for t in r.json()["tenants"]}
+    assert by_id["default"] == "ADMIN"
+
+
 # ── GET details ──────────────────────────────────────────────────────────────
 def test_get_own_tenant_as_tenant_admin():
     c, hub, holder = _build(_acme_record())

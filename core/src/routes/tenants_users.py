@@ -220,7 +220,11 @@ def register(app, hub, ctx):
         tenant_list = [
             {
                 "id": tid,
-                "name": cfg.get("name") or tid,
+                # The built-in 'default' tenant is the global-admin scope; always
+                # display it as 'ADMIN' regardless of any persisted/empty name.
+                # (A stored record with name=None would otherwise fall back to the
+                # 'default' id AND skip the ADMIN injection below.)
+                "name": "ADMIN" if tid == "default" else (cfg.get("name") or tid),
                 "slug": cfg.get("netbox_tenant_slug") or tid,
                 "netbox_id": cfg.get("netbox_id"),
                 "description": cfg.get("description", ""),
