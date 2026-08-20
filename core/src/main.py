@@ -7645,6 +7645,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 else:
                     tenants.add(t)
             set_proxied_tenants(tenants, all_tenants=shared_present)
+            if shared_present or tenants:
+                logger.info(
+                    "[cache] proxied disk-backed tenants: %s",
+                    "ALL (shared proxy)" if shared_present else sorted(tenants))
         except Exception as e:  # noqa: BLE001 — best-effort optimisation
             logger.debug(f"recompute proxied tenants failed: {e}")
 
