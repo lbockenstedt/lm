@@ -43,16 +43,26 @@ class _Hub:
     """
     _STALE_RESTART_SENTINEL = "/tmp/lm-test-stale-restart-requested"
 
-    def __init__(self, startup_version=None, disk_version="0.25", boom=False):
+    def __init__(self, startup_version=None, disk_version="0.25", boom=False,
+                 startup_commit=None, disk_commit="unknown", commit_boom=False):
         if startup_version is not None:
             self._startup_version = startup_version
         self._disk_version = disk_version
         self._boom = boom
+        if startup_commit is not None:
+            self._startup_commit = startup_commit
+        self._disk_commit = disk_commit
+        self._commit_boom = commit_boom
 
     async def get_local_version(self):
         if self._boom:
             raise OSError("VERSION unreadable")
         return self._disk_version
+
+    async def get_local_commit(self):
+        if self._commit_boom:
+            raise OSError("git unavailable")
+        return self._disk_commit
 
 
 def _stale(hub):
@@ -87,6 +97,37 @@ def test_unreadable_disk_version_never_triggers_a_restart_loop():
 
 def test_empty_disk_version_is_not_stale():
     assert _stale(_Hub(startup_version="0.23", disk_version="")) is False
+
+
+# ── commit-level staleness (VERSION-independent) ─────────────────────────────
+# Every VERSION file is the constant 1.00, so the version compare is inert; the
+# boot-commit vs on-disk-commit compare is the real stale signal for a git hub.
+
+def test_running_behind_disk_commit_is_stale():
+    """VERSION equal (both 1.00) but the boot commit trails on-disk HEAD."""
+    assert _stale(_Hub(startup_version="1.00", disk_version="1.00",
+                       startup_commit="aaaaaaaa", disk_commit="bbbbbbbb")) is True
+
+
+def test_running_equals_disk_commit_is_not_stale():
+    assert _stale(_Hub(startup_version="1.00", disk_version="1.00",
+                       startup_commit="aaaaaaaa", disk_commit="aaaaaaaa")) is False
+
+
+def test_unknown_commit_is_not_stale():
+    assert _stale(_Hub(startup_version="1.00", disk_version="1.00",
+                       startup_commit="unknown", disk_commit="bbbbbbbb")) is False
+
+
+def test_missing_startup_commit_is_not_stale():
+    """Tarball install / pre-boot-capture: no commit to compare, no false stale."""
+    assert _stale(_Hub(startup_version="1.00", disk_version="1.00",
+                       disk_commit="bbbbbbbb")) is False
+
+
+def test_unreadable_disk_commit_never_triggers_a_restart_loop():
+    assert _stale(_Hub(startup_version="1.00", disk_version="1.00",
+                       startup_commit="aaaaaaaa", commit_boom=True)) is False
 
 
 # ── the gate that consumes it ────────────────────────────────────────────────

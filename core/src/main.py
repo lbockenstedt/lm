@@ -8134,6 +8134,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Capture the VERSION this process booted with so the update-health check
         # can detect process-vs-disk drift (code updated on disk but not restarted).
         self._startup_version = version
+        # Also capture the boot-time git HEAD. Every VERSION file was reset to the
+        # constant 1.00, so the version-equality stale check can NEVER fire; the
+        # commit SHA is the only reliable "am I running the on-disk code?" signal
+        # for a git install (see check_update_health / _detect_stale_process).
+        # "unknown" on a tarball install → the commit check is skipped and the
+        # behaviour falls back to the (inert) VERSION compare.
+        try:
+            self._startup_commit = await self.get_local_commit()
+        except Exception:  # noqa: BLE001
+            self._startup_commit = "unknown"
         # Publish the RUNNING version to a file the watchdog reads for its
         # stale-detection — robust vs log-parsing the startup line, which can
         # rotate out of hub.log (the failure that left a stale hub undetected).

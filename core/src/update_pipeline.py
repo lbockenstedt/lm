@@ -780,6 +780,28 @@ class UpdatePipelineMixin:
                 # manual footer "Update now" button (operator asked).
                 self._request_watchdog_restart(f"stale v{run_v}->v{disk_v}", force=False)
 
+            # Commit-level drift — the VERSION-INDEPENDENT stale signal. Every
+            # VERSION file was reset to the constant 1.00, so the version compare
+            # above can NEVER fire; a commit-SHA compare is the only reliable
+            # process-vs-disk stale check for a git install (THE stale-hub bug that
+            # left the hub serving old code after a pull-without-restart). Boot
+            # commit is captured once at startup (main sets _startup_commit);
+            # "unknown" (tarball install / git unavailable) skips this and leaves
+            # the VERSION compare as the sole signal. Reuses the SAME proven
+            # watchdog-restart sentinel path as the version check above.
+            boot_c = getattr(self, "_startup_commit", None)
+            disk_c = await self.get_local_commit()
+            checks["running_commit"] = (boot_c or "unknown")[:12]
+            checks["disk_commit"] = (disk_c or "unknown")[:12]
+            if (boot_c and disk_c and boot_c not in ("unknown", "")
+                    and disk_c not in ("unknown", "") and boot_c != disk_c):
+                notices.append(
+                    f"process is STALE: running commit {boot_c[:8]} but on-disk is "
+                    f"{disk_c[:8]} — code updated without a restart; the watchdog "
+                    f"will restart it in the maintenance window.")
+                self._request_watchdog_restart(
+                    f"stale {boot_c[:8]}->{disk_c[:8]}", force=False)
+
             helper = "/usr/local/bin/lm-update-restart"
             checks["restart_helper"] = os.path.isfile(helper) and os.access(helper, os.X_OK)
             if not checks["restart_helper"]:
@@ -1107,6 +1129,20 @@ class UpdatePipelineMixin:
                 return True
         except Exception as _e:  # noqa: BLE001
             logger.debug("stale-process check skipped: %s", _e)
+        # Commit-level fallback: the VERSION compare above is inert (every VERSION
+        # is the constant 1.00), so also compare the boot-time git HEAD to the
+        # on-disk HEAD. This is the reliable stale signal for a git install.
+        try:
+            boot_c = getattr(self, "_startup_commit", None)
+            disk_c = await self.get_local_commit()
+            if (boot_c and disk_c and boot_c not in ("unknown", "")
+                    and disk_c not in ("unknown", "") and boot_c != disk_c):
+                logger.warning(
+                    "Hub PROCESS is STALE (running commit %s, on-disk %s) — will "
+                    "self-restart to load the on-disk code.", boot_c[:8], disk_c[:8])
+                return True
+        except Exception as _e:  # noqa: BLE001
+            logger.debug("stale-process commit check skipped: %s", _e)
         return False
 
     async def _git_update(self, hub_root: str, hub_repo: str, branch: str) -> bool:
