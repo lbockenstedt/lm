@@ -18237,7 +18237,40 @@ function serialFitConsole(entry) {
     if (!entry || !entry.bodyEl || !entry.term) return;
     if (entry.bodyEl.classList.contains('hidden') || !entry.bodyEl.offsetParent) return;
     try { if (entry.fitAddon) entry.fitAddon.fit(); } catch (e) {}
+    // Backstop for when the fit addon is absent (its CDN module can be blocked
+    // while the core xterm still loads) or no-oped before the renderer measured
+    // its cell — either leaves the grid stuck at the default 80×24 so a tall
+    // pane is only ~half filled. Compute the grid ourselves from the measured
+    // cell size; single controller, so no oscillation with the addon.
+    try { _serialManualFit(entry); } catch (e) {}
     try { entry.term.refresh(0, entry.term.rows - 1); } catch (e) {}
+}
+
+// Dependency-free fit: size the xterm grid to its body using the renderer's
+// measured cell dimensions. Mirrors what the fit addon does, but without the
+// external addon-fit module (which the appliance's CDN egress can block). No-op
+// until the renderer has measured a cell (retried by the ResizeObserver and the
+// delayed refits registered at open).
+function _serialManualFit(entry) {
+    const term = entry.term, el = entry.bodyEl;
+    if (!term || !el) return;
+    const core = term._core;
+    const dims = core && core._renderService && core._renderService.dimensions;
+    const cell = dims && dims.css && dims.css.cell;
+    const cellW = cell && cell.width, cellH = cell && cell.height;
+    if (!cellW || !cellH) return;
+    const cs = getComputedStyle(el);
+    const padX = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    const padY = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    const sb = (core.viewport && core.viewport.scrollBarWidth) || 14;
+    const availW = el.clientWidth - padX - sb;
+    const availH = el.clientHeight - padY;
+    if (availW <= 0 || availH <= 0) return;
+    const cols = Math.max(2, Math.floor(availW / cellW));
+    const rows = Math.max(1, Math.floor(availH / cellH));
+    if (cols !== term.cols || rows !== term.rows) {
+        try { term.resize(cols, rows); } catch (e) {}
+    }
 }
 
 // Refit every currently-visible console (window resize / fullscreen change).
