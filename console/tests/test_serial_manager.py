@@ -286,6 +286,39 @@ def test_ensure_monitor_no_reopen_while_user_attached(monkeypatch):
     assert chan2 is chan1 and chan1.ser.closed is False  # user keeps their channel
 
 
+def test_open_rebuilds_channel_whose_reader_died(monkeypatch):
+    """Connecting must never attach a user to a channel whose serial reader has
+    already died (device errored/pulled, or a close() raced the in-flight read):
+    that yields a console that connects then immediately goes silent /
+    disconnects. open() tears the dead channel down and rebuilds a live one."""
+    _use_fake_serial(monkeypatch)
+    sm = m.SessionManager(on_data=lambda sid, d: None)
+    chan1 = sm.ensure_monitor("p1", "/dev/ttyUSB0", {"baud": 9600})
+    assert chan1 is not None
+    # Simulate the reader thread having exited (dead serial handle).
+    chan1._reader_alive = False
+    info = sm.open("u1", "p1", "/dev/ttyUSB0", {"baud": 9600}, writable=True)
+    assert info["created"] is True             # a fresh, live channel was built
+    assert chan1.ser.closed is True            # the dead one was torn down
+    new_chan = sm.channel("p1")
+    assert new_chan is not None and new_chan is not chan1
+    assert new_chan.reader_alive() is True     # user attaches to a LIVE handle
+    assert info["writer"] is True
+    sm.close("u1")
+
+
+def test_open_reuses_live_channel(monkeypatch):
+    """The dead-channel guard must NOT disturb a healthy monitored channel — a
+    user still shares the existing live handle (streaming handoff)."""
+    _use_fake_serial(monkeypatch)
+    sm = m.SessionManager(on_data=lambda sid, d: None)
+    chan1 = sm.ensure_monitor("p1", "/dev/ttyUSB0", {"baud": 9600})
+    info = sm.open("u1", "p1", "/dev/ttyUSB0", {"baud": 9600}, writable=True)
+    assert info["created"] is False and sm.channel("p1") is chan1
+    assert chan1.ser.closed is False
+    sm.close("u1")
+
+
 def test_session_manager_records_open_error_for_faulty_port(monkeypatch):
     _use_fake_serial(monkeypatch)
     sm = m.SessionManager(on_data=lambda sid, d: None)

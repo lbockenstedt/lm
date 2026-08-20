@@ -446,7 +446,13 @@ class PortChannel:
         while not self._stop.is_set():
             try:
                 data = self.ser.read(1024)
-            except Exception as e:  # noqa: BLE001 - device pulled / error
+            except Exception as e:  # noqa: BLE001 - device pulled / error / closed under us
+                if self._stop.is_set():
+                    # Benign: close() closed the handle under the in-flight read
+                    # (raises e.g. "'NoneType' object cannot be interpreted as an
+                    # integer" from os.read on the now-None fd). Not a device
+                    # fault — exit quietly WITHOUT flagging sessions as errored.
+                    break
                 logger.info("read loop ended for %s: %s", self.port_id, e)
                 self._reader_alive = False
                 for sid in list(self.sessions):
@@ -605,6 +611,15 @@ class SessionManager:
              settings: Dict[str, Any], writable: bool) -> Dict[str, Any]:
         chan = self._channels.get(port_id)
         created = False
+        # A channel whose serial reader has already died (device errored/pulled,
+        # or a close() raced the in-flight read) must NOT be reused: attaching a
+        # user to a dead channel yields a console that connects then immediately
+        # goes silent / disconnects. Tear it down and rebuild so every open gets
+        # a LIVE handle (mirrors ensure_monitor's dead-channel recovery).
+        if chan is not None and not chan.reader_alive():
+            chan.close()
+            self._channels.pop(port_id, None)
+            chan = None
         if chan is None:
             chan = PortChannel(port_id, dev, settings, self._on_data)
             chan.start()
