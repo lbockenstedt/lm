@@ -23776,6 +23776,7 @@ async function loadHenet() {
     const adminScope = admin ? ((currentTenant && currentTenant !== 'default') ? currentTenant : '') : null;
     const backBar = _extDnsBackBar('HE.NET');
     const btnCls = 'bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1.5 rounded-md text-xs font-bold shadow-sm';
+    const btnClsDanger = 'bg-red-50 hover:bg-red-100 text-red-600 border border-red-300 px-3 py-1.5 rounded-md text-xs font-bold shadow-sm';
     const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
 
@@ -23833,6 +23834,8 @@ async function loadHenet() {
           ${canWrite ? `<button onclick="showHenetRecordModal()" class="${btnCls}">+ Add Record</button>` : ''}
           ${admin && assignedCred ? `<button onclick="importHenet()" class="${btnCls}" title="Read the existing records already in your HE.NET zone (via the account login) and bring them under management">⇩ Import existing</button>` : ''}
           ${admin && assignedCred ? `<button onclick="syncHenet()" class="${btnCls}" title="Re-push every managed A/AAAA record to HE.NET">↻ Sync all</button>` : ''}
+          ${admin ? `<button onclick="showHenetMoveAllModal()" class="${btnCls}" title="Re-home every record in the current view to another tenant (metadata only — the HE.NET zone is untouched)">➡ Move all…</button>` : ''}
+          ${canWrite ? `<button onclick="deconfigureHenetScope()" class="${btnClsDanger}" title="Remove every record in the current view from management (the HE.NET zone is left unchanged)">🧹 Deconfigure</button>` : ''}
         </div>
       </div>`;
 
@@ -24068,6 +24071,90 @@ async function deleteHenetRecord(name, type) {
         if (ok && d.status === 'SUCCESS') loadHenet();
         else showToast('Error: ' + (detail || d?.message || 'Delete failed'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+// Human label for the records currently in view — the scope the bulk actions
+// (Deconfigure / Move all) operate on. Admin sees "Admin (shared)" for the
+// global slot or the selected tenant's name; a non-admin only ever sees their
+// own tenant's records, so the label is generic.
+function _henetCurrentScopeLabel() {
+    if (!isAdmin()) return 'this tenant';
+    if (currentTenant && currentTenant !== 'default') {
+        return (window._allTenantsName || {})[currentTenant] || currentTenant;
+    }
+    return 'Admin (shared)';
+}
+
+// Bulk "Deconfigure" — remove EVERY record currently in view from management
+// (looping the same DELETE the per-row trash icon uses). The HE.NET zone at
+// dns.he.net is never touched; this only drops LM's management records.
+async function deconfigureHenetScope() {
+    const recs = (window._henetRecords || []).slice();
+    const scope = _henetCurrentScopeLabel();
+    if (!recs.length) { showToast(`No HE.NET records under management for ${scope}.`, 'success'); return; }
+    if (!await showConfirmToast(`Deconfigure HE.NET for ${scope}?\n\nThis removes all ${recs.length} managed record(s) from management. The zone entries at dns.he.net are left unchanged — delete them there if you want them gone.`)) return;
+    let okN = 0, failN = 0;
+    for (const r of recs) {
+        try {
+            const { ok, data: d } = await _spokeFetch('/api/henet/record', {
+                method: 'DELETE',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: r.name, type: r.type }),
+            });
+            if (ok && d && d.status === 'SUCCESS') okN++; else failN++;
+        } catch (e) { failN++; }
+    }
+    showToast(`Deconfigured ${scope} — removed ${okN} record(s)${failN ? `, ${failN} failed` : ''}.`, failN ? 'error' : 'success');
+    loadHenet();
+}
+
+// Bulk "Move all → tenant" — re-home every record in the current view to
+// another tenant (or Admin/shared) in one shot. Metadata-only, reusing the
+// push-free /api/henet/record/tenant endpoint the record modal uses. Lands the
+// operator on the destination tenant so they see the moved records. Admin only.
+async function showHenetMoveAllModal() {
+    if (!isAdmin()) { showToast('Admin only', 'error'); return; }
+    const recs = (window._henetRecords || []);
+    if (!recs.length) { showToast('No records in the current view to move.', 'success'); return; }
+    await ensureTenants();
+    const tenants = window._allTenants || [];
+    const curScope = (currentTenant && currentTenant !== 'default') ? currentTenant : '';
+    const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
+    const opts = [`<option value=""${curScope === '' ? ' disabled' : ''}>Admin (admin-managed / shared)</option>`]
+        .concat(tenants.map(t => `<option value="${escapeHtml(t.id)}"${t.id === curScope ? ' disabled' : ''}>${escapeHtml(t.name || t.id)}</option>`)).join('');
+    openModal('henet-moveall-modal', `
+        <h3 class="text-lg font-bold text-[#263040]">Move all records → tenant</h3>
+        <p class="text-xs text-slate-500">Re-home all ${recs.length} record(s) currently shown (<span class="font-medium">${escapeHtml(_henetCurrentScopeLabel())}</span>) to another tenant. Metadata only — the HE.NET zone at dns.he.net is untouched.</p>
+        <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Destination</label><select id="henet-moveall-target" class="${inputCls}">${opts}</select></div>
+        <div class="flex justify-end gap-2 pt-2">
+            <button onclick="_henetMoveAll()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Move all</button>
+            <button onclick="document.getElementById('henet-moveall-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+}
+
+async function _henetMoveAll() {
+    const sel = document.getElementById('henet-moveall-target');
+    if (!sel) return;
+    const tgt = sel.value;
+    const recs = (window._henetRecords || []).slice();
+    if (!recs.length) { showToast('Nothing to move.', 'success'); return; }
+    let okN = 0, failN = 0;
+    for (const r of recs) {
+        try {
+            const { ok, data: d } = await _spokeFetch('/api/henet/record/tenant', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: r.name, type: r.type, tenant: tgt }),
+            });
+            if (ok && d && d.status === 'SUCCESS') okN++; else failN++;
+        } catch (e) { failN++; }
+    }
+    const destName = tgt ? ((window._allTenantsName || {})[tgt] || tgt) : 'Admin';
+    document.getElementById('henet-moveall-modal')?.remove();
+    showToast(`Moved ${okN} record(s) → ${destName}${failN ? `, ${failN} failed` : ''}.`, failN ? 'error' : 'success');
+    window._henetActiveTab = tgt;
+    // Land on the destination tenant so the operator sees the moved records.
+    await viewAsTenant(tgt || 'default');
 }
 
 async function importHenet() {
