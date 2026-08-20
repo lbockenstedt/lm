@@ -24,6 +24,16 @@ logger = logging.getLogger("ProxySpoke")
 _HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
         "te", "trailers", "transfer-encoding", "upgrade", "host"}
 
+# WebSocket handshake headers the browser sends that MUST NOT be forwarded to
+# aiohttp's ClientSession.ws_connect(): aiohttp generates its own Sec-WebSocket-*
+# handshake for the upstream leg. Forwarding the browser's values makes aiohttp
+# emit a corrupt/duplicated handshake — the upstream opens but the first data
+# frame breaks the connection, which the browser sees as an immediate console
+# disconnect.
+_WS_HANDSHAKE = {"sec-websocket-key", "sec-websocket-version",
+                 "sec-websocket-extensions", "sec-websocket-accept",
+                 "sec-websocket-protocol"}
+
 # Console-open endpoints whose JSON response carries the Phase-2 `relay` descriptor.
 _CONSOLE_OPEN_PATHS = ("/api/pxmx/console", "/api/pxmx/shell")
 
@@ -289,6 +299,10 @@ async def _proxy_ws(request: web.Request, spoke, target: str) -> web.StreamRespo
     ws_target = target.replace("https://", "wss://", 1).replace("http://", "ws://", 1)
     sess = _session(spoke)
     headers = _fwd_headers(request, request.remote or "")
+    # Strip the browser's WebSocket handshake headers — aiohttp mints its own for
+    # the upstream leg (see _WS_HANDSHAKE). Leaving them in opens the upstream but
+    # breaks it on the first data frame (browser sees an immediate disconnect).
+    headers = {k: v for k, v in headers.items() if k.lower() not in _WS_HANDSHAKE}
     try:
         async with sess.ws_connect(ws_target, headers=headers, max_msg_size=0,
                                    autoping=True) as ws_up:
