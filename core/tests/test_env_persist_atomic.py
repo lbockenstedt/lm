@@ -32,6 +32,7 @@ class _EnvHost:
 
     _persist_secret_to_env = cp.BaseControlPlane._persist_secret_to_env
     _read_env_value = cp.BaseControlPlane._read_env_value
+    _atomic_write_lines = staticmethod(cp.BaseControlPlane._atomic_write_lines)
 
 
 def test_upsert_round_trips_and_creates_file(tmp_path):
@@ -96,3 +97,21 @@ def test_concurrent_writers_do_not_lose_lines(tmp_path):
         assert h._read_env_value(f"KEY_{i}") == f"val_{i}", f"KEY_{i} was lost"
     # And the seed key is intact.
     assert h._read_env_value("LOADED_ROLES") == "console,cppm,network,proxy"
+
+
+def test_falls_back_to_in_place_when_atomic_write_fails(tmp_path, monkeypatch):
+    """If the atomic path can't create a sibling temp file (e.g. the parent dir
+    isn't writable by this process even though the .env file is), the writer must
+    fall back to an in-place write rather than silently dropping the update —
+    strictly no worse than the legacy behavior."""
+    h = _EnvHost(tmp_path)
+    h._persist_secret_to_env("SPOKE_SECRET", "orig")
+
+    def _boom(*a, **k):
+        raise PermissionError("dir not writable")
+
+    monkeypatch.setattr(cp.tempfile, "mkstemp", _boom)
+    # Update must still land via the in-place fallback.
+    h._persist_secret_to_env("SPOKE_SECRET", "rotated")
+    assert h._read_env_value("SPOKE_SECRET") == "rotated"
+

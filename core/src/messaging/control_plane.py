@@ -2386,7 +2386,14 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         LOADED_ROLES on a busy multi-role agent (base agent + every hosted role's
         control plane persist secrets/URLs/roles to the SAME .env). The rename is
         atomic on POSIX, so a reader either sees the whole old file or the whole
-        new one — never a truncated one."""
+        new one — never a truncated one.
+
+        The atomic path needs write permission on the .env's DIRECTORY (to create
+        the temp file); the legacy in-place write needed it only on the FILE. To
+        never regress a deployment where the dir isn't writable but the file is,
+        an atomic-write failure FALLS BACK to the original in-place write — so
+        this is strictly no worse than before, and better wherever the atomic
+        path succeeds."""
         with _ENV_FILE_LOCK:
             try:
                 env_path = os.path.join(self._repo_root(), ".env")
@@ -2410,27 +2417,46 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                         updated.append(line)
                 if not found:
                     updated.append(f"{prefix}{value}\n")
-                # Atomic replace: write a sibling temp file (same dir → same fs,
-                # so os.replace is a rename, not a cross-device copy), fsync, then
-                # swap it in. A reader never sees a half-written .env.
-                env_dir = os.path.dirname(env_path) or "."
-                fd, tmp_path = tempfile.mkstemp(prefix=".env.", dir=env_dir)
-                try:
-                    with os.fdopen(fd, "w") as f:
-                        f.writelines(updated)
-                        f.flush()
-                        os.fsync(f.fileno())
-                    os.chmod(tmp_path, mode)
-                    os.replace(tmp_path, env_path)
-                except Exception:
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-                    raise
+                self._atomic_write_lines(env_path, updated, mode)
                 logger.info("Persisted %s to %s", key, env_path)
             except Exception as e:
                 logger.warning("Failed to persist %s to .env: %s", key, e)
+
+    @staticmethod
+    def _atomic_write_lines(path: str, lines: list, mode: int) -> None:
+        """Write ``lines`` to ``path`` atomically (temp file in the same dir →
+        same fs, fsync, os.replace). If the atomic path fails (e.g. the parent
+        dir isn't writable by this process even though the file is), fall back to
+        an in-place truncate-write so behavior is never worse than the legacy
+        writer. Caller holds ``_ENV_FILE_LOCK``."""
+        env_dir = os.path.dirname(path) or "."
+        try:
+            fd, tmp_path = tempfile.mkstemp(prefix=".env.", dir=env_dir)
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.writelines(lines)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.chmod(tmp_path, mode)
+                os.replace(tmp_path, path)
+                return
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except Exception as e:
+            # Best-effort atomicity: never fail the persist just because we
+            # couldn't create a sibling temp file. Fall back to in-place write.
+            logger.warning("atomic .env write failed (%s); falling back to "
+                           "in-place write", e)
+            with open(path, "w") as f:
+                f.writelines(lines)
+            try:
+                os.chmod(path, mode)
+            except OSError:
+                pass
 
     def _persist_session_secret(self, new_secret: str) -> None:
         """Writes the rotated session key back to .env so it survives spoke restarts."""
