@@ -5812,7 +5812,71 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         pinned = [str(n).strip() for n in (gc.get("ab_cert_identities") or []) if str(n).strip()]
         is_bf = module_type == "ab" or spoke_id == "ab" or pk == "ab"
         if is_bf and pinned:
-            sans = list(dict.fromkeys(pinned + [spoke_id]))
+            # F-K4 hardening. The pinned AppBuilder SANs are not cosmetic: a cert
+            # bearing them passes _hub_request_authorized (H1) and thereby unlocks
+            # the fleet-wide reverse HUB_REQUEST channel — fleet RCE
+            # (TRIGGER_ALL_UPDATES fans SPOKE_UPDATE to every spoke) + cross-tenant
+            # log/roster harvest. But `is_bf` above is SELF-ASSERTED: module_type
+            # and spoke_id are spoke-supplied at connect (main.py ~4535) and
+            # spoofable. So an approved-but-ordinary spoke — e.g. one auto-approved
+            # with only a *tenant-scoped* onboarding PSK — that simply claims
+            # module_type "ab" would otherwise be minted this fleet-authority cert,
+            # escalating one tenant's PSK into fleet-wide, cross-tenant RCE.
+            #
+            # Fix: honor an operator allow-list global_config["ab_spoke_ids"] (the
+            # spoke_id or primary key of the real AppBuilder spoke(s)). When it is
+            # SET, ENFORCE it — only a designated spoke gets the pinned SANs; any
+            # other claimant is refused them (it still receives an ordinary
+            # self-identity cert) and flagged. When it is UNSET (legacy default)
+            # today's self-declared behavior is preserved so the live AppBuilder
+            # keeps working, but EVERY grant of the fleet-authority SANs is surfaced
+            # as an anomaly so an unexpected recipient is loud in the logs. Set
+            # ab_spoke_ids to fully close the self-assertion gap.
+            designated = {str(x).strip() for x in (gc.get("ab_spoke_ids") or []) if str(x).strip()}
+            _ab_ok = (not designated) or (spoke_id in designated) or (pk in designated)
+            try:
+                _ab_ip = (self.spoke_telemetry.get(pk, {}) or {}).get("remote_ip")
+            except Exception:  # noqa: BLE001
+                _ab_ip = None
+            _tm = getattr(self, "threat_monitor", None)
+            if _ab_ok:
+                sans = list(dict.fromkeys(pinned + [spoke_id]))
+                # Visibility (never auto-blocks — severity warning): record every
+                # grant of the fleet-authority SANs, noting whether it was an
+                # operator-designated spoke or a legacy self-declared claim.
+                if _tm is not None:
+                    try:
+                        _how = ("designated" if (designated and (spoke_id in designated or pk in designated))
+                                else "legacy-self-declared")
+                        _tm.note_anomaly(
+                            "ab_identity_grant",
+                            f"pinned AppBuilder (fleet-authority) SANs issued to "
+                            f"spoke={spoke_id} pk={pk} module_type={module_type or '?'} "
+                            f"tenant={self.state.get_spoke_tenant(pk) or 'unassigned'} "
+                            f"basis={_how}",
+                            _ab_ip, severity="warning")
+                    except Exception:  # noqa: BLE001
+                        pass
+            else:
+                # Operator designated the AppBuilder spoke(s) and this claimant is
+                # NOT one of them — refuse the fleet-authority SANs (it still gets
+                # an ordinary identity cert via the unchanged `sans=[spoke_id]`).
+                logger.warning(
+                    f"[F-K4] refused pinned AppBuilder SANs to non-designated "
+                    f"spoke={spoke_id} pk={pk} (claimed module_type={module_type!r}); "
+                    f"ab_spoke_ids={sorted(designated)}")
+                self.record_spoke_event(spoke_id, "ab_identity_refused",
+                                        f"claimed module_type={module_type!r} — not in ab_spoke_ids")
+                if _tm is not None:
+                    try:
+                        _tm.note_anomaly(
+                            "ab_identity_spoof",
+                            f"non-designated spoke={spoke_id} pk={pk} claimed "
+                            f"AppBuilder (module_type={module_type or '?'}) — pinned "
+                            f"fleet-authority SANs REFUSED (ab_spoke_ids enforced)",
+                            _ab_ip, severity="warning")
+                    except Exception:  # noqa: BLE001
+                        pass
         cn = sans[0]
         try:
             fullchain, key = mtls_ca.issue_client_cert(cn, sans=sans, days=397)
