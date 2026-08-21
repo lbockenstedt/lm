@@ -118,7 +118,19 @@ _KEEPALIVE_CMDS = {
     # The newer/larger CPPM servers answer these slowly enough to blow the base
     # request_response timeout, so the nac agent must emit keepalives too.
     "CPPM_GET_NAC_STATUS", "CPPM_GET_SYSTEM_HEALTH", "CPPM_GET_ACCESS_TRACKER",
-    "CPPM_REFRESH_CACHE", "LIST_ENDPOINTS", "GET_LOGS",
+    "CPPM_REFRESH_CACHE", "LIST_ENDPOINTS", "GET_LOGS", "CPPM_SYNC_ENDPOINTS",
+    # Bulk IPAM / DNS / DHCP / firewall reads+syncs whose runtime scales with
+    # the fleet size — same failure mode as the CPPM reads above. These already
+    # carry generous fixed base timeouts (30–60s) at their call sites, but
+    # without keepalives a big enough fleet hard-fails at that ceiling instead
+    # of extending toward the hard limit. Their spokes all extend
+    # BaseControlPlane, so listing here is enough for them to emit progress.
+    "NETBOX_GET_DEVICES", "NETBOX_GET_IPS", "NETBOX_GET_PREFIXES",
+    "NETBOX_GET_RACKS", "NETBOX_SYNC_DEVICES",
+    "DNS_SYNC", "DHCP_SYNC", "OPNSENSE_GET_ALL_RULES", "HENET_LIST",
+    # AppBuilder log analysis: genuinely long (LLM on a CPU model, queued behind
+    # the single fix slot — 600s base) so it must keep the deadline alive.
+    "ANALYZE_LOGS",
 }
 
 # Seconds between SPOKE_PROGRESS keepalive frames while a slow command runs.

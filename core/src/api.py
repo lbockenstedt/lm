@@ -903,13 +903,18 @@ async def _fetch_module(hub, tenant_id: str, module_key: str, fw_id: str = None)
             # bound; clears it the moment a usable instance is pushed.
             if spoke in hub._nac_unconfigured_spokes:
                 _set_cache_status(tenant_id, cache_key, "error"); return False
-            result = await hub.request_response(spoke, "CPPM_GET_ACCESS_TRACKER", {})
+            # 20s, not the 5.0s default: these bulk CPPM reads hit the same
+            # large ClearPass servers as the /api/cppm routes and (like the
+            # netbox GETs below) blow the bare default on a big fleet. Now in
+            # _KEEPALIVE_CMDS, so the 20s base lets the first keepalive land and
+            # extend the deadline toward the hard ceiling.
+            result = await hub.request_response(spoke, "CPPM_GET_ACCESS_TRACKER", {}, timeout=20.0)
         elif module_key == "cppm_devices":
             spoke = hub.get_spoke_by_type("nac")
             if not spoke: _set_cache_status(tenant_id, cache_key, "error"); return False
             if spoke in hub._nac_unconfigured_spokes:
                 _set_cache_status(tenant_id, cache_key, "error"); return False
-            result = await hub.request_response(spoke, "LIST_ENDPOINTS", {})
+            result = await hub.request_response(spoke, "LIST_ENDPOINTS", {}, timeout=20.0)
         elif module_key in ("netbox_racks", "netbox_devices", "netbox_ips", "netbox_prefixes"):
             spoke = hub.get_spoke_by_type("ipam")
             if not spoke: _set_cache_status(tenant_id, cache_key, "error"); return False
@@ -931,7 +936,10 @@ async def _fetch_module(hub, tenant_id: str, module_key: str, fw_id: str = None)
             if not spoke: _set_cache_status(tenant_id, cache_key, "error"); return False
             cfg = hub.state.get_tenant(tenant_id) or {}
             payload = {"tag_filter": cfg["proxmox_tag"]} if cfg.get("proxmox_tag") else {}
-            result = await hub.request_response(spoke, "PXMX_LIST_VMS", payload)
+            # 30s, not the 5.0s default: PXMX_LIST_VMS is slow on a big cluster
+            # (the other call sites already use 8–30s). It's a keepalive command,
+            # so the 30s base lets the first progress frame land and extend.
+            result = await hub.request_response(spoke, "PXMX_LIST_VMS", payload, timeout=30.0)
 
         if result is not None:
             _set_cache_entry(tenant_id, cache_key, _normalize_cached(result))
