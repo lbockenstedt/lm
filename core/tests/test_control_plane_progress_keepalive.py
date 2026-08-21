@@ -129,3 +129,20 @@ def test_non_keepalive_command_never_emits_progress():
 
     assert "SPOKE_PROGRESS" not in ws.types()
     assert ws.types()[-1] == "COMMAND_RESULT"
+
+
+def test_slow_cppm_nac_status_emits_progress():
+    """Regression: the newer/larger CPPM servers answer CPPM_GET_NAC_STATUS
+    slowly enough to blow the base request_response timeout. It's now in
+    _KEEPALIVE_CMDS, so a slow nac read emits keepalives that extend the hub's
+    deadline instead of logging ``Request Timeout: [CPPM_GET_NAC_STATUS]``."""
+    assert "CPPM_GET_NAC_STATUS" in cp._KEEPALIVE_CMDS
+    spoke = _Spoke(_StubModule(delay=0.18), module_name="cppm")
+    ws = _dispatch(spoke, "CPPM_GET_NAC_STATUS", delay_interval=0.05)
+
+    types = ws.types()
+    assert "SPOKE_PROGRESS" in types
+    assert types[-1] == "COMMAND_RESULT"
+    for f in ws.frames:
+        if f.get("payload", {}).get("type") == "SPOKE_PROGRESS":
+            assert f.get("correlation_id") == "corr-123"

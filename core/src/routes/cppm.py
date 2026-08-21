@@ -118,7 +118,7 @@ def register(app, hub, ctx):
             logger.error("API: No CPPM spoke connected for refresh")
             raise HTTPException(status_code=503, detail="No spoke connected")
         try:
-            result = await hub.request_response(cppm_spoke, "CPPM_REFRESH_CACHE", {})
+            result = await hub.request_response(cppm_spoke, "CPPM_REFRESH_CACHE", {}, timeout=20.0)
             return result
         except Exception as e:
             logger.error(f"API: Error refreshing CPPM cache: {e}", exc_info=True)
@@ -161,7 +161,7 @@ def register(app, hub, ctx):
             logger.error("API: No CPPM spoke connected")
             raise HTTPException(status_code=503, detail="No spoke connected")
         try:
-            result = await hub.request_response(cppm_spoke, "CPPM_GET_SYSTEM_HEALTH", {})
+            result = await hub.request_response(cppm_spoke, "CPPM_GET_SYSTEM_HEALTH", {}, timeout=20.0)
             data = result.get("payload", {}).get("data", {}) if isinstance(result, dict) else result
             logger.info(f"API: Received CPPM health: {data}")
             return data
@@ -518,7 +518,7 @@ def register(app, hub, ctx):
             logger.error("API: No CPPM spoke connected")
             raise HTTPException(status_code=503, detail="No spoke connected")
         try:
-            result = await hub.request_response(cppm_spoke, "GET_LOGS", {"start": start, "end": end})
+            result = await hub.request_response(cppm_spoke, "GET_LOGS", {"start": start, "end": end}, timeout=20.0)
             data = _unwrap_spoke(result)
             return await _filter_tenant(request, data, "nac", ["ip", "nas_ip_address"], tenant)
         except Exception as e:
@@ -550,7 +550,7 @@ def register(app, hub, ctx):
             if not cppm_spoke:
                 raise HTTPException(status_code=503, detail="No spoke connected")
             try:
-                result = await hub.request_response(cppm_spoke, "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset})
+                result = await hub.request_response(cppm_spoke, "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset}, timeout=20.0)
                 return await _filter_tenant(request, _cppm_unwrap(result), "nac", ["ip"], tenant)
             except HTTPException:
                 raise
@@ -584,7 +584,7 @@ def register(app, hub, ctx):
                     return await _filter_session(request, cached["data"], "nac", ["ip"])
             raise HTTPException(status_code=503, detail="No spoke connected")
         try:
-            result = await hub.request_response(cppm_spoke, "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset})
+            result = await hub.request_response(cppm_spoke, "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset}, timeout=20.0)
             return await _filter_session(request, _cppm_unwrap(result), "nac", ["ip"])
         except HTTPException:
             raise
@@ -599,7 +599,7 @@ def register(app, hub, ctx):
         if not cppm_spoke:
             raise HTTPException(status_code=503, detail="No spoke connected")
         try:
-            result = await hub.request_response(cppm_spoke, "CPPM_GET_NAC_STATUS", {})
+            result = await hub.request_response(cppm_spoke, "CPPM_GET_NAC_STATUS", {}, timeout=20.0)
             return _cppm_unwrap(result)
         except HTTPException:
             raise

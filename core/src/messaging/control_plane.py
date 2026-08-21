@@ -114,6 +114,11 @@ logger = logging.getLogger("BaseControlPlane")
 _KEEPALIVE_CMDS = {
     "GET_NODE_STATS", "PXMX_LIST_VMS", "GET_VM_LIST", "GET_VM_INFO",
     "GET_SYSTEM_STATS", "GET_AGENTS", "RUN_COMMAND", "SPOKE_RELAY",
+    # CPPM/NAC reads that enumerate large datasets on a busy ClearPass cluster.
+    # The newer/larger CPPM servers answer these slowly enough to blow the base
+    # request_response timeout, so the nac agent must emit keepalives too.
+    "CPPM_GET_NAC_STATUS", "CPPM_GET_SYSTEM_HEALTH", "CPPM_GET_ACCESS_TRACKER",
+    "CPPM_REFRESH_CACHE", "LIST_ENDPOINTS", "GET_LOGS",
 }
 
 # Seconds between SPOKE_PROGRESS keepalive frames while a slow command runs.
