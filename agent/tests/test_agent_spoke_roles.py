@@ -39,6 +39,10 @@ def test_role_map_has_all_roles_with_correct_module_types():
         "proxmox":    "hypervisor",
         "le":         "certificates",
         "console":    "console",
+        "henet":      "henet",
+        "statuspage": "statuspage",
+        "proxy":      "proxy",
+        "truenas":    "storage",
     }
     assert set(_ROLE_MAP.keys()) == set(expected.keys()), \
         f"missing/extra roles: {set(_ROLE_MAP.keys()) ^ set(expected.keys())}"
@@ -47,7 +51,7 @@ def test_role_map_has_all_roles_with_correct_module_types():
         assert got_mtype == mtype, f"{role}: module_type {got_mtype!r} != {mtype!r}"
         assert cls_name, f"{role}: empty class name"
         # in-repo roles have no clone URL; the siblings do (incl. le).
-        if role in ("dns", "dhcp", "console"):
+        if role in ("dns", "dhcp", "console", "henet", "statuspage", "proxy"):
             assert repo_url is None, f"{role} should be in-repo (no repo_url)"
         else:
             assert isinstance(repo_url, str) and repo_url.startswith("https://"), \
@@ -286,6 +290,8 @@ class _FakeControlPlane:
     hub_url = "ws://hub:8765"
     def _persist_secret_to_env(self, key, val):
         self.env[key] = val
+    def _read_env_value(self, key):
+        return self.env.get(key, "")
 
 
 class _FakeRoleConn:
@@ -475,6 +481,37 @@ def test_unload_role_without_arg_errors_when_multiple_loaded(monkeypatch):
 
     assert res["status"] == "ERROR"
     assert set(res["active"]) == {"dns", "dhcp"}
+
+
+def test_boot_seed_interrupted_midway_does_not_truncate_loaded_roles(monkeypatch):
+    """Regression (lrb-agent outage): boot seeds roles sequentially and each
+    successful LOAD_ROLE persists LOADED_ROLES. A self-update restart landing
+    mid-seed (e.g. while a later role's pip install runs) must NOT freeze the
+    persisted set at the partial subset loaded so far — the later roles would be
+    permanently evicted on every subsequent boot.
+
+    _resolve_startup_roles() persists the full desired union BEFORE seeding, so
+    the seed loop's per-role persists must UNION with that (never shrink)."""
+    agent = GenericAgent("agent-1", {})
+    cp = _FakeControlPlane()
+    # Boot: _resolve_startup_roles already wrote the full desired set.
+    cp.env["LOADED_ROLES"] = "console,cppm,network,proxy"
+    agent.control_plane = cp
+    _stub_role_load(agent, monkeypatch)
+    _patch_role_conn(monkeypatch)
+
+    async def _run():
+        # Simulate the seed loop getting only partway (console, cppm) before a
+        # self-update restart exits the process.
+        await agent.handle_command("LOAD_ROLE", {"role": "console"})
+        await agent.handle_command("LOAD_ROLE", {"role": "cppm"})
+        await asyncio.sleep(0)
+    asyncio.run(_run())
+
+    # network + proxy were never loaded this boot, but must SURVIVE in .env so
+    # the next boot re-seeds them — the load must not shrink the durable set.
+    assert set(cp.env["LOADED_ROLES"].split(",")) == {
+        "console", "cppm", "network", "proxy"}
 
 
 # ── 6. RoleConnection: identity, auth, per-role SPOKE_UPDATE ─────────────────

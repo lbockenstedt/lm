@@ -1225,20 +1225,31 @@ class GenericAgent(BaseSpoke):
         except (asyncio.CancelledError, Exception):
             pass
         logger.info("Role unloaded: %s (sub-spoke %s)", role_name, conn.spoke_id)
-        self._persist_loaded_roles()
+        self._persist_loaded_roles(remove={role_name})
 
-    def _persist_loaded_roles(self) -> None:
-        """Persist the loaded-role set to .env (LOADED_ROLES) so runtime-loaded
+    def _persist_loaded_roles(self, *, remove: Optional[set] = None) -> None:
+        """Persist the desired-role set to .env (LOADED_ROLES) so runtime-loaded
         roles survive a self-update restart (the RoleConnection SPOKE_UPDATE
         handler exits the whole process; AgentControlPlane re-spawns every role
         in LOADED_ROLES on the next boot). No-op if the control plane isn't
-        wired yet (e.g. construction-time)."""
+        wired yet (e.g. construction-time).
+
+        The persisted set is the UNION of the roles already in .env and the
+        roles currently loaded — a load never SHRINKS the durable set. This is
+        critical during boot-seeding: roles load sequentially, and each one used
+        to overwrite LOADED_ROLES with only the subset loaded so far, so a
+        self-update restart landing mid-seed (e.g. while a later role's pip
+        install runs) would freeze the persisted set at that partial subset and
+        permanently evict every not-yet-loaded role. Removal happens ONLY via an
+        explicit UNLOAD_ROLE (``remove=``), never as a side effect of a load."""
         cp = getattr(self, "control_plane", None)
         if cp is None:
             return
-        roles = sorted(self._roles.keys())
         try:
-            cp._persist_secret_to_env("LOADED_ROLES", ",".join(roles))
+            existing = {r for r in cp._read_env_value("LOADED_ROLES").split(",")
+                        if r.strip()}
+            roles = (existing | set(self._roles.keys())) - (remove or set())
+            cp._persist_secret_to_env("LOADED_ROLES", ",".join(sorted(roles)))
         except Exception as e:
             logger.warning("Could not persist LOADED_ROLES: %s", e)
 
