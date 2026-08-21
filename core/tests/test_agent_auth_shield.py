@@ -86,3 +86,50 @@ def test_shield_fails_closed_on_error():
             raise RuntimeError("boom")
     # An internal error must never grant the exemption.
     assert main.LabManagerHub._is_approved_install_reconnect(_Broken(), "x", _UUID) is False
+
+
+# ── reconnect exemption budget (rate cap) ───────────────────────────────────
+
+class _BudgetHub:
+    _RECONNECT_EXEMPTION_WINDOW_S = main.LabManagerHub._RECONNECT_EXEMPTION_WINDOW_S
+    _RECONNECT_EXEMPTION_CAP = main.LabManagerHub._RECONNECT_EXEMPTION_CAP
+
+    def __init__(self):
+        self._known_install_glitches = {}
+
+
+def _budget(hub, ip):
+    return main.LabManagerHub._within_reconnect_exemption_budget(hub, ip)
+
+
+def test_reconnect_budget_allows_a_reboot_burst():
+    # A 15-role agent rebooting (with retries) stays well under the cap.
+    hub = _BudgetHub()
+    assert all(_budget(hub, "10.0.0.5") for _ in range(45)) is True
+
+
+def test_reconnect_budget_blocks_a_sustained_stream():
+    # A leaked-uuid guessing loop from one IP eventually blows the budget →
+    # further attempts are no longer exempt (fall back to invalid_secret).
+    hub = _BudgetHub()
+    cap = main.LabManagerHub._RECONNECT_EXEMPTION_CAP
+    exempt = [_budget(hub, "203.0.113.9") for _ in range(cap + 5)]
+    assert exempt[:cap] == [True] * cap          # within budget
+    assert exempt[cap] is False                   # first over-budget attempt
+    assert exempt[-1] is False                    # stays blocked
+
+
+def test_reconnect_budget_is_per_ip():
+    # One noisy IP must not consume another IP's budget.
+    hub = _BudgetHub()
+    cap = main.LabManagerHub._RECONNECT_EXEMPTION_CAP
+    for _ in range(cap + 5):
+        _budget(hub, "203.0.113.9")
+    assert _budget(hub, "10.0.0.6") is True
+
+
+def test_reconnect_budget_fails_open_without_ip():
+    hub = _BudgetHub()
+    assert _budget(hub, "") is True
+    assert _budget(hub, None) is True
+

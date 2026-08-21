@@ -369,6 +369,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # approval/tenant binding/config instead of treating it as a stranger.
         self.install_uuid_index: Dict[str, str] = {}
         self._rebuild_install_uuid_index()
+        # Per-IP budget for the approved-install reconnect exemption (see
+        # _is_approved_install_reconnect / _within_reconnect_exemption_budget):
+        # peer_ip -> deque[timestamps] of exemptions granted in the last hour.
+        self._known_install_glitches: Dict[str, deque] = {}
         # Phase 2 guid-primary: once a spoke is lazily migrated to
         # guid-primary, spoke_id_alias maps the spoke_id it CONNECTS with →
         # the guid its routing/approval/crypto/mailbox state lives under.
@@ -4678,7 +4682,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     # approved identity, so this exempts the reboot/rotation glitch
                     # without weakening detection of a real guessing source (which
                     # has no such identity proof and still trips the block).
-                    if self._is_approved_install_reconnect(spoke_id, install_uuid):
+                    if (self._is_approved_install_reconnect(spoke_id, install_uuid)
+                            and self._within_reconnect_exemption_budget(peer_ip)):
                         self.record_spoke_event(
                             spoke_id, "auth_glitch_known_install",
                             "invalid secret from an approved install (reboot/rotation) "
@@ -4690,6 +4695,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     else:
                         # Established-good IPs are also success-grace exempt (above),
                         # so a probing source with neither identity proof nor grace
+                        # — or a proven identity that BLEW the reconnect budget (a
+                        # sustained stale-secret stream, i.e. not a bounded reboot) —
                         # trips the block at threshold.
                         self._record_spoke_auth_failure(peer_ip, spoke_id, "invalid_secret")
                     await websocket.close(1008, "Authentication failed")
@@ -8219,6 +8226,44 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             return bool(self.approved_modules.get(self._primary_key(spoke_id)))
         except Exception:  # noqa: BLE001 — never let the shield break a connect
             return False
+
+    _RECONNECT_EXEMPTION_WINDOW_S = 3600.0
+    _RECONNECT_EXEMPTION_CAP = 120
+
+    def _within_reconnect_exemption_budget(self, peer_ip) -> bool:
+        """Rate-cap the approved-install reconnect exemption per source IP.
+
+        A genuine reboot burst is BOUNDED — at most ~one stale-secret glitch per
+        hosted role (a multi-role agent tops out around 15) plus a couple of
+        reconnect retries, after which the agent re-negotiates a fresh secret and
+        goes quiet. A *sustained* stream from one IP is the opposite: it means
+        someone who somehow learned a valid ``install_uuid`` is replaying it to
+        guess secrets unthrottled. The cap (120 / hour) sits comfortably above
+        the worst-case reboot yet finite, so past it the attempts spill back into
+        the normal ``invalid_secret`` counter and the threat monitor / NSG can
+        act — restoring both visibility and the auto-block. Fail-OPEN on any
+        error: the caller already proved an approved identity, so a bookkeeping
+        hiccup must never block a legitimate reconnect."""
+        try:
+            if not peer_ip:
+                return True
+            now = time.time()
+            buf = self._known_install_glitches.setdefault(peer_ip, deque())
+            horizon = now - self._RECONNECT_EXEMPTION_WINDOW_S
+            while buf and buf[0] < horizon:
+                buf.popleft()
+            buf.append(now)
+            if len(buf) > self._RECONNECT_EXEMPTION_CAP:
+                logger.warning(
+                    "IP %s exceeded the known-install reconnect exemption budget "
+                    "(%d in %ds) — treating further stale-secret attempts as "
+                    "invalid_secret so the threat monitor can act.",
+                    peer_ip, self._RECONNECT_EXEMPTION_CAP,
+                    int(self._RECONNECT_EXEMPTION_WINDOW_S))
+                return False
+            return True
+        except Exception:  # noqa: BLE001 — bookkeeping must never block a reconnect
+            return True
 
     def _record_spoke_auth_failure(self, peer_ip: Optional[str], spoke_id,
                                    detail: str) -> None:
