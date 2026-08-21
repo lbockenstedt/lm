@@ -697,13 +697,26 @@ class AgentControlPlane(BaseControlPlane):
 
         Roles removed from STARTUP_ROLES are NOT auto-dropped (LOADED_ROLES
         keeps them); use UNLOAD_ROLE to retire one. Unknown role names (not in
-        _ROLE_MAP) are filtered out so a stale entry can't crash the seed loop."""
-        persisted = [r for r in self._read_env_value("LOADED_ROLES").split(",")
-                     if r.strip() and r in _ROLE_MAP]
-        roles = list(dict.fromkeys([*persisted, *self._cli_roles]))  # union, order-stable
-        if roles:
-            self._persist_secret_to_env("LOADED_ROLES", ",".join(roles))
-        return roles
+        _ROLE_MAP) are SKIPPED for this boot's seed but KEPT in .env — a role
+        whose module is transiently unimportable mid-update (so it's briefly
+        absent from _ROLE_MAP) must not be permanently evicted; it re-seeds once
+        the code settles. The persisted set is only ever rewritten to GROW (union
+        with CLI roles), never to shrink."""
+        raw = [r.strip() for r in self._read_env_value("LOADED_ROLES").split(",")
+               if r.strip()]
+        # Union with CLI/STARTUP_ROLES. Do NOT filter by _ROLE_MAP here: filtering
+        # then re-persisting the smaller set is a truncation vector (a transiently
+        # unknown role would be dropped from .env for good).
+        desired = list(dict.fromkeys([*raw, *self._cli_roles]))  # union, order-stable
+        # Persist ONLY when the union added something (never a shrink / no-op churn).
+        if desired and set(desired) != set(raw):
+            self._persist_secret_to_env("LOADED_ROLES", ",".join(desired))
+        seed = [r for r in desired if r in _ROLE_MAP]
+        skipped = [r for r in desired if r not in _ROLE_MAP]
+        if skipped:
+            logger.warning("Skipping unknown role(s) this boot (kept in .env for a "
+                           "later retry): %s", skipped)
+        return seed
 
     async def run(self):
         startup_roles = self._resolve_startup_roles()

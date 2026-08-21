@@ -514,6 +514,53 @@ def test_boot_seed_interrupted_midway_does_not_truncate_loaded_roles(monkeypatch
         "console", "cppm", "network", "proxy"}
 
 
+class _ResolveHost:
+    """Minimal host to exercise the real AgentControlPlane._resolve_startup_roles
+    against an in-memory .env — no hub, no filesystem."""
+    def __init__(self, loaded_roles="", cli_roles=None):
+        self._env = {"LOADED_ROLES": loaded_roles} if loaded_roles else {}
+        self._cli_roles = list(cli_roles or [])
+
+    def _read_env_value(self, key):
+        return self._env.get(key, "")
+
+    def _persist_secret_to_env(self, key, value):
+        self._env[key] = value
+
+    _resolve_startup_roles = AgentControlPlane._resolve_startup_roles
+
+
+def test_resolve_startup_roles_keeps_unknown_role_and_never_shrinks(monkeypatch):
+    """A persisted role transiently absent from _ROLE_MAP (e.g. its module is
+    briefly unimportable mid self-update) must be SKIPPED for this boot's seed
+    but KEPT in .env — filtering then re-persisting the smaller set would evict
+    it permanently (a 'randomly removed role' vector)."""
+    h = _ResolveHost(loaded_roles="console,cppm,network,proxy,bogusrole")
+    seed = h._resolve_startup_roles()
+    # bogusrole is not seeded (unknown)...
+    assert "bogusrole" not in seed
+    assert set(seed) == {"console", "cppm", "network", "proxy"}
+    # ...but it is NOT evicted from .env — still present for a later retry.
+    assert "bogusrole" in h._env["LOADED_ROLES"].split(",")
+
+
+def test_resolve_startup_roles_unions_cli_and_grows_only(monkeypatch):
+    """CLI/STARTUP_ROLES is unioned in and persisted when it ADDS a role; an
+    all-known persisted set with no new CLI roles is a no-op (no churn, no
+    shrink)."""
+    h = _ResolveHost(loaded_roles="console", cli_roles=["cppm"])
+    seed = h._resolve_startup_roles()
+    assert set(seed) == {"console", "cppm"}
+    assert set(h._env["LOADED_ROLES"].split(",")) == {"console", "cppm"}
+
+    # No new CLI roles → the persisted set is unchanged (never shrinks/churns).
+    h2 = _ResolveHost(loaded_roles="console,cppm,network,proxy")
+    before = h2._env["LOADED_ROLES"]
+    seed2 = h2._resolve_startup_roles()
+    assert set(seed2) == {"console", "cppm", "network", "proxy"}
+    assert h2._env["LOADED_ROLES"] == before
+
+
 # ── 6. RoleConnection: identity, auth, per-role SPOKE_UPDATE ─────────────────
 
 class _FakeRoleInstance:

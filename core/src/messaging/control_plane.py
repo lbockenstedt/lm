@@ -62,6 +62,14 @@ except ImportError:
                 pass
         return truncated
 
+# Serializes .env upserts across every in-process spoke (base agent + each
+# hosted role's control plane all share one .env). Combined with the atomic
+# temp-file+os.replace write in _persist_secret_to_env, this makes each upsert a
+# safe read-modify-write and never exposes a truncated/partial file to a
+# concurrent reader — the race behind roles "randomly" vanishing from
+# LOADED_ROLES (and secrets/URLs being lost) on a busy multi-role agent.
+_ENV_FILE_LOCK = threading.Lock()
+
 # Code-drift watchdog mixin — shared with the device-mode SpokeClient (agent
 # repo) so both consumers run ONE source of truth. Same-package relative import
 # with a bare-module fallback (mirrors the logging_setup block above).
@@ -2368,29 +2376,61 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         return {"status": "SUCCESS", "data": results}
 
     def _persist_secret_to_env(self, key: str, value: str) -> None:
-        """Upserts a key=value line in the spoke's .env file, creating it if needed."""
-        try:
-            env_path = os.path.join(self._repo_root(), ".env")
-            lines: list = []
-            if os.path.exists(env_path):
-                with open(env_path, "r") as f:
-                    lines = f.readlines()
-            updated = []
-            found = False
-            prefix = f"{key}="
-            for line in lines:
-                if line.startswith(prefix):
+        """Upserts a key=value line in the spoke's .env file, creating it if needed.
+
+        Atomic + serialized: the read-modify-write runs under a per-process lock
+        (`_ENV_FILE_LOCK`) and the new contents are written to a temp file then
+        `os.replace`d into place. A plain open("w") truncate-then-rewrite let a
+        concurrent reader see an empty/partial file and let interleaved writers
+        drop each other's lines — observed as roles "randomly" disappearing from
+        LOADED_ROLES on a busy multi-role agent (base agent + every hosted role's
+        control plane persist secrets/URLs/roles to the SAME .env). The rename is
+        atomic on POSIX, so a reader either sees the whole old file or the whole
+        new one — never a truncated one."""
+        with _ENV_FILE_LOCK:
+            try:
+                env_path = os.path.join(self._repo_root(), ".env")
+                lines: list = []
+                mode = 0o600
+                if os.path.exists(env_path):
+                    try:
+                        mode = os.stat(env_path).st_mode & 0o777
+                    except OSError:
+                        pass
+                    with open(env_path, "r") as f:
+                        lines = f.readlines()
+                updated = []
+                found = False
+                prefix = f"{key}="
+                for line in lines:
+                    if line.startswith(prefix):
+                        updated.append(f"{prefix}{value}\n")
+                        found = True
+                    else:
+                        updated.append(line)
+                if not found:
                     updated.append(f"{prefix}{value}\n")
-                    found = True
-                else:
-                    updated.append(line)
-            if not found:
-                updated.append(f"{prefix}{value}\n")
-            with open(env_path, "w") as f:
-                f.writelines(updated)
-            logger.info("Persisted %s to %s", key, env_path)
-        except Exception as e:
-            logger.warning("Failed to persist %s to .env: %s", key, e)
+                # Atomic replace: write a sibling temp file (same dir → same fs,
+                # so os.replace is a rename, not a cross-device copy), fsync, then
+                # swap it in. A reader never sees a half-written .env.
+                env_dir = os.path.dirname(env_path) or "."
+                fd, tmp_path = tempfile.mkstemp(prefix=".env.", dir=env_dir)
+                try:
+                    with os.fdopen(fd, "w") as f:
+                        f.writelines(updated)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.chmod(tmp_path, mode)
+                    os.replace(tmp_path, env_path)
+                except Exception:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+                    raise
+                logger.info("Persisted %s to %s", key, env_path)
+            except Exception as e:
+                logger.warning("Failed to persist %s to .env: %s", key, e)
 
     def _persist_session_secret(self, new_secret: str) -> None:
         """Writes the rotated session key back to .env so it survives spoke restarts."""
