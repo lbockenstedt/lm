@@ -223,3 +223,67 @@ async def test_update_health_warning_re_logged_after_clearing(caplog):
                and "CLEARED" in r.message and "hub empty" in r.message]
     assert len(warns) == 2, "re-logged at WARNING when it re-appears after clearing"
     assert len(cleared) == 1, "clearing is logged once at INFO"
+
+
+# ── site-extension (private ext repo) sync → gated restart on tip move ────────
+# The private operator ext repo (e.g. detection tripwires) is provisioned at
+# app-build time, so a changed extension only takes effect after a restart. The
+# repo-sync cycle re-provisions it and, ONLY when its git tip actually moves,
+# requests the SAME gated watchdog restart the hub uses for its own updates.
+
+class _SiteExtHub(_RepoSyncHub):
+    """Hub stand-in with a controllable _git_head sequence + recorded restart."""
+    def __init__(self, heads, **kw):
+        super().__init__(**kw)
+        self._heads = list(heads)          # returned by _git_head in order
+        self.restart_calls = []            # (reason, force) per request
+
+    async def _git_head(self, repo_dir):
+        return self._heads.pop(0) if self._heads else ""
+
+    def _request_watchdog_restart(self, reason, force=False):
+        self.restart_calls.append((reason, force))
+
+
+def _patch_site_ext(monkeypatch, tmp_path, provision_exc=None):
+    import site_ext
+    d = tmp_path / "site_ext"
+    (d / ".git").mkdir(parents=True)       # has_git → before/after are read
+    monkeypatch.setattr(site_ext, "ext_dir", lambda hub: str(d))
+
+    async def _prov(hub):
+        if provision_exc:
+            raise provision_exc
+    monkeypatch.setattr(site_ext, "provision", _prov)
+    return str(d)
+
+
+@pytest.mark.asyncio
+async def test_site_ext_tip_move_schedules_gated_restart(monkeypatch, tmp_path):
+    _patch_site_ext(monkeypatch, tmp_path)
+    # before=aaaaaaaaaa, after=bbbbbbbbbb → changed → one NON-force restart.
+    h = _SiteExtHub(heads=["a" * 10, "b" * 10])
+    res = await h.run_repo_sync_all()
+    assert h.restart_calls == [("site-ext aaaaaaaaaa->bbbbbbbbbb", False)]
+    se = [r for r in res["provisioning_repos"] if r.get("name") == "site_ext"]
+    assert se and se[0]["changed"] is True
+
+
+@pytest.mark.asyncio
+async def test_site_ext_unchanged_no_restart(monkeypatch, tmp_path):
+    _patch_site_ext(monkeypatch, tmp_path)
+    # identical before/after → no tip move → no restart requested.
+    h = _SiteExtHub(heads=["c" * 10, "c" * 10])
+    res = await h.run_repo_sync_all()
+    assert h.restart_calls == []
+    se = [r for r in res["provisioning_repos"] if r.get("name") == "site_ext"]
+    assert se and se[0]["changed"] is False
+
+
+@pytest.mark.asyncio
+async def test_site_ext_provision_failure_is_best_effort(monkeypatch, tmp_path):
+    _patch_site_ext(monkeypatch, tmp_path, provision_exc=RuntimeError("token expired"))
+    h = _SiteExtHub(heads=["d" * 10])      # provision raises before 2nd head read
+    res = await h.run_repo_sync_all()       # must not raise; cycle still completes
+    assert h.restart_calls == []            # no restart on a failed provision
+    assert h.perform_calls == 1             # main sync path still ran

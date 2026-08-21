@@ -122,6 +122,48 @@ class RepoSyncMixin:
                     "commit_before": before, "commit_after": "",
                     "changed": False}
 
+    async def _sync_site_ext(self) -> Dict[str, Any]:
+        """Re-provision the private operator site-extension repo on the repo-sync
+        cadence and, only if its tip actually moved, request a gated hub restart
+        so the new module code is re-imported.
+
+        site_ext modules are imported + ``register()``-ed at app-build time
+        (``create_app`` -> ``site_ext.load``); their middleware/routes cannot be
+        swapped on a live app. So a changed extension takes effect only after a
+        restart — provisioning alone would stage new code on disk but leave it
+        inactive. We reuse the SAME reliable, gated watchdog-restart path the hub
+        uses for its own updates: a non-force sentinel, which the watchdog defers
+        while users are actively logged in. No source configured / disabled ->
+        ``provision`` no-ops and the tip never moves, so nothing restarts.
+        Best-effort — never raises into the sync loop.
+        """
+        try:
+            import site_ext
+            d = site_ext.ext_dir(self)
+        except Exception as e:  # noqa: BLE001 — optional feature, never fatal
+            logger.debug("repo_sync site_ext: unavailable (%s)", e)
+            return {}
+        has_git = os.path.isdir(os.path.join(d, ".git"))
+        before = await self._git_head(d) if has_git else ""
+        try:
+            await site_ext.provision(self)
+        except Exception as e:  # noqa: BLE001 — best-effort
+            logger.debug("repo_sync site_ext provision failed: %s", e)
+            return {}
+        after = await self._git_head(d) if os.path.isdir(os.path.join(d, ".git")) else ""
+        changed = bool(before) and bool(after) and before != after
+        if changed:
+            logger.info("repo_sync: site extensions updated %s->%s — scheduling "
+                        "gated hub restart to load new code",
+                        before[:10], after[:10])
+            try:
+                self._request_watchdog_restart(
+                    f"site-ext {before[:10]}->{after[:10]}", force=False)
+            except Exception as e:  # noqa: BLE001 — signalling is best-effort
+                logger.debug("repo_sync site_ext restart request failed: %s", e)
+        return {"name": "site_ext", "status": "ok", "commit_before": before,
+                "commit_after": after, "changed": changed}
+
     async def run_repo_sync_all(self, force_spokes: bool = False,
                                 force: bool = False) -> Dict[str, Any]:
         """Run one GitHub repo-sync cycle and record its status.
@@ -174,6 +216,17 @@ class RepoSyncMixin:
                     repo_results.append(await self._git_pull_repo(sub))
         except Exception as e:  # noqa: BLE001 — best-effort, never fatal
             logger.warning("[sync-error] repo_sync provisioning_repos scan failed: %s", e)
+
+        # ── private operator site-extension repo (optional; e.g. tripwires) ─
+        # Re-sync the out-of-band ext repo on the same cadence and, if its tip
+        # moved, schedule a gated restart so the updated modules load. Keeps the
+        # hub's private extensions current without a manual restart.
+        try:
+            se = await self._sync_site_ext()
+            if se:
+                repo_results.append(se)
+        except Exception as e:  # noqa: BLE001 — best-effort, never fatal
+            logger.warning("[sync-error] repo_sync site_ext sync failed: %s", e)
 
         # ── Sibling-repo latest-version cache refresh ──────────────────────
         # Primary refresh of the per-repo latest-.NN used by the diagnostics
