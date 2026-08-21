@@ -2431,10 +2431,23 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # "CPPM host not configured" / count=None for every query even
                 # though the UI shows the server configured. Resolve the
                 # instance bound to this spoke; fall back to the first unbound
-                # instance (single-product deployments don't bind spoke_id),
-                # then the first instance, then the legacy single-config key.
+                # instance (single-product deployments don't bind spoke_id).
                 # Project through the same field map the Save path uses so the
                 # pushed shape matches a manual Save.
+                #
+                # Regression this guards against: with 2+ instances each bound
+                # to a DIFFERENT spoke (e.g. two ClearPass appliances, one per
+                # tenant, each only reachable from its own spoke), this used to
+                # fall back to "the first instance in the list" whenever the
+                # direct spoke_id match missed for any reason (a race right
+                # after approval, a stale connect-time id, etc.) — silently
+                # pushing ANOTHER spoke's host/credentials onto this one, e.g.
+                # tenant A's ClearPass host landing on tenant B's spoke, which
+                # then fails every query with "no route to host" against an IP
+                # that was never meant for it. Never do that: if this spoke
+                # isn't bound to (and there's no unbound) instance, it simply
+                # isn't configured for this module — push nothing rather than
+                # someone else's config.
                 storage_key, project = _INSTANCE_CONFIG_SOURCES[module_key]
                 gc = self.state.get_global_config()
                 instances = gc.get(storage_key, []) or []
@@ -2443,15 +2456,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 if inst is None:
                     inst = next((x for x in instances
                                  if isinstance(x, dict) and not x.get("spoke_id")), None)
-                if inst is None and instances and isinstance(instances[0], dict):
-                    inst = instances[0]
                 if inst is not None:
                     import instance_vault as _instance_vault
                     inst = await _instance_vault.overlay(self, inst, storage_key)
                     config = project(inst)
-                else:
+                elif not instances:
                     # Pre-multi-instance deployment: push the raw legacy config.
                     config = gc.get(module_key, {})
+                else:
+                    # Every configured instance belongs to a DIFFERENT spoke —
+                    # nothing here is this spoke's to receive.
+                    config = {}
             else:
                 config = self.state.get_global_config().get(module_key, {})
 
