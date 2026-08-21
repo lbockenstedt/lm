@@ -44,6 +44,7 @@ import sys
 import psutil
 import os
 import socket
+import ipaddress
 import ssl
 import uuid
 import secrets
@@ -66,6 +67,7 @@ from simulations.central_hub_poller import CentralHubPoller
 from simulations.mist_hub_poller import MistHubPoller
 from security.auth_manager import AuthManager, LDAPAuthProvider
 from security.threat_monitor import ThreatMonitor
+from security.probe_signatures import looks_like_probe as _edge_looks_like_probe
 from alert_engine import AlertEngine, run_alert_loop
 from security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
                                    encryption_enabled, is_encrypted, wrap)
@@ -1095,6 +1097,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # bearing ack) must survive every rung. Per-spoke last_seq + gap count
         # prove zero loss even while telemetry is being coalesced/shed.
         self._probe_state = {}            # spoke_id -> {"count":int,"last_seq":int,"gaps":int}
+        # Edge-reported HTTPS-port scanner reports (HTTP_PROBE_REPORT): per-reporter
+        # timestamps for the rate cap that stops a compromised edge from flooding
+        # forged reports to poison the NSG blocklist. See _handle_edge_probe_report.
+        self._edge_probe_reports = {}     # reporter spoke_id -> [ts, ...]
+        self._EDGE_PROBE_MAX = 60         # max edge probe reports per reporter / 600s
 
     # Message classes for the escalation ladder. Config-overridable via
     # global_config["backpressure"]["classes"] (type -> class) so the policy is
@@ -5506,6 +5513,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         spoke_id, payload.get("data", {}) or {}))
                     continue
 
+                # --- Edge-reported HTTPS-port scanner (HTTP_PROBE_REPORT) ---
+                # A reverse proxy / AppBuilder / role-hosted spoke UI detected a
+                # scanner on ITS OWN :443 listener and relayed it up (send_to_hub)
+                # so the hub blocks the source centrally — one NSG deny protects
+                # every edge, exactly like the hub's own _looks_like_probe. The
+                # frame's signature already verified above (authenticated spoke);
+                # _handle_edge_probe_report re-classifies the path server-side and
+                # rate-caps the reporter so a compromised edge can't poison the
+                # blocklist. Fire-and-forget: never block the dispatch loop.
+                if payload.get("type") == "HTTP_PROBE_REPORT":
+                    self._handle_edge_probe_report(
+                        spoke_id, remote_ip, payload.get("data", {}) or {})
+                    continue
+
                 # --- Scale-Out Relay Logic ---
                 # _handle_agent_relay_up returns True when it matched + handled a
                 # sub-type (AGENT_LOG/HEARTBEAT/AGENT_TELEMETRY/CS_*), in which case
@@ -8083,6 +8104,71 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             "detail": detail,
         })
         logger.info(f"[spoke-event] {spoke_id} {event}" + (f": {detail}" if detail else ""))
+
+    def _handle_edge_probe_report(self, spoke_id, reporter_ip: Optional[str],
+                                  data: dict) -> None:
+        """Ingest an ``HTTP_PROBE_REPORT`` from an edge component (reverse proxy,
+        AppBuilder, a role-hosted spoke UI) that detected an HTTPS-port scanner
+        on ITS own listener and relayed it up the authenticated tunnel so the hub
+        can auto-block the source centrally (one NSG deny protects every edge).
+
+        This runs only after the frame's signature verified, so the reporter is
+        an authenticated spoke — but a *compromised* edge could still forge
+        reports to poison the blocklist (block a victim / the admin by IP). Three
+        defenses make that useless:
+
+        * **Server-side re-classification** — the reported ``path`` must ITSELF
+          match a scanner signature (``looks_like_probe``); a compromised edge
+          cannot get an arbitrary benign path attributed to a victim.
+        * **Per-reporter rate cap** — at most ``_EDGE_PROBE_MAX`` reports per
+          reporter per window, so one owned edge cannot flood-block a range.
+        * **Exemption reuse** — the report funnels through
+          ``threat_monitor.record_failure``, which already spares trusted /
+          allow-listed / recently-authenticated IPs, so the admin and known-good
+          egresses can never be blocked via a forged report.
+
+        Telemetry-only failure mode: a monitoring hiccup must never break the
+        dispatch loop.
+        """
+        tm = getattr(self, "threat_monitor", None)
+        if not tm:
+            return
+        try:
+            src = str((data or {}).get("source_ip") or "").strip()
+            path = str((data or {}).get("path") or "")
+            method = str((data or {}).get("method") or "?").upper()[:8]
+            node = str((data or {}).get("node") or spoke_id or "?")[:64]
+            if not src:
+                return
+            # Never let an edge attribute a probe to a bogus / non-routable
+            # source (loopback = the edge itself; unparseable = junk).
+            try:
+                ipobj = ipaddress.ip_address(src)
+                if ipobj.is_loopback or ipobj.is_unspecified:
+                    return
+            except ValueError:
+                logger.debug("HTTP_PROBE_REPORT from %s: bad source_ip %r", spoke_id, src)
+                return
+            # Server-side re-validation: the hub does NOT trust the edge's
+            # classification — the reported path must itself look like a probe.
+            if not _edge_looks_like_probe(path):
+                logger.debug("HTTP_PROBE_REPORT from %s: path %r not a probe signature",
+                             spoke_id, path)
+                return
+            # Per-reporter rate cap (blocklist-poisoning defense).
+            now = time.time()
+            window = 600.0
+            times = self._edge_probe_reports.setdefault(spoke_id or node, [])
+            times[:] = [t for t in times if t > now - window]
+            if len(times) >= self._EDGE_PROBE_MAX:
+                logger.warning("HTTP_PROBE_REPORT rate cap hit for reporter %s "
+                               "(%d/%ds) — dropping", spoke_id, self._EDGE_PROBE_MAX, int(window))
+                return
+            times.append(now)
+            tm.record_failure(src, "http_probe",
+                              detail=f"edge {node} ({method} {path[:120]})")
+        except Exception:  # noqa: BLE001 — monitoring must never break dispatch
+            logger.debug("HTTP_PROBE_REPORT ingest failed", exc_info=True)
 
     def _record_spoke_auth_failure(self, peer_ip: Optional[str], spoke_id,
                                    detail: str) -> None:

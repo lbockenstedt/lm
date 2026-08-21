@@ -19,6 +19,11 @@ from aiohttp import (ClientSession, ClientTimeout, DummyCookieJar, TCPConnector,
                      WSMsgType, client_exceptions, web)
 from multidict import CIMultiDict
 
+try:  # shared scanner-signature classifier (single source of truth with the hub)
+    from security.probe_signatures import looks_like_probe
+except ImportError:  # pragma: no cover - packaging layout fallback
+    from core.src.security.probe_signatures import looks_like_probe
+
 logger = logging.getLogger("ProxySpoke")
 
 # Hop-by-hop headers (RFC 7230 §6.1) — never forwarded across the proxy.
@@ -222,8 +227,53 @@ def _fwd_headers(request: web.BaseRequest, client_ip: str) -> dict:
     return headers
 
 
+def _report_source_ip(request: web.BaseRequest) -> str:
+    """Best-effort real client IP for a probe report. If a front load balancer
+    stamped ``X-Forwarded-For``, the leftmost entry is the true origin; otherwise
+    the direct TCP peer. (Mirrors the chain the proxy already forwards to the hub
+    for its per-IP login lockout.)"""
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        first = xff.split(",")[0].strip()
+        if first:
+            return first
+    return request.remote or ""
+
+
+def _report_edge_probe(spoke, request: web.BaseRequest) -> None:
+    """Fire-and-forget: relay a detected scanner probe up the authenticated tunnel
+    to the hub (``HTTP_PROBE_REPORT``) so it blocks the source centrally. Never
+    raises into the request path — a missing control-plane back-reference (not yet
+    connected) or no running loop just drops the report (best-effort)."""
+    cp = getattr(spoke, "control_plane", None)
+    if cp is None or not hasattr(cp, "send_to_hub"):
+        return
+    data = {
+        "source_ip": _report_source_ip(request),
+        "path": request.path,
+        "method": request.method,
+        "node": getattr(spoke, "spoke_id", None) or "proxy",
+    }
+    try:
+        asyncio.get_event_loop().create_task(cp.send_to_hub("HTTP_PROBE_REPORT", data))
+    except RuntimeError:  # pragma: no cover - no running loop (never inside a handler)
+        pass
+
+
 async def _dispatch(request: web.Request) -> web.StreamResponse:
     spoke = request.app["spoke"]
+    # HTTPS-port scanner detection at the edge. A request for a path we never
+    # serve (PHP/dotfiles/DB-admin panels/app-server consoles) is an automated
+    # vulnerability scanner fingerprinting THIS proxy, not a real client. When
+    # enabled (per-node toggle), report it up the authenticated tunnel so the hub
+    # blocks the source centrally on the NSG — one deny protects every edge — and
+    # answer a bare 404 instead of forwarding the junk to the hub. Runs FIRST so
+    # a scan is caught even when the upstream is unavailable. Uses the SAME shared
+    # signatures as the hub's own _looks_like_probe, so proxied SPA deep-links and
+    # static assets never trip it.
+    if getattr(spoke, "probe_detection_enabled", True) and looks_like_probe(request.path):
+        _report_edge_probe(spoke, request)
+        return web.Response(status=404)
     upstream = spoke.upstream_url
     if not upstream:
         return _hub_unavailable(request, "no upstream configured")

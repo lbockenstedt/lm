@@ -89,6 +89,19 @@ Sync-rule legend:
 - The DNS-failure sim's flood list. Keep the three copies identical when
   regenerated. Verify with `cmp` pairwise.
 
+## 9. probe_signatures.py  — HTTPS-port scanner classifier  (byte, twin cross-repo)
+- CANONICAL: `lm/core/src/security/probe_signatures.py`
+- VENDORED : `ab/probe_signatures.py`  (the `ab` repo can't import from `lm/core`
+  at runtime, so it ships its own byte-identical copy)
+- Rule: **byte-identical**. The two `PROBE_SUFFIXES`/`PROBE_TOKENS` signature
+  lists + `looks_like_probe()` MUST match so a new scanner signature added on the
+  hub is enforced at the AppBuilder edge too. Edit the canonical, then:
+  `cp lm/core/src/security/probe_signatures.py ab/probe_signatures.py`
+- Verify: `cmp lm/core/src/security/probe_signatures.py ab/probe_signatures.py`
+- The hub middleware (`lm/core/src/api.py`) and the edge proxy
+  (`lm/proxy/src/proxy_app.py`) import the canonical directly — no copy — so only
+  the cross-repo `ab` copy needs the `cp` sync.
+
 ---
 
 ## Quick audit commands
@@ -98,6 +111,7 @@ cd /Users/lbockenstedt/vscode
 cmp cs/clients/lib/common.sh cs/clients/linux/common.sh && echo "common.sh in sync"
 cmp cs/configs/dns_fail.txt cs/clients/linux/dns_fail.txt && echo "dns_fail.txt L in sync"
 cmp cs/configs/dns_fail.txt cs/clients/windows/dns_fail.txt && echo "dns_fail.txt W in sync"
+cmp lm/core/src/security/probe_signatures.py ab/probe_signatures.py && echo "probe_signatures in sync"
 # parity/twin pairs — read + compare the shared data, don't cmp:
 #   CS_OVERRIDE_KEYS   in cs/clients/lib/common.sh vs cs/clients/windows/common.ps1
 #   SIM_QUOTA_KEYS     in cs/lm-spoke/src/sim_quota.py vs lm/core/src/simulations/sim_quota.py

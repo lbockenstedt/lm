@@ -54,6 +54,22 @@ def _ws_to_http(url: str) -> str:
         return ""
 
 
+def _as_bool(*vals, default: bool) -> bool:
+    """First of ``vals`` that is a recognizable bool wins; else ``default``.
+    Accepts real bools and the usual 1/true/yes/on ↔ 0/false/no/off strings."""
+    for v in vals:
+        if v is None:
+            continue
+        if isinstance(v, bool):
+            return v
+        s = str(v).strip().lower()
+        if s in ("1", "true", "yes", "on"):
+            return True
+        if s in ("0", "false", "no", "off"):
+            return False
+    return default
+
+
 class ProxySpoke(BaseSpoke):
     def __init__(self, spoke_id: str, config: Dict[str, Any]):
         super().__init__(spoke_id, config)
@@ -122,6 +138,17 @@ class ProxySpoke(BaseSpoke):
         self.tenant_id = (cfg.get("tenant_id")
                           or os.environ.get("LM_PROXY_TENANT_ID") or "")
         self.tenant_shared = bool(cfg.get("tenant_shared"))
+
+        # HTTPS-port scanner detection at this edge (see proxy_app._dispatch). ON
+        # by default — it's inherently safe (report-only; the hub's auto-block is
+        # itself opt-in and exempts trusted IPs). Per-node toggle so an operator
+        # can silence a proxy that legitimately sees odd paths. Hub can flip it
+        # live via UPDATE_CONFIG; LM_PROXY_PROBE_DETECTION env overrides the boot
+        # default.
+        self.probe_detection_enabled = _as_bool(
+            cfg.get("probe_detection"),
+            os.environ.get("LM_PROXY_PROBE_DETECTION"),
+            default=True)
 
         self._proxy_app = None
         self._runner = None
@@ -208,6 +235,9 @@ class ProxySpoke(BaseSpoke):
             self.tenant_id = str(data["tenant_id"] or "")  # hot — gates the shortcut
         if "tenant_shared" in data and data["tenant_shared"] is not None:
             self.tenant_shared = bool(data["tenant_shared"])
+        if data.get("probe_detection") is not None:  # hot — no re-bind needed
+            self.probe_detection_enabled = _as_bool(
+                data["probe_detection"], default=self.probe_detection_enabled)
         for key in ("web_host", "tls_cert", "tls_key", "upstream_url",
                     "upstream_cert", "upstream_key"):
             if key in data and data[key] is not None and getattr(self, key) != data[key]:
@@ -256,6 +286,7 @@ class ProxySpoke(BaseSpoke):
             "console_relay": bool(self.relay_spoke_url),
             "tenant_id": self.tenant_id or None,
             "tenant_shared": self.tenant_shared,
+            "probe_detection": self.probe_detection_enabled,
             "relay_sessions": len(self._console_relay_cache),
         }
 

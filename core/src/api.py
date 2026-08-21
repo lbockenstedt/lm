@@ -435,30 +435,15 @@ access.set_client_ip_resolver(_client_ip)
 # index.html and hide the probe). Matches are recorded as ``http_probe`` auth
 # failures so the threat monitor tallies them and auto-blocks the source once it
 # crosses the failure threshold (trusted/allow-listed IPs stay exempt).
-_PROBE_SUFFIXES = (
-    ".php", ".php5", ".php7", ".phtml", ".asp", ".aspx", ".jsp", ".jspx",
-    ".cgi", ".env", ".sql", ".bak", ".htaccess", ".htpasswd",
-)
-_PROBE_TOKENS = (
-    "/wp-", "/wordpress/", "/.git", "/.env", "/.aws", "/.ssh/", "/.svn",
-    "/phpmyadmin", "/pma/", "/adminer", "/dbadmin", "/mysql", "/xmlrpc",
-    "/actuator/", "/solr/", "/jenkins/", "/manager/html", "/vendor/",
-    "/phpunit", "/eval-stdin", "/.vscode", "/.idea", "/boaform", "/hnap1",
-    "/owa/", "/autodiscover/", "/cgi-bin/",
-)
-
-
-def _looks_like_probe(path: str) -> bool:
-    """True when ``path`` matches a known external-scanner signature the hub
-    never legitimately serves. High-confidence only — SPA deep-links and static
-    assets (``.js``/``.css``/``.svg``/...) never match, so a mistyped in-app
-    route is not mistaken for an attack."""
-    p = (path or "").lower()
-    if not p:
-        return False
-    if any(p.endswith(sfx) for sfx in _PROBE_SUFFIXES):
-        return True
-    return any(tok in p for tok in _PROBE_TOKENS)
+#
+# The signature lists + classifier live in ONE shared module so the edge
+# components (proxy/AppBuilder/spoke UIs) that report probes back to the hub use
+# the exact same signatures — no per-edge copy to drift. ``_looks_like_probe``
+# is kept as a local alias for the many in-module call sites.
+try:
+    from security.probe_signatures import looks_like_probe as _looks_like_probe
+except ImportError:  # pragma: no cover - packaging layout fallback
+    from core.src.security.probe_signatures import looks_like_probe as _looks_like_probe
 
 
 def _sessions_file(hub) -> str:
