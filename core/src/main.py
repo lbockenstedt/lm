@@ -4667,11 +4667,31 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # If they provided a secret and it was wrong, we close.
                 # If they provided no secret, we KEEP the connection open to negotiate one.
                 if secret:
-                    # Invalid session secret = a credential-guessing attempt.
-                    # Established-good IPs are success-grace exempt (above), so a
-                    # legit spoke's rotation glitch won't self-block; a probing
-                    # source has no such grace and trips the block at threshold.
-                    self._record_spoke_auth_failure(peer_ip, spoke_id, "invalid_secret")
+                    # Invalid session secret = a credential-guessing attempt —
+                    # UNLESS the peer proves it is an already-approved install
+                    # (matching 128-bit install_uuid). A generic agent fans out
+                    # several role sub-spokes from ONE IP; after a reboot or a key
+                    # rotation that outlived the 3600s success-grace, their
+                    # stale-but-legit secrets would otherwise rack up spoke_auth
+                    # failures from that single IP and NSG-block the whole agent.
+                    # An attacker cannot forge a valid install_uuid that maps to an
+                    # approved identity, so this exempts the reboot/rotation glitch
+                    # without weakening detection of a real guessing source (which
+                    # has no such identity proof and still trips the block).
+                    if self._is_approved_install_reconnect(spoke_id, install_uuid):
+                        self.record_spoke_event(
+                            spoke_id, "auth_glitch_known_install",
+                            "invalid secret from an approved install (reboot/rotation) "
+                            "— not counted as an attack; will re-negotiate")
+                        logger.info(
+                            "Spoke %s presented a stale secret but proved an approved "
+                            "install (uuid match) — treating as a rotation/reboot glitch, "
+                            "not a threat signal.", spoke_id)
+                    else:
+                        # Established-good IPs are also success-grace exempt (above),
+                        # so a probing source with neither identity proof nor grace
+                        # trips the block at threshold.
+                        self._record_spoke_auth_failure(peer_ip, spoke_id, "invalid_secret")
                     await websocket.close(1008, "Authentication failed")
                     return
             else:
@@ -8169,6 +8189,36 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                               detail=f"edge {node} ({method} {path[:120]})")
         except Exception:  # noqa: BLE001 — monitoring must never break dispatch
             logger.debug("HTTP_PROBE_REPORT ingest failed", exc_info=True)
+
+    def _is_approved_install_reconnect(self, spoke_id, install_uuid) -> bool:
+        """True when an ``invalid_secret`` connect is really an ALREADY-APPROVED
+        install proving its identity with a matching ``install_uuid`` — i.e. a
+        reboot/rotation glitch, NOT a credential-guessing attacker.
+
+        This is the "agent hardening" shield: a generic agent fans out several
+        role sub-spokes (``{base}-{role}``) from ONE IP, and a cold reconnect
+        (VM reboot, hub restart, or a key rotation that outlived the 3600s
+        success-grace) makes each present a stale-but-legit secret. Counting
+        those as brute-force would NSG-block the whole agent by IP. The
+        ``install_uuid`` is a 128-bit value the hub minted and indexed at
+        approval time; an attacker cannot forge one that maps to an approved
+        identity, so keying the exemption on a uuid->approved-identity match
+        keeps real guessing sources (no such proof) fully detected. Fail-closed
+        on any error (-> record the failure as before)."""
+        try:
+            uuid = (install_uuid or "").strip()
+            if not uuid:
+                return False
+            owner = self.install_uuid_index.get(uuid)
+            if not owner:
+                return False
+            # The uuid must map to THIS connecting identity (rename-safe: compare
+            # primary keys), and that identity must already be approved.
+            if self._primary_key(owner) != self._primary_key(spoke_id):
+                return False
+            return bool(self.approved_modules.get(self._primary_key(spoke_id)))
+        except Exception:  # noqa: BLE001 — never let the shield break a connect
+            return False
 
     def _record_spoke_auth_failure(self, peer_ip: Optional[str], spoke_id,
                                    detail: str) -> None:
