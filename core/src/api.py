@@ -895,7 +895,14 @@ async def _fetch_module(hub, tenant_id: str, module_key: str, fw_id: str = None)
                 _set_cache_status(tenant_id, cache_key, "error"); return False
             result = await hub.request_response(spoke_id, _FW_CMD_MAP[module_key], {})
         elif module_key == "cppm_sessions":
-            spoke = hub.get_spoke_by_type("nac")
+            # Tenant-scoped, NOT get_spoke_by_type("nac") — with more than one
+            # nac spoke connected (e.g. two ClearPass appliances, each only
+            # reachable from its own spoke), the untargeted lookup picked
+            # whichever spoke connected/reconnected most recently, so this
+            # cache-refresh cycle could hit a spoke with no route to the
+            # OTHER instance's ClearPass host. get_cppm_spoke_for_tenant pins
+            # to this tenant's own bound nac_instances record.
+            spoke = hub.get_cppm_spoke_for_tenant(tenant_id)
             if not spoke: _set_cache_status(tenant_id, cache_key, "error"); return False
             # Skip the query while the spoke is connected-but-unconfigured — the
             # spoke would just return "CPPM host not configured" every cycle.
@@ -910,7 +917,7 @@ async def _fetch_module(hub, tenant_id: str, module_key: str, fw_id: str = None)
             # extend the deadline toward the hard ceiling.
             result = await hub.request_response(spoke, "CPPM_GET_ACCESS_TRACKER", {}, timeout=20.0)
         elif module_key == "cppm_devices":
-            spoke = hub.get_spoke_by_type("nac")
+            spoke = hub.get_cppm_spoke_for_tenant(tenant_id)  # see cppm_sessions above
             if not spoke: _set_cache_status(tenant_id, cache_key, "error"); return False
             if spoke in hub._nac_unconfigured_spokes:
                 _set_cache_status(tenant_id, cache_key, "error"); return False
