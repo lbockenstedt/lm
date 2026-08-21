@@ -239,10 +239,39 @@ class PortStore:
     def get(self, port_id: str) -> Dict[str, Any]:
         return self._data.get(port_id, {})
 
+    def delete(self, port_id: str) -> None:
+        """Drop a port's record entirely (device gone for good, or its record was
+        just migrated to a new port_id by find_by_identity's caller)."""
+        if port_id in self._data:
+            del self._data[port_id]
+            self._save()
+
     def all_items(self) -> Dict[str, Dict[str, Any]]:
         """Shallow copy of every persisted port record (used to enumerate stable
         assignments such as DPA TCP ports across all known ports)."""
         return dict(self._data)
+
+    def find_by_identity(self, identity: Dict[str, Any], exclude_port_id: str = "") -> Optional[str]:
+        """Find an existing port_id (other than ``exclude_port_id``) whose
+        persisted ``probe.identity`` matches on a field that identifies the
+        DEVICE ITSELF (serial number or MAC learned by logging into it) rather
+        than the USB adapter/cable. Lets a device's alias/tenant carry forward
+        automatically when it reappears under a new port_id — e.g. a reboot
+        renumbers /dev/ttyUSBn, or the cable gets moved to a different adapter —
+        without leaving the old port_id behind as an orphaned duplicate."""
+        serial = str((identity or {}).get("serial") or "").strip()
+        mac = str((identity or {}).get("mac") or "").strip().lower()
+        if not serial and not mac:
+            return None
+        for pid, rec in self._data.items():
+            if pid == exclude_port_id:
+                continue
+            ident = (rec.get("probe") or {}).get("identity") or {}
+            if serial and str(ident.get("serial") or "").strip() == serial:
+                return pid
+            if mac and str(ident.get("mac") or "").strip().lower() == mac:
+                return pid
+        return None
 
     def settings(self, port_id: str) -> Dict[str, Any]:
         return {**_DEFAULT_SETTINGS, **self._data.get(port_id, {}).get("settings", {})}

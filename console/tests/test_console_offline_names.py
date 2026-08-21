@@ -1,7 +1,18 @@
-"""Spoke-level tests for offline-device name persistence: a port we've NAMED or
-IDENTIFIED must keep appearing (as ``present=False``) even once its adapter is
-unplugged / the target is powered off, so its name survives a reboot instead of
-vanishing from the enumeration-only inventory.
+"""Spoke-level tests: a port that isn't physically enumerated right now must
+NOT appear in CONSOLE_LIST_PORTS at all — no ghost/offline row.
+
+Regression this replaces: the old behavior resurfaced a named/identified port
+as a ``present=False`` row once its adapter unplugged (e.g. across a reboot).
+Combined with derive_port_id's bottom-tier fallback embedding the current
+``/dev/ttyUSBn`` name (unstable across a reboot when several generic
+USB-serial adapters share no burned-in serial number), every reboot minted a
+NEW port_id for the same physical port and left the OLD port_id's ghost row
+behind forever — producing exactly the "duplicate/stale DISCONNECTED rows,
+some with an empty port" symptom seen in production. The fix: a port is either
+up or it isn't shown; its alias/identity data stays in PortStore and
+reattaches automatically if the same DEVICE (by serial/MAC learned via
+login, not the USB adapter) reappears under a different port_id — see
+test_console_port_reconcile.py.
 """
 import asyncio
 import sys
@@ -45,8 +56,7 @@ def _list(sp):
     return asyncio.run(sp.handle_command("CONSOLE_LIST_PORTS", {}))["ports"]
 
 
-def test_named_offline_port_persists_as_not_present(monkeypatch, spoke):
-    # A port is present and gets a human alias; its hw is remembered.
+def test_named_port_drops_from_list_once_unplugged(monkeypatch, spoke):
     monkeypatch.setattr(cs, "enumerate_ports", lambda: [
         {"port_id": "sw1", "device": "/dev/ttyUSB0", "kind": "usb",
          "vendor": "FTDI", "product": "FT232", "serial": "A1", "vid": "0403", "pid": "6001"},
@@ -57,37 +67,24 @@ def test_named_offline_port_persists_as_not_present(monkeypatch, spoke):
 
     # Device is now unplugged / powered off → not enumerated anymore.
     monkeypatch.setattr(cs, "enumerate_ports", lambda: [])
-    ports = _list(spoke)
-    assert len(ports) == 1
-    p = ports[0]
-    assert p["port_id"] == "sw1"
-    assert p["alias"] == "core-switch"
-    assert p["present"] is False
-    assert p["in_use"] is False
-    # hw snapshot was persisted while present → still describes the device offline.
-    assert p["product"] == "FT232" and p["device"] == "/dev/ttyUSB0"
+    assert _list(spoke) == [], "an absent port must not appear at all — no ghost row"
 
 
-def test_identified_offline_port_persists(monkeypatch, spoke):
+def test_identified_port_drops_from_list_once_unplugged(monkeypatch, spoke):
     monkeypatch.setattr(cs, "enumerate_ports", lambda: [
         {"port_id": "rtr1", "device": "/dev/ttyUSB1", "product": "console"},
     ])
     spoke.store.update("rtr1", probe={"identity": {"hostname": "edge-rtr"}})
-    _list(spoke)  # persist hw
+    _list(spoke)
     monkeypatch.setattr(cs, "enumerate_ports", lambda: [])
-    ports = _list(spoke)
-    assert len(ports) == 1
-    assert ports[0]["port_id"] == "rtr1" and ports[0]["present"] is False
-    assert ports[0]["probe"]["identity"]["hostname"] == "edge-rtr"
+    assert _list(spoke) == []
 
 
 def test_unnamed_offline_port_not_resurfaced(monkeypatch, spoke):
-    # A port that was merely seen but never named/identified should NOT clutter
-    # the list once it's gone (only meaningful, human-named ports persist).
     monkeypatch.setattr(cs, "enumerate_ports", lambda: [
         {"port_id": "tmp0", "device": "/dev/ttyUSB9", "product": "generic"},
     ])
-    _list(spoke)  # persists hw only, no alias/identity
+    _list(spoke)
     monkeypatch.setattr(cs, "enumerate_ports", lambda: [])
     assert _list(spoke) == []
 
@@ -99,3 +96,23 @@ def test_present_flag_on_live_ports(monkeypatch, spoke):
     ])
     ports = _list(spoke)
     assert {p["port_id"]: p["present"] for p in ports} == {"a": True, "b": True}
+
+
+def test_alias_and_identity_survive_in_the_store_while_absent(monkeypatch, spoke):
+    """The row disappears from the list, but the underlying record is NOT
+    deleted — it's exactly what a reappearing device (same port_id, e.g. a
+    stable uart or a real USB serial number) reattaches to automatically."""
+    monkeypatch.setattr(cs, "enumerate_ports", lambda: [
+        {"port_id": "sw1", "device": "/dev/ttyUSB0", "product": "FT232"},
+    ])
+    spoke.store.update("sw1", alias="core-switch",
+                        probe={"identity": {"hostname": "core-sw", "serial": "SN123"}})
+    monkeypatch.setattr(cs, "enumerate_ports", lambda: [])
+    assert _list(spoke) == []
+    assert spoke.store.get("sw1").get("alias") == "core-switch"
+
+    monkeypatch.setattr(cs, "enumerate_ports", lambda: [
+        {"port_id": "sw1", "device": "/dev/ttyUSB0", "product": "FT232"},
+    ])
+    ports = _list(spoke)
+    assert ports[0]["alias"] == "core-switch"

@@ -60,6 +60,55 @@ def test_port_store_partial_settings_update_keeps_others(tmp_path):
     assert s["baud"] == 38400 and s["flow"] == "rtscts"
 
 
+def test_port_store_delete_removes_the_record(tmp_path):
+    store = m.PortStore(path=tmp_path / "ports.json")
+    store.update("p1", alias="x")
+    store.delete("p1")
+    assert store.get("p1") == {}
+    assert "p1" not in store.all_items()
+
+
+def test_port_store_delete_missing_key_is_a_noop(tmp_path):
+    store = m.PortStore(path=tmp_path / "ports.json")
+    store.delete("nope")  # must not raise
+
+
+def test_find_by_identity_matches_on_serial(tmp_path):
+    store = m.PortStore(path=tmp_path / "ports.json")
+    store.update("old-pid", alias="core-sw",
+                 probe={"identity": {"hostname": "core-sw", "serial": "SN123"}})
+    found = store.find_by_identity({"serial": "SN123"}, exclude_port_id="new-pid")
+    assert found == "old-pid"
+
+
+def test_find_by_identity_matches_on_mac_when_no_serial(tmp_path):
+    store = m.PortStore(path=tmp_path / "ports.json")
+    store.update("old-pid", probe={"identity": {"mac": "38:21:C7:BA:E9:35"}})
+    # Case-insensitive match.
+    found = store.find_by_identity({"mac": "38:21:c7:ba:e9:35"}, exclude_port_id="new-pid")
+    assert found == "old-pid"
+
+
+def test_find_by_identity_excludes_the_current_port_id(tmp_path):
+    store = m.PortStore(path=tmp_path / "ports.json")
+    store.update("pid-1", probe={"identity": {"serial": "SN123"}})
+    # A port must never "reconcile" against its own record.
+    assert store.find_by_identity({"serial": "SN123"}, exclude_port_id="pid-1") is None
+
+
+def test_find_by_identity_no_match_returns_none(tmp_path):
+    store = m.PortStore(path=tmp_path / "ports.json")
+    store.update("old-pid", probe={"identity": {"serial": "SN123"}})
+    assert store.find_by_identity({"serial": "SN999"}, exclude_port_id="new-pid") is None
+
+
+def test_find_by_identity_with_no_identifying_fields_returns_none(tmp_path):
+    store = m.PortStore(path=tmp_path / "ports.json")
+    store.update("old-pid", probe={"identity": {"hostname": "core-sw"}})
+    # hostname alone (no serial/mac) isn't trusted as a stable device identity.
+    assert store.find_by_identity({"hostname": "core-sw"}, exclude_port_id="new-pid") is None
+
+
 # ── Writer-lock takeover (force_attach / SessionManager.takeover) ────────────
 # PortChannel.__init__ opens a real pyserial handle, which isn't available in
 # this pyserial-free test env — bypass it (object.__new__) and hand-seed just
