@@ -77,7 +77,35 @@ def register(app, hub, ctx):
         merged = [r for recs in await asyncio.gather(*[_one(s) for s in spokes]) for r in recs]
         return {list_key: merged, "total": len(merged)}
 
-    async def _cppm_warm(cmd, warm_key, payload=None, request: Request = None, tenant: str = None):
+    async def _nac_gather_merge(spokes, cmd: str, payload: dict, list_key: str):
+        """Query every spoke in ``spokes`` with ``cmd``, merging each response's
+        ``list_key`` list into one combined list — used for a SINGLE tenant's
+        combined view (their own dedicated CPPM + the shared CPPM, if any;
+        see ``hub.get_cppm_spokes_for_tenant``), unlike ``_nac_merge_fanout``
+        which fans out across EVERY tenant's spoke for the admin view. A spoke
+        that errors is skipped rather than failing the whole call — one bad/
+        offline source must not blank the other's data. Returns ``None`` only
+        when every spoke fails."""
+        async def _one(sid):
+            try:
+                result = await hub.request_response(sid, cmd, payload or {}, timeout=20.0)
+                return _cppm_unwrap(result)
+            except Exception as e:  # noqa: BLE001 — one bad/offline spoke must not fail the merge
+                logger.debug("nac combine: %s failed: %s", sid, e)
+                return None
+        results = await asyncio.gather(*[_one(s) for s in spokes])
+        merged = []
+        any_ok = False
+        for d in results:
+            if isinstance(d, dict) and isinstance(d.get(list_key), list):
+                any_ok = True
+                merged.extend(d[list_key])
+        if not any_ok:
+            return None
+        return {list_key: merged, "total": len(merged)}
+
+    async def _cppm_warm(cmd, warm_key, payload=None, request: Request = None, tenant: str = None,
+                         list_key: str = "devices"):
         """Run a CPPM read with warm cache: cache the raw (scope-independent)
         result and serve last-known (stale) on spoke-down / error / overrun so
         the NAC page renders instantly instead of blocking/503-ing. Tenant/subnet
@@ -87,27 +115,48 @@ def register(app, hub, ctx):
         none) so two tenants' nac spokes never share a cache slot — without
         this, once spoke resolution became tenant-aware, a single shared
         "_all_" cache key would still let tenant B's request be served
-        tenant A's cached devices/sessions from a moment earlier."""
+        tenant A's cached devices/sessions from a moment earlier.
+
+        A tenant-scoped request (real ``tid``) COMBINES the tenant's own
+        dedicated CPPM with the shared-tenant CPPM, if one is configured
+        (``hub.get_cppm_spokes_for_tenant``) — ``list_key`` names the response
+        field to merge (``"devices"`` for LIST_ENDPOINTS). Admin/no-tenant
+        keeps the legacy single global spoke (unchanged)."""
         tid = _effective_tenant(request, tenant) if request is not None else None
-        cppm_spoke = _nac_spoke_for_request(request, tenant) if request is not None else hub.get_spoke_by_type("nac")
         scoped_key = f"{warm_key}:{tid or '_global_'}"
-        if not cppm_spoke:
+        if not tid:
+            cppm_spoke = hub.get_spoke_by_type("nac")
+            if not cppm_spoke:
+                cached = hub.warm_get(cmd.lower(), scoped_key)
+                if cached is not None:
+                    return cached
+                raise HTTPException(status_code=503, detail="No spoke connected")
+            try:
+                result = await hub.request_response(cppm_spoke, cmd, payload or {}, timeout=20.0)
+                data = _cppm_unwrap(result)
+                await hub.warm_set(cmd.lower(), scoped_key, data)
+                return data
+            except HTTPException:
+                raise
+            except Exception:
+                cached = hub.warm_get(cmd.lower(), scoped_key)
+                if cached is not None:
+                    return cached
+                raise
+        spokes = hub.get_cppm_spokes_for_tenant(tid)
+        if not spokes:
             cached = hub.warm_get(cmd.lower(), scoped_key)
             if cached is not None:
                 return cached
             raise HTTPException(status_code=503, detail="No spoke connected")
-        try:
-            result = await hub.request_response(cppm_spoke, cmd, payload or {}, timeout=20.0)
-            data = _cppm_unwrap(result)
-            await hub.warm_set(cmd.lower(), scoped_key, data)
-            return data
-        except HTTPException:
-            raise
-        except Exception:
+        data = await _nac_gather_merge(spokes, cmd, payload, list_key)
+        if data is None:
             cached = hub.warm_get(cmd.lower(), scoped_key)
             if cached is not None:
                 return cached
-            raise
+            raise HTTPException(status_code=503, detail="No spoke connected")
+        await hub.warm_set(cmd.lower(), scoped_key, data)
+        return data
 
     @app.get("/cppm/refresh")
     async def refresh_cppm_cache(request: Request, tenant: str = None):
@@ -546,12 +595,19 @@ def register(app, hub, ctx):
         # (explicit_tenant). Without a selection, non-admins keep session-tenant
         # scoping via the cache path below.
         if tenant and _effective_tenant(request, tenant):
-            cppm_spoke = _nac_spoke_for_request(request, tenant)
-            if not cppm_spoke:
+            # Combined view: this tenant's own dedicated CPPM + the shared
+            # CPPM, if one is configured (get_cppm_spokes_for_tenant) — not a
+            # single spoke, so a tenant with access to a shared ClearPass
+            # sees both sources merged.
+            spokes = hub.get_cppm_spokes_for_tenant(_effective_tenant(request, tenant))
+            if not spokes:
                 raise HTTPException(status_code=503, detail="No spoke connected")
             try:
-                result = await hub.request_response(cppm_spoke, "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset}, timeout=20.0)
-                return await _filter_tenant(request, _cppm_unwrap(result), "nac", ["ip"], tenant)
+                data = await _nac_gather_merge(
+                    spokes, "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset}, "sessions")
+                if data is None:
+                    raise HTTPException(status_code=503, detail="No spoke connected")
+                return await _filter_tenant(request, data, "nac", ["ip"], tenant)
             except HTTPException:
                 raise
             except Exception as e:
@@ -575,8 +631,13 @@ def register(app, hub, ctx):
             except Exception as e:
                 logger.exception("get_cppm_sessions failed")
                 raise HTTPException(status_code=500, detail=str(e))
-        cppm_spoke = _nac_spoke_for_request(request, tenant)
-        if not cppm_spoke:
+        tid = _effective_tenant(request, tenant)
+        spokes = hub.get_cppm_spokes_for_tenant(tid) if tid else None
+        if spokes is None:
+            # Admin / no resolvable tenant — legacy single global spoke.
+            cppm_spoke = _nac_spoke_for_request(request, tenant)
+            spokes = [cppm_spoke] if cppm_spoke else []
+        if not spokes:
             if sess:
                 tenant_id = sess.get("user", {}).get("tenant_id")
                 cached = _cache_entry(tenant_id, "cppm_sessions") if tenant_id else None
@@ -584,8 +645,11 @@ def register(app, hub, ctx):
                     return await _filter_session(request, cached["data"], "nac", ["ip"])
             raise HTTPException(status_code=503, detail="No spoke connected")
         try:
-            result = await hub.request_response(cppm_spoke, "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset}, timeout=20.0)
-            return await _filter_session(request, _cppm_unwrap(result), "nac", ["ip"])
+            data = await _nac_gather_merge(
+                spokes, "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset}, "sessions")
+            if data is None:
+                raise HTTPException(status_code=503, detail="No spoke connected")
+            return await _filter_session(request, data, "nac", ["ip"])
         except HTTPException:
             raise
         except Exception as e:

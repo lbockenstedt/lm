@@ -618,6 +618,38 @@ class SpokeRegistryMixin:
         return (self.get_cppm_spoke_for_tenant(sid)
                 if sid else self.get_spoke_by_type("nac"))
 
+    def get_cppm_spokes_for_tenant(self, tenant_id: str = None) -> list:
+        """Every nac spoke whose records belong in ``tenant_id``'s COMBINED NAC
+        view: their own dedicated spoke (``get_cppm_spoke_for_tenant``) PLUS
+        the hub's shared-tenant CPPM spoke, IF a shared tenant is actually
+        configured and its bound spoke differs from the tenant's own. A
+        tenant's own CPPM shows every record (it's entirely their own
+        equipment); a shared CPPM's records are narrowed to just this
+        tenant's own by the SAME downstream subnet/tag filter every NAC route
+        already applies to a single source — applying it to the union
+        instead just makes that filter do double duty as the "which shared
+        records are mine" gate.
+
+        Deliberately does NOT call ``get_cppm_spoke_for_shared()`` — that
+        method falls back to ``get_spoke_by_type("nac")`` (ANY connected nac
+        spoke, tenant-blind) when no shared tenant is configured at all, which
+        would silently pull an unrelated spoke into this tenant's combined
+        view. Resolves the shared tenant's spoke directly instead, so an
+        unconfigured shared tenant contributes nothing.
+
+        With ``tenant_id`` None / ``"default"`` (admin, unscoped), returns
+        ``[]`` — that view fans out across EVERY connected nac spoke via a
+        different path (``routes/cppm.py``'s ``_nac_merge_fanout``), which
+        also tags each record by its owning tenant, a distinct need this list
+        isn't for."""
+        if not tenant_id or tenant_id == "default":
+            return []
+        own = self.get_cppm_spoke_for_tenant(tenant_id)
+        from access import shared_tenant_id as _shared_tenant_id
+        shared_tid = _shared_tenant_id()
+        shared = self.get_cppm_spoke_for_tenant(shared_tid) if shared_tid else None
+        return list(dict.fromkeys(sid for sid in (own, shared) if sid))
+
     def get_dhcp_spoke_for_shared(self) -> Optional[str]:
         """The DHCP spoke that owns the SHARED-tenant Kea server — the
         fallback a tenant with no dedicated DHCP spoke of its own resolves to.

@@ -202,3 +202,79 @@ def test_for_shared_shared_tenant_unbound_returns_none(monkeypatch):
     hub = _CppmHub(["cppm-1"], {"cppm-1": {"tenant_id": "tenantA"}},
                    global_nac="cppm-1")
     assert LabManagerHub.get_cppm_spoke_for_shared(hub) is None
+
+
+# ── get_cppm_spokes_for_tenant (combined own + shared view) ─────────────────
+
+def test_spokes_for_tenant_includes_own_and_shared(monkeypatch):
+    import access
+    monkeypatch.setattr(access, "shared_tenant_id", lambda: "shared-tenant")
+    hub = _CppmHub(
+        ["cppm-a", "cppm-shared"],
+        {"cppm-a": {"tenant_id": "tenantA"}, "cppm-shared": {"tenant_id": "shared-tenant"}},
+        nac_instances=[
+            {"tenant_id": "tenantA", "spoke_id": "cppm-a"},
+            {"tenant_id": "shared-tenant", "spoke_id": "cppm-shared"},
+        ],
+    )
+    assert LabManagerHub.get_cppm_spokes_for_tenant(hub, "tenantA") == ["cppm-a", "cppm-shared"]
+
+
+def test_spokes_for_tenant_own_only_when_no_shared_tenant_configured(monkeypatch):
+    import access
+    monkeypatch.setattr(access, "shared_tenant_id", lambda: "")
+    hub = _CppmHub(
+        ["cppm-a"], {"cppm-a": {"tenant_id": "tenantA"}},
+        nac_instances=[{"tenant_id": "tenantA", "spoke_id": "cppm-a"}],
+    )
+    assert LabManagerHub.get_cppm_spokes_for_tenant(hub, "tenantA") == ["cppm-a"]
+
+
+def test_spokes_for_tenant_never_falls_back_to_an_unrelated_global_spoke(monkeypatch):
+    """The dangerous case get_cppm_spoke_for_shared() has: no shared tenant
+    configured must NOT pull in some unrelated connected nac spoke via
+    get_spoke_by_type("nac")."""
+    import access
+    monkeypatch.setattr(access, "shared_tenant_id", lambda: "")
+    hub = _CppmHub(
+        ["cppm-a", "cppm-unrelated"],
+        {"cppm-a": {"tenant_id": "tenantA"}, "cppm-unrelated": {"tenant_id": "tenantZ"}},
+        nac_instances=[{"tenant_id": "tenantA", "spoke_id": "cppm-a"}],
+        global_nac="cppm-unrelated",
+    )
+    assert LabManagerHub.get_cppm_spokes_for_tenant(hub, "tenantA") == ["cppm-a"]
+
+
+def test_spokes_for_tenant_shared_only_when_tenant_has_no_own_instance(monkeypatch):
+    import access
+    monkeypatch.setattr(access, "shared_tenant_id", lambda: "shared-tenant")
+    hub = _CppmHub(
+        ["cppm-shared"], {"cppm-shared": {"tenant_id": "shared-tenant"}},
+        nac_instances=[{"tenant_id": "shared-tenant", "spoke_id": "cppm-shared"}],
+    )
+    assert LabManagerHub.get_cppm_spokes_for_tenant(hub, "tenantA") == ["cppm-shared"]
+
+
+def test_spokes_for_tenant_deduplicates_when_shared_tenant_is_the_tenant_itself(monkeypatch):
+    import access
+    monkeypatch.setattr(access, "shared_tenant_id", lambda: "tenantA")
+    hub = _CppmHub(
+        ["cppm-a"], {"cppm-a": {"tenant_id": "tenantA"}},
+        nac_instances=[{"tenant_id": "tenantA", "spoke_id": "cppm-a"}],
+    )
+    assert LabManagerHub.get_cppm_spokes_for_tenant(hub, "tenantA") == ["cppm-a"]
+
+
+def test_spokes_for_tenant_empty_for_admin_unscoped(monkeypatch):
+    import access
+    monkeypatch.setattr(access, "shared_tenant_id", lambda: "shared-tenant")
+    hub = _CppmHub(["cppm-a"], {"cppm-a": {"tenant_id": "tenantA"}})
+    assert LabManagerHub.get_cppm_spokes_for_tenant(hub, None) == []
+    assert LabManagerHub.get_cppm_spokes_for_tenant(hub, "default") == []
+
+
+def test_spokes_for_tenant_empty_when_neither_own_nor_shared_bound(monkeypatch):
+    import access
+    monkeypatch.setattr(access, "shared_tenant_id", lambda: "")
+    hub = _CppmHub([], {})
+    assert LabManagerHub.get_cppm_spokes_for_tenant(hub, "tenantA") == []
