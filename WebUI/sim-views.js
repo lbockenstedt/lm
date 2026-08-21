@@ -72,6 +72,11 @@ function csSet(html) {
     // never blocked here.
     if (csRefreshInFlight && csUserIsEditing()) return;
     const el = csEl('cs-content');
+    // A health-strip hourly popup is a body-level element; if the strip it was
+    // anchored to is about to be replaced, force-hide it now so it can't linger
+    // on top of the next view (removing the anchor mid-hover doesn't reliably
+    // fire mouseleave).
+    if (window.csHealthHidePop) csHealthHidePop();
     if (el) el.innerHTML = html;
 }
 
@@ -1086,10 +1091,14 @@ async function csHealthLoadHourly(site, check) {
     return window._csHealthHourly[k];
 }
 
+// Two-digit hour label ("07", "13") for the per-hour cells.
+function _csHbarHH(i) { return (i < 10 ? '0' + i : '' + i); }
+
 window.csHealthHover = async function (ev) {
     const seg = ev.target.closest && ev.target.closest('.cs-hbar-seg');
     const bar = ev.target.closest && ev.target.closest('.cs-hbar');
     if (!seg || !bar) return;
+    clearTimeout(window._csHbarHideTimer);   // (re)entering the strip cancels a pending hide
     const site = bar.getAttribute('data-site'), check = bar.getAttribute('data-check');
     const day = parseInt(seg.getAttribute('data-day'), 10);
     const rect = seg.getBoundingClientRect();
@@ -1099,23 +1108,57 @@ window.csHealthHover = async function (ev) {
     const slots = Array.from({ length: 24 }, (_, i) => {
         const h = byHour[i];
         // Same ratio rule as the day strip (csHealthSegColor) — an hour with one
-        // bad probe out of many is a warning, not an outage.
+        // bad probe out of many is a warning, not an outage. Each cell carries
+        // its own title so the operator can hover a single hour to read exactly
+        // what made it red/yellow (the hour window + the green/yellow/red probe
+        // counts and the failing ratio that drove the colour).
         const c = h ? csHealthSegColor(h) : '#e2e8f0';
-        const t = h ? `${i}:00 — ${h.o || 0} green / ${h.w || 0} yellow / ${h.e || 0} red · ${csHealthRatioText(h)}`
-                    : `${i}:00 — no data`;
-        return `<div style="width:6px;height:16px;background:${c}" title="${csEscape(t)}"></div>`;
+        const t = h ? `${_csHbarHH(i)}:00–${_csHbarHH((i + 1) % 24)}:00 — ${h.o || 0} green / ${h.w || 0} yellow / ${h.e || 0} red · ${csHealthRatioText(h)}`
+                    : `${_csHbarHH(i)}:00 — no probes recorded`;
+        return `<div class="cs-hbar-hour" style="width:8px;height:18px;background:${c};cursor:default" title="${csEscape(t)}"></div>`;
     }).join('');
     let pop = document.getElementById('cs-hbar-pop');
-    if (!pop) { pop = document.createElement('div'); pop.id = 'cs-hbar-pop'; document.body.appendChild(pop); }
+    if (!pop) {
+        pop = document.createElement('div');
+        pop.id = 'cs-hbar-pop';
+        // Keep the popup up while the pointer is ON it, so the operator can
+        // travel from the day strip onto an individual hour cell; leaving the
+        // popup schedules the same grace hide as leaving the strip.
+        pop.addEventListener('mouseenter', () => clearTimeout(window._csHbarHideTimer));
+        pop.addEventListener('mouseleave', () => window.csHealthHoverOut());
+        document.body.appendChild(pop);
+        if (!window._csHbarGlobalWired) {
+            window._csHbarGlobalWired = true;
+            // A scroll or a window blur strands the popup (its anchor slides out
+            // from under it) — force-hide on either. csSet() force-hides on a
+            // view re-render.
+            window.addEventListener('scroll', () => window.csHealthHidePop(), true);
+            window.addEventListener('blur', () => window.csHealthHidePop());
+        }
+    }
     const date = new Date(day * 1000).toISOString().slice(0, 10);
-    pop.innerHTML = `<div style="font-size:10px;color:#64748b;margin-bottom:4px">${csEscape(check)} · ${date} · hourly</div><div style="display:flex;gap:1px">${slots}</div>`;
-    pop.style.cssText = 'position:fixed;z-index:9999;background:white;border:1px solid #cbd5e1;border-radius:6px;padding:6px;box-shadow:0 4px 12px rgba(0,0,0,.15)';
-    pop.style.left = Math.min(rect.left, window.innerWidth - 180) + 'px';
+    pop.innerHTML = `<div style="font-size:10px;color:#64748b;margin-bottom:4px">${csEscape(check)} · ${date} · hourly <span style="opacity:.55">— hover an hour</span></div><div style="display:flex;gap:1px">${slots}</div>`;
+    pop.style.cssText = 'position:fixed;z-index:9999;background:white;border:1px solid #cbd5e1;border-radius:6px;padding:6px;box-shadow:0 4px 12px rgba(0,0,0,.15);pointer-events:auto';
+    pop.style.left = Math.min(rect.left, window.innerWidth - 230) + 'px';
     pop.style.top = (rect.bottom + 4) + 'px';
     pop.style.display = 'block';
 };
 
+// Grace hide: leaving the strip (or the popup) doesn't hide immediately, giving
+// the pointer a moment to cross the small gap onto the popup — which cancels the
+// timer. This is what makes the individual hour cells reachable.
 window.csHealthHoverOut = function () {
+    clearTimeout(window._csHbarHideTimer);
+    window._csHbarHideTimer = setTimeout(() => {
+        const pop = document.getElementById('cs-hbar-pop');
+        if (pop) pop.style.display = 'none';
+    }, 180);
+};
+
+// Immediate, unconditional hide — used when the view is torn down/re-rendered
+// or the page scrolls, so a popup can never linger onto the next screen.
+window.csHealthHidePop = function () {
+    clearTimeout(window._csHbarHideTimer);
     const pop = document.getElementById('cs-hbar-pop');
     if (pop) pop.style.display = 'none';
 };
