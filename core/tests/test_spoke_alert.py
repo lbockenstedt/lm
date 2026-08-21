@@ -290,6 +290,11 @@ async def test_relayed_agent_ids_skipped_and_selfhealed(monkeypatch):
     assert "pxmx-agent" not in h.state.system_state["known_modules"]
     assert "pxmx-agent" not in h.known_modules
     assert saved["n"] == 1
+    # The de-approval is surfaced as a per-spoke lifecycle event so it is
+    # diagnosable in the ▾ timeline (previously it was a silent hub-log-only
+    # pop — indistinguishable from a never-onboarded/stuck spoke).
+    assert ("pxmx-agent", "relayed_agent_deapproved") in \
+        [(sid, ev) for (sid, ev, _detail) in h.events]
     # s1: still evaluated — escalates to error at 2000s (last_seen 0).
     assert h._spoke_alerts["s1"]["tier"] == _TIER_ERROR
 

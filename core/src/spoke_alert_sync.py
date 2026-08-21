@@ -159,6 +159,25 @@ class SpokeAlertMixin:
             self.approved_modules.pop(sid, None)
             self._spoke_alert_clear(sid)
             self._spoke_absent_since.pop(sid, None)
+            # Make this de-approval VISIBLE on the per-spoke event timeline (the
+            # ▾ events an operator inspects). Without it, a spoke that loses its
+            # approval here is indistinguishable from a never-onboarded / stuck
+            # spoke ("no key / never / re-approve while connected"), which has
+            # masked exactly this path during "roles/spokes randomly removed"
+            # triage. If the reaped id is genuinely a relayed pxmx node-agent
+            # this is expected housekeeping; if it is a real module spoke whose
+            # id collides with a relayed agent id, this event is the smoking gun.
+            # Best-effort — the alert loop must never break on event recording.
+            try:
+                self.record_spoke_event(
+                    sid, "relayed_agent_deapproved",
+                    "auto-removed from approved_modules by relayed-agent "
+                    "self-heal: this id is also tracked as a relayed pxmx "
+                    "node-agent (composite heartbeat key / agent_config / "
+                    "agent_info). If this is a real module spoke, its id "
+                    "collides with a relayed agent id — rename or re-onboard it.")
+            except Exception:  # noqa: BLE001
+                pass
         # Persisted self-heal: drop from known_modules too so a hub restart
         # doesn't re-leak them. Change-gated → no per-cycle write once clean.
         known = list(self.state.system_state.get("known_modules", []) or [])
