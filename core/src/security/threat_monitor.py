@@ -127,6 +127,21 @@ class ThreatMonitor:
         self._recent_success: Dict[str, float] = {}       # ip -> last-success ts
         self._offense: Dict[str, int] = {}                # ip -> lifetime block count
         self._never: List[str] = []                       # legacy; merged into shared list on load
+        # Durable cumulative counters — MONOTONIC lifetime tallies that survive
+        # block expiry, unblock, and the bounded events deque rolling over. They
+        # answer "is the system seeing/evaluating anything?" even when there are
+        # zero *active* blocks. Never decremented.
+        self._totals: Dict[str, Any] = {
+            "signals": 0,        # every failure + anomaly ingested (things evaluated)
+            "failures": 0,       # auth failures (record_failure)
+            "anomalies": 0,      # note_anomaly calls
+            "blocks_placed": 0,  # blocks ever created (auto + manual)
+            "blocks_permanent": 0,
+            "unblocks": 0,       # manual releases
+            "by_kind": {},       # {kind: count} across failures + anomalies
+            "since": _now(),     # first-init epoch
+            "last_ts": 0.0,      # last signal epoch
+        }
         self._cfg: Dict[str, Any] = dict(_DEFAULTS)
         self._nsg_dirty = False
         self._load()
@@ -157,6 +172,21 @@ class ThreatMonitor:
         self._schedule_reconcile()
         return self.config()
 
+    # ── durable cumulative counters ────────────────────────────────────────────
+    def _bump_signal(self, kind: str, *, anomaly: bool) -> None:
+        """Increment the monotonic lifetime tallies for one ingested signal.
+
+        Called for every auth failure and every anomaly so the operator can tell
+        the system is evaluating traffic even after all active blocks expire."""
+        t = self._totals
+        t["signals"] = int(t.get("signals", 0)) + 1
+        t["anomalies" if anomaly else "failures"] = int(
+            t.get("anomalies" if anomaly else "failures", 0)) + 1
+        bk = t.setdefault("by_kind", {})
+        k = kind or ("anomaly" if anomaly else "unknown")
+        bk[k] = int(bk.get(k, 0)) + 1
+        t["last_ts"] = _now()
+
     # ── ingest ─────────────────────────────────────────────────────────────────
     def record_failure(self, ip: str, kind: str, username: Optional[str] = None,
                         detail: str = "") -> None:
@@ -166,6 +196,7 @@ class ThreatMonitor:
         if not ip or not self._cfg.get("enabled"):
             return
         now = _now()
+        self._bump_signal(kind, anomaly=False)
         self._events.appendleft({"ts": now, "ip": ip, "kind": kind,
                                  "username": username or "", "detail": detail})
         if ip in self._blocks or self._is_exempt(ip):
@@ -209,6 +240,9 @@ class ThreatMonitor:
         }
         self._blocks[ip] = rec
         self._ip_fails.pop(ip, None)
+        self._totals["blocks_placed"] = int(self._totals.get("blocks_placed", 0)) + 1
+        if permanent:
+            self._totals["blocks_permanent"] = int(self._totals.get("blocks_permanent", 0)) + 1
         self._nsg_dirty = True
         self._persist()
         sec_log.warning("THREAT BLOCK %s (%s) — %s%s", ip, source, reason,
@@ -260,6 +294,7 @@ class ThreatMonitor:
         never raises into the caller."""
         try:
             now = _now()
+            self._bump_signal(kind, anomaly=True)
             self._events.appendleft({"ts": now, "ip": (ip or "").strip(),
                                      "kind": kind, "username": "",
                                      "detail": detail, "severity": severity})
@@ -271,10 +306,27 @@ class ThreatMonitor:
         except Exception:
             sec_log.exception("note_anomaly failed for kind=%s", kind)
 
+    def self_test(self) -> Dict[str, Any]:
+        """Operator-initiated detection self-test: record ONE synthetic signal so
+        the full pipeline (ingest → tally → persist → snapshot → Security view) can
+        be verified end-to-end without a real attack.
+
+        Deliberately benign: severity ``warning`` and no attributable IP, so it
+        NEVER places an NSG block. It increments the lifetime tallies under the
+        ``selftest`` kind (clearly labelled, easy to discount) and lands in the
+        recent-events feed. Returns the post-test totals for immediate display."""
+        self.note_anomaly("selftest", "operator-initiated detection self-test "
+                          "(synthetic; no IP → never blocks)", ip=None, severity="warning")
+        t = dict(self._totals)
+        sec_log.warning("SECURITY SELF-TEST recorded — pipeline OK (signals=%s)",
+                        t.get("signals"))
+        return {"status": "SUCCESS", "totals": t}
+
     def unblock(self, ip: str) -> Dict[str, Any]:
         ip = (ip or "").strip()
         existed = self._blocks.pop(ip, None)
         if existed:
+            self._totals["unblocks"] = int(self._totals.get("unblocks", 0)) + 1
             self._nsg_dirty = True
             self._persist()
             sec_log.info("THREAT UNBLOCK %s (manual)", ip)
@@ -540,6 +592,12 @@ class ThreatMonitor:
             "events": list(self._events)[:200],
             "counts": {"blocked": len(blocks), "permanent": sum(1 for b in blocks if b.get("permanent")),
                        "never": len(trusted), "events": len(self._events)},
+            # Durable lifetime tallies (survive expiry/unblock/deque-rollover) so
+            # the operator can confirm the pipeline is evaluating traffic even with
+            # zero active blocks. Includes currently-active for at-a-glance context.
+            "totals": {**dict(self._totals),
+                       "currently_blocked": len(blocks),
+                       "currently_permanent": sum(1 for b in blocks if b.get("permanent"))},
         }
 
     # ── persistence ─────────────────────────────────────────────────────────────
@@ -550,7 +608,8 @@ class ThreatMonitor:
         try:
             with open(self._file(), "w", encoding="utf-8") as f:
                 json.dump({"config": self._cfg, "blocks": self._blocks,
-                           "offense": self._offense, "never": self._never}, f)
+                           "offense": self._offense, "never": self._never,
+                           "totals": self._totals}, f)
         except Exception as e:  # noqa: BLE001
             logger.debug("threat_monitor persist failed: %s", e)
 
@@ -562,6 +621,13 @@ class ThreatMonitor:
             self._blocks = data.get("blocks") or {}
             self._offense = data.get("offense") or {}
             self._never = data.get("never") or []
+            _saved_totals = data.get("totals") or {}
+            if isinstance(_saved_totals, dict):
+                # Merge over defaults so a counter added in a later version starts
+                # at 0 rather than KeyError-ing, while preserving the running tally.
+                self._totals.update({k: v for k, v in _saved_totals.items()
+                                     if k in self._totals or k == "by_kind"})
+                self._totals.setdefault("by_kind", {})
             self._nsg_dirty = True  # re-push on boot so Azure matches our state
         except FileNotFoundError:
             pass

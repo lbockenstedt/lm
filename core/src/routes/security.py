@@ -96,3 +96,11 @@ def register(app, hub, ctx):
         _guard(request)
         hub.threat_monitor._nsg_dirty = True
         return await hub.threat_monitor.reconcile_nsg()
+
+    @app.post("/api/security/selftest")
+    async def security_selftest(request: Request):
+        """Record a synthetic detection signal so the operator can verify the
+        pipeline is live (it appears in Lifetime activity + Recent attempts).
+        Benign: no IP → never blocks anyone."""
+        _guard(request)
+        return hub.threat_monitor.self_test()

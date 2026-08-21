@@ -4166,6 +4166,33 @@ async function loadSecurityData() {
           <button onclick="securityBlock()" class="bg-red-600 hover:bg-red-700 text-white px-3 py-1 rounded font-bold">Block</button>
         </div></div>`;
 
+    const t = d.totals || {};
+    const bk = t.by_kind || {};
+    const statChip = (label, val, tone) => `<div class="text-center">
+        <div class="text-2xl font-bold ${tone || 'text-slate-700'}">${Number(val || 0).toLocaleString()}</div>
+        <div class="text-[11px] text-slate-400 uppercase tracking-wider">${label}</div></div>`;
+    const kindChips = Object.keys(bk).sort((a, b) => bk[b] - bk[a]).map(k =>
+        `<span class="inline-block px-2 py-0.5 rounded bg-slate-100 text-slate-600 text-[11px] mr-1 mb-1" title="${escapeHtml(k)}"><b>${Number(bk[k] || 0).toLocaleString()}</b> ${escapeHtml(k)}</span>`).join('');
+    const stats = `<div class="${card}">
+        <div class="flex items-center justify-between mb-3 flex-wrap gap-1">
+          <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Lifetime activity <span class="text-slate-400 normal-case font-normal">— cumulative; survives block expiry / unblock</span></h3>
+          <div class="flex items-center gap-2">
+            <button onclick="securitySelfTest()" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium" title="Record a synthetic detection signal to confirm the pipeline is live (never blocks anyone)">Run self-test</button>
+            <span class="text-[11px] text-slate-400">since ${fmtTs(t.since)}${t.last_ts ? ` · last signal ${fmtTs(t.last_ts)}` : ''}</span>
+          </div>
+        </div>
+        <div class="grid grid-cols-3 md:grid-cols-6 gap-3">
+          ${statChip('Signals seen', t.signals, 'text-slate-800')}
+          ${statChip('Auth failures', t.failures, 'text-amber-600')}
+          ${statChip('Anomalies', t.anomalies, 'text-amber-700')}
+          ${statChip('Blocks placed', t.blocks_placed, 'text-red-600')}
+          ${statChip('Perm blocks', t.blocks_permanent, 'text-red-700')}
+          ${statChip('Active now', t.currently_blocked, 'text-slate-700')}
+        </div>
+        ${kindChips ? `<div class="pt-3 mt-3 border-t border-slate-100"><span class="text-[11px] text-slate-400 uppercase tracking-wider mr-2">By kind</span>${kindChips}</div>` : ''}
+        ${!t.signals ? '<p class="text-[11px] text-slate-400 italic mt-2">No security signals evaluated yet — the pipeline is armed and will tally every attempt here as it occurs, even after individual blocks expire.</p>' : ''}
+      </div>`;
+
     const evts = d.events || [];
     const evtRows = evts.slice(0, 60).map(e => `<tr class="border-b border-slate-100">
         <td class="px-2 py-1 text-slate-400 whitespace-nowrap">${fmtTs(e.ts)}</td>
@@ -4178,6 +4205,7 @@ async function loadSecurityData() {
         <div class="overflow-x-auto max-h-72 overflow-y-auto"><table class="w-full text-xs"><thead class="text-slate-400 text-[10px] uppercase"><tr><th class="px-2 py-1 text-left">When</th><th class="px-2 py-1 text-left">Source IP</th><th class="px-2 py-1 text-left">Kind</th><th class="px-2 py-1 text-left">User</th><th class="px-2 py-1 text-left">Detail</th></tr></thead><tbody>${evtRows || '<tr><td colspan="5" class="px-2 py-3 text-slate-400 italic">no events yet</td></tr>'}</tbody></table></div></div>`;
 
     el.innerHTML = `
+      ${stats}
       ${cfg}
       ${manualBlock}
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -4269,6 +4297,7 @@ async function securityUnblock(ip) { await _securityReq('/api/security/unblock',
 async function securityNeverAdd() { const cidr = (document.getElementById('sec-never-ip').value || '').trim(); if (!cidr) return; const descEl = document.getElementById('sec-never-desc'); const description = (descEl && descEl.value || '').trim(); await _securityReq('/api/security/never-block', 'POST', { cidr, description }, `Added ${cidr} to trusted list`); loadSecurityData(); }
 async function securityNeverRemove(cidr) { await _securityReq('/api/security/never-block', 'DELETE', { cidr }, `Removed ${cidr}`); loadSecurityData(); }
 async function securityReconcile() { await _securityReq('/api/security/reconcile', 'POST', {}, 'NSG sync requested'); }
+async function securitySelfTest() { await _securityReq('/api/security/selftest', 'POST', {}, 'Self-test recorded — pipeline live'); loadSecurityData(); }
 async function _securityReq(url, method, body, okMsg) {
     try {
         const r = await setupFetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
