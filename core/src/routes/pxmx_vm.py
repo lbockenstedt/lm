@@ -1,8 +1,44 @@
 """Proxmox VM lifecycle routes: action, pools, ISOs, storages, create, clone."""
+import re
+
 from api import (
     HTTPException, Request, _cache_entry, _refresh_module_all_tenants,
     access, get_tenant_scoping, logger, spoke_or_503, vmid_alloc,
 )
+
+# ── Spoke-name numbering (pure; module-level for unit tests) ──────────────────
+_SPOKE_NAME_RE = re.compile(r"^(.*?)-0*(\d+)$")
+
+
+def _next_spoke_number(prefix, vm_names, spoke_hostnames):
+    """The lowest free positive integer N such that ``<prefix>-0N`` collides with
+    no existing VM name (``<prefix>-05``) AND no existing spoke hostname
+    (``<prefix>-05`` or ``agent-<prefix>-05``). Case-insensitive; tolerates any
+    zero-padding. Scans upward from 1, so a taken number is never reused even when
+    a lower gap exists."""
+    pfx = str(prefix or "").strip().lower()
+    used = set()
+
+    def _capture(text):
+        s = str(text or "").strip().lower()
+        if s.startswith("agent-"):
+            s = s[len("agent-"):]
+        m = _SPOKE_NAME_RE.match(s)
+        if m and m.group(1) == pfx:
+            try:
+                used.add(int(m.group(2)))
+            except ValueError:
+                pass
+
+    for v in (vm_names or []):
+        _capture(v)
+    for h in (spoke_hostnames or []):
+        _capture(h)
+    n = 1
+    while n in used:
+        n += 1
+    return n
+
 
 
 def register(app, hub, ctx):
@@ -619,3 +655,206 @@ def register(app, hub, ctx):
         except Exception as e:
             logger.exception("pxmx_clone_vm failed")
             raise HTTPException(status_code=500, detail=str(e))
+
+    # ── One-click spoke deploy (the "easy button") ────────────────────────────
+    # A CS/PXMX spoke used to be a 4-step manual chore: build a Debian VM, set an
+    # IP, register the agent, then bind the pxmx host to it. All four collapse
+    # into a single clone of a *golden spoke template* — a VM whose agent was
+    # installed with ``install_agent.sh --clone-only --onboarding-psk`` (service
+    # staged + enabled but STOPPED; PSK carried over). Cloning it with a fresh
+    # name and STARTING the clone makes it boot, DHCP an address, derive its
+    # spoke id from its own hostname (``agent-<hostname>``), auto-discover the
+    # hub, present the carried PSK, and self-approve + tenant-bind — zero touch.
+    #
+    # The clone must be a cloud-init template so Proxmox seeds the guest hostname
+    # from the VM ``name`` on first boot; otherwise every clone keeps the
+    # template's hostname and collides on one spoke id. This route only orchestrates
+    # existing relays (PXMX_CLONE_VM then PXMX_VM_ACTION start) — no agent change.
+
+    async def _list_all_pxmx_vms(hub, pxmx_spoke, tid):
+        """The tenant's cached VM list, or a live unfiltered PXMX_LIST_VMS when the
+        cache is cold. Best-effort ([] on any failure) — the caller only reads VM
+        names to pick the next free spoke number."""
+        try:
+            cached = _cache_entry(tid, "pxmx_vms")
+            vms = (cached["data"] or {}).get("vms", []) if cached else []
+            if vms:
+                return vms
+            r = await hub.request_response(pxmx_spoke, "PXMX_LIST_VMS", {})
+            d = r.get("payload", {}).get("data", r) if isinstance(r, dict) else r
+            return (d or {}).get("vms", []) or []
+        except Exception as e:  # noqa: BLE001
+            logger.debug("deploy-spoke: VM list lookup skipped: %s", e)
+            return []
+
+    def _known_spoke_hostnames(hub):
+        """Every hostname/display-name the hub already knows for a spoke, so the
+        next-number scan also avoids a spoke whose VM was renamed post-clone."""
+        out = []
+        try:
+            st = hub.state.system_state
+            names = st.get("module_names", {}) or {}
+            meta = st.get("module_metadata", {}) or {}
+            for sid in (st.get("known_modules", []) or []):
+                m = meta.get(sid, {}) or {}
+                for cand in (names.get(sid), m.get("hostname"), sid):
+                    if cand:
+                        out.append(cand)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("deploy-spoke: known-spoke scan skipped: %s", e)
+        return out
+
+    @app.post("/api/pxmx/deploy-spoke")
+    async def pxmx_deploy_spoke(request: Request):
+        """One-click spoke deploy: clone a golden spoke template, auto-name it
+        ``<prefix>-0N`` (next free, default prefix ``CS-SVR``), tag it for the
+        acting tenant, and START it so it self-onboards. Body:
+        ``{template_unique_id (or vmid+node), name?, number?, name_prefix?,
+        pool?, start?}``. ``start`` defaults to true. Returns the clone result
+        plus ``{deployed_name, spoke_id, started}`` (spoke_id is the id the box
+        will self-register under: ``agent-<name lowercased>``). Admin/write-user,
+        same gate as clone."""
+        sess = _session_user(request)
+        if not sess or not access.has_edit_access(sess):
+            raise HTTPException(status_code=403, detail="Edit access required to deploy spokes")
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body or {}
+
+        template_unique_id = str(body.get("template_unique_id", "")).strip()
+        if not template_unique_id:
+            vmid = body.get("vmid")
+            node = str(body.get("node", "")).strip()
+            if vmid is None or not node:
+                raise HTTPException(status_code=400,
+                                     detail="template_unique_id (or vmid+node) required")
+            template_unique_id = f"unknown/{node}/{vmid}"
+
+        hub = app.state.hub
+        pxmx_spoke = spoke_or_503(hub.get_hypervisor_spoke(), "Hypervisor")
+        tid = _resolve_tenant(request, None)
+
+        # Resolve the tenant's labels for the new VM (display name + proxmox_tag),
+        # identical to clone so the deployed spoke's backing VM is attributed to
+        # the right tenant on the next VM sync.
+        scoping = get_tenant_scoping(hub, tid) or {}
+        tenant_tag = scoping.get("proxmox_tag") or ""
+        tenant_name = ""
+        try:
+            trec = hub.state.get_tenant(tid) or {}
+            tenant_name = str(trec.get("name") or "").strip()
+        except Exception:
+            pass
+        tenant_tags = [t for t in (tenant_name, tenant_tag) if t]
+
+        # Determine the deploy name. Explicit name wins; else <prefix>-0N from an
+        # explicit number or the next free one. Prefix normalized to the CS-SVR
+        # convention (uppercase) so the guest hostname/spoke id read cleanly.
+        prefix = str(body.get("name_prefix") or "CS-SVR").strip() or "CS-SVR"
+        explicit_name = str(body.get("name", "")).strip()
+        if explicit_name:
+            deployed_name = explicit_name
+        else:
+            num = body.get("number")
+            if num is None:
+                vms = await _list_all_pxmx_vms(hub, pxmx_spoke, tid)
+                vm_names = [v.get("name") for v in vms if isinstance(v, dict)]
+                num = _next_spoke_number(prefix, vm_names, _known_spoke_hostnames(hub))
+            try:
+                num = int(num)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="number must be an integer")
+            deployed_name = f"{prefix}-{num:02d}"
+
+        # Template-pool guard (mirrors clone): only a VM in a configured template
+        # pool may be deployed. Also capture its type/node from the cached list.
+        template_pools = {p.lower() for p in access._template_pools(hub)}
+        template_pool_ok = False
+        vm_type = str(body.get("type", "")).strip().lower()
+        pool = str(body.get("pool", "")).strip()
+        try:
+            vms = await _list_all_pxmx_vms(hub, pxmx_spoke, tid)
+            for v in vms:
+                if v.get("unique_id") == template_unique_id:
+                    vpool = str(v.get("pool", "")).lower()
+                    if (vpool and vpool in template_pools) or not template_pools:
+                        template_pool_ok = True
+                    if not vm_type:
+                        vm_type = str(v.get("type", "")).lower()
+                    break
+        except Exception as e:  # noqa: BLE001
+            logger.debug("deploy-spoke: template-pool guard lookup skipped: %s", e)
+        if not template_pool_ok:
+            raise HTTPException(status_code=403,
+                                 detail="template is not in a configured template pool")
+
+        new_vmid = body.get("new_vmid")
+        if not new_vmid and vmid_alloc.vmid_alloc_cfg(hub).get("enabled", False):
+            try:
+                new_vmid = await vmid_alloc.allocate_vmid(hub, tid)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("vmid-alloc (deploy) tenant=%s failed: %s", tid, e)
+                new_vmid = None
+
+        node = (template_unique_id.split("/")[1]
+                if template_unique_id.count("/") >= 2 else str(body.get("node", "")))
+        clone_payload = {
+            "unique_id": template_unique_id,
+            "template_unique_id": template_unique_id,
+            "name": deployed_name,
+            "tenant_tags": tenant_tags,
+            "pool": pool,
+            "type": vm_type or "qemu",
+            "node": node,
+            "template_vmid": body.get("vmid"),
+            "new_vmid": new_vmid,
+        }
+        try:
+            result = await hub.request_response(pxmx_spoke, "PXMX_CLONE_VM", clone_payload, timeout=605.0)
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            if not isinstance(data, dict) or data.get("status") == "ERROR":
+                msg = (data or {}).get("message", "clone failed") if isinstance(data, dict) else "clone failed"
+                raise HTTPException(status_code=502, detail=msg)
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception("pxmx_deploy_spoke clone failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
+        # Start the clone so it boots, DHCPs, and self-onboards. Best-effort — a
+        # start failure still leaves a correctly-named, tenant-tagged VM the
+        # operator can boot by hand, so it degrades to the clone result + a note.
+        started = False
+        start_error = None
+        want_start = body.get("start", True)
+        new_unique_id = data.get("unique_id")
+        if want_start and new_unique_id:
+            try:
+                sres = await hub.request_response(pxmx_spoke, "PXMX_VM_ACTION", {
+                    "unique_id": new_unique_id,
+                    "vmid": data.get("vmid"),
+                    "node": data.get("node") or node,
+                    "type": data.get("type") or vm_type or "qemu",
+                    "action": "start",
+                }, timeout=35.0)
+                sdata = sres.get("payload", {}).get("data", sres) if isinstance(sres, dict) else sres
+                if isinstance(sdata, dict) and sdata.get("status") == "ERROR":
+                    start_error = sdata.get("message", "start failed")
+                else:
+                    started = True
+            except Exception as e:  # noqa: BLE001
+                logger.warning("deploy-spoke: start of %s failed: %s", new_unique_id, e)
+                start_error = str(e)
+
+        _trigger_vm_sync_after_pxmx_edit(hub, request, body)
+        _refresh_module_all_tenants(hub, "pxmx_vms")
+
+        out = dict(data)
+        out["deployed_name"] = deployed_name
+        out["spoke_id"] = "agent-" + deployed_name.lower()
+        out["started"] = started
+        if start_error:
+            out["start_error"] = start_error
+        return out

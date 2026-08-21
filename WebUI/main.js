@@ -16814,7 +16814,7 @@ function openVmDetail(uniqueId) {
             ${vm.protected
                 ? `<button disabled title="Protected from deletion — remove the safeguard in Setup → Hypervisors" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-200 text-slate-400 cursor-not-allowed">🔒 Delete</button>`
                 : `<button onclick="pxmxVmAction('${uid}','destroy')" title="Destroy this VM and its disks (--purge) — IRREVERSIBLE" class="px-3 py-1.5 rounded-md text-xs font-bold bg-red-800 hover:bg-red-900 text-white transition-colors">🗑 Delete</button>`}
-            ${(() => { const tp = (window._pxmxTemplatePools||[]); return (vm.pool && tp.includes(String(vm.pool).toLowerCase())) ? `<button onclick="pxmxCloneVm('${uid}')" title="Clone this template to a new VM" class="px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">⧉ Clone</button>` : ''; })()}
+            ${(() => { const tp = (window._pxmxTemplatePools||[]); return (vm.pool && tp.includes(String(vm.pool).toLowerCase())) ? `<button onclick="pxmxCloneVm('${uid}')" title="Clone this template to a new VM" class="px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">⧉ Clone</button><button onclick="pxmxDeploySpoke('${uid}')" title="One-click spoke deploy: clone this golden spoke template, auto-name it CS-SVR-0N, and start it so it DHCPs and self-onboards" class="px-3 py-1.5 rounded-md text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white transition-colors">🚀 Deploy Spoke</button>` : ''; })()}
             <span id="pxmx-vm-action-status" class="text-xs text-slate-400"></span>
         </div>`;
     // Populate the "Back up to Hub" storage dropdown with this host's
@@ -17353,7 +17353,89 @@ async function pxmxCloneVmSubmit(uniqueId) {
     }
 }
 
-// Build VM from ISO: a modal that lets the admin (acting as a tenant) define a
+// One-click spoke deploy (the "easy button"). Clones a *golden spoke template*
+// (a VM whose agent was installed with `install_agent.sh --clone-only
+// --onboarding-psk`, service staged+enabled but STOPPED, PSK carried over),
+// auto-names the clone CS-SVR-0N (next free — the hub computes it), and STARTS
+// it so it DHCPs, derives its spoke id from its own hostname, auto-discovers the
+// hub, presents the carried PSK, and self-approves + tenant-binds. The operator
+// can override the prefix/number and toggle auto-start. POSTs /api/pxmx/deploy-spoke.
+async function pxmxDeploySpoke(uniqueId) {
+    const vm = (window._pxmxVms || []).find(v => v.unique_id === uniqueId);
+    if (!vm) { showToast('Template not found in cache', 'error'); return; }
+    const escJs = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const tpl = `<div id="pxmx-deploy-modal" class="fixed inset-0 z-[60] flex items-center justify-center bg-black/40">
+        <div class="bg-white rounded-lg shadow-xl w-full max-w-md p-5 space-y-4">
+            <div class="flex items-center justify-between">
+                <h3 class="text-base font-semibold text-[#263040]">🚀 Deploy spoke</h3>
+                <button onclick="document.getElementById('pxmx-deploy-modal').remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+            </div>
+            <p class="text-xs text-slate-500">Cloning golden template <span class="font-mono">${escapeHtml(vm.name || '')}</span> (VMID ${vm.vmid}). The clone is named <span class="font-mono">&lt;prefix&gt;-0N</span>, tagged for the current tenant, and started — it then DHCPs and self-onboards under its own hostname (no IP to set, no agent to register).</p>
+            <div class="grid grid-cols-2 gap-3">
+                <label class="block text-xs font-medium text-slate-600">Name prefix
+                    <input id="pxmx-deploy-prefix" value="CS-SVR" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" />
+                </label>
+                <label class="block text-xs font-medium text-slate-600">Number (blank = next free)
+                    <input id="pxmx-deploy-number" placeholder="auto" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" />
+                </label>
+            </div>
+            <label class="flex items-center gap-2 text-xs font-medium text-slate-600">
+                <input id="pxmx-deploy-start" type="checkbox" checked class="w-4 h-4 rounded" /> Start the clone after deploy (self-onboard)
+            </label>
+            <div class="flex justify-end gap-2 pt-1">
+                <button onclick="document.getElementById('pxmx-deploy-modal').remove()" class="px-3 py-2 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100">Cancel</button>
+                <button id="pxmx-deploy-go" onclick="pxmxDeploySpokeSubmit('${escJs(vm.unique_id)}')" class="px-4 py-2 rounded-md text-sm font-bold bg-emerald-600 hover:bg-emerald-700 text-white">🚀 Deploy</button>
+            </div>
+            <p id="pxmx-deploy-status" class="text-xs text-slate-400"></p>
+        </div>
+    </div>`;
+    const existing = document.getElementById('pxmx-deploy-modal');
+    if (existing) existing.remove();
+    document.body.insertAdjacentHTML('beforeend', tpl);
+    const pfx = document.getElementById('pxmx-deploy-prefix');
+    if (pfx) { pfx.focus(); pfx.select(); }
+}
+
+async function pxmxDeploySpokeSubmit(uniqueId) {
+    const vm = (window._pxmxVms || []).find(v => v.unique_id === uniqueId);
+    if (!vm) { showToast('Template not found in cache', 'error'); return; }
+    const prefix = ((document.getElementById('pxmx-deploy-prefix') || {}).value || 'CS-SVR').trim() || 'CS-SVR';
+    const numberRaw = ((document.getElementById('pxmx-deploy-number') || {}).value || '').trim();
+    const start = !!(document.getElementById('pxmx-deploy-start') || {}).checked;
+    const statusEl = document.getElementById('pxmx-deploy-status');
+    const goBtn = document.getElementById('pxmx-deploy-go');
+    const body = { template_unique_id: vm.unique_id, type: vm.type || 'qemu', name_prefix: prefix, start };
+    if (numberRaw) {
+        const n = parseInt(numberRaw, 10);
+        if (isNaN(n)) { if (statusEl) statusEl.textContent = 'Number must be an integer'; return; }
+        body.number = n;
+    }
+    if (goBtn) { goBtn.disabled = true; goBtn.textContent = 'Deploying…'; }
+    if (statusEl) statusEl.textContent = 'Cloning the golden template — a full-disk clone can take a minute…';
+    try {
+        const r = await setupFetch('/api/pxmx/deploy-spoke', { method: 'POST', body: JSON.stringify(body) });
+        const data = await r.json().catch(() => ({}));
+        if (r.ok && data && data.status === 'SUCCESS') {
+            const startedMsg = data.started ? 'started — it will self-onboard shortly'
+                : (data.start_error ? `NOT started (${data.start_error}) — boot it manually` : 'left stopped');
+            showToast(`Deployed ${data.deployed_name} (VMID ${data.vmid}, spoke ${data.spoke_id}) — ${startedMsg}`, data.started || !start ? 'success' : 'error');
+            const modal = document.getElementById('pxmx-deploy-modal');
+            if (modal) modal.remove();
+            setTimeout(() => loadPxmxData('Virtual Machines'), 1200);
+        } else {
+            const msg = data && (data.detail || data.message) || r.status;
+            showToast(`Deploy failed: ${msg}`, 'error');
+            if (statusEl) statusEl.textContent = `Failed: ${msg}`;
+            if (goBtn) { goBtn.disabled = false; goBtn.textContent = '🚀 Deploy'; }
+        }
+    } catch (e) {
+        showToast(`Deploy failed: ${e.message || e}`, 'error');
+        if (statusEl) statusEl.textContent = `Failed: ${e.message || e}`;
+        if (goBtn) { goBtn.disabled = false; goBtn.textContent = '🚀 Deploy'; }
+    }
+}
+
+
 // new qemu VM that boots a Proxmox installer ISO. The user picks a node → the
 // ISO list + disk-storage list for that node load (PXMX_LIST_ISOS /
 // PXMX_LIST_STORAGES via /api/pxmx/isos + /api/pxmx/storages), then sets name,
