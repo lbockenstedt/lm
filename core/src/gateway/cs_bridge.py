@@ -139,8 +139,9 @@ class CSBridgePoller:
         self._apply_configured_timeouts()
         # Long-op actions (mirror cs_spoke._LONG so the bridge picks the long
         # relay window without a round-trip). Keep in sync with the spoke set.
-        self._long_actions = {"delete_vm", "reclone_vm", "snapshot_vm", "clone_lxc",
-                              "provision_unassigned", "reclone_all", "proxmox_reclone_all"}
+        self._long_actions = {"delete_vm", "delete_vms", "reclone_vm", "snapshot_vm",
+                              "clone_lxc", "provision_unassigned", "reclone_all",
+                              "proxmox_reclone_all"}
         # Per-agent USB-config sync state.
         self._last_usb_cfg: Dict[str, str] = {}   # agent_id -> canonical blob sig
         self._last_usb_push: Dict[str, float] = {}  # agent_id -> ts (last check)

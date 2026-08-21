@@ -10111,9 +10111,13 @@ window.csVmBulk = async function (action) {
     // awaiting) and re-render so their rows show the operation instantly.
     const _op = _CS_ACTION_OP[action];
     if (_op) { items.forEach(v => _vmInflight.set(v._key, { op: _op, ts: Date.now(), host: v._host })); csVmRerenderInflight(); }
-    if (action === 'delete_vm') {
-        for (const hh of new Set(items.map(v => v._host))) { await csExpirePendingForTarget(hh); }
-    }
+    // NOTE: no pre-teardown csExpirePendingForTarget() here. The spoke coalesces
+    // a multi-VM delete into ONE idempotent delete_vms batch per host, and the
+    // agent expires that host's stale pending commands inside destroy_vm itself
+    // — so clearing here is redundant AND harmful: clear_commands expires
+    // *delivered* (already-running) commands too, so a habitual re-click while
+    // the first batch is still in flight would cancel it (the "have to try a few
+    // times" churn). Idempotent destroy makes an overlapping re-click safe.
     // Bulk enqueue — group the selected VMs by their OWNING spoke and send ONE
     // request per spoke carrying the whole item list, instead of one request (and
     // one hub→spoke WS round-trip) per VM. Each item keeps its own target so VMs
