@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid as _uuid
 from collections import deque
 
@@ -95,6 +96,7 @@ class _ReconcileHub:
         self.active_connection_key_ids = {}
         self.agent_logs = {}
         self.agent_info = {}
+        self._recent_reimages = {}
 
     # Mirror the real record_spoke_event: per-spoke deque, most-recent-first read.
     def record_spoke_event(self, spoke_id, event, detail=""):
@@ -122,6 +124,15 @@ class _ReconcileHub:
 
     def _migrate_spoke_identity(self, old_id, new_id, **kw):
         return main.LabManagerHub._migrate_spoke_identity(self, old_id, new_id, **kw)
+
+    def _note_reimage_collision(self, guid):
+        return main.LabManagerHub._note_reimage_collision(self, guid)
+
+    def _is_uuid_collision(self, old_id, new_pk):
+        return main.LabManagerHub._is_uuid_collision(self, old_id, new_pk)
+
+    def _note_uuid_collision(self, old_id, new_id, install_uuid):
+        return main.LabManagerHub._note_uuid_collision(self, old_id, new_id, install_uuid)
 
     def _agent_primary_key(self, agent_id):
         return main.LabManagerHub._agent_primary_key(self, agent_id)
@@ -361,8 +372,96 @@ def test_unproven_rename_refuses_migration(tmp_path):
     assert state.system_state["module_metadata"]["evil-spoke"]["install_uuid"] == ""
     # Refusal is surfaced as a lifecycle event (visible in Setup → diagnostics).
     assert _events_of(hub, "evil-spoke", "identity_rename_unproven")
-    assert not _events_of(hub, "evil-spoke", "identity_changed")
+    assert not _events_of(hub, "clone-spoke", "identity_changed")
     assert not _events_of(hub, "old-spoke", "identity_changed")
+
+
+
+def _assert_victim_intact_and_clone_pending(state, km, hub):
+    """Common post-conditions for a refused shared-uuid collision: the real
+    owner (old-spoke) keeps its approval/key/uuid-index, and the colliding
+    clone is held pending with no inherited state and no uuid recorded."""
+    # Owner untouched.
+    assert state.system_state["approved_modules"].get("old-spoke") is True
+    assert "old-spoke" in state.system_state["known_modules"]
+    assert km.get_valid_key("old-spoke", "the-secret") == "k1"
+    assert hub.install_uuid_index["UUID-1"] == "old-spoke"
+    # Clone gets nothing.
+    assert state.system_state["approved_modules"].get("clone-spoke") is None
+    assert km.get_valid_key("clone-spoke", "the-secret") is None
+    assert state.system_state["module_metadata"]["clone-spoke"]["install_uuid"] == ""
+    # Collision surfaced on BOTH ids; NO migration event on either.
+    assert _events_of(hub, "old-spoke", "install_uuid_collision")
+    assert _events_of(hub, "clone-spoke", "install_uuid_collision")
+    assert not _events_of(hub, "clone-spoke", "identity_changed")
+    assert not _events_of(hub, "old-spoke", "identity_changed")
+
+
+def test_shared_uuid_live_owner_refuses_migration(tmp_path):
+    """The pxmx bug: two Proxmox clones share ONE SMBIOS install_uuid AND the
+    cloned golden .env secret, so the CC2 proof passes (migrate_if=True) — but
+    the real owner is STILL ONLINE, so this is a collision, not a rename.
+    Migrating would steal its approval/tenant/key and flap both boxes. Refuse."""
+    state = _fresh_state(tmp_path)
+    km = _make_km()
+    hub = _ReconcileHub(state, km)
+    _seed_approved_victim(state, km, hub)
+    # Owner holds a live connection (keyed by its primary key == its id pre-arm).
+    hub.active_connections["old-spoke"] = object()
+
+    reconcile(hub, "clone-spoke", "UUID-1", "clonehost", migrate_if=True)
+
+    _assert_victim_intact_and_clone_pending(state, km, hub)
+
+
+def test_shared_uuid_recently_seen_owner_refuses_migration(tmp_path):
+    """Even with the owner's socket momentarily gone, a last-seen inside the
+    concurrency window means it did not retire for a reboot cycle → collision."""
+    state = _fresh_state(tmp_path)
+    km = _make_km()
+    hub = _ReconcileHub(state, km)
+    _seed_approved_victim(state, km, hub)
+    state.set_spoke_last_seen("old-spoke", time.time())  # seen just now
+
+    reconcile(hub, "clone-spoke", "UUID-1", "clonehost", migrate_if=True)
+
+    _assert_victim_intact_and_clone_pending(state, km, hub)
+
+
+def test_shared_uuid_cross_tenant_refuses_migration(tmp_path):
+    """A real clone-and-rename never changes tenant. Owner offline + not
+    recently seen, but the claiming id is already bound to a DIFFERENT tenant →
+    cross-tenant clone claim → refuse (multi-tenant isolation)."""
+    state = _fresh_state(tmp_path)
+    km = _make_km()
+    hub = _ReconcileHub(state, km)
+    _seed_approved_victim(state, km, hub)             # owner in tenant-A, offline
+    # The claiming id is pre-bound to a different tenant (e.g. RA vs LRB).
+    state.update_module_metadata("clone-spoke", {"tenant_id": "tenant-B"})
+
+    reconcile(hub, "clone-spoke", "UUID-1", "clonehost", migrate_if=True)
+
+    _assert_victim_intact_and_clone_pending(state, km, hub)
+
+
+def test_offline_owner_still_migrates_a_genuine_rename(tmp_path):
+    """Guard must NOT over-block: an owner that is truly retired (no live socket,
+    not recently seen, no cross-tenant claim) is a legitimate clone-and-rename
+    and STILL migrates — same-tenant, proven secret."""
+    state = _fresh_state(tmp_path)
+    km = _make_km()
+    hub = _ReconcileHub(state, km)
+    _seed_approved_victim(state, km, hub)
+    # Owner last seen well outside the concurrency window.
+    state.set_spoke_last_seen("old-spoke", time.time() - 10_000)
+
+    reconcile(hub, "new-spoke", "UUID-1", "newhost", migrate_if=True)
+
+    assert state.system_state["approved_modules"].get("UUID-1") is True
+    assert km.get_valid_key("UUID-1", "the-secret") == "k1"
+    assert hub.install_uuid_index["UUID-1"] == "UUID-1"
+    assert _events_of(hub, "UUID-1", "identity_changed")
+    assert not _events_of(hub, "new-spoke", "install_uuid_collision")
 
 
 

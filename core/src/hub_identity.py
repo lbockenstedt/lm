@@ -16,6 +16,21 @@ logger = logging.getLogger("Hub")
 _CLONE_REIMAGE_WINDOW_S = 120
 _CLONE_REIMAGE_THRESHOLD = 3
 
+# Shared-install_uuid collision guard: N boxes cloned from one Proxmox
+# template share the SAME SMBIOS/DMI product UUID *and* the SAME golden .env
+# secret, so each presents an identical install_uuid under a DIFFERENT
+# operator-chosen spoke_id. Because the secret is genuinely shared, the CC2
+# proof-of-old-secret gate passes, and the clone-and-rename MIGRATION fires —
+# handing whichever box connected last the other's approval + tenant binding +
+# key material (cross-tenant identity theft), then the two flap the identity
+# back and forth on every reconnect, each knocking the other offline / no-key.
+# A genuine clone-and-rename is SEQUENTIAL: the old box is retired (its socket
+# is gone) before the renamed box reconnects. So an old id that is still LIVE
+# (or seen within this window) when a new id claims its uuid is two concurrent
+# boxes = a collision, not a rename → refuse the migration, keep the real owner
+# intact, and hold the new id pending until it presents a unique identity.
+_UUID_COLLISION_LIVE_WINDOW_S = 90
+
 
 class HubIdentityMixin:
     """Correlate spokes/agents by stable install_uuid so a cloned+renamed box is
@@ -75,6 +90,79 @@ class HubIdentityMixin:
                     "multiple boxes sharing one identity")
                 hist.clear()  # dedupe until it re-accumulates
         except Exception:
+            pass
+
+    def _is_uuid_collision(self, old_id: str, new_pk: str) -> bool:
+        """True when ``old_id`` and ``new_pk`` are two DISTINCT boxes CONCURRENTLY
+        alive on ONE install_uuid — a clone-template collision, NOT a
+        clone-and-rename.
+
+        A genuine rename is sequential: the old box is retired (its WebSocket is
+        gone) before the renamed box reconnects, so migrating its approval/key is
+        correct. A shared-uuid collision keeps the old box ONLINE while a sibling
+        (same golden .env → same secret, which passes the CC2 proof gate) connects
+        under a new id claiming the same uuid — migrating would steal the old box's
+        approval/tenant/key (cross-tenant) and flap both spokes. We refuse the
+        migration whenever the old id is still live, was seen very recently, or is
+        bound to a DIFFERENT tenant than an already-tenant-bound new id.
+
+        Fails CLOSED (treat as a collision → no migration): if we cannot positively
+        rule out a concurrent collision, the safe outcome is to leave the real
+        owner intact and hold the new id pending, never to auto-hand over keys."""
+        try:
+            old_pk = self._primary_key(old_id)
+            if old_pk == new_pk:
+                return False
+            # (1) The old id still holds a live connection → both boxes are up now.
+            if self.active_connections.get(old_pk) is not None:
+                return True
+            # (2) The old id was seen within the concurrency window → it did not
+            #     retire for a reboot cycle the way a real rename does.
+            try:
+                last = (self.state.get_spoke_last_seen() or {}).get(old_pk)
+            except Exception:  # noqa: BLE001
+                last = None
+            if last and (time.time() - float(last)) < _UUID_COLLISION_LIVE_WINDOW_S:
+                return True
+            # (3) Both ids are already bound to DIFFERENT tenants → a real rename
+            #     never changes tenant; this is a cross-tenant clone claim.
+            try:
+                old_tenant = (self.state.get_spoke_tenant(old_pk) or "").strip()
+                new_tenant = (self.state.get_spoke_tenant(new_pk) or "").strip()
+            except Exception:  # noqa: BLE001
+                old_tenant = new_tenant = ""
+            if old_tenant and new_tenant and old_tenant != new_tenant:
+                return True
+            return False
+        except Exception:  # noqa: BLE001 — fail closed (no silent key handover)
+            return True
+
+    def _note_uuid_collision(self, old_id: str, new_id: str,
+                             install_uuid: str) -> None:
+        """Record + loudly alert a shared-install_uuid collision (two live boxes,
+        one uuid) whose identity migration we just REFUSED. Deduplicated is not
+        needed here — the refusal short-circuits before any state mutation, and
+        the event is recorded on both ids so whichever the operator is triaging
+        shows why the new box is stuck pending."""
+        try:
+            short = (install_uuid or "")[:8]
+            logger.warning(
+                "[identity] INSTALL_UUID COLLISION: %s claimed install_uuid %s… "
+                "while its current owner %s is still live — refusing identity "
+                "migration (would hand %s the approval/tenant/key of %s, possibly "
+                "cross-tenant, and flap both offline). Fix: regenerate the "
+                "duplicate machine uuid (Proxmox clone-template / cloned golden "
+                ".env). The new id stays pending until it presents a unique "
+                "identity.", new_id, short, old_id, new_id, old_id)
+            self.record_spoke_event(
+                old_id, "install_uuid_collision",
+                f"{new_id} claimed this box's install_uuid while it is still live "
+                f"— migration refused (shared uuid / clone-template)")
+            self.record_spoke_event(
+                new_id, "install_uuid_collision",
+                f"shares install_uuid with live spoke {old_id} — left pending; "
+                f"regenerate this box's machine uuid")
+        except Exception:  # noqa: BLE001
             pass
 
     # Sentinel in system_state marking that the one-shot persisted-blob
@@ -240,7 +328,17 @@ class HubIdentityMixin:
         if install_uuid:
             old_id = self.install_uuid_index.get(install_uuid)
             if old_id and old_id != new_pk:
-                if migrate_if:
+                if migrate_if and self._is_uuid_collision(old_id, new_pk):
+                    # Shared install_uuid across two CONCURRENTLY-LIVE boxes
+                    # (Proxmox clone-template + cloned golden .env secret): the
+                    # shared secret passes the CC2 proof gate, but this is a
+                    # collision, not a rename. Migrating would steal the real
+                    # owner's approval/tenant/key (cross-tenant) and flap both
+                    # spokes. Refuse: keep old_id intact, hold new_id pending
+                    # (owns_uuid=False), do NOT repoint the index.
+                    self._note_uuid_collision(old_id, new_pk, install_uuid)
+                    owns_uuid = False
+                elif migrate_if:
                     # Same install UUID, new id → cloned+renamed spoke WITH proof of
                     # the old id's secret. Migrate so the renamed box keeps its
                     # approval/tenant binding + key material. Target is new_pk
