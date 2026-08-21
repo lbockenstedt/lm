@@ -523,9 +523,34 @@ class SpokeRegistryMixin:
         view), fall back to ``get_spoke_by_type("nac")`` so the admin's NAC
         page still shows a spoke (unchanged legacy behavior; the admin merge
         view fans out to every tenant-bound spoke separately — see
-        routes/cppm.py)."""
+        routes/cppm.py).
+
+        Regression this fixes: a tenant with TWO nac spokes (two ClearPass
+        appliances, e.g. on different network segments only one spoke can
+        reach) used to resolve via ``bound[0]`` over
+        ``get_all_spokes_by_type("nac")`` — a list whose order tracks
+        connection/reconnection timing (each spoke's entry is popped on
+        disconnect and re-inserted at the end on reconnect), NOT any stable
+        assignment. So which of the two spokes answered a query flipped
+        every time EITHER nac spoke's connection blipped — intermittently
+        routing a query to a spoke with no network route to the OTHER
+        instance's ClearPass host ("no route to host", then working again
+        once the order flipped back). Prefer the tenant's own
+        ``nac_instances`` record(s) instead — a config-ordered list, stable
+        across reconnects — and pin to the FIRST bound, connected instance's
+        own ``spoke_id`` every time, exactly like the config-push path
+        (``main.py``'s ``push_config_to_spoke``) already does. Only fall back
+        to the connection-order pool pick for a spoke that self-registered
+        this tenant_id without a formal instance record."""
         if not tenant_id or tenant_id == "default":
             return self.get_spoke_by_type("nac")
+        instances = (self.state.get_global_config().get("nac_instances", []) or [])
+        for inst in instances:
+            if not isinstance(inst, dict) or inst.get("tenant_id") != tenant_id:
+                continue
+            sid = inst.get("spoke_id") or ""
+            if sid and sid in self.active_connections and self.approved_modules.get(sid, False):
+                return sid
         cands = [sid for sid in (self.get_all_spokes_by_type("nac") or [])
                  if sid in self.active_connections
                  and self.approved_modules.get(sid, False)]

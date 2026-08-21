@@ -15,8 +15,12 @@ from main import LabManagerHub
 
 
 class _FakeState:
-    def __init__(self, metadata):
+    def __init__(self, metadata, nac_instances=None):
         self.system_state = {"module_metadata": metadata}
+        self._nac_instances = nac_instances or []
+
+    def get_global_config(self):
+        return {"nac_instances": self._nac_instances}
 
 
 class _CppmHub:
@@ -24,12 +28,12 @@ class _CppmHub:
     test_get_nw_spoke.py's _NwHub."""
 
     def __init__(self, nac_spokes, metadata, approved=None, active=None,
-                 global_nac=None):
+                 global_nac=None, nac_instances=None):
         self._nac_spokes = nac_spokes
         self._metadata = metadata
         self.approved_modules = approved or {sid: True for sid in nac_spokes}
         self.active_connections = active or set(nac_spokes)
-        self.state = _FakeState(metadata)
+        self.state = _FakeState(metadata, nac_instances)
         self._global_nac = global_nac
 
     def get_all_spokes_by_type(self, module_type):
@@ -92,6 +96,85 @@ def test_for_tenant_skips_unapproved_and_disconnected_spokes():
     hub2 = _CppmHub(["cppm-1"], {"cppm-1": {"tenant_id": "tenantA"}},
                     approved={"cppm-1": False})
     assert LabManagerHub.get_cppm_spoke_for_tenant(hub2, "tenantA") is None
+
+
+# ── two nac instances, same tenant: must PIN, never hop ─────────────────────
+# Regression: with two ClearPass appliances bound to the SAME tenant (each
+# only reachable from its own spoke), the old bound[0]-over-
+# get_all_spokes_by_type() pick depended on connection/reconnect ORDER, not
+# any stable assignment, so a query could land on either spoke unpredictably
+# — including one with no network route to the OTHER instance's ClearPass
+# host. Resolution must instead pin to the SAME spoke every time via the
+# tenant's own config-ordered nac_instances list.
+
+def test_two_instances_same_tenant_pins_to_the_bound_instance_regardless_of_module_metadata_order():
+    # module_metadata (connection-order-derived) says cppm-2 first, but the
+    # config-ordered nac_instances list says cppm-1 is this tenant's FIRST
+    # bound instance — the fix must follow nac_instances, not module_metadata
+    # iteration order.
+    hub = _CppmHub(
+        ["cppm-2", "cppm-1"],  # get_all_spokes_by_type order (connection order)
+        {"cppm-2": {"tenant_id": "tenantA"}, "cppm-1": {"tenant_id": "tenantA"}},
+        nac_instances=[
+            {"tenant_id": "tenantA", "spoke_id": "cppm-1"},
+            {"tenant_id": "tenantA", "spoke_id": "cppm-2"},
+        ],
+    )
+    assert LabManagerHub.get_cppm_spoke_for_tenant(hub, "tenantA") == "cppm-1"
+
+
+def test_two_instances_same_tenant_resolution_is_stable_across_reconnect_order_flips():
+    """The exact reported symptom: simulate cppm-2 reconnecting (moving to the
+    end of connection-order bookkeeping) and confirm the resolved spoke does
+    NOT change — it must stay pinned to whatever nac_instances says, not flip
+    with connection timing."""
+    instances = [
+        {"tenant_id": "tenantA", "spoke_id": "cppm-1"},
+        {"tenant_id": "tenantA", "spoke_id": "cppm-2"},
+    ]
+    metadata = {"cppm-1": {"tenant_id": "tenantA"}, "cppm-2": {"tenant_id": "tenantA"}}
+    before = _CppmHub(["cppm-1", "cppm-2"], metadata, nac_instances=instances)
+    after_reconnect = _CppmHub(["cppm-2", "cppm-1"], metadata, nac_instances=instances)
+    assert (LabManagerHub.get_cppm_spoke_for_tenant(before, "tenantA")
+            == LabManagerHub.get_cppm_spoke_for_tenant(after_reconnect, "tenantA")
+            == "cppm-1")
+
+
+def test_pinned_instance_offline_falls_back_to_the_other_bound_spoke():
+    hub = _CppmHub(
+        ["cppm-2"],  # cppm-1 (the pinned instance) is disconnected
+        {"cppm-2": {"tenant_id": "tenantA"}},
+        nac_instances=[
+            {"tenant_id": "tenantA", "spoke_id": "cppm-1"},
+            {"tenant_id": "tenantA", "spoke_id": "cppm-2"},
+        ],
+    )
+    assert LabManagerHub.get_cppm_spoke_for_tenant(hub, "tenantA") == "cppm-2"
+
+
+def test_instance_with_no_bound_spoke_id_is_skipped_not_treated_as_a_match():
+    hub = _CppmHub(
+        ["cppm-2"],
+        {"cppm-2": {"tenant_id": "tenantA"}},
+        nac_instances=[
+            {"tenant_id": "tenantA", "spoke_id": ""},  # unbound instance record
+            {"tenant_id": "tenantA", "spoke_id": "cppm-2"},
+        ],
+    )
+    assert LabManagerHub.get_cppm_spoke_for_tenant(hub, "tenantA") == "cppm-2"
+
+
+def test_nac_instances_never_leaks_across_tenants():
+    hub = _CppmHub(
+        ["cppm-1", "cppm-2"],
+        {"cppm-1": {"tenant_id": "tenantA"}, "cppm-2": {"tenant_id": "tenantB"}},
+        nac_instances=[
+            {"tenant_id": "tenantA", "spoke_id": "cppm-1"},
+            {"tenant_id": "tenantB", "spoke_id": "cppm-2"},
+        ],
+    )
+    assert LabManagerHub.get_cppm_spoke_for_tenant(hub, "tenantA") == "cppm-1"
+    assert LabManagerHub.get_cppm_spoke_for_tenant(hub, "tenantB") == "cppm-2"
 
 
 # ── get_cppm_spoke_for_shared ────────────────────────────────────────────────
