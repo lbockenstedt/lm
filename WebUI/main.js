@@ -1503,6 +1503,7 @@ const SUBMENU_LABELS = {
     'logs-pxmx': 'Hypervisor',
     'logs-cppm': 'Security/NAC',
     'logs-netbox': 'IPAM',
+    'logs-nw': 'Network',
     'logs-cs': 'Simulations',
     'logs-le': 'Certificates',
     'logs-ldap': 'Directory',
@@ -1519,6 +1520,7 @@ const LOG_MODULE_PRODUCT = {
     'logs-pxmx':   'pxmx',
     'logs-opn':    'opnsense',
     'logs-netbox': 'netbox',
+    'logs-nw':     'nw',
     'logs-cppm':   'cppm',
     'logs-cs':     'cs',
     'logs-le':     'le',
@@ -1530,7 +1532,7 @@ function logsSubmenu() {
     const hasAgents = !!window.hasAgents;
     // Preserve the canonical order: hub first, then installed module tabs in
     // their fixed sequence, agents, then the hub-native filtered views last.
-    const order = ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-le', 'logs-truenas', 'logs-ldap', 'logs-agents', 'logs-recovery', 'logs-errors'];
+    const order = ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-nw', 'logs-cppm', 'logs-cs', 'logs-le', 'logs-truenas', 'logs-ldap', 'logs-agents', 'logs-recovery', 'logs-errors'];
     return order.filter(m => {
         if (m === 'logs-hub' || m === 'logs-recovery' || m === 'logs-errors') return true;
         if (m === 'logs-agents') return hasAgents;
