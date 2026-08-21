@@ -18160,8 +18160,8 @@ function serialEnsureConsoleDock() {
     modal.id = 'serial-console-modal';
     modal.className = 'fixed top-16 bottom-10 left-56 right-0 z-40 flex bg-[#1e1e1e] border-t border-slate-700 shadow-2xl';
     modal.innerHTML = `
-        <div class="w-72 shrink-0 flex flex-col border-r border-slate-700 bg-[#181818]">
-            <div class="p-2 border-b border-slate-700 space-y-2">
+        <div id="serial-console-sidebar" class="shrink-0 flex flex-col border-r border-slate-700 bg-[#181818] overflow-hidden">
+            <div class="p-2 border-b border-slate-700 space-y-2 w-72">
                 <div class="flex items-center justify-between">
                     <strong class="text-sm text-slate-200">Serial Consoles</strong>
                     <div class="flex items-center gap-2">
@@ -18174,7 +18174,12 @@ function serialEnsureConsoleDock() {
                 <button id="serial-broadcast-toggle" title="Check 2 or more consoles below first" disabled
                         class="opacity-40 w-full px-2 py-1 text-xs rounded border border-sky-500 text-sky-400 hover:bg-sky-900/40">Broadcast: Off</button>
             </div>
-            <div id="serial-console-list" class="flex-1 overflow-y-auto"></div>
+            <div id="serial-console-list" class="flex-1 overflow-y-auto w-72"></div>
+        </div>
+        <div id="serial-console-resize-handle" title="Drag to resize — collapse to fit two consoles side-by-side"
+             class="w-1.5 shrink-0 cursor-col-resize bg-slate-700 hover:bg-sky-500 active:bg-sky-500 relative">
+            <button id="serial-console-sidebar-collapse" title="Collapse/expand the console list"
+                    class="absolute top-2 -left-2 w-4 h-8 flex items-center justify-center rounded-sm bg-slate-700 hover:bg-sky-600 text-slate-300 hover:text-white text-[10px] leading-none">◂</button>
         </div>
         <div class="flex-1 flex flex-col min-w-0 min-h-0">
             <div class="flex items-center gap-3 px-4 py-2 bg-[#2d2d2d] border-b border-slate-700 text-slate-200 text-sm">
@@ -18239,10 +18244,71 @@ function serialEnsureConsoleDock() {
         if (!sent) showToast('Broadcast: no writable consoles in the group', 'warning');
     });
     serialUpdateBroadcastBar();
+    // Sidebar starts at its remembered width (session-only — resets on a full
+    // page reload) so reopening the dock keeps the operator's preferred split
+    // instead of resetting to the default every time. Collapsing it (rather
+    // than closing sessions) is what makes room to view two consoles
+    // side-by-side without the list eating into the split.
+    modal.querySelector('#serial-console-sidebar-collapse').onclick = () =>
+        serialSetSidebarCollapsed(!window._serialSidebarCollapsed);
+    serialSetSidebarCollapsed(!!window._serialSidebarCollapsed);
+    modal.querySelector('#serial-console-resize-handle').addEventListener('mousedown', (ev) => {
+        // A mousedown on the collapse button shouldn't also start a drag.
+        if (ev.target.closest('#serial-console-sidebar-collapse')) return;
+        window._serialSidebarDragging = true;
+        document.body.style.userSelect = 'none';
+        ev.preventDefault();
+    });
+    _serialWireSidebarResize();
     // Populate the left menu with EVERY console the user has rights to (not just
     // the ones already open) so it acts as a click-to-open directory.
     serialRefreshAvailablePorts();
     return modal;
+}
+
+// Expand/collapse the console LIST specifically (distinct from
+// serialSetDockCollapsed, which minimizes the WHOLE dock to a footer pill).
+// Collapsing just hides the browse-and-search sidebar, reclaiming its width
+// for the console body area — e.g. so a broadcast pair of split panes gets
+// the full dock width instead of competing with the list for space. No
+// sessions are affected either way.
+function serialSetSidebarCollapsed(collapsed) {
+    window._serialSidebarCollapsed = !!collapsed;
+    const modal = document.getElementById('serial-console-modal');
+    if (!modal) return;
+    const sidebar = modal.querySelector('#serial-console-sidebar');
+    const btn = modal.querySelector('#serial-console-sidebar-collapse');
+    if (sidebar) sidebar.style.width = collapsed ? '0px' : ((window._serialSidebarWidth || 288) + 'px');
+    if (btn) { btn.textContent = collapsed ? '▸' : '◂'; btn.title = collapsed ? 'Expand the console list' : 'Collapse the console list'; }
+}
+
+// Drag-to-resize wiring for the sidebar — attached to `document` ONCE (guarded
+// by a flag) rather than per dock-open, since the dock's DOM (and any
+// listeners bound to ITS elements) is destroyed on close; a document-level
+// listener would otherwise accumulate a stale copy every reopen. Looks up the
+// current dock elements by id on every move rather than closing over them, so
+// it naturally no-ops once the dock (or its drag) is gone.
+function _serialWireSidebarResize() {
+    if (window._serialResizeWired) return;
+    window._serialResizeWired = true;
+    const MIN_W = 160, MAX_W = 560;
+    document.addEventListener('mousemove', (ev) => {
+        if (!window._serialSidebarDragging) return;
+        const modal = document.getElementById('serial-console-modal');
+        const sidebar = document.getElementById('serial-console-sidebar');
+        if (!modal || !sidebar) return;
+        const w = Math.max(MIN_W, Math.min(MAX_W, ev.clientX - modal.getBoundingClientRect().left));
+        window._serialSidebarWidth = w;
+        window._serialSidebarCollapsed = false;
+        sidebar.style.width = w + 'px';
+        const btn = document.getElementById('serial-console-sidebar-collapse');
+        if (btn) { btn.textContent = '◂'; btn.title = 'Collapse the console list'; }
+    });
+    document.addEventListener('mouseup', () => {
+        if (!window._serialSidebarDragging) return;
+        window._serialSidebarDragging = false;
+        document.body.style.userSelect = '';
+    });
 }
 
 // Send one line to every member of the broadcast group (from the shared
@@ -18894,6 +18960,11 @@ function serialCloseAllConsoles() {
     window._serialBroadcastOn = false;
     window._serialConsoleFilter = '';
     window._serialDockCollapsed = false;
+    // Sidebar width/collapsed preference deliberately survives a close — it's
+    // a layout choice, not session state, so reopening later keeps it. Only
+    // the transient drag flag is reset, in case consoles closed mid-drag.
+    window._serialSidebarDragging = false;
+    document.body.style.userSelect = '';
     if (window._serialHeartbeatTimer) { clearInterval(window._serialHeartbeatTimer); window._serialHeartbeatTimer = null; }
     const pill = document.getElementById('serial-console-dock-pill');
     if (pill) pill.remove();
