@@ -5823,17 +5823,46 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # module_type "ab" would otherwise be minted this fleet-authority cert,
             # escalating one tenant's PSK into fleet-wide, cross-tenant RCE.
             #
-            # Fix: honor an operator allow-list global_config["ab_spoke_ids"] (the
-            # spoke_id or primary key of the real AppBuilder spoke(s)). When it is
-            # SET, ENFORCE it — only a designated spoke gets the pinned SANs; any
-            # other claimant is refused them (it still receives an ordinary
-            # self-identity cert) and flagged. When it is UNSET (legacy default)
-            # today's self-declared behavior is preserved so the live AppBuilder
-            # keeps working, but EVERY grant of the fleet-authority SANs is surfaced
-            # as an anomaly so an unexpected recipient is loud in the logs. Set
-            # ab_spoke_ids to fully close the self-assertion gap.
+            # Fix: bind the fleet-authority SANs to a designated AppBuilder spoke
+            # (global_config["ab_spoke_ids"] = the spoke_id or primary key / stable
+            # install-UUID of the real AppBuilder). It is auto-populated by TOFU
+            # (trust-on-first-use) below — the first spoke to legitimately receive
+            # the pinned cert after the operator labels it is locked in by UUID —
+            # and can also be set explicitly by the operator. Once set it is
+            # ENFORCED: only a designated spoke gets the pinned SANs; any other
+            # claimant is refused them (it still receives an ordinary self-identity
+            # cert) and flagged. This closes the self-assertion gap by default with
+            # no operator action and without breaking the live AppBuilder.
             designated = {str(x).strip() for x in (gc.get("ab_spoke_ids") or []) if str(x).strip()}
-            _ab_ok = (not designated) or (spoke_id in designated) or (pk in designated)
+            _autodesignated = False
+            if designated:
+                # Explicit allow-list set (by the operator, or by a prior TOFU
+                # auto-designation below) → ENFORCE it. Only a designated spoke
+                # gets the fleet-authority SANs; every other claimant is refused.
+                _ab_ok = (spoke_id in designated) or (pk in designated)
+            else:
+                # TOFU (trust-on-first-use): no AppBuilder spoke designated yet, so
+                # the FIRST spoke to legitimately receive the pinned cert (the
+                # operator-deployed AppBuilder, which connects first) is locked in
+                # by its stable install-UUID (pk). Persist it as ab_spoke_ids so
+                # every LATER self-declared "ab" claimant is enforced against it and
+                # refused — closing the self-assertion gap automatically, with no
+                # operator action, without breaking the live AppBuilder. If a rogue
+                # box ever wins the race it grabs the designation, but then the real
+                # AppBuilder is refused → loud ab_identity_spoof + dead logs/AI, the
+                # exact symptom an operator notices; they can override ab_spoke_ids.
+                _lock = (pk or spoke_id or "").strip()
+                _ab_ok = bool(_lock)
+                if _ab_ok:
+                    try:
+                        self.state.update_global_config({"ab_spoke_ids": [_lock]})
+                        await self.state.save_state_now()
+                        designated = {_lock}
+                        _autodesignated = True
+                    except Exception:  # noqa: BLE001
+                        # Persistence failed — still grant (don't break the live ab)
+                        # but leave undesignated so a later attempt can lock it in.
+                        pass
             try:
                 _ab_ip = (self.spoke_telemetry.get(pk, {}) or {}).get("remote_ip")
             except Exception:  # noqa: BLE001
@@ -5846,10 +5875,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # operator-designated spoke or a legacy self-declared claim.
                 if _tm is not None:
                     try:
-                        _how = ("designated" if (designated and (spoke_id in designated or pk in designated))
-                                else "legacy-self-declared")
+                        _how = ("auto-designated (TOFU first-use)" if _autodesignated
+                                else "designated" if (spoke_id in designated or pk in designated)
+                                else "self-declared")
                         _tm.note_anomaly(
-                            "ab_identity_grant",
+                            "ab_identity_autodesignated" if _autodesignated else "ab_identity_grant",
                             f"pinned AppBuilder (fleet-authority) SANs issued to "
                             f"spoke={spoke_id} pk={pk} module_type={module_type or '?'} "
                             f"tenant={self.state.get_spoke_tenant(pk) or 'unassigned'} "

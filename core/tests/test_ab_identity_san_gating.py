@@ -12,8 +12,10 @@ otherwise be minted the fleet-authority cert.
 These tests drive the REAL method (with a bare hub instance + fakes) and capture
 the ``sans`` handed to the CA, asserting:
 
-* legacy (no ``ab_spoke_ids`` configured) → self-declared ``ab`` still gets the
-  pinned SANs (no behaviour change) BUT the grant is surfaced as an anomaly;
+* TOFU default (no ``ab_spoke_ids`` configured) → the FIRST self-declared ``ab``
+  is auto-designated by its UUID/pk (persisted to ``ab_spoke_ids``) and granted
+  the pinned SANs, surfaced as an ``ab_identity_autodesignated`` anomaly;
+* a LATER different spoke claiming ``ab`` is then REFUSED the pinned SANs;
 * enforced (``ab_spoke_ids`` set) → a designated spoke gets the pinned SANs;
 * enforced → a NON-designated spoke claiming ``module_type == "ab"`` is REFUSED
   the pinned SANs (it still gets an ordinary self-identity cert) and flagged.
@@ -65,12 +67,21 @@ def _make_hub(global_config):
         return None
 
     h.send_to_spoke = _send
+    # A LIVE global-config dict + a real update_global_config so the TOFU
+    # auto-designation (which persists ab_spoke_ids) is observable in-test.
+    _gc = dict(global_config)
+
+    def _update(cfg):
+        _gc.update(cfg)
+
     h.state = types.SimpleNamespace(
         system_state={"mtls_revoked": {}, "mtls_client_certs": {}},
-        get_global_config=lambda: dict(global_config),
+        get_global_config=lambda: _gc,
+        update_global_config=_update,
         get_spoke_tenant=lambda pk: "t-acme",
         save_state_now=_save,
     )
+    h._gc = _gc  # test-visible handle onto the live config
     return h
 
 
@@ -93,23 +104,45 @@ def _provision(hub, spoke_id, module_type):
     return _run(hub._provision_spoke_mtls_cert(spoke_id, force=True))
 
 
-# ── legacy default: unchanged behaviour + a visibility anomaly ──────────────
-def test_legacy_self_declared_ab_still_gets_pinned_sans_but_is_flagged():
+# ── TOFU default: the first self-declared ab is auto-designated by UUID ──────
+def test_tofu_first_ab_is_autodesignated_and_gets_pinned_sans():
     orig = _mtls_ca.issue_client_cert
     try:
         cap = _capture_sans()
-        hub = _make_hub({"ab_cert_identities": _PINNED})  # no ab_spoke_ids
-        res = _provision(hub, "some-rogue-box", "ab")
+        hub = _make_hub({"ab_cert_identities": _PINNED})  # no ab_spoke_ids yet
+        res = _provision(hub, "the-real-ab", "ab")
         assert res["status"] == "SUCCESS"
-        assert "ab.example.com" in cap["sans"]          # legacy: still granted
+        assert "ab.example.com" in cap["sans"]              # first-use: granted
         kinds = [e[0] for e in hub.threat_monitor.events]
-        assert "ab_identity_grant" in kinds             # but now visible
+        assert "ab_identity_autodesignated" in kinds        # TOFU lock recorded
         assert all(e[1] == "warning" for e in hub.threat_monitor.events)  # never auto-blocks
+        # ...and the spoke's UUID/pk is now persisted as the designated AppBuilder.
+        assert hub._gc.get("ab_spoke_ids") == ["the-real-ab"]
     finally:
         _mtls_ca.issue_client_cert = orig
 
 
-# ── enforced: designated spoke is granted ───────────────────────────────────
+# ── TOFU then lock-out: a LATER different ab claimant is refused ─────────────
+def test_tofu_locks_out_a_later_impostor():
+    orig = _mtls_ca.issue_client_cert
+    try:
+        hub = _make_hub({"ab_cert_identities": _PINNED})
+        # First-use: the real AppBuilder connects and is auto-designated.
+        cap1 = _capture_sans()
+        _provision(hub, "the-real-ab", "ab")
+        assert "ab.example.com" in cap1["sans"]
+        # Later: a different box claims module_type ab — must be REFUSED the SANs.
+        cap2 = _capture_sans()
+        res = _provision(hub, "impostor-box", "ab")
+        assert res["status"] == "SUCCESS"                   # ordinary cert only
+        assert cap2["sans"] == ["impostor-box"]
+        assert "ab.example.com" not in cap2["sans"]
+        assert any(e[0] == "ab_identity_spoof" for e in hub.threat_monitor.events)
+    finally:
+        _mtls_ca.issue_client_cert = orig
+
+
+# ── enforced: explicitly-designated spoke is granted ────────────────────────
 def test_enforced_designated_spoke_gets_pinned_sans():
     orig = _mtls_ca.issue_client_cert
     try:
