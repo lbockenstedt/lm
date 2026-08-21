@@ -4187,7 +4187,7 @@ async function loadSecurityData() {
           ${statChip('Auth failures', t.failures, 'text-amber-600', "securityEventsModal('auth','Auth failures')")}
           ${statChip('Anomalies', t.anomalies, 'text-amber-700', "securityEventsModal('anomaly','Anomalies')")}
           ${statChip('Blocks placed', t.blocks_placed, 'text-red-600')}
-          ${statChip('Perm blocks', t.blocks_permanent, 'text-red-700')}
+          ${statChip('Perm blocks', t.currently_permanent, 'text-red-700')}
           ${statChip('Active now', t.currently_blocked, 'text-slate-700')}
         </div>
         ${kindChips ? `<div class="pt-3 mt-3 border-t border-slate-100"><span class="text-[11px] text-slate-400 uppercase tracking-wider mr-2">By kind</span>${kindChips}</div>` : ''}
