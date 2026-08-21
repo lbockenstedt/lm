@@ -299,6 +299,38 @@ def _mdns_hub_properties(version_str: str, agent_port: int,
     return props
 
 
+def _log_source_label(hub, sid: str) -> str:
+    """Human-readable label for a relayed spoke/agent log source.
+
+    The ``agent_logs`` deques are keyed by the spoke/agent primary key, which
+    for pxmx node-agents and many spokes is a bare UUID — useless when an
+    operator is scanning the Error Log. Resolve that key to the spoke's
+    registered display name / hostname (``module_metadata`` for top-level
+    spokes, ``agent_info`` for relayed pxmx node-agents) and render it as
+    ``cs-svr-05 (a25e89a6)`` — name first, with a short id hint so a line can
+    still be correlated back to the raw key. Falls back to the raw id when no
+    name is registered (so a brand-new/unnamed source is never hidden). Reads
+    ``hub`` state defensively so it never breaks log collection. Mirrors
+    ``SpokeAlertSync._spoke_label``.
+    """
+    sid = str(sid or "")
+    name = ""
+    try:
+        md = (hub.state.system_state.get("module_metadata", {}) or {}).get(sid, {}) or {}
+        name = (md.get("display_name") or md.get("name") or md.get("hostname") or "").strip()
+    except Exception:  # noqa: BLE001 — a label must never break log collection
+        name = ""
+    if not name:
+        try:
+            info = (hub.agent_info or {}).get(sid, {}) or {}
+            name = str(info.get("hostname") or "").strip()
+        except Exception:  # noqa: BLE001
+            name = ""
+    if name and name != sid:
+        return f"{name} ({sid[:8]})"
+    return sid
+
+
 class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, HenetSyncMixin, RealtimeIpamNacSyncMixin, SearchIndexMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, FleetHealthAlertMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
@@ -5675,6 +5707,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
     # the class bases below). They operate on `self` unchanged, so hub.perform_update
     # / self.get_local_version() etc. resolve exactly as before via inheritance.
 
+    def _log_source_label(self, sid: str) -> str:
+        """Instance shim for the module-level resolver (kept for callers/tests
+        that have a real hub)."""
+        return _log_source_label(self, sid)
+
     def collect_all_logs(self):
         """Aggregate every log source the Hub can see.
 
@@ -5688,7 +5725,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
         for agent_id, logs in self.agent_logs.items():
             for log in logs:
-                all_logs.append({"module": agent_id, "log": log})
+                all_logs.append({"module": _log_source_label(self, agent_id), "log": log})
 
         try:
             log_dir = "/var/log/lm"
@@ -5756,7 +5793,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         for agent_id, logs in self.agent_logs.items():
             for log in logs:
                 if pat.search(log):
-                    errs.append(f"[{agent_id}] {log}")
+                    errs.append(f"[{_log_source_label(self, agent_id)}] {log}")
         try:
             log_dir = "/var/log/lm"
             if os.path.exists(log_dir):
