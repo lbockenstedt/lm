@@ -167,3 +167,31 @@ def test_quiet_uvicorn_lifecycle_filter_drops_connection_lifecycle_at_info():
         assert f.filter(_rec("uvicorn.error", logging.INFO, "connection open")) is True
     finally:
         _restore_root(saved_h, saved_lvl)
+
+def test_cap_oversized_logs_truncates_only_oversized_dot_log(tmp_path):
+    """The 50 MB circular-log watchdog pass truncates every *.log OVER the cap
+    to zero bytes in place, leaves under-cap files and non-.log files alone,
+    and returns the names it truncated. Uses a tiny cap so the test is fast."""
+    big = tmp_path / "hub.log"
+    big.write_bytes(b"x" * 2048)
+    small = tmp_path / "agent.log"
+    small.write_bytes(b"y" * 100)
+    other = tmp_path / "keep.txt"
+    other.write_bytes(b"z" * 4096)
+
+    truncated = logging_setup.cap_oversized_logs(str(tmp_path), max_bytes=1024)
+
+    assert truncated == ["hub.log"]
+    assert big.stat().st_size == 0          # oversized .log truncated in place
+    assert small.stat().st_size == 100      # under-cap .log untouched
+    assert other.stat().st_size == 4096     # non-.log untouched even if oversized
+
+
+def test_cap_oversized_logs_disabled_and_missing_dir_are_safe(tmp_path):
+    """max_bytes<=0 (LM_LOG_MAX_BYTES=0 -> cap disabled) is a no-op, and a
+    non-existent dir never raises (watchdog must never crash its host)."""
+    f = tmp_path / "hub.log"
+    f.write_bytes(b"x" * 4096)
+    assert logging_setup.cap_oversized_logs(str(tmp_path), max_bytes=0) == []
+    assert f.stat().st_size == 4096
+    assert logging_setup.cap_oversized_logs(str(tmp_path / "nope"), max_bytes=10) == []

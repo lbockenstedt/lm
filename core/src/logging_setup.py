@@ -19,17 +19,34 @@ import logging
 import logging.handlers
 import os
 import sys
+import threading
+import time
 
 DEFAULT_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 DEFAULT_DATEFMT = '%Y-%m-%d %H:%M:%S'
 
 # Circular (size-capped) logging so a component's /var/log/lm/<x>.log can't grow
 # unbounded and fill the box's disk. Every entrypoint routes through
-# configure_logging(), so capping here gives ALL modules/spokes/agents rotation
-# at once. Tunable via env; LM_LOG_MAX_BYTES=0 disables rotation (plain append).
-# Default: 20 MB × 5 backups = ~120 MB max per component.
-_DEFAULT_LOG_MAX_BYTES = 20 * 1024 * 1024
-_DEFAULT_LOG_BACKUPS = 5
+# configure_logging(), so capping here gives ALL modules/spokes/agents a single
+# 50 MB circular file at once — NO rotated backups to maintain.
+#
+# Two enforcement layers, both driven from configure_logging():
+#   1. The process FileHandler (this file's writer) — plain append, no rollover.
+#   2. An in-process size-cap watchdog thread (_start_log_cap_watchdog) that
+#      every ~30 s truncates any /var/log/lm/*.log over the cap IN PLACE.
+# Layer 2 is what actually enforces the cap because most LM services run under
+# systemd with StandardOutput/StandardError=append:/var/log/lm/<x>.log — i.e.
+# systemd (NOT the FileHandler) owns the fd, so a RotatingFileHandler's rollover
+# never fires. Truncate-in-place (open(path,"w")) works regardless: both the
+# FileHandler fd and systemd's O_APPEND fd resume writing at offset 0 after the
+# truncate (same inode), so the file stays a single circular file with no
+# backups. See truncate_log_files() for the full rationale on why in-place.
+#
+# Tunable via env: LM_LOG_MAX_BYTES=0 disables the cap entirely (unbounded).
+# Default: 50 MB, 0 backups.
+_DEFAULT_LOG_MAX_BYTES = 50 * 1024 * 1024
+_DEFAULT_LOG_BACKUPS = 0
+_DEFAULT_LOG_CAP_INTERVAL = 30.0
 
 # Liveness-poll endpoints whose successful (2xx/3xx) uvicorn.access lines are pure
 # noise — the hub/agents health-probe these per second, flooding spoke/hub logs.
@@ -123,20 +140,20 @@ def _int_env(name: str, default: int) -> int:
 
 
 def _build_file_handler(log_file: str) -> logging.Handler:
-    """A size-capped RotatingFileHandler for ``log_file`` (falls back to a plain
-    FileHandler when rotation is disabled via ``LM_LOG_MAX_BYTES=0`` or if the
-    handlers module is somehow unavailable). ``delay=True`` so the file isn't
-    opened until the first record — cheap when a component logs elsewhere.
-
-    NOTE on systemd ``StandardError=append:`` co-writers: the entrypoint drops
-    the stderr StreamHandler for the canonical /var/log/lm file, so this handler
-    owns the bulk log stream and rotates it; only rare uncaught-traceback stderr
-    (captured by systemd) may trail into the last rotated file — bounded and
-    acceptable. Boxes that also install the /etc/logrotate.d/lm copytruncate
-    drop-in get belt-and-suspenders coverage of that stderr stream too."""
+    """A FileHandler for ``log_file``. The 50 MB cap is enforced out-of-band by
+    the in-process watchdog (:func:`_start_log_cap_watchdog`), NOT by handler
+    rollover — because most LM services run under systemd with
+    ``StandardOutput/StandardError=append:`` owning the fd, so a
+    RotatingFileHandler's rollover would never fire anyway. So when backups are
+    disabled (the default, ``LM_LOG_BACKUPS=0``) we attach a plain FileHandler
+    and let the watchdog truncate-in-place at the cap. A RotatingFileHandler is
+    only used if an operator explicitly asks for backups
+    (``LM_LOG_BACKUPS>=1``), for the rare standalone-file case where this
+    handler actually owns the writer. ``delay=True`` so the file isn't opened
+    until the first record — cheap when a component logs elsewhere."""
     max_bytes = _int_env("LM_LOG_MAX_BYTES", _DEFAULT_LOG_MAX_BYTES)
     backups = _int_env("LM_LOG_BACKUPS", _DEFAULT_LOG_BACKUPS)
-    if max_bytes <= 0:
+    if max_bytes <= 0 or backups <= 0:
         return logging.FileHandler(log_file)
     return logging.handlers.RotatingFileHandler(
         log_file, maxBytes=max_bytes, backupCount=backups, delay=True)
@@ -151,6 +168,73 @@ def _resolve_level(default_level: int) -> int:
         if isinstance(resolved, int):
             return resolved
     return default_level
+
+
+_log_cap_watchdog_started = False
+_log_cap_watchdog_lock = threading.Lock()
+
+
+def cap_oversized_logs(log_dir: str, max_bytes: int) -> list:
+    """Truncate every ``*.log`` in ``log_dir`` currently larger than
+    ``max_bytes`` to zero bytes, in place. One watchdog pass.
+
+    Truncation is ``open(path, "w")`` (``O_TRUNC`` on the existing inode) so
+    both this process's held FileHandler fd AND systemd's
+    ``StandardOutput/StandardError=append:`` fd keep writing at offset 0 after
+    the truncate — the file stays a single circular file with NO backups. See
+    :func:`truncate_log_files` for the full "why in-place, not unlink"
+    rationale. Best-effort per file: any error is swallowed so the watchdog can
+    never crash the process it runs inside. Returns the list of filenames it
+    truncated on this pass."""
+    if max_bytes <= 0:
+        return []
+    truncated = []
+    try:
+        names = os.listdir(log_dir)
+    except Exception:  # noqa: BLE001 — dir may not exist yet; try next pass
+        return truncated
+    for name in names:
+        if not name.endswith(".log"):
+            continue
+        path = os.path.join(log_dir, name)
+        try:
+            if os.path.isfile(path) and os.path.getsize(path) > max_bytes:
+                with open(path, "w"):
+                    pass  # O_TRUNC in place — see truncate_log_files() docstring
+                truncated.append(name)
+        except Exception:  # noqa: BLE001 — per-file best-effort, never raise
+            pass
+    return truncated
+
+
+def _start_log_cap_watchdog(log_dir: str, max_bytes: int,
+                            interval: float = _DEFAULT_LOG_CAP_INTERVAL) -> None:
+    """Start (once per process) a daemon thread that every ``interval`` seconds
+    truncates any oversized ``*.log`` in ``log_dir`` back under ``max_bytes``.
+
+    This is the actual 50 MB circular-log enforcement: it works even when
+    systemd (``append:``), not the Python FileHandler, owns the log fd — the
+    case for every LM service — because it truncates the inode in place. Daemon
+    thread so it never blocks interpreter shutdown; idempotent so repeated
+    ``configure_logging`` calls don't spawn duplicates; ``max_bytes<=0``
+    (``LM_LOG_MAX_BYTES=0``) disables it (unbounded logs)."""
+    global _log_cap_watchdog_started
+    if max_bytes <= 0:
+        return
+    with _log_cap_watchdog_lock:
+        if _log_cap_watchdog_started:
+            return
+        _log_cap_watchdog_started = True
+
+    def _loop():
+        while True:
+            try:
+                cap_oversized_logs(log_dir, max_bytes)
+            except Exception:  # noqa: BLE001 — never let the watchdog die
+                pass
+            time.sleep(interval)
+
+    threading.Thread(target=_loop, name="lm-log-cap-watchdog", daemon=True).start()
 
 
 def configure_logging(default_level: int = logging.INFO, *,
@@ -208,6 +292,15 @@ def configure_logging(default_level: int = logging.INFO, *,
         _lg = logging.getLogger(_lname)
         if not any(isinstance(f, _QuietUvicornLifecycleFilter) for f in _lg.filters):
             _lg.addFilter(_QuietUvicornLifecycleFilter())
+
+    # Start the 50 MB circular-log watchdog. Derive the log dir from log_file
+    # when given, else the canonical /var/log/lm (CS + some spokes call
+    # configure_logging() with no log_file — their file is written by systemd's
+    # append: redirect, which the watchdog still caps in place). Idempotent, so
+    # a re-init won't spawn a second thread. LM_LOG_MAX_BYTES=0 disables.
+    _cap_dir = os.path.dirname(log_file) if log_file else "/var/log/lm"
+    _start_log_cap_watchdog(_cap_dir or "/var/log/lm",
+                            _int_env("LM_LOG_MAX_BYTES", _DEFAULT_LOG_MAX_BYTES))
     return level
 
 
