@@ -19525,10 +19525,36 @@ function pxmxActivateConsole(key) {
     pxmxSyncConsoleHeader();
     const c = window._pxmxConsoles && window._pxmxConsoles.get(key);
     if (c && c.rfb && c.rfb.focus) { try { c.rfb.focus(); } catch (e) {} }
-    // A body hidden via display:none can't measure itself, so noVNC's
-    // scaleViewport may be stale when it's re-shown — nudge a resize so the
-    // newly visible console rescales to fill the dock.
-    try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+    // A body hidden via display:none reports 0×0, so nudging noVNC in the same
+    // tick we un-hide it races the browser's layout and can leave the
+    // framebuffer scaled to nothing — the "blank on switch-back" bug. Rescale on
+    // the next frame, once the newly visible body actually has dimensions.
+    pxmxRescaleConsole(c);
+}
+
+// Force one console's noVNC to rescale + re-present its framebuffer after its
+// body becomes visible again (tab switch or dock restore). The body it renders
+// into was display:none while inactive, so it reports 0×0 until the browser
+// lays it out; a synchronous resize therefore scales the retained framebuffer
+// bitmap to nothing (blank). We defer to an animation frame, wait until the body
+// has real dimensions (retrying a few frames if needed), then toggle
+// scaleViewport so noVNC recomputes the scale against the now-correct container
+// size and re-presents the (still-intact) pixels.
+function pxmxRescaleConsole(entry, tries) {
+    if (!entry || !entry.rfb || !entry.bodyEl) return;
+    requestAnimationFrame(() => {
+        if (!window._pxmxConsoles || !window._pxmxConsoles.get(entry.key)) return;
+        const el = entry.bodyEl;
+        if ((el.clientWidth === 0 || el.clientHeight === 0) && (tries || 0) < 10) {
+            pxmxRescaleConsole(entry, (tries || 0) + 1);
+            return;
+        }
+        try {
+            const rfb = entry.rfb;
+            if ('scaleViewport' in rfb) { rfb.scaleViewport = false; rfb.scaleViewport = true; }
+        } catch (e) {}
+        try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+    });
 }
 
 // Is this VM one that can actually have a noVNC console? Mirrors the VM-table
@@ -19734,9 +19760,10 @@ function pxmxSetDockCollapsed(collapsed) {
     if (!collapsed && modal) {
         const c = pxmxActiveConsole();
         if (c && c.rfb && c.rfb.focus) { try { c.rfb.focus(); } catch (e) {} }
-        // A body hidden while minimized can't measure itself, so noVNC's
-        // scaleViewport may be stale on restore — nudge a resize to rescale.
-        try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+        // A body hidden while minimized reports 0×0, so noVNC's scaleViewport is
+        // stale on restore — rescale on the next frame (once it has dimensions)
+        // rather than with a racy synchronous resize, else it restores blank.
+        pxmxRescaleConsole(c);
     }
 }
 
