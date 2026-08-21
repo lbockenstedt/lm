@@ -4099,7 +4099,6 @@ async function loadSecurityData() {
     window._secDenyPriority = c.block_priority;                // stored deny (for save ordering)
     const card = 'hpe-card rounded-lg p-5 shadow-sm';
     const fmtTs = ts => { try { return new Date(ts * 1000).toLocaleString(); } catch (e) { return ''; } };
-    const expIn = b => { if (b.permanent) return 'never'; if (!b.expires_at) return '—'; const s = Math.max(0, b.expires_at - Date.now() / 1000); return s > 3600 ? Math.round(s / 3600) + 'h' : Math.round(s / 60) + 'm'; };
 
     const cfg = `
       <div class="${card}">
@@ -4128,14 +4127,25 @@ async function loadSecurityData() {
         <div class="flex justify-end mt-3"><button onclick="saveSecurityConfig()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold">Save</button></div>
       </div>`;
 
-    const blockRow = b => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
-        <div class="min-w-0"><span class="font-mono text-slate-700">${escapeHtml(b.ip)}</span>
-          <div class="text-[11px] text-slate-400 truncate" title="${escapeHtml(b.reason || '')}">${escapeHtml(b.reason || '')}${b.permanent ? '' : ` · expires ${expIn(b)}`}</div></div>
-        <button onclick="securityUnblock('${escapeHtml(b.ip)}')" class="text-[11px] text-red-500 hover:text-red-700 font-medium shrink-0">Unblock</button>
-      </div>`;
-    const tile = (title, items, tone) => `<div class="${card}">
-        <h3 class="text-sm font-bold ${tone} mb-2">${title} <span class="text-slate-400 font-normal">(${items.length})</span></h3>
-        <div class="text-xs max-h-64 overflow-y-auto">${items.length ? items.map(blockRow).join('') : '<p class="text-slate-400 italic">none</p>'}</div>
+    // One unified "Blocked IPs" list: permanent ∪ temporary = every current
+    // block (disjoint, backend-guaranteed). Manual blocks live inside those two
+    // by their `permanent` flag; each row carries a per-entry type badge
+    // (Perm / 24h TTL / Manual) so the three old tiles collapse into one. The
+    // full list is searchable via securityBlocksModal(). Stash on window so the
+    // modal reads it without a refetch.
+    const allBlocks = (d.permanent || []).concat(d.temporary || []);
+    window._secBlocks = allBlocks;
+    const _PREVIEW_N = 8;
+    const blockedTile = `<div class="${card}">
+        <div class="flex items-center justify-between mb-1">
+          <h3 class="text-sm font-bold text-red-700">Blocked IPs <span class="text-slate-400 font-normal">(${allBlocks.length})</span></h3>
+          <button onclick="securityBlocksModal('all')" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium">Search / view all →</button>
+        </div>
+        <p class="text-[11px] text-slate-400 mb-2">Each entry is tagged <b>Perm</b>, <b>24h&nbsp;TTL</b>, or <b>Manual</b> — the full list is searchable via the button.</p>
+        <div class="text-xs">${allBlocks.length
+            ? allBlocks.slice(0, _PREVIEW_N).map(_secBlockRowHtml).join('')
+              + (allBlocks.length > _PREVIEW_N ? `<button onclick="securityBlocksModal('all')" class="mt-2 text-[11px] text-blue-500 hover:text-blue-700 font-medium">+ ${allBlocks.length - _PREVIEW_N} more — view all</button>` : '')
+            : '<p class="text-slate-400 italic">none</p>'}</div>
       </div>`;
 
     // Shared trusted list — the SAME global_config.azure_nsg.entries the Azure
@@ -4171,7 +4181,7 @@ async function loadSecurityData() {
     const t = d.totals || {};
     const bk = t.by_kind || {};
     window._secEvents = d.events || [];   // stash for drill-down modals
-    const statChip = (label, val, tone, onclick) => `<div class="text-center${onclick ? ' cursor-pointer hover:bg-slate-50 rounded-lg py-1 -my-1 transition-colors' : ''}"${onclick ? ` onclick="${onclick}" title="Click to drill into these events"` : ''}>
+    const statChip = (label, val, tone, onclick, title) => `<div class="text-center${onclick ? ' cursor-pointer hover:bg-slate-50 rounded-lg py-1 -my-1 transition-colors' : ''}"${onclick ? ` onclick="${onclick}" title="${title || 'Click to drill into these events'}"` : ''}>
         <div class="text-2xl font-bold ${tone || 'text-slate-700'}">${Number(val || 0).toLocaleString()}</div>
         <div class="text-[11px] text-slate-400 uppercase tracking-wider">${label}${onclick ? ' <span class="text-slate-300">🔍</span>' : ''}</div></div>`;
     const kindChips = Object.keys(bk).sort((a, b) => bk[b] - bk[a]).map(k =>
@@ -4189,8 +4199,8 @@ async function loadSecurityData() {
           ${statChip('Auth failures', t.failures, 'text-amber-600', "securityEventsModal('auth','Auth failures')")}
           ${statChip('Anomalies', t.anomalies, 'text-amber-700', "securityEventsModal('anomaly','Anomalies')")}
           ${statChip('Blocks placed', t.blocks_placed, 'text-red-600')}
-          ${statChip('Perm blocks', t.currently_permanent, 'text-red-700')}
-          ${statChip('Active now', t.currently_blocked, 'text-slate-700')}
+          ${statChip('Perm blocks', t.currently_permanent, 'text-red-700', "securityBlocksModal('perm')", 'Click for the full permanently-blocked IP list')}
+          ${statChip('Active now', t.currently_blocked, 'text-slate-700', "securityBlocksModal('all')", 'Click for the full blocked-IP list (searchable)')}
         </div>
         ${kindChips ? `<div class="pt-3 mt-3 border-t border-slate-100"><span class="text-[11px] text-slate-400 uppercase tracking-wider mr-2">By kind</span>${kindChips}</div>` : ''}
         ${!t.signals ? '<p class="text-[11px] text-slate-400 italic mt-2">No security signals evaluated yet — the pipeline is armed and will tally every attempt here as it occurs, even after individual blocks expire.</p>' : ''}
@@ -4211,11 +4221,7 @@ async function loadSecurityData() {
       ${stats}
       ${cfg}
       ${manualBlock}
-      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        ${tile('Blocked — forever', d.permanent || [], 'text-red-700')}
-        ${tile('Blocked — 24h TTL', d.temporary || [], 'text-amber-600')}
-        ${tile('Manual blocks', d.manual || [], 'text-slate-700')}
-      </div>
+      ${blockedTile}
       ${neverTile}
       ${events}`;
     _secPrioLive();
@@ -4289,6 +4295,80 @@ function securityEventDetail(i) {
           <button onclick="document.getElementById('sec-event-detail-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Close</button>
         </div>`;
     openModal('sec-event-detail-modal', body, { backdropClose: true, card: 'w-full max-w-lg p-6 space-y-3 max-h-[90vh] overflow-y-auto', overlay: 'z-[60]' });
+}
+
+// ── Unified blocked-IP list + full-screen searchable modal ──────────────────
+// Replaces the old three separate tiles (permanent / 24h-TTL / manual). Every
+// current block carries a per-entry type badge derived from its own fields:
+//   duration  → b.permanent ? PERM : 24h TTL
+//   source    → String(b.source).startsWith('manual') ? MANUAL (else auto)
+// so a manual permanent block shows both PERM and MANUAL. Data comes from
+// window._secBlocks (permanent ∪ temporary), stashed by loadSecurityData().
+function _secExpIn(b) {
+    if (b.permanent) return 'never';
+    if (!b.expires_at) return '—';
+    const s = Math.max(0, b.expires_at - Date.now() / 1000);
+    return s > 3600 ? Math.round(s / 3600) + 'h' : Math.round(s / 60) + 'm';
+}
+function _secBlockBadges(b) {
+    const dur = b.permanent
+        ? '<span class="px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-bold uppercase">Perm</span>'
+        : '<span class="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-bold uppercase">24h&nbsp;TTL</span>';
+    const src = String(b.source || '').startsWith('manual')
+        ? ' <span class="px-1.5 py-0.5 rounded bg-slate-200 text-slate-600 text-[10px] font-bold uppercase">Manual</span>'
+        : '';
+    return dur + src;
+}
+function _secBlockRowHtml(b) {
+    return `<div class="flex items-center justify-between gap-3 py-1.5 border-b border-slate-100 last:border-0">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2 flex-wrap"><span class="font-mono text-slate-700 text-sm">${escapeHtml(b.ip || '')}</span>${_secBlockBadges(b)}${b.permanent ? '' : `<span class="text-[10px] text-slate-400">expires ${_secExpIn(b)}</span>`}</div>
+          <div class="text-[11px] text-slate-400 truncate" title="${escapeHtml(b.reason || '')}">${escapeHtml(b.reason || '')}</div>
+        </div>
+        <button onclick="_secModalUnblock('${escapeHtml(b.ip || '')}')" class="text-[11px] text-red-500 hover:text-red-700 font-medium shrink-0">Unblock</button>
+      </div>`;
+}
+function securityBlocksModal(filter) {
+    window._secBlocksFilter = filter || 'all';
+    const body = `
+        <div class="flex items-center justify-between mb-3">
+          <h3 class="text-lg font-bold text-[#263040]">Blocked IPs <span id="sec-blocks-count" class="text-sm text-slate-400 font-normal"></span></h3>
+          <button onclick="document.getElementById('sec-blocks-modal')?.remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+        </div>
+        <div class="flex items-center gap-2 mb-3 flex-wrap">
+          <input id="sec-blocks-search" oninput="_secBlocksRender()" placeholder="Search IP or reason…" class="flex-1 min-w-[180px] border border-slate-300 rounded px-3 py-1.5 text-sm font-mono">
+          <div id="sec-blocks-filters" class="flex gap-1"></div>
+        </div>
+        <div id="sec-blocks-list" class="max-h-[65vh] overflow-y-auto pr-1"></div>`;
+    openModal('sec-blocks-modal', body, { backdropClose: true, card: 'w-full max-w-3xl p-6 max-h-[90vh] overflow-y-auto' });
+    _secBlocksRender();
+    setTimeout(() => document.getElementById('sec-blocks-search')?.focus(), 30);
+}
+function _secBlocksSetFilter(f) { window._secBlocksFilter = f; _secBlocksRender(); }
+function _secBlocksRender() {
+    const listEl = document.getElementById('sec-blocks-list');
+    if (!listEl) return; // modal not open
+    const all = window._secBlocks || [];
+    const f = window._secBlocksFilter || 'all';
+    const term = (document.getElementById('sec-blocks-search')?.value || '').trim().toLowerCase();
+    const isManual = b => String(b.source || '').startsWith('manual');
+    const counts = { all: all.length, perm: all.filter(b => b.permanent).length, '24h': all.filter(b => !b.permanent).length, manual: all.filter(isManual).length };
+    let rows = all.filter(b => f === 'perm' ? b.permanent : f === '24h' ? !b.permanent : f === 'manual' ? isManual(b) : true);
+    if (term) rows = rows.filter(b => (b.ip || '').toLowerCase().includes(term) || (b.reason || '').toLowerCase().includes(term));
+    const fb = document.getElementById('sec-blocks-filters');
+    if (fb) {
+        const active = 'bg-slate-700 text-white', idle = 'bg-slate-100 text-slate-600 hover:bg-slate-200';
+        const btn = (key, label) => `<button onclick="_secBlocksSetFilter('${key}')" class="px-2.5 py-1 rounded text-[11px] font-bold ${f === key ? active : idle}">${label} <span class="opacity-70">${counts[key]}</span></button>`;
+        fb.innerHTML = btn('all', 'All') + btn('perm', 'Perm') + btn('24h', '24h') + btn('manual', 'Manual');
+    }
+    const cnt = document.getElementById('sec-blocks-count');
+    if (cnt) cnt.textContent = `(${rows.length}${(term || f !== 'all') ? ` of ${all.length}` : ''})`;
+    listEl.innerHTML = rows.length ? rows.map(_secBlockRowHtml).join('') : '<p class="text-slate-400 italic py-3 text-sm">no matching blocked IPs</p>';
+}
+async function _secModalUnblock(ip) {
+    await _securityReq('/api/security/unblock', 'POST', { ip }, `Unblocked ${ip}`);
+    await loadSecurityData(); // rebuilds the tab + refreshes window._secBlocks
+    _secBlocksRender();       // refresh the open modal list (no-op if closed)
 }
 
 
