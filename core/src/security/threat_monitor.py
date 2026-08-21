@@ -68,6 +68,18 @@ _DEFAULTS = {
 _EVENTS_MAX = 500
 
 
+def _bound_meta(meta: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Clamp a structured-evidence dict so a hostile client can't bloat the
+    persisted state file: at most 32 keys, key names <=64 chars, and each
+    non-numeric value coerced to a <=512-char string. Returns {} for empties."""
+    if not meta:
+        return {}
+    out: Dict[str, Any] = {}
+    for k, v in list(meta.items())[:32]:
+        out[str(k)[:64]] = v if isinstance(v, (int, float, bool)) else str(v)[:512]
+    return out
+
+
 def _now() -> float:
     return time.time()
 
@@ -189,16 +201,24 @@ class ThreatMonitor:
 
     # ── ingest ─────────────────────────────────────────────────────────────────
     def record_failure(self, ip: str, kind: str, username: Optional[str] = None,
-                        detail: str = "") -> None:
+                        detail: str = "", meta: Optional[Dict[str, Any]] = None) -> None:
         """Record an auth failure from ``ip``. Blocks the IP once it crosses the
-        threshold within the window (unless exempt). Safe to call from sync code."""
+        threshold within the window (unless exempt). Safe to call from sync code.
+
+        ``meta`` is optional structured evidence (e.g. request path/method/
+        user-agent) stored on the event so the operator can drill into exactly
+        what failed from the Security UI; see :func:`_bound_meta`."""
         ip = (ip or "").strip()
         if not ip or not self._cfg.get("enabled"):
             return
         now = _now()
         self._bump_signal(kind, anomaly=False)
-        self._events.appendleft({"ts": now, "ip": ip, "kind": kind,
-                                 "username": username or "", "detail": detail})
+        evt = {"ts": now, "ip": ip, "kind": kind,
+               "username": username or "", "detail": detail, "anomaly": False}
+        m = _bound_meta(meta)
+        if m:
+            evt["meta"] = m
+        self._events.appendleft(evt)
         if ip in self._blocks or self._is_exempt(ip):
             return  # already blocked, or trusted — still logged above
         window = self._cfg["window_s"]
@@ -287,7 +307,8 @@ class ThreatMonitor:
         return {"status": "SUCCESS", "block": self._blocks.get(ip)}
 
     def note_anomaly(self, kind: str, detail: str = "",
-                     ip: Optional[str] = None, severity: str = "warning") -> None:
+                     ip: Optional[str] = None, severity: str = "warning",
+                     meta: Optional[Dict[str, Any]] = None) -> None:
         """Record a non-auth security anomaly (e.g. from the in-process
         :mod:`security.sentinel` tripwire — a contract breach, canary trip, or
         vault-read volume spike).
@@ -297,13 +318,22 @@ class ThreatMonitor:
         drives an exemption-respecting NSG block (reusing the hijack response) so
         a remote attacker is cut off; a purely local signal (no IP) is CRITICAL-
         logged for the operator/host-layer response. Safe to call from sync code;
-        never raises into the caller."""
+        never raises into the caller.
+
+        ``meta`` is an optional dict of structured evidence about the signal
+        (e.g. the offending request's method/path/headers) that the operator can
+        drill into from the Security UI. It is stored verbatim on the event and
+        persisted with it, so keep it small and JSON-serializable."""
         try:
             now = _now()
             self._bump_signal(kind, anomaly=True)
-            self._events.appendleft({"ts": now, "ip": (ip or "").strip(),
-                                     "kind": kind, "username": "",
-                                     "detail": detail, "severity": severity})
+            evt = {"ts": now, "ip": (ip or "").strip(),
+                   "kind": kind, "username": "",
+                   "detail": detail, "severity": severity, "anomaly": True}
+            m = _bound_meta(meta)
+            if m:
+                evt["meta"] = m
+            self._events.appendleft(evt)
             level = logging.ERROR if severity == "critical" else logging.WARNING
             sec_log.log(level, "SECURITY ANOMALY %s [%s]%s — %s", kind, severity,
                         f" from {ip}" if ip else "", detail)
@@ -498,8 +528,10 @@ class ThreatMonitor:
         grace = self._cfg["success_grace_s"]
         self._recent_success = {ip: t for ip, t in self._recent_success.items()
                                 if t > now - grace}
-        if expired:
-            self._persist()
+        # Always flush: persists the recent-events evidence feed (signals / auth
+        # failures / anomalies and their drill-down meta) at least once per sweep
+        # so it survives a restart even when no block changed this tick.
+        self._persist()
 
     def _schedule_reconcile(self) -> None:
         try:
@@ -615,7 +647,12 @@ class ThreatMonitor:
             with open(self._file(), "w", encoding="utf-8") as f:
                 json.dump({"config": self._cfg, "blocks": self._blocks,
                            "offense": self._offense, "never": self._never,
-                           "totals": self._totals}, f)
+                           "totals": self._totals,
+                           # Retain the recent-events evidence feed (newest-first,
+                           # capped at the deque bound) so a wire-trip / hijack /
+                           # auth-failure and its drill-down details survive a
+                           # hub restart.
+                           "events": list(self._events)}, f)
         except Exception as e:  # noqa: BLE001
             logger.debug("threat_monitor persist failed: %s", e)
 
@@ -634,6 +671,11 @@ class ThreatMonitor:
                 self._totals.update({k: v for k, v in _saved_totals.items()
                                      if k in self._totals or k == "by_kind"})
                 self._totals.setdefault("by_kind", {})
+            _saved_events = data.get("events")
+            if isinstance(_saved_events, list):
+                # Rehydrate newest-first into a fresh bounded deque (drops the
+                # oldest if the persisted list somehow exceeds the cap).
+                self._events = deque(_saved_events, maxlen=_EVENTS_MAX)
             self._nsg_dirty = True  # re-push on boot so Azure matches our state
         except FileNotFoundError:
             pass

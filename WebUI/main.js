@@ -4168,11 +4168,12 @@ async function loadSecurityData() {
 
     const t = d.totals || {};
     const bk = t.by_kind || {};
-    const statChip = (label, val, tone) => `<div class="text-center">
+    window._secEvents = d.events || [];   // stash for drill-down modals
+    const statChip = (label, val, tone, onclick) => `<div class="text-center${onclick ? ' cursor-pointer hover:bg-slate-50 rounded-lg py-1 -my-1 transition-colors' : ''}"${onclick ? ` onclick="${onclick}" title="Click to drill into these events"` : ''}>
         <div class="text-2xl font-bold ${tone || 'text-slate-700'}">${Number(val || 0).toLocaleString()}</div>
-        <div class="text-[11px] text-slate-400 uppercase tracking-wider">${label}</div></div>`;
+        <div class="text-[11px] text-slate-400 uppercase tracking-wider">${label}${onclick ? ' <span class="text-slate-300">🔍</span>' : ''}</div></div>`;
     const kindChips = Object.keys(bk).sort((a, b) => bk[b] - bk[a]).map(k =>
-        `<span class="inline-block px-2 py-0.5 rounded bg-slate-100 text-slate-600 text-[11px] mr-1 mb-1" title="${escapeHtml(k)}"><b>${Number(bk[k] || 0).toLocaleString()}</b> ${escapeHtml(k)}</span>`).join('');
+        `<span onclick="securityEventsModal('kind:${escapeHtml(k)}')" class="inline-block px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 cursor-pointer text-slate-600 text-[11px] mr-1 mb-1" title="Click to see ${escapeHtml(k)} events"><b>${Number(bk[k] || 0).toLocaleString()}</b> ${escapeHtml(k)}</span>`).join('');
     const stats = `<div class="${card}">
         <div class="flex items-center justify-between mb-3 flex-wrap gap-1">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Lifetime activity <span class="text-slate-400 normal-case font-normal">— cumulative; survives block expiry / unblock</span></h3>
@@ -4182,9 +4183,9 @@ async function loadSecurityData() {
           </div>
         </div>
         <div class="grid grid-cols-3 md:grid-cols-6 gap-3">
-          ${statChip('Signals seen', t.signals, 'text-slate-800')}
-          ${statChip('Auth failures', t.failures, 'text-amber-600')}
-          ${statChip('Anomalies', t.anomalies, 'text-amber-700')}
+          ${statChip('Signals seen', t.signals, 'text-slate-800', "securityEventsModal('all','Signals seen')")}
+          ${statChip('Auth failures', t.failures, 'text-amber-600', "securityEventsModal('auth','Auth failures')")}
+          ${statChip('Anomalies', t.anomalies, 'text-amber-700', "securityEventsModal('anomaly','Anomalies')")}
           ${statChip('Blocks placed', t.blocks_placed, 'text-red-600')}
           ${statChip('Perm blocks', t.blocks_permanent, 'text-red-700')}
           ${statChip('Active now', t.currently_blocked, 'text-slate-700')}
@@ -4194,14 +4195,14 @@ async function loadSecurityData() {
       </div>`;
 
     const evts = d.events || [];
-    const evtRows = evts.slice(0, 60).map(e => `<tr class="border-b border-slate-100">
+    const evtRows = evts.slice(0, 60).map((e, i) => `<tr class="border-b border-slate-100 cursor-pointer hover:bg-slate-50" onclick="securityEventDetail(${i})" title="Click for full details">
         <td class="px-2 py-1 text-slate-400 whitespace-nowrap">${fmtTs(e.ts)}</td>
         <td class="px-2 py-1 font-mono">${escapeHtml(e.ip)}</td>
         <td class="px-2 py-1"><span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] uppercase">${escapeHtml(e.kind)}</span></td>
         <td class="px-2 py-1 text-slate-500">${escapeHtml(e.username || '')}</td>
-        <td class="px-2 py-1 text-slate-400 truncate max-w-[180px]" title="${escapeHtml(e.detail || '')}">${escapeHtml(e.detail || '')}</td></tr>`).join('');
+        <td class="px-2 py-1 text-slate-400 truncate max-w-[180px]" title="${escapeHtml(e.detail || '')}">${e.meta ? '<span class="text-[#01A982] mr-1" title="has evidence">🔍</span>' : ''}${escapeHtml(e.detail || '')}</td></tr>`).join('');
     const events = `<div class="${card}">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Recent invalid attempts <span class="text-slate-400 font-normal">(${evts.length})</span></h3>
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Recent invalid attempts <span class="text-slate-400 font-normal">(${evts.length})</span> <span class="text-[11px] text-slate-400 normal-case font-normal">— click a row to drill in</span></h3>
         <div class="overflow-x-auto max-h-72 overflow-y-auto"><table class="w-full text-xs"><thead class="text-slate-400 text-[10px] uppercase"><tr><th class="px-2 py-1 text-left">When</th><th class="px-2 py-1 text-left">Source IP</th><th class="px-2 py-1 text-left">Kind</th><th class="px-2 py-1 text-left">User</th><th class="px-2 py-1 text-left">Detail</th></tr></thead><tbody>${evtRows || '<tr><td colspan="5" class="px-2 py-3 text-slate-400 italic">no events yet</td></tr>'}</tbody></table></div></div>`;
 
     el.innerHTML = `
@@ -4217,6 +4218,77 @@ async function loadSecurityData() {
       ${events}`;
     _secPrioLive();
 }
+
+// ── Security event drill-down ───────────────────────────────────────────────
+// The Lifetime-activity stat chips (Signals / Auth failures / Anomalies) and
+// the by-kind chips open a filtered list of the retained recent-events feed;
+// each row drills into the full per-event evidence (incl. the structured
+// ``meta`` captured at detection time — e.g. a session-hijack's bound vs.
+// presented IP, user, user-agent). Reads window._secEvents stashed by
+// loadSecurity(); no refetch needed.
+function _secFmtTs(ts) { try { return new Date(ts * 1000).toLocaleString(); } catch (e) { return String(ts); } }
+
+function securityEventsModal(filter, title) {
+    const all = window._secEvents || [];
+    const kindMatch = String(filter || '').startsWith('kind:') ? String(filter).slice(5) : null;
+    if (!title) title = kindMatch ? ('Kind: ' + kindMatch)
+        : filter === 'auth' ? 'Auth failures'
+        : filter === 'anomaly' ? 'Anomalies' : 'Signals seen';
+    const idx = all.map((e, i) => i).filter(i => {
+        const e = all[i];
+        if (kindMatch) return e.kind === kindMatch;
+        if (filter === 'auth') return !e.anomaly;
+        if (filter === 'anomaly') return !!e.anomaly;
+        return true; // 'all'
+    });
+    const rows = idx.map(i => {
+        const e = all[i];
+        return `<tr class="border-b border-slate-100 cursor-pointer hover:bg-slate-50" onclick="securityEventDetail(${i})" title="Click for full details">
+            <td class="px-2 py-1 text-slate-400 whitespace-nowrap">${_secFmtTs(e.ts)}</td>
+            <td class="px-2 py-1 font-mono">${escapeHtml(e.ip || '')}</td>
+            <td class="px-2 py-1"><span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] uppercase">${escapeHtml(e.kind || '')}</span></td>
+            <td class="px-2 py-1 text-slate-500">${escapeHtml(e.username || '')}</td>
+            <td class="px-2 py-1 text-slate-400 truncate max-w-[220px]" title="${escapeHtml(e.detail || '')}">${e.meta ? '<span class="text-[#01A982] mr-1">🔍</span>' : ''}${escapeHtml(e.detail || '')}</td></tr>`;
+    }).join('');
+    const body = `
+        <div class="flex items-center justify-between">
+          <h3 class="text-lg font-bold text-[#263040]">${escapeHtml(title || 'Events')} <span class="text-sm text-slate-400 font-normal">(${idx.length} retained)</span></h3>
+          <button onclick="document.getElementById('sec-events-modal')?.remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+        </div>
+        <p class="text-[11px] text-slate-400">Showing the recent-events evidence feed (capped, newest first). Lifetime totals may be higher; click any row for full details.</p>
+        <div class="overflow-x-auto max-h-[60vh] overflow-y-auto"><table class="w-full text-xs"><thead class="text-slate-400 text-[10px] uppercase sticky top-0 bg-white"><tr><th class="px-2 py-1 text-left">When</th><th class="px-2 py-1 text-left">Source IP</th><th class="px-2 py-1 text-left">Kind</th><th class="px-2 py-1 text-left">User</th><th class="px-2 py-1 text-left">Detail</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="px-2 py-3 text-slate-400 italic">no matching events retained</td></tr>'}</tbody></table></div>`;
+    openModal('sec-events-modal', body, { backdropClose: true, card: 'w-full max-w-3xl p-6 space-y-3 max-h-[90vh] overflow-y-auto' });
+}
+
+function securityEventDetail(i) {
+    const e = (window._secEvents || [])[i];
+    if (!e) return;
+    const row = (k, v) => `<div class="flex gap-3 py-1 border-b border-slate-100 last:border-0">
+        <div class="w-40 shrink-0 text-[11px] uppercase tracking-wider text-slate-400 pt-0.5">${escapeHtml(k)}</div>
+        <div class="text-sm text-slate-700 break-all font-mono">${escapeHtml(String(v))}</div></div>`;
+    let core = row('When', _secFmtTs(e.ts))
+        + row('Source IP', e.ip || '—')
+        + row('Kind', e.kind || '—')
+        + (e.username ? row('User', e.username) : '')
+        + (e.severity ? row('Severity', e.severity) : '')
+        + row('Category', e.anomaly ? 'anomaly' : 'auth failure')
+        + (e.detail ? row('Detail', e.detail) : '');
+    const meta = e.meta || {};
+    const metaRows = Object.keys(meta).map(k => row(k, meta[k])).join('');
+    const body = `
+        <div class="flex items-center justify-between">
+          <h3 class="text-lg font-bold text-[#263040]">Event detail</h3>
+          <button onclick="document.getElementById('sec-event-detail-modal')?.remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">&times;</button>
+        </div>
+        <div>${core}</div>
+        ${metaRows ? `<div class="pt-2 mt-1 border-t border-slate-200"><div class="text-[11px] uppercase tracking-wider text-[#01A982] font-bold mb-1">Evidence</div>${metaRows}</div>`
+            : '<p class="text-[11px] text-slate-400 italic pt-2 border-t border-slate-200 mt-1">No structured evidence captured for this event.</p>'}
+        <div class="flex justify-end pt-2">
+          <button onclick="document.getElementById('sec-event-detail-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Close</button>
+        </div>`;
+    openModal('sec-event-detail-modal', body, { backdropClose: true, card: 'w-full max-w-lg p-6 space-y-3 max-h-[90vh] overflow-y-auto', overlay: 'z-[60]' });
+}
+
 
 // ── Shared NSG allow/deny priority helpers (used by BOTH the Security tile and
 // the Settings → Azure NSG tile — single source of truth, edit in either) ─────

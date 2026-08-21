@@ -13,6 +13,22 @@ from security.credential_store import resolve_password_hash
 def register(app, hub, ctx):
     """Register auth routes on the Hub app."""
     _session_user = ctx._session_user
+
+    def _login_ev_meta(request, reason):
+        """Structured evidence for a failed-login threat event so the operator
+        can drill into who/what attempted it from the Security UI."""
+        try:
+            return {
+                "method": request.method,
+                "path": request.url.path,
+                "user_agent": request.headers.get("user-agent") or "",
+                "referer": request.headers.get("referer") or "",
+                "x_forwarded_for": request.headers.get("x-forwarded-for") or "",
+                "reason": reason,
+            }
+        except Exception:  # noqa: BLE001
+            return {"reason": reason}
+
     _is_admin = ctx._is_admin
     _resolve_prefixes = ctx._resolve_prefixes
     _effective_tenant = ctx._effective_tenant
@@ -59,7 +75,7 @@ def register(app, hub, ctx):
                 # Malformed, but still abuse — count it against the IP window so
                 # an empty-field flood fills the bucket and trips the throttle
                 # above on the next request.
-                _login_fail(hub, lkey, ip)
+                _login_fail(hub, lkey, ip, meta=_login_ev_meta(request, "missing username/password"))
                 raise HTTPException(status_code=400, detail="username and password required")
             users = hub.state.system_state.get("users", {})
             user = users.get(user_id)
@@ -71,7 +87,7 @@ def register(app, hub, ctx):
             # username enumeration; both increment the lockout/spray counters.
             if not user or not pw_hash or \
                not _verify_password(password, pw_hash):
-                _login_fail(hub, lkey, ip)
+                _login_fail(hub, lkey, ip, meta=_login_ev_meta(request, "invalid credentials"))
                 raise HTTPException(status_code=401, detail="Invalid credentials")
             _login_success(hub, lkey, ip)
             # Always read the live record so migrations/admin changes take effect on next login.
@@ -152,7 +168,7 @@ def register(app, hub, ctx):
             if (not user_id or not password or not user
                     or not pw_hash
                     or not _verify_password(password, pw_hash)):
-                _login_fail(hub, lkey, ip)
+                _login_fail(hub, lkey, ip, meta=_login_ev_meta(request, "invalid credentials"))
                 raise HTTPException(status_code=401, detail="Invalid credentials")
             _login_success(hub, lkey, ip)
             snap = _user_snapshot(hub, user_id, user)

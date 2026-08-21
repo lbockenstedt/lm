@@ -1355,7 +1355,15 @@ def create_app(hub):
                 _tm = getattr(hub, "threat_monitor", None)
                 if _tm is not None:
                     _tm.record_failure(_client_ip(request), "http_probe",
-                                       detail=f"{request.method} {path}"[:200])
+                                       detail=f"{request.method} {path}"[:200],
+                                       meta={
+                                           "method": request.method,
+                                           "path": path,
+                                           "query": str(request.url.query or ""),
+                                           "user_agent": request.headers.get("user-agent") or "",
+                                           "referer": request.headers.get("referer") or "",
+                                           "x_forwarded_for": request.headers.get("x-forwarded-for") or "",
+                                       })
             except Exception:  # noqa: BLE001 — detection must never break serving
                 pass
             return JSONResponse(status_code=404, content={"detail": "Not found"})
@@ -1487,7 +1495,21 @@ def create_app(hub):
                         try:
                             _tm.record_failure(
                                 _ip, "session_hijack" if _admin else "session",
-                                detail=f"cookie bound to {_bound}, presented from {_ip}")
+                                username=_raw.get("user_id") or "",
+                                detail=f"cookie bound to {_bound}, presented from {_ip}",
+                                meta={
+                                    "user": _raw.get("user_id") or "",
+                                    "sid": _raw.get("sid") or "",
+                                    "bound_ip": _bound,
+                                    "presented_from": _ip,
+                                    "concurrent_ips": ", ".join(_involved),
+                                    "admin_session": _admin,
+                                    "method": request.method,
+                                    "path": path,
+                                    "user_agent": request.headers.get("user-agent") or "",
+                                    "referer": request.headers.get("referer") or "",
+                                    "x_forwarded_for": request.headers.get("x-forwarded-for") or "",
+                                })
                         except Exception:  # noqa: BLE001
                             pass
                         if _admin and _concurrent:
@@ -1529,7 +1551,16 @@ def create_app(hub):
             # ordinary logged-out page loads don't accrue toward a block).
             if request.cookies.get("lm_session"):
                 try:
-                    hub.threat_monitor.record_failure(_client_ip(request), "session", detail=path)
+                    hub.threat_monitor.record_failure(
+                        _client_ip(request), "session", detail=path,
+                        meta={
+                            "method": request.method,
+                            "path": path,
+                            "user_agent": request.headers.get("user-agent") or "",
+                            "referer": request.headers.get("referer") or "",
+                            "x_forwarded_for": request.headers.get("x-forwarded-for") or "",
+                            "reason": "present-but-invalid lm_session cookie",
+                        })
                 except Exception:  # noqa: BLE001
                     pass
             return JSONResponse(status_code=401, content={"detail": "Authentication required"})

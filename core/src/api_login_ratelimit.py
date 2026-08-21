@@ -114,9 +114,12 @@ def _prune_ip_buckets(max_keep: int) -> None:
         _login_ip_attempts.pop(ip, None)
 
 
-def _login_fail(hub, user_id: str, ip: str) -> int:
+def _login_fail(hub, user_id: str, ip: str, meta: dict = None) -> int:
     """Record a failed attempt; engage/extend exponential lockout when over the
-    threshold. Returns the remaining lockout seconds (0 if not yet locked)."""
+    threshold. Returns the remaining lockout seconds (0 if not yet locked).
+
+    ``meta`` is optional structured evidence (e.g. user-agent) forwarded to the
+    threat monitor so the operator can drill into the attempt."""
     import math as _math
     now = time.time()
     # IP spray accounting.
@@ -134,7 +137,7 @@ def _login_fail(hub, user_id: str, ip: str) -> int:
     _login_attempts[user_id] = rec
     _save_login_attempts(hub)
     try:
-        hub.threat_monitor.record_failure(ip, "login", username=user_id)
+        hub.threat_monitor.record_failure(ip, "login", username=user_id, meta=meta)
     except Exception:  # noqa: BLE001 - the monitor must never break login handling
         pass
     return max(0, int(_math.ceil(rec.get("locked_until", 0) - now)))
