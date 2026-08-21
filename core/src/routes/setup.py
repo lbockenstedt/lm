@@ -1014,7 +1014,7 @@ def register(app, hub, ctx):
 
     # ── NetBox → CPPM endpoint sync (hub-orchestrated) ──────────────────────
     # On-demand trigger + per-tenant last-sync status for the Setup →
-    # Security/NAC "NetBox → ClearPass Endpoint Sync" card. Config (enabled /
+    # NAC "NetBox → ClearPass Endpoint Sync" card. Config (enabled /
     # mode / interval_seconds / daily_time) is stored under
     # global_config["netbox_cppm_sync"] and saved via the generic POST
     # /setup/config shallow-merge — no dedicated config route needed. The
@@ -1048,7 +1048,7 @@ def register(app, hub, ctx):
 
     @app.get("/setup/endpoint-sync/status")
     async def endpoint_sync_status(request: Request):
-        """Per-tenant last-sync status for the Setup → Security/NAC card."""
+        """Per-tenant last-sync status for the Setup → NAC card."""
         hub = app.state.hub
         sess = _session_user(request)
         if not sess or not _is_admin(sess):
