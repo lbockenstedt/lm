@@ -427,6 +427,40 @@ def _client_ip(request: Request) -> str:
 access.set_client_ip_resolver(_client_ip)
 
 
+# ── HTTPS-port probe / scanner detection ────────────────────────────────────
+# The hub serves a Python/FastAPI API + a static JS SPA over :443 — it never
+# serves PHP/ASP/JSP/CGI, dotfiles, DB admin panels, or app-server consoles. A
+# request for any of those is an automated vulnerability scanner fingerprinting
+# the port, not a real client (the SPA catch-all would otherwise answer 200
+# index.html and hide the probe). Matches are recorded as ``http_probe`` auth
+# failures so the threat monitor tallies them and auto-blocks the source once it
+# crosses the failure threshold (trusted/allow-listed IPs stay exempt).
+_PROBE_SUFFIXES = (
+    ".php", ".php5", ".php7", ".phtml", ".asp", ".aspx", ".jsp", ".jspx",
+    ".cgi", ".env", ".sql", ".bak", ".htaccess", ".htpasswd",
+)
+_PROBE_TOKENS = (
+    "/wp-", "/wordpress/", "/.git", "/.env", "/.aws", "/.ssh/", "/.svn",
+    "/phpmyadmin", "/pma/", "/adminer", "/dbadmin", "/mysql", "/xmlrpc",
+    "/actuator/", "/solr/", "/jenkins/", "/manager/html", "/vendor/",
+    "/phpunit", "/eval-stdin", "/.vscode", "/.idea", "/boaform", "/hnap1",
+    "/owa/", "/autodiscover/", "/cgi-bin/",
+)
+
+
+def _looks_like_probe(path: str) -> bool:
+    """True when ``path`` matches a known external-scanner signature the hub
+    never legitimately serves. High-confidence only — SPA deep-links and static
+    assets (``.js``/``.css``/``.svg``/...) never match, so a mistyped in-app
+    route is not mistaken for an attack."""
+    p = (path or "").lower()
+    if not p:
+        return False
+    if any(p.endswith(sfx) for sfx in _PROBE_SUFFIXES):
+        return True
+    return any(tok in p for tok in _PROBE_TOKENS)
+
+
 def _sessions_file(hub) -> str:
     """Path to the persisted session store under the hub data dir."""
     return os.path.join(hub.state.data_dir, "sessions.json")
@@ -1323,6 +1357,23 @@ def create_app(hub):
         the next handler.
         """
         path = request.url.path
+
+        # HTTPS-port scanner detection: a request for a path we never serve
+        # (PHP/ASP/CGI, dotfiles, DB-admin/app-server consoles) is an automated
+        # vulnerability scan of the port. Flag it as an ``http_probe`` failure so
+        # the threat monitor tallies + auto-blocks the source past threshold
+        # (trusted IPs exempt), and answer a bare 404 instead of the SPA's 200
+        # index.html so we don't look like a juicy target. Runs FIRST, before the
+        # public/static passthrough, so probes to non-gated paths are caught too.
+        if _looks_like_probe(path):
+            try:
+                _tm = getattr(hub, "threat_monitor", None)
+                if _tm is not None:
+                    _tm.record_failure(_client_ip(request), "http_probe",
+                                       detail=f"{request.method} {path}"[:200])
+            except Exception:  # noqa: BLE001 — detection must never break serving
+                pass
+            return JSONResponse(status_code=404, content={"detail": "Not found"})
 
         # Only API namespaces require authentication — static UI files are always public.
         # /vm/ and /cppm/ were previously OUTSIDE this list → reachable with no

@@ -222,6 +222,7 @@ class ThreatMonitor:
         label = {"login": "failed logins", "session": "invalid session tokens",
                  "api_key": "invalid API keys",
                  "spoke_auth": "invalid spoke onboarding attempts",
+                 "http_probe": "HTTPS-port scan probes (paths we never serve)",
                  "session_hijack": "concurrent admin session-cookie use"}.get(kind, f"{kind} failures")
         mins = max(1, int(self._cfg["window_s"] / 60))
         return f"{count} {label}{who} within {mins}m"
