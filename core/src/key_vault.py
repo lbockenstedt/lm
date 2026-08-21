@@ -146,6 +146,34 @@ async def test_connection(cfg: OidcConfig, vault_url: str,
     return {"ok": True, "secret_count": len(names)}
 
 
+async def resolve_ref(hub, ref: Optional[str],
+                      http: Optional[httpx.AsyncClient] = None) -> Optional[str]:
+    """Resolve a secret *reference* to its value, Key-Vault-optionally.
+
+    ``kv:<name>`` → fetch secret ``<name>`` from the hub's configured vault via
+    the app certificate (returns ``None`` when no vault is configured or the
+    secret is absent — the caller decides how to degrade). Any other non-empty
+    string is treated as an inline literal and returned unchanged, so a
+    self-hosted deployment with no vault keeps working. Never raises."""
+    if not ref:
+        return None
+    ref = str(ref)
+    if not ref.startswith("kv:"):
+        return ref
+    name = ref[len("kv:"):].strip()
+    if not name:
+        return None
+    try:
+        from security.oidc import get_oidc_config
+        vault_url = (get_config(hub) or {}).get("vault_url")
+        if not vault_url:
+            return None
+        return await get_secret(get_oidc_config(hub), vault_url, name, http=http)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Key Vault: resolve_ref(%s) failed: %s", name, e)
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Hub-level operations (shared by the WebUI routes and the 7-day scheduler).
 # These touch hub state and the api helpers; api is imported lazily to avoid a

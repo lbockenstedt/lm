@@ -115,7 +115,18 @@ class SimulationsStore:
         # silently re-encrypt an empty store over every tenant's PSKs + tokens —
         # the next save after a failed load used to permanently destroy them.
         self._load_failed = False
+        # Optional async callback ``(ref) -> token`` used to resolve a
+        # ``github_token`` that is stored as a secret reference (``kv:<name>``)
+        # rather than an inline value, so the token can live in Key Vault instead
+        # of on disk. Injected by the hub (see main.py). When unset, or when it
+        # returns None (no vault / not found), the stored value is used as-is —
+        # so a self-hosted deployment with an inline token is unaffected.
+        self._secret_resolver = None
         self._load()
+
+    def set_secret_resolver(self, resolver) -> None:
+        """Install the async ``github_token`` secret-reference resolver."""
+        self._secret_resolver = resolver
 
     # ── persistence ────────────────────────────────────────────────────────
     def _load(self) -> None:
@@ -650,9 +661,30 @@ class SimulationsStore:
         return added
 
     # ── github config (Setup → GitHub: per-spoke repo + token) ───────────────
-    async def get_github_config(self, tenant_id: str) -> Dict[str, Any]:
-        """Return the tenant's GitHub config (per-spoke repo + token)."""
-        return self._data.get(tenant_id, {}).get("github_config", {})
+    async def get_github_config(self, tenant_id: str, resolve: bool = False) -> Dict[str, Any]:
+        """Return the tenant's GitHub config (per-spoke repo + token).
+
+        With ``resolve=True`` and a ``github_token`` stored as a secret reference
+        (``kv:<name>``), the real token is fetched (from Key Vault) and injected
+        into the returned copy — the on-disk file keeps only the reference.
+        Callers that merely display/mask/merge-and-save the config MUST leave
+        ``resolve`` False so the reference is preserved on disk; only callers that
+        actually contact GitHub pass True. If a reference can't be resolved (no
+        vault, not found), the stored value is returned unchanged so nothing
+        breaks, and an inline token (self-hosted, no vault) is always returned
+        as-is."""
+        cfg = self._data.get(tenant_id, {}).get("github_config", {})
+        if not resolve:
+            return cfg
+        tok = (cfg or {}).get("github_token") or ""
+        if tok.startswith("kv:") and self._secret_resolver is not None:
+            try:
+                resolved = await self._secret_resolver(tok)
+            except Exception:  # noqa: BLE001
+                resolved = None
+            if resolved:
+                cfg = {**cfg, "github_token": resolved}
+        return cfg
 
     async def set_github_config(self, tenant_id: str, cfg: Dict[str, Any]) -> None:
         """Replace the tenant's GitHub config and persist."""

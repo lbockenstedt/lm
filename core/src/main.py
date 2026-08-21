@@ -852,7 +852,18 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Simulations module: tenant-scoped browser broadcast + slim cs-config store.
         self.simulations_broadcaster = SimulationsBroadcaster()
         self.simulations_store = SimulationsStore(self.state.data_dir)
-        # API threat monitor: brute-force / faked-credential detection, security
+        # Resolve a tenant github_token stored as a Key Vault reference
+        # (``kv:<name>``) at read time, so the token can live in the vault instead
+        # of on disk. No-op for inline tokens / no vault (self-hosted).
+        try:
+            import key_vault as _kv
+
+            async def _gh_token_resolver(ref):
+                return await _kv.resolve_ref(self, ref)
+
+            self.simulations_store.set_secret_resolver(_gh_token_resolver)
+        except Exception:  # noqa: BLE001 — resolver is optional
+            logger.debug("github_token KV resolver not installed", exc_info=True)
         # audit log, and (opt-in) Azure NSG deny-rule auto-block.
         self.threat_monitor = ThreatMonitor(self)
         # In-process access sentinel (application-level tripwire): route its
@@ -2645,7 +2656,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             _have = bool((await self.simulations_store.get_sim_conf_content(tenant_id) or "").strip())
             if _sot == "github" and not _have:
                 from simulations import github_config_client as _ghc
-                _gh_cfg = await self.simulations_store.get_github_config(tenant_id) or {}
+                _gh_cfg = await self.simulations_store.get_github_config(tenant_id, resolve=True) or {}
                 if _ghc.is_configured(_gh_cfg):
                     _pulled = await _ghc.pull(_gh_cfg)
                     if _pulled:
@@ -2709,7 +2720,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # nor commits; the creds ride along only for the brief 'github' bootstrap
         # window (before the hub's first pull) and for repo_url/branch display.
         try:
-            _gh = await self.simulations_store.get_github_config(tenant_id) or {}
+            _gh = await self.simulations_store.get_github_config(tenant_id, resolve=True) or {}
         except Exception as exc:  # noqa: BLE001 — best-effort
             _gh = {}
         if _gh:
@@ -8895,6 +8906,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 raise
             del _ctx
         listen_port = self.tls_port  # single unified port (443 w/ TLS, 443 plain)
+        # Provision any operator site-extension modules BEFORE the app is built
+        # (create_app → site_ext.load imports them). Best-effort; optional.
+        try:
+            import site_ext
+            await site_ext.provision(self)
+        except Exception:
+            logger.debug("site extension provisioning skipped", exc_info=True)
         self._api_server = build_server(
             self, host=self.host, port=listen_port,
             tls_cert=self.tls_cert_path, tls_key=self.tls_key_path)

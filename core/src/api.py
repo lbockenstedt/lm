@@ -2183,6 +2183,16 @@ def create_app(hub):
     client_debug_routes.register(app, hub, ctx)
     admin_ops_routes.register(app, hub, ctx)
 
+    # ── Operator site extensions (optional; absent on a stock checkout) ──────
+    # Import any locally-provisioned register(app, hub, ctx) modules from the
+    # hub's ext dir (provisioned out-of-band in main.start() via
+    # site_ext.provision). Best-effort — never blocks app build.
+    try:
+        import site_ext
+        site_ext.load(app, hub, ctx)
+    except Exception:
+        logger.debug("site extensions: load skipped", exc_info=True)
+
     # ── H1: scrub internal-exception detail from 5xx for non-Global callers ──
     # Routes raise ``HTTPException(500, detail=str(e))`` in their
     # except-Exception blocks (118+ sites). Without this handler a tenant_admin

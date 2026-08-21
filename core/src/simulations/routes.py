@@ -549,7 +549,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if "github_config" not in payload:
             try:
                 payload = {**payload,
-                           "github_config": await store.get_github_config(tenant_id)}
+                           "github_config": await store.get_github_config(tenant_id, resolve=True)}
             except Exception as exc:  # noqa: BLE001 — best-effort, never block the push
                 logger.debug("CS_CONFIG_UPDATE: github_config merge for %s failed: %s",
                              tenant_id, exc)
@@ -4578,7 +4578,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         try:
             if await store.get_source_of_truth(tenant_id) != "github":
                 return False
-            gh = await store.get_github_config(tenant_id) or {}
+            gh = await store.get_github_config(tenant_id, resolve=True) or {}
             if not github_config_client.is_configured(gh):
                 return False
             pulled = await github_config_client.pull(gh)
@@ -4605,7 +4605,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         edit is already saved hub-side and fanned out to spokes, so the repo just
         lags until the next successful commit / poll."""
         try:
-            gh = await store.get_github_config(tenant_id) or {}
+            gh = await store.get_github_config(tenant_id, resolve=True) or {}
             if not github_config_client.is_configured(gh):
                 return
             await github_config_client.push(gh, path, content, message)
