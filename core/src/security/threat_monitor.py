@@ -259,7 +259,8 @@ class ThreatMonitor:
                     kind="manual", source="manual_perm" if permanent else "manual")
         return {"status": "SUCCESS", "block": self._blocks.get(ip)}
 
-    def block_ip_unless_trusted(self, ip: str, reason: str = "") -> Dict[str, Any]:
+    def block_ip_unless_trusted(self, ip: str, reason: str = "",
+                                kind: str = "session_hijack") -> Dict[str, Any]:
         """Immediately block ``ip`` UNLESS it is exempt (allow-listed/trusted, or
         inside the recent-successful-login grace).
 
@@ -268,7 +269,11 @@ class ThreatMonitor:
         we block every *involved* source that isn't trusted. That spares a
         trusted or freshly-authenticated roaming admin IP while still cutting off
         a non-allowlisted attacker. (``block_manual`` deliberately bypasses the
-        exemption; this wrapper is the exemption-respecting variant.)"""
+        exemption; this wrapper is the exemption-respecting variant.)
+
+        ``kind`` labels the block record for the Security tally/tiles; it
+        defaults to ``session_hijack`` for the original caller, but any anomaly
+        source (see :meth:`note_anomaly`) can attribute its own kind."""
         ip = (ip or "").strip()
         if not ip:
             return {"status": "ERROR", "message": "ip required"}
@@ -278,7 +283,7 @@ class ThreatMonitor:
                 "recent login) — %s", ip, reason)
             return {"status": "SUCCESS", "spared": ip, "reason": "trusted"}
         self._block(ip, reason or "concurrent admin session-cookie use",
-                    kind="session_hijack", source="auto")
+                    kind=kind, source="auto")
         return {"status": "SUCCESS", "block": self._blocks.get(ip)}
 
     def note_anomaly(self, kind: str, detail: str = "",
@@ -303,7 +308,7 @@ class ThreatMonitor:
             sec_log.log(level, "SECURITY ANOMALY %s [%s]%s — %s", kind, severity,
                         f" from {ip}" if ip else "", detail)
             if severity == "critical" and (ip or "").strip():
-                self.block_ip_unless_trusted(ip, reason=f"{kind}: {detail}")
+                self.block_ip_unless_trusted(ip, reason=f"{kind}: {detail}", kind=kind)
         except Exception:
             sec_log.exception("note_anomaly failed for kind=%s", kind)
 
