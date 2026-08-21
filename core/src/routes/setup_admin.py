@@ -640,8 +640,12 @@ def register(app, hub, ctx):
                 for agent_id, logs in hub.agent_logs.items():
                     # B2: agent_logs is guid-keyed for relayed agents; label with
                     # the raw name (guid→name via agent_info). Spoke-namespace
-                    # keys (SPOKE_LOG, guid-keyed) fall back to the key itself.
+                    # keys (SPOKE_LOG, guid-keyed) fall back to the key itself —
+                    # so when the relay name is still a bare guid, resolve it to
+                    # the registered display name / hostname instead of a UUID.
                     label = hub._agent_relay_name(agent_id)
+                    if label == agent_id:
+                        label = hub._log_source_label(agent_id)
                     for line in logs:
                         flat.append(f"[{label}] {line}")
                 return {"logs": flat[-500:]}
@@ -675,8 +679,9 @@ def register(app, hub, ctx):
             if matching_sids:
                 flat = []
                 for sid in matching_sids:
+                    label = hub._log_source_label(sid)
                     for line in hub.agent_logs.get(sid, []):
-                        flat.append(f"[{sid}] {line}")
+                        flat.append(f"[{label}] {line}")
                 # Hub-side cert-distribution activity (the le.distribution logger
                 # — per-target push outcomes, hub self-install, LE_GET_CERT
                 # failures) lives on the HUB, not the le spoke, so it isn't in
