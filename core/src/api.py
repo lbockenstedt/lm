@@ -1692,7 +1692,7 @@ def create_app(hub):
                 return JSONResponse(status_code=403,
                                     content={"detail": "Firewall module access required"})
 
-        # /api/cppm/* + /cppm/* (Security/NAC module) require the ``nac`` right OR
+        # /api/cppm/* + /cppm/* (NAC module) require the ``nac`` right OR
         # admin. NAC is read-only (no mutation endpoints); its admin-only
         # diagnostic relays (probe/test-auth/refresh/health) are already returned
         # above by _ADMIN_API_PREFIXES, so this only gates the tenant data reads

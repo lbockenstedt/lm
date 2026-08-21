@@ -405,7 +405,7 @@ const MODULE_CLASSES = {
     'Hypervisors': ['pxmx', 'kvm', 'vmware', 'utm'],
     'Firewalls': ['opnsense', 'pfsense', 'juniper', 'fortigate'],
     'IPAM': ['netbox', 'phpipam'],
-    'Security/NAC': ['cppm', 'ise'],
+    'NAC': ['cppm', 'ise'],
     'DNS': ['dns', 'henet'],
     'DHCP': ['dhcp'],
     'Network': ['nw'],
@@ -574,7 +574,7 @@ const LOG_NAMES = {
     'hub': 'Lab Manager Logs',
     'opn': 'Firewall Logs',
     'pxmx': 'Hypervisor Logs',
-    'cppm': 'Security/NAC Logs',
+    'cppm': 'NAC Logs',
     'cs': 'Client Simulator Logs',
     'le': 'Certificate Logs'
 };
@@ -766,7 +766,7 @@ const pollManager = (() => {
 // granted its explicit right. Today only the Simulations (cs) module is gated
 // this way; other modules remain product-driven (visible when their spoke is
 // connected). Add a key here to gate another module the same way.
-const MODULE_RIGHT = { 'Simulations': 'cs', 'Network': 'nw', 'IPAM': 'ipam', 'Certificates': 'le', 'Console': 'console', 'Firewalls': 'firewall', 'Security/NAC': 'nac', 'DNS': 'dns', 'HE.NET': 'henet', 'DHCP': 'dhcp', 'Hypervisors': 'pxmx', 'Directory': 'ldap', 'Reports': 'reports' };
+const MODULE_RIGHT = { 'Simulations': 'cs', 'Network': 'nw', 'IPAM': 'ipam', 'Certificates': 'le', 'Console': 'console', 'Firewalls': 'firewall', 'NAC': 'nac', 'DNS': 'dns', 'HE.NET': 'henet', 'DHCP': 'dhcp', 'Hypervisors': 'pxmx', 'Directory': 'ldap', 'Reports': 'reports' };
 function canSeeModule(className) {
     const right = MODULE_RIGHT[className];
     if (!right) return true;              // no right defined → product-driven
@@ -1501,7 +1501,7 @@ const SUBMENU_LABELS = {
     'logs-features': 'Feature Request',
     'logs-opn': 'Firewall',
     'logs-pxmx': 'Hypervisor',
-    'logs-cppm': 'Security/NAC',
+    'logs-cppm': 'NAC',
     'logs-netbox': 'IPAM',
     'logs-nw': 'Network',
     'logs-cs': 'Simulations',
@@ -2959,7 +2959,7 @@ function _rebuildMainNav(allSpokes, connections) {
             icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>';
         } else if (className === 'Hypervisors') {
             icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12H3m18 0h-2M12 5V3m0 18v-2m5.657-14.343l-1.414 1.414M6.757 17.243l-1.414 1.414m12.728 0l-1.414-1.414M6.757 6.757L5.343 5.343M12 8a4 4 0 100 8 4 4 0 000-8z"></path></svg>';
-        } else if (className === 'Security/NAC') {
+        } else if (className === 'NAC') {
             icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>';
         } else if (className === 'IPAM') {
             icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 8v2m0 4v-2m8-2v2m0 4v-2M8 12h8"></path></svg>';
@@ -6631,7 +6631,7 @@ function _renderSetupUserAccessTile(content) {
 
 
 // System → Sync tile. The unified home for cross-system sync schedules:
-//   1. IPAM → NAC endpoint sync (moved here from Setup → Security/NAC)
+//   1. IPAM → NAC endpoint sync (moved here from Setup → NAC)
 //   2. Hypervisor (Proxmox) → NetBox VM sync (moved here from Setup → IPAM)
 // Each card owns its own source dropdown, schedule, Save + Sync-now actions,
 // and per-tenant last-sync status. Loaders / actions (defined below):
@@ -7532,7 +7532,7 @@ window.saveLdapConfig = saveLdapConfig; window.pushLdapConfig = pushLdapConfig;
 
 
 // Setup → Module Management tile. One unified device-management page for every
-// managed module (Firewalls, Network Devices, Security/NAC, IPAM, LDAP, DNS,
+// managed module (Firewalls, Network Devices, NAC, IPAM, LDAP, DNS,
 // DHCP). A single "+ Add Device" button opens a modal where the admin first
 // picks the module type (OPNsense, ClearPass, NetBox, …) and then fills in
 // that type's specifics — the device type is determined by the module type and
@@ -10052,7 +10052,7 @@ const LM_NAV_ICONS = [
     { id: 3,  name: 'Firewalls',    key: 'opnsense',   svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>' },
     { id: 4,  name: 'IPAM',         key: 'netbox',     svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zm10 0a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 8v2m0 4v-2m8-2v2m0 4v-2M8 12h8"></path></svg>' },
     { id: 5,  name: 'Network',      key: 'nw',         svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.25" stroke-width="2"></circle><circle cx="18" cy="6" r="2.25" stroke-width="2"></circle><circle cx="12" cy="18" r="2.25" stroke-width="2"></circle><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.25 6h7.5M7.2 7.9l3.6 8.2M16.8 7.9l-3.6 8.2"></path></svg>' },
-    { id: 6,  name: 'Security/NAC', key: 'cppm',       svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>' },
+    { id: 6,  name: 'NAC',          key: 'cppm',       svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>' },
     { id: 7,  name: 'Simulations',  key: 'cs',         svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z"></path></svg>' },
     { id: 8,  name: 'DNS',          key: 'dns',        svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.6 9h16.8M3.6 15h16.8M11.5 3a17 17 0 000 18M12.5 3a17 17 0 010 18"></path></svg>' },
     { id: 9,  name: 'DHCP',         key: 'dhcp',       svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M9 3.75H6.912a2.25 2.25 0 00-2.15 1.588L2.35 13.177a2.25 2.25 0 00-.1.661V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18v-4.162c0-.224-.034-.447-.1-.661L19.24 5.338a2.25 2.25 0 00-2.15-1.588H15M2.25 13.5h3.86a2.25 2.25 0 012.012 1.244l.256.512a2.25 2.25 0 002.013 1.244h3.218a2.25 2.25 0 002.013-1.244l.256-.512a2.25 2.25 0 012.013-1.244h3.859M12 3v8.25m0 0l-3-3m3 3l3-3"></path></svg>' },
@@ -10850,7 +10850,7 @@ function _renderSetupSection(subMenu, container) {
 // Module subnet-filter toggles + global/per-tenant USB management. Admin-only
 // (the submenu is hidden for non-admins and the backend 403s non-admins).
 const _SUBNET_FILTER_MODULES = [
-    { key: 'nac',       label: 'Security / NAC' },
+    { key: 'nac',       label: 'NAC' },
     { key: 'firewall',   label: 'Firewall' },
     { key: 'nw',         label: 'Network Devices' },
     { key: 'netbox',     label: 'IPAM' },
@@ -13993,7 +13993,7 @@ const _RBAC_RIGHT_LABELS = {
     firewall: 'Firewall',
     nw: 'Network Devices',
     ipam: 'IPAM',
-    nac: 'Security / NAC',
+    nac: 'NAC',
     dns: 'DNS',
     dhcp: 'DHCP',
     ldap: 'Directory / LDAP',
@@ -25124,14 +25124,14 @@ async function deleteDhcpReservation(ip) {
 
 // Shared 403 hint rendered under a ClearPass API error card. CPPM requires an
 // OAuth2 API Client; a 403 almost always means one isn't configured or the
-// credentials in Setup → Security/NAC don't match. Used by loadCPPMData() in
+// credentials in Setup → NAC don't match. Used by loadCPPMData() in
 // both the sessions branch (NAC Status / Access Tracker) and the devices
 // branch (My Devices / Unknown Devices).
 // Routes: GET /api/cppm/sessions, /api/cppm/devices, /api/cppm/unknown-devices
 // — see core/src/api.py get_cppm_sessions / get_cppm_devices.
 function _cppm403Hint(status) {
     return status === 403
-        ? '<p class="mt-3 text-xs text-amber-600">ClearPass returned 403 — check that an OAuth2 API Client is configured in CPPM and that the credentials in Setup → Security/NAC match.</p>'
+        ? '<p class="mt-3 text-xs text-amber-600">ClearPass returned 403 — check that an OAuth2 API Client is configured in CPPM and that the credentials in Setup → NAC match.</p>'
         : '';
 }
 

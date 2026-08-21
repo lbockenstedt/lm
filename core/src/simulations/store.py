@@ -720,7 +720,7 @@ class SimulationsStore:
             self._tenant(tenant_id)["security_config"] = cfg or {}
             await self._asave()
 
-    # ── NetBox → CPPM endpoint-sync last-run status (Setup → Security/NAC) ──
+    # ── NetBox → CPPM endpoint-sync last-run status (Setup → NAC) ──
     # Per-tenant result of the most recent endpoint sync cycle (background loop
     # or on-demand "Sync now"). Persisted so the UI still shows the last run
     # after a hub restart. Shape: {status, pushed, errors, message,

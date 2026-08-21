@@ -46,10 +46,10 @@ class _Hub:
 
 def test_get_spoke_or_503_generic_when_none_connected():
     with pytest.raises(HTTPException) as ei:
-        api.get_spoke_or_503(_Hub(None), "nac", "Security / NAC")
+        api.get_spoke_or_503(_Hub(None), "nac", "NAC")
     assert ei.value.status_code == 503
     assert ei.value.detail == "No spoke connected"
 
 
 def test_get_spoke_or_503_returns_connected_spoke():
-    assert api.get_spoke_or_503(_Hub("nac-1"), "nac", "Security / NAC") == "nac-1"
+    assert api.get_spoke_or_503(_Hub("nac-1"), "nac", "NAC") == "nac-1"

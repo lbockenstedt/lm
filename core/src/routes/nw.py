@@ -597,7 +597,7 @@ def register(app, hub, ctx):
         ``legacy_key``/``legacy_to_instance`` perform a one-shot migration of a
         pre-multi-instance single config (e.g. global_config.cppm / .netbox)
         into the instance list so deployments that configured CPPM/NetBox
-        before the refactor still see their server on Setup → Security/NAC /
+        before the refactor still see their server on Setup → NAC /
         IPAM. The migrated entry is deduped by host/url and persisted so it
         becomes a normal editable instance."""
         hub = app.state.hub
