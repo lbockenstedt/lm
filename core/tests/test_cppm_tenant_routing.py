@@ -56,6 +56,13 @@ class FakeHub:
     def get_cppm_spoke_for_shared(self):
         return None
 
+    def get_cppm_spokes_for_tenant(self, tenant_id=None):
+        if not tenant_id or tenant_id == "default":
+            return []
+        own = self.get_cppm_spoke_for_tenant(tenant_id)
+        shared = self.get_cppm_spoke_for_shared()
+        return list(dict.fromkeys(sid for sid in (own, shared) if sid))
+
     async def request_response(self, sid, cmd, payload=None, timeout=None):
         self.forwarded.append((sid, cmd, payload))
         data = (self.replies.get(sid) or {}).get(cmd, {"status": "SUCCESS"})
@@ -235,8 +242,10 @@ def test_no_nac_spokes_connected_returns_503_for_admin_merge_view():
 
 
 def test_tenant_scoped_devices_view_does_not_fan_out():
-    """A tenant-scoped caller only ever talks to their own spoke — the merge
-    fanout is admin-only."""
+    """A tenant-scoped caller only talks to spokes in their OWN combined view
+    (own + shared, if configured) — never every tenant's spoke like the
+    admin merge fanout. No shared instance is configured here, so this
+    tenant's view is just their own spoke."""
     hub = FakeHub(
         {"cppm-a", "cppm-b"},
         replies={"cppm-a": {"LIST_ENDPOINTS": {"status": "SUCCESS",
@@ -248,3 +257,87 @@ def test_tenant_scoped_devices_view_does_not_fan_out():
     r = c.get("/api/cppm/devices")
     assert r.status_code == 200
     assert {sid for sid, _, _ in hub.forwarded} == {"cppm-a"}
+
+
+# ── combined view: tenant's own CPPM + shared CPPM merged ───────────────────
+
+def test_tenant_devices_view_combines_own_and_shared_spoke():
+    hub = FakeHub(
+        {"cppm-a", "cppm-shared"},
+        replies={
+            "cppm-a": {"LIST_ENDPOINTS": {"status": "SUCCESS",
+                                          "devices": [{"mac": "own-1"}]}},
+            "cppm-shared": {"LIST_ENDPOINTS": {"status": "SUCCESS",
+                                               "devices": [{"mac": "shared-1"}]}},
+        },
+        module_metadata={"cppm-a": {"tenant_id": "tenantA"},
+                         "cppm-shared": {"tenant_id": "shared-tenant"}},
+    )
+    hub.get_cppm_spoke_for_shared = lambda: "cppm-shared"
+    c = _build(_tenant_user("tenantA"), hub)
+    r = c.get("/api/cppm/devices")
+    assert r.status_code == 200
+    macs = {d["mac"] for d in r.json()["devices"]}
+    assert macs == {"own-1", "shared-1"}
+    assert {sid for sid, _, _ in hub.forwarded} == {"cppm-a", "cppm-shared"}
+
+
+def test_tenant_sessions_view_combines_own_and_shared_spoke():
+    hub = FakeHub(
+        {"cppm-a", "cppm-shared"},
+        replies={
+            "cppm-a": {"CPPM_GET_ACCESS_TRACKER": {"status": "SUCCESS",
+                                                    "sessions": [{"mac": "own-1"}]}},
+            "cppm-shared": {"CPPM_GET_ACCESS_TRACKER": {"status": "SUCCESS",
+                                                        "sessions": [{"mac": "shared-1"}]}},
+        },
+        module_metadata={"cppm-a": {"tenant_id": "tenantA"},
+                         "cppm-shared": {"tenant_id": "shared-tenant"}},
+    )
+    hub.get_cppm_spoke_for_shared = lambda: "cppm-shared"
+    c = _build(_tenant_user("tenantA"), hub)
+    r = c.get("/api/cppm/sessions")
+    assert r.status_code == 200
+    macs = {s["mac"] for s in r.json()["sessions"]}
+    assert macs == {"own-1", "shared-1"}
+    assert {sid for sid, _, _ in hub.forwarded} == {"cppm-a", "cppm-shared"}
+
+
+def test_tenant_devices_view_survives_shared_spoke_erroring():
+    hub = FakeHub(
+        {"cppm-a", "cppm-shared"},
+        replies={"cppm-a": {"LIST_ENDPOINTS": {"status": "SUCCESS",
+                                               "devices": [{"mac": "own-1"}]}}},
+        module_metadata={"cppm-a": {"tenant_id": "tenantA"},
+                         "cppm-shared": {"tenant_id": "shared-tenant"}},
+    )
+    hub.get_cppm_spoke_for_shared = lambda: "cppm-shared"
+
+    async def _boom(sid, cmd, payload=None, timeout=None):
+        if sid == "cppm-shared":
+            raise RuntimeError("shared clearpass unreachable")
+        hub.forwarded.append((sid, cmd, payload))
+        return {"payload": {"data": hub.replies[sid][cmd]}}
+    hub.request_response = _boom
+
+    c = _build(_tenant_user("tenantA"), hub)
+    r = c.get("/api/cppm/devices")
+    assert r.status_code == 200
+    assert [d["mac"] for d in r.json()["devices"]] == ["own-1"]
+
+
+def test_shared_tenant_itself_does_not_double_query_its_own_spoke():
+    """The shared tenant's OWN users must not see their spoke queried twice —
+    own == shared for them, so the combined list dedupes to one entry."""
+    hub = FakeHub(
+        {"cppm-shared"},
+        replies={"cppm-shared": {"LIST_ENDPOINTS": {"status": "SUCCESS",
+                                                     "devices": [{"mac": "shared-1"}]}}},
+        module_metadata={"cppm-shared": {"tenant_id": "shared-tenant"}},
+    )
+    hub.get_cppm_spoke_for_shared = lambda: "cppm-shared"
+    c = _build(_tenant_user("shared-tenant"), hub)
+    r = c.get("/api/cppm/devices")
+    assert r.status_code == 200
+    assert [d["mac"] for d in r.json()["devices"]] == ["shared-1"]
+    assert len(hub.forwarded) == 1

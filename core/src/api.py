@@ -879,6 +879,34 @@ def _nb_slug(hub, tenant_id: str):
     except Exception:
         return None
 
+async def _cppm_merge_spokes(hub, spokes, cmd: str, list_key: str, timeout: float = 20.0):
+    """Query every spoke in ``spokes`` with ``cmd``, merging each response's
+    ``list_key`` list into one combined list — the tenant's own dedicated
+    CPPM (full) plus the shared CPPM (its records narrowed to this tenant by
+    the SAME subnet/tag filter every NAC route already applies downstream).
+    A spoke marked unconfigured or that errors is skipped rather than
+    failing the whole fetch, so one bad/unconfigured source can't blank the
+    other's data. Returns None (caller treats as an error) only when NO
+    usable spoke remains."""
+    usable = [s for s in spokes if s not in hub._nac_unconfigured_spokes]
+    if not usable:
+        return None
+
+    async def _one(sid):
+        try:
+            r = await hub.request_response(sid, cmd, {}, timeout=timeout)
+            return _normalize_cached(r)
+        except Exception as e:  # noqa: BLE001 — one bad spoke must not fail the merge
+            logger.warning(f"cppm merge fetch {sid} ({cmd}): {e}")
+            return None
+
+    results = await asyncio.gather(*[_one(s) for s in usable])
+    merged = []
+    for d in results:
+        if isinstance(d, dict) and isinstance(d.get(list_key), list):
+            merged.extend(d[list_key])
+    return {list_key: merged, "total": len(merged)}
+
 async def _fetch_module(hub, tenant_id: str, module_key: str, fw_id: str = None) -> bool:
     """Fetch one module from its spoke and store in tenant cache."""
     cache_key = f"{module_key}:{fw_id}" if fw_id else module_key
@@ -895,33 +923,28 @@ async def _fetch_module(hub, tenant_id: str, module_key: str, fw_id: str = None)
                 _set_cache_status(tenant_id, cache_key, "error"); return False
             result = await hub.request_response(spoke_id, _FW_CMD_MAP[module_key], {})
         elif module_key == "cppm_sessions":
-            # Tenant-scoped, NOT get_spoke_by_type("nac") — with more than one
-            # nac spoke connected (e.g. two ClearPass appliances, each only
-            # reachable from its own spoke), the untargeted lookup picked
-            # whichever spoke connected/reconnected most recently, so this
-            # cache-refresh cycle could hit a spoke with no route to the
-            # OTHER instance's ClearPass host. get_cppm_spoke_for_tenant pins
-            # to this tenant's own bound nac_instances record.
-            spoke = hub.get_cppm_spoke_for_tenant(tenant_id)
-            if not spoke: _set_cache_status(tenant_id, cache_key, "error"); return False
-            # Skip the query while the spoke is connected-but-unconfigured — the
-            # spoke would just return "CPPM host not configured" every cycle.
-            # push_config_to_spoke sets this flag once (one WARN) when no host is
-            # bound; clears it the moment a usable instance is pushed.
-            if spoke in hub._nac_unconfigured_spokes:
-                _set_cache_status(tenant_id, cache_key, "error"); return False
+            # Combined view: the tenant's own dedicated CPPM (get_cppm_spoke_
+            # for_tenant, pinned — never the untargeted, connection-order-
+            # dependent get_spoke_by_type("nac")) PLUS the shared-tenant CPPM
+            # if one is configured (get_cppm_spokes_for_tenant). Merged here
+            # rather than one-spoke-wins so a tenant with access to a shared
+            # ClearPass sees both sources, matching the live /api/cppm/*
+            # routes (routes/cppm.py's _cppm_warm/_nac_merge_fanout use the
+            # same spoke list).
             # 20s, not the 5.0s default: these bulk CPPM reads hit the same
             # large ClearPass servers as the /api/cppm routes and (like the
             # netbox GETs below) blow the bare default on a big fleet. Now in
             # _KEEPALIVE_CMDS, so the 20s base lets the first keepalive land and
             # extend the deadline toward the hard ceiling.
-            result = await hub.request_response(spoke, "CPPM_GET_ACCESS_TRACKER", {}, timeout=20.0)
+            spokes = hub.get_cppm_spokes_for_tenant(tenant_id)
+            if not spokes: _set_cache_status(tenant_id, cache_key, "error"); return False
+            result = await _cppm_merge_spokes(hub, spokes, "CPPM_GET_ACCESS_TRACKER", "sessions", timeout=20.0)
+            if result is None: _set_cache_status(tenant_id, cache_key, "error"); return False
         elif module_key == "cppm_devices":
-            spoke = hub.get_cppm_spoke_for_tenant(tenant_id)  # see cppm_sessions above
-            if not spoke: _set_cache_status(tenant_id, cache_key, "error"); return False
-            if spoke in hub._nac_unconfigured_spokes:
-                _set_cache_status(tenant_id, cache_key, "error"); return False
-            result = await hub.request_response(spoke, "LIST_ENDPOINTS", {}, timeout=20.0)
+            spokes = hub.get_cppm_spokes_for_tenant(tenant_id)  # see cppm_sessions above
+            if not spokes: _set_cache_status(tenant_id, cache_key, "error"); return False
+            result = await _cppm_merge_spokes(hub, spokes, "LIST_ENDPOINTS", "devices", timeout=20.0)
+            if result is None: _set_cache_status(tenant_id, cache_key, "error"); return False
         elif module_key in ("netbox_racks", "netbox_devices", "netbox_ips", "netbox_prefixes"):
             spoke = hub.get_spoke_by_type("ipam")
             if not spoke: _set_cache_status(tenant_id, cache_key, "error"); return False
