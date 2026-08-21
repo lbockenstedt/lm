@@ -84,6 +84,12 @@ class ConsoleSpoke(BaseSpoke):
         self._probe_fails: Dict[str, int] = {}        # port_id → consecutive failed identify attempts
         self._seen_ports: set = set()                 # port_ids seen last scan (for first-seen detection)
         self._probing: set = set()
+        # port_id → last time an ALREADY-identified port was actively re-checked
+        # (monotonic). In-memory only (not persisted) so it starts empty every
+        # process lifetime — a restart/reboot therefore always re-verifies every
+        # previously-known port on its first scan, since a reboot can reshuffle
+        # port_ids. See _reverify_due.
+        self._identify_verify_ts: Dict[str, float] = {}
         # Boot watcher: per-port last-observed capture byte count (to spot NEW
         # output between scans) and last baud-relock attempt (monotonic), so we
         # don't re-sweep a garbled line every cycle. Boot state itself lives in
@@ -183,44 +189,6 @@ class ConsoleSpoke(BaseSpoke):
                 return (p.get("product") or "").strip()
         return ""
 
-    def _absent_named_ports(self, seen: set) -> list:
-        """Persisted ports we've NAMED (alias) or IDENTIFIED (probe.identity) that
-        aren't enumerated right now → returned as ``present=False`` telemetry rows
-        so an offline device (adapter unplugged / target powered off) keeps its
-        saved name across a reboot. ``seen`` is the set of live port_ids to skip.
-        """
-        out = []
-        for pid, saved in self.store.all_items().items():
-            if pid in seen:
-                continue
-            if not (saved.get("alias") or (saved.get("probe") or {}).get("identity")):
-                continue  # only resurface ports a human meaningfully named/identified
-            hw = saved.get("hw") or {}
-            out.append({
-                "port_id": pid,
-                "device": hw.get("device", ""),
-                "kind": hw.get("kind", "usb"),
-                "vendor": hw.get("vendor", ""),
-                "product": hw.get("product", ""),
-                "serial": hw.get("serial", ""),
-                "vid": hw.get("vid", ""),
-                "pid": hw.get("pid", ""),
-                "alias": saved.get("alias", ""),
-                "tenant_id": saved.get("tenant_id", ""),
-                "settings": self.store.settings(pid),
-                "probe": saved.get("probe", {}),
-                "in_use": False,
-                "writer": None,
-                "monitoring": False,
-                "last_activity": 0,
-                "capture_bytes": 0,
-                "pending_out": 0,
-                "dpa": None,
-                "boot": None,
-                "present": False,  # not physically enumerated (offline / unplugged)
-            })
-        return out
-
     # ── command dispatch ──────────────────────────────────────────────────────
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
         cmd = command_type.upper()
@@ -233,22 +201,14 @@ class ConsoleSpoke(BaseSpoke):
 
         if cmd == "CONSOLE_LIST_PORTS":
             ports = []
-            seen = set()
             for p in enumerate_ports():
                 pid = p["port_id"]
-                seen.add(pid)  # present now → never resurrect it as an absent row
                 # Hide ports the automated system can't open (faulty/non-real
                 # serial devices) so the operator never sees a broken port or its
                 # raw error — unless a live session is somehow attached to it.
                 if pid in self._unopenable and not self.sessions.has_user_sessions(pid):
                     continue
                 saved = self.store.get(pid)
-                # Remember this port's hardware descriptor (change-guarded) so an
-                # absent/offline port can still be listed with its saved name.
-                hw = {k: p.get(k, "") for k in
-                      ("device", "kind", "vendor", "product", "serial", "vid", "pid")}
-                if saved.get("hw") != hw:
-                    saved = self.store.update(pid, hw=hw)
                 snap = self.sessions.snapshot(pid)
                 ports.append({
                     **p,
@@ -266,11 +226,11 @@ class ConsoleSpoke(BaseSpoke):
                     "boot": self._boot_info(pid),        # boot/wake cycle status (None if never seen)
                     "present": True,                     # physically enumerated right now
                 })
-            # Known-but-absent NAMED ports: an offline device (adapter unplugged /
-            # target powered off) doesn't enumerate, so an enumeration-only list
-            # drops its saved name on reboot. Re-surface those we've named/
-            # identified, marked present=False, so the name survives regardless.
-            ports.extend(self._absent_named_ports(seen))
+            # A port that isn't physically enumerated right now is just gone from
+            # this list — no ghost/offline row. Its alias/identity stays in the
+            # store and reattaches automatically if the same DEVICE reappears
+            # under a new port_id (see the reconcile step in _emit_probe_result);
+            # it never lingers here as a stale duplicate.
             return {"status": "SUCCESS", "ports": ports}
 
         if cmd == "CONSOLE_GET_CAPTURE":
@@ -732,6 +692,29 @@ class ConsoleSpoke(BaseSpoke):
                 probe["baud_confident"] = True
             if res.get("detected_baud"):
                 self.store.update(port_id, settings={"baud": res["detected_baud"]})
+        # Reconcile: this identity (serial/MAC learned by logging into the
+        # DEVICE, not the USB adapter) may already be known under a different,
+        # now-absent port_id — e.g. a reboot renumbered /dev/ttyUSBn, or the
+        # cable moved to a different port. Carry the operator's alias/tenant
+        # assignment forward onto this port_id and drop the orphan so it never
+        # lingers in the list as a stale duplicate.
+        identity = probe.get("identity") or {}
+        if identity:
+            old_pid = self.store.find_by_identity(identity, exclude_port_id=port_id)
+            if old_pid:
+                old = self.store.get(old_pid)
+                fields = {}
+                if old.get("alias") and not self.store.get(port_id).get("alias"):
+                    fields["alias"] = old["alias"]
+                if old.get("tenant_id") and not self.store.get(port_id).get("tenant_id"):
+                    fields["tenant_id"] = old["tenant_id"]
+                if fields:
+                    self.store.update(port_id, **fields)
+                self.store.delete(old_pid)
+                logger.info("console: device %s reappeared on port %s (was %s) — carried "
+                            "alias/tenant forward, dropped the old port record",
+                            identity.get("hostname") or identity.get("serial")
+                            or identity.get("mac") or "?", port_id, old_pid)
         self.store.update(port_id, probe=probe)
         self._probe_attempts[port_id] = time.monotonic()
         if self.control_plane is not None:
@@ -772,9 +755,16 @@ class ConsoleSpoke(BaseSpoke):
         defaults preserve prior behaviour):
           console_identify_retry_secs      floor backoff after a failed attempt (300)
           console_identify_retry_max_secs  cap the escalating backoff (3600)
-          console_identify_reverify_secs   retained backoff bookkeeping only —
-                                            identified ports are NOT actively
-                                            re-probed on a timer (1800)
+          console_identify_reverify_secs   how often an ALREADY-identified port is
+                                            actively re-checked (default once/day,
+                                            86400) — never fully trust a cable
+                                            stayed put; a device silently swapped
+                                            onto the same port/cable must not keep
+                                            reporting the old identity forever.
+                                            Also effectively fires on every restart
+                                            (reboot can reshuffle port_ids) since
+                                            the last-checked timestamp is in-memory
+                                            only. See _reverify_due.
           console_identify_max_attempts    give up after N consecutive failures,
                                             0 = never give up (0)
           console_autoprobe_interval       scan/first-seen poll cadence secs (30)
@@ -798,7 +788,7 @@ class ConsoleSpoke(BaseSpoke):
         return {
             "retry_min": _pos("console_identify_retry_secs", 300.0),
             "retry_max": _pos("console_identify_retry_max_secs", 3600.0),
-            "reverify": _pos("console_identify_reverify_secs", 1800.0),
+            "reverify": _pos("console_identify_reverify_secs", 86400.0),
             "max_attempts": _nonneg("console_identify_max_attempts", 0),
             "scan_interval": _pos("console_autoprobe_interval", 30.0),
         }
@@ -832,18 +822,37 @@ class ConsoleSpoke(BaseSpoke):
             self._probe_attempts.pop(pid, None)
             self._probe_delay.pop(pid, None)
             self._probe_fails.pop(pid, None)
+            # A disappear+reappear cycle under this SAME port_id might be a
+            # different device swapped onto the same cable, not the original
+            # coming back — force an immediate re-verify rather than trusting
+            # the old identity until the next daily cycle.
+            self._identify_verify_ts.pop(pid, None)
         self._seen_ports = set(live)
         for pid, p in live.items():
             if self.sessions.has_user_sessions(pid) or pid in self._probing:
                 continue
             probe = self.store.get(pid).get("probe") or {}
-            # Already identified via active login — authoritative; passive
-            # monitoring keeps it fresh, so don't re-probe it on a timer.
             if self._probe_identified(probe):
-                continue
-            if not self._identify_due(pid):
+                # Never fully trust a cable/port stayed put: periodically
+                # re-verify an already-identified port too (default once/day),
+                # so a device silently swapped onto the SAME port/cable can't
+                # keep reporting the old identity forever.
+                if not self._reverify_due(pid):
+                    continue
+            elif not self._identify_due(pid):
                 continue
             await self._active_identify(pid, p["device"])
+
+    def _reverify_due(self, pid: str) -> bool:
+        """True once ``console_identify_reverify_secs`` has elapsed since an
+        already-identified ``pid`` was last actively re-checked — or it has
+        never been checked THIS process lifetime (the timestamp is in-memory
+        only), which makes every previously-known port due on the first scan
+        after any restart, since a reboot can reshuffle port_ids."""
+        last = self._identify_verify_ts.get(pid)
+        if last is None:
+            return True
+        return (time.monotonic() - last) >= self._identify_cfg()["reverify"]
 
     def _identify_due(self, pid: str) -> bool:
         """True when the shared login-retry backoff has elapsed for ``pid`` (or it
@@ -869,6 +878,7 @@ class ConsoleSpoke(BaseSpoke):
         (:meth:`_identify_cfg`)."""
         cfg = self._identify_cfg()
         self._probe_attempts[pid] = time.monotonic()
+        self._identify_verify_ts[pid] = time.monotonic()
 
         def _fail_backoff() -> None:
             self._probe_fails[pid] = self._probe_fails.get(pid, 0) + 1

@@ -38,7 +38,7 @@ def _make_spoke(monkeypatch, tmp_path, config, ports):
 def test_identify_cfg_defaults_and_overrides(monkeypatch, tmp_path):
     sp = _make_spoke(monkeypatch, tmp_path, {"auto_identify": True}, [])
     d = sp._identify_cfg()
-    assert d == {"retry_min": 300.0, "retry_max": 3600.0, "reverify": 1800.0,
+    assert d == {"retry_min": 300.0, "retry_max": 3600.0, "reverify": 86400.0,
                  "max_attempts": 0, "scan_interval": 30.0}
     sp.config.update({
         "console_identify_retry_secs": 60,
