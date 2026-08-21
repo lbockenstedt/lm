@@ -1362,9 +1362,25 @@ EnvironmentFile=-$BASE_DIR/.env
 # install sets LM_HUB_TLS_VERIFY=1 + LM_HUB_CA_CERT so co-located
 # spokes/agents verify. AmbientCapabilities lets svc_lm bind the privileged
 # 443 without being root.
-Environment=LM_TLS_PORT=443 LM_PXMX_AGENT_PORT=8443 LM_HUB_TLS_VERIFY=$HUB_TLS_VERIFY_ENV$_TLS_CA_UNIT
+Environment=LM_TLS_PORT=443 LM_PXMX_AGENT_PORT=8443 LM_HUB_TLS_VERIFY=$HUB_TLS_VERIFY_ENV$_TLS_CA_UNIT LM_DROP_FERNET_KEY_ENV=1
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# ── Tier-0 root/LPE hardening (see docs/security-pentest.md §5I) ──
+# LM_DROP_FERNET_KEY_ENV=1 (above) makes the hub drop LM_FERNET_KEY from its own
+# /proc/<pid>/environ after load, so an SSL-port RCE / root reader can't slurp
+# the at-rest key from the environment file without ptrace or a core dump. The
+# directives below then close the core-dump path and block the classic LPE
+# persistence primitives. NOTE: we deliberately do NOT set NoNewPrivileges or the
+# mount-namespace protections (ProtectSystem/ProtectHome/PrivateTmp/ProtectProc)
+# — the hub self-restarts and repairs itself via 'sudo -n' root helpers
+# (lm-update-restart, lm-fix-perms, lm-spoke-recover, hub cert push), which
+# NoNewPrivileges would break and whose write targets a read-only mount would
+# block. These seccomp/rlimit directives raise the bar without touching that path.
+LimitCORE=0
+RestrictSUIDSGID=yes
+ProtectKernelModules=yes
+RestrictRealtime=yes
+LockPersonality=yes
 ExecStart=$BASE_DIR/core/venv/bin/python3 $BASE_DIR/core/src/main.py
 StandardOutput=append:$LOG_DIR/hub.log
 StandardError=append:$LOG_DIR/hub.log
@@ -1377,6 +1393,26 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# ── Tier-0 kernel hardening (system-wide sysctl drop-in) ──
+# Raise the bar for reading the hub's live memory / the at-rest key after an
+# SSL-port RCE lands as svc_lm (see docs/security-pentest.md §5I):
+#   * ptrace_scope=2 — only a process with CAP_SYS_PTRACE (admin) may ptrace, so
+#     a same-uid (svc_lm) foothold can NOT attach to the hub to scrape the key
+#     from its heap. (True root still can — that is the Tier-1+ off-box-key job.)
+#   * suid_dumpable=0 + hard core-dump off — no core file can leak the key.
+#   * kptr_restrict / dmesg_restrict — deny kernel-pointer + dmesg recon that
+#     assists a local privilege-escalation exploit.
+cat > /etc/sysctl.d/99-lm-hardening.conf <<'SYSCTL_EOF'
+# Lab Manager Tier-0 root/LPE hardening — do not edit by hand (managed by install_all.sh)
+kernel.yama.ptrace_scope = 2
+fs.suid_dumpable = 0
+kernel.kptr_restrict = 2
+kernel.dmesg_restrict = 1
+SYSCTL_EOF
+# Apply now (best-effort; some sysctls may be unavailable in a container/VM).
+sysctl -p /etc/sysctl.d/99-lm-hardening.conf >/dev/null 2>&1 || \
+    sysctl --system >/dev/null 2>&1 || true
 
 # Reap the :8000 boot probe (started above for the in-install REST calls) BEFORE
 # bringing up the real :443 hub. Left running it lingers as a SECOND hub serving

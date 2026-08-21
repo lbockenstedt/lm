@@ -178,6 +178,26 @@ def get_oidc_config(hub) -> OidcConfig:
 
 # ── PKCE + state cookie ─────────────────────────────────────────────────────
 
+def _fernet_key_secret() -> str:
+    """The raw primary Fernet key, via the encryption singleton (env-drop safe).
+
+    ``oidc.py`` uses this only as a last-resort HMAC secret for the state cookie.
+    It must NOT read ``os.environ['LM_FERNET_KEY']`` directly — that var is
+    dropped from the environment after load (root/LPE hardening), so we go
+    through ``security.encryption.primary_fernet_key`` which stashes the key."""
+    try:
+        from .encryption import primary_fernet_key  # security package (relative)
+    except ImportError:  # pragma: no cover - import-path fallback
+        try:
+            from security.encryption import primary_fernet_key  # core/src on path
+        except ImportError:
+            from encryption import primary_fernet_key  # standalone
+    try:
+        return primary_fernet_key()
+    except Exception:  # noqa: BLE001
+        return (os.environ.get("LM_FERNET_KEY", "") or "").strip()
+
+
 def _state_secret(hub) -> bytes:
     """HMAC key for the OIDC state cookie. Prefers a dedicated env, then the
     hub's current root secret (rotates with it; the state cookie is consumed
@@ -193,7 +213,7 @@ def _state_secret(hub) -> bytes:
             return secrets_list[0].encode()
     except Exception:  # noqa: BLE001
         pass
-    fk = os.environ.get("LM_FERNET_KEY", "").strip()
+    fk = _fernet_key_secret()
     if fk:
         return fk.encode()
     logger.warning("OIDC state cookie has no dedicated secret — using weak fallback")
@@ -245,7 +265,7 @@ def verify_state_cookie(hub, cookie: str) -> tuple | None:
     env_sec = os.environ.get("LM_OIDC_STATE_SECRET", "").strip()
     if env_sec:
         keys.append(env_sec.encode())
-    fk = os.environ.get("LM_FERNET_KEY", "").strip()
+    fk = _fernet_key_secret()
     if fk:
         keys.append(fk.encode())
     if not keys:

@@ -53,9 +53,17 @@ class HubEncryption:
     primary (LM_FERNET_KEY) key, so state migrates off the legacy key as it is rewritten.
     """
     def __init__(self):
+        # Raw primary key string, captured at load so consumers that legitimately
+        # need the key material (e.g. oidc.py's state-cookie HMAC fallback) can
+        # read it from HERE instead of re-reading os.environ — which lets us DROP
+        # LM_FERNET_KEY from the environment after load (Tier-0 root/LPE
+        # hardening: shrink the /proc/<pid>/environ window a root reader can grab
+        # the key from without ptrace/core-dump).
+        self._primary_key_str: str = ""
         self._legacy_fernet = self._derive_machine_id_fernet()
         self.fernet = self._load_primary_fernet()
         self._previous_fernets = self._load_previous_fernets()
+        self._maybe_drop_env_key()
         # Decrypt attempt order: current primary key, then any PREVIOUS
         # (post-rotation) keys, then the legacy machine-id key. A blob that only
         # decrypts via a non-primary key is re-encrypted under the primary the
@@ -111,9 +119,52 @@ class HubEncryption:
             )
         key = key_env.strip().encode()
         try:
-            return Fernet(key)
+            fernet = Fernet(key)
         except Exception as e:
             raise RuntimeError(f"LM_FERNET_KEY is set but is not a valid Fernet key: {e}")
+        # Stash the validated raw key so oidc.py (and any future consumer) can get
+        # it from the singleton after we drop it from os.environ.
+        self._primary_key_str = key_env.strip()
+        return fernet
+
+    def _maybe_drop_env_key(self) -> None:
+        """Remove ``LM_FERNET_KEY``/``LM_FERNET_KEY_PREVIOUS`` from ``os.environ``
+        once they are loaded (Tier-0 root/LPE hardening).
+
+        The key material stays in-process (Fernet objects + ``_primary_key_str``);
+        this only removes it from ``/proc/<pid>/environ``, which a root reader can
+        slurp WITHOUT ptrace or a core dump. systemd re-sources the key from
+        ``.env`` (``EnvironmentFile``) on every restart, so this does not affect
+        the hub's own restart path.
+
+        OPT-IN (default OFF): enabled by ``LM_DROP_FERNET_KEY_ENV=1`` — set by the
+        installer in the hub's systemd unit. Kept opt-in so the test suite and any
+        tooling that constructs the singleton in a shell keep the env var by
+        default. ``LM_KEEP_FERNET_KEY_ENV=1`` force-disables it even when the drop
+        flag is on (the rotate CLI sets this). No-op if the key material could not
+        be captured (fail-safe)."""
+        if os.environ.get("LM_DROP_FERNET_KEY_ENV", "").strip() not in ("1", "true", "yes"):
+            return
+        if os.environ.get("LM_KEEP_FERNET_KEY_ENV", "").strip() in ("1", "true", "yes"):
+            return
+        if not self._primary_key_str:
+            return
+        dropped = []
+        for var in ("LM_FERNET_KEY", "LM_FERNET_KEY_PREVIOUS"):
+            if os.environ.pop(var, None) is not None:
+                dropped.append(var)
+        if dropped:
+            logger.info(
+                "Dropped %s from the process environment after load "
+                "(root/LPE hardening: /proc/<pid>/environ no longer exposes the "
+                "at-rest key). Unset LM_DROP_FERNET_KEY_ENV to disable.",
+                ", ".join(dropped),
+            )
+
+    def primary_key(self) -> str:
+        """The raw primary Fernet key string captured at load. Prefer this over
+        ``os.environ['LM_FERNET_KEY']`` — the env var is dropped after load."""
+        return self._primary_key_str
 
     def _get_machine_id(self) -> str:
         """Retrieves the unique machine ID from the system."""
@@ -170,3 +221,23 @@ class HubEncryption:
 
 # Singleton instance for the process
 hub_encryption = HubEncryption()
+
+
+def primary_fernet_key() -> str:
+    """Best-effort accessor for the raw primary Fernet key string.
+
+    Reads it from the loaded ``hub_encryption`` singleton (which captured it
+    before dropping ``LM_FERNET_KEY`` from ``os.environ``), falling back to the
+    env var if the singleton is somehow unavailable or the key was kept in env
+    (``LM_KEEP_FERNET_KEY_ENV=1``). Returns ``""`` if nothing is resolvable.
+
+    Consumers that historically read ``os.environ['LM_FERNET_KEY']`` (e.g.
+    ``oidc.py``'s state-cookie HMAC fallback) MUST use this so they keep working
+    after the env-drop."""
+    try:
+        k = hub_encryption.primary_key()
+        if k:
+            return k
+    except Exception:  # noqa: BLE001
+        pass
+    return (os.environ.get("LM_FERNET_KEY", "") or "").strip()

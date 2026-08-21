@@ -99,6 +99,10 @@ def _build_decryptor(old_key: str):
     # the singleton (we build old + legacy Fernets directly below), but it must
     # not raise on import.
     os.environ["LM_FERNET_KEY"] = old_key
+    # Keep the env var in place through the import-time singleton construction —
+    # this CLI manages LM_FERNET_KEY deliberately and must not have it dropped by
+    # the hub's Tier-0 env-drop hardening (HubEncryption._maybe_drop_env_key).
+    os.environ["LM_KEEP_FERNET_KEY_ENV"] = "1"
     try:
         from security.encryption import HubEncryption  # pytest / hub (core/src on path)
     except ImportError:

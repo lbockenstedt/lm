@@ -157,6 +157,21 @@ import json as _json
 import os as _os
 import time as _time
 
+
+def _primary_fernet_key() -> str:
+    """Raw primary Fernet key via the encryption singleton (env-drop safe).
+
+    ``LM_FERNET_KEY`` is dropped from ``os.environ`` after load (root/LPE
+    hardening), so the break-glass min-backup bundle and the push-to-Key-Vault
+    path must source the key from ``security.encryption`` — which stashed it —
+    rather than re-reading the (now absent) env var."""
+    try:
+        from security.encryption import primary_fernet_key
+        return primary_fernet_key() or ""
+    except Exception:  # noqa: BLE001
+        return (_os.environ.get("LM_FERNET_KEY", "") or "").strip()
+
+
 CFG_FIELDS = ("enabled", "vault_url", "admin_secret", "fernet_secret",
               "backup_prefix", "retain", "rotate_days")
 DEFAULTS = {"enabled": False, "vault_url": "", "admin_secret": "lm-admin-password",
@@ -236,7 +251,7 @@ def build_min_backup(hub) -> bytes:
         "oidc_key_pem": _read(getattr(oidc_cfg, "key_path", "")),
         "mtls_ca_cert_pem": _mtls_ca_cert,
         "mtls_ca_key_pem": _mtls_ca_key,
-        "fernet_key": _os.environ.get("LM_FERNET_KEY", ""),
+        "fernet_key": _primary_fernet_key(),
     }
     return _json.dumps(bundle).encode()
 
@@ -270,7 +285,7 @@ async def do_rotate_admin(hub) -> Dict[str, Any]:
 async def do_push_fernet(hub) -> Dict[str, Any]:
     from security.oidc import get_oidc_config
     cfg = get_config(hub)
-    fk = _os.environ.get("LM_FERNET_KEY", "").strip()
+    fk = _primary_fernet_key().strip()
     if not fk:
         raise KeyVaultError("LM_FERNET_KEY is not set in the hub environment")
     await set_secret(get_oidc_config(hub), cfg["vault_url"], cfg["fernet_secret"], fk)
