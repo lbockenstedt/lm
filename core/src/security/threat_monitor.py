@@ -246,6 +246,31 @@ class ThreatMonitor:
                     kind="session_hijack", source="auto")
         return {"status": "SUCCESS", "block": self._blocks.get(ip)}
 
+    def note_anomaly(self, kind: str, detail: str = "",
+                     ip: Optional[str] = None, severity: str = "warning") -> None:
+        """Record a non-auth security anomaly (e.g. from the in-process
+        :mod:`security.sentinel` tripwire — a contract breach, canary trip, or
+        vault-read volume spike).
+
+        Always lands in the ``Security`` audit stream + the recent-events feed.
+        When an ``ip`` is attributable and the signal is ``critical``, it also
+        drives an exemption-respecting NSG block (reusing the hijack response) so
+        a remote attacker is cut off; a purely local signal (no IP) is CRITICAL-
+        logged for the operator/host-layer response. Safe to call from sync code;
+        never raises into the caller."""
+        try:
+            now = _now()
+            self._events.appendleft({"ts": now, "ip": (ip or "").strip(),
+                                     "kind": kind, "username": "",
+                                     "detail": detail, "severity": severity})
+            level = logging.ERROR if severity == "critical" else logging.WARNING
+            sec_log.log(level, "SECURITY ANOMALY %s [%s]%s — %s", kind, severity,
+                        f" from {ip}" if ip else "", detail)
+            if severity == "critical" and (ip or "").strip():
+                self.block_ip_unless_trusted(ip, reason=f"{kind}: {detail}")
+        except Exception:
+            sec_log.exception("note_anomaly failed for kind=%s", kind)
+
     def unblock(self, ip: str) -> Dict[str, Any]:
         ip = (ip or "").strip()
         existed = self._blocks.pop(ip, None)

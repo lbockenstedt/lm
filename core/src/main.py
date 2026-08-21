@@ -849,6 +849,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # API threat monitor: brute-force / faked-credential detection, security
         # audit log, and (opt-in) Azure NSG deny-rule auto-block.
         self.threat_monitor = ThreatMonitor(self)
+        # In-process access sentinel (application-level tripwire): route its
+        # anomalies (vault-contract breaches, canary trips, read-volume spikes)
+        # into the threat monitor's audit + NSG-response pipeline. See
+        # security/sentinel.py and docs/security-pentest.md §5J.
+        try:
+            from security import sentinel as _sentinel
+            _sentinel.set_reporter(self.threat_monitor.note_anomaly)
+        except Exception:
+            logger.exception("failed to wire security sentinel reporter")
         # Realtime alert engine (edge-triggered per-tenant alert-rule routing).
         self.alert_engine = AlertEngine(self)
         # Hub-local Proxmox template-backup repository (vzdump archives + metadata
@@ -3965,6 +3974,38 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             return _H4_DROP
         return dec_secret
 
+    def _relay_session_owner_ok(self, sess, sender_spoke_id: str, *,
+                                kind: str = "relay", remote_ip: Optional[str] = None) -> bool:
+        """Surface K defense-in-depth: a console/VNC/shell ``session_id`` is a
+        server-minted ``uuid4`` capability handed ONLY to the spoke the session
+        was opened to. Verify an inbound relay frame's AUTHENTICATED sender owns
+        the session it addresses, so a *different* compromised spoke inside the
+        tunnel cannot replay a leaked/logged ``session_id`` to inject into (or
+        pivot onto) another tenant's console/VNC/shell stream.
+
+        Owner-unset → allowed (legacy/back-compat). A definite owner mismatch
+        emits a critical ``spoke_session_pivot`` anomaly (→ NSG response when an
+        IP is attributable) and refuses. Never raises — a guard bug must not
+        break a legitimate relay."""
+        try:
+            owner = (sess or {}).get("spoke_id") or ""
+            if not owner or not sender_spoke_id:
+                return True
+            if self._primary_key(owner) == self._primary_key(sender_spoke_id):
+                return True
+            tm = getattr(self, "threat_monitor", None)
+            if tm is not None:
+                tm.note_anomaly(
+                    "spoke_session_pivot",
+                    f"{kind} session owned by '{owner}' addressed by '{sender_spoke_id}'",
+                    remote_ip, "critical")
+            else:
+                logger.warning("SECURITY: %s session-pivot — owner=%s sender=%s",
+                               kind, owner, sender_spoke_id)
+            return False
+        except Exception:
+            return True
+
     async def _handle_agent_relay_up(self, spoke_id: str, msg_data, payload,
                                       _dec_secret: Optional[str] = None) -> bool:
         """Dispatch a relayed agent frame (AGENT_RELAY_UP) from a pxmx spoke.
@@ -4146,6 +4187,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             _vnc_data = original_msg.get("payload", {}).get("data", {}) or {}
             _sid = _vnc_data.get("session_id")
             _sess = self.get_vnc_session(_sid) if _sid else None
+            if _sess and not self._relay_session_owner_ok(_sess, spoke_id, kind="vnc"):
+                _sess = None  # sender does not own this session — refuse (surface K)
             if _orig_type == "VNC_FRAME_UP" and _sess:
                 try:
                     raw = base64.b64decode(_vnc_data.get("data") or "")
@@ -4167,6 +4210,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             _sh_data = original_msg.get("payload", {}).get("data", {}) or {}
             _sid = _sh_data.get("session_id")
             _sess = self.get_shell_session(_sid) if _sid else None
+            if _sess and not self._relay_session_owner_ok(_sess, spoke_id, kind="shell"):
+                _sess = None  # sender does not own this session — refuse (surface K)
             if _orig_type == "SHELL_OUT" and _sess:
                 try:
                     await _sess["queue"].put(base64.b64decode(_sh_data.get("data") or ""))
@@ -5340,6 +5385,9 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 if _ctype in ("CONSOLE_DATA_UP", "CONSOLE_READY", "CONSOLE_ERROR", "CONSOLE_CLOSED", "CONSOLE_DOWNGRADED"):
                     _cdata = payload.get("data", {}) or {}
                     _csess = self.get_console_session(_cdata.get("session_id")) if _cdata.get("session_id") else None
+                    if _csess and not self._relay_session_owner_ok(
+                            _csess, spoke_id, kind="console", remote_ip=remote_ip):
+                        _csess = None  # sender does not own this session — refuse (surface K)
                     if _csess:
                         if _ctype == "CONSOLE_DATA_UP":
                             try:

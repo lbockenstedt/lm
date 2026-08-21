@@ -55,12 +55,18 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 import key_vault as _kv
 from security.encryption import hub_encryption
+from security import sentinel
 from security.oidc import get_oidc_config
 
 logger = logging.getLogger("CredVault")
 
 ADMIN_BUCKET = "__admin__"          # the non-tenant "Global Admin slot"
 _KV_PREFIX = "cred-"                # opaque Key Vault secret-name prefix
+# Canary / honeytoken secret name (§5J-J1). A decoy secret provisioned under this
+# name is NEVER read by any legitimate code path, so ANY read of it — via any
+# vault entry point — is malicious by definition and trips the sentinel canary.
+CANARY_SECRET = "__canary__"
+sentinel.register_canary("vault.canary")
 _MODE_PSK = "psk"
 _MODE_HUB = "hub"
 _MODES = (_MODE_PSK, _MODE_HUB)
@@ -332,6 +338,8 @@ async def put_secret(hub, bucket: str, name: str, value: Dict[str, Any], *,
 
 
 async def _fetch_and_decrypt(hub, bucket: str, name: str, *, psk: Optional[str]) -> Dict[str, Any]:
+    if name == CANARY_SECRET:
+        sentinel.guard("vault.canary", detail=f"{bucket}/{name} (honeytoken read)")
     sm = _meta(hub)["secrets"].get(bucket, {}).get(name)
     if not sm:
         raise CredVaultError(f"secret '{name}' not found")
@@ -353,6 +361,7 @@ async def _fetch_and_decrypt(hub, bucket: str, name: str, *, psk: Optional[str])
 
 async def reveal_secret(hub, bucket: str, name: str, *, psk: str, actor: str = "") -> Dict[str, Any]:
     """Interactive reveal — ALWAYS requires the bucket PSK, regardless of mode."""
+    sentinel.guard("vault.reveal_secret", detail=f"{bucket}/{name} actor={actor}")
     _require_psk(hub, bucket, psk)
     value = await _fetch_and_decrypt(hub, bucket, name, psk=psk)
     sm = _meta(hub)["secrets"][bucket][name]
@@ -365,6 +374,7 @@ async def reveal_secret(hub, bucket: str, name: str, *, psk: str, actor: str = "
 async def automation_get(hub, bucket: str, name: str) -> Dict[str, Any]:
     """Unattended retrieval for tooling — NO pass-phrase. Only works for
     ``hub``-mode (automation-readable) secrets; ``psk``-mode secrets raise."""
+    sentinel.guard("vault.automation_get", detail=f"{bucket}/{name}")
     sm = _meta(hub)["secrets"].get(bucket, {}).get(name)
     if not sm:
         raise CredVaultError(f"secret '{name}' not found")
@@ -390,6 +400,7 @@ async def automation_list_by_type(hub, sec_type: str,
 
     Unlike :func:`automation_get` it does NOT stamp ``last_accessed_*`` (a seed
     can run on every spoke connect, so we avoid churning hub state on each scan)."""
+    sentinel.guard("vault.automation_list_by_type", detail=f"type={sec_type}")
     want = set(buckets) if buckets is not None else None
     out: List[Dict[str, Any]] = []
     for bucket, secrets in (_meta(hub)["secrets"] or {}).items():
