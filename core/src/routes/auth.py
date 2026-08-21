@@ -91,7 +91,7 @@ def register(app, hub, ctx):
                 "tenant_id":  tenant_id,
                 "protected":  protected,
             }
-            token = _record_session(hub, user_data)
+            token = _record_session(hub, user_data, bind_ip=_client_ip(request))
             resp = JSONResponse({"status": "ok", **user_data})
             resp.set_cookie(
                 key="lm_session", value=token,
@@ -325,7 +325,7 @@ def register(app, hub, ctx):
                 "tenant_id": None,
                 "protected": True,
             }
-            token = _record_session(hub, user_data)
+            token = _record_session(hub, user_data, bind_ip=_client_ip(request))
             resp = JSONResponse({
                 "status": "ok",
                 **user_data,

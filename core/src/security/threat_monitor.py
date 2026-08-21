@@ -190,7 +190,8 @@ class ThreatMonitor:
         who = f" as '{username}'" if username else ""
         label = {"login": "failed logins", "session": "invalid session tokens",
                  "api_key": "invalid API keys",
-                 "spoke_auth": "invalid spoke onboarding attempts"}.get(kind, f"{kind} failures")
+                 "spoke_auth": "invalid spoke onboarding attempts",
+                 "session_hijack": "concurrent admin session-cookie use"}.get(kind, f"{kind} failures")
         mins = max(1, int(self._cfg["window_s"] / 60))
         return f"{count} {label}{who} within {mins}m"
 
@@ -221,6 +222,28 @@ class ThreatMonitor:
             return {"status": "ERROR", "message": "ip required"}
         self._block(ip, reason or "manually blocked",
                     kind="manual", source="manual_perm" if permanent else "manual")
+        return {"status": "SUCCESS", "block": self._blocks.get(ip)}
+
+    def block_ip_unless_trusted(self, ip: str, reason: str = "") -> Dict[str, Any]:
+        """Immediately block ``ip`` UNLESS it is exempt (allow-listed/trusted, or
+        inside the recent-successful-login grace).
+
+        The admin session-hijack response: a concurrent two-IP use of one admin
+        cookie is ambiguous — we can't be certain which IP is the attacker — so
+        we block every *involved* source that isn't trusted. That spares a
+        trusted or freshly-authenticated roaming admin IP while still cutting off
+        a non-allowlisted attacker. (``block_manual`` deliberately bypasses the
+        exemption; this wrapper is the exemption-respecting variant.)"""
+        ip = (ip or "").strip()
+        if not ip:
+            return {"status": "ERROR", "message": "ip required"}
+        if self._is_exempt(ip):
+            sec_log.warning(
+                "THREAT hijack-response: %s SPARED (trusted/allow-listed or "
+                "recent login) — %s", ip, reason)
+            return {"status": "SUCCESS", "spared": ip, "reason": "trusted"}
+        self._block(ip, reason or "concurrent admin session-cookie use",
+                    kind="session_hijack", source="auto")
         return {"status": "SUCCESS", "block": self._blocks.get(ip)}
 
     def unblock(self, ip: str) -> Dict[str, Any]:

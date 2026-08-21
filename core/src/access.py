@@ -471,12 +471,44 @@ def get_session_idle_timeout() -> float:
     return _SESSION_IDLE_TIMEOUT_S
 
 
+# Pluggable trusted-proxy-aware client-IP resolver. The hub sets this at import
+# time to ``api._client_ip`` (which honours LM_TRUSTED_PROXIES / ignores
+# spoofable XFF from untrusted peers). Kept as a hook so the single source of
+# truth for "what IP is this request really from" lives in one place while the
+# session-layer bind (below) can still be enforced here — the universal funnel
+# every route (and WebSocket handler) passes through.
+_client_ip_resolver = None
+
+
+def set_client_ip_resolver(fn) -> None:
+    """Register the trusted-proxy-aware client-IP resolver (see above)."""
+    global _client_ip_resolver
+    _client_ip_resolver = fn
+
+
+def _resolve_client_ip(request) -> Optional[str]:
+    try:
+        if _client_ip_resolver is not None:
+            return _client_ip_resolver(request)
+    except Exception:  # noqa: BLE001 — never break auth on a resolver hiccup
+        pass
+    try:
+        return request.client.host if request.client else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def session_user(sessions: dict, request: "Request"):
     """Return the session dict for the current cookie, or None.
 
-    Enforces both the absolute TTL (``expires``) and the idle timeout
-    (``last_seen`` + ``_SESSION_IDLE_TIMEOUT_S``); an expired/idle token is
-    popped from the store so the slot frees and the next persist drops it."""
+    Enforces the absolute TTL (``expires``), the idle timeout (``last_seen`` +
+    ``_SESSION_IDLE_TIMEOUT_S``), and the **source-IP bind**: a session minted
+    for one client IP that is presented from a different IP is a stolen/synced
+    cookie (or a roamed client) and is rejected — the token is popped so the
+    slot frees and the next persist drops it. The bind is the deterministic
+    close of the admin session-cookie hijack (surface H); the HTTP middleware
+    adds the active NSG response for admin cookies, but this backstop also
+    covers non-HTTP (WebSocket) callers that bypass the middleware."""
     token = request.cookies.get("lm_session")
     if not token:
         return None
@@ -487,6 +519,12 @@ def session_user(sessions: dict, request: "Request"):
     if _SESSION_IDLE_TIMEOUT_S > 0:
         last = sess.get("last_seen") or sess.get("created") or sess["expires"]
         if time.time() - float(last) > _SESSION_IDLE_TIMEOUT_S:
+            sessions.pop(token, None)
+            return None
+    bound = sess.get("client_ip")
+    if bound:
+        ip = _resolve_client_ip(request)
+        if ip and ip != bound:
             sessions.pop(token, None)
             return None
     return sess

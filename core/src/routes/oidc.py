@@ -98,7 +98,7 @@ a.btn:hover{background:#018f6f}
     return HTMLResponse(content=page, status_code=status)
 
 from api import (
-    HTTPException, Request, _SESSION_TTL, _cookie_secure, _record_session,
+    HTTPException, Request, _SESSION_TTL, _client_ip, _cookie_secure, _record_session,
     _start_cache_for_tenant, logger,
 )
 from security.oidc import (
@@ -231,7 +231,7 @@ def register(app, hub, ctx):
             user_record = provision_or_sync_entra_user(
                 hub, oid, email, name, member_of, cfg.allowed_group)
             user_data = build_user_data(hub, user_record, oid)
-            token = _record_session(hub, user_data)
+            token = _record_session(hub, user_data, bind_ip=_client_ip(request))
             resp = RedirectResponse("/", status_code=302)
             resp.set_cookie(
                 key="lm_session", value=token,

@@ -283,6 +283,12 @@ _FILTER_MODULES = access._FILTER_MODULES
 _FILTER_DEFAULTS = access._FILTER_DEFAULTS
 
 _SESSION_TTL = 8 * 3600  # 8 hours (absolute cap)
+# Session-hijack (surface H) concurrency window: if the SAME lm_session cookie
+# is seen from two DIFFERENT client IPs within this many seconds, that is a
+# stolen/synced cookie replayed from a second host while the owner is still
+# active — NOT roaming (roaming is sequential: the old IP goes quiet before the
+# new one takes over). Env-overridable for tuning.
+_HIJACK_WINDOW_S = float(os.environ.get("LM_SESSION_HIJACK_WINDOW_S", "120"))
 # Per-user live-session cap (evicts oldest on login). The idle timeout is owned
 # by access.session_user (reads LM_SESSION_IDLE_TIMEOUT_S there).
 _MAX_SESSIONS_PER_USER = int(os.environ.get("LM_MAX_SESSIONS_PER_USER", "5"))
@@ -415,6 +421,12 @@ def _client_ip(request: Request) -> str:
     return chain[0] if chain else peer
 
 
+# Give the access layer the trusted-proxy-aware resolver so its session-IP bind
+# (access.session_user) uses the same "real client IP" logic as the hub, incl.
+# for WebSocket callers that bypass the HTTP middleware.
+access.set_client_ip_resolver(_client_ip)
+
+
 def _sessions_file(hub) -> str:
     """Path to the persisted session store under the hub data dir."""
     return os.path.join(hub.state.data_dir, "sessions.json")
@@ -437,12 +449,17 @@ def _cookie_secure() -> bool:
     return bool(os.environ.get("LM_TLS_CERT", "").strip())
 
 
-def _record_session(hub, user_data: dict) -> str:
+def _record_session(hub, user_data: dict, bind_ip: str = "") -> str:
     """Mint a session token, enforce the per-user cap (evict oldest), persist.
 
     Centralizes session creation so every login path gets the same token entropy,
     ``sid`` (non-secret admin-revocation id), idle/created timestamps, and
-    per-user cap enforcement. Returns the new opaque token (set as the cookie)."""
+    per-user cap enforcement. ``bind_ip`` is the trusted-proxy-aware client IP
+    the login came from — it is stored as ``client_ip`` so the session is bound
+    to that source (a cookie later presented from a different IP is rejected as
+    a stolen/synced cookie; see ``access.session_user``). Binding at LOGIN
+    (rather than first-use) closes the ``client_ip=None`` window where the first
+    replayer would otherwise become the baseline. Returns the new opaque token."""
     import math as _math
     token = secrets.token_urlsafe(32)
     sid = secrets.token_hex(8)
@@ -466,6 +483,8 @@ def _record_session(hub, user_data: dict) -> str:
         "last_seen": now,
         "sid":      sid,
         "user":     user_data,
+        "client_ip": (bind_ip or None),
+        "ip_seen":  ({bind_ip: now} if bind_ip else {}),
     }
     _save_sessions(hub)
     return token
@@ -1384,6 +1403,88 @@ def create_app(hub):
             if _is_loopback_install_request(request):
                 return await call_next(request)
 
+        # ── Source-IP bind + admin session-hijack response (surface H) ──────
+        # A stolen/synced lm_session cookie replayed from a client IP other than
+        # the one it was minted for is rejected here, BEFORE session_user, so the
+        # attacker's request never reaches a route. Deterministic close of the
+        # cookie-hijack vuln (a valid admin token no longer works from a second
+        # host). For an ADMIN cookie, when the bound owner is CONCURRENTLY active
+        # (owner IP seen within _HIJACK_WINDOW_S = live theft, not a benign
+        # sequential roam), we also NSG-block the offending non-trusted source
+        # (a trusted/allow-listed admin IP is spared). access.session_user
+        # enforces the same bind for non-HTTP (WebSocket) callers. Wrapped so a
+        # resolver/monitor hiccup can never wrongly reject a valid request.
+        _btok = request.cookies.get("lm_session")
+        _raw = _sessions.get(_btok) if _btok else None
+        if isinstance(_raw, dict) and _raw.get("expires", 0) > time.time():
+            try:
+                _ip = _client_ip(request)
+                _bound = _raw.get("client_ip")
+                _nowt = time.time()
+                _seen = _raw.setdefault("ip_seen", {})
+                _concurrent = sorted(
+                    o for o, ts in _seen.items()
+                    if o and o != _ip and (_nowt - float(ts)) <= _HIJACK_WINDOW_S)
+                if _bound is None:
+                    # No bound IP (session rehydrated across a hub restart, which
+                    # drops client_ip, or a legacy entry) → bind on first use.
+                    _raw["client_ip"] = _ip
+                    if _ip:
+                        _seen[_ip] = _nowt
+                elif _ip and _ip != _bound:
+                    _admin = _is_admin(_raw)
+                    _involved = sorted(set(_concurrent) | {_ip})
+                    logger.warning(
+                        "SESSION-IP-BIND-REJECT user=%s sid=%s bound=%s got=%s "
+                        "admin=%s concurrent=%s path=%s ua=%r — invalidating "
+                        "session (cookie used from a non-bound IP).",
+                        _raw.get("user_id"), _raw.get("sid"), _bound, _ip,
+                        _admin, _concurrent, path,
+                        (request.headers.get("user-agent") or "")[:80])
+                    _sessions.pop(_btok, None)
+                    try:
+                        _save_sessions(hub)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _tm = getattr(hub, "threat_monitor", None)
+                    if _tm:
+                        try:
+                            _tm.record_failure(
+                                _ip, "session_hijack" if _admin else "session",
+                                detail=f"cookie bound to {_bound}, presented from {_ip}")
+                        except Exception:  # noqa: BLE001
+                            pass
+                        if _admin and _concurrent:
+                            logger.critical(
+                                "SESSION-HIJACK user=%s sid=%s — admin cookie "
+                                "used from %s while bound owner %s active within "
+                                "%ss; NSG-blocking non-trusted source(s) %s.",
+                                _raw.get("user_id"), _raw.get("sid"), _ip, _bound,
+                                int(_HIJACK_WINDOW_S), _involved)
+                            for _bip in _involved:
+                                try:
+                                    _tm.block_ip_unless_trusted(
+                                        _bip,
+                                        reason=("admin session-cookie hijack — "
+                                                f"cookie bound to {_bound} "
+                                                f"replayed from {_ip}"))
+                                except Exception:  # noqa: BLE001
+                                    pass
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "Session invalidated — cookie used "
+                                           "from a different IP"})
+                else:
+                    # Matched (or freshly bound) — record activity for the
+                    # concurrency window and prune stale seen-IPs.
+                    if _ip:
+                        _seen[_ip] = _nowt
+                    for _stale in [o for o, ts in _seen.items()
+                                   if _nowt - float(ts) > 3600]:
+                        _seen.pop(_stale, None)
+            except Exception:  # noqa: BLE001 — never wrongly break a valid request
+                pass
+
         sess = _session_user(request)
         if not sess:
             # A present-but-invalid lm_session cookie is a forged/tampered
@@ -1399,34 +1500,13 @@ def create_app(hub):
 
         # Touch the session's last_seen so the idle-timeout window (access.py)
         # resets on real activity. ``session_user`` already enforces the idle
-        # cap on read, so a stale session is rejected before this runs; for a
-        # live one we bump last_seen lazily (no per-request disk write — the
-        # next _save_sessions, e.g. login/logout, persists it).
+        # cap (and the source-IP bind) on read, so a stale/mismatched session is
+        # rejected before this runs; for a live one we bump last_seen lazily (no
+        # per-request disk write — the next _save_sessions, e.g. login/logout,
+        # persists it). The cross-IP rejection + admin hijack response is handled
+        # by the bind block above, before session_user.
         if isinstance(sess, dict):
             sess["last_seen"] = time.time()
-            # Diagnostic (non-blocking): flag when the SAME lm_session cookie is
-            # presented from a second client IP. A single session token used from
-            # two different clients means one identity is shared across browsers
-            # — the fingerprint of the "two users kick each other out / see each
-            # other's WebUI" report (a synced/shared cookie or a shared account).
-            # We DON'T reject on IP change (would break VPN/NAT/mobile roaming);
-            # we log once per new IP so a real occurrence is captured with hard
-            # evidence (user_id + both IPs + UA) instead of staying invisible.
-            try:
-                _ip = _client_ip(request)
-                _known = sess.get("client_ip")
-                if _known is None:
-                    sess["client_ip"] = _ip
-                elif _ip and _ip != _known and _ip not in sess.get("alt_ips", ()):
-                    sess.setdefault("alt_ips", []).append(_ip)
-                    logger.warning(
-                        "SESSION-IP-CHANGE user=%s sid=%s first_ip=%s new_ip=%s "
-                        "ua=%r path=%s — one lm_session cookie used from a second "
-                        "client (shared/synced cookie or shared account)",
-                        sess.get("user_id"), sess.get("sid"), _known, _ip,
-                        (request.headers.get("user-agent") or "")[:80], path)
-            except Exception:  # noqa: BLE001 — diagnostic must never break a request
-                pass
 
         # /setup/* and /admin/* are admin-only
         if path.startswith("/setup/") or path.startswith("/admin/"):
