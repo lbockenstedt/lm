@@ -5852,17 +5852,31 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # AppBuilder is refused → loud ab_identity_spoof + dead logs/AI, the
                 # exact symptom an operator notices; they can override ab_spoke_ids.
                 _lock = (pk or spoke_id or "").strip()
-                _ab_ok = bool(_lock)
-                if _ab_ok:
-                    try:
-                        self.state.update_global_config({"ab_spoke_ids": [_lock]})
-                        await self.state.save_state_now()
+                _mem = getattr(self, "_ab_tofu_lock", None)
+                if _mem and _mem != _lock:
+                    # A prior TOFU grant this process locked a DIFFERENT spoke but
+                    # its persistence to ab_spoke_ids failed (else `designated`
+                    # would be set from global_config). Enforce the in-memory lock
+                    # so a state-save outage cannot reopen the multi-grant window
+                    # to a second self-declared "ab".
+                    _ab_ok = False
+                    designated = {_mem}
+                else:
+                    _ab_ok = bool(_lock)
+                    if _ab_ok:
+                        # Lock in-memory FIRST so the window is closed even if the
+                        # durable write below fails.
+                        self._ab_tofu_lock = _lock
                         designated = {_lock}
                         _autodesignated = True
-                    except Exception:  # noqa: BLE001
-                        # Persistence failed — still grant (don't break the live ab)
-                        # but leave undesignated so a later attempt can lock it in.
-                        pass
+                        try:
+                            self.state.update_global_config({"ab_spoke_ids": [_lock]})
+                            await self.state.save_state_now()
+                        except Exception:  # noqa: BLE001
+                            # Durable write failed — the in-memory lock still holds
+                            # this process, so a later different claimant is refused
+                            # above; it will persist on the next successful grant.
+                            pass
             try:
                 _ab_ip = (self.spoke_telemetry.get(pk, {}) or {}).get("remote_ip")
             except Exception:  # noqa: BLE001
