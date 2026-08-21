@@ -5,6 +5,10 @@ Signals fed in from the auth layer (api.py):
   * failed logins            (``record_failure(ip, "login", username)``)
   * present-but-invalid       session cookie / API token
     credential ("faked key")  (``record_failure(ip, "session")``)
+  * spoke-onboarding probes   (``record_failure(ip, "spoke_auth")``) — a wrong
+    onboarding PSK, an invalid session secret, or a malformed/incomplete
+    ``/ws/spoke`` auth frame (fed from main.handle_connection). The hub serves
+    ``/ws/spoke`` directly, so the WebSocket peer is the real client IP.
 
 Policy (all configurable via ``global_config["threat_monitor"]``):
   * ``> threshold`` failures from one IP within ``window_s`` → BLOCK (default: >5).
@@ -185,7 +189,8 @@ class ThreatMonitor:
     def _reason(self, ip: str, kind: str, username: Optional[str], count: int) -> str:
         who = f" as '{username}'" if username else ""
         label = {"login": "failed logins", "session": "invalid session tokens",
-                 "api_key": "invalid API keys"}.get(kind, f"{kind} failures")
+                 "api_key": "invalid API keys",
+                 "spoke_auth": "invalid spoke onboarding attempts"}.get(kind, f"{kind} failures")
         mins = max(1, int(self._cfg["window_s"] / 60))
         return f"{count} {label}{who} within {mins}m"
 

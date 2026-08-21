@@ -660,6 +660,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # (rate-limits re-pushing the current session key to a spoke that's
         # still signing with a previous/rotated-out key — missed rotation push).
         self._rotation_repush_at: Dict[str, float] = {}
+        # Key-clone probe state (surface G). When a spoke's CURRENT and a BACKUP
+        # key are seen in simultaneous use from two DIFFERENT source IPs, we
+        # cannot yet tell a real clone from a legitimate DHCP move that left a
+        # stale/unclosed session behind. First sighting ARMS a watch here and
+        # kills both sessions; if the exact same cross-IP current+backup
+        # conflict recurs within _CLONE_WATCH_WINDOW (both clients came back and
+        # are actively reusing the keys) it is CONFIRMED as a compromise. A DHCP
+        # move never reappears from the old IP, so it never confirms and the
+        # watch simply ages out. pk -> {"since": ts, "ips": {ip_a, ip_b}}.
+        self._clone_watch: Dict[str, dict] = {}
         # NAC (CPPM) spokes that are CONNECTED but UNCONFIGURED — i.e. no
         # nac_instances entry is bound to this spoke (or the bound instance has
         # no 'host'), so push_config_to_spoke never delivered an UPDATE_CONFIG
@@ -3216,6 +3226,137 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 "message": f"revoked; old secret invalidated, approval dropped — "
                            f"re-onboard + re-approve to return"}
 
+    # Seconds a key-clone watch stays armed after strike 1. A legit DHCP move
+    # reconnects within seconds from its new IP and never re-creates the
+    # cross-IP conflict; a live clone's two boxes both retry and do. Long enough
+    # to catch a retry storm, short enough that a real clone is caught promptly.
+    _CLONE_WATCH_WINDOW = 120.0
+
+    def _arm_clone_watch(self, pk: str, current_ip: str, backup_ip: str) -> None:
+        """Record strike 1 of a cross-IP current+backup key reuse (surface G).
+
+        Stores the offending IP pair + timestamp so a recurrence within
+        ``_CLONE_WATCH_WINDOW`` (``_clone_watch_confirms``) escalates to a
+        confirmed compromise. Re-arming refreshes the timestamp/pair."""
+        self._clone_watch[pk] = {
+            "since": time.time(),
+            "ips": {current_ip, backup_ip},
+        }
+
+    def _clone_watch_confirms(self, pk: str, current_ip: str,
+                              backup_ip: str) -> bool:
+        """Strike 2: True iff a watch armed by ``_arm_clone_watch`` is still live
+        and the SAME cross-IP pair is reusing the keys again.
+
+        A recurrence means both clients came back and are actively reusing the
+        keys — a real clone. A legit DHCP move never reappears from the old IP so
+        the pair never matches and the (expired) watch is dropped. Consumes the
+        watch on a confirmed match; refreshes it for a different IP pair (still
+        strike 1)."""
+        w = self._clone_watch.get(pk)
+        if not w:
+            return False
+        if time.time() - w.get("since", 0.0) > self._CLONE_WATCH_WINDOW:
+            self._clone_watch.pop(pk, None)  # aged out — treat as a fresh strike 1
+            return False
+        if {current_ip, backup_ip} == w.get("ips"):
+            self._clone_watch.pop(pk, None)
+            return True
+        # Different offending pair — re-arm on the new pair, still strike 1.
+        self._arm_clone_watch(pk, current_ip, backup_ip)
+        return False
+
+    async def _handle_key_clone_compromise(self, spoke_id: str, pk: str,
+                                           current_ip: str, backup_ip: str,
+                                           ws_current, ws_backup) -> None:
+        """Fail-closed response to a key-clone compromise (surface G).
+
+        Two sessions for the SAME spoke identity are live from DIFFERENT source
+        IPs — one on the CURRENT session key and the other on a retained BACKUP
+        (history) key — i.e. a harvested backup started alongside the live spoke.
+
+        Response:
+          * KILL BOTH sessions and invalidate EVERY credential the identity holds
+            (session keys + mTLS cert + approval/PSK binding) so neither side can
+            reconnect. This is scoped to the ONE compromised identity.
+          * NSG-block only the *new* IP — the source that reused the keys from a
+            location other than the spoke's HISTORICAL (known-good) IP. We must
+            NOT block the historical IP: a shared NAT/egress may host OTHER
+            legitimate spokes and blocking it would kill them all. The known-good
+            IP is the persisted ``known_ip`` (recorded while the spoke ran on its
+            current key); if unknown we fall back to sparing the current-key
+            session's IP (a harvested BACKUP key is the intruder), which is the
+            same conclusion in the common case.
+        """
+        historical_ip = self._known_ip(pk) or current_ip
+        # Block every offending IP that is NOT the historical/known-good one.
+        to_block = sorted({ip for ip in (current_ip, backup_ip)
+                           if ip and ip != historical_ip})
+        # Safety net: never end up blocking the historical IP, but if for some
+        # reason nothing differs from it, block the backup-key IP (the reused
+        # key) as long as it isn't the historical one.
+        if not to_block and backup_ip and backup_ip != historical_ip:
+            to_block = [backup_ip]
+
+        # 1. FLAG immediately — CRITICAL audit line + spoke event + a persisted
+        #    marker the WebUI surfaces so the operator acts now.
+        logger.critical(
+            "KEY-CLONE COMPROMISE: spoke %s used its CURRENT key from %s and a "
+            "BACKUP key from %s concurrently (historical/known-good IP=%s). "
+            "Killing both sessions + invalidating keys + mTLS cert + approval; "
+            "NSG-blocking the new source(s) %s (sparing the historical IP so "
+            "other spokes behind it are not killed). Verify the real host and "
+            "re-onboard.", spoke_id, current_ip, backup_ip, historical_ip,
+            to_block or "<none>")
+        self.record_spoke_event(
+            spoke_id, "key_clone_compromise",
+            f"current-key@{current_ip} + backup-key@{backup_ip}; "
+            f"historical={historical_ip}; both killed, creds invalidated; "
+            f"NSG-blocked new source(s)={to_block or '[]'}")
+        try:
+            self.state.system_state.setdefault("key_clone_compromise", {})[pk] = {
+                "spoke_id": spoke_id,
+                "detected_at": time.time(),
+                "current_ip": current_ip,
+                "backup_ip": backup_ip,
+                "historical_ip": historical_ip,
+                "blocked": to_block,
+            }
+        except Exception:  # noqa: BLE001
+            pass
+        # 2. Kill both sessions outright.
+        for ws in (ws_backup, ws_current):
+            try:
+                await ws.close(1008, "Key-clone compromise — credentials invalidated")
+            except Exception:  # noqa: BLE001
+                pass
+        # 3. revoke_spoke closes the still-active session, wipes ALL session keys
+        #    (current + history), drops approval (re-onboard required), and clears
+        #    the mailbox. Then revoke the mTLS cert so a harvested cert is dead too.
+        try:
+            await self.revoke_spoke(spoke_id)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"key-clone: revoke_spoke({spoke_id}) failed: {e}")
+        try:
+            await self._revoke_spoke_mtls_cert(spoke_id)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"key-clone: mTLS revoke for {spoke_id} failed: {e}")
+        # 4. NSG-block ONLY the new source(s) immediately — never the historical
+        #    IP (it may front other legitimate spokes). reconcile_nsg() pushes the
+        #    deny now rather than waiting for the periodic sweep.
+        tm = getattr(self, "threat_monitor", None)
+        if tm and to_block:
+            for ip in to_block:
+                try:
+                    tm.block_manual(ip, reason=f"key-clone: reused {spoke_id}'s keys "
+                                               f"from a new IP (historical={historical_ip})")
+                except Exception as e:  # noqa: BLE001
+                    logger.error(f"key-clone: NSG block {ip} failed: {e}")
+            try:
+                await tm.reconcile_nsg()
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"key-clone: NSG reconcile failed: {e}")
+
     async def _parent_vouches(self, spoke_id: str, parent_spoke_id: str) -> Tuple[bool, str]:
         """Signed parent attestation for parent-auto-approve (H3).
 
@@ -4131,6 +4272,74 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 current_kid is not None
                 and self.active_connection_key_ids.get(pk) == current_kid
             )
+            # Key-clone compromise (surface G): one side is on the CURRENT key
+            # and the other on a RETAINED BACKUP (history) key — i.e. a harvested
+            # backup running alongside the live spoke — AND the two are from
+            # DIFFERENT source IPs. A same-IP overlap is exempt: that is a legit
+            # backup/restore on the same running VM (or a same-box zombie), not a
+            # clone, and is handled by the stale-key / liveness logic below.
+            #
+            # Cross-source overlap is NOT nuked on first sighting, because a
+            # legitimate DHCP lease change moves the spoke to a NEW IP without a
+            # graceful close — leaving a stale/unclosed session on the OLD IP.
+            # That looks identical to a clone (same keys, two IPs) at the instant
+            # of detection. So we PROBE, per the operator's disambiguation rule:
+            #   * Strike 1 (first sighting): ARM a watch and KILL BOTH sessions.
+            #     A DHCP-moved spoke reconnects only from its new IP; the old
+            #     (stale) IP never comes back, so the exact conflict does not
+            #     recur → the watch ages out and no credentials are touched.
+            #   * Strike 2 (same cross-IP current+backup conflict recurs within
+            #     the window): BOTH clients came back and are actively reusing
+            #     the keys → CONFIRMED clone → fail-closed nuke (kill both,
+            #     invalidate keys + mTLS cert + approval/PSK, NSG-block the
+            #     non-historical IP only).
+            old_kid = self.active_connection_key_ids.get(pk)
+            hist_kids = {k.key_id for k in self.key_manager.history.get(pk, [])}
+            one_current_other_backup = (
+                (new_is_current and old_kid in hist_kids)
+                or (old_is_current and key_id in hist_kids)
+            )
+            if one_current_other_backup:
+                new_ip = self._peer_ip(websocket)
+                old_ip = self._peer_ip(existing)
+                if new_ip and old_ip and new_ip != old_ip:
+                    # Orient the pair: whichever side holds the CURRENT key is
+                    # current_ip (the live spoke), the other is backup_ip.
+                    if new_is_current:
+                        current_ip, backup_ip = new_ip, old_ip
+                        ws_current, ws_backup = websocket, existing
+                    else:
+                        current_ip, backup_ip = old_ip, new_ip
+                        ws_current, ws_backup = existing, websocket
+                    if self._clone_watch_confirms(pk, current_ip, backup_ip):
+                        # Strike 2 — both clients returned reusing the keys.
+                        await self._handle_key_clone_compromise(
+                            spoke_id, pk, current_ip, backup_ip,
+                            ws_current, ws_backup)
+                        return False
+                    # Strike 1 — could be a real clone OR a legit DHCP move that
+                    # left a stale unclosed session. Arm the watch, kill both,
+                    # and recheck: only a clone re-creates this exact conflict.
+                    self._arm_clone_watch(pk, current_ip, backup_ip)
+                    logger.warning(
+                        "KEY-REUSE PROBE: spoke %s used its CURRENT key from %s "
+                        "and a BACKUP key from %s (two IPs). Killing both and "
+                        "rechecking — a legit DHCP move will not reappear from "
+                        "the old IP, a clone will.",
+                        spoke_id, current_ip, backup_ip)
+                    self.record_spoke_event(
+                        spoke_id, "key_reuse_probe",
+                        f"current-key@{current_ip} + backup-key@{backup_ip} from "
+                        f"two IPs — killed both, watching for reappearance "
+                        f"(DHCP-move vs clone)")
+                    for ws in (ws_backup, ws_current):
+                        try:
+                            await ws.close(
+                                1008,
+                                "Key reuse from a new IP — rechecking")
+                        except Exception:  # noqa: BLE001
+                            pass
+                    return False
             if old_is_current and not new_is_current:
                 # Live current-key connection already active; this socket auth'd
                 # with a stale history key — reject so the zombie can't take over.
@@ -4259,8 +4468,23 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         spoke_id = None
         try:
             # 1. Authentication Handshake
+            # Peer IP for the threat monitor. The hub serves /ws/spoke directly
+            # (no reverse proxy), so the WebSocket peer IS the real client IP —
+            # safe to feed to threat_monitor without X-Forwarded-For trust.
+            peer_ip = None
+            try:
+                peer_ip = websocket.remote_address[0] if websocket.remote_address else None
+            except Exception:  # noqa: BLE001 — never block a connect on IP capture
+                peer_ip = None
             auth_json = await websocket.recv()
-            auth_data = json.loads(auth_json)
+            try:
+                auth_data = json.loads(auth_json)
+            except (ValueError, TypeError):
+                # Malformed first frame = a probe, not a real spoke. Feed the
+                # threat monitor so repeated garbage from one IP trips the block.
+                self._record_spoke_auth_failure(peer_ip, None, "malformed_auth_frame")
+                await websocket.close(1008, "Malformed auth frame")
+                return
             spoke_id = auth_data.get("spoke_id")
             secret = auth_data.get("secret")
             module_type = auth_data.get("module_type")
@@ -4301,6 +4525,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             self.record_spoke_event(spoke_id, "auth_attempt", f"secret={'yes' if secret else 'no'} module_type={module_type}")
 
             if not spoke_id:
+                self._record_spoke_auth_failure(peer_ip, None, "missing_spoke_id")
                 await websocket.close(1008, "Missing spoke_id")
                 return
 
@@ -4356,6 +4581,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     # It adopted its key — clear any prior "never authenticated"
                     # diagnosis so a future regression re-triggers a fresh ERROR.
                     self._unauth_warned_spokes.discard(pk)
+                    # Established-good IP: shield it from a false-positive
+                    # threat block if it later glitches during a key rotation.
+                    if peer_ip:
+                        tm = getattr(self, "threat_monitor", None)
+                        if tm:
+                            try:
+                                tm.record_success(peer_ip)
+                            except Exception:  # noqa: BLE001
+                                pass
                     logger.info(f"Spoke {spoke_id} authenticated successfully with secret.")
                     self.record_spoke_event(spoke_id, "auth_ok", "secret verified")
                 else:
@@ -4381,6 +4615,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # If they provided a secret and it was wrong, we close.
                 # If they provided no secret, we KEEP the connection open to negotiate one.
                 if secret:
+                    # Invalid session secret = a credential-guessing attempt.
+                    # Established-good IPs are success-grace exempt (above), so a
+                    # legit spoke's rotation glitch won't self-block; a probing
+                    # source has no such grace and trips the block at threshold.
+                    self._record_spoke_auth_failure(peer_ip, spoke_id, "invalid_secret")
                     await websocket.close(1008, "Authentication failed")
                     return
             else:
@@ -4392,6 +4631,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 if not await self._install_active_connection(spoke_id, websocket, key_id):
                     return
                 self.record_spoke_event(spoke_id, "connected", "authenticated with secret")
+                # Persist this source IP as the spoke's HISTORICAL (known-good)
+                # location — but ONLY when it authenticated on its CURRENT key
+                # while approved. A harvested BACKUP key can never move it, so
+                # the key-clone response can trust known_ip to spare the real
+                # spoke's IP (and follow it across a legit DHCP move) while
+                # NSG-blocking the intruder's IP. See _handle_key_clone_compromise.
+                try:
+                    _cur = self.key_manager.keys.get(pk)
+                    if (peer_ip and _cur and key_id == _cur.key_id
+                            and self.approved_modules.get(pk, False)):
+                        self._note_known_ip(pk, peer_ip)
+                except Exception:  # noqa: BLE001
+                    pass
                 # A history-key reconnect (missed a rotation push while offline)
                 # is re-synced by _maybe_redeliver_session_key on the first
                 # history-signed frame in the message loop (main.py ~3924) — no
@@ -4542,6 +4794,11 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         f"(tenant_hint={tenant_id_hint}): invalid/missing PSK — pending admin approval.")
                     self.record_spoke_event(spoke_id, "psk_self_provision_failed",
                                             f"tenant_hint={tenant_id_hint}")
+                    # A wrong onboarding PSK is an unambiguous attack signal (a
+                    # legit PSK spoke has the right PSK; a legit zero-touch spoke
+                    # sends none). Feed the threat monitor so PSK-guessing from
+                    # one IP trips the NSG block.
+                    self._record_spoke_auth_failure(peer_ip, spoke_id, "invalid_onboarding_psk")
 
             # Multi-role generic agent — parent-auto-approve: a role sub-spoke
             # (spoke_id {base}-{role}) that claimed a parent agent in its auth
@@ -7670,6 +7927,71 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             "detail": detail,
         })
         logger.info(f"[spoke-event] {spoke_id} {event}" + (f": {detail}" if detail else ""))
+
+    def _record_spoke_auth_failure(self, peer_ip: Optional[str], spoke_id,
+                                   detail: str) -> None:
+        """Feed a ``/ws/spoke`` onboarding failure to the threat monitor.
+
+        The hub serves ``/ws/spoke`` directly (no reverse proxy), so ``peer_ip``
+        is the real client IP and safe to auto-block on. Only UNAMBIGUOUS attack
+        signals are recorded here — a wrong onboarding PSK, an invalid session
+        secret, or a malformed/incomplete auth frame — NEVER a clean zero-touch
+        connect (no secret + no PSK), so a legitimate first-time spoke is never
+        counted. A source that crosses ``threshold`` such failures inside the
+        window is auto-blocked with an NSG deny, exactly like an HTTP login
+        brute-force. Established-good spoke IPs are shielded by
+        ``record_success`` (called on a verified secret) → success-grace exempt.
+        Telemetry only: never let a monitoring hiccup break a connect.
+        """
+        tm = getattr(self, "threat_monitor", None)
+        if not tm or not peer_ip:
+            return
+        try:
+            tm.record_failure(peer_ip, "spoke_auth", detail=f"{spoke_id or '?'}:{detail}")
+        except Exception:  # noqa: BLE001 — monitoring must never break a connect
+            pass
+
+    @staticmethod
+    def _peer_ip(websocket) -> Optional[str]:
+        """Best-effort remote IP of a spoke WebSocket. The hub serves /ws/spoke
+        directly (no reverse proxy), so this is the real client IP. None on
+        failure (used only for telemetry / clone detection, never as a gate)."""
+        try:
+            ra = getattr(websocket, "remote_address", None)
+            return ra[0] if ra else None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _known_ip(self, pk: str) -> Optional[str]:
+        """The spoke's persisted HISTORICAL (known-good) source IP, or None.
+
+        Recorded (via ``_note_known_ip``) whenever the spoke authenticates on its
+        CURRENT session key while approved — i.e. the location the real spoke
+        legitimately operates from. Used by the key-clone response to decide
+        which IP is the intruder (the one that is NOT this) so we never NSG-block
+        the known-good IP, which may front other legitimate spokes on a shared
+        NAT/egress. These systems are not portable, so this IP is stable in
+        normal operation."""
+        try:
+            md = self.state.system_state.get("module_metadata", {}) or {}
+            return (md.get(pk, {}) or {}).get("known_ip") or None
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _note_known_ip(self, pk: str, ip: Optional[str]) -> None:
+        """Persist ``ip`` as the spoke's known-good source IP if it changed.
+
+        Only called for a CURRENT-key + approved authentication, so a harvested
+        BACKUP key can never poison it. Deferred disk write (marks state dirty,
+        flushed by the periodic save) — and only on an actual change, so a normal
+        reconnect storm does not churn state."""
+        if not ip:
+            return
+        try:
+            if self._known_ip(pk) != ip:
+                self.state.update_module_metadata(pk, {"known_ip": ip})
+        except Exception:  # noqa: BLE001
+            pass
 
     def get_spoke_events(self, spoke_id: str, limit: int = 50) -> list:
         """Most-recent-first lifecycle events for a spoke (for the WebUI)."""
