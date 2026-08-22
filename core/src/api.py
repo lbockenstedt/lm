@@ -264,7 +264,7 @@ class StarletteWSAdapter:
 
 from messaging.protocol import Message, MessageHeader, MessagePayload
 from simulations.routes import register_simulations_routes
-from simulations.tenant_filter import filter_items_by_prefixes
+from simulations.tenant_filter import filter_items_by_prefixes, OWN_SOURCE_MARKER
 
 import access
 import api_tokens
@@ -879,7 +879,20 @@ def _nb_slug(hub, tenant_id: str):
     except Exception:
         return None
 
-async def _cppm_merge_spokes(hub, spokes, cmd: str, list_key: str, timeout: float = 20.0):
+def _cppm_own_spoke(hub, tenant_id: str):
+    """The tenant's OWN dedicated CPPM spoke, if any — the source whose records
+    bypass the subnet filter. Guarded with getattr so a minimal fake hub in the
+    tests (which only implements the plural ``get_cppm_spokes_for_tenant``) never
+    raises here."""
+    fn = getattr(hub, "get_cppm_spoke_for_tenant", None)
+    try:
+        return fn(tenant_id) if callable(fn) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _cppm_merge_spokes(hub, spokes, cmd: str, list_key: str, timeout: float = 20.0,
+                             own_spoke: str = None):
     """Query every spoke in ``spokes`` with ``cmd``, merging each response's
     ``list_key`` list into one combined list — the tenant's own dedicated
     CPPM (full) plus the shared CPPM (its records narrowed to this tenant by
@@ -887,7 +900,12 @@ async def _cppm_merge_spokes(hub, spokes, cmd: str, list_key: str, timeout: floa
     A spoke marked unconfigured or that errors is skipped rather than
     failing the whole fetch, so one bad/unconfigured source can't blank the
     other's data. Returns None (caller treats as an error) only when NO
-    usable spoke remains."""
+    usable spoke remains.
+
+    Records from ``own_spoke`` (the tenant's OWN dedicated CPPM) are stamped
+    with ``OWN_SOURCE_MARKER`` so the downstream subnet filter shows every one
+    of them — that appliance is entirely the tenant's equipment; only records
+    merged in from a SHARED CPPM stay subject to the subnet filter."""
     usable = [s for s in spokes if s not in hub._nac_unconfigured_spokes]
     if not usable:
         return None
@@ -895,16 +913,20 @@ async def _cppm_merge_spokes(hub, spokes, cmd: str, list_key: str, timeout: floa
     async def _one(sid):
         try:
             r = await hub.request_response(sid, cmd, {}, timeout=timeout)
-            return _normalize_cached(r)
+            return sid, _normalize_cached(r)
         except Exception as e:  # noqa: BLE001 — one bad spoke must not fail the merge
             logger.warning(f"cppm merge fetch {sid} ({cmd}): {e}")
-            return None
+            return sid, None
 
     results = await asyncio.gather(*[_one(s) for s in usable])
     merged = []
-    for d in results:
+    for sid, d in results:
         if isinstance(d, dict) and isinstance(d.get(list_key), list):
-            merged.extend(d[list_key])
+            recs = d[list_key]
+            if own_spoke and sid == own_spoke:
+                recs = [{**r, OWN_SOURCE_MARKER: True} if isinstance(r, dict) else r
+                        for r in recs]
+            merged.extend(recs)
     return {list_key: merged, "total": len(merged)}
 
 async def _fetch_module(hub, tenant_id: str, module_key: str, fw_id: str = None) -> bool:
@@ -938,12 +960,14 @@ async def _fetch_module(hub, tenant_id: str, module_key: str, fw_id: str = None)
             # extend the deadline toward the hard ceiling.
             spokes = hub.get_cppm_spokes_for_tenant(tenant_id)
             if not spokes: _set_cache_status(tenant_id, cache_key, "error"); return False
-            result = await _cppm_merge_spokes(hub, spokes, "CPPM_GET_ACCESS_TRACKER", "sessions", timeout=20.0)
+            result = await _cppm_merge_spokes(hub, spokes, "CPPM_GET_ACCESS_TRACKER", "sessions", timeout=20.0,
+                                              own_spoke=_cppm_own_spoke(hub, tenant_id))
             if result is None: _set_cache_status(tenant_id, cache_key, "error"); return False
         elif module_key == "cppm_devices":
             spokes = hub.get_cppm_spokes_for_tenant(tenant_id)  # see cppm_sessions above
             if not spokes: _set_cache_status(tenant_id, cache_key, "error"); return False
-            result = await _cppm_merge_spokes(hub, spokes, "LIST_ENDPOINTS", "devices", timeout=20.0)
+            result = await _cppm_merge_spokes(hub, spokes, "LIST_ENDPOINTS", "devices", timeout=20.0,
+                                              own_spoke=_cppm_own_spoke(hub, tenant_id))
             if result is None: _set_cache_status(tenant_id, cache_key, "error"); return False
         elif module_key in ("netbox_racks", "netbox_devices", "netbox_ips", "netbox_prefixes"):
             spoke = hub.get_spoke_by_type("ipam")

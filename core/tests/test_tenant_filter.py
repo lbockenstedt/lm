@@ -74,6 +74,35 @@ def test_alias_field_dropped_cant_filter():
     assert [r["source"] for r in out2] == ["LAN_NET"]
 
 
+def test_own_source_marker_bypasses_subnet_filter():
+    """A record carrying ``OWN_SOURCE_MARKER`` (the tenant's own CPPM) is shown
+    regardless of subnet — even with an off-prefix IP or no IP at all — while a
+    non-marked record from a shared source is still narrowed by prefix."""
+    from simulations.tenant_filter import OWN_SOURCE_MARKER
+    items = [
+        {"ip": "8.8.8.8", OWN_SOURCE_MARKER: True},   # own CPPM, off-prefix → kept
+        {OWN_SOURCE_MARKER: True},                    # own CPPM, no IP → kept
+        {"ip": "8.8.8.8"},                            # shared, off-prefix → hidden
+        {"ip": "10.20.0.1"},                          # shared, in-prefix → kept
+    ]
+    out = filter_items_by_prefixes(items, TENANT_PREFIXES, ["ip"])
+    assert out == [
+        {"ip": "8.8.8.8", OWN_SOURCE_MARKER: True},
+        {OWN_SOURCE_MARKER: True},
+        {"ip": "10.20.0.1"},
+    ]
+
+
+def test_own_source_marker_bypasses_single_record_gate():
+    """``filter_record_by_prefixes`` honors the own-source marker too (the
+    device-enrich drill-down): an own-CPPM record off-prefix is returned."""
+    from simulations.tenant_filter import OWN_SOURCE_MARKER, filter_record_by_prefixes
+    rec = {"ip": "8.8.8.8", OWN_SOURCE_MARKER: True}
+    assert filter_record_by_prefixes(rec, TENANT_PREFIXES, ["ip"]) is rec
+    # without the marker the same off-prefix record is dropped
+    assert filter_record_by_prefixes({"ip": "8.8.8.8"}, TENANT_PREFIXES, ["ip"]) is None
+
+
 def test_envelope_dict_filtered_in_place():
     """A spoke envelope {data: [...]} is filtered in place (the list is mutated)."""
     env = {"data": [{"ip": "10.20.0.1"}, {"ip": "8.8.8.8"}], "other": "keep"}

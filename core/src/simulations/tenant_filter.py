@@ -38,6 +38,17 @@ import ipaddress
 import re
 from typing import Any, Iterable, List, Optional, Sequence
 
+# Reserved per-record marker: a truthy value means the caller has already
+# attributed this record to the REQUESTING tenant's own data source, so it must
+# be shown regardless of subnet. Currently set by the NAC (CPPM) merge on
+# records that come from a tenant's OWN dedicated ClearPass appliance — that
+# equipment is entirely the tenant's, so its records bypass the subnet filter
+# (only records merged in from a SHARED CPPM are narrowed by subnet). The merge
+# is per-request and tenant-scoped, so this marker is only ever set for the
+# current requester's own source. Mirrors the ``_tenant`` tag the NAC fan-out
+# already stamps on records.
+OWN_SOURCE_MARKER = "_own_nac"
+
 # Concrete IPv4 or IPv4/CIDR strings embedded in a field value. Anything that
 # doesn't match (alias names like "LAN_NET", "any", "RFC1918", empty) yields no
 # hits → the caller treats the field as non-IP and skips it.
@@ -171,6 +182,8 @@ def filter_items_by_prefixes(
         return items
 
     def keep(item: dict) -> bool:
+        if isinstance(item, dict) and item.get(OWN_SOURCE_MARKER):
+            return True  # tenant's own data source (e.g. own CPPM) — never subnet-filtered
         if tenant_category and _category_matches(item.get(category_field), tenant_category):
             return True  # explicitly attributed to this tenant via category
         has_concrete = False
@@ -243,6 +256,8 @@ def filter_record_by_prefixes(record: Any, prefixes: Sequence[str], ip_fields: S
     """
     if not prefixes or not isinstance(record, dict):
         return record
+    if record.get(OWN_SOURCE_MARKER):
+        return record  # tenant's own data source (e.g. own CPPM) — never subnet-filtered
     nets = _nets(prefixes)
     if not nets:
         return record

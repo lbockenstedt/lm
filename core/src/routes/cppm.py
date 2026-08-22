@@ -4,6 +4,7 @@ import asyncio
 from api import (
     HTTPException, Request, _cache_entry, _unwrap_spoke, access, get_tenant_scoping, logger,
 )
+from simulations import tenant_filter
 
 
 def register(app, hub, ctx):
@@ -77,7 +78,8 @@ def register(app, hub, ctx):
         merged = [r for recs in await asyncio.gather(*[_one(s) for s in spokes]) for r in recs]
         return {list_key: merged, "total": len(merged)}
 
-    async def _nac_gather_merge(spokes, cmd: str, payload: dict, list_key: str):
+    async def _nac_gather_merge(spokes, cmd: str, payload: dict, list_key: str,
+                                own_spoke: str = None):
         """Query every spoke in ``spokes`` with ``cmd``, merging each response's
         ``list_key`` list into one combined list — used for a SINGLE tenant's
         combined view (their own dedicated CPPM + the shared CPPM, if any;
@@ -85,21 +87,30 @@ def register(app, hub, ctx):
         which fans out across EVERY tenant's spoke for the admin view. A spoke
         that errors is skipped rather than failing the whole call — one bad/
         offline source must not blank the other's data. Returns ``None`` only
-        when every spoke fails."""
+        when every spoke fails.
+
+        Records from ``own_spoke`` (the tenant's OWN dedicated CPPM) are stamped
+        with the ``OWN_SOURCE_MARKER`` so the downstream subnet filter shows them
+        all — that appliance is entirely the tenant's equipment. Only records
+        merged in from a SHARED CPPM stay subject to the subnet filter."""
         async def _one(sid):
             try:
                 result = await hub.request_response(sid, cmd, payload or {}, timeout=20.0)
-                return _cppm_unwrap(result)
+                return sid, _cppm_unwrap(result)
             except Exception as e:  # noqa: BLE001 — one bad/offline spoke must not fail the merge
                 logger.debug("nac combine: %s failed: %s", sid, e)
-                return None
+                return sid, None
         results = await asyncio.gather(*[_one(s) for s in spokes])
         merged = []
         any_ok = False
-        for d in results:
+        for sid, d in results:
             if isinstance(d, dict) and isinstance(d.get(list_key), list):
                 any_ok = True
-                merged.extend(d[list_key])
+                recs = d[list_key]
+                if own_spoke and sid == own_spoke:
+                    recs = [{**r, tenant_filter.OWN_SOURCE_MARKER: True}
+                            if isinstance(r, dict) else r for r in recs]
+                merged.extend(recs)
         if not any_ok:
             return None
         return {list_key: merged, "total": len(merged)}
@@ -149,7 +160,8 @@ def register(app, hub, ctx):
             if cached is not None:
                 return cached
             raise HTTPException(status_code=503, detail="No spoke connected")
-        data = await _nac_gather_merge(spokes, cmd, payload, list_key)
+        data = await _nac_gather_merge(spokes, cmd, payload, list_key,
+                                       own_spoke=hub.get_cppm_spoke_for_tenant(tid))
         if data is None:
             cached = hub.warm_get(cmd.lower(), scoped_key)
             if cached is not None:
@@ -604,7 +616,8 @@ def register(app, hub, ctx):
                 raise HTTPException(status_code=503, detail="No spoke connected")
             try:
                 data = await _nac_gather_merge(
-                    spokes, "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset}, "sessions")
+                    spokes, "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset}, "sessions",
+                    own_spoke=hub.get_cppm_spoke_for_tenant(_effective_tenant(request, tenant)))
                 if data is None:
                     raise HTTPException(status_code=503, detail="No spoke connected")
                 return await _filter_tenant(request, data, "nac", ["ip"], tenant)
@@ -646,7 +659,8 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=503, detail="No spoke connected")
         try:
             data = await _nac_gather_merge(
-                spokes, "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset}, "sessions")
+                spokes, "CPPM_GET_ACCESS_TRACKER", {"limit": limit, "offset": offset}, "sessions",
+                own_spoke=hub.get_cppm_spoke_for_tenant(tid) if tid else None)
             if data is None:
                 raise HTTPException(status_code=503, detail="No spoke connected")
             return await _filter_session(request, data, "nac", ["ip"])
