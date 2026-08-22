@@ -1,13 +1,24 @@
 """Simulation Build Assistant — a multi-turn chat, embedded in the
 Simulations module, that helps a user scope a NEW client simulation
 (e.g. "I want to build a simulation that runs this script") by asking
-clarifying questions when something needed is missing.
+clarifying questions when something needed is missing, and answers general
+"how does the engine work"-style questions about the module.
 
 The LLM backend is the AppBuilder module (ab) — same as help_assistant.py.
 This route only relays: it holds no LLM logic of its own, just the running
 conversation the client echoes back each turn and a system prompt scoped to
 "what a buildable simulation spec needs" (per the add-simulation skill this
 platform's build tooling — sim-builder — already follows).
+
+HARD SCOPE BOUNDARY, enforced two ways: (1) retrieval — the only docs ever
+loaded into context are a fixed whitelist of Simulations-module docs
+(_CS_DOCS); mTLS, Azure, core hub systems, and every other module are
+structurally unreachable, there is nothing to retrieve. (2) prompt — the
+system prompt explicitly instructs the model to decline and redirect any
+off-topic question rather than answer from its general training. Neither
+alone is airtight (an LLM can still say something wrong), but together they
+keep this assistant from being a general-purpose hub Q&A the way
+help_assistant.py deliberately is.
 
 Unlike help_assistant.py (single question in, single answer out, no history),
 this is a REAL back-and-forth: the client accumulates the message list itself
@@ -56,17 +67,59 @@ def register(app, hub, ctx):
             logger.warning("sim_assistant: could not read doc %s: %s", name, e)
             return ""
 
-    def _system_prompt():
-        cs_doc = _read_doc("cs")
-        alert_doc = _read_doc("alert-generation")
+    # Hard scope boundary #1 (retrieval): the ONLY docs this assistant can ever
+    # load into context are these — the Simulations (cs) module and its
+    # directly-related product twins/subsystems. mTLS, Azure, other modules
+    # (NAC, DNS, DHCP, IPAM, firewall, console, LDAP, etc.) and core hub
+    # systems are structurally never in reach, regardless of what's asked —
+    # there's nothing to retrieve. Mirrors help_assistant.py's _select_docs
+    # RAG-lite (keyword overlap), just over a fixed whitelist instead of the
+    # full doc corpus.
+    _CS_DOCS = ("cs", "alert-generation", "dongle-quarantine",
+               "iot-device-catalog-quota", "central-on-prem", "mist")
+
+    def _select_cs_docs(question, k=3):
+        words = {w for w in ''.join(c.lower() if c.isalnum() else ' '
+                                    for c in question).split() if len(w) > 2}
+        docs = {n: _read_doc(n) for n in _CS_DOCS}
+        scored = []
+        for name, text in docs.items():
+            if not text:
+                continue
+            tl = text.lower()
+            score = sum(tl.count(w) for w in words) + 5 * sum(w in name.lower() for w in words)
+            scored.append((score, name))
+        scored.sort(reverse=True)
+        picked = [n for s, n in scored if s > 0][:k]
+        if not picked:
+            picked = ["cs"]  # always-relevant fallback — the module's own doc
+        return {n: docs[n] for n in picked}
+
+    def _system_prompt(question):
+        picked_docs = _select_cs_docs(question)
+        doc_ctx = "\n\n".join(f"=== DOC: {n} ===\n{t}" for n, t in picked_docs.items())
         return (
             "You are the Lab Manager (LM) Simulation Build Assistant, embedded in the "
-            "Simulations module. Your job is a CONVERSATION: help the user scope a new "
-            "client-side traffic/failure simulation (e.g. a custom script they paste in, "
-            "or a variant of an existing sim type) by asking ONE focused clarifying "
-            "question at a time whenever something needed is missing or ambiguous. Do "
-            "NOT dump a long checklist up front — have a natural back-and-forth, like a "
-            "teammate scoping the work with them.\n\n"
+            "Simulations module.\n\n"
+            "HARD SCOPE BOUNDARY: you may ONLY discuss the Simulations (cs) module and "
+            "directly related topics — client simulations, the sim-quota/alert-"
+            "generation engine, dongle/hardware provisioning for sim clients, VM Server "
+            "(the sim client VM infrastructure), and the Central / Central On-Prem / "
+            "Mist product twins. Questions like 'how does the quota engine work' or "
+            "'what's the difference between T1/T2/T3' are exactly on-topic. If asked "
+            "about ANYTHING else — mTLS, certificates, Azure, core hub systems, other "
+            "modules (NAC/ClearPass, DNS, DHCP, IPAM/NetBox, firewall, console, LDAP, "
+            "hypervisor/Proxmox management outside sim VMs, etc.) — politely decline and "
+            "redirect the user back to Simulations-module topics. Do not answer, do not "
+            "speculate, do not offer to help with it even briefly — just redirect.\n\n"
+            "Within that scope, you have two jobs:\n"
+            "1. CONVERSATION to help the user scope a NEW client simulation (e.g. a "
+            "custom script they paste in, or a variant of an existing sim type) — ask "
+            "ONE focused clarifying question at a time whenever something needed is "
+            "missing or ambiguous. Do NOT dump a long checklist up front — have a "
+            "natural back-and-forth, like a teammate scoping the work with them.\n"
+            "2. General Q&A about how the Simulations module and its engine work, using "
+            "the reference material below.\n\n"
             "What a complete, buildable simulation spec needs (per this platform's "
             "add-simulation build process):\n"
             "- A short, unique sim name/id (snake_case, matching existing naming style "
@@ -85,8 +138,7 @@ def register(app, hub, ctx):
             "they're satisfied — you never file anything yourself; a human always "
             "reviews and submits.\n\n"
             "Reference material (how simulations actually work on this platform):\n\n"
-            "=== DOC: cs ===\n" + cs_doc + "\n\n"
-            "=== DOC: alert-generation ===\n" + alert_doc
+            + doc_ctx
         )
 
     @app.get("/api/sim-assistant/available")
@@ -119,10 +171,14 @@ def register(app, hub, ctx):
         if not messages:
             raise HTTPException(status_code=400, detail="messages is empty/invalid")
 
+        # Doc selection uses every user turn so far (not just the latest) —
+        # a short "yes" reply mid-conversation shouldn't lose the doc context
+        # an earlier, more descriptive turn already established.
+        user_text = " ".join(m["content"] for m in messages if m["role"] == "user")
         try:
             res = await hub.request_response(
                 agent, "HELP_ASK",
-                {"messages": messages, "tools": None, "system": _system_prompt()},
+                {"messages": messages, "tools": None, "system": _system_prompt(user_text)},
                 timeout=90.0)
         except Exception as e:  # noqa: BLE001
             logger.warning("sim_assistant chat relay failed: %s", e)
