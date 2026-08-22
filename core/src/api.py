@@ -1114,6 +1114,19 @@ def warm_load_tenant_cache(hub) -> None:
         logger.warning("tenant_cache warm load failed: %s — starting empty", e)
 
 
+def _active_session_tenant_ids(now: float = None) -> set:
+    """Distinct tenant_ids that currently have at least one non-expired session.
+    The set of tenants whose collection loop should be running (started at login,
+    resumed on restart, torn down when the last session for a tenant ends)."""
+    if now is None:
+        now = time.time()
+    return {
+        s.get("user", {}).get("tenant_id")
+        for s in _sessions.values()
+        if s.get("expires", 0) > now and s.get("user", {}).get("tenant_id")
+    }
+
+
 def _start_cache_for_tenant(hub, tenant_id: str):
     if not tenant_id or tenant_id == "default":
         return
@@ -1392,6 +1405,30 @@ def create_app(hub):
     # router.on_shutdown (what that method appended to internally) is stable and
     # is still run by the default lifespan.
     app.router.on_shutdown.append(_persist_on_shutdown)
+
+    async def _resume_caches_for_active_sessions():
+        """Restart the per-tenant cache-refresh loop for every tenant that still
+        has an active (non-expired) session after a hub restart.
+
+        Login is what normally starts a tenant's collection loop
+        (``_start_cache_for_tenant``), but the hub self-updates/restarts often
+        and ``_load_sessions`` rehydrates those logins from disk — WITHOUT the
+        loops, so a still-logged-in tenant would be served only warm-loaded
+        stale data and never actively refreshed until they logged in again. This
+        runs on startup (inside the event loop, so ``asyncio.create_task`` in
+        ``_start_cache_for_tenant`` is safe — it is NOT at ``create_app`` build
+        time) and re-establishes the same collection a fresh login would. A
+        tenant with no live session is left alone (poll-as-needed), matching the
+        logout teardown in ``_stop_cache_for_tenant``."""
+        now = time.time()
+        tids = _active_session_tenant_ids(now)
+        for tid in tids:
+            _start_cache_for_tenant(hub, tid)
+        if tids:
+            logger.info("[Cache] resumed collection for %d tenant(s) with active "
+                        "sessions after restart", len(tids))
+
+    app.router.on_startup.append(_resume_caches_for_active_sessions)
 
     @app.middleware("http")
     async def access_control_middleware(request, call_next):
