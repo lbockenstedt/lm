@@ -419,8 +419,6 @@ async def _aggregate_status(hub):
         _tag(hub.get_active_spoke_alerts(), "spoke_out_of_contact")
         + _tag(hub.get_fleet_alerts() if hasattr(hub, "get_fleet_alerts") else [],
                "fleet_availability")
-        + _tag(hub.get_dongle_alerts() if hasattr(hub, "get_dongle_alerts") else [],
-               "dongle_exhaustion")
         # Relayed node agents (pxmx/cs). Their own producer, because the
         # spoke_out_of_contact sweep deliberately skips them — without this a
         # whole fleet of dead agents raised NO alert and the tray stayed green.
@@ -1510,8 +1508,8 @@ def register(app, hub, ctx):
 
     # ── Alert-state forensics (System → Hub Status) ──────────────────────────
     # The footer MODULE STATUS dot turns red on ANY active error-tier alert, and
-    # /status merges THREE unrelated producers into one list (spoke
-    # out-of-contact + fleet availability + dongle exhaustion). That makes "every
+    # /status merges several producers into one list (spoke out-of-contact +
+    # relayed-agent out-of-contact + fleet availability). That makes "every
     # spoke is green but the dot is red" look like a contradiction when it isn't.
     # Worse, a relayed pxmx node-agent that leaks into approved_modules is keyed
     # in heartbeat under a COMPOSITE "{parent}:{agent_id}" key, so the alert
@@ -1881,8 +1879,7 @@ def register(app, hub, ctx):
                             # cannot see. Without it this forensics view showed
                             # "no alerts" during a total agent outage.
                             ("agent_out_of_contact", "get_agent_alerts"),
-                            ("fleet_availability", "get_fleet_alerts"),
-                            ("dongle_exhaustion", "get_dongle_alerts")):
+                            ("fleet_availability", "get_fleet_alerts")):
             fn = getattr(hub, getter, None)
             if not fn:
                 continue
@@ -1963,8 +1960,7 @@ def register(app, hub, ctx):
                 "spoke_alerts": len(spoke_alerts),
                 "alerts_total": len(alerts),
                 "by_source": {s: sum(1 for a in alerts if a["source"] == s)
-                              for s in ("spoke_out_of_contact", "fleet_availability",
-                                        "dongle_exhaustion")},
+                              for s in ("spoke_out_of_contact", "fleet_availability")},
             },
             "alerts": alerts,
             "spoke_alert_rows": rows,

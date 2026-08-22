@@ -3310,7 +3310,6 @@ function renderSpokeIndicators() {
             ['spoke_out_of_contact', 'Out-of-contact alerts'],
             ['agent_out_of_contact',  'Agents out of contact'],
             ['fleet_availability',   'Fleet availability'],
-            ['dongle_exhaustion',    'Dongle exhaustion'],
         ];
         alertHtml = GROUPS.map(([src, label]) => {
             const inGroup = alerts.filter(a => (a.source || 'spoke_out_of_contact') === src);
@@ -5732,8 +5731,8 @@ function _renderSettingsSection(subMenu) {
 
     // ── System → Diagnostics ────────────────────────────────────────────────
     // The single place the footer MODULE STATUS dot points at. That dot merges
-    // FOUR producers (spoke out-of-contact, agent out-of-contact, fleet
-    // availability, dongle exhaustion) and Spokes & Agents rendered only some
+    // several producers (spoke out-of-contact, agent out-of-contact, fleet
+    // availability) and Spokes & Agents rendered only some
     // of them — so clicking through from a red dot could show a page of green
     // spokes and no explanation. Everything the dot can represent is here, with
     // the per-alert forensics that say whether it is real.
@@ -5792,7 +5791,7 @@ function _renderSettingsSection(subMenu) {
                         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Alert Diagnostics ${helpIcon('lm-hub', null, 'Hub help')}</h3>
                         <button onclick="loadAlertDiagnostics()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50 transition-all" title="Why the footer MODULE STATUS dot is red — which producer raised each alert, and whether any are false positives">↻ Refresh</button>
                     </div>
-                    <p class="text-[10px] text-slate-400 mb-3">The footer <b>MODULE STATUS</b> dot turns red on <b>any</b> active error-tier alert, and that badge merges <b>three</b> producers — spoke out-of-contact, fleet availability, and dongle exhaustion. Every spoke green while the dot is red is therefore not a contradiction. This card names the producer behind each alert and flags the ones that are stale or false.</p>
+                    <p class="text-[10px] text-slate-400 mb-3">The footer <b>MODULE STATUS</b> dot turns red on <b>any</b> active error-tier alert, and that badge merges multiple producers — spoke out-of-contact, agent out-of-contact, and fleet availability. Every spoke green while the dot is red is therefore not a contradiction. This card names the producer behind each alert and flags the ones that are stale or false.</p>
                     <div id="alert-diag-body"><p class="text-slate-400 italic text-xs">Loading…</p></div>
                 </div>
                 <div class="${card} p-6">
@@ -23753,13 +23752,11 @@ const _MD_SOURCE_LABEL = {
     spoke_out_of_contact: 'Spokes out of contact',
     agent_out_of_contact: 'Agents out of contact',
     fleet_availability:   'Fleet availability',
-    dongle_exhaustion:    'Dongle exhaustion',
 };
 const _MD_SOURCE_NOTE = {
     spoke_out_of_contact: 'A module spoke stopped talking to the hub.',
     agent_out_of_contact: 'A RELAYED node agent (pxmx/cs) went silent. Its parent spoke can still be perfectly healthy — nothing else reports this.',
     fleet_availability:   'Lab capacity: a degraded client fleet. Not a module being down.',
-    dongle_exhaustion:    'Lab capacity: a host with no working dongles left. Not a module being down.',
 };
 
 async function loadModuleDiagnostics() {
@@ -23889,8 +23886,8 @@ function copyModuleDiagnostics(btn) {
 window.copyModuleDiagnostics = copyModuleDiagnostics;
 
 // Alert Diagnostics — inline card on System → Hub Status. Explains the footer
-// MODULE STATUS dot: which of the THREE producers raised each active alert
-// (spoke out-of-contact / fleet availability / dongle exhaustion, merged into
+// MODULE STATUS dot: which producer raised each active alert
+// (spoke out-of-contact / agent out-of-contact / fleet availability, merged into
 // one list by /status), and which alerts are false positives or stale state.
 // Backed by GET /setup/alert-diagnostics (core/src/routes/setup.py).
 async function loadAlertDiagnostics() {
@@ -23910,7 +23907,6 @@ window.loadAlertDiagnostics = loadAlertDiagnostics;
 const _ALERT_SOURCE_LABEL = {
     spoke_out_of_contact: 'Spoke out-of-contact',
     fleet_availability:   'Fleet availability',
-    dongle_exhaustion:    'Dongle exhaustion',
 };
 
 function _alertDiagHtml(d) {
@@ -23972,10 +23968,9 @@ function _alertDiagHtml(d) {
       <div class="flex items-center justify-end">
         <span class="text-xs px-2 py-1 rounded-full ${vClass}">${esc(verdict)}</span>
       </div>
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+      <div class="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
         <div><div class="text-slate-500 text-xs">Spoke out-of-contact</div><div class="font-bold ${bySrc.spoke_out_of_contact ? 'text-red-600' : 'text-slate-800'}">${bySrc.spoke_out_of_contact || 0}</div></div>
         <div><div class="text-slate-500 text-xs">Fleet availability</div><div class="font-bold ${bySrc.fleet_availability ? 'text-red-600' : 'text-slate-800'}">${bySrc.fleet_availability || 0}</div></div>
-        <div><div class="text-slate-500 text-xs">Dongle exhaustion</div><div class="font-bold ${bySrc.dongle_exhaustion ? 'text-red-600' : 'text-slate-800'}">${bySrc.dongle_exhaustion || 0}</div></div>
         <div><div class="text-slate-500 text-xs">Approved · relayed agents</div><div class="font-bold text-slate-800">${counts.approved || 0} · ${counts.relay_ids || 0}</div></div>
       </div>
       <div class="space-y-2">${findingHtml}</div>
