@@ -85,6 +85,16 @@ NONSECRET_VAULT_FIELDS = {
     "nac_instances": {
         "client_id": ("client_id", "clientid", "client"),
     },
+    "nw_devices": {
+        # A network device's SSH/CLI login username lives WITH the password in a
+        # Credential Vault "Console" secret ({username, password}). It is not a
+        # secret, so it is overlaid here (not stripped inline on save): a
+        # manually-typed username is preserved and only overridden when the
+        # resolved vault credential actually carries one. Without this, a
+        # vault-backed SSH device gets its password but an empty username, and
+        # every poll fails with "device address/username not configured".
+        "username": ("username", "user"),
+    },
 }
 
 

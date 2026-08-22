@@ -112,6 +112,26 @@ def test_overlay_nw_only_overlays_carried_fields(monkeypatch):
     assert out["address"] == "10.0.0.1"
 
 
+def test_overlay_nw_console_secret_fills_username_and_password(monkeypatch):
+    # A Credential Vault "Console" secret carries {username, password}; an SSH
+    # device must get BOTH from it, else every poll fails "address/username not
+    # configured". username is a NON-secret overlay field (kept inline on save).
+    _patch_get(monkeypatch, {"username": "admin", "password": "s3cr3t"})
+    dev = {"address": "172.16.1.1", "transport": "ssh", "username": "",
+           "vault_credential": {"bucket": "acme", "name": "gw"}}
+    out = _run(iv.overlay(object(), dev, "nw_devices"))
+    assert out["username"] == "admin"
+    assert out["password"] == "s3cr3t"
+
+
+def test_overlay_nw_user_alias_fills_username(monkeypatch):
+    _patch_get(monkeypatch, {"user": "netadmin", "password": "pw"})
+    dev = {"address": "172.16.1.1", "transport": "ssh",
+           "vault_credential": {"bucket": "acme", "name": "gw"}}
+    out = _run(iv.overlay(object(), dev, "nw_devices"))
+    assert out["username"] == "netadmin"
+
+
 def test_overlay_resolve_failure_degrades(monkeypatch):
     _patch_get(monkeypatch, None, raises=cred_vault.CredVaultError("boom"))
     dev = {"address": "10.0.0.1",
