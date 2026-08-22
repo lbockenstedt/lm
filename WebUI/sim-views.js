@@ -12768,7 +12768,7 @@ async function csRenderAssistant() {
             <div class="flex items-center justify-between mb-3">
                 <div>
                     <h2 class="text-lg font-bold text-slate-800">Simulation Build Assistant</h2>
-                    <p class="text-xs text-slate-500">Describe what you want to build — I'll ask for anything missing.</p>
+                    <p class="text-xs text-slate-500">Describe what you want to build, or ask to copy/vary an existing sim (e.g. "dns_fail" for one deployment) — I can look up the real source and ask for anything missing.</p>
                 </div>
                 <div class="flex gap-2">
                     <button onclick="csAssistantNewConversation()"
@@ -12783,7 +12783,7 @@ async function csRenderAssistant() {
             </div>
             <div id="cs-assistant-log" class="flex-1 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-4"></div>
             <form id="cs-assistant-form" class="flex gap-2 mt-3" onsubmit="event.preventDefault(); csAssistantSend();">
-                <input id="cs-assistant-input" type="text" placeholder="e.g. I want a simulation that runs this script…"
+                <input id="cs-assistant-input" type="text" placeholder="e.g. I want a simulation that runs this script… or: copy dns_fail for the LRB deployment"
                     class="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#01A982]">
                 <button id="cs-assistant-send" type="submit"
                     class="bg-[#01A982] text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-[#019172]">

@@ -1,41 +1,196 @@
 """Simulation Build Assistant — a multi-turn chat, embedded in the
 Simulations module, that helps a user scope a NEW client simulation
-(e.g. "I want to build a simulation that runs this script") by asking
-clarifying questions when something needed is missing, and answers general
+(e.g. "I want to build a simulation that runs this script", or "copy
+dns_fail but tweak it for the LRB deployment") by asking clarifying
+questions when something needed is missing, and answers general
 "how does the engine work"-style questions about the module.
 
 The LLM backend is the AppBuilder module (ab) — same as help_assistant.py.
 This route only relays: it holds no LLM logic of its own, just the running
-conversation the client echoes back each turn and a system prompt scoped to
+conversation the client echoes back each turn, a system prompt scoped to
 "what a buildable simulation spec needs" (per the add-simulation skill this
-platform's build tooling — sim-builder — already follows).
+platform's build tooling — sim-builder — already follows), and a small
+hub-side tool loop (mirroring help_assistant.py's) so the model can look up
+the ACTUAL source of an existing simulation when asked to base a new/varied
+one on it, instead of guessing at behavior it can't see.
 
 HARD SCOPE BOUNDARY, enforced two ways: (1) retrieval — the only docs ever
 loaded into context are a fixed whitelist of Simulations-module docs
-(_CS_DOCS); mTLS, Azure, core hub systems, and every other module are
-structurally unreachable, there is nothing to retrieve. (2) prompt — the
-system prompt explicitly instructs the model to decline and redirect any
-off-topic question rather than answer from its general training. Neither
-alone is airtight (an LLM can still say something wrong), but together they
-keep this assistant from being a general-purpose hub Q&A the way
-help_assistant.py deliberately is.
+(_CS_DOCS), and the only source code ever reachable is the ``clients/linux``
+and ``clients/windows`` directories of the canonical ``cs`` repo (read-only,
+via the tool loop below) — mTLS, Azure, core hub systems, and every other
+module/repo are structurally unreachable, there is nothing to retrieve.
+(2) prompt — the system prompt explicitly instructs the model to decline and
+redirect any off-topic question rather than answer from its general
+training. Neither alone is airtight (an LLM can still say something wrong),
+but together they keep this assistant from being a general-purpose hub Q&A
+the way help_assistant.py deliberately is.
 
 Unlike help_assistant.py (single question in, single answer out, no history),
 this is a REAL back-and-forth: the client accumulates the message list itself
 and POSTs the whole thing each turn (the same "client owns history" contract
-any OpenAI/Anthropic-style chat API uses) — the hub keeps no session state.
+any OpenAI/Anthropic-style chat API uses) — the hub keeps no session state
+across POSTs. Within a single POST, though, the hub DOES run a short
+tool-calling loop (mirroring help_assistant.py's shape) so the model can
+read_sim_source/list_available_sims before giving its final answer.
 
 Once the user is satisfied the conversation has gathered enough, they submit
 through the EXISTING feature-request pipeline (/api/bug-report, type=feature,
-admin-approval-gated) — this route never files anything itself. Keeping code-
-writing access out of a chat bot's hands is a deliberate boundary, not a gap:
-the actual build still goes through a human approval + the same sim-builder/
-add-simulation tooling used today.
+admin-approval-gated) — this route never files or writes anything itself,
+including the source-reading tools below, which are strictly read-only HTTP
+GETs against GitHub's Contents API. Keeping code-writing access out of a chat
+bot's hands is a deliberate boundary, not a gap: the actual build still goes
+through a human approval + the same sim-builder/add-simulation tooling used
+today.
 
 HARD REQUIREMENT: only usable when ab is connected — /api/sim-assistant/available
 reports that, mirroring /api/help/available.
 """
+import base64
+import json
+import re
+
 from api import HTTPException, Request, logger, os
+
+# ── existing-sim source reading (read-only, hub-side tool loop) ─────────────
+# The hub has no local checkout of the `cs` repo (its code runs on
+# spoke-managed client VMs, never on the hub's own filesystem) — so "read the
+# actual sim code" means a live, read-only fetch from the canonical repo's
+# GitHub Contents API, the same no-local-clone pattern
+# simulations/github_config_client.py already uses for tenant config. This is
+# intentionally its own tiny client, not a shared import — that module is
+# tenant-scoped (per-tenant token/repo/branch); this one is a single fixed,
+# public, read-only target.
+_GITHUB_API = "https://api.github.com"
+_CS_REPO_OWNER = "lbockenstedt"
+_CS_REPO_NAME = "cs"
+_CS_REPO_BRANCH = "main"
+
+# Hard scope boundary: sim_name is validated against this pattern BEFORE it
+# ever touches a path, so read_sim_source can only ever address a file
+# directly under clients/linux/ or clients/windows/ in the canonical cs
+# repo — no path traversal, no reaching outside those two directories,
+# regardless of what the model sends.
+_SIM_NAME_RE = re.compile(r"^[a-z0-9_]{2,40}$")
+
+# Orchestrator/shared-library files that live alongside the real sims but
+# aren't themselves a sim a user would name/copy — excluded from
+# list_available_sims so the model doesn't suggest copying platform
+# plumbing. (read_sim_source still allows reading them by name — a user or
+# the model may legitimately want to see e.g. network_common.sh for
+# context — this list is a discovery-UX filter, not a security boundary;
+# the directory restriction above is the actual boundary.)
+_CS_INFRA_FILES = {
+    "agent", "apt_update", "common", "connect_1x", "connect_psk",
+    "connect_wired_1x", "ini-parser", "install_wifi_drivers",
+    "network_common", "recovery", "simulation", "startup", "update",
+}
+
+
+async def _github_get_contents(path):
+    """GET one Contents-API path from the canonical cs repo. Returns the raw
+    httpx Response so callers branch on status_code (404 vs 200 vs error).
+    A thin, directly-monkeypatchable seam for tests — no local client/token
+    plumbing to fake."""
+    import httpx
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        return await client.get(
+            f"{_GITHUB_API}/repos/{_CS_REPO_OWNER}/{_CS_REPO_NAME}/contents/{path}",
+            params={"ref": _CS_REPO_BRANCH},
+            headers={"Accept": "application/vnd.github+json"})
+
+
+async def _tool_list_available_sims(_args):
+    """The names of existing sims (Linux/Windows script pairs), so the model
+    can pick a real name instead of guessing before calling read_sim_source."""
+    try:
+        resp = await _github_get_contents("clients/linux")
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"could not list sims: {e}"}
+    if resp.status_code != 200:
+        return {"error": f"GitHub returned {resp.status_code} listing sims"}
+    try:
+        entries = resp.json()
+    except Exception:  # noqa: BLE001
+        return {"error": "could not parse sim listing"}
+    if not isinstance(entries, list):
+        return {"error": "unexpected sim listing shape"}
+    names = sorted({
+        e["name"][:-3] for e in entries
+        if isinstance(e, dict) and e.get("type") == "file"
+        and str(e.get("name", "")).endswith(".sh")
+        and e["name"][:-3] not in _CS_INFRA_FILES
+    })
+    return {"sims": names}
+
+
+async def _tool_read_sim_source(args):
+    """Read an EXISTING sim's real source (Linux .sh and/or Windows .ps1),
+    read-only, so the model can base a new/varied sim on real behavior
+    instead of guessing. sim_name is regex-validated before it ever reaches
+    a path — see _SIM_NAME_RE above."""
+    sim_name = str(args.get("sim_name") or "").strip().lower()
+    platform = str(args.get("platform") or "both").strip().lower()
+    if not _SIM_NAME_RE.match(sim_name):
+        return {"error": "invalid sim_name — use the exact name from "
+                         "list_available_sims (lowercase, letters/digits/underscore)"}
+    plats = {"linux": ["linux"], "windows": ["windows"],
+            "both": ["linux", "windows"]}.get(platform, ["linux", "windows"])
+    out = {}
+    for plat in plats:
+        ext = "sh" if plat == "linux" else "ps1"
+        path = f"clients/{plat}/{sim_name}.{ext}"
+        try:
+            resp = await _github_get_contents(path)
+        except Exception as e:  # noqa: BLE001
+            out[plat] = f"(fetch error: {e})"
+            continue
+        if resp.status_code == 404:
+            out[plat] = "(not found)"
+            continue
+        if resp.status_code != 200:
+            out[plat] = f"(GitHub returned {resp.status_code})"
+            continue
+        try:
+            node = resp.json()
+            b64 = (node.get("content") or "").replace("\n", "")
+            out[plat] = base64.b64decode(b64).decode("utf-8", "replace")[:12000]
+        except Exception:  # noqa: BLE001
+            out[plat] = "(could not decode file)"
+    return out
+
+
+_SIM_TOOLS = [
+    {"type": "function", "function": {
+        "name": "list_available_sims",
+        "description": "List the names of existing client simulations (Linux/Windows script "
+                       "pairs) already implemented on this platform. Call this before "
+                       "read_sim_source whenever you don't already know the exact sim name.",
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "read_sim_source",
+        "description": "Read the real implementation source of an EXISTING simulation, by "
+                       "name — e.g. to base a new or per-deployment-varied sim on it (like a "
+                       "'dns_fail_lrb' variant of 'dns_fail' for one specific deployment). "
+                       "Returns the Linux .sh and/or Windows .ps1 source, read-only.",
+        "parameters": {"type": "object",
+                       "properties": {
+                           "sim_name": {"type": "string",
+                                       "description": "Exact sim name, e.g. 'dns_fail', 'collab'"},
+                           "platform": {"type": "string", "enum": ["linux", "windows", "both"]},
+                       },
+                       "required": ["sim_name"]},
+    }},
+]
+
+
+async def _exec_sim_tool(name, args):
+    if name == "list_available_sims":
+        return await _tool_list_available_sims(args)
+    if name == "read_sim_source":
+        return await _tool_read_sim_source(args)
+    return {"error": f"unknown tool: {name}"}
 
 
 def register(app, hub, ctx):
@@ -112,21 +267,30 @@ def register(app, hub, ctx):
             "hypervisor/Proxmox management outside sim VMs, etc.) — politely decline and "
             "redirect the user back to Simulations-module topics. Do not answer, do not "
             "speculate, do not offer to help with it even briefly — just redirect.\n\n"
-            "Within that scope, you have two jobs:\n"
+            "Within that scope, you have three jobs:\n"
             "1. CONVERSATION to help the user scope a NEW client simulation (e.g. a "
             "custom script they paste in, or a variant of an existing sim type) — ask "
             "ONE focused clarifying question at a time whenever something needed is "
             "missing or ambiguous. Do NOT dump a long checklist up front — have a "
             "natural back-and-forth, like a teammate scoping the work with them.\n"
             "2. General Q&A about how the Simulations module and its engine work, using "
-            "the reference material below.\n\n"
+            "the reference material below.\n"
+            "3. COPYING/VARYING an existing sim for a specific deployment (e.g. the user "
+            "wants a 'dns_fail_lrb' variant of 'dns_fail' with a tweaked target/threshold "
+            "for one site) — use list_available_sims to find the real name, then "
+            "read_sim_source to read its ACTUAL Linux/Windows source before proposing "
+            "anything. Never guess at existing sim behavior — always read it first. "
+            "Present the proposed new/changed script content directly in the chat; you "
+            "cannot write files or commit anything yourself.\n\n"
             "What a complete, buildable simulation spec needs (per this platform's "
             "add-simulation build process):\n"
             "- A short, unique sim name/id (snake_case, matching existing naming style "
-            "like dns_fail, dhcp_fail, collab)\n"
+            "like dns_fail, dhcp_fail, collab — a per-deployment variant typically suffixes "
+            "the base name, e.g. dns_fail_lrb)\n"
             "- What it actually does / simulates, in plain terms\n"
-            "- The behavior itself — ask the user to paste the script content (or "
-            "describe the logic) directly into the chat\n"
+            "- The behavior itself — for a brand-new sim, ask the user to paste the script "
+            "content (or describe the logic) directly into the chat; for a variant of an "
+            "existing sim, read it yourself with read_sim_source instead of asking\n"
             "- Target platform(s): Linux (.sh), Windows (.ps1), or both. BOTH is the "
             "norm on this platform — Windows/Linux parity is an invariant, a new sim "
             "lands on both unless there's a specific reason for one only\n"
@@ -134,9 +298,9 @@ def register(app, hub, ctx):
             "alert type, so the quota/alert-generation machinery can be wired up\n"
             "- Any config knobs it needs (a rate, an interval, a target host, etc.)\n\n"
             "Once you have enough for a complete spec, summarize it clearly in your "
-            "reply and tell the user they can click 'File as Feature Request' when "
-            "they're satisfied — you never file anything yourself; a human always "
-            "reviews and submits.\n\n"
+            "reply (including any proposed script content) and tell the user they can "
+            "click 'File as Feature Request' when they're satisfied — you never file "
+            "anything yourself; a human always reviews and submits.\n\n"
             "Reference material (how simulations actually work on this platform):\n\n"
             + doc_ctx
         )
@@ -175,19 +339,51 @@ def register(app, hub, ctx):
         # a short "yes" reply mid-conversation shouldn't lose the doc context
         # an earlier, more descriptive turn already established.
         user_text = " ".join(m["content"] for m in messages if m["role"] == "user")
-        try:
-            res = await hub.request_response(
-                agent, "HELP_ASK",
-                {"messages": messages, "tools": None, "system": _system_prompt(user_text)},
-                timeout=90.0)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("sim_assistant chat relay failed: %s", e)
-            raise HTTPException(status_code=502, detail=f"Simulation assistant error: {e}")
-        data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
-        if not isinstance(data, dict) or data.get("status") != "SUCCESS":
-            raise HTTPException(status_code=502,
-                                detail=(data or {}).get("message") or "Simulation assistant error")
-        answer = (data.get("assistant") or {}).get("content") or ""
+        system = _system_prompt(user_text)
+
+        # Tool-calling loop (mirrors help_assistant.py's shape): the model may
+        # call list_available_sims/read_sim_source before giving its final
+        # answer. Runs entirely within this one POST — tool calls/results are
+        # NOT echoed back to the client's own history (it only round-trips
+        # user/assistant content), so each POST starts the loop fresh; that's
+        # fine since a prior turn's answer already incorporated whatever it read.
+        turn_messages = list(messages)
+        answer = ""
+        for _ in range(5):
+            try:
+                res = await hub.request_response(
+                    agent, "HELP_ASK",
+                    {"messages": turn_messages, "tools": _SIM_TOOLS, "system": system},
+                    timeout=90.0)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("sim_assistant chat relay failed: %s", e)
+                raise HTTPException(status_code=502, detail=f"Simulation assistant error: {e}")
+            data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
+            if not isinstance(data, dict) or data.get("status") != "SUCCESS":
+                raise HTTPException(status_code=502,
+                                    detail=(data or {}).get("message") or "Simulation assistant error")
+            assistant = data.get("assistant") or {}
+            tool_calls = assistant.get("tool_calls") or []
+            text = assistant.get("content") or ""
+            if not tool_calls:
+                answer = text
+                break
+            turn_messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
+            for tc in tool_calls:
+                fn = tc.get("function") or {}
+                name = fn.get("name") or tc.get("name")
+                raw = fn.get("arguments") if fn else tc.get("arguments")
+                try:
+                    args = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                except Exception:
+                    args = {}
+                out = await _exec_sim_tool(name, args)
+                turn_messages.append({"role": "tool", "tool_call_id": tc.get("id"),
+                                      "name": name, "content": json.dumps(out)[:12000]})
+        else:
+            answer = answer or ("I wasn't able to finish looking up the existing sim source "
+                                "in time — try asking again, or narrow down which sim you mean.")
+
         if not answer.strip():
             answer = ("I didn't get a usable response from the current LLM provider. "
                       "Try again, or switch the AppBuilder provider in Settings.")
