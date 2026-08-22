@@ -478,6 +478,22 @@ def register(app, hub, ctx):
         except Exception as e:
             logger.warning(f"device-detail: console leg failed: {e}")
 
+        # NW module leg: stitch in where this ip/mac lives on the switched
+        # network (which switch/gateway, on what port/VLAN). Reads the hub's
+        # own nw_devices config + per-device cache (no spoke round-trip), so a
+        # searched IP is linked to the NW module the same way it is to
+        # NAC/DHCP/NetBox/Proxmox. Best-effort: never fail device-detail on it.
+        nw_results = []
+        try:
+            from routes.nw import correlate_nw_records
+            nw_devices = (hub.state.system_state.get("global_config", {})
+                          .get("nw_devices", []) or [])
+            nw_results = correlate_nw_records(
+                nw_devices, getattr(hub, "nw_device_cache", {}) or {},
+                ip=identity.get("ip") or ip, mac=identity.get("mac") or mac)
+        except Exception as e:
+            logger.warning(f"device-detail: nw leg failed: {e}")
+
         return {
             "identity": identity,
             "nac":      nac_result,
@@ -486,6 +502,7 @@ def register(app, hub, ctx):
             "proxmox":  px_results,
             "ldap":     ld_results,
             "console":  console_results,
+            "nw":       nw_results,
         }
 
     @app.get("/api/cppm/device-enrich")

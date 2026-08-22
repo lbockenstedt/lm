@@ -73,3 +73,55 @@ def test_scan_creds_strip_inline_secrets_with_vault_ref():
     assert "password" not in rec or not rec.get("password")
     assert "snmp_community" not in rec or not rec.get("snmp_community")
     assert rec.get("username") == "admin"
+
+
+# ── correlate_nw_records (cross-module NW stitch for /api/device-detail) ──────
+from routes.nw import correlate_nw_records
+
+
+def _cache(did, arp=None, macs=None, endpoints=None, interfaces=None):
+    entry = {}
+    if arp is not None:        entry["arp"] = {"status": "SUCCESS", "data": arp}
+    if macs is not None:       entry["macs"] = {"status": "SUCCESS", "data": macs}
+    if endpoints is not None:  entry["endpoints"] = {"status": "SUCCESS", "data": endpoints}
+    if interfaces is not None: entry["interfaces"] = {"status": "SUCCESS", "data": interfaces}
+    return {did: entry}
+
+
+def test_correlate_matches_arp_by_ip():
+    devs = [{"id": "d1", "name": "DIST-SW", "address": "172.16.1.90",
+             "object_type": "aos_switch", "tenant_id": "lrb"}]
+    cache = _cache("d1", arp=[{"ip": "172.16.1.16", "mac": "aa:bb:cc:dd:ee:ff",
+                              "interface": "1/1/5", "vlan": "10"}])
+    hits = correlate_nw_records(devs, cache, ip="172.16.1.16")
+    assert len(hits) == 1
+    assert hits[0]["name"] == "DIST-SW"
+    assert hits[0]["is_self"] is False
+    assert hits[0]["arp"][0]["interface"] == "1/1/5"
+
+
+def test_correlate_matches_mac_normalized():
+    devs = [{"id": "d1", "name": "SW", "address": "10.0.0.1"}]
+    cache = _cache("d1", macs=[{"mac": "AABB.CCDD.EEFF", "interface": "5", "vlan": "1"}])
+    hits = correlate_nw_records(devs, cache, mac="aa:bb:cc:dd:ee:ff")
+    assert len(hits) == 1
+    assert hits[0]["mac"][0]["interface"] == "5"
+
+
+def test_correlate_is_self_when_ip_is_mgmt_address():
+    devs = [{"id": "d1", "name": "DIST-SW", "address": "172.16.1.90"}]
+    hits = correlate_nw_records(devs, {}, ip="172.16.1.90")
+    assert len(hits) == 1 and hits[0]["is_self"] is True
+
+
+def test_correlate_no_match_returns_empty():
+    devs = [{"id": "d1", "name": "SW", "address": "10.0.0.1"}]
+    cache = _cache("d1", arp=[{"ip": "10.0.0.9", "mac": "00:00:00:00:00:01"}])
+    assert correlate_nw_records(devs, cache, ip="172.16.1.16") == []
+
+
+def test_correlate_blank_mac_never_false_matches():
+    devs = [{"id": "d1", "name": "SW", "address": "10.0.0.1"}]
+    cache = _cache("d1", arp=[{"ip": "10.0.0.9", "mac": ""}])
+    assert correlate_nw_records(devs, cache, mac="") == []
+    assert correlate_nw_records(devs, cache, ip=None, mac=None) == []

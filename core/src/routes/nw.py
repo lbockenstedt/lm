@@ -83,6 +83,67 @@ def build_scan_target_pool(targets, subnets, cap):
     return seen, per_source
 
 
+def _nw_norm_mac(mac):
+    """Lowercase hex-only MAC for comparison (drops ``:``/``-``/``.``). Empty
+    string for anything without 12 hex digits so a blank never false-matches."""
+    h = "".join(ch for ch in str(mac or "").lower() if ch in "0123456789abcdef")
+    return h if len(h) == 12 else ""
+
+
+def correlate_nw_records(devices, device_cache, ip=None, mac=None):
+    """Pure cross-module stitch for the NW module: given the configured
+    ``nw_devices`` list + the hub's per-device cache
+    (``{device_id: {arp|macs|interfaces|endpoints: {"data": [...]}}}``), return
+    every NW device that KNOWS about ``ip``/``mac`` — either because it IS that
+    device (its mgmt address == ip → ``is_self``) or because a cached
+    ARP/MAC/endpoint/interface row references the ip/mac (i.e. the host lives on
+    that switch, on a specific port/VLAN).
+
+    Used to add an ``nw`` leg to ``/api/device-detail`` so a searched IP is
+    stitched to where it physically sits on the switched network. Pure (no hub,
+    no I/O) so it is unit-testable without a spoke. Rows are returned verbatim
+    (they already carry ``ip``/``mac``/``interface``/``vlan``)."""
+    ip = (str(ip).strip() if ip else "") or None
+    norm = _nw_norm_mac(mac) if mac else ""
+
+    def _rows(entry, ep):
+        env = entry.get(ep)
+        data = env.get("data") if isinstance(env, dict) else None
+        return data if isinstance(data, list) else []
+
+    def _match(r):
+        if ip and str(r.get("ip", "")).strip() == ip:
+            return True
+        if norm and _nw_norm_mac(r.get("mac", "")) == norm:
+            return True
+        return False
+
+    hits = []
+    for dev in (devices or []):
+        if not isinstance(dev, dict):
+            continue
+        did = dev.get("id")
+        entry = (device_cache or {}).get(did) or {}
+        is_self = bool(ip and str(dev.get("address", "")).strip() == ip)
+        matched = {
+            "arp":        [r for r in _rows(entry, "arp") if _match(r)],
+            "mac":        [r for r in _rows(entry, "macs") if _match(r)],
+            "endpoints":  [r for r in _rows(entry, "endpoints") if _match(r)],
+            "interfaces": [r for r in _rows(entry, "interfaces") if _match(r)],
+        }
+        if is_self or any(matched.values()):
+            hits.append({
+                "device_id":   did,
+                "name":        dev.get("name"),
+                "address":     dev.get("address"),
+                "object_type": dev.get("object_type"),
+                "tenant_id":   dev.get("tenant_id"),
+                "is_self":     is_self,
+                **matched,
+            })
+    return hits
+
+
 def register(app, hub, ctx):
     """Register nw routes on the Hub app."""
     _session_user = ctx._session_user

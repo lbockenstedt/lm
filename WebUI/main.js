@@ -28651,6 +28651,24 @@ function openSearchResult(item) {
     showDeviceDashboard(item);
 }
 
+// Open the Proxmox VNC console for a VM discovered via the device dashboard.
+// The dashboard's proxmox leg (SEARCH_VMS) may surface a VM that isn't in the
+// PXMX page's window._pxmxVms cache that pxmxOpenConsole() looks up, so seed it
+// first, close the dashboard, then delegate to the existing console flow.
+function ddOpenVnc(vm) {
+    if (!vm || !vm.unique_id) { showToast('VM console identifiers unavailable', 'error'); return; }
+    window._pxmxVms = window._pxmxVms || [];
+    if (!window._pxmxVms.find(v => v.unique_id === vm.unique_id)) {
+        window._pxmxVms.push(vm);
+    }
+    document.getElementById('device-dashboard-modal')?.remove();
+    if (typeof pxmxOpenConsole === 'function') {
+        pxmxOpenConsole(vm.unique_id);
+    } else {
+        showToast('Console unavailable in this view', 'error');
+    }
+}
+
 async function showDeviceDashboard(item) {
     document.getElementById('device-dashboard-modal')?.remove();
 
@@ -28741,11 +28759,46 @@ async function showDeviceDashboard(item) {
         // Proxmox
         const px = d.proxmox || [];
         cards.push(card('Proxmox', px.length ? 'bg-orange-50 text-orange-700' : 'bg-slate-50 text-slate-400',
-            px.length ? px.slice(0, 3).map(v => `
-                <div class="text-xs py-1 border-b border-slate-50 last:border-0">
-                    <span class="font-medium text-slate-700">${v.name || '—'}</span>
-                    <span class="text-slate-400 ml-2">${v.type || 'VM'} ${v.ip ? '· ' + v.ip : ''} ${v.cluster ? '· ' + v.cluster : ''}</span>
-                </div>`).join('') : empty));
+            px.length ? px.slice(0, 3).map(v => {
+                const meta = `${v.type || 'VM'} ${v.ip ? '· ' + v.ip : ''} ${v.cluster ? '· ' + v.cluster : ''}`;
+                // VNC console: only when the VM carries the identifiers the
+                // console relay needs (unique_id/vmid/node). Off-repo agents
+                // that don't yet surface them simply render no button.
+                const canVnc = v.unique_id && v.vmid != null && v.node;
+                const vmArg = JSON.stringify({
+                    unique_id: v.unique_id, vmid: v.vmid, node: v.node,
+                    type: v.type || 'qemu', agent_id: v.agent_id || '', name: v.name || ''
+                }).replace(/"/g, '&quot;');
+                const btn = canVnc
+                    ? `<button onclick="ddOpenVnc(${vmArg})" class="text-[11px] px-2 py-1 rounded bg-orange-100 hover:bg-orange-200 text-orange-700 border border-orange-300 font-bold shrink-0">🖥 VNC Console</button>`
+                    : '';
+                return `<div class="flex items-center justify-between gap-2 py-1 border-b border-slate-50 last:border-0">
+                    <div class="min-w-0">
+                        <span class="text-xs font-medium text-slate-700">${v.name || '—'}</span>
+                        <span class="text-slate-400 ml-2 text-[10px]">${meta}</span>
+                    </div>${btn}
+                </div>`;
+            }).join('') : empty));
+
+        // Network (NW): which switch/gateway sees this ip/mac, and where (port /
+        // VLAN) — stitched from the NW module's ARP/MAC/endpoint/interface data.
+        const nwHits = d.nw || [];
+        cards.push(card('Network (NW)', nwHits.length ? 'bg-indigo-50 text-indigo-700' : 'bg-slate-50 text-slate-400',
+            nwHits.length ? nwHits.map(h => {
+                const loc = [];
+                (h.arp || []).forEach(a => loc.push(`ARP ${a.ip || ''} → ${a.mac || ''} @ ${a.interface || '?'}${a.vlan ? ' · vlan ' + a.vlan : ''}`));
+                (h.mac || []).forEach(m => loc.push(`MAC ${m.mac || ''} @ ${m.interface || '?'}${m.vlan ? ' · vlan ' + m.vlan : ''}`));
+                (h.endpoints || []).forEach(e => loc.push(`Endpoint ${e.ip || ''} / ${e.mac || ''} @ ${e.interface || '?'}`));
+                (h.interfaces || []).forEach(i => loc.push(`Iface ${i.name || ''}${i.ip ? ' · ' + i.ip : ''}${i.status ? ' · ' + i.status : ''}`));
+                const selfBadge = h.is_self ? badge('THIS DEVICE', 'bg-indigo-100 text-indigo-700') : '';
+                const lines = loc.length
+                    ? loc.slice(0, 6).map(l => `<div class="text-[10px] text-slate-500 font-mono truncate">${escapeHtml(l)}</div>`).join('')
+                    : (h.is_self ? '' : empty);
+                return `<div class="py-1.5 border-b border-slate-50 last:border-0">
+                    <div class="text-xs font-medium text-slate-700 truncate">${escapeHtml(h.name || h.address || '—')} ${selfBadge}<span class="text-slate-400 ml-1 text-[10px]">${escapeHtml(h.object_type || '')}${h.address ? ' · ' + escapeHtml(h.address) : ''}</span></div>
+                    ${lines}
+                </div>`;
+            }).join('') : empty));
 
         // LDAP
         const ld = d.ldap || [];
