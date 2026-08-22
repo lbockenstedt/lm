@@ -14,6 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from hub_vnc_console import HubVncConsoleMixin  # noqa: E402
 from routes import console_llm_identify as llm  # noqa: E402
+import access  # noqa: E402
 
 
 class _Hub(HubVncConsoleMixin):
@@ -187,3 +188,67 @@ def test_status_recorded_on_success():
     assert rows and rows[0]["status"] == "success"
     assert rows[0]["synced"] == 1
     assert rows[0]["last_device"] == "MIA-SW-1"
+
+
+# ── Cross-tenant attribution guard (tenant-hop hardening) ────────────────────
+# A console spoke's probe payload is spoke-controlled. A compromised/rogue spoke
+# dedicated to tenant "acme" must NOT be able to write a device into another
+# tenant's NetBox inventory by putting that tenant's id in the payload.
+
+def test_dedicated_spoke_cannot_claim_foreign_tenant(monkeypatch):
+    monkeypatch.setattr(access, "tenant_is_shared", lambda tid: False)
+    hub = _Hub()
+    hub.state.system_state = {}
+    _run(hub._handle_console_probe("console-1", {
+        "port_id": "usb-1", "vendor": "hp-procurve",
+        "identity": {"hostname": "VICTIM-SW", "ip": "10.9.9.9"},
+        "banner": "VICTIM-SW> ", "method": "login",
+        "tenant_id": "victim-corp",   # forged claim
+    }))
+    # Synced, but forced back to the spoke's OWN registered tenant.
+    assert hub.synced and hub.synced[0][0] == "NETBOX_SYNC_DEVICES"
+    assert hub.synced[0][1]["tenant_id"] == "acme"
+
+
+def test_matching_claim_is_honored(monkeypatch):
+    monkeypatch.setattr(access, "tenant_is_shared", lambda tid: False)
+    hub = _Hub()
+    hub.state.system_state = {}
+    _run(hub._handle_console_probe("console-1", {
+        "port_id": "usb-1", "vendor": "hp-procurve",
+        "identity": {"hostname": "ACME-SW", "ip": "10.1.1.1"},
+        "banner": "ACME-SW> ", "method": "login",
+        "tenant_id": "acme",   # matches the spoke's registered tenant
+    }))
+    assert hub.synced[0][1]["tenant_id"] == "acme"
+
+
+def test_shared_spoke_claim_requires_prefix_match(monkeypatch):
+    # A SHARED console spoke may attribute a device to a specific tenant, but
+    # only when the device IP is contained in that tenant's prefixes.
+    monkeypatch.setattr(access, "tenant_is_shared", lambda tid: tid == "acme")
+
+    async def _fake_attr(hub, records):
+        ip = (records[0].get("ip") or "")
+        return ({"victim-corp": records} if ip == "10.9.9.9" else {}), 0
+    monkeypatch.setattr(access, "attribute_by_prefix", _fake_attr)
+
+    # IP owned by the claimed tenant → honored.
+    hub = _Hub()
+    hub.state.system_state = {}
+    _run(hub._handle_console_probe("console-1", {
+        "port_id": "usb-1", "vendor": "hp-procurve",
+        "identity": {"hostname": "SW", "ip": "10.9.9.9"},
+        "banner": "SW> ", "method": "login", "tenant_id": "victim-corp",
+    }))
+    assert hub.synced[0][1]["tenant_id"] == "victim-corp"
+
+    # Same claim, IP the tenant does NOT own → refused, falls back to base.
+    hub2 = _Hub()
+    hub2.state.system_state = {}
+    _run(hub2._handle_console_probe("console-1", {
+        "port_id": "usb-1", "vendor": "hp-procurve",
+        "identity": {"hostname": "SW", "ip": "10.2.2.2"},
+        "banner": "SW> ", "method": "login", "tenant_id": "victim-corp",
+    }))
+    assert hub2.synced[0][1]["tenant_id"] == "acme"

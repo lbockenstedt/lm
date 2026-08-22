@@ -245,12 +245,61 @@ class HubVncConsoleMixin:
             logger.warning("console auto AI-identify failed for %s: %s", port_id, e)
             return False
 
+    async def _authorized_probe_tenant(self, spoke_id: str, claimed: Any, device_ip: str) -> str:
+        """Resolve the tenant a console probe result may be written under WITHOUT
+        trusting the spoke's self-declared ``tenant_id``.
+
+        The sender ``spoke_id`` is authenticated; its *registered* tenant is
+        authoritative. A compromised/rogue console spoke must not be able to
+        forge a device into another tenant's NetBox inventory by putting that
+        tenant's id in the (spoke-controlled) probe payload.
+
+          * Console spoke DEDICATED to a tenant (registered, non-shared) → every
+            device it reports is that tenant's; a differing payload ``tenant_id``
+            is refused and logged (mirrors ``_console_tenant_ok``: a dedicated
+            agent's ports are all its own tenant's).
+          * SHARED / unassigned console spoke → a per-port override to a specific
+            tenant is honored only when the identified device IP is contained in
+            that tenant's NetBox prefixes (hub-side prefix attribution, the same
+            containment rule ``attribute_by_prefix`` uses), so it still cannot
+            attribute a device to a tenant that doesn't own the address.
+
+        Returns the authorized tenant id, or the spoke's own (possibly empty /
+        shared) tenant as the fail-closed fallback — the caller's slug check then
+        skips the sync when that resolves to nothing.
+        """
+        import access
+        base = (self.state.get_spoke_tenant(spoke_id) or "").strip()
+        claimed = str(claimed or "").strip()
+        if not claimed or claimed == base:
+            return base
+        # Dedicated spoke: its registered tenant is authoritative, full stop.
+        if base and not access.tenant_is_shared(base):
+            logger.warning(
+                "console probe from %s claimed tenant %s but spoke is dedicated to %s; "
+                "forcing %s (cross-tenant attribution refused)", spoke_id, claimed, base, base)
+            return base
+        # Shared / unassigned spoke with a differing claim: corroborate the claim
+        # against the claimed tenant's prefixes before honoring it.
+        try:
+            buckets, _ = await access.attribute_by_prefix(self, [{"ip": device_ip or ""}])
+        except Exception:  # noqa: BLE001
+            buckets = {}
+        if device_ip and claimed in buckets:
+            return claimed
+        logger.warning(
+            "console probe from %s claimed tenant %s not corroborated by prefix for ip=%r; "
+            "refusing cross-tenant attribution", spoke_id, claimed, device_ip)
+        return base
+
     async def _handle_console_probe(self, spoke_id: str, data: Dict[str, Any]) -> None:
         """A console spoke auto-identified a device — match/create a NetBox device
         from the harvested identity (best-effort, event-driven). Uses the port's
-        EFFECTIVE tenant (per-port override in the payload, else the console
-        agent's tenant). replace=False so we upsert one device, not overwrite the
-        tenant's discovered set. Serial is surfaced in the port UI; NetBox gets
+        EFFECTIVE tenant, resolved hub-side by ``_authorized_probe_tenant`` (a
+        per-port override in the payload is honored only when the sender spoke is
+        actually authorized to attribute to it — never blindly trusted). Uses
+        replace=False so we upsert one device, not overwrite the tenant's
+        discovered set. Serial is surfaced in the port UI; NetBox gets
         ip/mac/hostname (the sync_devices device shape)."""
         identity = data.get("identity") or {}
         ip = str(identity.get("ip") or "").strip()
@@ -284,7 +333,7 @@ class HubVncConsoleMixin:
         if not netbox:
             logger.debug("console probe from %s: no NetBox spoke; device not synced", spoke_id)
             return
-        tenant_id = str(data.get("tenant_id") or "").strip() or (self.state.get_spoke_tenant(spoke_id) or "")
+        tenant_id = await self._authorized_probe_tenant(spoke_id, data.get("tenant_id"), ip)
         tenant_cfg = self.state.get_tenant(tenant_id) or {}
         tenant_name = tenant_cfg.get("name") or tenant_id
         slug = str(tenant_cfg.get("netbox_tenant_slug") or "").strip()
