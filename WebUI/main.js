@@ -26653,6 +26653,17 @@ async function editNwDevice(id) {
     document.getElementById('nw-device-modal').dataset.deviceId = id;
 }
 
+// Strict IPv4 validation for a network device's management address: exactly
+// four dot-separated 0-255 octets, no leading-zero octets. Mirrors the backend
+// validate_nw_address (ipaddress.IPv4Address) so the client and server agree.
+function isValidIPv4(s) {
+    const parts = String(s == null ? '' : s).trim().split('.');
+    if (parts.length !== 4) return false;
+    return parts.every(p => /^\d{1,3}$/.test(p) &&
+                            !(p.length > 1 && p[0] === '0') &&
+                            parseInt(p, 10) <= 255);
+}
+
 async function saveNwDevice() {
     const modal = document.getElementById('nw-device-modal');
     const id = modal.dataset.deviceId;
@@ -26684,13 +26695,9 @@ async function saveNwDevice() {
         showToast('Management IP address is required.', 'error');
         return;
     }
-    {
-        const p = config.address.split('.');
-        if (p.length === 4 && p.every(x => /^\d+$/.test(x)) &&
-            p.some(x => parseInt(x, 10) > 255 || (x.length > 1 && x[0] === '0'))) {
-            showToast(`'${config.address}' is not a valid IPv4 address (each octet must be 0-255).`, 'error');
-            return;
-        }
+    if (!isValidIPv4(config.address)) {
+        showToast(`'${config.address}' is not a valid IPv4 address.`, 'error');
+        return;
     }
 
     try {

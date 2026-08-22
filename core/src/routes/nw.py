@@ -1,4 +1,6 @@
 """Network-devices routes + multi-instance product CRUD (_instance_crud)."""
+import ipaddress
+
 import instance_vault
 from api import (
     HTTPException, Request, _hub_msg, _unwrap_spoke, access, get_spoke_or_503,
@@ -7,24 +9,24 @@ from api import (
 
 
 def validate_nw_address(addr):
-    """Require a non-empty management address and reject a malformed dotted-quad
-    IP (e.g. a typo'd octet like ``1721.6.1.90``) — that would otherwise fail
-    opaquely on the spoke as an unresolvable hostname (``Name or service not
-    known``). Anything that isn't four dot-separated numeric groups is treated
-    as a hostname and allowed. Raises HTTPException(400). Shared by the
-    ``/setup/nw-devices`` (admin) and ``/tenant/devices/nw-devices``
+    """Validate a network device's management address: it must be PRESENT and a
+    properly-formatted IPv4 address. Anything else — empty, a hostname, a
+    partial address, or a typo'd octet like ``1721.6.1.90`` — is rejected with a
+    clear 400 instead of failing opaquely on the spoke (an unresolvable value
+    surfaces there as ``Name or service not known``). ``ipaddress.IPv4Address``
+    enforces exactly four 0-255 octets and rejects leading-zero octets. Shared
+    by the ``/setup/nw-devices`` (admin) and ``/tenant/devices/nw-devices``
     (tenant-admin) CRUD paths so both enforce the same rule."""
     a = str(addr or "").strip()
     if not a:
         raise HTTPException(status_code=400,
                             detail="Management IP address is required")
-    parts = a.split(".")
-    if len(parts) == 4 and all(p.isdigit() for p in parts):
-        if any(len(p) > 1 and p[0] == "0" for p in parts) or \
-           any(int(p) > 255 for p in parts):
-            raise HTTPException(
-                status_code=400,
-                detail=f"'{a}' is not a valid IPv4 address (each octet must be 0-255)")
+    try:
+        ipaddress.IPv4Address(a)
+    except ipaddress.AddressValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"'{a}' is not a valid IPv4 address")
 
 
 def register(app, hub, ctx):
