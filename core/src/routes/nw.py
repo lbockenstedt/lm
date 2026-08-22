@@ -29,6 +29,60 @@ def validate_nw_address(addr):
             detail=f"'{a}' is not a valid IPv4 address")
 
 
+def build_scan_target_pool(targets, subnets, cap):
+    """Pure IPv4 host-IP pool builder for the network scanner: explicit host IPs
+    (``targets``) + expanded CIDRs (``subnets``), deduped, IPv4-only, bounded to
+    ``cap`` total hosts. Returns ``(ordered_ips, per_source_counts)``. Large
+    prefixes are expanded host-by-host until the cap is hit (a /8 won't blow up
+    the scan). Shared by ``_aggregate_scan_targets`` so the risky bounded
+    expansion is unit-testable without a spoke."""
+    seen = []
+    seen_set = set()
+    per_source = {}
+
+    def _add(ip):
+        ip = str(ip or "").split("/")[0].strip()
+        if not ip or ip in seen_set:
+            return False
+        try:
+            if not isinstance(ipaddress.ip_address(ip), ipaddress.IPv4Address):
+                return False
+        except ValueError:
+            return False
+        seen_set.add(ip)
+        seen.append(ip)
+        return True
+
+    c = 0
+    for t in (targets or []):
+        if len(seen) >= cap:
+            break
+        if _add(t):
+            c += 1
+    if c:
+        per_source["explicit"] = c
+
+    c = 0
+    for s in (subnets or []):
+        if len(seen) >= cap:
+            break
+        try:
+            net = ipaddress.ip_network(str(s).strip(), strict=False)
+        except ValueError:
+            continue
+        if not isinstance(net, ipaddress.IPv4Network):
+            continue
+        hosts = net.hosts() if net.prefixlen < 31 else iter([net.network_address])
+        for host in hosts:
+            if len(seen) >= cap:
+                break
+            if _add(str(host)):
+                c += 1
+    if c:
+        per_source["subnets"] = c
+    return seen, per_source
+
+
 def register(app, hub, ctx):
     """Register nw routes on the Hub app."""
     _session_user = ctx._session_user
@@ -499,6 +553,348 @@ def register(app, hub, ctx):
             logger.exception("run_nw_netbox_import failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    # ── Network scan (fingerprint discovery) ────────────────────────────────
+    _SCAN_OBJECT_TYPES = ("aos_switch", "cx_switch", "ex_switch", "gateway")
+
+    def _resolve_nw_scan_spoke(hub, sess, tenant_id, requested_spoke_id):
+        """The connected nw spoke the scan should run on. Prefer an explicit
+        request spoke_id (when connected), else the tenant's nw spoke, else the
+        shared nw spoke, else (admin only) any connected nw spoke."""
+        def _up(sid):
+            return sid and hub._primary_key(sid) in hub.active_connections
+        if requested_spoke_id and _up(requested_spoke_id):
+            return requested_spoke_id
+        sid = (hub.get_nw_spoke_for_shared() if access.tenant_is_shared(tenant_id)
+               else hub.get_nw_spoke_for_tenant(tenant_id)) if tenant_id else None
+        if _up(sid):
+            return sid
+        if _is_admin(sess):
+            for s in (hub.get_all_spokes_by_type("nw") or []):
+                if _up(s) and hub.approved_modules.get(s, False):
+                    return s
+        return ""
+
+    async def _aggregate_scan_targets(hub, tenant_id, sources, extra_subnets,
+                                      extra_targets, cap):
+        """Build the candidate host-IP list for a tenant scan.
+
+        Combines (best-effort, each source guarded):
+          * explicit ``extra_targets`` (host IPs) and ``extra_subnets`` (CIDRs),
+          * NetBox tenant prefixes (``netbox``) expanded to hosts,
+          * NAC/DHCP/DNS known host IPs (``nac`` / ``dhcp`` / ``dns``) pulled
+            from the tenant's bound spoke and parsed generically for any
+            ip/ip_address/address field.
+        Deduped, IPv4-only, bounded to ``cap``. Returns ``(targets, per_source)``
+        where ``per_source`` counts each source's contribution (for the UI)."""
+        sources = set(sources or [])
+        seen, per_source = build_scan_target_pool(extra_targets, extra_subnets, cap)
+        seen_set = set(seen)
+
+        def _add(ip):
+            ip = str(ip or "").split("/")[0].strip()
+            if not ip or ip in seen_set or len(seen) >= cap:
+                return False
+            try:
+                if not isinstance(ipaddress.ip_address(ip), ipaddress.IPv4Address):
+                    return False
+            except ValueError:
+                return False
+            seen_set.add(ip)
+            seen.append(ip)
+            return True
+
+        def _expand(cidr):
+            n = 0
+            try:
+                net = ipaddress.ip_network(str(cidr).strip(), strict=False)
+            except ValueError:
+                return 0
+            if not isinstance(net, ipaddress.IPv4Network):
+                return 0
+            hosts = net.hosts() if net.prefixlen < 31 else iter([net.network_address])
+            for host in hosts:
+                if len(seen) >= cap:
+                    break
+                if _add(str(host)):
+                    n += 1
+            return n
+
+        # NetBox tenant prefixes.
+        if "netbox" in sources and tenant_id and len(seen) < cap:
+            try:
+                prefixes = await access.fetch_tenant_prefixes(hub, tenant_id)
+            except Exception:
+                prefixes = []
+            c = 0
+            for p in (prefixes or []):
+                if len(seen) >= cap:
+                    break
+                c += _expand(p)
+            if c:
+                per_source["netbox"] = c
+
+        # NAC / DHCP / DNS host IPs (generic ip-field parse; fully guarded).
+        async def _pull(source, spoke_getter, command, payload=None):
+            if source not in sources or len(seen) >= cap:
+                return
+            try:
+                sid = spoke_getter(tenant_id) if tenant_id else None
+                if not sid or hub._primary_key(sid) not in hub.active_connections:
+                    return
+                result = await hub.request_response(sid, command, payload or {}, timeout=30.0)
+                data = access.unwrap_spoke(result)
+            except Exception as e:
+                logger.debug("scan aggregate %s skipped: %s", source, e)
+                return
+            rows = []
+            if isinstance(data, dict):
+                for key in ("endpoints", "leases", "records", "data", "results"):
+                    if isinstance(data.get(key), list):
+                        rows = data[key]
+                        break
+            elif isinstance(data, list):
+                rows = data
+            c = 0
+            for r in rows:
+                if len(seen) >= cap:
+                    break
+                if not isinstance(r, dict):
+                    continue
+                ip = r.get("ip") or r.get("ip_address") or r.get("address") or r.get("value")
+                if _add(ip):
+                    c += 1
+            if c:
+                per_source[source] = c
+
+        await _pull("nac", hub.get_cppm_spoke_for_tenant, "LIST_ENDPOINTS")
+        await _pull("dhcp", hub.get_dhcp_spoke_for_tenant, "DHCP_LIST_LEASES")
+        await _pull("dns", hub.get_dns_spoke_for_tenant, "DNS_LIST")
+
+        return seen, per_source
+
+    def _nw_scan_config(hub):
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        cfg = dict(gc.get("nw_scan", {}) or {})
+        cfg.setdefault("enabled", False)
+        cfg.setdefault("crawl", False)
+        cfg.setdefault("auto_add", False)
+        cfg.setdefault("credential_ids", [])
+        cfg.setdefault("ip_sources", ["netbox"])
+        cfg.setdefault("tcp_ports", [22, 443, 80, 23])
+        cfg.setdefault("try_snmp", True)
+        cfg.setdefault("use_nmap", False)
+        cfg.setdefault("max_targets", 1024)
+        cfg.setdefault("concurrency", 32)
+        cfg.setdefault("spoke_id", "")
+        return cfg
+
+    @app.get("/setup/nw-scan-config")
+    async def get_nw_scan_config(request: Request):
+        """Network-scan configuration: whether the nw spoke may scan/crawl, the
+        selected scan-credential set ids, IP sources, ports + bounds. Read by the
+        WebUI scan card."""
+        return {"nw_scan": _nw_scan_config(app.state.hub)}
+
+    @app.post("/setup/nw-scan-config")
+    async def set_nw_scan_config(request: Request):
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not (_is_admin(sess) or _is_tenant_admin(sess)):
+            raise HTTPException(status_code=403, detail="admin or tenant-admin required")
+        data = await request.json()
+        cfg = data.get("config", data) or {}
+        ports = cfg.get("tcp_ports")
+        if isinstance(ports, str):
+            ports = [p.strip() for p in ports.split(",") if p.strip()]
+        try:
+            ports = [int(p) for p in (ports or [22, 443, 80, 23])]
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="tcp_ports must be integers")
+        clean = {
+            "enabled": bool(cfg.get("enabled", False)),
+            "crawl": bool(cfg.get("crawl", False)),
+            "auto_add": bool(cfg.get("auto_add", False)),
+            "try_snmp": bool(cfg.get("try_snmp", True)),
+            "use_nmap": bool(cfg.get("use_nmap", False)),
+            "credential_ids": [str(x) for x in (cfg.get("credential_ids") or []) if str(x).strip()],
+            "ip_sources": [str(x) for x in (cfg.get("ip_sources") or ["netbox"]) if str(x).strip()],
+            "tcp_ports": ports,
+            "max_targets": max(1, min(int(cfg.get("max_targets") or 1024), 4096)),
+            "concurrency": max(1, min(int(cfg.get("concurrency") or 32), 128)),
+            "spoke_id": str(cfg.get("spoke_id") or "").strip(),
+        }
+        gc = hub.state.system_state.get("global_config", {})
+        gc["nw_scan"] = clean
+        hub.state.system_state["global_config"] = gc
+        hub.state._mark_dirty()
+        return {"status": "ok", "nw_scan": clean}
+
+    @app.post("/setup/nw-scan/run")
+    async def run_nw_scan(request: Request):
+        """Run a fingerprint scan on the nw spoke and (optionally) auto-add the
+        identified manageable devices to the tenant fleet.
+
+        Body (all optional; falls back to the saved ``nw_scan`` config):
+          ``tenant``, ``credential_ids``, ``ip_sources``, ``subnets`` (CIDRs),
+          ``targets`` (explicit IPs), ``crawl``, ``dry_run`` (default true —
+          preview only), ``spoke_id``.
+
+        Tenant-scoped: a tenant-admin scans only their own tenant (targets are
+        aggregated from that tenant's inventory + they may only add devices bound
+        to their tenant's spoke). Admin may scan any tenant / the shared tenant.
+        Devices are added tagged ``source="scanned"`` with the winning scan
+        credential's vault reference so future fleet pushes overlay the secret."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not (_is_admin(sess) or _is_tenant_admin(sess)):
+            raise HTTPException(status_code=403, detail="admin or tenant-admin required")
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        saved = _nw_scan_config(hub)
+
+        # Resolve the tenant to scan. A tenant-admin is pinned to their own
+        # tenant; an admin may name any tenant (default: the shared tenant).
+        req_tenant = str(data.get("tenant") or "").strip()
+        if _is_admin(sess):
+            tenant_id = req_tenant or access.shared_tenant_id() or ""
+        else:
+            own = ((sess or {}).get("user", {}).get("tenants")
+                   or [(sess or {}).get("user", {}).get("tenant_id")])
+            own = [t for t in own if t]
+            if req_tenant and req_tenant not in own:
+                raise HTTPException(status_code=403, detail="You may only scan your own tenant")
+            tenant_id = req_tenant or (own[0] if own else "")
+            if not tenant_id:
+                raise HTTPException(status_code=400, detail="No tenant to scan")
+
+        spoke_id = _resolve_nw_scan_spoke(
+            hub, sess, tenant_id, str(data.get("spoke_id") or saved.get("spoke_id") or "").strip())
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="Network Devices spoke not connected")
+
+        # Assemble the candidate credential sets (from the saved config or the
+        # request), overlaying each set's vault secret just before the push.
+        cred_ids = [str(x) for x in (data.get("credential_ids") or saved.get("credential_ids") or [])]
+        all_sets = (hub.state.system_state.get("global_config", {}) or {}).get("nw_scan_credentials", []) or []
+        chosen = [c for c in all_sets if isinstance(c, dict) and c.get("id") in set(cred_ids)]
+        # Tenant-admin may only use credential sets visible to them.
+        if not _is_admin(sess):
+            chosen = [c for c in chosen
+                      if access.spoke_visible_to_session(sess, c.get("tenant_id", ""))]
+        if not chosen:
+            raise HTTPException(status_code=400,
+                                detail="Select at least one accessible scan credential set")
+        overlaid = await instance_vault.overlay_many(hub, chosen, "nw_scan_credentials")
+        push_creds = [{
+            "id": c.get("id"), "name": c.get("name") or c.get("id"),
+            "username": c.get("username") or c.get("user") or "",
+            "password": c.get("password") or "",
+            "enable_secret": c.get("enable_secret") or "",
+            "snmp_community": c.get("snmp_community") or "",
+        } for c in overlaid]
+
+        ip_sources = data.get("ip_sources") or saved.get("ip_sources") or ["netbox"]
+        cap = max(1, min(int(data.get("max_targets") or saved.get("max_targets") or 1024), 4096))
+        targets, per_source = await _aggregate_scan_targets(
+            hub, tenant_id, ip_sources, data.get("subnets") or [],
+            data.get("targets") or [], cap)
+        if not targets:
+            return {"status": "ok", "message": "No candidate IPs found for this tenant.",
+                    "targets": 0, "sources": per_source, "identified": [], "added": []}
+
+        options = {
+            "tcp_ports": saved.get("tcp_ports") or [22, 443, 80, 23],
+            "try_snmp": bool(saved.get("try_snmp", True)),
+            "use_nmap": bool(saved.get("use_nmap", False)),
+            "concurrency": int(saved.get("concurrency") or 32),
+            "crawl": bool(data.get("crawl", saved.get("crawl", False))),
+            "max_targets": cap,
+            "max_depth": int(data.get("max_depth") or 2),
+        }
+        try:
+            result = await hub.request_response(
+                spoke_id, "NW_SCAN",
+                {"targets": targets, "credentials": push_creds, "options": options,
+                 "tenant": tenant_id},
+                timeout=max(60.0, min(len(targets) * 2.0, 900.0)))
+            scan = access.unwrap_spoke(result)
+        except Exception as e:
+            logger.exception("run_nw_scan failed")
+            raise HTTPException(status_code=500, detail=f"scan failed: {e}")
+
+        identified = (scan or {}).get("identified", []) if isinstance(scan, dict) else []
+
+        # Existing addresses for this tenant (dedup) — an identified device that
+        # is already in the fleet (own or shared) is reported but not re-added.
+        gc = hub.state.system_state.get("global_config", {})
+        devices = gc.get("nw_devices", []) or []
+        known = {str((d or {}).get("address", "")).strip()
+                 for d in devices if isinstance(d, dict)
+                 and (d.get("tenant_id", "") in (tenant_id, access.shared_tenant_id()))}
+        by_cred = {c.get("id"): c for c in chosen}
+
+        dry_run = bool(data.get("dry_run", True)) or not bool(
+            data.get("auto_add", saved.get("auto_add", False)))
+        added, preview = [], []
+        for dev in identified:
+            addr = str(dev.get("address", "")).strip()
+            if not addr or addr in known:
+                continue
+            cred_set = by_cred.get(dev.get("credential_id")) or (chosen[0] if chosen else {})
+            entry = {
+                "name": dev.get("hostname") or addr,
+                "object_type": dev.get("object_type"),
+                "address": addr,
+                "os": dev.get("os", ""),
+                "method": dev.get("method"),
+                "credential_id": dev.get("credential_id"),
+            }
+            if dev.get("object_type") not in _SCAN_OBJECT_TYPES:
+                continue
+            if dry_run:
+                preview.append(entry)
+                continue
+            # Auto-add: build a fleet device that reuses the winning credential
+            # set's vault reference (so future pushes overlay the same secret).
+            new_dev = {
+                "id": str(uuid.uuid4()),
+                "name": entry["name"],
+                "object_type": entry["object_type"],
+                "address": addr,
+                "transport": "auto",
+                "username": cred_set.get("username") or cred_set.get("user") or "",
+                "tenant_id": tenant_id,
+                "spoke_id": spoke_id,
+                "source": "scanned",
+            }
+            ref = cred_set.get("vault_credential")
+            if ref:
+                new_dev["vault_credential"] = ref
+            devices.append(new_dev)
+            known.add(addr)
+            added.append(new_dev)
+
+        if added:
+            gc["nw_devices"] = devices
+            hub.state.system_state["global_config"] = gc
+            hub.state._mark_dirty()
+            await _nw_push_fleet(hub, spoke_id)
+
+        return {
+            "status": "ok",
+            "tenant": tenant_id,
+            "spoke_id": spoke_id,
+            "targets": len(targets),
+            "sources": per_source,
+            "scanned": (scan or {}).get("scanned", 0) if isinstance(scan, dict) else 0,
+            "identified": identified,
+            "dry_run": dry_run,
+            "preview": preview,
+            "added": added,
+        }
+
     @app.post("/setup/nw-devices")
     async def add_nw_device(request: Request):
         hub = app.state.hub
@@ -798,6 +1194,11 @@ def register(app, hub, ctx):
             "api_token": c.get("api_token") or c.get("token"),
         },
     )
+    # Scan credential sets: per-tenant vault-backed SSH/SNMP credentials the
+    # fingerprint scanner tries against discovered IPs. Save-only (no
+    # payload_fn) — never pushed to a spoke as config; overlaid on demand at
+    # scan time by /setup/nw-scan/run.
+    _instance_crud("nw-scan-credentials", "nw_scan_credentials")
 
     @app.post("/setup/ipam/apply-schema", operation_id="ipam_apply_schema")
     async def ipam_apply_schema():

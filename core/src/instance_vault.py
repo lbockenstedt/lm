@@ -69,6 +69,16 @@ SECRET_FIELDS = {
         "api_token":      ("api_token", "token", "apikey", "api_key", "key", "value"),
         "snmp_community": ("snmp_community", "community"),
     },
+    "nw_scan_credentials": {
+        # A per-tenant network-scan credential set: the candidate SSH login
+        # password + enable secret + SNMP community the fingerprint scanner
+        # tries against discovered IPs. Same secret aliases as nw_devices so a
+        # Credential Vault "Console"/"Generic" secret supplies the password and a
+        # separate community can be typed inline or vaulted.
+        "password":       ("password", "secret", "apikey", "api_key", "key", "value"),
+        "enable_secret":  ("enable_secret", "enable", "enable_password"),
+        "snmp_community": ("snmp_community", "community"),
+    },
 }
 
 
@@ -93,6 +103,12 @@ NONSECRET_VAULT_FIELDS = {
         # resolved vault credential actually carries one. Without this, a
         # vault-backed SSH device gets its password but an empty username, and
         # every poll fails with "device address/username not configured".
+        "username": ("username", "user"),
+    },
+    "nw_scan_credentials": {
+        # The scan credential set's SSH login username — same rationale as
+        # nw_devices: overlaid (not stripped) so a vault "Console" secret can
+        # supply both username + password for the scanner.
         "username": ("username", "user"),
     },
 }

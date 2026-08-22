@@ -7624,6 +7624,61 @@ function _renderSetupModuleMgmtTile(content) {
                     </div>
                 </div>
             </div>
+            <div class="${card}">
+                <div class="flex items-center justify-between mb-1">
+                    <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Network Scan — Discovery ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                    <button onclick="showAddInstanceModal('nwscan')" class="${btnSecCls} text-xs">+ Add Scan Credential</button>
+                </div>
+                <p class="text-xs text-slate-400 mb-3">Fingerprint the tenant's known IPs (from NetBox / NAC / DHCP / DNS) with the selected scan credentials — the nw spoke port-probes each address and tries SSH / SNMP to identify Aruba/HPE/Juniper switches &amp; gateways. Identified, not-already-known hardware can be auto-added to the fleet (tagged <code>scanned</code>). Optionally crawl LLDP neighbors to expand beyond the inventory. Credentials are vaulted; secrets are never logged.</p>
+                <div id="nwscan-instances-list" class="space-y-2 mb-4"><p class="text-xs text-slate-400 italic animate-pulse">Loading credentials…</p></div>
+                <div class="space-y-3">
+                    <div class="flex flex-wrap gap-4">
+                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-enabled" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500"> Enable scanning</label>
+                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-crawl" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500"> Crawl LLDP neighbors</label>
+                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-autoadd" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500"> Auto-add discovered</label>
+                        <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-snmp" class="rounded border-slate-300 text-[#01A982] focus:ring-green-500" checked> Try SNMP</label>
+                    </div>
+                    <div class="space-y-1">
+                        <label class="text-xs text-slate-500 uppercase font-bold">IP sources</label>
+                        <div class="flex flex-wrap gap-4">
+                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-netbox" class="rounded border-slate-300 text-[#01A982]" checked> NetBox prefixes</label>
+                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-nac" class="rounded border-slate-300 text-[#01A982]"> NAC endpoints</label>
+                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-dhcp" class="rounded border-slate-300 text-[#01A982]"> DHCP leases</label>
+                            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwscan-src-dns" class="rounded border-slate-300 text-[#01A982]"> DNS records</label>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="space-y-1">
+                            <label class="text-xs text-slate-500 uppercase font-bold">Extra subnets (CIDR, comma/space/newline)</label>
+                            <textarea id="nwscan-subnets" rows="2" placeholder="10.0.0.0/24, 192.168.1.0/24" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500"></textarea>
+                        </div>
+                        <div class="space-y-1">
+                            <label class="text-xs text-slate-500 uppercase font-bold">Extra target IPs</label>
+                            <textarea id="nwscan-targets" rows="2" placeholder="10.0.0.1, 10.0.0.2" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm font-mono outline-none focus:ring-2 focus:ring-green-500"></textarea>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-3 gap-4">
+                        <div class="space-y-1">
+                            <label class="text-xs text-slate-500 uppercase font-bold">TCP ports</label>
+                            <input type="text" id="nwscan-ports" placeholder="22, 443, 80, 23" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        </div>
+                        <div class="space-y-1">
+                            <label class="text-xs text-slate-500 uppercase font-bold">Max targets</label>
+                            <input type="number" id="nwscan-maxtargets" min="1" max="4096" placeholder="1024" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        </div>
+                        <div class="space-y-1">
+                            <label class="text-xs text-slate-500 uppercase font-bold">Concurrency</label>
+                            <input type="number" id="nwscan-concurrency" min="1" max="128" placeholder="32" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <button onclick="saveNwScanConfig(this)" class="${btnSecCls}">Save config</button>
+                        <button onclick="runNwScan(this, true)" class="${btnCls} ml-auto">Scan now (preview)</button>
+                        <button onclick="runNwScan(this, false)" class="${btnCls}">Scan &amp; add</button>
+                    </div>
+                    <div id="nwscan-results" class="text-xs"></div>
+                </div>
+            </div>
             ${isAdmin() ? `<div class="${card}">
                 <div class="flex items-center justify-between mb-1">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">NetBox → Seed Device Catalog</h3>
@@ -7660,6 +7715,8 @@ function _renderSetupModuleMgmtTile(content) {
     loadAllDevices();
     loadNwPollConfig();
     loadNwNetboxImport();
+    loadInstances('nwscan');
+    loadNwScanConfig();
     loadTruenasAppliances();
     loadTruenasPollConfig();
 }
@@ -8093,6 +8150,126 @@ async function runNwNetboxImport(btn) {
         }
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
     finally { if (btn) { btn.disabled = false; btn.textContent = 'Import now'; } }
+}
+
+// ── Network Scan (discovery) config + run (Setup → Module Management) ────────
+function _nwScanParseList(v) {
+    return String(v || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+}
+
+async function loadNwScanConfig() {
+    if (!document.getElementById('nwscan-enabled')) return;
+    try {
+        const r = await setupFetch('/setup/nw-scan-config');
+        if (!r.ok) return;
+        const cfg = (await r.json()).nw_scan || {};
+        const set = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+        const val = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+        set('nwscan-enabled', cfg.enabled);
+        set('nwscan-crawl', cfg.crawl);
+        set('nwscan-autoadd', cfg.auto_add);
+        set('nwscan-snmp', cfg.try_snmp !== false);
+        const srcs = new Set(cfg.ip_sources || ['netbox']);
+        set('nwscan-src-netbox', srcs.has('netbox'));
+        set('nwscan-src-nac', srcs.has('nac'));
+        set('nwscan-src-dhcp', srcs.has('dhcp'));
+        set('nwscan-src-dns', srcs.has('dns'));
+        val('nwscan-ports', (cfg.tcp_ports || [22, 443, 80, 23]).join(', '));
+        val('nwscan-maxtargets', cfg.max_targets || 1024);
+        val('nwscan-concurrency', cfg.concurrency || 32);
+    } catch (e) { /* leave defaults */ }
+}
+
+function _nwScanSources() {
+    const s = [];
+    if (document.getElementById('nwscan-src-netbox')?.checked) s.push('netbox');
+    if (document.getElementById('nwscan-src-nac')?.checked) s.push('nac');
+    if (document.getElementById('nwscan-src-dhcp')?.checked) s.push('dhcp');
+    if (document.getElementById('nwscan-src-dns')?.checked) s.push('dns');
+    return s;
+}
+
+function _nwScanConfigBody() {
+    return {
+        enabled: !!document.getElementById('nwscan-enabled')?.checked,
+        crawl: !!document.getElementById('nwscan-crawl')?.checked,
+        auto_add: !!document.getElementById('nwscan-autoadd')?.checked,
+        try_snmp: !!document.getElementById('nwscan-snmp')?.checked,
+        ip_sources: _nwScanSources(),
+        tcp_ports: _nwScanParseList(document.getElementById('nwscan-ports')?.value)
+            .map(p => parseInt(p, 10)).filter(n => !isNaN(n)),
+        max_targets: parseInt(document.getElementById('nwscan-maxtargets')?.value, 10) || 1024,
+        concurrency: parseInt(document.getElementById('nwscan-concurrency')?.value, 10) || 32,
+    };
+}
+
+async function saveNwScanConfig(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const r = await setupFetch('/setup/nw-scan-config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: _nwScanConfigBody() }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) showToast('Scan configuration saved.', 'success');
+        else showToast('Failed to save: ' + (d.detail || r.status), 'error');
+    } catch (e) {
+        showToast('Error saving: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save config'; }
+    }
+}
+
+async function runNwScan(btn, dryRun) {
+    const out = document.getElementById('nwscan-results');
+    const label = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = dryRun ? 'Scanning…' : 'Scanning & adding…'; }
+    if (out) out.innerHTML = '<p class="text-slate-400 italic animate-pulse">Scanning — this can take a while for large subnets…</p>';
+    try {
+        const body = {
+            dry_run: !!dryRun,
+            auto_add: !dryRun,
+            crawl: !!document.getElementById('nwscan-crawl')?.checked,
+            ip_sources: _nwScanSources(),
+            subnets: _nwScanParseList(document.getElementById('nwscan-subnets')?.value),
+            targets: _nwScanParseList(document.getElementById('nwscan-targets')?.value),
+            max_targets: parseInt(document.getElementById('nwscan-maxtargets')?.value, 10) || 1024,
+        };
+        const r = await setupFetch('/setup/nw-scan/run', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { if (out) out.innerHTML = `<p class="text-red-500">Scan failed: ${escapeHtml(d.detail || String(r.status))}</p>`; return; }
+        _renderNwScanResults(d);
+        if (!dryRun && (d.added || []).length) { showToast(`Added ${d.added.length} discovered device(s).`, 'success'); loadAllDevices(); }
+    } catch (e) {
+        if (out) out.innerHTML = `<p class="text-red-500">Error: ${escapeHtml(e.message)}</p>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = label; }
+    }
+}
+
+function _renderNwScanResults(d) {
+    const out = document.getElementById('nwscan-results');
+    if (!out) return;
+    const rows = (d.added && d.added.length) ? d.added : (d.preview || []);
+    const srcTxt = Object.entries(d.sources || {}).map(([k, v]) => `${k}:${v}`).join(' · ') || 'none';
+    let html = `<div class="mt-2 p-3 bg-slate-50 border border-slate-200 rounded-md">
+        <p class="text-slate-600"><b>${d.targets || 0}</b> target(s) scanned (${escapeHtml(srcTxt)}) · <b>${(d.identified || []).length}</b> identified · <b>${d.dry_run ? (d.preview || []).length + ' to add (preview)' : (d.added || []).length + ' added'}</b></p>`;
+    if (rows.length) {
+        html += '<table class="w-full mt-2 text-left"><thead><tr class="text-slate-400 uppercase text-[10px]"><th class="py-1">Address</th><th>Type</th><th>Name</th><th>OS</th><th>Via</th></tr></thead><tbody>';
+        for (const dev of rows) {
+            html += `<tr class="border-t border-slate-100"><td class="py-1 font-mono">${escapeHtml(dev.address || '')}</td><td>${escapeHtml(dev.object_type || '')}</td><td>${escapeHtml(dev.name || dev.hostname || '')}</td><td>${escapeHtml(dev.os || '')}</td><td>${escapeHtml(dev.method || '')}</td></tr>`;
+        }
+        html += '</tbody></table>';
+    } else {
+        html += '<p class="text-slate-400 italic mt-1">No new manageable devices identified.</p>';
+    }
+    html += '</div>';
+    out.innerHTML = html;
 }
 
 // Module-level nw auto-poll default (Setup → Module Management). Device-level wins.
@@ -27210,6 +27387,20 @@ const INSTANCE_PRODUCTS = {
         rowSummary: inst => `${inst.host || '—'}`,
         fields: [
             { id: 'host', label: 'DHCP Server Host / IP', placeholder: '10.0.0.1' },
+        ],
+    },
+    nwscan: {
+        title: 'Network Scan Credential',
+        endpoint: '/setup/nw-scan-credentials',
+        listId: 'nwscan-instances-list',
+        moduleType: 'nw',
+        vaultPicker: true,
+        rowSummary: inst => `${inst.name || '—'}${inst.username ? ' · ' + inst.username : ''}`,
+        fields: [
+            { id: 'username', label: 'SSH Username', placeholder: 'admin' },
+            { id: 'password', label: 'SSH Password', type: 'password', placeholder: 'Password' },
+            { id: 'enable_secret', label: 'Enable Secret', type: 'password', placeholder: 'Optional (AOS-S enable)' },
+            { id: 'snmp_community', label: 'SNMP Community', placeholder: 'public' },
         ],
     },
 };
