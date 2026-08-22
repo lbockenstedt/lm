@@ -26574,7 +26574,7 @@ function showAddNwDeviceModal(prefillDevice) {
                     <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Spoke</label><select id="nw-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
                     <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Port</label><input type="text" id="nw-port" placeholder="22 / 443" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 </div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Address / Host IP</label><input type="text" id="nw-address" placeholder="10.0.0.1" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Address / Host IP <span class="text-red-500">*</span></label><input type="text" id="nw-address" placeholder="10.0.0.1" required class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                 <div class="grid grid-cols-2 gap-4">
                     <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Username</label><input type="text" id="nw-username" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
                     <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Password</label><input type="password" id="nw-password" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
@@ -26678,6 +26678,10 @@ async function saveNwDevice() {
     if (_vc !== undefined) config.vault_credential = _vc;
     if (!config.name || !config.object_type) {
         showToast('Device name and object type are required.', 'error');
+        return;
+    }
+    if (!config.address) {
+        showToast('Management IP address is required.', 'error');
         return;
     }
 

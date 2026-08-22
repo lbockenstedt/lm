@@ -481,6 +481,9 @@ def register(app, hub, ctx):
             new_dev = data.get("device", {})
             if not new_dev.get("name") or not new_dev.get("object_type"):
                 raise HTTPException(status_code=400, detail="Missing device name or object_type")
+            if not str(new_dev.get("address") or "").strip():
+                raise HTTPException(status_code=400,
+                                    detail="Management IP address is required")
             if new_dev.get("object_type") not in ("aos_switch", "cx_switch",
                                                    "ex_switch", "gateway"):
                 raise HTTPException(status_code=400, detail="Invalid object_type")
@@ -537,6 +540,14 @@ def register(app, hub, ctx):
                         if isinstance(d, dict) and d.get("id") == device_id), None)
             if idx is None:
                 raise HTTPException(status_code=404, detail="Network device not found")
+
+            # Validate the effective (post-merge) address BEFORE mutating the
+            # stored record, so a rejected edit can't blank a good device.
+            effective_addr = (update_data["address"] if "address" in update_data
+                              else devices[idx].get("address"))
+            if not str(effective_addr or "").strip():
+                raise HTTPException(status_code=400,
+                                    detail="Management IP address is required")
 
             devices[idx].update(update_data)
             await instance_vault.validate_ref(
