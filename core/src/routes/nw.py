@@ -107,14 +107,26 @@ def register(app, hub, ctx):
             spoke_id = ""
         return dev, scope, spoke_id
 
-    async def _filter_nw_optional(scope, request, data, endpoint, tenant):
+    async def _filter_nw_optional(scope, request, data, endpoint, tenant,
+                                  dedicated=False):
         """Apply the nw subnet filter ONLY when the reader is scoped or
         acting-as. A ``"full"``-scope reader (admin, or a device DEDICATED to
         the caller's own tenant) with no explicit ``?tenant=`` gets the whole
         device — preserves admin/own-tenant behavior. ``"filtered"`` (shared
         device) or an explicit ``?tenant=`` (admin acting-as) applies
         ``_filter_nw`` (shared → the viewer's session-tenant slice; acting-as
-        → the named tenant's slice)."""
+        → the named tenant's slice).
+
+        ``dedicated`` — the device is bound to ONE tenant (not the shared
+        tenant). A dedicated device's ENTIRE dataset belongs to that tenant, so
+        it is never subnet-filtered: the subnet filter only makes sense on a
+        SHARED device where many tenants' clients coexist and each sees only its
+        own subnet slice. Without this, a dedicated gateway whose owning tenant
+        has no (or non-covering) NetBox prefixes fails closed to an EMPTY view
+        even though every record is legitimately theirs (mirrors the own-CPPM
+        NAC bypass)."""
+        if dedicated:
+            return data
         if scope == "full" and not tenant:
             return data
         return await _filter_nw(request, data, endpoint, tenant)
@@ -260,6 +272,13 @@ def register(app, hub, ctx):
         logger.debug("relay GET /api/nw/%s/%s tenant=%s", device_id, endpoint, tenant)
         dev, scope, spoke_id = _authz_nw_device(request, device_id)
         tid = dev.get("tenant_id", "")
+        # A device bound to ONE (non-shared) tenant is DEDICATED: its whole
+        # dataset belongs to that tenant, so it is never subnet-filtered (the
+        # subnet filter only makes sense on a SHARED device). Without this, a
+        # dedicated gateway whose owning tenant has no (or non-covering) NetBox
+        # prefixes fails closed to an empty view even under an explicit
+        # ``?tenant=`` — mirrors the own-CPPM NAC bypass.
+        dedicated = bool(tid) and not access.tenant_is_shared(tid)
         # Defense-in-depth: re-check on the spoke via the tenant filter (the
         # spoke rejects a device whose tenant_id is neither the passed tenant
         # nor the shared tenant — Stage 1).
@@ -273,7 +292,7 @@ def register(app, hub, ctx):
         if not spoke_id:
             cached = hub.nw_cache_get_device(device_id, endpoint)
             if cached is not None:
-                filtered = await _filter_nw_optional(scope, request, cached, endpoint, tenant)
+                filtered = await _filter_nw_optional(scope, request, cached, endpoint, tenant, dedicated)
                 if isinstance(filtered, dict):
                     filtered = dict(filtered)
                     filtered["stale"] = True
@@ -285,7 +304,7 @@ def register(app, hub, ctx):
                                                 timeout=timeout)
             data = access.unwrap_spoke(result)
             await hub.nw_cache_set_device(device_id, endpoint, data)
-            return await _filter_nw_optional(scope, request, data, endpoint, tenant)
+            return await _filter_nw_optional(scope, request, data, endpoint, tenant, dedicated)
         except HTTPException:
             raise
         except Exception as e:
@@ -296,7 +315,7 @@ def register(app, hub, ctx):
             if cached is not None:
                 logger.warning("nw_get_device_data live fetch failed (%s/%s: %s)"
                                " — serving cached", device_id, endpoint, e)
-                filtered = await _filter_nw_optional(scope, request, cached, endpoint, tenant)
+                filtered = await _filter_nw_optional(scope, request, cached, endpoint, tenant, dedicated)
                 if isinstance(filtered, dict):
                     filtered = dict(filtered)
                     filtered["stale"] = True

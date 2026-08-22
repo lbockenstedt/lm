@@ -109,6 +109,34 @@ async def test_poll_folds_subresources_into_endpoint_slots(tmp_path):
     assert restarted.nw_cache_get_device("gw1", "poll")["reachable"] is True
 
 
+async def test_unreachable_poll_does_not_clobber_good_datum_caches(tmp_path):
+    """A poll we couldn't complete (reachable=False → empty datum lists) must
+    NOT overwrite good last-known-good per-datum caches with empties: the
+    individual /api/nw/{id}/{arp|macs|...} fetches still work, so blanking them
+    from a failed composite poll would wrongly empty the UI tabs."""
+    hub = _CacheHub(str(tmp_path))
+    # Seed good per-datum caches (as the live per-datum fetches do).
+    await hub.nw_cache_set_device("gw1", "arp",
+                            _envelope([{"ip": "10.20.0.5", "mac": "aa:bb:cc:dd:ee:ff"}]))
+    await hub.nw_cache_set_device("gw1", "endpoints",
+                            _envelope([{"ip": "10.20.0.5", "mac": "aa:bb:cc:dd:ee:ff"}]))
+    await hub.nw_cache_set_device("gw1", "vlans", _envelope([{"vlan": "10"}]))
+    # An unreachable poll (probe/creds/transport failed) with empty datum lists.
+    bad_poll = {
+        "status": "ERROR", "reachable": False, "latency_ms": None,
+        "device_info": {}, "interfaces": [], "arp": [], "mac_table": [],
+        "endpoints": [], "vlans": [],
+        "errors": ["probe: device address/username not configured"],
+    }
+    await hub.nw_cache_set_poll("gw1", bad_poll)
+    # The failed poll is recorded, but the good datum caches are preserved.
+    assert hub.nw_cache_get_device("gw1", "poll")["reachable"] is False
+    assert hub.nw_cache_get_device("gw1", "arp")["data"] == [
+        {"ip": "10.20.0.5", "mac": "aa:bb:cc:dd:ee:ff"}]
+    assert hub.nw_cache_get_device("gw1", "endpoints")["data"] != []
+    assert hub.nw_cache_get_device("gw1", "vlans")["data"] == [{"vlan": "10"}]
+
+
 async def test_missing_file_is_cold_start(tmp_path):
     hub = _CacheHub(str(tmp_path))
     hub.nw_cache_load()  # no file yet

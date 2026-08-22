@@ -398,6 +398,20 @@ def test_get_device_own_tenant_relays_to_record_spoke(monkeypatch, tmp_path):
     assert relay_calls[0][2].get("tenant") == "acme"
 
 
+def test_get_device_dedicated_ignores_explicit_tenant_filter(monkeypatch, tmp_path):
+    """A DEDICATED (single-tenant) device is never subnet-filtered — even under
+    an explicit ``?tenant=`` (admin acting-as). Its whole dataset belongs to
+    that tenant, so the out-of-prefix 192.168.1.5 row is kept, not dropped.
+    Regression: a dedicated gateway whose owning tenant has no/non-covering
+    NetBox prefixes must not fail closed to an empty view."""
+    c, hub = _build(monkeypatch, tmp_path, shared=False)
+    tok = _mint(hub, "acme-user", tenants=["acme"], rights=("nw",))
+    r = c.get("/api/nw/acme-sw/arp?tenant=acme", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    ips = {row["ip"] for row in r.json()["data"]}
+    assert ips == {"10.0.0.5", "192.168.1.5"}   # dedicated: filter bypassed
+
+
 def test_get_device_shared_relays_to_shared_spoke(monkeypatch, tmp_path):
     """A shared device resolves to the shared-tenant spoke and is visible to a
     non-admin (shared-tenant-flag invariant)."""

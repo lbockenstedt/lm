@@ -182,24 +182,32 @@ class NwCacheMixin:
         # so /api/nw/{id}/{info|arp|macs|interfaces} also serves the poll data
         # when the spoke is down. Wrapped in the standard SUCCESS envelope so
         # the unwrapping/contract the routes expect is preserved.
-        info = poll_result.get("device_info")
-        if isinstance(info, dict) and info:
-            entry["info"] = {"status": "SUCCESS", "data": info}
-        arp = poll_result.get("arp")
-        if isinstance(arp, list):
-            entry["arp"] = {"status": "SUCCESS", "data": arp}
-        macs = poll_result.get("mac_table")
-        if isinstance(macs, list):
-            entry["macs"] = {"status": "SUCCESS", "data": macs}
-        ifaces = poll_result.get("interfaces")
-        if isinstance(ifaces, list):
-            entry["interfaces"] = {"status": "SUCCESS", "data": ifaces}
-        endpoints = poll_result.get("endpoints")
-        if isinstance(endpoints, list):
-            entry["endpoints"] = {"status": "SUCCESS", "data": endpoints}
-        vlans = poll_result.get("vlans")
-        if isinstance(vlans, list):
-            entry["vlans"] = {"status": "SUCCESS", "data": vlans}
+        #
+        # ONLY when the poll actually reached the device: an UNREACHABLE poll
+        # returns empty datum lists (probe/creds/transport failed), and mirroring
+        # those would CLOBBER good last-known-good per-datum caches with empties
+        # stamped SUCCESS — blanking the UI tabs even though the individual
+        # fetches still work. A poll we couldn't complete must preserve, not
+        # destroy, the cached data.
+        if poll_result.get("reachable"):
+            info = poll_result.get("device_info")
+            if isinstance(info, dict) and info:
+                entry["info"] = {"status": "SUCCESS", "data": info}
+            arp = poll_result.get("arp")
+            if isinstance(arp, list):
+                entry["arp"] = {"status": "SUCCESS", "data": arp}
+            macs = poll_result.get("mac_table")
+            if isinstance(macs, list):
+                entry["macs"] = {"status": "SUCCESS", "data": macs}
+            ifaces = poll_result.get("interfaces")
+            if isinstance(ifaces, list):
+                entry["interfaces"] = {"status": "SUCCESS", "data": ifaces}
+            endpoints = poll_result.get("endpoints")
+            if isinstance(endpoints, list):
+                entry["endpoints"] = {"status": "SUCCESS", "data": endpoints}
+            vlans = poll_result.get("vlans")
+            if isinstance(vlans, list):
+                entry["vlans"] = {"status": "SUCCESS", "data": vlans}
         entry["fetched_at"] = time.time()
         self._nw_cache_schedule_save()
 
