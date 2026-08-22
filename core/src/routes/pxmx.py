@@ -251,6 +251,21 @@ def _offline_relay_agents(hub, live_ids):
             last = last_of.get(apk)
             age = max(0, int(now - last)) if isinstance(last, (int, float)) else None
             spoke_meta = meta.get(spoke_pk, {}) or {}
+            # Effective tenant, same precedence as the live tile's ``_agent_tid``
+            # (get_pxmx_agents): the agent's OWN pinned client_simulation.tenant_id
+            # wins, else it INHERITS its parent spoke's module_metadata binding.
+            # Without this fallback an offline agent bound at the spoke level (not
+            # pinned per-agent) reconstructed with an empty client_simulation and
+            # rendered "no tenant" — disagreeing with the live row + the spoke's
+            # real binding. Stamp the resolved tenant into client_simulation (the
+            # field the UI reads for the editable binding) AND top-level tenant_id
+            # (what ``_tenantOf`` reads for the display label) so the offline row
+            # shows the SAME tenant the agent had while connected.
+            cs = dict(cfg.get("client_simulation") or {})
+            eff_tid = str(cs.get("tenant_id") or "").strip() \
+                or str(spoke_meta.get("tenant_id") or "").strip()
+            if eff_tid:
+                cs["tenant_id"] = eff_tid
             out.append({
                 "agent_id": raw,
                 "spoke_id": spoke_pk,
@@ -260,7 +275,8 @@ def _offline_relay_agents(hub, live_ids):
                                  or cfg.get("hostname") or raw),
                 "hostname": cfg.get("hostname", "") or raw,
                 "install_uuid": cfg.get("install_uuid", ""),
-                "client_simulation": cfg.get("client_simulation") or {},
+                "client_simulation": cs,
+                "tenant_id": eff_tid,
                 "heartbeat_age_s": age,
                 "heartbeat_status": "OFFLINE",
                 "last_seen": last if isinstance(last, (int, float)) else None,
