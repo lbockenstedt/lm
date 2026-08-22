@@ -2410,8 +2410,18 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # Network Devices fleet: one nw spoke manages many devices.
                 # Push the devices bound to this spoke; fall back to unbound
                 # devices (single-product deployments don't bind spoke_id).
+                #
+                # Match through _primary_key (pk, already resolved above) on
+                # BOTH sides, not raw string equality: a device's spoke_id was
+                # saved whenever an admin bound it, which may have been before
+                # OR after this spoke's guid-primary identity migration armed
+                # (hub_identity.py). Raw equality silently stops matching the
+                # moment the two sides are on different identity generations
+                # — this spoke would then get ZERO devices (no fallback saves
+                # it, since it isn't unbound either), not a wrong spoke's.
                 devices = self.state.get_global_config().get("nw_devices", []) or []
-                mine = [d for d in devices if isinstance(d, dict) and d.get("spoke_id") == spoke_id]
+                mine = [d for d in devices if isinstance(d, dict)
+                        and self._primary_key(d.get("spoke_id") or "") == pk]
                 if not mine:
                     mine = [d for d in devices if isinstance(d, dict) and not d.get("spoke_id")]
                 # default_poll_interval = module-level poll cadence; the spoke
@@ -2480,11 +2490,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 # isn't bound to (and there's no unbound) instance, it simply
                 # isn't configured for this module — push nothing rather than
                 # someone else's config.
+                # Match through _primary_key (pk, resolved above) on BOTH
+                # sides, not raw string equality: an instance's spoke_id was
+                # saved whenever an admin bound it, which may have been
+                # before OR after this spoke's guid-primary identity
+                # migration armed (hub_identity.py) — raw equality silently
+                # stops matching the moment the two sides are on different
+                # identity generations, and with the "never guess" fallback
+                # above that means NO config at all (not a wrong spoke's).
                 storage_key, project = _INSTANCE_CONFIG_SOURCES[module_key]
                 gc = self.state.get_global_config()
                 instances = gc.get(storage_key, []) or []
                 inst = next((x for x in instances
-                             if isinstance(x, dict) and x.get("spoke_id") == spoke_id), None)
+                             if isinstance(x, dict)
+                             and self._primary_key(x.get("spoke_id") or "") == pk), None)
                 if inst is None:
                     inst = next((x for x in instances
                                  if isinstance(x, dict) and not x.get("spoke_id")), None)
@@ -2575,13 +2594,22 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # the spoke instead of the install-time fallback.
         gldap = gc.get("ldap") or {}
         instances = gc.get("ldap_instances", []) or []
+        # Match through _primary_key on BOTH sides, not raw string equality —
+        # an instance's spoke_id was saved whenever an admin bound it, which
+        # may have been before OR after this spoke's guid-primary identity
+        # migration armed (hub_identity.py); raw equality silently stops
+        # matching the moment the two sides are on different identity
+        # generations. And never fall back to "the first instance in the
+        # list" (mirrors the NAC/IPAM fix) — that would silently push
+        # ANOTHER spoke's directory server/credentials onto this one; gldap
+        # (the global Setup source, not a specific spoke's secret) is the
+        # only safe fallback, handled by the empty-check right below.
+        pk = self._primary_key(spoke_id)
         inst = next((x for x in instances
-                     if isinstance(x, dict) and x.get("spoke_id") == spoke_id), None)
+                     if isinstance(x, dict) and self._primary_key(x.get("spoke_id") or "") == pk), None)
         if inst is None:
             inst = next((x for x in instances
                          if isinstance(x, dict) and not x.get("spoke_id")), None)
-        if inst is None and instances and isinstance(instances[0], dict):
-            inst = instances[0]
         # Nothing to push only when BOTH sources are empty.
         if inst is None and not gldap:
             return None
