@@ -19530,6 +19530,7 @@ function pxmxEnsureConsoleDock() {
             <div class="flex items-center gap-3 px-4 py-2 bg-[#16213e] border-b border-slate-700 text-slate-200 text-sm">
                 <button id="pxmx-vnc-min" title="Minimize to the footer — keeps every session connected so you can browse the rest of the UI" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">▁ Minimize</button>
                 <button id="pxmx-vnc-cad" title="Send Ctrl+Alt+Del to the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Ctrl+Alt+Del</button>
+                <button id="pxmx-vnc-reconnect" title="Reconnect the active console — mints a fresh session and reattaches in the same tab, without disturbing the other open consoles" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">⟳ Reconnect</button>
                 <button id="pxmx-vnc-fs" title="Fullscreen the active console" class="px-2 py-0.5 text-xs rounded border border-slate-500 hover:bg-slate-700">Fullscreen</button>
                 <button id="pxmx-vnc-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
                 <span id="pxmx-vnc-status" class="ml-auto text-xs text-amber-400"></span>
@@ -19540,6 +19541,7 @@ function pxmxEnsureConsoleDock() {
     modal.querySelector('#pxmx-vnc-takeover').onclick = () => pxmxForceTakeover();
     modal.querySelector('#pxmx-vnc-min').onclick = () => pxmxSetDockCollapsed(true);
     modal.querySelector('#pxmx-vnc-cad').onclick = () => { const c = pxmxActiveConsole(); if (c && c.rfb) c.rfb.sendCtrlAltDel(); };
+    modal.querySelector('#pxmx-vnc-reconnect').onclick = () => pxmxReconnectConsole();
     modal.querySelector('#pxmx-vnc-fs').onclick = () => {
         const c = pxmxActiveConsole();
         const screen = c && c.bodyEl;
@@ -19581,6 +19583,18 @@ function pxmxAddConsoleTab(vm, RFB, session) {
     const ro = !!session.read_only;
     const entry = { key, vm, session, ro, rfb: null, bodyEl, statusText: 'Connecting…', statusCls: 'text-amber-400', viewers: [] };
     window._pxmxConsoles.set(key, entry);
+    pxmxAttachRfb(entry, RFB);
+    pxmxStartViewerPoll(entry);
+    pxmxActivateConsole(key);
+    pxmxSetDockCollapsed(false);
+}
+
+// Attach a fresh noVNC RFB to an existing console registry entry, wiring it
+// against the entry's CURRENT session (session_id/ws_token/ticket). Shared by
+// the initial tab creation and Reconnect so both use identical status,
+// credential, and relay-URL handling — the one place the RFB contract lives.
+function pxmxAttachRfb(entry, RFB) {
+    const session = entry.session;
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${proto}//${location.host}/ws/console/${encodeURIComponent(session.session_id)}?token=${encodeURIComponent(session.ws_token)}`;
     const upd = (text, cls) => { entry.statusText = text; entry.statusCls = cls; pxmxRenderConsoleList(); pxmxSyncConsoleHeader(); if (window._pxmxDockCollapsed) pxmxRenderDockPill(); };
@@ -19590,11 +19604,11 @@ function pxmxAddConsoleTab(vm, RFB, session) {
         // response. noVNC must present it during the RFB security handshake or
         // Proxmox drops the session ("Security failure" / blank console).
         const vncPassword = (session && session.ticket) || '';
-        const rfb = new RFB(bodyEl, wsUrl, { credentials: { password: vncPassword } });
+        const rfb = new RFB(entry.bodyEl, wsUrl, { credentials: { password: vncPassword } });
         rfb.scaleViewport = true;
         rfb.resizeSession = false;
-        rfb.viewOnly = ro;
-        rfb.addEventListener('connect', () => upd(ro ? 'Connected (read-only)' : 'Connected', 'text-green-400'));
+        rfb.viewOnly = entry.ro;
+        rfb.addEventListener('connect', () => upd(entry.ro ? 'Connected (read-only)' : 'Connected', 'text-green-400'));
         rfb.addEventListener('disconnect', (e) => upd('Disconnected: ' + ((e.detail && e.detail.reason) || 'closed'), 'text-red-400'));
         rfb.addEventListener('credentialsrequired', () => {
             // Ticket already supplied above; if Proxmox still asks, re-send it
@@ -19605,10 +19619,61 @@ function pxmxAddConsoleTab(vm, RFB, session) {
         entry.rfb = rfb;
     } catch (err) {
         entry.statusText = 'Error: ' + (err.message || err); entry.statusCls = 'text-red-400';
+        entry.rfb = null;
     }
-    pxmxStartViewerPoll(entry);
-    pxmxActivateConsole(key);
-    pxmxSetDockCollapsed(false);
+}
+
+// Reconnect the active (or given) console IN PLACE: tear down its current RFB,
+// mint a FRESH console session (the old ws_token/ticket are one-shot and are
+// dead after a drop), and reattach a new noVNC RFB into the SAME tab/body. A
+// console that dropped (agent restart, network blip, Proxmox idle timeout, or a
+// takeover) comes back without losing its tab — and, critically, without
+// touching any of the OTHER open consoles in the dock.
+async function pxmxReconnectConsole(key) {
+    const reg = window._pxmxConsoles;
+    if (!reg) return;
+    const entry = key ? reg.get(key) : pxmxActiveConsole();
+    if (!entry) return;
+    const vm = entry.vm || {};
+    const btn = document.getElementById('pxmx-vnc-reconnect');
+    if (btn) { btn.disabled = true; }
+    // Drop the old RFB + clear the stale framebuffer so we don't stack a second
+    // canvas in the same body.
+    try { if (entry.rfb) entry.rfb.disconnect(); } catch (e) {}
+    entry.rfb = null;
+    if (entry.bodyEl) entry.bodyEl.innerHTML = '';
+    entry.statusText = 'Reconnecting…'; entry.statusCls = 'text-amber-400';
+    pxmxRenderConsoleList(); pxmxSyncConsoleHeader();
+    try {
+        const RFB = await pxmxLoadNoVNC();
+        if (!RFB) {
+            entry.statusText = 'Reconnect failed: noVNC unavailable'; entry.statusCls = 'text-red-400';
+            showToast('Failed to load noVNC (CDN unreachable)', 'error');
+            return;
+        }
+        const r = await setupFetch('/api/pxmx/console', {
+            method: 'POST',
+            body: JSON.stringify({ unique_id: vm.unique_id, vmid: vm.vmid, node: vm.node, type: vm.type || 'qemu', agent_id: vm.agent_id || '' }),
+        });
+        const session = await r.json().catch(() => ({}));
+        if (!r.ok || !session || !session.session_id) {
+            entry.statusText = 'Reconnect failed: ' + ((session && (session.detail || session.message)) || r.status);
+            entry.statusCls = 'text-red-400';
+            showToast('Console reconnect failed', 'error');
+            return;
+        }
+        entry.session = session;
+        entry.ro = !!session.read_only;
+        pxmxAttachRfb(entry, RFB);
+        showToast(`Reconnecting console for ${vm.name || vm.vmid || ''}…`, 'info');
+        if (entry.key === window._pxmxActiveConsole) pxmxRescaleConsole(entry);
+    } catch (e) {
+        entry.statusText = 'Reconnect failed: ' + (e.message || e); entry.statusCls = 'text-red-400';
+        showToast('Console reconnect failed: ' + (e.message || e), 'error');
+    } finally {
+        if (btn) { btn.disabled = false; }
+        pxmxRenderConsoleList(); pxmxSyncConsoleHeader();
+    }
 }
 
 // Multiuser presence: poll who else is on this VM's console. Each viewer holds
@@ -19842,6 +19907,7 @@ function pxmxRenderConsoleList() {
             return `<div data-key="${kAttr}" data-open="1" class="pxmx-vnc-row flex items-center gap-2 px-3 py-2 border-b border-[#1f1f38] cursor-pointer text-xs ${rowCls}">
                 <span class="w-2 h-2 rounded-full ${dot} shrink-0"></span>
                 <span class="truncate flex-1">${label}</span>${viewerBadge}${roBadge}
+                <button data-reconnect="${kAttr}" title="Reconnect this console" class="text-slate-500 hover:text-sky-400 text-sm leading-none shrink-0">⟳</button>
                 <button data-close="${kAttr}" title="Close this console" class="text-slate-500 hover:text-red-400 text-sm leading-none shrink-0">&times;</button>
             </div>`;
         }
@@ -19863,11 +19929,14 @@ function pxmxRenderConsoleList() {
         const isOpen = el.getAttribute('data-open') === '1';
         el.onclick = (ev) => {
             if (ev.target.closest('[data-close]')) return;
+            if (ev.target.closest('[data-reconnect]')) return;
             if (isOpen) { pxmxActivateConsole(key); return; }
             pxmxOpenConsoleFromDir(key);
         };
         const closeBtn = el.querySelector('[data-close]');
         if (closeBtn) closeBtn.onclick = (ev) => { ev.stopPropagation(); pxmxCloseConsole(key); };
+        const reconnectBtn = el.querySelector('[data-reconnect]');
+        if (reconnectBtn) reconnectBtn.onclick = (ev) => { ev.stopPropagation(); pxmxReconnectConsole(key); };
     });
 }
 
