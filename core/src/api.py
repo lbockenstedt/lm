@@ -1424,9 +1424,8 @@ def create_app(hub):
         tids = _active_session_tenant_ids(now)
         for tid in tids:
             _start_cache_for_tenant(hub, tid)
-        if tids:
-            logger.info("[Cache] resumed collection for %d tenant(s) with active "
-                        "sessions after restart", len(tids))
+        logger.info("[Cache] restart resume: %d tenant(s) with active sessions "
+                    "→ collection restarted", len(tids))
 
     app.router.on_startup.append(_resume_caches_for_active_sessions)
 
