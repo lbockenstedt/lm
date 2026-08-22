@@ -790,6 +790,7 @@ async function loadCSData(subMenu, child, force) {
                 case 'Setup':       await csRenderSetup(force); break;
                 case 'VM Server':   await csRenderVmServer(force); break;
                 case 'Spoke Management': await csRenderSpokeManagement(force); break;
+                case 'Assistant':   await csRenderAssistant(force); break;
                 default:            csSet(csEmpty('Unknown Simulations view.'));
             }
         }
@@ -12622,5 +12623,182 @@ window.csClaimSpoke = async function () {
         showToast('Claim failed: ' + m, 'error');
     }
 };
+
+// ── Simulation Build Assistant (Simulations → Assistant) ────────────────────
+// A chat-style, multi-turn conversation that helps scope a new client
+// simulation — the LLM logic lives entirely on the ab agent (relayed via
+// /api/sim-assistant/chat, mirroring /api/help/ask); this file only owns the
+// chat UI + the running message history. The hub keeps no session state, so
+// the FULL transcript is echoed back on every turn — held in
+// window._csAssistantMessages so it survives switching away from this tab
+// and back (lost on a full page reload, which is expected for a client-side
+// session). "File as Feature Request" packages the transcript through the
+// EXISTING /api/bug-report pipeline (type=feature, admin-approval-gated) —
+// this UI never writes code or files anything on its own initiative.
+window._csAssistantMessages = window._csAssistantMessages || [];
+
+function _csAssistantBubble(role, text) {
+    const isUser = role === 'user';
+    const bg = isUser ? 'bg-[#01A982] text-white' : 'bg-white border border-slate-200 text-slate-800';
+    const align = isUser ? 'justify-end' : 'justify-start';
+    const body = window.renderHelpMarkdown ? window.renderHelpMarkdown(text) :
+        '<p>' + csEscape(text) + '</p>';
+    return `<div class="flex ${align} mb-3">
+        <div class="max-w-[75%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${bg} shadow-sm">
+            <div class="cs-assistant-msg">${body}</div>
+        </div>
+    </div>`;
+}
+
+function _csAssistantScrollToBottom() {
+    const log = csEl('cs-assistant-log');
+    if (log) log.scrollTop = log.scrollHeight;
+}
+
+function _csAssistantRenderLog() {
+    const log = csEl('cs-assistant-log');
+    if (!log) return;
+    if (!window._csAssistantMessages.length) {
+        log.innerHTML = '<p class="text-sm text-slate-400 text-center mt-8">' +
+            'Tell me what you want to build — e.g. "I want a simulation that runs this ' +
+            'script" and paste it in. I\'ll ask if I need more.</p>';
+        return;
+    }
+    log.innerHTML = window._csAssistantMessages.map(m => _csAssistantBubble(m.role, m.content)).join('');
+    _csAssistantScrollToBottom();
+}
+
+async function csAssistantSend() {
+    const input = csEl('cs-assistant-input');
+    if (!input) return;
+    const text = (input.value || '').trim();
+    if (!text) return;
+    input.value = '';
+    input.disabled = true;
+    const sendBtn = csEl('cs-assistant-send');
+    if (sendBtn) sendBtn.disabled = true;
+
+    window._csAssistantMessages.push({ role: 'user', content: text });
+    _csAssistantRenderLog();
+    const log = csEl('cs-assistant-log');
+    if (log) log.insertAdjacentHTML('beforeend',
+        '<div id="cs-assistant-thinking" class="flex justify-start mb-3">' +
+        '<div class="rounded-2xl px-4 py-2.5 text-sm bg-white border border-slate-200 text-slate-400 shadow-sm">Thinking…</div></div>');
+    _csAssistantScrollToBottom();
+
+    try {
+        const res = await fetch('/api/sim-assistant/chat', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: window._csAssistantMessages }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
+        window._csAssistantMessages.push({ role: 'assistant', content: data.answer || '(no answer)' });
+    } catch (e) {
+        console.error('csAssistantSend: chat failed', e);
+        window._csAssistantMessages.push({
+            role: 'assistant',
+            content: '⚠️ ' + ((e && e.message) ? e.message : String(e)),
+        });
+    } finally {
+        input.disabled = false;
+        if (sendBtn) sendBtn.disabled = false;
+        _csAssistantRenderLog();
+        input.focus();
+    }
+}
+
+async function csAssistantSubmitFeatureRequest() {
+    if (!window._csAssistantMessages.length) {
+        showToast('Chat with the assistant first, then submit.', 'error');
+        return;
+    }
+    const transcript = window._csAssistantMessages
+        .map(m => (m.role === 'user' ? 'User: ' : 'Assistant: ') + m.content)
+        .join('\n\n---\n\n');
+    const explanation = 'New simulation requested via the Simulation Build Assistant.\n\n' +
+        '=== CONVERSATION TRANSCRIPT ===\n\n' + transcript;
+    try {
+        const res = await fetch('/api/bug-report', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                explanation, severity: 'medium', type: 'feature',
+                context: { currentView: 'Simulations', source: 'sim-assistant' },
+            }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
+        showToast('Filed as a feature request — pending admin approval.', 'success');
+        window._csAssistantMessages.push({
+            role: 'assistant',
+            content: '✅ Filed as a feature request (id `' + (data.id || '?') +
+                '`). An admin needs to approve it in Setup → before it moves forward. ' +
+                'You can keep chatting to refine the spec, or start a new conversation.',
+        });
+        _csAssistantRenderLog();
+    } catch (e) {
+        console.error('csAssistantSubmitFeatureRequest: submit failed', e);
+        showToast('Could not file the request: ' + ((e && e.message) ? e.message : String(e)), 'error');
+    }
+}
+
+function csAssistantNewConversation() {
+    window._csAssistantMessages = [];
+    _csAssistantRenderLog();
+}
+
+async function csRenderAssistant() {
+    csSetToolbar('');
+    let available = false;
+    try {
+        const res = await fetch('/api/sim-assistant/available');
+        const data = await res.json();
+        available = !!(res.ok && data.available);
+    } catch (e) {
+        console.error('csRenderAssistant: availability check failed', e);
+    }
+    if (!available) {
+        csSet(csEmpty(
+            'The Simulation Build Assistant is unavailable — the AppBuilder (ab) LLM ' +
+            'agent is not connected.', 'Connect an ab agent to the hub to enable it.'));
+        return;
+    }
+    csSet(`
+        <div class="flex flex-col h-[calc(100vh-14rem)] max-w-3xl mx-auto">
+            <div class="flex items-center justify-between mb-3">
+                <div>
+                    <h2 class="text-lg font-bold text-slate-800">Simulation Build Assistant</h2>
+                    <p class="text-xs text-slate-500">Describe what you want to build — I'll ask for anything missing.</p>
+                </div>
+                <div class="flex gap-2">
+                    <button onclick="csAssistantNewConversation()"
+                        class="text-xs px-3 py-1.5 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">
+                        New conversation
+                    </button>
+                    <button onclick="csAssistantSubmitFeatureRequest()"
+                        class="text-xs px-3 py-1.5 rounded-md bg-[#01A982] text-white font-semibold hover:bg-[#019172]">
+                        File as Feature Request
+                    </button>
+                </div>
+            </div>
+            <div id="cs-assistant-log" class="flex-1 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50 p-4"></div>
+            <form id="cs-assistant-form" class="flex gap-2 mt-3" onsubmit="event.preventDefault(); csAssistantSend();">
+                <input id="cs-assistant-input" type="text" placeholder="e.g. I want a simulation that runs this script…"
+                    class="flex-1 border border-slate-300 rounded-lg px-3 py-2 text-sm outline-none focus:border-[#01A982]">
+                <button id="cs-assistant-send" type="submit"
+                    class="bg-[#01A982] text-white rounded-lg px-4 py-2 text-sm font-semibold hover:bg-[#019172]">
+                    Send
+                </button>
+            </form>
+        </div>
+    `);
+    _csAssistantRenderLog();
+    const input = csEl('cs-assistant-input');
+    if (input) input.focus();
+}
+window.csRenderAssistant = csRenderAssistant;
+window.csAssistantSend = csAssistantSend;
+window.csAssistantSubmitFeatureRequest = csAssistantSubmitFeatureRequest;
+window.csAssistantNewConversation = csAssistantNewConversation;
 
 })();
