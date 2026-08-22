@@ -26684,6 +26684,14 @@ async function saveNwDevice() {
         showToast('Management IP address is required.', 'error');
         return;
     }
+    {
+        const p = config.address.split('.');
+        if (p.length === 4 && p.every(x => /^\d+$/.test(x)) &&
+            p.some(x => parseInt(x, 10) > 255 || (x.length > 1 && x[0] === '0'))) {
+            showToast(`'${config.address}' is not a valid IPv4 address (each octet must be 0-255).`, 'error');
+            return;
+        }
+    }
 
     try {
         const method = id ? 'PUT' : 'POST';

@@ -13,6 +13,24 @@ def register(app, hub, ctx):
     _is_tenant_admin = ctx._is_tenant_admin
     _filter_nw = ctx._filter_nw
 
+    def _validate_nw_address(addr):
+        """Require a non-empty management address and reject a malformed
+        dotted-quad IP (e.g. a typo'd octet like ``1721.6.1.90``) — that would
+        otherwise fail opaquely on the spoke as an unresolvable hostname
+        (``Name or service not known``). Anything that isn't four dot-separated
+        numeric groups is treated as a hostname and allowed. Raises 400."""
+        a = str(addr or "").strip()
+        if not a:
+            raise HTTPException(status_code=400,
+                                detail="Management IP address is required")
+        parts = a.split(".")
+        if len(parts) == 4 and all(p.isdigit() for p in parts):
+            if any(len(p) > 1 and p[0] == "0" for p in parts) or \
+               any(int(p) > 255 for p in parts):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{a}' is not a valid IPv4 address (each octet must be 0-255)")
+
     def _enforce_tenant_bind(request, cfg, kind):
         """Shared add/edit gate for tenant-scoped device/instance creation. A
         tenant-admin may bind ``cfg`` ONLY to a spoke in their own tenant (via
@@ -481,9 +499,7 @@ def register(app, hub, ctx):
             new_dev = data.get("device", {})
             if not new_dev.get("name") or not new_dev.get("object_type"):
                 raise HTTPException(status_code=400, detail="Missing device name or object_type")
-            if not str(new_dev.get("address") or "").strip():
-                raise HTTPException(status_code=400,
-                                    detail="Management IP address is required")
+            _validate_nw_address(new_dev.get("address"))
             if new_dev.get("object_type") not in ("aos_switch", "cx_switch",
                                                    "ex_switch", "gateway"):
                 raise HTTPException(status_code=400, detail="Invalid object_type")
@@ -545,9 +561,7 @@ def register(app, hub, ctx):
             # stored record, so a rejected edit can't blank a good device.
             effective_addr = (update_data["address"] if "address" in update_data
                               else devices[idx].get("address"))
-            if not str(effective_addr or "").strip():
-                raise HTTPException(status_code=400,
-                                    detail="Management IP address is required")
+            _validate_nw_address(effective_addr)
 
             devices[idx].update(update_data)
             await instance_vault.validate_ref(
