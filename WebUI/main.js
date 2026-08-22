@@ -9330,6 +9330,19 @@ function _renderCollabTile(content) {
                 <p id="cb-ports" class="text-[11px] font-mono text-slate-500 mt-2"></p>
             </div>
             <div class="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
+                <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Replay capture (high-fidelity mode)</div>
+                <p class="text-[11px] text-slate-500 mb-2">Upload a real Teams/Zoom/WebEx call capture (<code>.pcap</code>/<code>.pcapng</code>, ≤64&nbsp;MB). Clients replay its <b>client→server</b> frames at the sink and the hub sink replays the capture's <b>server→client</b> frames back — a genuine bidirectional flow DPI/AppRF classifies as the real app. With no capture, clients fall back to synthetic UDP on the same ports.</p>
+                <label class="flex items-center gap-2 text-sm text-slate-600 mb-2 cursor-pointer"><input type="checkbox" id="cb-responder" class="w-4 h-4 text-green-600 rounded">Sink responds with the capture's server→client frames <span class="text-[10px] text-slate-400">(applied on <code>lm-collab-sink</code> restart)</span></label>
+                <p id="cb-pcap-info" class="text-[11px] font-mono text-slate-500 mb-2">No capture uploaded.</p>
+                <div class="flex flex-wrap gap-2 items-center">
+                    <input type="file" id="cb-pcap-file" accept=".pcap,.pcapng" class="text-xs">
+                    <button type="button" onclick="uploadCollabPcap()" id="cb-pcap-up" class="${btnSecCls} whitespace-nowrap">Upload capture</button>
+                    <button type="button" onclick="deleteCollabPcap()" id="cb-pcap-del" class="${btnSecCls} whitespace-nowrap">Remove</button>
+                    <a href="#" onclick="downloadCollabPcap(event)" id="cb-pcap-dl" class="text-[11px] text-blue-600 hover:underline">Download</a>
+                </div>
+                <p id="cb-pcap-msg" class="text-[11px] text-slate-500 mt-2"></p>
+            </div>
+            <div class="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
                 <div class="text-[11px] font-bold text-slate-500 uppercase tracking-wider mb-1">Apply to firewall</div>
                 <p class="text-[11px] text-slate-500 mb-2">Creates an OPNsense <b>port alias</b> (<code>lm-collab-ports</code>) from the active app ports + a <b>pass</b> rule (UDP, source → hub IP on that alias). Uses the existing firewall endpoints (tenant-scoped). Re-running skips the alias if it already exists; the rule is created each time — delete duplicates in Firewall → Rules.</p>
                 <div class="flex flex-wrap gap-2 items-end">
@@ -9359,6 +9372,8 @@ async function loadCollab() {
         set('cb-app', c.default_app || 'teams');
         set('cb-bw', c.default_bw || '1M');
         set('cb-server', c.collab_server || '');
+        const resp = document.getElementById('cb-responder'); if (resp) resp.checked = c.responder_enabled !== false;
+        _renderCollabPcap(c.pcap);
         const pill = document.getElementById('cb-state-pill');
         if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
         // Per-app toggles + the union port readout.
@@ -9411,8 +9426,72 @@ function _collabFormConfig() {
     return {
         enabled: !!document.getElementById('cb-enabled')?.checked,
         default_app: v('cb-app'), default_bw: v('cb-bw'),
-        collab_server: v('cb-server'), apps,
+        collab_server: v('cb-server'),
+        responder_enabled: !!document.getElementById('cb-responder')?.checked,
+        apps,
     };
+}
+
+// Render the current-capture info line + enable/disable the download/remove
+// controls based on whether a capture is stored.
+function _renderCollabPcap(pcap) {
+    const info = document.getElementById('cb-pcap-info');
+    const dl = document.getElementById('cb-pcap-dl');
+    const del = document.getElementById('cb-pcap-del');
+    const has = !!(pcap && pcap.stats);
+    if (dl) dl.style.display = has ? '' : 'none';
+    if (del) del.style.display = has ? '' : 'none';
+    if (!info) return;
+    if (!has) { info.textContent = 'No capture uploaded.'; return; }
+    const s = pcap.stats || {};
+    const kb = Math.round((pcap.size || 0) / 1024);
+    info.textContent = `${pcap.filename || 'replay.pcap'} — ${kb} KB · c2s ${s.c2s_packets || 0} / s2c ${s.s2c_packets || 0} pkts · ${s.duration_s || 0}s · ports ${(s.server_ports || []).join(',') || '—'}`;
+}
+
+async function uploadCollabPcap() {
+    const fileEl = document.getElementById('cb-pcap-file');
+    const msg = document.getElementById('cb-pcap-msg');
+    const f = fileEl && fileEl.files && fileEl.files[0];
+    if (!f) { if (msg) msg.textContent = 'Choose a .pcap/.pcapng file first.'; return; }
+    if (msg) msg.textContent = 'Uploading…';
+    try {
+        // Send the raw file bytes (the route accepts a raw body with ?name=);
+        // avoids multipart so setupFetch's forced JSON content-type is a non-issue.
+        const r = await setupFetch('/setup/collab/pcap?name=' + encodeURIComponent(f.name), {
+            method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: f });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || ('HTTP ' + r.status)); }
+        const d = await r.json().catch(() => ({}));
+        _renderCollabPcap(d.pcap);
+        if (fileEl) fileEl.value = '';
+        if (msg) { msg.textContent = 'Capture uploaded.'; setTimeout(() => { if (msg) msg.textContent = ''; }, 2500); }
+    } catch (e) { if (msg) msg.textContent = 'Error: ' + e.message; }
+}
+
+async function deleteCollabPcap() {
+    const msg = document.getElementById('cb-pcap-msg');
+    if (!confirm('Remove the uploaded replay capture? Clients will fall back to synthetic UDP.')) return;
+    try {
+        const r = await setupFetch('/setup/collab/pcap', { method: 'DELETE' });
+        if (!r.ok) { const d = await r.json().catch(() => ({})); throw new Error(d.detail || ('HTTP ' + r.status)); }
+        _renderCollabPcap(null);
+        if (msg) { msg.textContent = 'Capture removed.'; setTimeout(() => { if (msg) msg.textContent = ''; }, 2500); }
+    } catch (e) { if (msg) msg.textContent = 'Error: ' + e.message; }
+}
+
+async function downloadCollabPcap(ev) {
+    if (ev) ev.preventDefault();
+    try {
+        const r = await setupFetch('/setup/collab/pcap');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'replay.pcap';
+        document.body.appendChild(a); a.click(); a.remove();
+        URL.revokeObjectURL(url);
+    } catch (e) {
+        const msg = document.getElementById('cb-pcap-msg'); if (msg) msg.textContent = 'Error: ' + e.message;
+    }
 }
 
 async function saveCollab() {
@@ -9431,7 +9510,7 @@ async function saveCollab() {
 // Auto-save on change — only the config fields, not the firewall-apply controls.
 function _collabSaveFnFor(el) {
     const id = el.id || '';
-    const allow = ['cb-enabled', 'cb-app', 'cb-bw', 'cb-server', 'cb-app-teams', 'cb-app-zoom', 'cb-app-webex'];
+    const allow = ['cb-enabled', 'cb-app', 'cb-bw', 'cb-server', 'cb-responder', 'cb-app-teams', 'cb-app-zoom', 'cb-app-webex'];
     return allow.includes(id) ? saveCollab : null;
 }
 

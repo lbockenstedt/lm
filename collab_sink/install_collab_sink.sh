@@ -16,6 +16,12 @@ SVC_USER="${LM_SVC_USER:-svc_lm}"
 BIND="${LM_COLLAB_BIND:-0.0.0.0}"
 PORTS="${LM_COLLAB_PORTS:-3478,3481,3479,8801,8802,8803,9000,5004,5006}"
 LOG_INTERVAL="${LM_COLLAB_LOG_INTERVAL:-30}"
+# Replay capture: the hub collab route saves uploads under the lm state dir at
+# collab/replay.pcap; the sink replays that capture's server->client frames as
+# its responses (falls back to synthetic RTP-shaped payloads when absent).
+STATE_DIR="${LM_STATE_DIR:-/var/lib/lm/state}"
+PCAP="${LM_COLLAB_PCAP:-$STATE_DIR/collab/replay.pcap}"
+RESPOND="${LM_COLLAB_RESPOND:-1}"
 
 if [[ ! -f "$SRC_DIR/sink.py" ]]; then
     echo "lm-collab-sink: $SRC_DIR/sink.py not found — is the lm repo deployed?" >&2
@@ -41,6 +47,8 @@ WorkingDirectory=$SRC_DIR
 Environment=LM_COLLAB_BIND=$BIND
 Environment=LM_COLLAB_PORTS=$PORTS
 Environment=LM_COLLAB_LOG_INTERVAL=$LOG_INTERVAL
+Environment=LM_COLLAB_PCAP=$PCAP
+Environment=LM_COLLAB_RESPOND=$RESPOND
 ExecStart=/usr/bin/python3 $SRC_DIR/sink.py
 StandardOutput=append:/var/log/lm/lm-collab-sink.log
 StandardError=append:/var/log/lm/lm-collab-sink.log
