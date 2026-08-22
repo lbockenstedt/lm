@@ -1451,7 +1451,7 @@ const VIEW_SUBMENUS = {
     pxmx: ['Overview', 'Virtual Machines', 'Settings'],
     ldap: ['Users', 'Groups'],
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
-    cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management'],
+    cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management', 'Assistant'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
     dns: ['Records', 'Statistics', 'Forwarders', 'External DNS'],
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations'],

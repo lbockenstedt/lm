@@ -1729,6 +1729,13 @@ def create_app(hub):
                 return JSONResponse(status_code=403,
                                     content={"detail": "Simulations module access required"})
 
+        # /api/sim-assistant/* (the chat-style simulation build assistant,
+        # embedded in the Simulations module) — same gate as /api/cs/*.
+        if path.startswith("/api/sim-assistant/"):
+            if not (_is_admin(sess) or _has_cs_access(sess)):
+                return JSONResponse(status_code=403,
+                                    content={"detail": "Simulations module access required"})
+
         # /api/nw/* (Network Devices module) requires the ``nw`` right OR admin.
         # Mirrors the cs gate: frontend hides the Network nav on the same right.
         if path.startswith("/api/nw/"):
@@ -2270,7 +2277,7 @@ def create_app(hub):
 
     # ── Register relocated route groups (one module per coherent area) ──
     from routes import (
-        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, exec as exec_routes, os_updates as os_updates_routes, self_backup, tenant_devices, oidc, templates, azure_nsg, cloud_nac as cloud_nac_routes, key_vault as key_vault_routes, cred_vault as cred_vault_routes, notifications as notifications_routes, collab, truenas, onboarding,
+        setup, firewall, nw, cppm, pxmx, ws_transport, console, pxmx_vm, dashboard, setup_admin, ldap, netbox, tenants_users, auth, setup_misc, agents, net_services, admin_cache, help_assistant, sim_assistant, exec as exec_routes, os_updates as os_updates_routes, self_backup, tenant_devices, oidc, templates, azure_nsg, cloud_nac as cloud_nac_routes, key_vault as key_vault_routes, cred_vault as cred_vault_routes, notifications as notifications_routes, collab, truenas, onboarding,
     hub_watchdog as hub_watchdog_routes, netbox_sso as netbox_sso_routes, security as security_routes, client_debug as client_debug_routes, admin_ops as admin_ops_routes,
     )
     security_routes.register(app, hub, ctx)
@@ -2305,6 +2312,7 @@ def create_app(hub):
     net_services.register(app, hub, ctx)
     admin_cache.register(app, hub, ctx)
     help_assistant.register(app, hub, ctx)
+    sim_assistant.register(app, hub, ctx)
     exec_routes.register(app, hub, ctx)
     os_updates_routes.register(app, hub, ctx)
     self_backup.register(app, hub, ctx)
