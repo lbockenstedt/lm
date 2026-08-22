@@ -19590,8 +19590,8 @@ function pxmxEnsureConsoleDock() {
     modal.id = 'pxmx-vnc-modal';
     modal.className = 'fixed top-16 bottom-10 left-56 right-0 z-40 flex bg-[#1a1a2e] border-t border-slate-700 shadow-2xl';
     modal.innerHTML = `
-        <div class="w-72 shrink-0 flex flex-col border-r border-slate-700 bg-[#141428]">
-            <div class="p-2 border-b border-slate-700 space-y-2">
+        <div id="pxmx-vnc-sidebar" class="shrink-0 flex flex-col border-r border-slate-700 bg-[#141428] overflow-hidden">
+            <div class="p-2 border-b border-slate-700 space-y-2 w-72">
                 <div class="flex items-center justify-between">
                     <strong class="text-sm text-slate-200">VM Consoles</strong>
                     <button id="pxmx-vnc-closeall" title="Close all consoles" class="text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
@@ -19603,7 +19603,12 @@ function pxmxEnsureConsoleDock() {
                 </div>
                 <p class="text-[10px] text-slate-500 leading-tight">Type to search any VNC-capable VM you can access; empty shows only open consoles.</p>
             </div>
-            <div id="pxmx-vnc-list" class="flex-1 overflow-y-auto"></div>
+            <div id="pxmx-vnc-list" class="flex-1 overflow-y-auto w-72"></div>
+        </div>
+        <div id="pxmx-vnc-resize-handle" title="Drag to resize — collapse to fit two consoles side-by-side"
+             class="w-1.5 shrink-0 cursor-col-resize bg-slate-700 hover:bg-sky-500 active:bg-sky-500 relative">
+            <button id="pxmx-vnc-sidebar-collapse" title="Collapse/expand the console list"
+                    class="absolute top-2 -left-2 w-4 h-8 flex items-center justify-center rounded-sm bg-slate-700 hover:bg-sky-600 text-slate-300 hover:text-white text-[10px] leading-none">◂</button>
         </div>
         <div class="flex-1 flex flex-col min-w-0">
             <div class="flex items-center gap-3 px-4 py-2 bg-[#16213e] border-b border-slate-700 text-slate-200 text-sm">
@@ -19638,7 +19643,66 @@ function pxmxEnsureConsoleDock() {
         pxmxRenderConsoleList();
     });
     modal.querySelector('#pxmx-vnc-refresh').onclick = () => pxmxRefreshConsoleDir(true);
+    // Sidebar starts at its remembered width (session-only — resets on a full
+    // page reload) so reopening the dock keeps the operator's preferred split
+    // instead of resetting to the default every time. Collapsing it (rather
+    // than closing sessions) is what makes room to view the console body
+    // without the VM list eating into the split.
+    modal.querySelector('#pxmx-vnc-sidebar-collapse').onclick = () =>
+        pxmxSetSidebarCollapsed(!window._pxmxSidebarCollapsed);
+    pxmxSetSidebarCollapsed(!!window._pxmxSidebarCollapsed);
+    modal.querySelector('#pxmx-vnc-resize-handle').addEventListener('mousedown', (ev) => {
+        // A mousedown on the collapse button shouldn't also start a drag.
+        if (ev.target.closest('#pxmx-vnc-sidebar-collapse')) return;
+        window._pxmxSidebarDragging = true;
+        document.body.style.userSelect = 'none';
+        ev.preventDefault();
+    });
+    _pxmxWireSidebarResize();
     return modal;
+}
+
+// Expand/collapse the VM console LIST specifically (distinct from
+// pxmxSetDockCollapsed, which minimizes the WHOLE dock to a footer pill).
+// Collapsing just hides the browse-and-search sidebar, reclaiming its width
+// for the console body area. No sessions are affected either way.
+function pxmxSetSidebarCollapsed(collapsed) {
+    window._pxmxSidebarCollapsed = !!collapsed;
+    const modal = document.getElementById('pxmx-vnc-modal');
+    if (!modal) return;
+    const sidebar = modal.querySelector('#pxmx-vnc-sidebar');
+    const btn = modal.querySelector('#pxmx-vnc-sidebar-collapse');
+    if (sidebar) sidebar.style.width = collapsed ? '0px' : ((window._pxmxSidebarWidth || 288) + 'px');
+    if (btn) { btn.textContent = collapsed ? '▸' : '◂'; btn.title = collapsed ? 'Expand the console list' : 'Collapse the console list'; }
+}
+
+// Drag-to-resize wiring for the sidebar — attached to `document` ONCE (guarded
+// by a flag) rather than per dock-open, since the dock's DOM (and any
+// listeners bound to ITS elements) is destroyed on close; a document-level
+// listener would otherwise accumulate a stale copy every reopen. Looks up the
+// current dock elements by id on every move rather than closing over them, so
+// it naturally no-ops once the dock (or its drag) is gone.
+function _pxmxWireSidebarResize() {
+    if (window._pxmxResizeWired) return;
+    window._pxmxResizeWired = true;
+    const MIN_W = 160, MAX_W = 560;
+    document.addEventListener('mousemove', (ev) => {
+        if (!window._pxmxSidebarDragging) return;
+        const modal = document.getElementById('pxmx-vnc-modal');
+        const sidebar = document.getElementById('pxmx-vnc-sidebar');
+        if (!modal || !sidebar) return;
+        const w = Math.max(MIN_W, Math.min(MAX_W, ev.clientX - modal.getBoundingClientRect().left));
+        window._pxmxSidebarWidth = w;
+        window._pxmxSidebarCollapsed = false;
+        sidebar.style.width = w + 'px';
+        const btn = document.getElementById('pxmx-vnc-sidebar-collapse');
+        if (btn) { btn.textContent = '◂'; btn.title = 'Collapse the console list'; }
+    });
+    document.addEventListener('mouseup', () => {
+        if (!window._pxmxSidebarDragging) return;
+        window._pxmxSidebarDragging = false;
+        document.body.style.userSelect = '';
+    });
 }
 
 // The registry entry for the currently visible tab (or null).
