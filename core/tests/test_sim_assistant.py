@@ -140,3 +140,82 @@ def test_chat_empty_answer_gets_a_friendly_fallback():
     r = c.post("/api/sim-assistant/chat", json={"messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 200
     assert r.json()["answer"]  # non-empty fallback, not a blank string
+
+
+# ── scope guardrail: cs-module only ──────────────────────────────────────────
+# Two layers, both must hold: (1) retrieval — off-topic docs (mTLS, Azure,
+# other modules) are never even readable by this route's doc pool, so there's
+# nothing to leak into context; (2) prompt — an explicit instruction to
+# decline and redirect off-topic questions rather than answer from general
+# training.
+
+def test_system_prompt_declares_hard_scope_boundary():
+    hub = _FakeHub(replies=["ok"])
+    c = _build(hub)
+    c.post("/api/sim-assistant/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+    system = hub.last_request[2]["system"]
+    assert "decline" in system.lower() and "redirect" in system.lower()
+    # Named examples of what's explicitly out of scope.
+    for term in ("mTLS", "Azure"):
+        assert term in system
+
+
+def test_system_prompt_allows_general_engine_questions_as_on_topic():
+    hub = _FakeHub(replies=["ok"])
+    c = _build(hub)
+    c.post("/api/sim-assistant/chat", json={"messages": [
+        {"role": "user", "content": "how does the quota engine work?"}]})
+    system = hub.last_request[2]["system"]
+    assert "quota engine" in system.lower() or "engine" in system.lower()
+
+
+def test_doc_selection_never_includes_non_cs_docs():
+    """Structural guarantee: only the cs-module whitelist is ever readable —
+    an unrelated doc (e.g. security-pentest, entra-sso) can score highest by
+    raw keyword overlap and STILL never appear, because it was never in the
+    candidate pool to begin with."""
+    hub = _FakeHub(replies=["ok"])
+    c = _build(hub)
+    c.post("/api/sim-assistant/chat", json={"messages": [
+        {"role": "user", "content": "how do I configure mTLS client certs and Azure NSG rules?"}]})
+    system = hub.last_request[2]["system"]
+    # The mention of "mTLS"/"Azure" above is the REFUSAL instruction text
+    # itself (checked in test_system_prompt_declares_hard_scope_boundary) —
+    # what matters here is that no DOC content about them was pulled in, i.e.
+    # no "=== DOC:" section outside the whitelist appears.
+    for forbidden_doc in ("security-pentest", "entra-sso", "cppm", "nw", "dhcp",
+                          "dns", "opnsense", "ldap", "console", "netbox", "pxmx"):
+        assert f"=== DOC: {forbidden_doc} ===" not in system
+
+
+def test_doc_selection_picks_a_relevant_cs_doc_for_engine_questions():
+    hub = _FakeHub(replies=["ok"])
+    c = _build(hub)
+    c.post("/api/sim-assistant/chat", json={"messages": [
+        {"role": "user", "content": "how does alert generation and the quota engine work?"}]})
+    system = hub.last_request[2]["system"]
+    assert "=== DOC: alert-generation ===" in system
+
+
+def test_doc_selection_falls_back_to_cs_doc_when_nothing_scores():
+    hub = _FakeHub(replies=["ok"])
+    c = _build(hub)
+    c.post("/api/sim-assistant/chat", json={"messages": [
+        {"role": "user", "content": "xyzzy plugh qux"}]})
+    system = hub.last_request[2]["system"]
+    assert "=== DOC: cs ===" in system
+
+
+def test_doc_selection_uses_earlier_turns_not_just_the_latest_message():
+    """A short follow-up ("yes") shouldn't lose doc relevance an earlier,
+    more descriptive turn already established."""
+    hub = _FakeHub(replies=["first reply", "second reply"])
+    c = _build(hub)
+    history = [
+        {"role": "user", "content": "tell me about the dongle quarantine system"},
+        {"role": "assistant", "content": "first reply"},
+        {"role": "user", "content": "yes"},
+    ]
+    c.post("/api/sim-assistant/chat", json={"messages": history})
+    system = hub.last_request[2]["system"]
+    assert "=== DOC: dongle-quarantine ===" in system
