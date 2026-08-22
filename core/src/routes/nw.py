@@ -6,6 +6,27 @@ from api import (
 )
 
 
+def validate_nw_address(addr):
+    """Require a non-empty management address and reject a malformed dotted-quad
+    IP (e.g. a typo'd octet like ``1721.6.1.90``) — that would otherwise fail
+    opaquely on the spoke as an unresolvable hostname (``Name or service not
+    known``). Anything that isn't four dot-separated numeric groups is treated
+    as a hostname and allowed. Raises HTTPException(400). Shared by the
+    ``/setup/nw-devices`` (admin) and ``/tenant/devices/nw-devices``
+    (tenant-admin) CRUD paths so both enforce the same rule."""
+    a = str(addr or "").strip()
+    if not a:
+        raise HTTPException(status_code=400,
+                            detail="Management IP address is required")
+    parts = a.split(".")
+    if len(parts) == 4 and all(p.isdigit() for p in parts):
+        if any(len(p) > 1 and p[0] == "0" for p in parts) or \
+           any(int(p) > 255 for p in parts):
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{a}' is not a valid IPv4 address (each octet must be 0-255)")
+
+
 def register(app, hub, ctx):
     """Register nw routes on the Hub app."""
     _session_user = ctx._session_user
@@ -14,22 +35,7 @@ def register(app, hub, ctx):
     _filter_nw = ctx._filter_nw
 
     def _validate_nw_address(addr):
-        """Require a non-empty management address and reject a malformed
-        dotted-quad IP (e.g. a typo'd octet like ``1721.6.1.90``) — that would
-        otherwise fail opaquely on the spoke as an unresolvable hostname
-        (``Name or service not known``). Anything that isn't four dot-separated
-        numeric groups is treated as a hostname and allowed. Raises 400."""
-        a = str(addr or "").strip()
-        if not a:
-            raise HTTPException(status_code=400,
-                                detail="Management IP address is required")
-        parts = a.split(".")
-        if len(parts) == 4 and all(p.isdigit() for p in parts):
-            if any(len(p) > 1 and p[0] == "0" for p in parts) or \
-               any(int(p) > 255 for p in parts):
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"'{a}' is not a valid IPv4 address (each octet must be 0-255)")
+        return validate_nw_address(addr)
 
     def _enforce_tenant_bind(request, cfg, kind):
         """Shared add/edit gate for tenant-scoped device/instance creation. A

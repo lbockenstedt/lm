@@ -25,6 +25,7 @@ import instance_vault
 from api import (
     HTTPException, Request, _hub_msg, access, logger, uuid,
 )
+from routes.nw import validate_nw_address
 
 
 _FALSEY = {"0", "false", "no", "off", "none", "null", ""}
@@ -269,6 +270,7 @@ def register(app, hub, ctx):
                         raise HTTPException(status_code=400, detail="Missing object_type")
                     if rec.get("object_type") not in _NW_OBJECT_TYPES:
                         raise HTTPException(status_code=400, detail="Invalid object_type")
+                    validate_nw_address(rec.get("address"))
                 sess = _session_user(request)
                 spoke_id = rec.get("spoke_id")
                 # tenant_id is server-assigned from the bound spoke — never trust
@@ -308,6 +310,13 @@ def register(app, hub, ctx):
                 new_spoke = upd.get("spoke_id")
                 if new_spoke and new_spoke != rec.get("spoke_id"):
                     upd["tenant_id"] = _bind_gate(sess, _prod, new_spoke)
+                # Validate the effective (post-merge) address BEFORE mutating the
+                # stored record, so a rejected edit can't blank/corrupt a good
+                # device (mirrors nw.py update_nw_device).
+                if _prod["key"] == "nw_devices":
+                    effective_addr = (upd["address"] if "address" in upd
+                                      else rec.get("address"))
+                    validate_nw_address(effective_addr)
                 rec.update(upd)
                 await instance_vault.validate_ref(
                     hub, rec, sess, is_admin=access.is_admin(sess), storage_key=_prod["key"])
