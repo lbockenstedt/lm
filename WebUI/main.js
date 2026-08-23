@@ -27461,6 +27461,11 @@ const INSTANCE_PRODUCTS = {
         endpoint: '/setup/nac-instances',
         listId: 'nac-instances-list',
         moduleType: 'nac',
+        // A bare, not-yet-role-loaded base agent (module_type 'agent') is also
+        // selectable — binding an instance to one auto-loads the matching
+        // coordinator role as part of the save, instead of requiring a
+        // separate manual "Load Role" step first (see routes/role_pool.py).
+        alsoBareAgent: true,
         vaultPicker: true,
         rowSummary: inst => `${inst.host || '—'}`,
         fields: [
@@ -27477,6 +27482,7 @@ const INSTANCE_PRODUCTS = {
         endpoint: '/setup/ipam-instances',
         listId: 'ipam-instances-list',
         moduleType: 'ipam',
+        alsoBareAgent: true,
         vaultPicker: true,
         rowSummary: inst => `${inst.url || '—'}`,
         fields: [
@@ -27490,6 +27496,7 @@ const INSTANCE_PRODUCTS = {
         endpoint: '/setup/ldap-instances',
         listId: 'ldap-instances-list',
         moduleType: 'directory',
+        alsoBareAgent: true,
         rowSummary: inst => `${inst.server_url || '—'}`,
         fields: [
             { id: 'server_url', label: 'Server URL', placeholder: 'ldap://localhost:389' },
@@ -27593,9 +27600,12 @@ const DEVICE_TYPES = {
             { id: 'snmp_community', label: 'SNMP Community' },
         ],
     },
-    nac:   Object.assign({}, INSTANCE_PRODUCTS.nac,   { badgeLabel: 'NAC',  payloadKey: 'instance', responseKey: 'instances', spokeFilter: s => s.module_type === 'nac' }),
-    ipam:  Object.assign({}, INSTANCE_PRODUCTS.ipam,  { badgeLabel: 'IPAM', payloadKey: 'instance', responseKey: 'instances', spokeFilter: s => s.module_type === 'ipam' }),
-    ldap:  Object.assign({}, INSTANCE_PRODUCTS.ldap,  { badgeLabel: 'LDAP', payloadKey: 'instance', responseKey: 'instances', spokeFilter: s => s.module_type === 'directory' }),
+    // nac/ipam/ldap inherit `alsoBareAgent: true` from INSTANCE_PRODUCTS above
+    // — a not-yet-role-loaded base agent is selectable, and binding an
+    // instance to one auto-loads the matching coordinator role on save.
+    nac:   Object.assign({}, INSTANCE_PRODUCTS.nac,   { badgeLabel: 'NAC',  payloadKey: 'instance', responseKey: 'instances' }),
+    ipam:  Object.assign({}, INSTANCE_PRODUCTS.ipam,  { badgeLabel: 'IPAM', payloadKey: 'instance', responseKey: 'instances' }),
+    ldap:  Object.assign({}, INSTANCE_PRODUCTS.ldap,  { badgeLabel: 'LDAP', payloadKey: 'instance', responseKey: 'instances' }),
     dns:   Object.assign({}, INSTANCE_PRODUCTS.dns,   { badgeLabel: 'DNS',  payloadKey: 'instance', responseKey: 'instances', spokeFilter: s => s.module_type === 'dns' }),
     dhcp:  Object.assign({}, INSTANCE_PRODUCTS.dhcp,  { badgeLabel: 'DHCP', payloadKey: 'instance', responseKey: 'instances', spokeFilter: s => s.module_type === 'dhcp' }),
 };
@@ -27682,7 +27692,9 @@ ${schemaBtnHtml}
     loadApprovedSpokes().then(spokes => {
         const selector = document.getElementById('inst-spoke');
         if (!selector) return;
-        const matched = spokes.filter(s => s.module_type === p.moduleType && _spokeBindable(s));
+        const matched = spokes.filter(s => (s.module_type === p.moduleType
+                                            || (p.alsoBareAgent && s.module_type === 'agent'))
+                                           && _spokeBindable(s));
         selector.innerHTML = matched.length > 0
             ? '<option value="">— select spoke —</option>' + matched.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(_spokeName(s))}</option>`).join('')
             : `<option value="">No ${p.moduleType} spokes found</option>`;
@@ -27736,6 +27748,13 @@ async function saveInstance(productKey) {
         const vc = _collectVaultCred('inst-vaultcred');
         if (vc !== undefined) config.vault_credential = vc;
     }
+    // nac/ipam/ldap: binding to a spoke that hasn't loaded the matching
+    // coordinator role yet now auto-loads it as part of this save (see
+    // routes/role_pool.py) — that can take up to ~2 minutes the first time
+    // (a sibling-repo git clone + pip install), so set expectations instead
+    // of leaving the operator staring at a stuck Save button.
+    if (p.alsoBareAgent) showToast('Saving — if this spoke hasn\'t run this role before, '
+        + 'loading it can take up to a couple of minutes…', 'info');
     try {
         const method = id ? 'PUT' : 'POST';
         const url = id ? `${p.endpoint}/${id}` : p.endpoint;
@@ -27943,7 +27962,9 @@ function _renderDeviceModalFields(typeKey, values) {
     loadApprovedSpokes().then(spokes => {
         const selector = document.getElementById('dev-spoke');
         if (!selector) return;
-        const matched = spokes.filter(s => t.moduleType ? s.module_type === t.moduleType : true)
+        const matched = spokes.filter(s => t.moduleType
+                                  ? (s.module_type === t.moduleType || (t.alsoBareAgent && s.module_type === 'agent'))
+                                  : true)
                               .filter(s => t.spokeFilter ? t.spokeFilter(s) : true)
                               .filter(_spokeBindable);
         const current = values ? values.spoke_id : '';

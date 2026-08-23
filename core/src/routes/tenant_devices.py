@@ -26,6 +26,7 @@ from api import (
     HTTPException, Request, _hub_msg, access, logger, uuid,
 )
 from routes.nw import validate_nw_address
+from routes.role_pool import PRODUCT_ROLE, ensure_role_loaded, maybe_unload_orphaned_role
 
 
 _FALSEY = {"0", "false", "no", "off", "none", "null", ""}
@@ -274,8 +275,20 @@ def register(app, hub, ctx):
                 sess = _session_user(request)
                 spoke_id = rec.get("spoke_id")
                 # tenant_id is server-assigned from the bound spoke — never trust
-                # a client-supplied tenant on the way in.
+                # a client-supplied tenant on the way in. Authorize against
+                # whatever the operator picked (base agent OR an already-loaded
+                # role sub-spoke) BEFORE any auto-load below, since a freshly
+                # auto-loaded sub-spoke has no tenant of its own yet — the base
+                # agent's already-established tenant is the real source of truth.
                 rec["tenant_id"] = _bind_gate(sess, _prod, spoke_id)
+                if spoke_id and route in PRODUCT_ROLE:
+                    # Auto-load the matching coordinator role if the operator
+                    # picked a bare base agent rather than an already-loaded
+                    # role sub-spoke — removes the separate manual "Load Role"
+                    # step. Resolves to the sub-spoke id actually pushed to.
+                    role, module_type = PRODUCT_ROLE[route]
+                    spoke_id = await ensure_role_loaded(hub, spoke_id, role, module_type)
+                    rec["spoke_id"] = spoke_id
                 await instance_vault.validate_ref(
                     hub, rec, sess, is_admin=access.is_admin(sess), storage_key=_prod["key"])
                 instance_vault.strip_inline_secrets(rec, _prod["key"])
@@ -308,8 +321,13 @@ def register(app, hub, ctx):
                 # re-run the bind gate (which re-stamps tenant_id).
                 upd.pop("tenant_id", None)
                 new_spoke = upd.get("spoke_id")
-                if new_spoke and new_spoke != rec.get("spoke_id"):
+                old_spoke = rec.get("spoke_id")
+                if new_spoke and new_spoke != old_spoke:
                     upd["tenant_id"] = _bind_gate(sess, _prod, new_spoke)
+                    if route in PRODUCT_ROLE:
+                        role, module_type = PRODUCT_ROLE[route]
+                        new_spoke = await ensure_role_loaded(hub, new_spoke, role, module_type)
+                        upd["spoke_id"] = new_spoke
                 # Validate the effective (post-merge) address BEFORE mutating the
                 # stored record, so a rejected edit can't blank/corrupt a good
                 # device (mirrors nw.py update_nw_device).
@@ -323,6 +341,9 @@ def register(app, hub, ctx):
                 instance_vault.strip_inline_secrets(rec, _prod["key"])
                 _save(_prod, _store(_prod))
                 pushed = await _push_record(_prod, rec)
+                if route in PRODUCT_ROLE and old_spoke and old_spoke != rec.get("spoke_id"):
+                    role, _mt = PRODUCT_ROLE[route]
+                    await maybe_unload_orphaned_role(hub, old_spoke, role, _store(_prod))
                 return {"status": "ok" if pushed else "partial_success", "pushed": pushed}
             except HTTPException:
                 raise
@@ -345,6 +366,9 @@ def register(app, hub, ctx):
             pushed = False
             if _prod.get("push") == "nw" and spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
                 pushed = await _push_record(_prod, {"spoke_id": spoke_id})
+            if route in PRODUCT_ROLE and spoke_id:
+                role, _mt = PRODUCT_ROLE[route]
+                await maybe_unload_orphaned_role(hub, spoke_id, role, records)
             return {"status": "ok", "message": f"{_prod['kind']} deleted.", "pushed": pushed}
 
     for _route, _prod in _PRODUCTS.items():
