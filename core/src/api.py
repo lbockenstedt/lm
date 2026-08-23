@@ -2610,6 +2610,27 @@ def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
     # in-loop server path.)
     cfg_kwargs["server_header"] = False
     server = uvicorn.Server(uvicorn.Config(app, **cfg_kwargs))
+    # Explicitly pin the TLS floor + cipher suite on the public listener rather
+    # than inheriting the platform/uvicorn defaults, so the "strongest
+    # encryption" posture is auditable and host-independent. Force uvicorn to
+    # build its SSLContext now, then require TLS 1.2 as the minimum (TLS 1.3 is
+    # negotiated automatically when both peers support it) and restrict the
+    # TLS<=1.2 cipher list to modern forward-secret AEAD suites. TLS 1.3 suites
+    # are fixed by OpenSSL and always strong, so set_ciphers only shapes the 1.2
+    # handshake. Best-effort: on any hiccup uvicorn's defaults stay in place
+    # (still TLS 1.2+ on modern OpenSSL).
+    if tls_cert and tls_key:
+        try:
+            if not server.config.loaded:
+                server.config.load()
+            _lctx = getattr(server.config, "ssl", None)
+            if _lctx is not None:
+                _lctx.minimum_version = ssl.TLSVersion.TLSv1_2
+                _lctx.set_ciphers(
+                    "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:"
+                    "!aNULL:!eNULL:!MD5:!RC4:!3DES:!DES")
+        except Exception:  # noqa: BLE001 — never brick the boot on a TLS-hardening hiccup
+            pass
     # Register the listener's client-verify SSLContext so mTLS trust can be
     # hot-reloaded in place when certs/chains change — no hub restart needed for a
     # renewal or a newly-deployed device cert (see mtls.reload_client_ca). Force the

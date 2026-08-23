@@ -14,6 +14,7 @@ import subprocess
 import threading
 import queue
 import random
+import re
 import os
 import tempfile
 import socket
@@ -2135,6 +2136,21 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             new_hostname = data.get("hostname")
             if not new_hostname:
                 return {"status": "ERROR", "message": "Missing hostname in data"}
+
+            # Strict RFC-1123 validation BEFORE the value reaches any subprocess.
+            # The value is admin-set over an HMAC-authenticated frame, but never
+            # build a `sed` s/// script from unvalidated text: a hostname
+            # containing `/`, `;`, `&`, whitespace, or a newline would break out
+            # of the substitution expression (argument injection). Constrain to
+            # letters/digits/hyphens per label (no leading/trailing hyphen),
+            # optional dotted FQDN, ≤253 chars — the same shape systemd accepts.
+            if not re.match(
+                r"^(?=.{1,253}$)[A-Za-z0-9]([A-Za-z0-9-]{0,62})"
+                r"(\.[A-Za-z0-9]([A-Za-z0-9-]{0,62}))*$",
+                str(new_hostname)):
+                return {"status": "ERROR",
+                        "message": "Invalid hostname (RFC-1123: letters, digits, "
+                                   "hyphens and dots only, ≤253 chars)"}
 
             try:
                 logger.info(f"Updating system hostname to: {new_hostname}")
