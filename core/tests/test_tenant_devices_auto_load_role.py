@@ -181,3 +181,27 @@ def test_reassign_nac_instance_to_a_new_spoke_loads_new_and_unloads_old():
     assert r.status_code == 200
     assert hub.load_role_calls[-1] == ("spokeB", {"role": "cppm", "config": {}})
     assert hub.unload_role_calls == [("spokeA", {"role": "cppm"})]
+
+
+def test_spoke_pool_field_persists_through_add_and_update():
+    """spoke_pool isn't a backend-known field (PR1 never mentions it) — it
+    must still round-trip through the generic record dict unchanged, since
+    instance_relocate.py (PR2) reads it directly off the stored record."""
+    c, hub, holder = _build()
+    _connect_base_agent(hub, "spokeA")
+    _connect_base_agent(hub, "spokeB")
+    _connect_base_agent(hub, "spokeC")
+    holder.current = _sess(tenants=["acme"], tenant_id="acme")
+
+    add = c.post("/tenant/devices/nac-instances", json={"instance": {
+        "name": "ClearPass", "spoke_id": "spokeA", "host": "cppm.local",
+        "spoke_pool": ["spokeA", "spokeB"]}})
+    assert add.status_code == 200
+    assert add.json()["instance"]["spoke_pool"] == ["spokeA", "spokeB"]
+    rid = add.json()["instance"]["id"]
+
+    upd = c.put(f"/tenant/devices/nac-instances/{rid}", json={
+        "config": {"spoke_pool": ["spokeA", "spokeB", "spokeC"]}})
+    assert upd.status_code == 200
+    stored = hub.state.system_state["global_config"]["nac_instances"][0]
+    assert stored["spoke_pool"] == ["spokeA", "spokeB", "spokeC"]
