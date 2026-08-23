@@ -12,13 +12,64 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import tempfile
 
 from cryptography.fernet import Fernet
 from fastapi import Response
 
 from api import HTTPException, Request, logger
 from security.oidc import get_oidc_config
+from self_backup import _env_candidates
 import key_vault as _kv
+
+# Defense-in-depth against .env injection: an env VALUE (secret name, vault
+# URL) must not contain a newline or NUL — either would let a form field
+# inject an extra bogus line (or corrupt) the hub's .env, which carries
+# every other secret in the file. Everything else (letters/digits/./:/-/_
+# for a URL or secret name) is allowed; length-capped defensively.
+_ENV_VALUE_RE = re.compile(r"^[^\r\n\x00]{1,500}$")
+
+
+def _upsert_env_vars(path: str, updates: dict) -> None:
+    """Idempotently set ``KEY=value`` lines in an env file, atomically.
+
+    Every OTHER line — including any existing secret, comment, or blank line
+    — is preserved byte-for-byte; only a line whose KEY exactly matches one
+    of ``updates`` is replaced in place, and a new ``KEY=value`` line is
+    appended for any key not already present. Writes via a temp file in the
+    same directory + ``os.replace`` so a crash mid-write can never leave a
+    corrupted/partial ``.env`` — this file carries every hub secret,
+    including ``LM_FERNET_KEY`` itself, which this function never touches
+    unless it's literally one of the keys in ``updates``."""
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    remaining = dict(updates)
+    out = []
+    for line in lines:
+        stripped = line.strip()
+        matched_key = None
+        if stripped and not stripped.startswith("#") and "=" in stripped:
+            key = stripped.split("=", 1)[0].strip()
+            if key in remaining:
+                matched_key = key
+        out.append(f"{matched_key}={remaining.pop(matched_key)}" if matched_key else line)
+    for k, v in remaining.items():
+        out.append(f"{k}={v}")
+    content = "\n".join(out) + "\n"
+    directory = os.path.dirname(path) or "."
+    fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".env.tmp-")
+    try:
+        os.chmod(tmp_path, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def register(app, hub, ctx):
@@ -134,6 +185,51 @@ def register(app, hub, ctx):
                 "message": f"Secret '{secret_name}' fetched from Key Vault and is a valid Fernet "
                           f"key — a restart with only LM_FERNET_KEY_KV_SECRET set would boot on it.",
                 **diag}
+
+    @app.post("/setup/key-vault/configure-tier1")
+    async def configure_fernet_tier1(request: Request):
+        """Write LM_FERNET_KEY_KV_SECRET / LM_KEYVAULT_URL into this hub's own
+        .env (idempotent upsert via _upsert_env_vars — every other line,
+        including LM_FERNET_KEY itself, is left untouched byte-for-byte) and
+        restart the hub so they take effect. Reuses the existing
+        hub._hub_self_restart() primitive (System → Hub Status' "Restart hub
+        service" button) rather than a new restart mechanism. Never reads
+        back or returns any OTHER line from .env — this route only ever
+        writes the two values it was given."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        secret_name = str((body or {}).get("secret_name") or "").strip()
+        vault_url = str((body or {}).get("vault_url") or "").strip()
+        if not secret_name or not vault_url:
+            raise HTTPException(status_code=400, detail="secret_name and vault_url are required")
+        if not _ENV_VALUE_RE.match(secret_name) or not _ENV_VALUE_RE.match(vault_url):
+            raise HTTPException(status_code=400,
+                                detail="secret_name/vault_url contain characters not allowed in an env value")
+        env_path = next((c for c in _env_candidates() if os.path.isfile(c)), None)
+        if not env_path:
+            raise HTTPException(status_code=503, detail="could not locate this hub's .env file")
+        try:
+            _upsert_env_vars(env_path, {
+                "LM_FERNET_KEY_KV_SECRET": secret_name,
+                "LM_KEYVAULT_URL": vault_url,
+            })
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[diag] Tier-1 .env write failed: %s", e)
+            raise HTTPException(status_code=500, detail=f"could not write .env: {e}")
+        logger.warning("[diag] Tier-1 Key Vault boot vars written to .env (secret=%s) — restarting hub",
+                       secret_name)
+        restart = getattr(hub, "_hub_self_restart", None)
+        if restart is None:
+            return {"status": "ok", "message": "Saved to .env — restart the hub manually to apply it."}
+        try:
+            msg = await restart()
+        except Exception as e:  # noqa: BLE001
+            return {"status": "ok",
+                    "message": f"Saved to .env, but the automatic restart could not be scheduled "
+                              f"({e}) — restart the hub manually to apply it."}
+        return {"status": "ok", "message": msg or "Saved — lm.service restarting to apply it."}
 
     @app.post("/setup/key-vault/rotate-admin")
     async def rotate_admin(request: Request):
