@@ -16249,13 +16249,86 @@ async function loadOpnsenseManagement() {
 }
 
 // Network Devices management view (mirrors loadOpnsenseManagement).
+// Per-sub-view column order for the NW sub-resource tables. Keeps the header
+// set (and its order) identical whether we render one device's tab or the
+// fused "All" view.
+const _NW_SUBVIEW_KEYS = {
+    'MAC Table':   ['device', 'mac', 'ip', 'os', 'vlan', 'interface'],
+    'ARP':         ['device', 'ip', 'mac', 'os', 'interface'],
+    'Interfaces':  ['device', 'name', 'status', 'speed', 'mode', 'ip', 'mac', 'vlan'],
+    'IP Addresses':['device', 'ip', 'mac', 'os', 'vlan', 'interface'],
+    'VLANs':       ['device', 'vlan', 'name', 'ports', 'macs', 'ips', 'gateway_ip'],
+};
+
+// Render one NW sub-resource table (shared by the per-device tabs and the
+// fused "All" tab so both look identical).
+function _nwSubViewTableHtml(subMenu, items) {
+    let keys = _NW_SUBVIEW_KEYS[subMenu];
+    if (!keys) keys = ['device', ...Object.keys(items[0] || {}).filter(k => k !== 'id' && k !== 'device' && !k.startsWith('_'))];
+    const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace(/_/g, ' ')}</th>`).join('');
+    const rows = items.map(item => {
+        const cells = keys.map(k => {
+            const val = item[k] !== undefined && item[k] !== null && item[k] !== '' ? String(item[k]) : '-';
+            if (k === 'device') return `<td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(val)}</td>`;
+            if (k === 'status') {
+                const color = val === 'up' ? 'text-green-600' : 'text-slate-400';
+                return `<td class="px-4 py-3 font-mono text-xs ${color}">${escapeHtml(val)}</td>`;
+            }
+            return `<td class="px-4 py-3 text-slate-600 font-mono text-xs max-w-[200px] truncate" title="${escapeHtml(val)}">${escapeHtml(val)}</td>`;
+        }).join('');
+        return `<tr class="hover:bg-slate-50 transition-colors">${cells}</tr>`;
+    }).join('');
+    return `<div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
+        <table class="w-full text-left text-sm">
+            <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}</tr></thead>
+            <tbody class="divide-y divide-slate-200">${rows}</tbody>
+        </table>
+    </div>`;
+}
+
+// Tab strip (one tab per device that returned rows, plus a fused "All") + the
+// active tab's table. In a large fleet the sub-views used to dump every
+// device's hundreds of rows into one table at once; tabbing scopes the display
+// to a single device by default (first tab active) so the page stays light.
+// This is display-only — cross-module search still queries every device
+// server-side (/api/search), so nothing is hidden from a lookup.
+function _nwSubViewHtml() {
+    const st = window._nwSubView;
+    if (!st) return '';
+    const { subMenu, groups, order, active } = st;
+    const tabBtn = (devId, label, count, isActive) =>
+        `<button onclick="nwSelectDeviceTab('${escJsAttr(devId)}')" class="px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${isActive ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}">${escapeHtml(label)} <span class="opacity-60">(${count})</span></button>`;
+    const allCount = order.reduce((n, id) => n + groups[id].items.length, 0);
+    const tabs = [tabBtn('__all__', 'All', allCount, active === '__all__')]
+        .concat(order.map(id => tabBtn(id, groups[id].name, groups[id].items.length, active === id)))
+        .join('');
+    const items = active === '__all__'
+        ? order.reduce((acc, id) => acc.concat(groups[id].items), [])
+        : (groups[active] ? groups[active].items : []);
+    const errBanner = st.errorsCount ? `<div class="text-xs text-amber-600">${st.errorsCount} of ${st.devTotal} device(s) unreachable.</div>` : '';
+    const body = items.length
+        ? _nwSubViewTableHtml(subMenu, items)
+        : `<div class="py-12 text-center text-slate-400 italic">No ${escapeHtml(subMenu)} on this device.</div>`;
+    return `<div class="space-y-3">
+        ${errBanner}
+        <div class="flex flex-wrap gap-1.5">${tabs}</div>
+        ${body}
+    </div>`;
+}
+window.nwSelectDeviceTab = function (devId) {
+    if (window._nwSubView) window._nwSubView.active = devId;
+    const c = document.getElementById('nw-table-container');
+    if (c) c.innerHTML = _nwSubViewHtml();
+};
+
 // Devices → fleet list (/api/nw/devices); IP Addresses / VLANs / MAC Table / ARP
 // / Interfaces → per-device fetch merged across the fleet
 // (/api/nw/{id}/{endpoints|vlans|macs|arp|interfaces}); IP Addresses fuses the
 // ARP/user-table with the MAC/bridge table on MAC (unique IP+MAC per client),
-// each row tagged with its source device (_deviceId / device). ?tenant=
-// scopes the server-side subnet filter to the selected tenant (incl. admins
-// via the switcher); without it admins bypass the filter (see access.filter_nw).
+// each row tagged with its source device (_deviceId / device). Results are
+// rendered as per-device tabs (see _nwSubViewHtml). ?tenant= scopes the
+// server-side subnet filter to the selected tenant (incl. admins via the
+// switcher); without it admins bypass the filter (see access.filter_nw).
 async function loadNwData(subMenu) {
     const container = document.getElementById('nw-table-container');
     if (!container) return;
@@ -16383,39 +16456,26 @@ async function loadNwData(subMenu) {
             return;
         }
 
-        let keys;
-        if (subMenu === 'MAC Table') keys = ['device', 'mac', 'ip', 'os', 'vlan', 'interface'];
-        else if (subMenu === 'ARP') keys = ['device', 'ip', 'mac', 'os', 'interface'];
-        else if (subMenu === 'Interfaces') keys = ['device', 'name', 'status', 'speed', 'mode', 'ip', 'mac', 'vlan'];
-        else if (subMenu === 'IP Addresses') keys = ['device', 'ip', 'mac', 'os', 'vlan', 'interface'];
-        else if (subMenu === 'VLANs') keys = ['device', 'vlan', 'name', 'ports', 'macs', 'ips', 'gateway_ip'];
-        else keys = ['device', ...Object.keys(items[0] || {}).filter(k => k !== 'id' && k !== 'device' && !k.startsWith('_'))];
-
-        const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace(/_/g, ' ')}</th>`).join('');
-        const rows = items.map(item => {
-            const cells = keys.map(k => {
-                const val = item[k] !== undefined && item[k] !== null && item[k] !== '' ? String(item[k]) : '-';
-                if (k === 'device') return `<td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(val)}</td>`;
-                if (k === 'status') {
-                    const color = val === 'up' ? 'text-green-600' : 'text-slate-400';
-                    return `<td class="px-4 py-3 font-mono text-xs ${color}">${escapeHtml(val)}</td>`;
-                }
-                return `<td class="px-4 py-3 text-slate-600 font-mono text-xs max-w-[200px] truncate" title="${escapeHtml(val)}">${escapeHtml(val)}</td>`;
-            }).join('');
-            return `<tr class="hover:bg-slate-50 transition-colors">${cells}</tr>`;
-        }).join('');
-
-        const errBanner = errors.length ? `<div class="text-xs text-amber-600">${errors.length} of ${devList.length} device(s) unreachable.</div>` : '';
-        container.innerHTML = `
-            <div class="space-y-4">
-                ${errBanner}
-                <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
-                    <table class="w-full text-left text-sm">
-                        <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}</tr></thead>
-                        <tbody class="divide-y divide-slate-200">${rows}</tbody>
-                    </table>
-                </div>
-            </div>`;
+        // Group rows by source device and render as tabs (default: first
+        // device) so a large fleet doesn't dump every device's rows at once.
+        const byDev = {};
+        items.forEach(it => { (byDev[it._deviceId] = byDev[it._deviceId] || []).push(it); });
+        const order = [];
+        const groups = {};
+        devList.forEach(d => {
+            const rows = byDev[d.id];
+            if (rows && rows.length) {
+                order.push(d.id);
+                groups[d.id] = { name: d.name || d.id, items: rows };
+            }
+        });
+        window._nwSubView = {
+            subMenu, groups, order,
+            active: order[0] || '__all__',
+            errorsCount: errors.length,
+            devTotal: devList.length,
+        };
+        container.innerHTML = _nwSubViewHtml();
     } catch (err) {
         console.error(`[Network] Error in loadNwData:`, err);
         container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading ${subMenu}: ${err.message}</div>`;
