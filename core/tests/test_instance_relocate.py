@@ -166,3 +166,119 @@ async def test_cycle_covers_all_three_products_independently():
     await hub._instance_relocate_cycle()
     roles_loaded = {payload["role"] for _sid, payload in hub.load_role_calls}
     assert roles_loaded == {"cppm", "netbox", "ldap"}
+
+
+# ── load-based rebalancing (PR3) ─────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_rebalance_moves_instance_to_a_much_less_loaded_candidate():
+    """spokeA is currently serving 3 instances (2 NAC-irrelevant here, but
+    load counts across all 3 products); spokeB is idle. The gap (3 vs 0)
+    clears the threshold, so the NAC instance on spokeA moves to spokeB."""
+    hub = _hub(instances_by_key={
+        "nac_instances": [
+            {"id": "n1", "name": "CPPM-1", "spoke_id": "spokeA-cppm", "spoke_pool": ["spokeA", "spokeB"]}],
+        "ipam_instances": [{"id": "p1", "spoke_id": "spokeA-netbox"}],
+        "ldap_instances": [{"id": "l1", "spoke_id": "spokeA-ldap"}],
+    })
+    _connect(hub, "spokeA-cppm", "nac")
+    _connect(hub, "spokeA-netbox", "ipam")
+    _connect(hub, "spokeA-ldap", "directory")
+    _connect(hub, "spokeB", "agent")
+
+    await hub._instance_rebalance_cycle()
+
+    assert hub.load_role_calls == [("spokeB", {"role": "cppm", "config": {}})]
+    inst = hub.state.system_state["global_config"]["nac_instances"][0]
+    assert inst["spoke_id"] == "spokeB-cppm"
+    assert hub.push_calls == ["spokeB-cppm"]
+
+
+@pytest.mark.asyncio
+async def test_rebalance_leaves_a_small_imbalance_alone():
+    """spokeA serves 1 instance, spokeB serves 0 — a gap of 1 is below the
+    threshold (2), so nothing moves. Avoids thrashing on trivial imbalance."""
+    hub = _hub(instances_by_key={"nac_instances": [
+        {"id": "n1", "spoke_id": "spokeA-cppm", "spoke_pool": ["spokeA", "spokeB"]}]})
+    _connect(hub, "spokeA-cppm", "nac")
+    _connect(hub, "spokeB", "agent")
+
+    await hub._instance_rebalance_cycle()
+
+    assert hub.load_role_calls == []
+    inst = hub.state.system_state["global_config"]["nac_instances"][0]
+    assert inst["spoke_id"] == "spokeA-cppm"
+
+
+@pytest.mark.asyncio
+async def test_rebalance_never_touches_an_unhealthy_instance():
+    """A down instance is the failover pass's job, not rebalancing's — even
+    with a huge apparent load gap, rebalance must not act on it."""
+    hub = _hub(instances_by_key={"nac_instances": [
+        {"id": "n1", "spoke_id": "spokeA-cppm", "spoke_pool": ["spokeA", "spokeB"]}]})
+    # spokeA-cppm is NOT connected (down) — only spokeB is up.
+    _connect(hub, "spokeB", "agent")
+
+    await hub._instance_rebalance_cycle()
+
+    assert hub.load_role_calls == []
+
+
+@pytest.mark.asyncio
+async def test_rebalance_only_considers_pool_candidates_not_every_idle_spoke():
+    """spokeC is idle but was never checked into this instance's pool — must
+    not be used as a rebalance target."""
+    hub = _hub(instances_by_key={
+        "nac_instances": [{"id": "n1", "spoke_id": "spokeA-cppm", "spoke_pool": ["spokeA"]}],
+        "ipam_instances": [{"id": "p1", "spoke_id": "spokeA-netbox"}],
+        "ldap_instances": [{"id": "l1", "spoke_id": "spokeA-ldap"}],
+    })
+    _connect(hub, "spokeA-cppm", "nac")
+    _connect(hub, "spokeA-netbox", "ipam")
+    _connect(hub, "spokeA-ldap", "directory")
+    _connect(hub, "spokeC", "agent")  # idle, but not in the pool
+
+    await hub._instance_rebalance_cycle()
+
+    assert hub.load_role_calls == []
+    inst = hub.state.system_state["global_config"]["nac_instances"][0]
+    assert inst["spoke_id"] == "spokeA-cppm"
+
+
+@pytest.mark.asyncio
+async def test_rebalance_runs_only_every_nth_cycle_of_the_main_loop(monkeypatch):
+    """The rebalance pass shares the failover loop's tick rather than running
+    on its own asyncio loop — assert it only fires every
+    _REBALANCE_EVERY_N_CYCLES ticks, not every cycle. instance_relocate.py is
+    a stdlib-only leaf that doesn't import asyncio itself — sync_loop.py owns
+    the sleep, so that's what gets patched."""
+    import asyncio
+    import sync_loop
+    import instance_relocate as mod
+
+    hub = _hub(instances_by_key={"nac_instances": []})
+    calls = {"relocate": 0, "rebalance": 0}
+
+    async def _fake_relocate():
+        calls["relocate"] += 1
+
+    async def _fake_rebalance():
+        calls["rebalance"] += 1
+    hub._instance_relocate_cycle = _fake_relocate
+    hub._instance_rebalance_cycle = _fake_rebalance
+
+    sleeps = []
+
+    async def _fake_sleep(s):
+        sleeps.append(s)
+        if len(sleeps) >= mod._REBALANCE_EVERY_N_CYCLES + 2:
+            raise asyncio.CancelledError
+    monkeypatch.setattr(sync_loop.asyncio, "sleep", _fake_sleep)
+
+    try:
+        await hub.run_instance_relocate_loop()
+    except asyncio.CancelledError:
+        pass
+
+    assert calls["relocate"] == mod._REBALANCE_EVERY_N_CYCLES + 1
+    assert calls["rebalance"] == 1  # only fired once the tick count hit the Nth cycle
