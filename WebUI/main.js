@@ -1813,6 +1813,23 @@ function fmtDate(val) {
     return isNaN(d) ? String(val) : d.toLocaleString();
 }
 
+// Compact count formatting so a growing tally (e.g. 1,100 → "1.1K") stays narrow
+// in fixed-width stat chips. Exact numbers below 1000 render in full; 1000+ use
+// compact notation (1.1K / 12.3K / 1.2M). Callers keep the exact value in a
+// title/tooltip so the precise count is still available on hover.
+function fmtCompactNum(val) {
+    const n = Number(val || 0);
+    if (!isFinite(n)) return '0';
+    if (Math.abs(n) < 1000) return n.toLocaleString();
+    try {
+        return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(n);
+    } catch (e) {  // very old engines without compact notation
+        const units = [['B', 1e9], ['M', 1e6], ['K', 1e3]];
+        for (const [u, d] of units) if (Math.abs(n) >= d) return (n / d).toFixed(1).replace(/\.0$/, '') + u;
+        return n.toLocaleString();
+    }
+}
+
 // Parse a ClearPass `acctstarttime` (OpenAPI date-time / RFC 3339, ISO 8601).
 // ClearPass commonly emits "YYYY-MM-DD HH:MM:SS(.ffffff)" in server-local time
 // (space-separated, microseconds, no tz marker); JS Date only guarantees
@@ -4203,10 +4220,10 @@ async function loadSecurityData() {
     const bk = t.by_kind || {};
     window._secEvents = d.events || [];   // stash for drill-down modals
     const statChip = (label, val, tone, onclick, title) => `<div class="text-center${onclick ? ' cursor-pointer hover:bg-slate-50 rounded-lg py-1 -my-1 transition-colors' : ''}"${onclick ? ` onclick="${onclick}" title="${title || 'Click to drill into these events'}"` : ''}>
-        <div class="text-2xl font-bold ${tone || 'text-slate-700'}">${Number(val || 0).toLocaleString()}</div>
+        <div class="text-2xl font-bold ${tone || 'text-slate-700'}" title="${Number(val || 0).toLocaleString()}">${fmtCompactNum(val)}</div>
         <div class="text-[11px] text-slate-400 uppercase tracking-wider">${label}${onclick ? ' <span class="text-slate-300">🔍</span>' : ''}</div></div>`;
     const kindChips = Object.keys(bk).sort((a, b) => bk[b] - bk[a]).map(k =>
-        `<span onclick="securityEventsModal('kind:${escapeHtml(k)}')" class="inline-block px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 cursor-pointer text-slate-600 text-[11px] mr-1 mb-1" title="Click to see ${escapeHtml(k)} events"><b>${Number(bk[k] || 0).toLocaleString()}</b> ${escapeHtml(k)}</span>`).join('');
+        `<span onclick="securityEventsModal('kind:${escapeHtml(k)}')" class="inline-block px-2 py-0.5 rounded bg-slate-100 hover:bg-slate-200 cursor-pointer text-slate-600 text-[11px] mr-1 mb-1" title="${Number(bk[k] || 0).toLocaleString()} ${escapeHtml(k)} events — click to see"><b>${fmtCompactNum(bk[k])}</b> ${escapeHtml(k)}</span>`).join('');
     const stats = `<div class="${card}">
         <div class="flex items-center justify-between mb-3 flex-wrap gap-1">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Lifetime activity <span class="text-slate-400 normal-case font-normal">— cumulative; survives block expiry / unblock</span></h3>
