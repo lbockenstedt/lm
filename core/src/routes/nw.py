@@ -6,6 +6,7 @@ from api import (
     HTTPException, Request, _hub_msg, _unwrap_spoke, access, get_spoke_or_503,
     logger, uuid,
 )
+from routes.role_pool import PRODUCT_ROLE, ensure_role_loaded, maybe_unload_orphaned_role
 
 
 def validate_nw_address(addr):
@@ -1154,6 +1155,14 @@ def register(app, hub, ctx):
                 if not new_inst.get("name"):
                     raise HTTPException(status_code=400, detail="Missing instance name")
                 _enforce_tenant_bind(request, new_inst, route_prefix.split("-")[0])
+                if new_inst.get("spoke_id") and route_prefix in PRODUCT_ROLE:
+                    # Auto-load the matching coordinator role if the operator
+                    # picked a bare base agent rather than an already-loaded
+                    # role sub-spoke — removes the separate manual "Load Role"
+                    # step. Resolves to the sub-spoke id actually pushed to.
+                    role, module_type = PRODUCT_ROLE[route_prefix]
+                    new_inst["spoke_id"] = await ensure_role_loaded(
+                        hub, new_inst["spoke_id"], role, module_type)
                 # Validate any Credential Vault reference up-front, then strip
                 # inline secrets so only the {bucket,name} reference is stored.
                 await instance_vault.validate_ref(
@@ -1189,6 +1198,11 @@ def register(app, hub, ctx):
                 idx = next((i for i, x in enumerate(instances) if x.get("id") == instance_id), None)
                 if idx is None:
                     raise HTTPException(status_code=404, detail="Instance not found")
+                old_spoke = instances[idx].get("spoke_id")
+                new_spoke = update_data.get("spoke_id")
+                if new_spoke and new_spoke != old_spoke and route_prefix in PRODUCT_ROLE:
+                    role, module_type = PRODUCT_ROLE[route_prefix]
+                    update_data["spoke_id"] = await ensure_role_loaded(hub, new_spoke, role, module_type)
                 instances[idx].update(update_data)
                 # Validate/strip a Credential Vault reference on the merged record.
                 await instance_vault.validate_ref(
@@ -1198,6 +1212,9 @@ def register(app, hub, ctx):
                 hub.state.system_state["global_config"] = global_config
                 hub.state._mark_dirty()
                 pushed = await _push_instance_config(hub, instances[idx], payload_fn, storage_key)
+                if route_prefix in PRODUCT_ROLE and old_spoke and old_spoke != instances[idx].get("spoke_id"):
+                    role, _mt = PRODUCT_ROLE[route_prefix]
+                    await maybe_unload_orphaned_role(hub, old_spoke, role, instances)
                 if pushed:
                     return {"status": "ok", "message": "Instance updated and pushed to spoke.", "pushed": True}
                 return {"status": "partial_success", "message": "Instance saved; associated spoke not connected.", "pushed": False}
@@ -1212,12 +1229,17 @@ def register(app, hub, ctx):
             """Delete an instance; the spoke keeps its last config until re-pushed."""
             global_config = hub.state.system_state.get("global_config", {})
             instances = global_config.get(storage_key, [])
+            deleted = next((x for x in instances if x.get("id") == instance_id), None)
             before = len(instances)
             instances[:] = [x for x in instances if x.get("id") != instance_id]
             if len(instances) == before:
                 raise HTTPException(status_code=404, detail="Instance not found")
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
+            spoke_id = (deleted or {}).get("spoke_id")
+            if route_prefix in PRODUCT_ROLE and spoke_id:
+                role, _mt = PRODUCT_ROLE[route_prefix]
+                await maybe_unload_orphaned_role(hub, spoke_id, role, instances)
             return {"status": "ok", "message": f"Instance {instance_id} deleted."}
 
     _instance_crud(
