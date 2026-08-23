@@ -27702,7 +27702,7 @@ function showAddInstanceModal(productKey, editItem) {
     const failoverPoolHtml = p.roleName ? `
                 <div class="space-y-2 pt-2 border-t border-slate-100">
                     <label class="text-xs text-slate-500 uppercase font-bold">Failover Pool (optional)</label>
-                    <p class="text-[11px] text-slate-400 leading-snug">Spokes that can take over this instance if the active one goes out of contact. No priority order — the hub picks any available checked spoke. Once relocated, it stays there (no automatic fail-back).</p>
+                    <p class="text-[11px] text-slate-400 leading-snug">Spokes that can take over this instance if the active one goes out of contact, or if load gets unbalanced across the pool. No priority order — the hub picks any available checked spoke. Once relocated, it stays there (no automatic fail-back).</p>
                     <div id="inst-spoke-pool" class="max-h-32 overflow-y-auto space-y-1 border border-slate-200 rounded-md p-2">
                         <p class="text-xs text-slate-400 italic">Loading spokes…</p>
                     </div>
