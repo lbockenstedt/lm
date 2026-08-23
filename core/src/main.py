@@ -1174,6 +1174,28 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             2, int(os.environ.get("LM_TENANT_PROBE_ESCALATE_NODES", "2") or 2))
         self._TENANT_PROBE_WINDOW_S = float(
             os.environ.get("LM_TENANT_PROBE_WINDOW_S", "600") or 600)
+        # Operator canary endpoints (NODE_CANARY_HIT). A node reports that one of
+        # its hub-assigned canary endpoints was touched (a definitive intrusion —
+        # nothing legitimate ever requests one). Same per-reporter rate cap as the
+        # probe path guards against a compromised edge flooding forged hits. The
+        # per-node canary SET is supplied at runtime by an optional operator hook
+        # (a private site-extension registers it via register_node_canary_provider);
+        # a stock hub has no provider → pushes nothing → the fleet stays inert, and
+        # nothing in this repo reveals which paths are canaries.
+        self._canary_hit_reports = {}     # reporter spoke_id -> [ts, ...]
+        self._node_canary_provider = None  # Optional[callable(node_id, tenant)->list]
+
+    def register_node_canary_provider(self, provider) -> None:
+        """Register the operator hook that returns a node's canary endpoint set.
+
+        Called by an out-of-band private site-extension (``register(app, hub,
+        ctx)``) so the sensitive endpoint/bait definitions live only on the hub,
+        never in this public repo. ``provider(node_id, tenant_id)`` returns a list
+        of ``{"path","status"?,"ctype"?,"body"?}`` dicts (or an empty list to
+        assign none). ``push_config_to_spoke`` calls it on every (re)connect and
+        pushes the result as ``NODE_CANARY_SET``. No provider registered → the
+        push is skipped entirely."""
+        self._node_canary_provider = provider
 
     # Message classes for the escalation ladder. Config-overridable via
     # global_config["backpressure"]["classes"] (type -> class) so the policy is
@@ -2341,6 +2363,35 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     logger.debug(f"Pushed hub-contact watchdog config to {spoke_id}")
             except Exception as e:
                 logger.warning(f"Failed to push watchdog config to {spoke_id}: {e}")
+
+            # Operator canary endpoints (optional; provider registered out-of-band
+            # by a private site-extension). Push this node's assigned canary set on
+            # every (re)connect so a reinstalled node re-arms with no operator
+            # action. Stock hub has no provider → nothing is pushed and the node
+            # stays inert. Runs before the module_key early-return so agents (no
+            # module_key) receive it too. Fire-and-forget; never blocks the loop.
+            try:
+                provider = getattr(self, "_node_canary_provider", None)
+                if callable(provider):
+                    pk_c = self._primary_key(spoke_id)
+                    tenant_c = self.state.get_spoke_tenant(pk_c)
+                    entries = provider(spoke_id, tenant_c) or []
+                    if entries:
+                        canary_msg = Message(
+                            header=MessageHeader(
+                                message_id=str(uuid.uuid4()),
+                                timestamp=time.time(),
+                                sender_id="hub",
+                                destination_id=spoke_id,
+                            ),
+                            payload=MessagePayload(
+                                type="NODE_CANARY_SET", data={"entries": entries}),
+                        )
+                        await self.send_to_spoke(canary_msg)
+                        logger.debug("Pushed %d canary endpoint(s) to %s",
+                                     len(entries), spoke_id)
+            except Exception as e:
+                logger.debug("node canary push skipped for %s: %s", spoke_id, e)
 
             # Re-seed the le (certificates) spoke's DNS-01 hook creds from the
             # Credential Vault on every (re)connect, BEFORE the module_key
@@ -5684,6 +5735,18 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         spoke_id, remote_ip, payload.get("data", {}) or {})
                     continue
 
+                # --- Node canary-endpoint interaction (NODE_CANARY_HIT) ---
+                # A node reported that one of its hub-assigned canary endpoints
+                # was touched — a definitive intrusion attempt (nothing legitimate
+                # requests one). The frame's signature already verified above;
+                # _handle_node_canary_hit rate-caps the reporter and routes the
+                # response by the reporter's location (perimeter → bounded source
+                # block; tenant → self-scoped hard-revoke). Fire-and-forget.
+                if payload.get("type") == "NODE_CANARY_HIT":
+                    self._handle_node_canary_hit(
+                        spoke_id, remote_ip, payload.get("data", {}) or {})
+                    continue
+
                 # --- Scale-Out Relay Logic ---
                 # _handle_agent_relay_up returns True when it matched + handled a
                 # sub-type (AGENT_LOG/HEARTBEAT/AGENT_TELEMETRY/CS_*), in which case
@@ -8437,6 +8500,93 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     logger.debug("tenant-wide revoke: failed on %s", sid, exc_info=True)
         except Exception:  # noqa: BLE001 — never let the response crash the loop
             logger.debug("_tenant_probe_hard_revoke failed", exc_info=True)
+
+    def _handle_node_canary_hit(self, spoke_id, reporter_ip: Optional[str],
+                                data: dict) -> None:
+        """Ingest a ``NODE_CANARY_HIT`` — a node reporting that one of its
+        hub-assigned canary endpoints was touched.
+
+        A canary endpoint has no legitimate use, so any interaction is a
+        definitive intrusion attempt; the response is routed by the reporter's
+        LOCATION exactly like ``_handle_edge_probe_report``:
+
+        * **Perimeter / infra reporter** (shared/unassigned Azure edge): bounded
+          central NSG block of the external source (self-expiring, never
+          permanent, internal/non-routable sources refused, exemptions honored,
+          per-reporter rate-capped).
+        * **Tenant reporter**: the NSG is NEVER touched — self-scoped hard-revoke
+          of the reporting node (correct whether genuine or forged: a forged hit
+          from an owned node only revokes itself), with the SAME tenant-wide
+          escalation ladder as the probe path (shared ``_tenant_probe_trips``, so
+          a mix of probe + canary trips on one tenant escalates together).
+
+        Unlike the probe path, the hub does NOT re-classify the reported path:
+        the canary set is provisioned by the hub and kept out of this repo, so
+        there is no public signature to re-check against — and it is unnecessary,
+        because the node only serves the exact paths the hub assigned it, so any
+        reported hit is high-signal by construction. The compromised-edge blast
+        radius is bounded identically to the probe path (rate cap + bounded TTL +
+        internal-source refusal + exemptions). Telemetry-only failure mode.
+        """
+        tm = getattr(self, "threat_monitor", None)
+        try:
+            src = str((data or {}).get("source_ip") or "").strip()
+            path = str((data or {}).get("path") or "")
+            method = str((data or {}).get("method") or "?").upper()[:8]
+            node = str((data or {}).get("node") or spoke_id or "?")[:64]
+
+            # Per-reporter rate cap (a compromised edge can't flood forged hits).
+            now = time.time()
+            window = 600.0
+            times = self._canary_hit_reports.setdefault(spoke_id or node, [])
+            times[:] = [t for t in times if t > now - window]
+            if len(times) >= self._EDGE_PROBE_MAX:
+                logger.warning("NODE_CANARY_HIT rate cap hit for reporter %s "
+                               "(%d/%ds) — dropping", spoke_id, self._EDGE_PROBE_MAX,
+                               int(window))
+                return
+            times.append(now)
+
+            # Route by reporter location (unassigned/shared = perimeter/infra;
+            # a real tenant_id = a tenant-network node). Fail SAFE to tenant-side.
+            try:
+                import access as _access
+                reporter_tenant = self.state.get_spoke_tenant(self._primary_key(spoke_id)) or ""
+                is_perimeter = (not reporter_tenant) or _access.tenant_is_shared(reporter_tenant)
+            except Exception:  # noqa: BLE001
+                reporter_tenant, is_perimeter = "", False
+
+            if is_perimeter:
+                # ── Perimeter: bounded central NSG block of the external source ──
+                if not tm or not src:
+                    return
+                try:
+                    ipobj = ipaddress.ip_address(src)
+                    if (ipobj.is_loopback or ipobj.is_unspecified or ipobj.is_link_local
+                            or any(ipobj in net for net in _INTERNAL_NETS)):
+                        logger.debug("NODE_CANARY_HIT from %s: refusing internal/"
+                                     "non-routable source_ip %r", spoke_id, src)
+                        return
+                except ValueError:
+                    logger.debug("NODE_CANARY_HIT from %s: bad source_ip %r", spoke_id, src)
+                    return
+                tm.record_failure(src, "canary",
+                                  detail=f"edge {node} ({method} {path[:120]})",
+                                  max_ttl_s=self._EDGE_BLOCK_TTL_S,
+                                  allow_permanent=False)
+                return
+
+            # ── Tenant-side: self-scoped hard-revoke (NEVER the NSG) ──
+            reason = (f"tenant-side intrusion detected (canary endpoint touched): "
+                      f"{method} {path[:120]}"
+                      + (f" from {src}" if src else ""))
+            logger.warning("NODE_CANARY_HIT: tenant node %s (tenant=%s) reported a "
+                           "canary interaction — hard-revoking the node. %s",
+                           spoke_id, reporter_tenant or "?", reason)
+            asyncio.create_task(
+                self._tenant_probe_hard_revoke(spoke_id, reporter_tenant, reason))
+        except Exception:  # noqa: BLE001 — monitoring must never break dispatch
+            logger.debug("NODE_CANARY_HIT ingest failed", exc_info=True)
 
     def _is_approved_install_reconnect(self, spoke_id, install_uuid) -> bool:
         """True when an ``invalid_secret`` connect is really an ALREADY-APPROVED

@@ -27,6 +27,11 @@ try:  # shared scanner-signature classifier (single source of truth with the hub
 except ImportError:  # pragma: no cover - packaging layout fallback
     from core.src.security.probe_signatures import looks_like_probe
 
+try:  # node-side operator canary endpoints (generic engine; inert until hub push)
+    from security import node_canary as _node_canary
+except ImportError:  # pragma: no cover - packaging layout fallback
+    from core.src.security import node_canary as _node_canary
+
 logger = logging.getLogger("ProxySpoke")
 
 
@@ -309,6 +314,27 @@ def _report_edge_probe(spoke, request: web.BaseRequest) -> None:
         pass
 
 
+def _report_canary_hit(spoke, request: web.BaseRequest) -> None:
+    """Fire-and-forget: relay an interaction with an operator canary endpoint up
+    the authenticated tunnel (``NODE_CANARY_HIT``) so the hub decides the response
+    centrally (self-scoped containment for a tenant node, source block at the
+    perimeter). A canary has no legitimate use, so any hit is high-signal. Mirrors
+    ``_report_edge_probe``: never raises into the request path."""
+    cp = getattr(spoke, "control_plane", None)
+    if cp is None or not hasattr(cp, "send_to_hub"):
+        return
+    data = {
+        "source_ip": _report_source_ip(request),
+        "path": request.path,
+        "method": request.method,
+        "node": getattr(spoke, "spoke_id", None) or "proxy",
+    }
+    try:
+        asyncio.get_event_loop().create_task(cp.send_to_hub("NODE_CANARY_HIT", data))
+    except RuntimeError:  # pragma: no cover - no running loop (never inside a handler)
+        pass
+
+
 async def _dispatch(request: web.Request) -> web.StreamResponse:
     spoke = request.app["spoke"]
     # HTTPS-port scanner detection at the edge. A request for a path we never
@@ -323,6 +349,17 @@ async def _dispatch(request: web.Request) -> web.StreamResponse:
     if getattr(spoke, "probe_detection_enabled", True) and looks_like_probe(request.path):
         _report_edge_probe(spoke, request)
         return web.Response(status=404)
+    # Operator canary endpoints (hub-provisioned; inert until the hub pushes a
+    # set). A request for one is a definitive intrusion attempt — no legitimate
+    # client, SPA route, or asset ever touches it. Answer with the operator-
+    # supplied body (so the port looks live) and relay the hit up so the hub
+    # decides the response centrally. Runs after the generic probe check and
+    # before any upstream forwarding; empty config → match() is None → no-op.
+    _canary = _node_canary.match(request.path)
+    if _canary is not None:
+        _report_canary_hit(spoke, request)
+        return web.Response(status=_canary["status"], body=_canary["body"],
+                            content_type=_canary["ctype"])
     upstream = spoke.upstream_url
     if not upstream:
         return _hub_unavailable(request, "no upstream configured")

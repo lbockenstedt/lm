@@ -1820,6 +1820,22 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         if cmd_type == "HUB_PING":
             return {"status": "SUCCESS", "nonce": data.get("nonce")}
 
+        # Operator canary endpoints (hub → node). The hub pushes this node's
+        # assigned set of canary request paths + the body to answer with; the
+        # node's request server (edge proxy _dispatch) serves them and relays any
+        # interaction back up (NODE_CANARY_HIT) for central handling. The set is
+        # provisioned by the hub at runtime and is NOT in the source, so nothing
+        # here reveals which paths are canaries. Inherited by every node type, so
+        # a single handler covers all of them; a node with no request server just
+        # holds the config harmlessly. Idempotent (full replace); empty clears.
+        if cmd_type == "NODE_CANARY_SET":
+            try:
+                from ..security.node_canary import set_config
+            except ImportError:  # bare-module path (production: core/src on sys.path)
+                from security.node_canary import set_config  # type: ignore
+            n = set_config(data.get("entries") or [])
+            return {"status": "SUCCESS", "count": n}
+
         # Remote Console (WebUI → troubleshooting). The hub only ever dispatches
         # RUN_COMMAND after gating on Global-Admin + the remote_exec.enabled knob;
         # ``allow_shell`` mirrors the WebUI "Debug (shell)" toggle. The frame is
