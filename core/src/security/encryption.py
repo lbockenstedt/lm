@@ -3,11 +3,14 @@
 Owns the ``HubEncryption`` singleton (``hub_encryption``) that wraps
 ``cryptography.fernet.Fernet`` to encrypt/decrypt persisted JSON such as
 ``hub_secret.json``, ``keys.json``, ``system.json``, and ``tenants.json``.
-The primary key is sourced from the ``LM_FERNET_KEY`` env var (REQUIRED,
-fail-closed); a weak machine-id-derived key is retained only as
-``_legacy_fernet`` so blobs encrypted before ``LM_FERNET_KEY`` was deployed
-remain decryptable (transparent migration — new writes always use the primary
-key).
+The primary key is sourced either from Azure Key Vault (Tier 1 — opt-in via
+``LM_FERNET_KEY_KV_SECRET``, off-disk) or the ``LM_FERNET_KEY`` env var (the
+default, and the fallback when a configured vault is momentarily
+unreachable); one of the two is REQUIRED, fail-closed. See
+``_resolve_primary_key`` for the exact resolution order. A weak
+machine-id-derived key is retained only as ``_legacy_fernet`` so blobs
+encrypted before ``LM_FERNET_KEY`` was deployed remain decryptable
+(transparent migration — new writes always use the primary key).
 
 This module is consumed by ``security/key_manager.py`` (which encrypts/decrypts
 the key and hub-secret stores) and by ``state/manager.py`` (which uses
@@ -42,10 +45,13 @@ class HubEncryption:
     Handles transparent at-rest encryption for Hub JSON files
     (hub_secret.json, keys.json, system.json, tenants.json).
 
-    Key source: LM_FERNET_KEY env var — a full base64 Fernet key (REQUIRED, fail-closed).
-    Generate with:
+    Key source: a full base64 Fernet key, from either Azure Key Vault (Tier 1 —
+    opt-in via LM_FERNET_KEY_KV_SECRET naming the secret, off-disk) or the
+    LM_FERNET_KEY env var (the default, and the fallback when a configured
+    vault is momentarily unreachable). One of the two is REQUIRED, fail-closed.
+    Generate a key with:
       python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-    If LM_FERNET_KEY is unset or invalid, initialization raises and the Hub will not start.
+    If neither source yields a valid key, initialization raises and the Hub will not start.
 
     A weak machine-id-derived key is still computed as `_legacy_fernet` ONLY so that blobs
     encrypted before LM_FERNET_KEY was deployed remain decryptable (transparent migration):
@@ -104,28 +110,92 @@ class HubEncryption:
         return Fernet(base64.urlsafe_b64encode(key))
 
     def _load_primary_fernet(self) -> Fernet:
-        """Loads the primary Fernet key from LM_FERNET_KEY.
+        """Load + validate the primary Fernet key, stash the raw value, return a
+        ``Fernet``.
 
-        LM_FERNET_KEY is REQUIRED (fail-closed): if it is unset or invalid, this raises
-        and the Hub will not start. The weak machine-id-derived key is kept only as
-        `_legacy_fernet` for transparent decryption of blobs encrypted before
-        LM_FERNET_KEY was deployed (new writes use the primary key)."""
-        key_env = os.getenv("LM_FERNET_KEY")
-        if not key_env:
+        Key source, in order:
+          1. **Tier 1 — Azure Key Vault** (only when ``LM_FERNET_KEY_KV_SECRET``
+             names a secret AND a vault is reachable): fetch the key from Key
+             Vault so it never lives on disk in ``.env``. See
+             ``_resolve_primary_key`` — this is a no-op on-prem (the env var is
+             unset), so a non-Azure install keeps the pure env behavior.
+          2. **Env** — ``LM_FERNET_KEY`` (the on-prem / default path, and the
+             migration fallback when a configured vault is momentarily
+             unreachable).
+
+        REQUIRED (fail-closed): if neither source yields a valid key this raises
+        and the hub will not start. The weak machine-id key is kept only as
+        ``_legacy_fernet`` for transparent decrypt of pre-``LM_FERNET_KEY``
+        blobs (new writes use the primary key)."""
+        key_str, source = self._resolve_primary_key()
+        if not key_str:
             raise RuntimeError(
-                "LM_FERNET_KEY is not set. At-rest encryption requires a Fernet key. "
-                "Generate one with: python -c \"from cryptography.fernet import Fernet; "
-                "print(Fernet.generate_key().decode())\" and set LM_FERNET_KEY (see .env.example)."
+                "No Fernet key available. At-rest encryption requires a key. "
+                "Set LM_FERNET_KEY (see .env.example), or — for the off-disk "
+                "'Tier 1' path — set LM_FERNET_KEY_KV_SECRET (the Key Vault "
+                "secret name) plus LM_KEYVAULT_URL and install the Azure SDK. "
+                "Generate a key with: python -c \"from cryptography.fernet import "
+                "Fernet; print(Fernet.generate_key().decode())\"."
             )
-        key = key_env.strip().encode()
         try:
-            fernet = Fernet(key)
+            fernet = Fernet(key_str.encode())
         except Exception as e:
-            raise RuntimeError(f"LM_FERNET_KEY is set but is not a valid Fernet key: {e}")
-        # Stash the validated raw key so oidc.py (and any future consumer) can get
-        # it from the singleton after we drop it from os.environ.
-        self._primary_key_str = key_env.strip()
+            raise RuntimeError(
+                f"The Fernet key from {source} is not a valid Fernet key: {e}")
+        # Stash the validated raw key so consumers (oidc.py, key_vault.py) can get
+        # it from the singleton after we drop LM_FERNET_KEY from os.environ.
+        self._primary_key_str = key_str
+        if source.startswith("keyvault"):
+            logger.info("Loaded primary Fernet key from %s (off-disk Tier 1).", source)
         return fernet
+
+    def _resolve_primary_key(self) -> tuple:
+        """Resolve the raw primary Fernet key string + a source label.
+
+        Tier 1 (Key Vault) is attempted ONLY when ``LM_FERNET_KEY_KV_SECRET`` is
+        set — that env var is the explicit opt-in that says "the master key lives
+        in the vault under this name". When set, the key is fetched via the shared
+        ``security.credential_store`` provider (which reads ``LM_KEYVAULT_URL`` /
+        ``LM_KEYVAULT_CLIENT_ID`` and uses managed identity). A configured-but-
+        unreachable vault does NOT hard-fail: it falls back to ``LM_FERNET_KEY``
+        (env) with a warning, so a migrating deployment that still keeps the key
+        in ``.env`` stays bootable. Returns ``("", "")`` if nothing resolves."""
+        kv_secret = (os.getenv("LM_FERNET_KEY_KV_SECRET") or "").strip()
+        if kv_secret:
+            val = self._fetch_key_from_vault(kv_secret)
+            if val:
+                return val.strip(), f"keyvault:{kv_secret}"
+            logger.warning(
+                "LM_FERNET_KEY_KV_SECRET=%r is set but the key could not be "
+                "fetched from Key Vault (SDK missing, LM_KEYVAULT_URL unset, "
+                "auth/network error, or secret absent). Falling back to "
+                "LM_FERNET_KEY from the environment if present.", kv_secret)
+        env_key = (os.getenv("LM_FERNET_KEY") or "").strip()
+        if env_key:
+            return env_key, "env"
+        return "", ""
+
+    @staticmethod
+    def _fetch_key_from_vault(secret_name: str):
+        """Best-effort fetch of ``secret_name`` from Azure Key Vault via the
+        shared credential provider. Returns the secret value or ``None`` (never
+        raises — a vault problem must not crash import)."""
+        try:
+            from security.credential_store import get_credential_provider
+        except ImportError:  # pragma: no cover - import-path fallback
+            try:
+                from credential_store import get_credential_provider
+            except Exception:  # noqa: BLE001
+                return None
+        try:
+            provider = get_credential_provider()
+            if getattr(provider, "name", "") != "keyvault" or not provider.ready:
+                return None
+            return provider.get_secret(secret_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Key Vault fetch of Fernet key %r failed: %s",
+                           secret_name, exc)
+            return None
 
     def _maybe_drop_env_key(self) -> None:
         """Remove ``LM_FERNET_KEY``/``LM_FERNET_KEY_PREVIOUS`` from ``os.environ``
