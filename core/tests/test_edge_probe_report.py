@@ -103,6 +103,21 @@ def test_loopback_and_bad_source_are_dropped(tmp_path):
     assert len(tm._events) == 0
 
 
+def test_internal_source_is_refused(tmp_path):
+    # An edge report must never NSG-block one of our own internal ranges (RFC1918
+    # / CGNAT / link-local): denying e.g. the 100.127.x hub/spoke private subnet
+    # or the 10.x fleet space would sever internal control-plane paths. This is
+    # the defense-in-depth backstop to the edge no longer trusting spoofable XFF.
+    tm = _tm_for(tmp_path)
+    hub = _FakeHub(tm)
+    for internal in ("10.0.0.9", "172.16.4.4", "192.168.1.5",
+                     "100.127.255.4", "169.254.1.1"):
+        _report(hub, "proxy-1", "10.0.0.9",
+                {"source_ip": internal, "path": "/.env", "method": "GET"})
+    assert len(tm._events) == 0
+    assert tm.snapshot()["totals"]["by_kind"].get("http_probe", 0) == 0
+
+
 def test_per_reporter_rate_cap(tmp_path):
     # A single owned edge cannot flood forged reports to poison the blocklist.
     tm = _tm_for(tmp_path, threshold=100)  # high so the cap, not the block, is what limits

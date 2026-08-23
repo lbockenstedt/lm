@@ -148,6 +148,16 @@ except ImportError:
 configure_logging()
 logger = logging.getLogger("Hub")
 
+# Internal / non-routable IP ranges that an edge scanner-probe report must never
+# be allowed to name as the "attacker" (see _handle_edge_probe_report): RFC1918
+# private space, CGNAT 100.64/10 (the hub/spoke private subnet), plus loopback/
+# link-local handled inline. NSG-denying one of our own internal ranges would
+# sever internal control-plane paths — a self-inflicted outage. Documentation
+# (TEST-NET) ranges are deliberately NOT listed so they behave as public IPs.
+_INTERNAL_NETS = tuple(ipaddress.ip_network(c) for c in (
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
+))
+
 # How long version drift (pull available, or a restart pending) may persist
 # before the footer dot escalates from amber "pending" to red "stuck". Long
 # enough that a routine pull + watchdog restart never trips it.
@@ -8226,12 +8236,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
         This runs only after the frame's signature verified, so the reporter is
         an authenticated spoke — but a *compromised* edge could still forge
-        reports to poison the blocklist (block a victim / the admin by IP). Three
+        reports to poison the blocklist (block a victim / the admin by IP). Four
         defenses make that useless:
 
         * **Server-side re-classification** — the reported ``path`` must ITSELF
           match a scanner signature (``looks_like_probe``); a compromised edge
           cannot get an arbitrary benign path attributed to a victim.
+        * **Global-source-only** — the ``source_ip`` must be a globally-routable
+          public address. Private / CGNAT / link-local / loopback sources are
+          refused: an edge probe report is for blocking an *external* scanner,
+          and our own internal/infra addresses must never be auto-blockable via
+          a report (the edge reports the real TCP peer, not a spoofable header).
         * **Per-reporter rate cap** — at most ``_EDGE_PROBE_MAX`` reports per
           reporter per window, so one owned edge cannot flood-block a range.
         * **Exemption reuse** — the report funnels through
@@ -8253,10 +8268,20 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             if not src:
                 return
             # Never let an edge attribute a probe to a bogus / non-routable
-            # source (loopback = the edge itself; unparseable = junk).
+            # source (loopback = the edge itself; unparseable = junk). Also
+            # refuse any INTERNAL address — RFC1918 private, CGNAT (100.64/10,
+            # the hub/spoke private subnet), or link-local: an edge probe report
+            # is for blocking an *external* scanner, and NSG-denying one of our
+            # own internal ranges would sever internal control-plane paths. A
+            # forged (or XFF-spoofed) report naming such an IP is a self-inflicted
+            # outage vector — internal infrastructure is never auto-blocked.
             try:
                 ipobj = ipaddress.ip_address(src)
-                if ipobj.is_loopback or ipobj.is_unspecified:
+                if (ipobj.is_loopback or ipobj.is_unspecified or ipobj.is_link_local
+                        or any(ipobj in net for net in _INTERNAL_NETS)):
+                    logger.debug("HTTP_PROBE_REPORT from %s: refusing internal/"
+                                 "non-routable source_ip %r (never auto-blocked)",
+                                 spoke_id, src)
                     return
             except ValueError:
                 logger.debug("HTTP_PROBE_REPORT from %s: bad source_ip %r", spoke_id, src)

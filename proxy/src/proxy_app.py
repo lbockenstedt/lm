@@ -12,8 +12,11 @@ dumb forwarding front door. See docs/edge-proxy-role.md.
 import asyncio
 import base64
 import html
+import ipaddress
 import json
 import logging
+import os
+import re
 
 from aiohttp import (ClientSession, ClientTimeout, DummyCookieJar, TCPConnector,
                      WSMsgType, client_exceptions, web)
@@ -25,6 +28,40 @@ except ImportError:  # pragma: no cover - packaging layout fallback
     from core.src.security.probe_signatures import looks_like_probe
 
 logger = logging.getLogger("ProxySpoke")
+
+
+def _load_trusted_proxies() -> tuple:
+    """Parse ``LM_TRUSTED_PROXIES`` (comma/space-separated IPs/CIDRs) into a
+    tuple of ``ipaddress`` networks. Empty when unset.
+
+    Mirrors the hub's ``_client_ip`` discipline (core/src/api.py): this edge is
+    internet-facing, so ``X-Forwarded-For`` is CLIENT-SETTABLE and must NOT be
+    trusted unless the immediate TCP peer is a configured front load balancer /
+    CDN that stamped it. Fail-safe: with no trusted proxies configured, XFF is
+    ignored and the TCP peer is used."""
+    raw = os.environ.get("LM_TRUSTED_PROXIES", "").strip()
+    nets = []
+    if raw:
+        for tok in re.split(r"[,\s]+", raw):
+            tok = tok.strip()
+            if not tok:
+                continue
+            try:
+                nets.append(ipaddress.ip_network(tok, strict=False))
+            except ValueError:
+                logger.warning("LM_TRUSTED_PROXIES: skipping unparseable entry %r", tok)
+    return tuple(nets)
+
+
+_TRUSTED_PROXY_NETS = _load_trusted_proxies()
+
+
+def _ip_in_trusted(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except (ValueError, TypeError):
+        return False
+    return any(addr in net for net in _TRUSTED_PROXY_NETS)
 
 # Hop-by-hop headers (RFC 7230 §6.1) — never forwarded across the proxy.
 _HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -228,16 +265,28 @@ def _fwd_headers(request: web.BaseRequest, client_ip: str) -> dict:
 
 
 def _report_source_ip(request: web.BaseRequest) -> str:
-    """Best-effort real client IP for a probe report. If a front load balancer
-    stamped ``X-Forwarded-For``, the leftmost entry is the true origin; otherwise
-    the direct TCP peer. (Mirrors the chain the proxy already forwards to the hub
-    for its per-IP login lockout.)"""
+    """Real client IP for a scanner-probe report — the IP the hub will NSG-block.
+
+    SECURITY: this edge is internet-facing, so ``X-Forwarded-For`` is fully
+    client-settable. Trusting it blindly lets any anonymous scanner set
+    ``X-Forwarded-For: <victim>`` on a probe path and make the hub block an
+    arbitrary IP — including the shared NAT-gateway egress every internal spoke
+    uses, which severs the whole fleet from the hub (a remotely-triggerable
+    outage). So we trust XFF ONLY when the immediate TCP peer is a configured
+    front proxy (``LM_TRUSTED_PROXIES``), then walk the chain right-to-left past
+    trusted hops to the first non-trusted address = the real origin. Otherwise we
+    report the direct TCP peer (``request.remote``) — the host actually sending
+    the probe. This mirrors the hub's ``_client_ip`` discipline; the forwarding
+    path already uses ``request.remote`` for the same reason."""
+    peer = request.remote or ""
+    if not _TRUSTED_PROXY_NETS or not _ip_in_trusted(peer):
+        return peer
     xff = request.headers.get("X-Forwarded-For", "")
-    if xff:
-        first = xff.split(",")[0].strip()
-        if first:
-            return first
-    return request.remote or ""
+    chain = [h.strip() for h in xff.split(",") if h.strip()]
+    for hop in reversed(chain):
+        if not _ip_in_trusted(hop):
+            return hop
+    return chain[0] if chain else peer
 
 
 def _report_edge_probe(spoke, request: web.BaseRequest) -> None:

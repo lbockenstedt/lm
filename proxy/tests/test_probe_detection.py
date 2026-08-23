@@ -6,6 +6,7 @@ source centrally, and answered with a bare 404 instead of being forwarded. The
 per-node ``probe_detection`` toggle can silence it.
 """
 import asyncio
+import ipaddress
 import os
 import sys
 import types
@@ -27,15 +28,42 @@ class _FakeReq:
         self.headers = headers or {}
 
 
-# ── source-IP resolution ────────────────────────────────────────────────────
-def test_report_source_ip_prefers_xff_origin():
-    r = _FakeReq("/.env", headers={"X-Forwarded-For": "203.0.113.7, 10.0.0.1"})
-    assert proxy_app._report_source_ip(r) == "203.0.113.7"
+# ── source-IP resolution (anti-spoof) ───────────────────────────────────────
+def test_report_source_ip_ignores_untrusted_xff():
+    # This edge is internet-facing: X-Forwarded-For is client-settable, so with
+    # no trusted front proxy configured it MUST be ignored and the real TCP peer
+    # reported. (Trusting it let a scanner name an arbitrary victim IP.)
+    r = _FakeReq("/.env", remote="198.51.100.4",
+                 headers={"X-Forwarded-For": "203.0.113.7, 10.0.0.1"})
+    assert proxy_app._report_source_ip(r) == "198.51.100.4"
+
+
+def test_report_source_ip_spoofed_xff_cannot_name_fleet_egress():
+    # Regression: a scanner probing the public edge sets X-Forwarded-For to the
+    # shared NAT-gateway egress every internal spoke rides. The report must name
+    # the scanner's real peer, NOT the spoofed fleet IP (blocking which would
+    # sever the whole fleet from the hub).
+    r = _FakeReq("/.env", remote="185.7.7.7",
+                 headers={"X-Forwarded-For": "4.148.8.120"})
+    assert proxy_app._report_source_ip(r) == "185.7.7.7"
 
 
 def test_report_source_ip_falls_back_to_peer():
     r = _FakeReq("/.env", remote="198.51.100.4")
     assert proxy_app._report_source_ip(r) == "198.51.100.4"
+
+
+def test_report_source_ip_honors_xff_from_trusted_proxy():
+    # When a REAL front proxy (in LM_TRUSTED_PROXIES) is the TCP peer, walk the
+    # XFF chain past trusted hops to the true origin.
+    saved = proxy_app._TRUSTED_PROXY_NETS
+    proxy_app._TRUSTED_PROXY_NETS = (ipaddress.ip_network("192.0.2.0/24"),)
+    try:
+        r = _FakeReq("/.env", remote="192.0.2.10",
+                     headers={"X-Forwarded-For": "203.0.113.7, 192.0.2.10"})
+        assert proxy_app._report_source_ip(r) == "203.0.113.7"
+    finally:
+        proxy_app._TRUSTED_PROXY_NETS = saved
 
 
 # ── report emission ─────────────────────────────────────────────────────────
@@ -48,7 +76,8 @@ def test_report_edge_probe_sends_expected_frame():
 
     cp = types.SimpleNamespace(send_to_hub=_send_to_hub)
     spoke = types.SimpleNamespace(control_plane=cp, spoke_id="proxy-7")
-    r = _FakeReq("/wp-login.php", method="POST",
+    # Untrusted peer + spoofable XFF → the frame carries the REAL peer, not XFF.
+    r = _FakeReq("/wp-login.php", method="POST", remote="203.0.113.9",
                  headers={"X-Forwarded-For": "203.0.113.7"})
 
     async def _run():
@@ -57,7 +86,7 @@ def test_report_edge_probe_sends_expected_frame():
 
     asyncio.run(_run())
     assert sent["type"] == "HTTP_PROBE_REPORT"
-    assert sent["data"] == {"source_ip": "203.0.113.7", "path": "/wp-login.php",
+    assert sent["data"] == {"source_ip": "203.0.113.9", "path": "/wp-login.php",
                             "method": "POST", "node": "proxy-7"}
 
 
