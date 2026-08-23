@@ -9808,6 +9808,7 @@ function _renderSettingsKeyVaultTile(content) {
             </div>
             <div class="mt-3 flex flex-wrap items-center gap-2">
                 <button type="button" onclick="testKeyVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Test connection</button>
+                <button type="button" onclick="testFernetTier1()" title="Tests the DIFFERENT auth path the hub actually uses at boot to source the Fernet key from Key Vault (managed identity via LM_KEYVAULT_URL/LM_FERNET_KEY_KV_SECRET) — separate from 'Test connection' above, which only checks the SSO app-cert path used by the buttons below." class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Test Fernet boot path (Tier 1)</button>
                 <button type="button" onclick="rotateKeyVaultAdmin()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Rotate admin now</button>
                 <button type="button" onclick="pushKeyVaultFernet()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Push Fernet key</button>
                 <button type="button" onclick="backupKeyVaultNow()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Backup now</button>
@@ -9898,6 +9899,30 @@ async function testKeyVault() {
         if (d.status === 'ok') { if (out) out.textContent = `OK — ${d.secret_count} secret(s) visible`; showToast('Key Vault connection OK.', 'success'); }
         else { if (out) out.textContent = d.message || 'failed'; showToast('Test failed: ' + (d.message || ''), 'error'); }
     } catch (e) { if (out) out.textContent = ''; showToast('Test failed: ' + (e.message || e), 'error'); }
+}
+
+async function testFernetTier1() {
+    const out = document.getElementById('kv-action-out');
+    if (out) out.textContent = 'Testing Tier-1 boot path…';
+    try {
+        const r = await setupFetch('/setup/key-vault/test-fernet-tier1', { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        const diagBits = [
+            `env: LM_FERNET_KEY_KV_SECRET=${d.kv_secret_env_set ? 'set' : 'unset'}`,
+            `LM_KEYVAULT_URL=${d.vault_url_env_set ? 'set' : 'unset'}`,
+        ];
+        if (d.provider) diagBits.push(`provider=${d.provider}`, `ready=${d.ready}`);
+        if ('secret_found' in d) diagBits.push(`secret_found=${d.secret_found}`);
+        if ('valid_fernet_key' in d) diagBits.push(`valid_fernet_key=${d.valid_fernet_key}`);
+        const diagText = diagBits.join(' · ');
+        if (d.status === 'ok') {
+            if (out) out.textContent = `OK — ${d.message} (${diagText})`;
+            showToast('Tier-1 Fernet boot path OK — a restart would source the key from Key Vault.', 'success');
+        } else {
+            if (out) out.textContent = `${d.message || 'failed'} (${diagText})`;
+            showToast('Tier-1 test failed: ' + (d.message || ''), 'error');
+        }
+    } catch (e) { if (out) out.textContent = ''; showToast('Tier-1 test failed: ' + (e.message || e), 'error'); }
 }
 
 async function _kvAction(path, label, confirmMsg) {
@@ -10331,7 +10356,7 @@ function restoreKeyVaultFromVault() {
     _kvRestore({ from_vault: secret });
 }
 
-window.testKeyVault = testKeyVault; window.saveKeyVault = saveKeyVault;
+window.testKeyVault = testKeyVault; window.testFernetTier1 = testFernetTier1; window.saveKeyVault = saveKeyVault;
 window.rotateKeyVaultAdmin = rotateKeyVaultAdmin; window.pushKeyVaultFernet = pushKeyVaultFernet;
 window.backupKeyVaultNow = backupKeyVaultNow; window.downloadKeyVaultMin = downloadKeyVaultMin;
 window.restoreKeyVaultFromFile = restoreKeyVaultFromFile; window.restoreKeyVaultFromVault = restoreKeyVaultFromVault;

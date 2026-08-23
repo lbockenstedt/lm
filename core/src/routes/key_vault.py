@@ -11,7 +11,9 @@ Under ``/setup/`` so the access-control middleware gates them to admins.
 from __future__ import annotations
 
 import json
+import os
 
+from cryptography.fernet import Fernet
 from fastapi import Response
 
 from api import HTTPException, Request, logger
@@ -66,6 +68,72 @@ def register(app, hub, ctx):
             return {"status": "ok", **res}
         except Exception as e:  # noqa: BLE001
             return {"status": "error", "message": str(e)}
+
+    @app.post("/setup/key-vault/test-fernet-tier1")
+    async def test_fernet_tier1(request: Request):
+        """Diagnostic for the Tier-1 Fernet-key-from-Key-Vault boot path
+        (security/encryption.py's ``_resolve_primary_key``) — a DIFFERENT
+        auth mechanism than every other route in this file (which all use the
+        SSO app-cert token via ``security.oidc``). Tier-1 uses
+        ``security.credential_store``'s ``DefaultAzureCredential`` (managed
+        identity / az-cli / env chain), driven by the SAME raw env vars the
+        hub reads at boot (``LM_KEYVAULT_URL``, ``LM_FERNET_KEY_KV_SECRET``,
+        optional ``LM_KEYVAULT_CLIENT_ID``) — deliberately NOT
+        ``global_config``, since at real boot time config isn't decryptable
+        yet (it's encrypted with the very key being resolved). Reads exactly
+        those env vars so a "PASS" here means a restart would actually work.
+
+        Never returns the secret's VALUE — only whether it was found and
+        whether it parses as a valid Fernet key — so this diagnostic can't
+        become a way to exfiltrate the master encryption key over the API."""
+        from security.credential_store import get_credential_provider
+
+        secret_name = (os.getenv("LM_FERNET_KEY_KV_SECRET") or "").strip()
+        vault_url = (os.getenv("LM_KEYVAULT_URL") or "").strip()
+        diag = {"kv_secret_env_set": bool(secret_name), "vault_url_env_set": bool(vault_url)}
+        if not secret_name:
+            return {"status": "error",
+                    "message": "LM_FERNET_KEY_KV_SECRET is not set on this hub process — "
+                              "nothing to test yet. Set it in .env and restart before testing.",
+                    **diag}
+        try:
+            provider = get_credential_provider()
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "message": f"could not build a credential provider: {e}", **diag}
+        diag["provider"] = getattr(provider, "name", "")
+        diag["ready"] = bool(getattr(provider, "ready", False))
+        if diag["provider"] != "keyvault":
+            return {"status": "error",
+                    "message": "Resolved provider is 'env', not 'keyvault' — check LM_KEYVAULT_URL "
+                              "and that azure-identity/azure-keyvault-secrets are installed.",
+                    **diag}
+        if not diag["ready"]:
+            return {"status": "error",
+                    "message": "Key Vault provider is not ready (missing SDK or invalid vault URL).",
+                    **diag}
+        try:
+            value = provider.get_secret(secret_name)
+        except Exception as e:  # noqa: BLE001
+            return {"status": "error", "message": f"get_secret raised: {e}", **diag}
+        diag["secret_found"] = bool(value)
+        if not value:
+            return {"status": "error",
+                    "message": f"Secret '{secret_name}' was not found in the vault (or the fetch "
+                              f"failed — check the hub log for a 'Key Vault fetch' warning).",
+                    **diag}
+        try:
+            Fernet(value.encode())
+            diag["valid_fernet_key"] = True
+        except Exception:
+            diag["valid_fernet_key"] = False
+        if not diag["valid_fernet_key"]:
+            return {"status": "error",
+                    "message": f"Secret '{secret_name}' was fetched but is NOT a valid Fernet key.",
+                    **diag}
+        return {"status": "ok",
+                "message": f"Secret '{secret_name}' fetched from Key Vault and is a valid Fernet "
+                          f"key — a restart with only LM_FERNET_KEY_KV_SECRET set would boot on it.",
+                **diag}
 
     @app.post("/setup/key-vault/rotate-admin")
     async def rotate_admin(request: Request):
