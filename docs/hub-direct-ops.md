@@ -51,16 +51,27 @@ Only `_install_cert_on_hub` (in `core/src/hub_cert_distribution.py`):
 | Write `LM_TLS_CERT` (fullchain, 0644) | `WRITE_FILE` → `_hub_self_write` | direct `_atomic_write` |
 | Write `LM_TLS_KEY` (privkey, 0600) | `WRITE_FILE` → `_hub_self_write` | direct `_atomic_write` |
 | Write `mtls-ca.pem` (CA bundle, 0644) | `WRITE_FILE` → `_hub_self_write` | direct `_atomic_write` |
-| Schedule `lm-self-restart` | `RUN_COMMAND` (`sudo -n … &`, backgrounded) → `_hub_self_restart` | direct `subprocess.Popen` |
+| Schedule `lm-self-restart` | `RUN_COMMAND` (`sudo -n …`, awaited) → `_hub_self_restart` | direct `asyncio.create_subprocess_exec` (awaited) |
 
 **Direct fallback** fires whenever the hub-self agent isn't connected (feature
-off, not booted yet, listener died). The fallback is byte-identical to what the
+off, not booted yet, listener died), OR the agent reached it but the command
+itself genuinely failed (see below). The fallback is byte-identical to what the
 agent would have run, so behavior is unchanged from pre-Phase-4 when the agent
 is absent — this is why existing cert-rotation tests pass without a hub-self
-agent. The restart is **backgrounded** (`&`) so the agent responds BEFORE the
-restart kills the hub process; an awaited foreground restart would drop the WS
-mid-reply and the caller's `send_to_agent` would time out and double-restart on
-fallback.
+agent.
+
+The restart command is **awaited to completion**, not backgrounded. That's
+safe despite restarting the very process running it: `lm-self-restart` (see
+`install_all.sh`) itself only runs `systemd-run --no-block … systemctl
+restart lm`, which returns almost instantly having merely SCHEDULED a
+transient unit — the actual kill/restart happens ~3s later from that
+separate unit, outside lm's cgroup. Awaiting `lm-self-restart`'s own exit
+status doesn't risk dropping the response mid-restart; it's exactly what
+lets `_hub_self_restart` tell whether `sudo` actually succeeded, and RAISE
+instead of optimistically claiming success when it didn't (e.g. `sudo`
+denied or misconfigured — this used to be silently swallowed, since the old
+code only checked that the command *launched*, not that it *exited 0*; the
+real result was nested at `resp["result"]["rc"]`/`["stderr"]`, never read).
 
 `_register_hub_mtls_ca` (runtime CA registry + `global_config` persist) stays
 **inline** — it's hub-state mutation, not a file-on-disk-via-agent op. Cert
@@ -93,8 +104,11 @@ listener must not bind.
 
 - Unit: `core/tests/test_hub_self.py` pins the `_hub_self_write` /
   `_hub_self_restart` routing + fallback contract (agent path, agent-error
-  fallback, no-agent direct path, direct-write failure, backgrounded restart,
-  Popen fallback, Popen-failure message).
+  fallback, no-agent direct path, direct-write failure, awaited restart,
+  direct-exec fallback, exec-failure raises). `core/tests/
+  test_hub_self_restart_honesty.py` pins the deeper exit-code-checking
+  contract — a transport-level "SUCCESS" with a genuinely failed inner
+  command (e.g. `sudo` denied) must NOT be reported as success.
 - End-to-end (lab, Python 3.10+): rotate the hub's cert via the le flow and
   confirm the cert/key land via `WRITE_FILE` and `lm-self-restart` fires via
   `RUN_COMMAND`, then the hub reloads the new cert. With `LM_HUB_SELF_AGENT=0`,

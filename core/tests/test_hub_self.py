@@ -8,16 +8,17 @@ for its ssl-context validation):
 * cert/key writes route to the in-process hub-self agent's ``WRITE_FILE``;
 * a non-SUCCESS agent response (or no ``_hub_self`` at all) falls back to the
   direct inline atomic write — identical to what the agent would have run;
-* ``lm-self-restart`` routes to the agent's ``RUN_COMMAND`` BACKGROUNDED (so the
-  agent responds before the restart kills the hub), with a direct
-  ``subprocess.Popen`` fallback when the agent is absent.
+* ``lm-self-restart`` routes to the agent's ``RUN_COMMAND`` (awaited, NOT
+  backgrounded — see test_hub_self_restart_honesty.py for why that's safe),
+  with a direct ``asyncio.create_subprocess_exec`` fallback when the agent
+  is absent, raising on a genuine failure rather than optimistically
+  reporting success.
 
 The full ``_install_cert_on_hub`` path (cert validation → these helpers) is
 covered end-to-end in the lab (3.10+); here we pin the helper contract.
 """
 import asyncio
 import os
-import subprocess
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -46,6 +47,12 @@ class _FakeHubSelf:
     async def run_command(self, command, allow_shell=True, timeout=10.0):
         self.run_calls.append({"command": command, "allow_shell": allow_shell})
         return self._run_resp
+
+
+def _agent_run_ok():
+    """A genuinely successful RUN_COMMAND envelope — status AND the nested
+    real command result both indicate success (see run_local_command)."""
+    return {"status": "SUCCESS", "result": {"ok": True, "rc": 0, "stdout": "", "stderr": ""}}
 
 
 class _Distro(HubCertDistributionMixin):
@@ -97,39 +104,62 @@ def test_hub_self_write_direct_failure_returns_false():
 
 
 # ── _hub_self_restart ────────────────────────────────────────────────────────
+# NOTE: no longer backgrounded (`&`), and no longer optimistic about a mere
+# "the command launched" signal — it awaits the real exit status and RAISES
+# on genuine failure instead of returning a falsely-reassuring message. See
+# test_hub_self_restart_honesty.py for the exit-code-checking contract in
+# depth; these keep pinning ROUTING/fallback structure (this file's original
+# purpose).
 
-def test_hub_self_restart_routes_to_agent_backgrounded(monkeypatch):
-    # Guard: a stray Popen must NOT fire when the agent handles the restart.
-    popped = []
-    monkeypatch.setattr("hub_cert_distribution.subprocess.Popen",
-                        lambda *a, **k: popped.append((a, k)))
-    fake = _FakeHubSelf(run_resp={"status": "SUCCESS"})
+def test_hub_self_restart_routes_to_agent_not_backgrounded(monkeypatch):
+    # Guard: a stray subprocess exec must NOT fire when the agent handles it.
+    execed = []
+
+    async def _fake_exec(*a, **k):
+        execed.append((a, k))
+        raise AssertionError("should not reach the direct fallback")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+
+    fake = _FakeHubSelf(run_resp=_agent_run_ok())
     d = _Distro(hub_self=fake, atomic=lambda *a: None)
     msg = _run(d._hub_self_restart())
     assert msg == "lm.service restarting to apply"
     assert fake.run_calls, "RUN_COMMAND should have been issued to the agent"
     cmd = fake.run_calls[0]["command"]
     assert "sudo -n" in cmd and _LM_SELF_RESTART in cmd
-    assert cmd.rstrip().endswith("&"), "restart must be backgrounded (avoid await-then-kill)"
+    assert not cmd.rstrip().endswith("&"), \
+        "must NOT be backgrounded — that's what hid the real exit status"
     assert fake.run_calls[0]["allow_shell"] is True
-    assert popped == []         # no direct fallback when the agent succeeds
+    assert execed == []          # no direct fallback when the agent succeeds
 
 
-def test_hub_self_restart_falls_back_to_popen(monkeypatch):
-    popped = []
-    monkeypatch.setattr("hub_cert_distribution.subprocess.Popen",
-                        lambda *a, **k: popped.append((a, k)))
+def test_hub_self_restart_falls_back_when_no_hub_self(monkeypatch):
+    class _FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            return b"", b""
+
+    execed = []
+
+    async def _fake_exec(*args, **kwargs):
+        execed.append(args)
+        return _FakeProc()
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+
     d = _Distro(hub_self=None, atomic=lambda *a: None)
     msg = _run(d._hub_self_restart())
     assert msg == "lm.service restarting to apply"
-    assert popped and popped[0][0] == (["sudo", "-n", _LM_SELF_RESTART],) \
-        and popped[0][1] == {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    assert execed == [("sudo", "-n", _LM_SELF_RESTART)]
 
 
-def test_hub_self_restart_fallback_failure_message(monkeypatch):
-    def _boom(*a, **k):
+def test_hub_self_restart_raises_when_direct_exec_fails(monkeypatch):
+    async def _boom(*a, **k):
         raise FileNotFoundError("no sudo")
-    monkeypatch.setattr("hub_cert_distribution.subprocess.Popen", _boom)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _boom)
     d = _Distro(hub_self=None, atomic=lambda *a: None)
-    msg = _run(d._hub_self_restart())
-    assert "could not schedule self-restart" in msg
+    try:
+        _run(d._hub_self_restart())
+        assert False, "expected a RuntimeError"
+    except RuntimeError as e:
+        assert "could not schedule self-restart" in str(e)
