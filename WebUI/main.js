@@ -2667,13 +2667,12 @@ async function dropHubBacklog() {
     }
 }
 
-// Restart the hub service (admin, System → Hub Status). Confirms first, since the
-// hub (and this WebUI session) briefly drops while lm.service cycles.
+// Restart the hub service (admin, System → Hub Status). No confirmation —
+// this is a deliberate admin action reachable only from an already-gated
+// admin page; the hub (and this WebUI session) briefly drops while
+// lm.service cycles.
 async function restartHubService() {
     const btn = document.getElementById('restart-hub-btn');
-    if (!confirm('Restart the hub service (lm.service) now?\n\n'
-               + 'This loads the latest pulled code (e.g. to fix a "Method Not Allowed" on a new endpoint after an update). '
-               + 'The hub and this page will be briefly unavailable for a few seconds; spokes reconnect automatically.')) return;
     if (btn) { btn.disabled = true; btn.textContent = 'Restarting…'; }
     try {
         const data = await apiJson('/setup/hub/restart', { method: 'POST' });
