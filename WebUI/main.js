@@ -9809,6 +9809,7 @@ function _renderSettingsKeyVaultTile(content) {
             <div class="mt-3 flex flex-wrap items-center gap-2">
                 <button type="button" onclick="testKeyVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Test connection</button>
                 <button type="button" onclick="testFernetTier1()" title="Tests the DIFFERENT auth path the hub actually uses at boot to source the Fernet key from Key Vault (managed identity via LM_KEYVAULT_URL/LM_FERNET_KEY_KV_SECRET) — separate from 'Test connection' above, which only checks the SSO app-cert path used by the buttons below." class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Test Fernet boot path (Tier 1)</button>
+                <button type="button" onclick="saveFernetTier1Config()" title="Writes LM_FERNET_KEY_KV_SECRET and LM_KEYVAULT_URL — using the Vault URL / Fernet-key secret name fields above — into this hub's .env, then restarts the hub to apply them. LM_FERNET_KEY stays in place as a fallback; nothing else in .env is touched." class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Save &amp; restart for Tier 1</button>
                 <button type="button" onclick="rotateKeyVaultAdmin()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Rotate admin now</button>
                 <button type="button" onclick="pushKeyVaultFernet()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Push Fernet key</button>
                 <button type="button" onclick="backupKeyVaultNow()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 py-1.5 rounded-md text-xs font-bold">Backup now</button>
@@ -9923,6 +9924,38 @@ async function testFernetTier1() {
             showToast('Tier-1 test failed: ' + (d.message || ''), 'error');
         }
     } catch (e) { if (out) out.textContent = ''; showToast('Tier-1 test failed: ' + (e.message || e), 'error'); }
+}
+
+// Writes LM_FERNET_KEY_KV_SECRET/LM_KEYVAULT_URL into the hub's own .env
+// (reusing whatever's currently in the Vault URL / Fernet-key secret name
+// fields above — no separate inputs) and restarts the hub. Confirms first,
+// same as restartHubService() — this both touches the hub's secrets file
+// AND restarts it.
+async function saveFernetTier1Config() {
+    const secretName = (document.getElementById('kv-fernet-secret')?.value || '').trim();
+    const vaultUrl = (document.getElementById('kv-url')?.value || '').trim();
+    if (!secretName || !vaultUrl) {
+        showToast('Fill in the Vault URL and Fernet-key secret name fields above first.', 'error');
+        return;
+    }
+    if (!confirm(`Write LM_FERNET_KEY_KV_SECRET=${secretName} and LM_KEYVAULT_URL=${vaultUrl} into `
+               + `this hub's .env, then restart lm.service to apply them?\n\n`
+               + `LM_FERNET_KEY stays in place as a fallback — nothing else in .env is touched. `
+               + `The hub and this page will be briefly unavailable for a few seconds.`)) return;
+    const out = document.getElementById('kv-action-out');
+    if (out) out.textContent = 'Saving + restarting…';
+    try {
+        const d = await apiJson('/setup/key-vault/configure-tier1', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ secret_name: secretName, vault_url: vaultUrl }),
+        });
+        showToast(`${d.message || 'Saved'} — reloading in ~8s…`, 'success');
+        setTimeout(() => location.reload(), 8000);
+    } catch (e) {
+        if (out) out.textContent = '';
+        showToast('Save failed: ' + (e.message || e), 'error');
+    }
 }
 
 async function _kvAction(path, label, confirmMsg) {
@@ -10356,7 +10389,7 @@ function restoreKeyVaultFromVault() {
     _kvRestore({ from_vault: secret });
 }
 
-window.testKeyVault = testKeyVault; window.testFernetTier1 = testFernetTier1; window.saveKeyVault = saveKeyVault;
+window.testKeyVault = testKeyVault; window.testFernetTier1 = testFernetTier1; window.saveFernetTier1Config = saveFernetTier1Config; window.saveKeyVault = saveKeyVault;
 window.rotateKeyVaultAdmin = rotateKeyVaultAdmin; window.pushKeyVaultFernet = pushKeyVaultFernet;
 window.backupKeyVaultNow = backupKeyVaultNow; window.downloadKeyVaultMin = downloadKeyVaultMin;
 window.restoreKeyVaultFromFile = restoreKeyVaultFromFile; window.restoreKeyVaultFromVault = restoreKeyVaultFromVault;
