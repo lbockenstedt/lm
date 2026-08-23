@@ -2062,6 +2062,16 @@ def create_app(hub):
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
         resp.headers.setdefault("X-Frame-Options", "DENY")
         resp.headers.setdefault("Referrer-Policy", "no-referrer")
+        # A few more zero-risk hardening headers that scanners routinely flag as
+        # "missing". None affect app behaviour: the WebUI needs none of the
+        # gated browser features, isn't a Flash/PDF cross-domain host, and the
+        # legacy XSS auditor is best disabled (value 0) per modern guidance.
+        resp.headers.setdefault("X-XSS-Protection", "0")
+        resp.headers.setdefault("X-Permitted-Cross-Domain-Policies", "none")
+        resp.headers.setdefault(
+            "Permissions-Policy",
+            "geolocation=(), camera=(), microphone=(), payment=(), usb=(), "
+            "magnetometer=(), gyroscope=(), accelerometer=()")
         # Content-Security-Policy. The WebUI is a single-origin admin app that
         # (a) uses ~500 inline event handlers and inline <script> bootstrap
         # blocks, and (b) loads the Tailwind Play CDN (which JITs CSS via
@@ -2595,6 +2605,10 @@ def build_server(hub, host="0.0.0.0", port=443, tls_cert="", tls_key=""):
             cfg_kwargs["ws"] = _peer_cert_ws._PeerCertProtocol
     except Exception:  # noqa: BLE001 - never brick the boot on a peer-cert-ws hiccup
         pass
+    # Don't emit uvicorn's default ``Server: uvicorn`` header — it's a free
+    # technology/version disclosure that scanners flag. (Applies to the hub's
+    # in-loop server path.)
+    cfg_kwargs["server_header"] = False
     server = uvicorn.Server(uvicorn.Config(app, **cfg_kwargs))
     # Register the listener's client-verify SSLContext so mTLS trust can be
     # hot-reloaded in place when certs/chains change — no hub restart needed for a
@@ -2656,6 +2670,8 @@ def run_api_server(hub, port=443):
             _mtls_kw = {}
         uvicorn.run(app, host="0.0.0.0", port=port, ssl_certfile=cert,
                     ssl_keyfile=key, log_config=_uvicorn_log_config(),
+                    server_header=False,
                     **_ws_kw, **_mtls_kw)
     else:
-        uvicorn.run(app, host="0.0.0.0", port=port, log_config=_uvicorn_log_config(), **_ws_kw)
+        uvicorn.run(app, host="0.0.0.0", port=port, log_config=_uvicorn_log_config(),
+                    server_header=False, **_ws_kw)

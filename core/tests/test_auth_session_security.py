@@ -286,6 +286,17 @@ def test_csp_header_present_and_hardened(tmp_path):
     assert "https://cdn.jsdelivr.net" in csp
 
 
+def test_extra_hardening_headers_present(tmp_path):
+    """Zero-risk hardening headers scanners commonly flag as missing."""
+    users = {"admin": _admin_user()}
+    c, hub = _build(users, tmp_path)
+    h = {k.lower(): v for k, v in c.get("/status").headers.items()}
+    assert h.get("x-permitted-cross-domain-policies") == "none"
+    assert h.get("x-xss-protection") == "0"
+    pp = h.get("permissions-policy") or ""
+    assert "geolocation=()" in pp and "camera=()" in pp and "microphone=()" in pp
+
+
 def test_no_secure_cookie_no_hsts_on_plaintext(tmp_path):
     users = {"admin": _admin_user()}
     c, hub = _build(users, tmp_path)
