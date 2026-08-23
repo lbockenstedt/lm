@@ -2062,6 +2062,33 @@ def create_app(hub):
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
         resp.headers.setdefault("X-Frame-Options", "DENY")
         resp.headers.setdefault("Referrer-Policy", "no-referrer")
+        # Content-Security-Policy. The WebUI is a single-origin admin app that
+        # (a) uses ~500 inline event handlers and inline <script> bootstrap
+        # blocks, and (b) loads the Tailwind Play CDN (which JITs CSS via
+        # Function()/eval) plus xterm/noVNC ES modules from jsdelivr — so a
+        # strict nonce/hash policy is not achievable without a full front-end
+        # refactor. This policy is therefore intentionally permissive on
+        # script/style ('unsafe-inline'/'unsafe-eval') but still hardens the
+        # cheap, high-value directives (object-src/base-uri/frame-ancestors/
+        # form-action) and pins script/style/connect to a known allowlist
+        # (self + the two CDNs the UI actually pulls from). All WebSockets are
+        # same-origin, covered by connect-src 'self'.
+        resp.headers.setdefault(
+            "Content-Security-Policy",
+            "; ".join((
+                "default-src 'self'",
+                "base-uri 'self'",
+                "object-src 'none'",
+                "frame-ancestors 'none'",
+                "form-action 'self'",
+                "img-src 'self' data: blob:",
+                "font-src 'self' data: https://cdn.jsdelivr.net",
+                "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+                "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
+                "https://cdn.tailwindcss.com https://cdn.jsdelivr.net",
+                "connect-src 'self' https://cdn.jsdelivr.net",
+                "worker-src 'self' blob:",
+            )))
         # Cross-user identity bleed guard: dynamic responses (``/auth/*``,
         # ``/api/*`` — every per-cookie identity/tenant payload, including the
         # recurring ``/auth/me`` poll) MUST NOT be stored by any shared or

@@ -269,6 +269,23 @@ def test_secure_cookie_and_hsts_when_tls(monkeypatch, tmp_path):
     assert "strict-transport-security" in {k.lower() for k in s.headers}
 
 
+def test_csp_header_present_and_hardened(tmp_path):
+    """Content-Security-Policy is emitted on every response (http and https) and
+    pins the cheap high-value directives while allowing the two CDNs the WebUI
+    actually loads (Tailwind Play + jsdelivr)."""
+    users = {"admin": _admin_user()}
+    c, hub = _build(users, tmp_path)
+    s = c.get("/status")
+    csp = {k.lower(): v for k, v in s.headers.items()}.get("content-security-policy")
+    assert csp is not None
+    assert "default-src 'self'" in csp
+    assert "object-src 'none'" in csp
+    assert "frame-ancestors 'none'" in csp
+    assert "base-uri 'self'" in csp
+    assert "https://cdn.tailwindcss.com" in csp
+    assert "https://cdn.jsdelivr.net" in csp
+
+
 def test_no_secure_cookie_no_hsts_on_plaintext(tmp_path):
     users = {"admin": _admin_user()}
     c, hub = _build(users, tmp_path)
