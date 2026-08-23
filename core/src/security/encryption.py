@@ -3,11 +3,14 @@
 Owns the ``HubEncryption`` singleton (``hub_encryption``) that wraps
 ``cryptography.fernet.Fernet`` to encrypt/decrypt persisted JSON such as
 ``hub_secret.json``, ``keys.json``, ``system.json``, and ``tenants.json``.
-The primary key is sourced from the ``LM_FERNET_KEY`` env var (REQUIRED,
-fail-closed); a weak machine-id-derived key is retained only as
-``_legacy_fernet`` so blobs encrypted before ``LM_FERNET_KEY`` was deployed
-remain decryptable (transparent migration — new writes always use the primary
-key).
+The primary key is sourced either from Azure Key Vault (Tier 1 — opt-in via
+``LM_FERNET_KEY_KV_SECRET``, off-disk) or the ``LM_FERNET_KEY`` env var (the
+default, and the fallback when a configured vault is momentarily
+unreachable); one of the two is REQUIRED, fail-closed. See
+``_resolve_primary_key`` for the exact resolution order. A weak
+machine-id-derived key is retained only as ``_legacy_fernet`` so blobs
+encrypted before ``LM_FERNET_KEY`` was deployed remain decryptable
+(transparent migration — new writes always use the primary key).
 
 This module is consumed by ``security/key_manager.py`` (which encrypts/decrypts
 the key and hub-secret stores) and by ``state/manager.py`` (which uses
@@ -42,10 +45,13 @@ class HubEncryption:
     Handles transparent at-rest encryption for Hub JSON files
     (hub_secret.json, keys.json, system.json, tenants.json).
 
-    Key source: LM_FERNET_KEY env var — a full base64 Fernet key (REQUIRED, fail-closed).
-    Generate with:
+    Key source: a full base64 Fernet key, from either Azure Key Vault (Tier 1 —
+    opt-in via LM_FERNET_KEY_KV_SECRET naming the secret, off-disk) or the
+    LM_FERNET_KEY env var (the default, and the fallback when a configured
+    vault is momentarily unreachable). One of the two is REQUIRED, fail-closed.
+    Generate a key with:
       python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-    If LM_FERNET_KEY is unset or invalid, initialization raises and the Hub will not start.
+    If neither source yields a valid key, initialization raises and the Hub will not start.
 
     A weak machine-id-derived key is still computed as `_legacy_fernet` ONLY so that blobs
     encrypted before LM_FERNET_KEY was deployed remain decryptable (transparent migration):
