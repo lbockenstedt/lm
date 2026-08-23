@@ -1153,6 +1153,27 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # forged reports to poison the NSG blocklist. See _handle_edge_probe_report.
         self._edge_probe_reports = {}     # reporter spoke_id -> [ts, ...]
         self._EDGE_PROBE_MAX = 60         # max edge probe reports per reporter / 600s
+        # An edge-reported PERIMETER block (shared/infra reporter → NSG) is
+        # capped to this TTL and can NEVER escalate to permanent — bounding the
+        # blast radius of a compromised perimeter edge to a short, self-expiring
+        # nuisance. Tenant-side reports never touch the NSG (see below).
+        self._EDGE_BLOCK_TTL_S = float(
+            os.environ.get("LM_EDGE_BLOCK_TTL_S", "3600") or 3600)
+        # Tenant-side threat response (A3 + Hard Revoke). A probe reported by a
+        # TENANT node (spoke/agent behind a tenant firewall) must NOT touch the
+        # Azure NSG — the Azure resources are not under attack, the tenant node
+        # is. The response is location-scoped: hard-revoke the REPORTING node
+        # itself (self-scoped, so a forged report from an owned tenant node can
+        # only revoke itself — no cross-victim leverage), and on a coordinated
+        # sweep (≥ _TENANT_PROBE_ESCALATE_NODES distinct nodes on the same tenant
+        # within _TENANT_PROBE_WINDOW_S) escalate to hard-revoking that whole
+        # tenant's fleet. These high-confidence signatures never fire on normal
+        # SPA/API/agent traffic, so a trip means a real recon attempt.
+        self._tenant_probe_trips = {}     # tenant_id -> {node_pk -> last_ts}
+        self._TENANT_PROBE_ESCALATE_NODES = max(
+            2, int(os.environ.get("LM_TENANT_PROBE_ESCALATE_NODES", "2") or 2))
+        self._TENANT_PROBE_WINDOW_S = float(
+            os.environ.get("LM_TENANT_PROBE_WINDOW_S", "600") or 600)
 
     # Message classes for the escalation ladder. Config-overridable via
     # global_config["backpressure"]["classes"] (type -> class) so the policy is
@@ -3297,7 +3318,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         logger.info(f"Watchdog fan-out: {len(pushed)} pushed, {len(queued)} queued, {len(failed)} failed.")
         return {"status": "SUCCESS", "pushed": pushed, "queued": queued, "failed": failed}
 
-    async def revoke_spoke(self, spoke_id: str) -> Dict[str, Any]:
+    async def revoke_spoke(self, spoke_id: str, reason: Optional[str] = None,
+                           source: str = "admin") -> Dict[str, Any]:
         """Immediate, non-destructive revocation of a spoke (item 9c).
 
         The complement to on-demand rotation for the suspected-compromise case
@@ -3309,8 +3331,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         record is KEPT (the spoke remains in ``known_modules`` as a revoked /
         pending entry) so the operator can see it was revoked and re-onboard +
         re-approve the same id when ready. Also clears queued mail (the keyless
-        spoke can't verify signed frames). Returns ``{"status", "spoke_id",
-        "was_connected", "message"}``.
+        spoke can't verify signed frames).
+
+        ``reason``/``source`` are persisted on the module record
+        (``module_metadata``) so the spokes/agents module AND the tenant view can
+        surface WHY a node was revoked (admin action vs an automatic tenant-side
+        threat response), and survive a hub restart. Returns ``{"status",
+        "spoke_id", "was_connected", "message"}``.
         """
         pk = self._primary_key(spoke_id)
         was_connected = pk in self.active_connections
@@ -3322,17 +3349,30 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 logger.warning(f"revoke_spoke: could not close live WS for {spoke_id}: {e}")
         self.approved_modules[pk] = False
         self.state.register_module(pk, approved=False)
+        # Persist the revoke reason so both the spokes/agents module and the
+        # tenant view render WHY, and it survives a restart. Best-effort — a
+        # metadata hiccup must never block the security-critical revoke below.
+        try:
+            self.state.update_module_metadata(pk, {
+                "revoked": True,
+                "revoke_reason": (reason or "admin revoke")[:400],
+                "revoked_ts": time.time(),
+                "revoked_by": source or "admin",
+            })
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"revoke_spoke: could not stamp revoke metadata for {spoke_id}: {e}")
         await self.state.save_state_now()
         self.key_manager.delete_spoke_key(pk)
         # Mailbox is guid-keyed after arm — clear by pk so a revoked armed
         # spoke's stranded queue/pending-ack (under its guid) is actually dropped.
         await self.mailbox.clear_spoke(pk)
         self.record_spoke_event(spoke_id, "revoked",
-                                f"admin revoke; was_connected={was_connected}")
-        logger.warning(f"Spoke {spoke_id} revoked by admin "
-                       f"(was_connected={was_connected}); re-onboard + re-approve to return.")
+                                (reason or f"admin revoke; was_connected={was_connected}"))
+        logger.warning(f"Spoke {spoke_id} revoked ({source}); was_connected={was_connected}; "
+                       f"reason={reason or 'admin revoke'}; re-onboard + re-approve to return.")
         return {"status": "SUCCESS", "spoke_id": spoke_id,
                 "was_connected": was_connected,
+                "reason": reason or "admin revoke", "source": source,
                 "message": f"revoked; old secret invalidated, approval dropped — "
                            f"re-onboard + re-approve to return"}
 
@@ -8231,68 +8271,59 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                   data: dict) -> None:
         """Ingest an ``HTTP_PROBE_REPORT`` from an edge component (reverse proxy,
         AppBuilder, a role-hosted spoke UI) that detected an HTTPS-port scanner
-        on ITS own listener and relayed it up the authenticated tunnel so the hub
-        can auto-block the source centrally (one NSG deny protects every edge).
+        on ITS own listener and relayed it up the authenticated tunnel.
 
-        This runs only after the frame's signature verified, so the reporter is
-        an authenticated spoke — but a *compromised* edge could still forge
-        reports to poison the blocklist (block a victim / the admin by IP). Four
-        defenses make that useless:
+        The response is routed by the reporter's LOCATION, because the two
+        deployments have different threat models and different assets at risk:
 
-        * **Server-side re-classification** — the reported ``path`` must ITSELF
-          match a scanner signature (``looks_like_probe``); a compromised edge
-          cannot get an arbitrary benign path attributed to a victim.
-        * **Global-source-only** — the ``source_ip`` must be a globally-routable
-          public address. Private / CGNAT / link-local / loopback sources are
-          refused: an edge probe report is for blocking an *external* scanner,
-          and our own internal/infra addresses must never be auto-blockable via
-          a report (the edge reports the real TCP peer, not a spoofable header).
-        * **Per-reporter rate cap** — at most ``_EDGE_PROBE_MAX`` reports per
-          reporter per window, so one owned edge cannot flood-block a range.
-        * **Exemption reuse** — the report funnels through
-          ``threat_monitor.record_failure``, which already spares trusted /
-          allow-listed / recently-authenticated IPs, so the admin and known-good
-          egresses can never be blocked via a forged report.
+        * **Perimeter / infra reporter** (shared-tenant or unassigned — the
+          Azure LM-RG internet-facing edge): the Azure resources ARE the thing
+          under attack, so the source is auto-blocked centrally at the NSG (one
+          deny protects every edge). This runs only after the frame's signature
+          verified, but a *compromised* perimeter edge could still forge reports,
+          so the block is defended and BOUNDED:
+            - **Server-side re-classification** — the reported ``path`` must
+              itself match a scanner signature; a forged benign path is ignored.
+            - **Global-source-only** — private/CGNAT/link-local/loopback sources
+              are refused, so our own internal/infra ranges are never NSG-denied.
+            - **Per-reporter rate cap** — one owned edge cannot flood-block.
+            - **Bounded block** — ``max_ttl_s``/``allow_permanent=False`` cap the
+              blast radius of a forged report to a short, self-expiring nuisance.
+            - **Exemption reuse** — trusted/allow-listed/recently-authed IPs are
+              spared inside ``record_failure``.
+
+        * **Tenant reporter** (a spoke/agent behind a tenant firewall): the Azure
+          NSG is NEVER touched — those resources are not under attack, the tenant
+          node is. Under zero-trust the tenant node cannot be trusted, so the
+          response is **self-scoped hard-revoke** of the REPORTING node itself
+          (A3 + Hard Revoke): kill its session, drop approval (admin re-approval
+          required), wipe its crypto so the old secret can't reconnect. This is
+          correct whether the report is genuine (a real scan is hitting a node
+          with sensitive fleet access → cut it off) or forged (an owned node is
+          lying → it only revokes ITSELF, giving an attacker zero cross-victim
+          leverage). On a coordinated sweep (≥ ``_TENANT_PROBE_ESCALATE_NODES``
+          distinct nodes tripping on the same tenant within the window) the whole
+          tenant's fleet is hard-revoked. These high-confidence signatures never
+          fire on normal SPA/API/agent traffic, so a trip is a real recon attempt.
 
         Telemetry-only failure mode: a monitoring hiccup must never break the
         dispatch loop.
         """
         tm = getattr(self, "threat_monitor", None)
-        if not tm:
-            return
         try:
             src = str((data or {}).get("source_ip") or "").strip()
             path = str((data or {}).get("path") or "")
             method = str((data or {}).get("method") or "?").upper()[:8]
             node = str((data or {}).get("node") or spoke_id or "?")[:64]
-            if not src:
-                return
-            # Never let an edge attribute a probe to a bogus / non-routable
-            # source (loopback = the edge itself; unparseable = junk). Also
-            # refuse any INTERNAL address — RFC1918 private, CGNAT (100.64/10,
-            # the hub/spoke private subnet), or link-local: an edge probe report
-            # is for blocking an *external* scanner, and NSG-denying one of our
-            # own internal ranges would sever internal control-plane paths. A
-            # forged (or XFF-spoofed) report naming such an IP is a self-inflicted
-            # outage vector — internal infrastructure is never auto-blocked.
-            try:
-                ipobj = ipaddress.ip_address(src)
-                if (ipobj.is_loopback or ipobj.is_unspecified or ipobj.is_link_local
-                        or any(ipobj in net for net in _INTERNAL_NETS)):
-                    logger.debug("HTTP_PROBE_REPORT from %s: refusing internal/"
-                                 "non-routable source_ip %r (never auto-blocked)",
-                                 spoke_id, src)
-                    return
-            except ValueError:
-                logger.debug("HTTP_PROBE_REPORT from %s: bad source_ip %r", spoke_id, src)
-                return
-            # Server-side re-validation: the hub does NOT trust the edge's
+            # Server-side re-validation FIRST: the hub never trusts the edge's
             # classification — the reported path must itself look like a probe.
+            # A benign path is ignored regardless of reporter location, so a
+            # misconfigured edge can neither poison the NSG nor self-revoke.
             if not _edge_looks_like_probe(path):
                 logger.debug("HTTP_PROBE_REPORT from %s: path %r not a probe signature",
                              spoke_id, path)
                 return
-            # Per-reporter rate cap (blocklist-poisoning defense).
+            # Per-reporter rate cap (poisoning / revoke-loop defense).
             now = time.time()
             window = 600.0
             times = self._edge_probe_reports.setdefault(spoke_id or node, [])
@@ -8302,10 +8333,110 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                "(%d/%ds) — dropping", spoke_id, self._EDGE_PROBE_MAX, int(window))
                 return
             times.append(now)
-            tm.record_failure(src, "http_probe",
-                              detail=f"edge {node} ({method} {path[:120]})")
+
+            # Route by reporter location. Unassigned (no tenant binding) and the
+            # shared tenant are admin-managed perimeter/infra; a real tenant_id
+            # is a tenant-network node.
+            try:
+                import access as _access
+                reporter_tenant = self.state.get_spoke_tenant(self._primary_key(spoke_id)) or ""
+                is_perimeter = (not reporter_tenant) or _access.tenant_is_shared(reporter_tenant)
+            except Exception:  # noqa: BLE001 — fail SAFE: treat unknown as tenant-side
+                reporter_tenant, is_perimeter = "", False
+
+            if is_perimeter:
+                # ── Perimeter: bounded central NSG block of the external source ──
+                if not tm:
+                    return
+                if not src:
+                    return
+                # Never let an edge attribute a probe to a bogus / non-routable
+                # source, or to one of our own INTERNAL ranges (RFC1918, CGNAT
+                # 100.64/10, link-local) — NSG-denying those would sever internal
+                # control-plane paths. A forged report naming such an IP is a
+                # self-inflicted-outage vector; internal infra is never blocked.
+                try:
+                    ipobj = ipaddress.ip_address(src)
+                    if (ipobj.is_loopback or ipobj.is_unspecified or ipobj.is_link_local
+                            or any(ipobj in net for net in _INTERNAL_NETS)):
+                        logger.debug("HTTP_PROBE_REPORT from %s: refusing internal/"
+                                     "non-routable source_ip %r (never auto-blocked)",
+                                     spoke_id, src)
+                        return
+                except ValueError:
+                    logger.debug("HTTP_PROBE_REPORT from %s: bad source_ip %r", spoke_id, src)
+                    return
+                tm.record_failure(src, "http_probe",
+                                  detail=f"edge {node} ({method} {path[:120]})",
+                                  max_ttl_s=self._EDGE_BLOCK_TTL_S,
+                                  allow_permanent=False)
+                return
+
+            # ── Tenant-side: self-scoped hard-revoke (NEVER the NSG) ──
+            reason = (f"tenant-side recon detected on its own listener: "
+                      f"{method} {path[:120]}"
+                      + (f" from {src}" if src else ""))
+            logger.warning("HTTP_PROBE_REPORT: tenant node %s (tenant=%s) reported "
+                           "a scanner on its listener — hard-revoking the node. %s",
+                           spoke_id, reporter_tenant or "?", reason)
+            asyncio.create_task(
+                self._tenant_probe_hard_revoke(spoke_id, reporter_tenant, reason))
         except Exception:  # noqa: BLE001 — monitoring must never break dispatch
             logger.debug("HTTP_PROBE_REPORT ingest failed", exc_info=True)
+
+    async def _tenant_probe_hard_revoke(self, spoke_id, tenant_id: str,
+                                        reason: str) -> None:
+        """Self-scoped hard-revoke of a TENANT node that reported a scanner on
+        its own listener, with tenant-wide escalation on a coordinated sweep.
+
+        Self-scoped by construction: the node revoked is the reporter itself, so
+        a forged report from an owned tenant node can only revoke that same node
+        — an attacker gains no leverage over any other victim. On
+        ``_TENANT_PROBE_ESCALATE_NODES`` DISTINCT nodes tripping on the same
+        tenant within ``_TENANT_PROBE_WINDOW_S``, the entire tenant fleet is
+        revoked (a coordinated sweep is treated as a tenant-level compromise).
+        Never raises — a monitoring path must not crash the loop."""
+        try:
+            pk = self._primary_key(spoke_id)
+            # 1) Revoke the reporting node itself.
+            await self.revoke_spoke(spoke_id, reason=reason, source="threat_auto")
+
+            # 2) Track distinct-node trips per tenant for escalation. A blank
+            # tenant can't be escalated tenant-wide (nothing to enumerate), so
+            # the self-revoke above is the whole response in that case.
+            if not tenant_id:
+                return
+            now = time.time()
+            trips = self._tenant_probe_trips.setdefault(tenant_id, {})
+            trips[pk] = now
+            # Age out old trips outside the window.
+            cutoff = now - self._TENANT_PROBE_WINDOW_S
+            for k in [k for k, ts in trips.items() if ts < cutoff]:
+                trips.pop(k, None)
+
+            if len(trips) < self._TENANT_PROBE_ESCALATE_NODES:
+                return
+
+            # 3) Escalate: hard-revoke every spoke/agent bound to this tenant.
+            distinct = len(trips)
+            trips.clear()  # consume so we don't re-escalate on each subsequent hit
+            esc_reason = (f"tenant-wide auto-revoke: {distinct} distinct nodes on "
+                          f"tenant {tenant_id} reported recon within "
+                          f"{int(self._TENANT_PROBE_WINDOW_S)}s (coordinated sweep)")
+            logger.warning("HTTP_PROBE_REPORT ESCALATION — %s", esc_reason)
+            try:
+                known = list(self.state.system_state.get("known_modules", []) or [])
+            except Exception:  # noqa: BLE001
+                known = []
+            for sid in known:
+                try:
+                    if (self.state.get_spoke_tenant(self._primary_key(sid)) or "") != tenant_id:
+                        continue
+                    await self.revoke_spoke(sid, reason=esc_reason, source="threat_auto")
+                except Exception:  # noqa: BLE001 — one bad spoke must not stop the sweep
+                    logger.debug("tenant-wide revoke: failed on %s", sid, exc_info=True)
+        except Exception:  # noqa: BLE001 — never let the response crash the loop
+            logger.debug("_tenant_probe_hard_revoke failed", exc_info=True)
 
     def _is_approved_install_reconnect(self, spoke_id, install_uuid) -> bool:
         """True when an ``invalid_secret`` connect is really an ALREADY-APPROVED

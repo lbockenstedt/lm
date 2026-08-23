@@ -121,6 +121,14 @@ async def _aggregate_spokes(hub):
                                             lambda _pk: False)(hub._primary_key(sid))),
             "module_type": _module_type_for(hub, sid),
             "hostname": meta.get("hostname", ""),
+            # Revocation surface (admin action OR automatic tenant-side threat
+            # response): the WebUI shows a "Revoked" badge + the reason so an
+            # operator immediately sees WHY a node lost access without digging
+            # through logs. Cleared on re-approval.
+            "revoked": bool(meta.get("revoked")),
+            "revoke_reason": meta.get("revoke_reason", "") or "",
+            "revoked_ts": meta.get("revoked_ts", 0) or 0,
+            "revoked_by": meta.get("revoked_by", "") or "",
             "install_uuid": meta.get("install_uuid", ""),
             "spoke_guid": meta.get("install_uuid", ""),
             "identity_change": _identity_change_for(hub, sid, meta),
@@ -934,6 +942,14 @@ def register(app, hub, ctx):
             else:
                 hub.state.register_module(spoke_id, approved=True)
                 hub.approved_modules[hub._primary_key(spoke_id)] = True
+                # Re-approval clears any prior revoke reason so the spokes/agents
+                # module + tenant view stop showing a stale "revoked" badge.
+                try:
+                    hub.state.update_module_metadata(hub._primary_key(spoke_id), {
+                        "revoked": False, "revoke_reason": "",
+                        "revoked_ts": 0, "revoked_by": ""})
+                except Exception:  # noqa: BLE001 — cosmetic; never block approval
+                    pass
 
             # Spoke→tenant binding (admin assigns at approval time). Omitting
             # tenant_id leaves any existing binding untouched.

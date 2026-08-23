@@ -112,6 +112,10 @@ def register(app, hub, ctx):
                 "module_type": live_types.get(pk) or m.get("module_type") or "",
                 "connected": pk in conns,
                 "approved": bool(hub.approved_modules.get(pk, False)),
+                "revoked": bool(m.get("revoked")),
+                "revoke_reason": m.get("revoke_reason", "") or "",
+                "revoked_ts": m.get("revoked_ts", 0) or 0,
+                "revoked_by": m.get("revoked_by", "") or "",
                 "tenant_id": tenant,
             })
         out.sort(key=lambda s: (s["module_type"], s["spoke_id"]))

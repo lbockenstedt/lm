@@ -13,6 +13,7 @@ reuse of the threat monitor's trusted-IP exemption.
 import importlib.util
 import os
 import sys
+import asyncio
 
 _SRC = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
 if _SRC not in sys.path:
@@ -52,12 +53,61 @@ class _TmHub:
         self.state = state
 
 
+class _NoTenantState:
+    """State for a PERIMETER reporter: no tenant binding (unassigned/infra) →
+    the report routes to the central NSG block path."""
+    def get_spoke_tenant(self, pk):
+        return None
+
+
 class _FakeHub:
-    """Minimal stand-in exposing only what _handle_edge_probe_report reads."""
+    """Minimal stand-in exposing only what _handle_edge_probe_report reads for
+    the PERIMETER (NSG) path — a reporter with no tenant binding."""
     def __init__(self, tm, max_reports=3):
         self.threat_monitor = tm
         self._edge_probe_reports = {}
         self._EDGE_PROBE_MAX = max_reports
+        self._EDGE_BLOCK_TTL_S = 3600.0
+        self.state = _NoTenantState()
+
+    def _primary_key(self, x):
+        return x
+
+
+class _TenantState:
+    """State for a TENANT reporter: a real tenant binding + a known_modules
+    roster so the escalation sweep can enumerate the tenant's fleet."""
+    def __init__(self, tenant_by_id, known):
+        self._tenant_by_id = tenant_by_id
+        self.system_state = {"known_modules": list(known)}
+
+    def get_spoke_tenant(self, pk):
+        return self._tenant_by_id.get(pk)
+
+
+class _TenantHub:
+    """Stand-in for the tenant-side self-scoped hard-revoke path. Records every
+    revoke_spoke call instead of touching real crypto/WS."""
+    def __init__(self, tm, tenant_by_id, known, escalate=2, window=600.0, max_reports=100):
+        self.threat_monitor = tm
+        self._edge_probe_reports = {}
+        self._EDGE_PROBE_MAX = max_reports
+        self._EDGE_BLOCK_TTL_S = 3600.0
+        self._tenant_probe_trips = {}
+        self._TENANT_PROBE_ESCALATE_NODES = escalate
+        self._TENANT_PROBE_WINDOW_S = window
+        self.state = _TenantState(tenant_by_id, known)
+        self.revoked = []  # [(spoke_id, reason, source), ...]
+
+    def _primary_key(self, x):
+        return x
+
+    async def revoke_spoke(self, spoke_id, reason=None, source="admin"):
+        self.revoked.append((spoke_id, reason, source))
+        return {"status": "SUCCESS", "spoke_id": spoke_id}
+
+    # Exercise the REAL tenant-side response logic (self-revoke + escalation).
+    _tenant_probe_hard_revoke = main.LabManagerHub._tenant_probe_hard_revoke
 
 
 def _tm_for(tmp_path, entries=None, threshold=5):
@@ -153,3 +203,81 @@ def test_missing_threat_monitor_is_a_noop(tmp_path):
     # Must not raise even with no monitor wired.
     _report(hub, "proxy-1", "10.0.0.9",
             {"source_ip": "203.0.113.7", "path": "/.env", "method": "GET"})
+
+
+# ── Tenant-side self-scoped hard-revoke (A3 + Hard Revoke) ──────────────────
+
+def _report_async(hub, spoke_id, remote_ip, data):
+    """Drive the sync ingest inside a loop so the tenant-side path's
+    ``asyncio.create_task(...)`` actually runs to completion."""
+    async def _run():
+        main.LabManagerHub._handle_edge_probe_report(hub, spoke_id, remote_ip, data)
+        await asyncio.sleep(0)  # let the scheduled task start
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        if pending:
+            await asyncio.gather(*pending)
+    asyncio.run(_run())
+
+
+def test_tenant_reporter_self_revokes_and_never_touches_nsg(tmp_path):
+    # A TENANT node reporting a scanner on its listener is hard-revoked (itself),
+    # and the Azure NSG is NEVER written — the tenant node is the thing under
+    # attack, not the Azure resources.
+    tm = _tm_for(tmp_path, threshold=1)
+    hub = _TenantHub(tm, {"proxy-t": "acme"}, ["proxy-t", "other-acme", "shared-x"])
+    _report_async(hub, "proxy-t", "10.9.9.9",
+                  {"source_ip": "203.0.113.7", "path": "/wp-login.php", "method": "GET"})
+    assert hub.revoked == [("proxy-t", hub.revoked[0][1], "threat_auto")]
+    assert "recon detected" in hub.revoked[0][1]  # reason is descriptive
+    # No NSG / threat-monitor write at all on the tenant path.
+    assert len(tm._events) == 0
+    assert tm.snapshot()["totals"]["by_kind"].get("http_probe", 0) == 0
+    assert tm._blocks == {}
+
+
+def test_forged_tenant_report_only_revokes_itself(tmp_path):
+    # A COMPROMISED tenant node forging a report (even naming a public victim IP)
+    # can only revoke ITSELF — self-scoped containment gives an attacker zero
+    # cross-victim leverage.
+    tm = _tm_for(tmp_path, threshold=1)
+    hub = _TenantHub(tm, {"owned": "acme", "victim": "acme"},
+                     ["owned", "victim", "other"])
+    _report_async(hub, "owned", "10.9.9.9",
+                  {"source_ip": "198.51.100.9", "path": "/.git/config",
+                   "method": "GET", "node": "victim"})
+    revoked_ids = [r[0] for r in hub.revoked]
+    assert revoked_ids == ["owned"]           # only the reporter, never "victim"
+    assert tm._blocks == {}                    # and never the NSG
+
+
+def test_tenant_wide_escalation_on_multiple_nodes(tmp_path):
+    # >= escalate DISTINCT nodes tripping on the SAME tenant within the window
+    # escalates to hard-revoking that whole tenant's fleet (coordinated sweep).
+    tm = _tm_for(tmp_path, threshold=1)
+    known = ["a-acme", "b-acme", "c-acme", "z-other"]
+    tenants = {"a-acme": "acme", "b-acme": "acme", "c-acme": "acme", "z-other": "other"}
+    hub = _TenantHub(tm, tenants, known, escalate=2)
+    _report_async(hub, "a-acme", "10.0.0.1",
+                  {"source_ip": "203.0.113.1", "path": "/.env", "method": "GET"})
+    _report_async(hub, "b-acme", "10.0.0.2",
+                  {"source_ip": "203.0.113.2", "path": "/.env", "method": "GET"})
+    revoked_ids = [r[0] for r in hub.revoked]
+    # a-acme + b-acme self-revoked, then the escalation revokes EVERY acme spoke
+    # (a/b/c) — never the other tenant's z-other.
+    assert "a-acme" in revoked_ids and "b-acme" in revoked_ids and "c-acme" in revoked_ids
+    assert "z-other" not in revoked_ids
+    # The escalation revoke carries a tenant-wide reason.
+    esc = [r for r in hub.revoked if r[1] and "tenant-wide" in r[1]]
+    assert esc, "expected a tenant-wide escalation revoke"
+    assert tm._blocks == {}  # still never the NSG
+
+
+def test_single_tenant_node_does_not_escalate(tmp_path):
+    # One node tripping (below the escalate threshold) revokes only itself — no
+    # tenant-wide sweep.
+    tm = _tm_for(tmp_path, threshold=1)
+    hub = _TenantHub(tm, {"solo": "acme", "peer": "acme"}, ["solo", "peer"], escalate=2)
+    _report_async(hub, "solo", "10.0.0.1",
+                  {"source_ip": "203.0.113.1", "path": "/.env", "method": "GET"})
+    assert [r[0] for r in hub.revoked] == ["solo"]  # peer untouched
+

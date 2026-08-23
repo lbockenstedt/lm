@@ -201,13 +201,21 @@ class ThreatMonitor:
 
     # ── ingest ─────────────────────────────────────────────────────────────────
     def record_failure(self, ip: str, kind: str, username: Optional[str] = None,
-                        detail: str = "", meta: Optional[Dict[str, Any]] = None) -> None:
+                        detail: str = "", meta: Optional[Dict[str, Any]] = None,
+                        *, max_ttl_s: Optional[float] = None,
+                        allow_permanent: bool = True) -> None:
         """Record an auth failure from ``ip``. Blocks the IP once it crosses the
         threshold within the window (unless exempt). Safe to call from sync code.
 
         ``meta`` is optional structured evidence (e.g. request path/method/
         user-agent) stored on the event so the operator can drill into exactly
-        what failed from the Security UI; see :func:`_bound_meta`."""
+        what failed from the Security UI; see :func:`_bound_meta`.
+
+        ``max_ttl_s`` / ``allow_permanent`` bound the resulting block: an
+        edge-*reported* signal (see the hub's ``_handle_edge_probe_report``)
+        passes a short ``max_ttl_s`` and ``allow_permanent=False`` so that even a
+        corroborated report can only ever place a short, self-expiring block —
+        never a permanent one — capping the blast radius of a compromised edge."""
         ip = (ip or "").strip()
         if not ip or not self._cfg.get("enabled"):
             return
@@ -229,7 +237,8 @@ class ThreatMonitor:
             self._prune_fails()
         if len(hits) > self._cfg["threshold"]:
             self._block(ip, reason=self._reason(ip, kind, username, len(hits)),
-                        kind=kind, source="auto")
+                        kind=kind, source="auto",
+                        max_ttl_s=max_ttl_s, allow_permanent=allow_permanent)
 
     def record_success(self, ip: str) -> None:
         ip = (ip or "").strip()
@@ -248,16 +257,22 @@ class ThreatMonitor:
         return f"{count} {label}{who} within {mins}m"
 
     # ── blocking ───────────────────────────────────────────────────────────────
-    def _block(self, ip: str, reason: str, kind: str, source: str) -> None:
+    def _block(self, ip: str, reason: str, kind: str, source: str,
+               *, max_ttl_s: Optional[float] = None,
+               allow_permanent: bool = True) -> None:
         now = _now()
         self._offense[ip] = self._offense.get(ip, 0) + 1
         permanent = (source == "manual_perm"
-                     or self._offense[ip] >= self._cfg["permanent_after"])
+                     or (allow_permanent
+                         and self._offense[ip] >= self._cfg["permanent_after"]))
+        ttl = self._cfg["ttl_s"]
+        if max_ttl_s is not None:
+            ttl = min(ttl, max_ttl_s)
         rec = {
             "ip": ip, "reason": reason, "kind": kind, "source": source,
             "blocked_at": now, "offense_count": self._offense[ip],
             "permanent": permanent,
-            "expires_at": None if permanent else now + self._cfg["ttl_s"],
+            "expires_at": None if permanent else now + ttl,
         }
         self._blocks[ip] = rec
         self._ip_fails.pop(ip, None)
@@ -268,7 +283,7 @@ class ThreatMonitor:
         self._persist()
         sec_log.warning("THREAT BLOCK %s (%s) — %s%s", ip, source, reason,
                         " [PERMANENT]" if permanent else
-                        f" [expires {self._cfg['ttl_s'] // 3600}h]")
+                        f" [expires {int(ttl) // 3600}h]")
         self._schedule_reconcile()
 
     def block_manual(self, ip: str, reason: str = "", permanent: bool = False) -> Dict[str, Any]:

@@ -2295,15 +2295,36 @@ function _nodeLabel(base, tenant) {
     return label.toUpperCase();
 }
 
-function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant, idTitle) {
-    const dot = status === 'online'
+function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant, idTitle, revokeInfo) {
+    const _revoked = !!(revokeInfo && revokeInfo.revoked);
+    const dot = _revoked
+        ? 'bg-red-500 shadow-[0_0_8px_rgba(239,68,68,0.7)]'
+        : (status === 'online'
         ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]'
-        : (status === 'pending' ? 'bg-amber-400' : 'bg-slate-400');
+        : (status === 'pending' ? 'bg-amber-400' : 'bg-slate-400'));
     const badge = status === 'online'
         ? '<span class="text-[10px] uppercase tracking-widest text-green-600 font-bold">Online</span>'
         : (status === 'pending'
             ? '<span class="text-[10px] uppercase tracking-widest text-amber-500 font-bold">Pending</span>'
             : '<span class="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Offline</span>');
+    // Revoked badge — surfaces WHY a node lost access (admin action OR an
+    // automatic tenant-side threat response) right in the spokes/agents module
+    // and the tenant view. The reason + who/when is in the hover title. A
+    // threat_auto revoke is styled distinctly (it means the node tripped a
+    // recon/scan signature and was auto-contained; admin re-approval required).
+    const revokedBadge = _revoked
+        ? (() => {
+            const _by = revokeInfo.revoked_by || '';
+            const _auto = _by === 'threat_auto';
+            const _when = revokeInfo.revoked_ts
+                ? new Date(revokeInfo.revoked_ts * 1000).toLocaleString() : '';
+            const _title = `Revoked${_auto ? ' automatically (tenant-side threat response)' : ' by admin'}`
+                + (revokeInfo.revoke_reason ? ` — ${revokeInfo.revoke_reason}` : '')
+                + (_when ? ` (${_when})` : '')
+                + '. Re-approval required to return.';
+            return `<span class="text-[10px] px-2 py-0.5 rounded-full font-bold uppercase ${_auto ? 'bg-red-600 text-white animate-pulse' : 'bg-red-100 text-red-700'}" title="${escapeHtml(_title)}">${_auto ? '⛔ Auto-Revoked' : '⛔ Revoked'}</span>`;
+        })()
+        : '';
     const container = spokeVariant
         ? 'flex items-center justify-between p-3 rounded-lg bg-slate-50 border border-slate-200 hover:border-green-500 transition-all group'
         : 'flex items-center justify-between p-3 rounded-lg bg-slate-50 border border-slate-200';
@@ -2360,7 +2381,7 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant, idTitle)
                 ${tenantChip}
             </div>
             <div class="flex items-center gap-2">
-                ${throttleChip}${mpsChip}${backlogChip}${badge}
+                ${revokedBadge}${throttleChip}${mpsChip}${backlogChip}${badge}
             </div>
         </div>`;
 }
@@ -3167,7 +3188,8 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
                 const mod = moduleLabel(spoke.module_type);
                 const status = !spoke.approved ? 'pending'
                     : (connections.includes(id) ? 'online' : 'offline');
-                return _renderSpokeAgentRow(_nodeLabel(name, spoke.tenant_id), mod, status, true, spoke.tenant_id, id);
+                return _renderSpokeAgentRow(_nodeLabel(name, spoke.tenant_id), mod, status, true, spoke.tenant_id, id,
+                    { revoked: spoke.revoked, revoke_reason: spoke.revoke_reason, revoked_by: spoke.revoked_by, revoked_ts: spoke.revoked_ts });
             }).join('');
         }
     }
@@ -3177,8 +3199,8 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
     if (!agentList) return;
     // Generic Hub-direct agents (module_type "agent") from /setup/pending_spokes.
     const hubAgentRows = [
-        ...approvedHubAgents.map(a => ({ id: a.spoke_id, label: _nodeLabel((a.display_name && a.display_name !== a.spoke_id) ? a.display_name : (a.hostname || a.spoke_id), a.tenant_id), status: connections.includes(a.spoke_id) ? 'online' : 'offline', mod: moduleLabel(a.module_type) })),
-        ...pendingHubAgents.map(a => ({ id: a.spoke_id, label: _nodeLabel((a.display_name && a.display_name !== a.spoke_id) ? a.display_name : (a.hostname || a.spoke_id), a.tenant_id), status: 'pending', mod: moduleLabel(a.module_type) })),
+        ...approvedHubAgents.map(a => ({ id: a.spoke_id, label: _nodeLabel((a.display_name && a.display_name !== a.spoke_id) ? a.display_name : (a.hostname || a.spoke_id), a.tenant_id), status: connections.includes(a.spoke_id) ? 'online' : 'offline', mod: moduleLabel(a.module_type), rv: { revoked: a.revoked, revoke_reason: a.revoke_reason, revoked_by: a.revoked_by, revoked_ts: a.revoked_ts } })),
+        ...pendingHubAgents.map(a => ({ id: a.spoke_id, label: _nodeLabel((a.display_name && a.display_name !== a.spoke_id) ? a.display_name : (a.hostname || a.spoke_id), a.tenant_id), status: 'pending', mod: moduleLabel(a.module_type), rv: { revoked: a.revoked, revoke_reason: a.revoke_reason, revoked_by: a.revoked_by, revoked_ts: a.revoked_ts } })),
     ];
     // Proxmox node agents relayed through the pxmx hypervisor spoke
     // (best-effort). This runs on every 10s updateStatus() poll, so cache the
@@ -3212,7 +3234,7 @@ async function _renderDashboardLists(allSpokes, approvedSpokes, connections) {
     if (all.length === 0) {
         agentList.innerHTML = `<p class="text-xs text-slate-400 italic">No agents connected.</p>`;
     } else {
-        agentList.innerHTML = all.map(a => _renderSpokeAgentRow(a.label, a.mod, a.status, false, undefined, a.id)).join('');
+        agentList.innerHTML = all.map(a => _renderSpokeAgentRow(a.label, a.mod, a.status, false, undefined, a.id, a.rv)).join('');
     }
 }
 
@@ -13018,6 +13040,21 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                 // approve_agent_under_spoke in api.py.
                 const tenantId = s.tenant_id || '';
                 const eTenant = tenantId.replace(/'/g, "\\'");
+                // Revoked chip for the management card: an auto-revoke
+                // (threat_auto) means the node tripped a recon/scan signature and
+                // was hard-revoked by the tenant-side threat response; an admin
+                // revoke shows the same way with its reason. Admin Approve (on the
+                // row for any non-approved node) is the re-approval path.
+                const _revChip = s.revoked
+                    ? (() => {
+                        const _auto = s.revoked_by === 'threat_auto';
+                        const _when = s.revoked_ts ? new Date(s.revoked_ts * 1000).toLocaleString() : '';
+                        const _t = `Revoked${_auto ? ' automatically (tenant-side threat response)' : ' by admin'}`
+                            + (s.revoke_reason ? ` — ${s.revoke_reason}` : '')
+                            + (_when ? ` (${_when})` : '') + '. Approve to re-instate.';
+                        return `<span class="font-bold ${_auto ? 'text-red-700' : 'text-red-600'}" title="${escapeHtml(_t)}">⛔ ${_auto ? 'Auto-Revoked' : 'Revoked'}</span>`;
+                    })()
+                    : '';
                 // A spoke bound to the SHARED tenant is visible to every tenant.
                 // The server stamps `tenant_shared` per row (setup._aggregate_spokes);
                 // fall back to the cached shared-tenant id so the badge still shows
@@ -13048,6 +13085,7 @@ function _renderSpokesTable(spokesWrap, trueSpokes, diagBy) {
                         escapeHtml(kindLabel),
                         (modLabel && modLabel !== '—') ? escapeHtml(modLabel) : '',
                         ...(extras ? extras.metaParts : []),
+                        _revChip,
                         approved ? '' : '<span class="text-amber-600 font-semibold">Pending approval</span>',
                     ]),
                     actions: [
@@ -15058,6 +15096,20 @@ async function loadMyDeviceSpokes() {
             const appr = s.approved
                 ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700">approved</span>'
                 : '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700">pending</span>';
+            // Revoked surface: a node auto-contained by the tenant-side threat
+            // response (or an admin revoke) shows WHY, so a tenant-admin sees the
+            // reason inline instead of a silent "pending". Re-approval (by an
+            // admin) is required to return.
+            const revoked = s.revoked
+                ? (() => {
+                    const _auto = s.revoked_by === 'threat_auto';
+                    const _when = s.revoked_ts ? new Date(s.revoked_ts * 1000).toLocaleString() : '';
+                    const _t = `Revoked${_auto ? ' automatically (tenant-side threat response)' : ' by admin'}`
+                        + (s.revoke_reason ? ` — ${s.revoke_reason}` : '')
+                        + (_when ? ` (${_when})` : '') + '. Admin re-approval required.';
+                    return `<span class="px-2 py-0.5 rounded text-[10px] font-bold ${_auto ? 'bg-red-600 text-white' : 'bg-red-100 text-red-700'}" title="${escapeHtml(_t)}">${_auto ? '⛔ auto-revoked' : '⛔ revoked'}</span>`;
+                })()
+                : '';
             // A bare agent (module_type "agent") can host roles — offer Load/Unload
             // via the same modal the Global-Admin Spokes & Agents view uses. The
             // backend (/tenant/agent/*) re-checks that this spoke is bound to the
@@ -15076,7 +15128,7 @@ async function loadMyDeviceSpokes() {
             return `<div class="flex items-center justify-between border border-slate-100 rounded-md px-3 py-2">
                 <div><span class="text-sm font-medium text-slate-700">${escapeHtml(_nodeLabel(s.display_name || s.spoke_id, s.tenant_id || tenant))}</span>
                 <span class="ml-2 text-[11px] text-slate-400 font-mono">${escapeHtml(s.module_type || '—')}</span></div>
-                <div class="flex items-center gap-2">${rolesBtn}${appr}${conn}${delBtn}</div></div>`;
+                <div class="flex items-center gap-2">${rolesBtn}${revoked}${appr}${conn}${delBtn}</div></div>`;
         }).join('');
     } catch (e) {
         console.error('loadMyDeviceSpokes failed', e);
