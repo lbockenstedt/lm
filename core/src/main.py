@@ -94,6 +94,7 @@ from self_backup import SelfBackupMixin
 from key_vault import KeyVaultSchedulerMixin
 from spoke_alert_sync import SpokeAlertMixin
 from fleet_health_alert import FleetHealthAlertMixin
+from instance_relocate import InstanceRelocateMixin
 from repo_sync import RepoSyncMixin
 from hub_vnc_console import HubVncConsoleMixin
 from hub_cert_distribution import HubCertDistributionMixin
@@ -341,7 +342,7 @@ def _log_source_label(hub, sid: str) -> str:
     return sid
 
 
-class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, HenetSyncMixin, RealtimeIpamNacSyncMixin, SearchIndexMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, FleetHealthAlertMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
+class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, HenetSyncMixin, RealtimeIpamNacSyncMixin, SearchIndexMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, FleetHealthAlertMixin, InstanceRelocateMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
     """The LM Hub — central node of the zero-trust Hub-Spoke mesh.
 
     Owns the WebSocket control plane, the JSON state store, mutual auth/key
@@ -9459,6 +9460,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # degraded (working/eligible below the ok band) past the debounce fires a
         # dashboard alert on the same /status channel. See run_fleet_health_alert_loop.
         fleet_alert_task = asyncio.create_task(self.run_fleet_health_alert_loop())
+        # Coordinator-role instance pool failover: relocates a NAC/IPAM/LDAP
+        # instance to another connected pool candidate when its currently
+        # active spoke goes out of contact (cold switch, no auto-failback —
+        # a returned node is just an ordinary candidate again). No-ops for any
+        # instance with no spoke_pool configured. See run_instance_relocate_loop
+        # (InstanceRelocateMixin) and routes/role_pool.py (PR1: auto-load-on-bind).
+        instance_relocate_task = asyncio.create_task(self.run_instance_relocate_loop())
         # CS bridge: polls the cs (Client-Simulation) spoke's command inbox for
         # every CS-enabled connected pxmx agent and relays commands to the agent
         # as CS_COMMAND (one-socket invariant — the agent never talks to the cs

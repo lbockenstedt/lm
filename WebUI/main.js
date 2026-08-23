@@ -27466,6 +27466,10 @@ const INSTANCE_PRODUCTS = {
         // coordinator role as part of the save, instead of requiring a
         // separate manual "Load Role" step first (see routes/role_pool.py).
         alsoBareAgent: true,
+        // LOAD_ROLE/UNLOAD_ROLE role name (routes/role_pool.py's PRODUCT_ROLE) —
+        // used to derive a sub-spoke's base agent id for the failover pool
+        // checkboxes (spokeX-cppm -> spokeX).
+        roleName: 'cppm',
         vaultPicker: true,
         rowSummary: inst => `${inst.host || '—'}`,
         fields: [
@@ -27483,6 +27487,7 @@ const INSTANCE_PRODUCTS = {
         listId: 'ipam-instances-list',
         moduleType: 'ipam',
         alsoBareAgent: true,
+        roleName: 'netbox',
         vaultPicker: true,
         rowSummary: inst => `${inst.url || '—'}`,
         fields: [
@@ -27497,6 +27502,7 @@ const INSTANCE_PRODUCTS = {
         listId: 'ldap-instances-list',
         moduleType: 'directory',
         alsoBareAgent: true,
+        roleName: 'ldap',
         rowSummary: inst => `${inst.server_url || '—'}`,
         fields: [
             { id: 'server_url', label: 'Server URL', placeholder: 'ldap://localhost:389' },
@@ -27636,6 +27642,28 @@ async function loadInstances(productKey) {
     }
 }
 
+// Derive the failover-pool checkbox candidates from the same `matched` spoke
+// rows the Associated Spoke dropdown uses — deduped to one entry per PHYSICAL
+// box (a bare base agent and its own already-loaded role sub-spoke, e.g.
+// 'spokeA' and 'spokeA-cppm', are the same candidate; store/display by the
+// base agent id, matching what instance_relocate.py expects in spoke_pool).
+function _instancePoolCandidates(p, matched) {
+    const byBase = new Map();
+    matched.forEach(s => {
+        const suffix = '-' + p.roleName;
+        const baseId = s.module_type === 'agent' ? s.spoke_id
+            : (s.spoke_id.endsWith(suffix) ? s.spoke_id.slice(0, -suffix.length) : s.spoke_id);
+        // Prefer a bare agent row's label (it's the base identity); an
+        // already-loaded sub-spoke row only fills in if the base agent
+        // itself isn't separately listed.
+        if (!byBase.has(baseId) || s.module_type === 'agent') {
+            byBase.set(baseId, _spokeName(s));
+        }
+    });
+    return Array.from(byBase, ([baseId, label]) => ({ baseId, label }))
+        .sort((a, b) => a.label.localeCompare(b.label));
+}
+
 function showAddInstanceModal(productKey, editItem) {
     const p = INSTANCE_PRODUCTS[productKey];
     if (!p) return;
@@ -27666,6 +27694,20 @@ function showAddInstanceModal(productKey, editItem) {
     // e.g. NAC/ClearPass). Backs the secret field(s) with a Vault entry so the
     // plaintext never persists on the hub — see instance_vault.py.
     const vaultHtml = p.vaultPicker ? _vaultCredSelectHtml('inst-vaultcred') : '';
+    // Failover pool (PR2, coordinator roles only): an unordered, checkbox-
+    // selected set of candidate spokes. When the currently active spoke goes
+    // out of contact, the hub cold-switches to another checked candidate —
+    // no ordering/priority, and deliberately no auto-failback (see
+    // instance_relocate.py). Empty/unchecked = plain single-spoke behavior.
+    const failoverPoolHtml = p.roleName ? `
+                <div class="space-y-2 pt-2 border-t border-slate-100">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Failover Pool (optional)</label>
+                    <p class="text-[11px] text-slate-400 leading-snug">Spokes that can take over this instance if the active one goes out of contact. No priority order — the hub picks any available checked spoke. Once relocated, it stays there (no automatic fail-back).</p>
+                    <div id="inst-spoke-pool" class="max-h-32 overflow-y-auto space-y-1 border border-slate-200 rounded-md p-2">
+                        <p class="text-xs text-slate-400 italic">Loading spokes…</p>
+                    </div>
+                    <p id="inst-active-spoke" class="text-[11px] text-slate-500"></p>
+                </div>` : '';
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
@@ -27677,6 +27719,7 @@ function showAddInstanceModal(productKey, editItem) {
                 <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Spoke</label><select id="inst-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
 ${fieldHtml}
 ${vaultHtml}
+${failoverPoolHtml}
 ${schemaBtnHtml}
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
@@ -27699,6 +27742,28 @@ ${schemaBtnHtml}
             ? '<option value="">— select spoke —</option>' + matched.map(s => `<option value="${s.spoke_id}" title="${escapeHtml(s.spoke_id)}">${escapeHtml(_spokeName(s))}</option>`).join('')
             : `<option value="">No ${p.moduleType} spokes found</option>`;
         if (editItem) selector.value = editItem.spoke_id || '';
+
+        if (p.roleName) {
+            const poolEl = document.getElementById('inst-spoke-pool');
+            const activeEl = document.getElementById('inst-active-spoke');
+            if (poolEl) {
+                const candidates = _instancePoolCandidates(p, matched);
+                const checked = new Set((editItem && editItem.spoke_pool) || []);
+                poolEl.innerHTML = candidates.length > 0
+                    ? candidates.map(c => `<label class="flex items-center gap-2 text-sm text-slate-600">
+                            <input type="checkbox" class="inst-pool-cb" value="${escapeHtml(c.baseId)}"${checked.has(c.baseId) ? ' checked' : ''}>
+                            ${escapeHtml(c.label)}
+                        </label>`).join('')
+                    : '<p class="text-xs text-slate-400 italic">No eligible spokes found.</p>';
+            }
+            if (activeEl) {
+                const activeSpoke = editItem && editItem.spoke_id
+                    ? spokes.find(s => s.spoke_id === editItem.spoke_id) : null;
+                activeEl.textContent = activeSpoke
+                    ? `Currently active on: ${_spokeName(activeSpoke)}`
+                    : (editItem && editItem.spoke_id ? `Currently active on: ${editItem.spoke_id}` : '');
+            }
+        }
     });
 
     if (editItem) {
@@ -27736,6 +27801,10 @@ async function saveInstance(productKey) {
         name: document.getElementById('inst-name').value,
         spoke_id: document.getElementById('inst-spoke').value,
     };
+    if (p.roleName) {
+        config.spoke_pool = Array.from(document.querySelectorAll('#inst-spoke-pool .inst-pool-cb:checked'))
+            .map(cb => cb.value);
+    }
     p.fields.forEach(f => {
         let v = document.getElementById('inst-' + f.id).value;
         // A select whose options are literally true/false (e.g. verify_ssl)
