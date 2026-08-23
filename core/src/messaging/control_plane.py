@@ -128,6 +128,18 @@ _KEEPALIVE_CMDS = {
     "NETBOX_GET_DEVICES", "NETBOX_GET_IPS", "NETBOX_GET_PREFIXES",
     "NETBOX_GET_RACKS", "NETBOX_SYNC_DEVICES",
     "DNS_SYNC", "DHCP_SYNC", "OPNSENSE_GET_ALL_RULES", "HENET_LIST",
+    # Network Devices (nw): every NW_* datum is a live SSH/REST/SNMP round-trip
+    # to a switch/gateway, and NW_POLL chains probe + device_info + interfaces +
+    # arp + mac in ONE call (a big MAC/ARP table or a slow-to-answer switch
+    # blows the hub's 60s base). NW_SCAN/NW_DISCOVER fingerprint many target IPs
+    # and are genuinely long. INSTALL_CERT can fan a cert across the whole
+    # fleet. Without keepalives these hard-fail at the base ceiling instead of
+    # extending; the nw spoke extends BaseControlPlane, so listing them is
+    # enough for it to emit SPOKE_PROGRESS. (Fast single-datum calls finish
+    # before the first interval and never emit a frame.)
+    "NW_POLL", "NW_PROBE", "NW_LIST_DEVICES", "NW_GET_DEVICE_INFO",
+    "NW_GET_MAC_TABLE", "NW_GET_ARP", "NW_GET_INTERFACES", "NW_GET_ENDPOINTS",
+    "NW_GET_VLANS", "NW_RUN_CONFIG", "NW_SCAN", "NW_DISCOVER", "INSTALL_CERT",
     # AppBuilder log analysis: genuinely long (LLM on a CPU model, queued behind
     # the single fix slot — 600s base) so it must keep the deadline alive.
     "ANALYZE_LOGS",

@@ -146,3 +146,21 @@ def test_slow_cppm_nac_status_emits_progress():
     for f in ws.frames:
         if f.get("payload", {}).get("type") == "SPOKE_PROGRESS":
             assert f.get("correlation_id") == "corr-123"
+
+
+def test_slow_nw_poll_emits_progress():
+    """Regression: NW_POLL chains probe + device_info + interfaces + arp + mac in
+    one call over live SSH, so a big MAC/ARP table or a slow switch blows the
+    hub's 60s base and logs ``Request Timeout: [NW_POLL]``. It's now in
+    _KEEPALIVE_CMDS, so a slow poll emits SPOKE_PROGRESS keepalives that extend
+    the hub's deadline instead of hard-failing at the base ceiling."""
+    assert "NW_POLL" in cp._KEEPALIVE_CMDS
+    spoke = _Spoke(_StubModule(delay=0.18), module_name="nw")
+    ws = _dispatch(spoke, "NW_POLL", delay_interval=0.05)
+
+    types = ws.types()
+    assert "SPOKE_PROGRESS" in types
+    assert types[-1] == "COMMAND_RESULT"
+    for f in ws.frames:
+        if f.get("payload", {}).get("type") == "SPOKE_PROGRESS":
+            assert f.get("correlation_id") == "corr-123"
