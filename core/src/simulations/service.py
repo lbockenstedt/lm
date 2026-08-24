@@ -7,7 +7,7 @@ the UI never white-screens. ``spoke_online`` is the live websocket connection
 state from ``hub.active_connections``.
 """
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # Check statuses that count as pass / fail / warning for summaries.
 _PASS = {"pass", "ok", "functional", "up", "healthy"}
@@ -24,6 +24,11 @@ _CACHE_FRESH_S = 300
 # shut-down agent stops showing "online" (recomputed per REQUEST, not baked into
 # the memoized build, so a host with no new frame still ages out).
 _HOST_STALE_S = 180
+
+# Sim VMs live above this vmid floor (auto-provisioned client pool). Matches the
+# cs spoke's stale_client_reclone._VMID_FLOOR so the hub correlates the SAME set
+# of VMs the spoke would reclone. Template/lxc/infrastructure VMs sit below it.
+_SIM_VMID_FLOOR = 90000
 
 
 def _agent_cs_enabled(hub, hostname: str) -> bool:
@@ -352,47 +357,122 @@ class SimulationsService:
                 pass
         rows = [best[k] for k in order] + extras
         return {"tenant_id": tenant_id, "clients": rows,
-                "fleet_health": self._fleet_health(rows)}
+                "fleet_health": self._fleet_health(
+                    rows, self._running_sim_vms(tenant_id))}
 
-    def _fleet_health(self, clients: List[dict]) -> Dict[str, Any]:
-        """Fleet availability, judged against the ~80% USB-dongle churn floor (see
-        cs/docs/t2-usb-dongle-throttle-recover.md) — NOT against 100%.
+    def _running_sim_vms(self, tenant_id: str) -> Dict[str, int]:
+        """{vm_name_lower: vmid} for every RUNNING auto-provisioned sim VM across
+        the tenant's cs spoke(s) — the population that is SUPPOSED to be checking
+        into the API. Correlated to client hostnames by name (VM name == in-guest
+        hostname, the same key stale_client_reclone matches on).
 
-        Denominator = the tenant's REGISTERED clients (the stable pool the engine
-        sees). We do NOT use the Proxmox vm_count sum — it swings wildly as hosts
-        drop in/out of the telemetry cache (seen 87 then 21 for the same fleet),
-        and could go below the reporting-client count → pct > 100%. The registry
-        count matches the engine's harvestable-pool number.
+        Uses the actual per-host VM LIST (not the flaky summed ``vm_count``): a VM
+        only counts when its host is currently in telemetry AND it is running, so
+        a host that drops out removes its VMs from both this set and the VM Server
+        view in lockstep. Templates, LXC and sub-floor infra VMs are excluded."""
+        out: Dict[str, int] = {}
+        for _sid, data in self._spokes_for_tenant(tenant_id):
+            host_list = data.get("proxmox_hosts")
+            vm_lists: List[list] = []
+            if isinstance(host_list, list) and host_list:
+                for h in host_list:
+                    h = h or {}
+                    # Match the VM Server view, which HIDES CS-disabled hosts —
+                    # their VMs have no reporting client by design, so counting
+                    # them would deflate health against VMs the user can't see.
+                    hn = h.get("hostname") or ""
+                    if hn and not _agent_cs_enabled(self.hub, hn):
+                        continue
+                    vm_lists.append((h.get("proxmox_vms")) or [])
+            else:
+                vm_lists.append(data.get("proxmox_vms") or [])
+            for vms in vm_lists:
+                for vm in (vms or []):
+                    if not isinstance(vm, dict):
+                        continue
+                    if vm.get("is_template") or vm.get("type") == "lxc":
+                        continue
+                    try:
+                        vid = int(vm.get("vmid") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if vid <= _SIM_VMID_FLOOR:
+                        continue
+                    if str(vm.get("status") or "").lower() != "running":
+                        continue
+                    name = str(vm.get("name") or "").strip().lower()
+                    if name:
+                        out[name] = vid
+        return out
 
-        working = clients that are online AND gateway_reachable. Clients running a
-        CONNECTIVITY-BREAKING sim (ssidpw_fail/auth_fail/mac_auth_fail/assoc_fail/
-        port_flap — they can't associate/auth by design) are EXCLUDED from both
-        sides. NOTE:
-        dns_fail/dns_latency/dhcp_fail stay CONNECTED (they flood over a live link)
-        so they COUNT as working — do NOT use SIM_META multi_capable here.
-        eligible = registered - excluded; pct = working / eligible (working <=
-        eligible, so it can never exceed 100%)."""
-        exclusive = {"ssidpw_fail", "auth_fail", "mac_auth_fail", "assoc_fail", "port_flap"}
-        excl = working = 0
+    def _fleet_health(self, clients: List[dict],
+                      sim_vms: Optional[Dict[str, int]] = None) -> Dict[str, Any]:
+        """Fleet availability, judged on API CHECK-IN — NOT SSID/gateway.
+
+        Every sim client is expected to check into the API (heartbeat rides a
+        backend network independent of the sim SSID), so a client that never
+        reports IS the problem — even ones that deliberately never associate to
+        an SSID (ssidpw_fail/auth_fail/mac_auth_fail/assoc_fail/port_flap). Those
+        still beacon, so they are NOT excluded here; we key on ``online`` (a
+        recent API heartbeat), never on ``gateway_reachable`` (which is false by
+        design for the connectivity-breaking sims and would zero out the metric).
+
+        Denominator = the RUNNING sim VMs the hypervisor reports (``sim_vms`` =
+        {vm_name: vmid}). This correlates the VM population to the clients
+        actually reporting in, so a VM that boots but whose client never checks
+        in (dead / silent) counts AGAINST health instead of being invisible (the
+        Clients view only lists clients that DID report — the VM/client gap). A
+        VM is ``working`` when a client of the same hostname is online.
+
+        ``not_reporting`` = running sim VMs with no live client = the reclone
+        candidates stale_client_reclone acts on.
+
+        Fallbacks: with no VM telemetry, or when VM names don't correlate to any
+        online client (a name↔hostname mismatch that would otherwise show a false
+        0%), fall back to the registry metric (online clients ÷ registered)."""
+        online_names = set()
         for c in clients:
-            if any(s in exclusive for s in (c.get("active_simulations") or [])):
-                excl += 1
-                continue
-            if c.get("online") and c.get("gateway_reachable"):
-                working += 1
-        registered = len(clients)
-        eligible = max(0, registered - excl)
+            if c.get("online"):
+                h = str(c.get("hostname") or c.get("id") or "").strip().lower()
+                if h:
+                    online_names.add(h)
+
+        use_vms = bool(sim_vms)
+        if use_vms:
+            reporting = sum(1 for name in sim_vms if name in online_names)
+            # Name↔hostname correlation failed (VMs exist, clients ARE checking
+            # in, but none match) → don't publish a false 0%; use the registry.
+            if reporting == 0 and online_names:
+                use_vms = False
+
+        if use_vms:
+            total = len(sim_vms)
+            reporting = sum(1 for name in sim_vms if name in online_names)
+            working = reporting
+            eligible = total
+            provisioned = total
+            not_reporting = max(0, total - reporting)
+            basis = "vm_checkin"
+        else:
+            registered = len(clients)
+            working = len(online_names)
+            eligible = registered
+            provisioned = registered
+            not_reporting = max(0, registered - working)
+            basis = "client_checkin"
+
         pct = round(100.0 * working / eligible, 1) if eligible > 0 else None
         if pct is None:
             status = "no_data"
-        elif pct >= 75:
+        elif pct >= 90:
             status = "ok"
-        elif pct >= 50:
+        elif pct >= 75:
             status = "warning"
         else:
             status = "critical"
-        return {"provisioned": registered, "exclusive": excl, "eligible": eligible,
-                "working": working, "pct": pct, "status": status}
+        return {"provisioned": provisioned, "exclusive": 0, "eligible": eligible,
+                "working": working, "not_reporting": not_reporting,
+                "pct": pct, "status": status, "basis": basis}
 
     async def get_simulations_data(self, tenant_id: str) -> Dict[str, Any]:
         """One row per active simulation across the tenant's cached clients (the Simulations view shape)."""

@@ -1847,9 +1847,12 @@ async function csRenderClients(tier) {
     csRenderClientsFaceted();
 }
 
-// Fleet-health banner: working ÷ (provisioned − exclusive), judged against the
-// ~80% USB-dongle churn floor (NOT 100%). ≥75% OK, 50–75% WARNING (blink amber),
-// <50% CRITICAL (blink red). See cs/docs/t2-usb-dongle-throttle-recover.md.
+// Fleet-health banner: clients checking into the API ÷ running sim VMs. Every
+// sim VM is expected to check in (the heartbeat rides a backend network,
+// independent of the sim SSID), so a VM whose client never reports is dead and
+// counts against health — those are the reclone candidates (not_reporting).
+// gateway_reachable is NOT used (connectivity-breaking sims still beacon).
+// ≥90% OK, 75–90% LOW (blink amber), <75% CRITICAL (blink red).
 function csFleetHealthBadge(fh) {
     if (!fh || fh.pct == null) return '';
     const cls = fh.status === 'ok' ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
@@ -1858,11 +1861,11 @@ function csFleetHealthBadge(fh) {
         : 'bg-slate-50 text-slate-500 border-slate-200';
     const label = fh.status === 'critical' ? 'CRITICAL' : fh.status === 'warning' ? 'LOW' : 'OK';
     return `<div class="flex items-center gap-3 text-sm px-4 py-2 rounded-md border ${cls}"
-        title="Working clients (online + gateway reachable) ÷ provisioned, EXCLUDING exclusive failure sims (which are meant to be disconnected). Bands: ≥75% OK, 50–75% warning, <50% critical — ~80% is normal USB-dongle churn.">
+        title="Clients checking into the API ÷ running sim VMs. Every VM should check in (heartbeat is independent of the sim SSID); a running VM whose client never reports is dead and will be recloned. Bands: ≥90% OK, 75–90% low, <75% critical.">
       <span class="font-bold">Fleet Health</span>
       <span class="font-mono">${csEscape(String(fh.working))}/${csEscape(String(fh.eligible))} working · ${csEscape(String(fh.pct))}%</span>
       <span class="text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/60">${label}</span>
-      ${fh.exclusive ? `<span class="text-[11px] text-slate-500">(${csEscape(String(fh.exclusive))} exclusive excluded)</span>` : ''}
+      ${fh.not_reporting ? `<span class="text-[11px] font-semibold ${fh.status === 'critical' ? 'text-red-600' : 'text-amber-600'}">${csEscape(String(fh.not_reporting))} not checking in</span>` : ''}
     </div>`;
 }
 
