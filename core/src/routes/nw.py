@@ -1,5 +1,7 @@
 """Network-devices routes + multi-instance product CRUD (_instance_crud)."""
+import asyncio
 import ipaddress
+import time
 
 import instance_vault
 from api import (
@@ -7,6 +9,95 @@ from api import (
     logger, uuid,
 )
 from routes.role_pool import PRODUCT_ROLE, ensure_role_loaded, maybe_unload_orphaned_role
+
+
+# ── cache-first (stale-while-revalidate) read path ───────────────────────────
+# The Network Devices read routes serve the local nw cache FIRST (the JSON-
+# persisted store warmed continuously by spoke poll telemetry — apply_nw_auto_
+# poll) instead of blocking every page load on live SSH. A cached hit returns
+# immediately; if the data is older than _NW_SERVE_MAX_AGE_S and a spoke is
+# connected, a single background revalidate is kicked off (deduped) so the NEXT
+# load is fresh — the spoke's own poll cadence is the primary revalidator. Only
+# a cold miss (or an explicit ?refresh=1) falls through to a blocking live
+# fetch. This trades a bounded staleness window for an instant, poll-free UI.
+_NW_SERVE_MAX_AGE_S = 60.0
+
+# In-flight guard so rapid navigation coalesces to at most one background
+# revalidate per key (fleet: "__fleet__"; device: "<id>:<endpoint>"). The task
+# set keeps a strong ref so the fire-and-forget tasks aren't GC'd mid-flight.
+_NW_BG_INFLIGHT: set = set()
+_NW_BG_TASKS: set = set()
+
+
+def _nw_truthy(v) -> bool:
+    return str(v or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _nw_spawn_refresh(key, coro_factory) -> None:
+    """Fire ONE background revalidate for ``key`` (deduped). ``coro_factory`` is
+    a zero-arg callable returning the coroutine — built INSIDE the guard so a
+    skipped spawn never leaves an un-awaited coroutine. No running loop (sync
+    test path) → no-op."""
+    if key in _NW_BG_INFLIGHT:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _NW_BG_INFLIGHT.add(key)
+
+    async def _run():
+        try:
+            await coro_factory()
+        except Exception as e:  # noqa: BLE001 - best-effort revalidate
+            logger.debug("nw bg refresh [%s] failed: %s", key, e)
+        finally:
+            _NW_BG_INFLIGHT.discard(key)
+
+    t = loop.create_task(_run())
+    _NW_BG_TASKS.add(t)
+    t.add_done_callback(_NW_BG_TASKS.discard)
+
+
+async def _nw_bg_refresh_fleet(hub) -> None:
+    """Whole-fleet revalidate: query every connected+approved nw spoke for the
+    full inventory ({} = no tenant filter) and refresh the global fleet cache.
+    Server-side (no session) — writes only the authoritative whole-fleet
+    snapshot the offline/cache-first read path filters per-reader."""
+    spokes = [s for s in (hub.get_all_spokes_by_type("nw") or [])
+              if s in hub.active_connections and hub.approved_modules.get(s, False)]
+    if not spokes:
+        return
+    merged, seen = [], set()
+    for sid in spokes:
+        try:
+            result = await hub.request_response(sid, "NW_LIST_DEVICES", {}, timeout=20.0)
+            env = access.unwrap_spoke(result)
+            rows = env.get("data") if isinstance(env, dict) else None
+            if isinstance(rows, list):
+                for r in rows:
+                    if isinstance(r, dict) and r.get("id") and r["id"] not in seen:
+                        seen.add(r["id"])
+                        merged.append(r)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("nw bg fleet refresh: spoke %s failed: %s", sid, e)
+    env = {"status": "SUCCESS", "data": merged, "message": f"{len(merged)} device(s)"}
+    try:
+        await hub.nw_cache_set_fleet(env)
+    except Exception:  # noqa: BLE001
+        logger.debug("nw bg fleet cache set failed", exc_info=True)
+
+
+async def _nw_bg_refresh_device(hub, device_id, endpoint, spoke_id, spoke_cmd,
+                                relay_payload, timeout) -> None:
+    """Per-device endpoint revalidate: re-run the live spoke fetch and refresh
+    the cache so the next cache-first serve is fresh. Best-effort; the on-demand
+    poll button + spoke poll telemetry are the primary refreshers."""
+    result = await hub.request_response(spoke_id, spoke_cmd, relay_payload,
+                                        timeout=timeout)
+    data = access.unwrap_spoke(result)
+    await hub.nw_cache_set_device(device_id, endpoint, data)
+
 
 
 def validate_nw_address(addr):
@@ -283,11 +374,15 @@ def register(app, hub, ctx):
         reader's visible config set so a stale/leaky spoke can't surface a
         device the reader can't see (the cross-tenant leak this closes).
 
-        Caches the whole-fleet (admin) fetch and serves it tenant-filtered
-        (``nw_cache_get_fleet_filtered``) when no relevant spoke is connected,
-        so a spoke outage still seeds the Network Devices table without
-        cross-tenant leak. ``?tenant=`` is accepted for signature compat (the
-        fleet list is inventory, no IP to subnet-filter on)."""
+        Cache-first: serves the last-known whole-fleet snapshot tenant-filtered
+        (``nw_cache_get_fleet_filtered``) WITHOUT blocking on live SSH — the
+        cache is warmed continuously by spoke poll telemetry. When the snapshot
+        is aging and a spoke is connected, a single background revalidate
+        refreshes it for the next load; ``?refresh=1`` forces a live fetch. A
+        cold miss with a connected spoke falls through to a blocking live fetch
+        (which also seeds the cache, admin-only). No spoke + no cache → 503.
+        ``?tenant=`` is accepted for signature compat (the fleet list is
+        inventory, no IP to subnet-filter on)."""
         hub = app.state.hub
         sess = _session_user(request)
         is_admin = _is_admin(sess)
@@ -327,20 +422,30 @@ def register(app, hub, ctx):
                             and hub.approved_modules.get(s, False)}
             spokes = list(spoke_to_tid)
 
-        if not spokes:
-            # No live spoke for the reader's slice → serve the cached fleet,
-            # tenant-filtered (the leak fix: never serve the whole global cache
-            # to a non-admin). Admin predicate is all-True (whole cache).
-            cached = hub.nw_cache_get_fleet_filtered(
-                lambda r: is_admin
-                or access.spoke_visible_to_session(sess, r.get("tenant_id", "")))
-            if cached:
-                out = dict((cached.get("devices") or {}))
+        # Cache-first: serve the last-known fleet snapshot (tenant-filtered)
+        # WITHOUT blocking on live SSH, then revalidate in the background when
+        # it's aging and a spoke is up. ``?refresh=1`` forces a live fetch.
+        force = _nw_truthy(request.query_params.get("refresh"))
+        predicate = (lambda r: is_admin
+                     or access.spoke_visible_to_session(sess, r.get("tenant_id", "")))
+        cached = None if force else hub.nw_cache_get_fleet_filtered(predicate)
+        if cached is not None:
+            out = dict((cached.get("devices") or {}))
+            out["cached"] = True
+            out["fetched_at"] = cached.get("fetched_at")
+            if not spokes:
+                # Offline: no live spoke for the reader's slice — last-known.
                 out["stale"] = True
-                out["fetched_at"] = cached.get("fetched_at")
                 out["message"] = (out.get("message") or
                                   "Network Devices spoke offline — showing last-known data")
-                return out
+            else:
+                age = time.time() - float(cached.get("fetched_at") or 0.0)
+                if age > _NW_SERVE_MAX_AGE_S:
+                    _nw_spawn_refresh("__fleet__", lambda: _nw_bg_refresh_fleet(hub))
+            return out
+
+        if not spokes:
+            # Cold miss AND no live spoke → nothing to serve.
             raise HTTPException(status_code=503,
                                 detail="Network Devices spoke not connected")
 
@@ -383,7 +488,7 @@ def register(app, hub, ctx):
     @app.get("/api/nw/{device_id}/{endpoint}")
     async def nw_get_device_data(request: Request, device_id: str, endpoint: str,
                                  tenant: str = None):
-        """Live per-device nw data (info|macs|arp|interfaces|endpoints|vlans),
+        """Per-device nw data (info|macs|arp|interfaces|endpoints|vlans),
         tenant-gated. ``_authz_nw_device`` resolves the device record, classifies
         the read scope, and resolves the spoke from the record's ``spoke_id``
         (per-tenant) — 404 unknown, 403 other-tenant/unassigned, 503 spoke down.
@@ -395,10 +500,15 @@ def register(app, hub, ctx):
         own tenant) with no explicit tenant gets the whole device (preserves
         admin/own-tenant behavior). MAC/ARP/interfaces carry IPs; info does not.
 
-        Caches the raw per-device endpoint envelope on every live fetch and
-        serves it (marked ``stale``, scope-filtered) when the spoke is offline.
-        The cache is gated by the same ``_authz_nw_device`` check, so a
-        non-admin can't fetch another tenant's device cache."""
+        Cache-first: serves the last-known raw per-device endpoint envelope
+        (scope-filtered) WITHOUT blocking on live SSH — the cache is warmed by
+        spoke poll telemetry. When the entry is aging and the spoke is up, a
+        single background revalidate refreshes it for the next load;
+        ``?refresh=1`` (or the per-device poll button) forces a live fetch. A
+        cold miss with a connected spoke falls through to a blocking live fetch
+        (which also seeds the cache). The cache is gated by the same
+        ``_authz_nw_device`` check, so a non-admin can't fetch another tenant's
+        device cache."""
         hub = app.state.hub
         command_map = {
             "info":       "NW_GET_DEVICE_INFO",
@@ -431,14 +541,30 @@ def register(app, hub, ctx):
         # on the spoke, so the 5s default relay timeout is far too short — give
         # them room; the single-datum views get a comfortable margin too.
         timeout = 45.0 if endpoint in ("endpoints", "vlans") else 20.0
-        if not spoke_id:
-            cached = hub.nw_cache_get_device(device_id, endpoint)
-            if cached is not None:
-                filtered = await _filter_nw_optional(scope, request, cached, endpoint, tenant, dedicated)
-                if isinstance(filtered, dict):
-                    filtered = dict(filtered)
+
+        # Cache-first: serve the last-known endpoint value WITHOUT blocking on
+        # live SSH, then revalidate in the background when it's aging and the
+        # spoke is up. ``?refresh=1`` forces a live fetch (cold path below).
+        force = _nw_truthy(request.query_params.get("refresh"))
+        cached = None if force else hub.nw_cache_get_device(device_id, endpoint)
+        if cached is not None:
+            filtered = await _filter_nw_optional(scope, request, cached, endpoint, tenant, dedicated)
+            fetched_at = hub.nw_cache_device_fetched_at(device_id)
+            if isinstance(filtered, dict):
+                filtered = dict(filtered)
+                filtered["cached"] = True
+                filtered["fetched_at"] = fetched_at
+                if not spoke_id:
                     filtered["stale"] = True
-                return filtered
+            if spoke_id and (time.time() - fetched_at) > _NW_SERVE_MAX_AGE_S:
+                _nw_spawn_refresh(
+                    f"{device_id}:{endpoint}",
+                    lambda: _nw_bg_refresh_device(hub, device_id, endpoint,
+                                                  spoke_id, spoke_cmd, relay_payload, timeout))
+            return filtered
+
+        if not spoke_id:
+            # Cold miss AND no live spoke → nothing to serve.
             raise HTTPException(status_code=503,
                                 detail="Network Devices spoke not connected")
         try:
@@ -450,6 +576,20 @@ def register(app, hub, ctx):
         except HTTPException:
             raise
         except Exception as e:
+            # A slow/timed-out live fetch shouldn't blank the tab — serve the
+            # last-known cached value (marked stale, scope-filtered) if we have
+            # one, so a heavy gateway that occasionally overruns still shows data.
+            cached = hub.nw_cache_get_device(device_id, endpoint)
+            if cached is not None:
+                logger.warning("nw_get_device_data live fetch failed (%s/%s: %s)"
+                               " — serving cached", device_id, endpoint, e)
+                filtered = await _filter_nw_optional(scope, request, cached, endpoint, tenant, dedicated)
+                if isinstance(filtered, dict):
+                    filtered = dict(filtered)
+                    filtered["stale"] = True
+                return filtered
+            logger.exception("nw_get_device_data failed (%s/%s)", device_id, endpoint)
+            raise HTTPException(status_code=500, detail=str(e))
             # A slow/timed-out live fetch shouldn't blank the tab — serve the
             # last-known cached value (marked stale, scope-filtered) if we have
             # one, so a heavy gateway that occasionally overruns still shows data.

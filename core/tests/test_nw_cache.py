@@ -60,6 +60,20 @@ async def test_set_fleet_then_get_and_persist(tmp_path):
     assert on_disk["fleet"]["devices"] == envelope
 
 
+async def test_fetched_at_helpers_drive_cache_first_freshness(tmp_path):
+    """The cache-first read path (routes/nw) revalidates when the cached data
+    ages past a TTL — it reads freshness via these helpers. Cold → 0.0; a write
+    stamps a positive epoch; an unknown device stays 0.0."""
+    hub = _CacheHub(str(tmp_path))
+    assert hub.nw_cache_fleet_fetched_at() == 0.0          # cold fleet
+    assert hub.nw_cache_device_fetched_at("sw1") == 0.0    # unknown device
+    await hub.nw_cache_set_fleet(_envelope([{"id": "sw1"}]))
+    await hub.nw_cache_set_device("sw1", "arp", _envelope([{"ip": "10.0.0.5"}]))
+    assert hub.nw_cache_fleet_fetched_at() > 0
+    assert hub.nw_cache_device_fetched_at("sw1") > 0
+    assert hub.nw_cache_device_fetched_at("never-seen") == 0.0
+
+
 async def test_persisted_cache_seeds_a_fresh_instance_on_restart(tmp_path):
     """The UI-seed-on-restart contract: a new hub instance loads the file."""
     hub = _CacheHub(str(tmp_path))

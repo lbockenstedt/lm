@@ -149,6 +149,23 @@ class NwCacheMixin:
         val = entry.get(endpoint)
         return val if val is not None else None
 
+    def nw_cache_fleet_fetched_at(self) -> float:
+        """Epoch of the last fleet-cache write (0.0 if never cached). Drives the
+        cache-first read path's staleness/revalidate decision in ``routes/nw``."""
+        f = self.nw_fleet_cache
+        if not f or f.get("devices") is None:
+            return 0.0
+        return float(f.get("fetched_at", 0.0) or 0.0)
+
+    def nw_cache_device_fetched_at(self, device_id: str) -> float:
+        """Epoch of the most recent write to one device's cache entry (0.0 if
+        the device was never cached). Drives the cache-first read path's
+        staleness/revalidate decision in ``routes/nw``."""
+        entry = self.nw_device_cache.get(device_id)
+        if not entry:
+            return 0.0
+        return float(entry.get("fetched_at", 0.0) or 0.0)
+
     # ── write ─────────────────────────────────────────────────────────────────
 
     async def nw_cache_set_fleet(self, data: Any) -> None:
