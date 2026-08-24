@@ -98,6 +98,7 @@ def register(app, hub, ctx):
         meta = st.get("module_metadata", {}) or {}
         conns = getattr(hub, "active_connections", {}) or {}
         live_types = getattr(hub, "spoke_module_types", {}) or {}
+        telemetry = getattr(hub, "spoke_telemetry", {}) or {}
         out = []
         for sid in known:
             # Tenant binding is the ownership signal — never a client claim.
@@ -110,6 +111,7 @@ def register(app, hub, ctx):
                 "display_name": names.get(sid) or m.get("hostname") or sid,
                 "hostname": m.get("hostname") or "",
                 "module_type": live_types.get(pk) or m.get("module_type") or "",
+                "ip": (telemetry.get(pk, {}) or {}).get("remote_ip", "") or "",
                 "connected": pk in conns,
                 "approved": bool(hub.approved_modules.get(pk, False)),
                 "revoked": bool(m.get("revoked")),

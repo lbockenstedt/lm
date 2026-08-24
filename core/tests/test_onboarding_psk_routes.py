@@ -33,6 +33,7 @@ class FakeHub:
         self.active_connections = {}
         self.approved_modules = {}
         self.spoke_module_types = {}
+        self.spoke_telemetry = {}
         self.state = SimpleNamespace(
             system_state={"known_modules": [], "module_names": {}, "module_metadata": {}},
             get_spoke_tenant=lambda sid: self._tenants.get(sid, ""),
@@ -61,7 +62,7 @@ class FakeHub:
         self.state.system_state["module_metadata"].pop(sid, None)
         self._tenants.pop(sid, None)
 
-    def add_spoke(self, sid, tenant, *, module_type="nac", approved=True, connected=True, name=None):
+    def add_spoke(self, sid, tenant, *, module_type="nac", approved=True, connected=True, name=None, ip=None):
         self.state.system_state["known_modules"].append(sid)
         if name:
             self.state.system_state["module_names"][sid] = name
@@ -70,6 +71,8 @@ class FakeHub:
         self.approved_modules[sid] = approved
         if connected:
             self.active_connections[sid] = object()
+        if ip:
+            self.spoke_telemetry[sid] = {"remote_ip": ip}
 
 
 def _build(sess):
@@ -186,6 +189,22 @@ def test_list_spokes_includes_pending_and_offline():
     assert by_id["s-pending"]["connected"] is True
     assert by_id["s-offline"]["approved"] is True
     assert by_id["s-offline"]["connected"] is False
+
+
+def test_list_spokes_includes_remote_ip_from_telemetry():
+    """The Proxmox Host Agent install-command spoke picker needs each
+    hypervisor spoke's remote_ip so it can pin --spoke-ip; sourced from
+    hub.spoke_telemetry, keyed by primary key — same data the WS connect
+    handler in main.py captures."""
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.add_spoke("s-hv1", "tenantA", module_type="hypervisor", approved=True,
+                   connected=True, name="pve1", ip="10.1.2.3")
+    hub.add_spoke("s-hv2", "tenantA", module_type="hypervisor", approved=True,
+                   connected=False, name="pve2")  # no telemetry captured
+    r = c.get("/tenant/tenantA/spokes")
+    by_id = {s["spoke_id"]: s for s in r.json()["spokes"]}
+    assert by_id["s-hv1"]["ip"] == "10.1.2.3"
+    assert by_id["s-hv2"]["ip"] == ""
 
 
 def test_tenant_admin_cannot_list_another_tenants_spokes():
