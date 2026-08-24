@@ -3689,6 +3689,7 @@ function _viewTemplate(viewId) {
       <button onclick="showAddDeviceModal()" class="${btn}">+ Add Device</button>
     </div>
     <p class="text-xs text-slate-400 mb-3">Firewalls, network devices, NAC, IPAM, directory, DNS, and DHCP instances bound to your tenant. Click <strong>Add Device</strong>, choose the module type, and bind it to one of your tenant's spokes.</p>
+    <div id="all-devices-tabs" class="mb-3"></div>
     <div id="all-devices-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
   </div>
 
@@ -28544,9 +28545,18 @@ function _renderManagedDeviceTabs() {
         all.some(d => d._typeKey === k));
     const chip = (active, onclick, label, count) =>
         `<div onclick="${onclick}" class="sub-nav-item ${active ? 'active ' : ''}px-2 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">${escapeHtml(label)}<span class="ml-1 text-[10px] text-slate-400 normal-case">${count}</span></div>`;
-    let typeRow = chip(f.type === 'all', "_mdSelectType('all')", 'All', underTenant.length);
-    typeRow += typeKeys.map(k => chip(f.type === k, `_mdSelectType('${k}')`,
-        DEVICE_TYPES[k].badgeLabel || DEVICE_TYPES[k].title, typeCounts[k] || 0)).join('');
+    // A single device type makes the type row redundant (All == that one type).
+    let typeRow = '';
+    if (typeKeys.length > 1) {
+        let chips = chip(f.type === 'all', "_mdSelectType('all')", 'All', underTenant.length);
+        chips += typeKeys.map(k => chip(f.type === k, `_mdSelectType('${k}')`,
+            DEVICE_TYPES[k].badgeLabel || DEVICE_TYPES[k].title, typeCounts[k] || 0)).join('');
+        typeRow = `<div class="flex flex-wrap items-center gap-x-1 gap-y-1">
+            <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Type</span>${chips}</div>`;
+    } else if (f.type !== 'all') {
+        // Only one type exists but a stale filter still points at a removed one.
+        f.type = 'all';
+    }
 
     // Tenant tabs (admin only): tenants that own ≥1 device, under the current
     // type filter. A single tenant (or none) makes the row pointless → hide it.
@@ -28570,9 +28580,7 @@ function _renderManagedDeviceTabs() {
         }
     }
 
-    wrap.innerHTML = tenantRow +
-        `<div class="flex flex-wrap items-center gap-x-1 gap-y-1">
-            <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Type</span>${typeRow}</div>`;
+    wrap.innerHTML = tenantRow + typeRow;
 }
 
 function _mdSelectType(key) {
