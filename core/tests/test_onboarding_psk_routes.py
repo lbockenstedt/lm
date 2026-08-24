@@ -6,6 +6,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from types import SimpleNamespace
 
+import routes.pxmx as pxmx_routes
+import routes.setup as setup_routes
 from routes.onboarding import register
 
 
@@ -262,3 +264,121 @@ def test_admin_may_delete_any_tenants_spoke():
     assert r.status_code == 200
     assert "s-b1" not in hub.state.system_state["known_modules"]
     assert "s-b1" in hub.evicted
+
+
+# ── GET /tenant/{tenant}/agents ──────────────────────────────────────────────
+# Relayed node-agents (Proxmox host agents dialing a hypervisor/simulation
+# spoke's /ws/agent) — a tenant-admin self-service view mirroring the
+# Global-Admin-only Setup -> Spokes & Agents Agents tile, without needing the
+# `pxmx` module right.
+
+def test_list_agents_returns_tenant_scoped_payload(monkeypatch):
+    async def _fake_payload(hub, tid):
+        assert tid == "tenantA"
+        return {"agents": [{"agent_id": "a1"}], "pending_agents": [{"agent_id": "p1"}],
+                "offline_agents": []}
+    monkeypatch.setattr(pxmx_routes, "pxmx_agents_payload", _fake_payload)
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    r = c.get("/tenant/tenantA/agents")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["tenant_id"] == "tenantA"
+    assert body["agents"] == [{"agent_id": "a1"}]
+    assert body["pending_agents"] == [{"agent_id": "p1"}]
+
+
+def test_list_agents_cross_tenant_denied():
+    c, _ = _build(_tenant_admin(["tenantA"]))
+    r = c.get("/tenant/tenantB/agents")
+    assert r.status_code == 403
+
+
+# ── POST /tenant/{tenant}/agents/{spoke_id}/{agent_id}/approve ─────────────
+
+def test_approve_agent_delegates_with_explicit_tenant(monkeypatch):
+    calls = []
+
+    async def _fake_approve(hub, spoke_id, agent_id, explicit_tenant=None):
+        calls.append((spoke_id, agent_id, explicit_tenant))
+        return {"agent_id": agent_id, "target_spoke": spoke_id,
+                "tenant_inherited": explicit_tenant}
+
+    monkeypatch.setattr(setup_routes, "_perform_agent_approval", _fake_approve)
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.add_spoke("spoke-1", "tenantA", module_type="hypervisor")
+    r = c.post("/tenant/tenantA/agents/spoke-1/agent-1/approve")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+    assert calls == [("spoke-1", "agent-1", "tenantA")]
+
+
+def test_approve_agent_rejects_spoke_bound_to_another_tenant(monkeypatch):
+    calls = []
+
+    async def _fake_approve(hub, spoke_id, agent_id, explicit_tenant=None):
+        calls.append(1)
+
+    monkeypatch.setattr(setup_routes, "_perform_agent_approval", _fake_approve)
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.add_spoke("spoke-1", "tenantB")  # bound to a DIFFERENT tenant
+    r = c.post("/tenant/tenantA/agents/spoke-1/agent-1/approve")
+    assert r.status_code == 404
+    assert calls == []
+
+
+def test_approve_agent_rejects_unbound_spoke(monkeypatch):
+    calls = []
+
+    async def _fake_approve(hub, spoke_id, agent_id, explicit_tenant=None):
+        calls.append(1)
+
+    monkeypatch.setattr(setup_routes, "_perform_agent_approval", _fake_approve)
+    c, _ = _build(_tenant_admin(["tenantA"]))
+    # spoke-1 was never registered — get_spoke_tenant returns "".
+    r = c.post("/tenant/tenantA/agents/spoke-1/agent-1/approve")
+    assert r.status_code == 404
+    assert calls == []
+
+
+def test_approve_agent_rejects_shared_tenant_spoke(monkeypatch):
+    """A spoke bound to the SHARED tenant's id is never equal to a real
+    tenant's own id from that tenant-admin's perspective, so the exact-match
+    ownership check already excludes it — same anti-ambiguity rule as
+    _perform_agent_approval's own admin-click inherit path."""
+    calls = []
+
+    async def _fake_approve(hub, spoke_id, agent_id, explicit_tenant=None):
+        calls.append(1)
+
+    monkeypatch.setattr(setup_routes, "_perform_agent_approval", _fake_approve)
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.add_spoke("spoke-1", "shared-tid")
+    r = c.post("/tenant/tenantA/agents/spoke-1/agent-1/approve")
+    assert r.status_code == 404
+    assert calls == []
+
+
+def test_admin_may_approve_agent_for_any_tenant(monkeypatch):
+    calls = []
+
+    async def _fake_approve(hub, spoke_id, agent_id, explicit_tenant=None):
+        calls.append((spoke_id, agent_id, explicit_tenant))
+        return {}
+
+    monkeypatch.setattr(setup_routes, "_perform_agent_approval", _fake_approve)
+    c, hub = _build(_admin())
+    hub.add_spoke("spoke-1", "tenantZ")
+    r = c.post("/tenant/tenantZ/agents/spoke-1/agent-1/approve")
+    assert r.status_code == 200
+    assert calls == [("spoke-1", "agent-1", "tenantZ")]
+
+
+def test_approve_agent_propagates_failure_as_500(monkeypatch):
+    async def _boom(hub, spoke_id, agent_id, explicit_tenant=None):
+        raise RuntimeError("mailbox exploded")
+
+    monkeypatch.setattr(setup_routes, "_perform_agent_approval", _boom)
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.add_spoke("spoke-1", "tenantA")
+    r = c.post("/tenant/tenantA/agents/spoke-1/agent-1/approve")
+    assert r.status_code == 500
