@@ -718,6 +718,13 @@ class AgentHostingControlPlane(BaseControlPlane):
             # AGENT_RELAY_UP frame via _relay_agent_msg_up.
             agent_install_uuid = (auth.get("install_uuid") or "").strip()
             agent_hostname     = (auth.get("hostname") or "").strip()
+            # Optional zero-touch onboarding credential (pxmx install_agent.sh
+            # --onboarding-psk / --tenant-hint). Only meaningful pre-approval —
+            # relayed to the hub below so it can validate the PSK against the
+            # hinted tenant's onboarding-key store and auto-approve without an
+            # admin click. Never logged.
+            onboarding_psk = auth.get("onboarding_psk") or ""
+            tenant_hint    = (auth.get("tenant_hint") or "").strip()
 
             if not agent_id:
                 await websocket.close(1008, "Missing agent_id"); return
@@ -733,6 +740,23 @@ class AgentHostingControlPlane(BaseControlPlane):
                 event = asyncio.Event()
                 self.pending_agents[agent_id] = {"ws": websocket, "event": event}
                 await websocket.send(json.dumps({"status": "APPROVAL_REQUIRED"}))
+                if onboarding_psk and tenant_hint:
+                    # Fire-and-forget: the hub validates + (on match) pushes
+                    # APPROVAL_SUCCESS back down the normal SPOKE_RELAY path,
+                    # same as an admin-triggered approval. A send failure or an
+                    # invalid/missing PSK just leaves the agent pending for
+                    # manual approval — never breaks the keepalive loop below.
+                    try:
+                        await self.send_to_hub("AGENT_ONBOARDING_PSK", {
+                            "agent_id": agent_id, "psk": onboarding_psk,
+                            "tenant_hint": tenant_hint,
+                            "hostname": agent_hostname,
+                            "install_uuid": agent_install_uuid,
+                        })
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "Failed to relay onboarding PSK for agent '%s': %s",
+                            agent_id, e)
                 try:
                     # Keep connection alive (heartbeats only) until approved/disconnected
                     while not event.is_set():

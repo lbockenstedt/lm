@@ -3848,6 +3848,55 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self.record_spoke_event(spoke_id, "psk_self_provision", f"tenant={tenant_hint}")
         return True
 
+    async def _handle_agent_onboarding_psk(self, spoke_id: str, data: Dict[str, Any]) -> None:
+        """A zero-touch RELAYED node-agent (Proxmox host agent dialing a pxmx/
+        cs spoke's ``/ws/agent``, NOT a hub-direct spoke) presented an
+        onboarding PSK + tenant hint on connect — see agent_hosting.py's
+        ``_agent_handler`` pending branch, which relays this fire-and-forget
+        the instant it happens (the hub has no other way to learn about a
+        pending agent until something polls GET_AGENTS). Best-effort: never
+        raises, never replies on this channel — the only signal the agent
+        gets is the eventual APPROVAL_SUCCESS relay on success, identical to
+        an admin-triggered approval."""
+        agent_id = (data.get("agent_id") or "").strip()
+        tenant_hint = (data.get("tenant_hint") or "").strip()
+        psk = data.get("psk") or ""
+        if not agent_id or not tenant_hint or not psk:
+            return
+        try:
+            await self._try_psk_agent_auto_approve(spoke_id, agent_id, tenant_hint, psk)
+        except Exception:
+            logger.exception(
+                f"AGENT_ONBOARDING_PSK handling failed for agent={agent_id}")
+
+    async def _try_psk_agent_auto_approve(self, spoke_id: str, agent_id: str,
+                                          tenant_hint: str, psk: str) -> bool:
+        """Validate a RELAYED node-agent's onboarding PSK against
+        ``tenant_hint``'s stored PSKs and, on a match, auto-approve + bind it
+        to that tenant immediately — the relayed-agent counterpart to
+        ``_try_psk_self_provision`` (which does the same for a hub-direct
+        spoke). Returns True on success, False on any mismatch/failure (the
+        agent stays pending for manual admin approval — never a hard-close,
+        matching the zero-touch contract). The PSK itself is never logged."""
+        if not await self._psk_is_valid(tenant_hint, psk):
+            return False
+        from routes.setup import _perform_agent_approval  # lazy: avoid import cycle
+        try:
+            await _perform_agent_approval(self, spoke_id, agent_id,
+                                          explicit_tenant=tenant_hint)
+        except Exception:
+            logger.exception(
+                f"PSK agent auto-approve: _perform_agent_approval failed for "
+                f"agent={agent_id} tenant={tenant_hint}")
+            return False
+        logger.info(
+            f"PSK agent auto-approve: agent={agent_id} auto-approved + bound "
+            f"to tenant {tenant_hint} via spoke {spoke_id}.")
+        self.record_spoke_event(
+            spoke_id, "agent_psk_auto_approve",
+            f"agent={agent_id} tenant={tenant_hint}")
+        return True
+
     @staticmethod
     def _infer_sim_spoke_tenant(proxmox_hosts, agent_config) -> Optional[str]:
         """The single tenant that a simulation spoke's backing CS-enabled agents
@@ -5750,6 +5799,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 if payload.get("type") == "NODE_CANARY_HIT":
                     self._handle_node_canary_hit(
                         spoke_id, remote_ip, payload.get("data", {}) or {})
+                    continue
+
+                # --- Relayed node-agent zero-touch onboarding PSK ---
+                # A pxmx/cs agent-hosting spoke relays this the instant a
+                # zero-touch node agent presents an onboarding PSK + tenant
+                # hint on connect (agent_hosting.py's _agent_handler pending
+                # branch). Fire-and-forget: on a valid PSK the agent is
+                # auto-approved + bound to that tenant immediately (no admin
+                # click); on any mismatch/failure it just stays pending for
+                # manual approval, unchanged.
+                if payload.get("type") == "AGENT_ONBOARDING_PSK":
+                    await self._handle_agent_onboarding_psk(
+                        spoke_id, payload.get("data", {}) or {})
                     continue
 
                 # --- Scale-Out Relay Logic ---
