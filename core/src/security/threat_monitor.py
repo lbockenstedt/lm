@@ -157,6 +157,17 @@ class ThreatMonitor:
         self._cfg: Dict[str, Any] = dict(_DEFAULTS)
         self._nsg_dirty = False
         self._load()
+        # The deny rule NAME last confirmed pushed to Azure — distinct from
+        # self._cfg["block_rule_name"], which updates synchronously on every
+        # set_config() call even before the async reconcile has actually run.
+        # reconcile_nsg() compares against THIS to detect a rename and delete
+        # the stale old-named rule (see reconcile_nsg's docstring for why that
+        # matters: Azure NSG rules are keyed by name, so a rename that only
+        # PUTs the new name leaves the old rule — same priority + direction —
+        # still live, and ARM rejects the PUT with SecurityRuleConflict).
+        # Best-effort assumption at boot: the last-persisted name is whatever
+        # was live before the process restarted.
+        self._nsg_live_rule_name: Optional[str] = self._cfg.get("block_rule_name")
         self._migrate_never_to_entries()  # one-time: fold legacy _never into shared entries
 
     # ── config ───────────────────────────────────────────────────────────────
@@ -590,7 +601,19 @@ class ThreatMonitor:
     async def reconcile_nsg(self) -> Dict[str, Any]:
         """Push the current blocked-IP set onto the Azure NSG deny rule (one
         prefix per IP). No-op unless auto_block is ON and azure_nsg is configured.
-        Empty set → the deny rule is deleted (reconcile_allowlist semantics)."""
+        Empty set → the deny rule is deleted (reconcile_allowlist semantics).
+
+        If ``block_rule_name`` changed since the last successful reconcile,
+        the OLD-named rule is deleted FIRST. Azure NSG rules are keyed by
+        name: a rename that only PUTs the new name leaves the old rule (same
+        priority + direction) still live in the NSG, and ARM rejects the new
+        PUT with ``SecurityRuleConflict`` — "Rules cannot have the same
+        Priority and Direction." ``self._nsg_live_rule_name`` (not
+        ``self._cfg``, which updates synchronously on every ``set_config()``
+        call regardless of whether this async reconcile has run yet) tracks
+        the name actually confirmed pushed, so a burst of rapid renames
+        before a reconcile fires still deletes the ORIGINAL live name, not
+        an intermediate one that was never actually created in Azure."""
         if not self._nsg_dirty:
             return {"status": "SKIPPED", "message": "no change"}
         self._nsg_dirty = False
@@ -606,15 +629,27 @@ class ThreatMonitor:
         if not all(azcfg.get(k) for k in ("subscription_id", "resource_group", "nsg_name")):
             return {"status": "SKIPPED", "message": "Azure NSG not configured — logged only"}
         deny_cfg = dict(azcfg)
-        deny_cfg["rule_name"] = self._cfg.get("block_rule_name") or "lm-threat-block"
+        new_name = self._cfg.get("block_rule_name") or "lm-threat-block"
+        deny_cfg["rule_name"] = new_name
         deny_cfg["access"] = "Deny"
         deny_cfg["direction"] = "Inbound"
         deny_cfg["priority"] = int(self._cfg.get("block_priority") or 400)
         ips = sorted(self._blocks.keys())
+        old_name = self._nsg_live_rule_name
         try:
+            if old_name and old_name != new_name:
+                # Delete is 404-tolerant (reconcile_allowlist treats a missing
+                # rule as already-gone), so this is safe even if the old rule
+                # was never actually created (e.g. auto_block was off).
+                old_cfg = dict(deny_cfg)
+                old_cfg["rule_name"] = old_name
+                await _nsg.reconcile_allowlist(get_oidc_config(self.hub), old_cfg, [])
+                sec_log.info("THREAT NSG deny-rule renamed: deleted old rule '%s' before creating '%s'",
+                             old_name, new_name)
             res = await _nsg.reconcile_allowlist(get_oidc_config(self.hub), deny_cfg, ips)
+            self._nsg_live_rule_name = new_name
             sec_log.info("THREAT NSG deny-rule reconciled: %d IP(s) on %s/%s",
-                         len(ips), deny_cfg.get("nsg_name"), deny_cfg["rule_name"])
+                         len(ips), deny_cfg.get("nsg_name"), new_name)
             return {"status": "SUCCESS", "count": len(ips), **res}
         except Exception as e:  # noqa: BLE001
             logger.warning("threat NSG reconcile failed: %s", e)
