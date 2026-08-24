@@ -16,6 +16,7 @@ works with no live spoke connection).
 import asyncio
 
 import access
+import routes.pxmx as pxmx_routes
 from routes.setup import _perform_agent_approval
 
 
@@ -58,6 +59,7 @@ class FakeHub:
         self.mailbox = _FakeMailbox()
         self.active_connections = {}
         self.agent_info = {}
+        self.spoke_module_types = {}
 
     def _primary_key(self, sid):
         return sid
@@ -149,3 +151,87 @@ def test_approval_flag_and_known_modules_cleanup_unaffected_by_tenant_path():
     assert hub.approved_modules["agent-1"] is True
     assert "agent-1" not in hub.state.system_state["known_modules"]
     assert "other-spoke" in hub.state.system_state["known_modules"]
+
+
+# ── CS auto-enable when the target spoke is a simulation (cs) spoke ────────
+# Dialing a cs spoke's /ws/agent listener at all is itself a strong signal of
+# intent — the box was specifically pointed at a cs spoke, typically because
+# the operator wants it hosting client-sim traffic — so no separate manual
+# toggle should be required.
+
+def test_cs_auto_enabled_for_simulation_spoke(monkeypatch):
+    pushes = []
+
+    async def _fake_push(hub, agent_id, push_cfg, owning_spoke=None):
+        pushes.append((agent_id, push_cfg, owning_spoke))
+        return True, False
+
+    monkeypatch.setattr(pxmx_routes, "push_pxmx_agent_config", _fake_push)
+    hub = FakeHub()
+    hub.spoke_module_types["spoke-1"] = "simulation"
+    summary = _run(_perform_agent_approval(hub, "spoke-1", "agent-1"))
+    assert summary["cs_auto_enabled"] is True
+    cfg = hub.state.system_state["agent_config"]["agent-1"]
+    assert cfg["client_simulation"]["enabled"] is True
+    assert pushes == [("agent-1", {"client_simulation": cfg["client_simulation"]}, "spoke-1")]
+
+
+def test_cs_not_auto_enabled_for_hypervisor_spoke(monkeypatch):
+    pushes = []
+
+    async def _fake_push(hub, agent_id, push_cfg, owning_spoke=None):
+        pushes.append(1)
+        return True, False
+
+    monkeypatch.setattr(pxmx_routes, "push_pxmx_agent_config", _fake_push)
+    hub = FakeHub()
+    hub.spoke_module_types["spoke-1"] = "hypervisor"
+    summary = _run(_perform_agent_approval(hub, "spoke-1", "agent-1"))
+    assert summary["cs_auto_enabled"] is False
+    assert pushes == []
+    # No tenant + no CS auto-enable → agent_config untouched entirely.
+    assert "agent-1" not in hub.state.system_state["agent_config"]
+
+
+def test_cs_auto_enable_preserves_existing_usb_config_and_combines_with_tenant(monkeypatch):
+    async def _fake_push(hub, agent_id, push_cfg, owning_spoke=None):
+        return True, False
+
+    monkeypatch.setattr(pxmx_routes, "push_pxmx_agent_config", _fake_push)
+    hub = FakeHub()
+    hub.spoke_module_types["spoke-1"] = "simulation"
+    hub.state.set_spoke_tenant("spoke-1", "tenantA")
+    hub.state.system_state["agent_config"]["agent-1"] = {
+        "client_simulation": {"usb_config": {"vidpids": ["1234:5678"]}}}
+    summary = _run(_perform_agent_approval(hub, "spoke-1", "agent-1"))
+    cfg = hub.state.system_state["agent_config"]["agent-1"]["client_simulation"]
+    assert cfg["enabled"] is True
+    assert cfg["tenant_id"] == "tenantA"
+    assert cfg["usb_config"] == {"vidpids": ["1234:5678"]}
+    assert summary["cs_auto_enabled"] is True
+
+
+def test_cs_auto_enable_push_failure_does_not_raise_and_state_still_persisted(monkeypatch):
+    async def _boom(hub, agent_id, push_cfg, owning_spoke=None):
+        raise RuntimeError("spoke unreachable")
+
+    monkeypatch.setattr(pxmx_routes, "push_pxmx_agent_config", _boom)
+    hub = FakeHub()
+    hub.spoke_module_types["spoke-1"] = "simulation"
+    summary = _run(_perform_agent_approval(hub, "spoke-1", "agent-1"))
+    assert summary["cs_auto_enabled"] is True
+    cfg = hub.state.system_state["agent_config"]["agent-1"]
+    assert cfg["client_simulation"]["enabled"] is True
+
+
+def test_cs_auto_enable_resolves_module_type_from_module_metadata_fallback(monkeypatch):
+    """spoke_module_types (live) is preferred, but a spoke resolved via the
+    known-modules fallback (module_metadata) still triggers auto-enable."""
+    async def _fake_push(hub, agent_id, push_cfg, owning_spoke=None):
+        return True, False
+
+    monkeypatch.setattr(pxmx_routes, "push_pxmx_agent_config", _fake_push)
+    hub = FakeHub()
+    hub.state.system_state["module_metadata"] = {"spoke-1": {"module_type": "simulation"}}
+    summary = _run(_perform_agent_approval(hub, "spoke-1", "agent-1"))
+    assert summary["cs_auto_enabled"] is True

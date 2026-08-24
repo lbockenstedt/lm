@@ -172,6 +172,42 @@ def register(app, hub, ctx):
                     agent_id, tenant, spoke_id)
         return {"status": "ok", **summary}
 
+    @app.post("/tenant/{tenant}/agents/{agent_id}/cs-config",
+              operation_id="tenant_set_agent_cs_enabled")
+    async def set_tenant_agent_cs_config(request: Request, tenant: str, agent_id: str):
+        """Tenant-admin self-service toggle for Client-Simulation mode on
+        THEIR OWN already-approved Proxmox node agent — the tenant-admin
+        counterpart to the Global-Admin-only ``POST
+        /api/pxmx/agents/{agent_id}/config`` (which ALSO exposes
+        display_name/crontab/an arbitrary tenant re-pin, so that route stays
+        admin-only). This route only ever flips ``enabled`` — it reaffirms
+        the agent's OWN already-pinned tenant_id, it can never move the
+        agent to a different tenant. Gated on that pin (not the owning
+        spoke's binding, unlike ``approve_tenant_agent``): a PSK-auto-approved
+        or admin-approved agent may be bound to a tenant whose OWN spoke
+        isn't (e.g. approved via a shared spoke), so the agent's tenant_id is
+        the authoritative ownership signal here."""
+        _require_owns_tenant(request, tenant)
+        body = await request.json()
+        enabled = bool(body.get("enabled")) if isinstance(body, dict) else False
+        agent_pk = hub._agent_primary_key(agent_id)
+        store = hub.state.system_state.setdefault("agent_config", {})
+        entry = dict(store.get(agent_pk, {}))
+        cs_cfg = dict(entry.get("client_simulation") or {})
+        bound = (cs_cfg.get("tenant_id") or "").strip()
+        if bound != tenant:
+            raise HTTPException(status_code=404, detail="Not found")
+        cs_cfg["enabled"] = enabled
+        entry["client_simulation"] = cs_cfg
+        store[agent_pk] = entry
+        hub.state._mark_dirty()
+        from routes.pxmx import push_pxmx_agent_config  # lazy: avoid import cycle
+        pushed, queued = await push_pxmx_agent_config(
+            hub, agent_id, {"client_simulation": cs_cfg})
+        logger.info("tenant agent cs-config: agent '%s' enabled=%s set by tenant %s",
+                    agent_id, enabled, tenant)
+        return {"status": "ok", "enabled": enabled, "pushed": pushed, "queued": queued}
+
     @app.delete("/tenant/{tenant}/spokes/{spoke_id}", operation_id="tenant_delete_own_spoke")
     async def delete_tenant_spoke(request: Request, tenant: str, spoke_id: str):
         """Permanently remove a spoke/agent bound to ``tenant`` — the tenant-admin

@@ -3707,7 +3707,7 @@ function _viewTemplate(viewId) {
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Proxmox Node Agents</h3>
       <button onclick="loadMyDeviceAgents()" class="text-xs text-[#01A982] hover:underline">Refresh</button>
     </div>
-    <p class="text-xs text-slate-400 mb-3">Proxmox host agents relayed through one of your tenant's spokes (see Proxmox Host Agent below) — connected, pending, or offline. A pending agent relayed through a spoke already bound to your tenant can be approved right here, no admin needed. An agent relayed through a spoke NOT bound to your tenant (e.g. a shared spoke) still needs an admin — or install it with an onboarding key's <code>--onboarding-psk</code>/<code>--tenant-hint</code> to skip approval entirely.</p>
+    <p class="text-xs text-slate-400 mb-3">Proxmox host agents relayed through one of your tenant's spokes (see Proxmox Host Agent below) — connected, pending, or offline. A pending agent relayed through a spoke already bound to your tenant can be approved right here, no admin needed. An agent relayed through a spoke NOT bound to your tenant (e.g. a shared spoke) still needs an admin — or install it with an onboarding key's <code>--onboarding-psk</code>/<code>--tenant-hint</code> to skip approval entirely. Once approved, use <strong>Enable/Disable CS</strong> to toggle Client-Simulation mode — an agent that connects through a <strong>simulation (cs)</strong> spoke gets this turned on automatically; one on a hypervisor (pxmx) spoke starts off and can be enabled here.</p>
     <div id="my-pxmx-agents-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
   </div>
 
@@ -15324,10 +15324,22 @@ async function loadMyDeviceAgents() {
             const approveBtn = a._status === 'pending'
                 ? `<button onclick="_myDevApproveAgent('${eSpk}', '${eAid}')" class="px-2.5 py-1 rounded-md text-[11px] font-bold bg-white hover:bg-green-50 text-green-700 border border-green-300 transition-colors">Approve</button>`
                 : '';
+            // Client-Simulation toggle: only meaningful once approved (a
+            // pending agent has no tenant pin yet, and the tenant-scoped
+            // cs-config route gates on that pin — see set_tenant_agent_cs_config).
+            // A cs-spoke-dialed agent already arrives with this ON (auto-
+            // enabled at approval time), so the common case is just a status
+            // badge; this lets it be turned off (or a hypervisor-spoke agent
+            // turned on) without an admin.
+            const csEnabled = !!(a.client_simulation && a.client_simulation.enabled);
+            const csToggle = a._status !== 'pending'
+                ? `<button onclick="_myDevToggleAgentCs('${eAid}', ${!csEnabled})" class="px-2.5 py-1 rounded-md text-[11px] font-bold border transition-colors ${csEnabled ? 'bg-white hover:bg-red-50 text-red-600 border-red-300' : 'bg-white hover:bg-green-50 text-green-700 border-green-300'}" title="Client-Simulation mode">${csEnabled ? 'Disable CS' : 'Enable CS'}</button>`
+                : '';
             return `<div class="flex items-center justify-between border border-slate-100 rounded-md px-3 py-2">
                 <div><span class="text-sm font-medium text-slate-700">${escapeHtml(String(a.hostname || a.agent_id || '').toUpperCase())}</span>
-                <span class="ml-2 text-[11px] text-slate-400 font-mono">via ${escapeHtml(a.spoke_id || '—')}</span></div>
-                <div class="flex items-center gap-2">${badge}${approveBtn}</div></div>`;
+                <span class="ml-2 text-[11px] text-slate-400 font-mono">via ${escapeHtml(a.spoke_id || '—')}</span>
+                ${csEnabled ? '<span class="ml-2 px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-700">CS</span>' : ''}</div>
+                <div class="flex items-center gap-2">${badge}${approveBtn}${csToggle}</div></div>`;
         }).join('');
     } catch (e) {
         console.error('loadMyDeviceAgents failed', e);
@@ -15345,6 +15357,20 @@ async function _myDevApproveAgent(spokeId, agentId) {
         loadMyDeviceAgents();
     } catch (e) {
         console.error('_myDevApproveAgent failed', e);
+        if (typeof showToast === 'function') showToast(e.message, 'error');
+    }
+}
+
+async function _myDevToggleAgentCs(agentId, enabled) {
+    const tenant = _myDevTenant();
+    if (!tenant) return;
+    try {
+        await apiJson(`/tenant/${encodeURIComponent(tenant)}/agents/${encodeURIComponent(agentId)}/cs-config`,
+            { method: 'POST', body: JSON.stringify({ enabled }) });
+        if (typeof showToast === 'function') showToast(enabled ? 'Client-Simulation enabled' : 'Client-Simulation disabled', 'success');
+        loadMyDeviceAgents();
+    } catch (e) {
+        console.error('_myDevToggleAgentCs failed', e);
         if (typeof showToast === 'function') showToast(e.message, 'error');
     }
 }
