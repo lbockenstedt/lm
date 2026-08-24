@@ -405,15 +405,40 @@ def register(app, hub, ctx):
                       for d in visible
                       if d.get("id") and str(d.get("name") or "").strip()}
 
+        # Surface the box's identity datums (serial / base MAC / model / firmware
+        # / hostname) captured on each poll, so an operator can positively ID the
+        # physical device from the fleet list / detail without opening a session.
+        # Pulled from the warm per-device cache (poll → device_info, mirrored to
+        # the ``info`` envelope); absent until the device is first polled.
+        def _device_identity(did):
+            env = hub.nw_cache_get_device(did, "info")
+            info = (env or {}).get("data") if isinstance(env, dict) else None
+            if not isinstance(info, dict):
+                return {}
+            out = {}
+            for k in ("serial", "mac", "model", "firmware", "hostname"):
+                v = info.get(k)
+                if v not in (None, ""):
+                    out[k] = v
+            return out
+
+        info_by_id = {did: _device_identity(did) for did in visible_ids}
+
         def _overlay_names(env):
             if not isinstance(env, dict):
                 return env
             rows = env.get("data")
             if isinstance(rows, list):
-                env = {**env, "data": [
-                    ({**r, "name": name_by_id[r.get("id")]}
-                     if isinstance(r, dict) and name_by_id.get(r.get("id")) else r)
-                    for r in rows]}
+                def _merge(r):
+                    if not isinstance(r, dict):
+                        return r
+                    rid = r.get("id")
+                    extra = {}
+                    if name_by_id.get(rid):
+                        extra["name"] = name_by_id[rid]
+                    extra.update(info_by_id.get(rid) or {})
+                    return {**r, **extra} if extra else r
+                env = {**env, "data": [_merge(r) for r in rows]}
             return env
 
         # Resolve the connected, approved nw spoke(s) to query for live data.

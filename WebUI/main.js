@@ -16617,10 +16617,18 @@ function _nwDetailHtml() {
                </div>`
             : '';
         const metaRow = (k, v) => `<div class="flex justify-between py-1.5 border-b border-slate-100 last:border-0"><span class="text-xs text-slate-400 uppercase tracking-wider">${k}</span><span class="text-xs text-slate-700 font-mono">${v}</span></div>`;
+        // Identity datums captured on poll (surfaced by the list route from the
+        // warm per-device cache) — help positively ID the physical box.
+        const idRow = (k, val) => val ? metaRow(k, escapeHtml(String(val))) : '';
         body = `<div class="rounded-md border border-slate-200 bg-white p-4 max-w-lg">
             ${metaRow('Type', escapeHtml(typeLabel))}
             ${metaRow('Transport', escapeHtml(transport))}
             ${metaRow('Address', escapeHtml(dev.address || '—'))}
+            ${idRow('Hostname', dev.hostname)}
+            ${idRow('Model', dev.model)}
+            ${idRow('Serial (SN)', dev.serial)}
+            ${idRow('Base MAC', dev.mac)}
+            ${idRow('Firmware', dev.firmware)}
             ${metaRow('Reachable', rcell)}
             ${cfg}
         </div>`;
@@ -16794,7 +16802,7 @@ function _renderNwOverview(devices, counts) {
                 ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
                 : '<span class="text-slate-400 text-xs">—</span>';
         return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer">
-            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}</td>
+            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${(it.serial || it.mac) ? `<div class="text-[10px] font-mono font-normal text-slate-400 mt-0.5">${it.serial ? 'SN ' + escapeHtml(String(it.serial)) : ''}${(it.serial && it.mac) ? ' · ' : ''}${it.mac ? escapeHtml(String(it.mac)) : ''}</div>` : ''}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(typeLabel)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(category)}</td>
             <td class="px-4 py-3 text-slate-600 font-mono text-xs">${escapeHtml(it.address || '—')}</td>
@@ -17121,7 +17129,7 @@ function _renderNwDeviceList(category, devices, counts) {
               `<button onclick="event.stopPropagation();showNwConfigModal('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Configure</button>`
             : '';
         return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer">
-            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}</td>
+            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${(it.serial || it.mac) ? `<div class="text-[10px] font-mono font-normal text-slate-400 mt-0.5">${it.serial ? 'SN ' + escapeHtml(String(it.serial)) : ''}${(it.serial && it.mac) ? ' · ' : ''}${it.mac ? escapeHtml(String(it.mac)) : ''}</div>` : ''}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(typeLabel)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(transport)}</td>
             <td class="px-4 py-3 text-slate-600 font-mono text-xs">${escapeHtml(it.address || '—')}</td>
