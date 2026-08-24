@@ -293,13 +293,12 @@ def register(app, hub, ctx):
         # plaintext lives only in the vault, not in global_config.
         slice_ = await instance_vault.overlay_many(
             hub, _nw_devices_for_spoke(hub, spoke_id), "nw_devices")
-        gc = (hub.state.system_state.get("global_config", {}) or {})
+        # Per-tenant poll knobs overlaid on the global defaults for the spoke's
+        # owning tenant (see access.nw_poll_cfg_for_tenant).
+        poll_cfg = access.nw_poll_cfg_for_tenant(hub, access.nw_spoke_tenant(hub, spoke_id))
         payload = {"devices": _project_nw_devices_for_push(slice_),
                    "shared_tenant_id": access.shared_tenant_id() or "",
-                   "default_poll_interval": gc.get("nw_poll_default_interval"),
-                   "poll_jitter_frac": gc.get("nw_poll_jitter_frac"),
-                   "max_poll_per_tick": gc.get("nw_poll_max_per_tick"),
-                   "max_poll_concurrency": gc.get("nw_poll_max_concurrency")}
+                   **poll_cfg}
         msg = _hub_msg(spoke_id, "UPDATE_CONFIG", payload)
         await hub.send_to_spoke(msg)
         return True
@@ -807,10 +806,13 @@ def register(app, hub, ctx):
     # ── Network scan (fingerprint discovery) ────────────────────────────────
     _SCAN_OBJECT_TYPES = ("aos_switch", "cx_switch", "ex_switch", "gateway")
 
-    def _resolve_nw_scan_spoke(hub, sess, tenant_id, requested_spoke_id):
+    def _resolve_nw_scan_spoke(hub, sess, tenant_id, requested_spoke_id, *, allow_any=None):
         """The connected nw spoke the scan should run on. Prefer an explicit
         request spoke_id (when connected), else the tenant's nw spoke, else the
-        shared nw spoke, else (admin only) any connected nw spoke."""
+        shared nw spoke, else (``allow_any`` — admins only) any connected nw
+        spoke. ``allow_any`` defaults to the session's admin status."""
+        if allow_any is None:
+            allow_any = _is_admin(sess)
         def _up(sid):
             return sid and hub._primary_key(sid) in hub.active_connections
         if requested_spoke_id and _up(requested_spoke_id):
@@ -819,7 +821,7 @@ def register(app, hub, ctx):
                else hub.get_nw_spoke_for_tenant(tenant_id)) if tenant_id else None
         if _up(sid):
             return sid
-        if _is_admin(sess):
+        if allow_any:
             for s in (hub.get_all_spokes_by_type("nw") or []):
                 if _up(s) and hub.approved_modules.get(s, False):
                     return s
@@ -923,9 +925,18 @@ def register(app, hub, ctx):
 
         return seen, per_source
 
-    def _nw_scan_config(hub):
+    def _nw_scan_config(hub, tenant_id=None):
+        """Effective scan config. Base = global admin ``nw_scan`` (Setup card).
+        When ``tenant_id`` is given and that tenant has a per-tenant override
+        (``nw_tenant_cfg[tenant]['scan']``), its keys win — so a tenant manages
+        its own scan settings without clobbering the shared/global config."""
         gc = hub.state.system_state.get("global_config", {}) or {}
         cfg = dict(gc.get("nw_scan", {}) or {})
+        if tenant_id:
+            ov = (((gc.get("nw_tenant_cfg") or {}).get(tenant_id) or {}).get("scan") or {})
+            for k, v in ov.items():
+                if v is not None:
+                    cfg[k] = v
         cfg.setdefault("enabled", False)
         cfg.setdefault("crawl", False)
         cfg.setdefault("auto_add", False)
@@ -980,61 +991,204 @@ def register(app, hub, ctx):
         hub.state._mark_dirty()
         return {"status": "ok", "nw_scan": clean}
 
-    @app.post("/setup/nw-scan/run")
-    async def run_nw_scan(request: Request):
-        """Run a fingerprint scan on the nw spoke and (optionally) auto-add the
-        identified manageable devices to the tenant fleet.
+    def _nw_caller_tenant(sess, req_tenant):
+        """Resolve+authorize the tenant a caller may configure. Admin: the named
+        tenant or the shared tenant. Tenant-admin: only one of their own tenants.
+        Raises 403/400 on violation."""
+        req_tenant = str(req_tenant or "").strip()
+        if _is_admin(sess):
+            return req_tenant or access.shared_tenant_id() or ""
+        own = ((sess or {}).get("user", {}).get("tenants")
+               or [(sess or {}).get("user", {}).get("tenant_id")])
+        own = [t for t in own if t]
+        if req_tenant and req_tenant not in own:
+            raise HTTPException(status_code=403, detail="You may only configure your own tenant")
+        tid = req_tenant or (own[0] if own else "")
+        if not tid:
+            raise HTTPException(status_code=400, detail="No tenant resolved")
+        return tid
 
-        Body (all optional; falls back to the saved ``nw_scan`` config):
-          ``tenant``, ``credential_ids``, ``ip_sources``, ``subnets`` (CIDRs),
-          ``targets`` (explicit IPs), ``crawl``, ``dry_run`` (default true —
-          preview only), ``spoke_id``.
+    def _nw_scan_schedule(hub, tenant_id):
+        """Per-tenant recurring-scan schedule from ``nw_tenant_cfg`` with defaults.
+        ``interval_seconds`` 0/absent = off; ``dry_run`` true = preview only (no
+        auto-add) even when the scan config allows adding."""
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        sc = (((gc.get("nw_tenant_cfg") or {}).get(tenant_id) or {}).get("scan_schedule") or {})
+        return {
+            "enabled": bool(sc.get("enabled", False)),
+            "interval_seconds": int(sc.get("interval_seconds") or 0),
+            "dry_run": bool(sc.get("dry_run", True)),
+        }
 
-        Tenant-scoped: a tenant-admin scans only their own tenant (targets are
-        aggregated from that tenant's inventory + they may only add devices bound
-        to their tenant's spoke). Admin may scan any tenant / the shared tenant.
-        Devices are added tagged ``source="scanned"`` with the winning scan
-        credential's vault reference so future fleet pushes overlay the secret."""
+    @app.get("/api/nw/tenant-config")
+    async def get_nw_tenant_config(request: Request):
+        """Tenant-facing NW config surface (Network → Scan tab): effective scan
+        settings, poll jitter/caps/cadence, and the recurring-scan schedule for
+        the caller's tenant, plus a flag per poll knob showing whether the tenant
+        overrides the global admin default."""
         hub = app.state.hub
         sess = _session_user(request)
         if not (_is_admin(sess) or _is_tenant_admin(sess)):
             raise HTTPException(status_code=403, detail="admin or tenant-admin required")
-        try:
-            data = await request.json()
-        except Exception:
-            data = {}
-        saved = _nw_scan_config(hub)
+        tid = _nw_caller_tenant(sess, request.query_params.get("tenant"))
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        poll_ov = (((gc.get("nw_tenant_cfg") or {}).get(tid) or {}).get("poll") or {})
+        eff = access.nw_poll_cfg_for_tenant(hub, tid)
+        return {
+            "tenant_id": tid,
+            "scan": _nw_scan_config(hub, tid),
+            "poll": {
+                "default_interval": eff["default_poll_interval"],
+                "jitter_frac": eff["poll_jitter_frac"],
+                "max_per_tick": eff["max_poll_per_tick"],
+                "max_concurrency": eff["max_poll_concurrency"],
+                # True where the tenant overrides the global admin default.
+                "overridden": {k: (poll_ov.get(k) is not None)
+                               for k in ("default_interval", "jitter_frac",
+                                         "max_per_tick", "max_concurrency")},
+            },
+            "scan_schedule": _nw_scan_schedule(hub, tid),
+        }
 
-        # Resolve the tenant to scan. A tenant-admin is pinned to their own
-        # tenant; an admin may name any tenant (default: the shared tenant).
-        req_tenant = str(data.get("tenant") or "").strip()
-        if _is_admin(sess):
-            tenant_id = req_tenant or access.shared_tenant_id() or ""
-        else:
-            own = ((sess or {}).get("user", {}).get("tenants")
-                   or [(sess or {}).get("user", {}).get("tenant_id")])
-            own = [t for t in own if t]
-            if req_tenant and req_tenant not in own:
-                raise HTTPException(status_code=403, detail="You may only scan your own tenant")
-            tenant_id = req_tenant or (own[0] if own else "")
-            if not tenant_id:
-                raise HTTPException(status_code=400, detail="No tenant to scan")
+    @app.post("/api/nw/tenant-config")
+    async def set_nw_tenant_config(request: Request):
+        """Persist a tenant's NW overrides. Body: ``tenant`` (admin only),
+        ``scan`` (partial scan config), ``poll`` (jitter/caps/cadence; null a key
+        to clear the override → inherit global), ``scan_schedule``. Re-pushes the
+        tenant's connected nw spoke(s) so poll changes take effect immediately."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not (_is_admin(sess) or _is_tenant_admin(sess)):
+            raise HTTPException(status_code=403, detail="admin or tenant-admin required")
+        data = await request.json()
+        tid = _nw_caller_tenant(sess, data.get("tenant"))
 
+        gc = hub.state.system_state.get("global_config", {})
+        tmap = dict(gc.get("nw_tenant_cfg") or {})
+        cur = dict(tmap.get(tid) or {})
+
+        # ── scan (partial merge over the existing tenant scan override) ──
+        if isinstance(data.get("scan"), dict):
+            s = data["scan"]
+            scan_ov = dict(cur.get("scan") or {})
+            for k in ("enabled", "crawl", "auto_add", "try_snmp"):
+                if k in s:
+                    scan_ov[k] = bool(s[k])
+            if "ip_sources" in s:
+                scan_ov["ip_sources"] = [str(x) for x in (s["ip_sources"] or []) if str(x).strip()]
+            if "credential_ids" in s:
+                scan_ov["credential_ids"] = [str(x) for x in (s["credential_ids"] or []) if str(x).strip()]
+            if "tcp_ports" in s:
+                ports = s["tcp_ports"]
+                if isinstance(ports, str):
+                    ports = [p.strip() for p in ports.split(",") if p.strip()]
+                try:
+                    scan_ov["tcp_ports"] = [int(p) for p in (ports or [])]
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=400, detail="tcp_ports must be integers")
+            if "max_targets" in s:
+                scan_ov["max_targets"] = max(1, min(int(s["max_targets"] or 1024), 4096))
+            if "concurrency" in s:
+                scan_ov["concurrency"] = max(1, min(int(s["concurrency"] or 32), 128))
+            if "spoke_id" in s:
+                scan_ov["spoke_id"] = str(s["spoke_id"] or "").strip()
+            cur["scan"] = scan_ov
+
+        # ── poll (null a key → clear override so it inherits the global) ──
+        if isinstance(data.get("poll"), dict):
+            p = data["poll"]
+            poll_ov = dict(cur.get("poll") or {})
+
+            def _num_or_clear(key, cast, lo, hi):
+                if key not in p:
+                    return
+                v = p[key]
+                if v in (None, "", "null"):
+                    poll_ov.pop(key, None)
+                    return
+                try:
+                    poll_ov[key] = max(lo, min(cast(v), hi))
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=400, detail=f"{key} must be numeric or null")
+
+            _num_or_clear("default_interval", int, 0, 604800)
+            _num_or_clear("jitter_frac", float, 0.0, 0.9)
+            _num_or_clear("max_per_tick", int, 1, 100)
+            _num_or_clear("max_concurrency", int, 1, 50)
+            cur["poll"] = poll_ov
+
+        # ── scan_schedule ──
+        if isinstance(data.get("scan_schedule"), dict):
+            ss = data["scan_schedule"]
+            sched = dict(cur.get("scan_schedule") or {})
+            if "enabled" in ss:
+                sched["enabled"] = bool(ss["enabled"])
+            if "interval_seconds" in ss:
+                try:
+                    iv = int(ss["interval_seconds"] or 0)
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=400, detail="interval_seconds must be an integer")
+                # 0 = off; otherwise floor at 1h so a tenant can't hammer scans.
+                sched["interval_seconds"] = 0 if iv <= 0 else max(3600, iv)
+            if "dry_run" in ss:
+                sched["dry_run"] = bool(ss["dry_run"])
+            cur["scan_schedule"] = sched
+
+        tmap[tid] = cur
+        gc["nw_tenant_cfg"] = tmap
+        hub.state.system_state["global_config"] = gc
+        hub.state._mark_dirty()
+
+        # Re-push this tenant's connected nw spoke(s) so poll knobs apply now.
+        pushed = 0
+        md = hub.state.system_state.get("module_metadata", {}) or {}
+        for sid in (hub.get_all_spokes_by_type("nw") or []):
+            if (md.get(sid, {}) or {}).get("tenant_id") == tid:
+                if await _nw_push_fleet(hub, sid):
+                    pushed += 1
+        return {"status": "ok", "tenant_id": tid, "pushed": pushed,
+                "scan": _nw_scan_config(hub, tid),
+                "scan_schedule": _nw_scan_schedule(hub, tid)}
+
+    async def _execute_nw_scan(tenant_id, saved, *, sess, data):
+        """Shared scan executor for BOTH the interactive route and the recurring
+        scheduler. ``sess`` is the caller session for an interactive scan, or
+        ``None`` for a system-initiated (scheduled) scan. Resolves the spoke,
+        assembles + vault-overlays the credential sets, aggregates the tenant's
+        candidate IPs, runs NW_SCAN on the spoke, then (unless dry-run) auto-adds
+        the newly-identified manageable devices to the tenant fleet and re-pushes.
+
+        Credential scoping: admin → any chosen set; tenant-admin → only sets
+        visible to their session; system (``sess is None``) → only sets owned by
+        this tenant (or the shared tenant). ``allow_any_spoke`` mirrors that —
+        only a real admin may fall back to an unbound nw spoke."""
+        system = sess is None
+        allow_any = (not system) and _is_admin(sess)
         spoke_id = _resolve_nw_scan_spoke(
-            hub, sess, tenant_id, str(data.get("spoke_id") or saved.get("spoke_id") or "").strip())
+            hub, sess, tenant_id,
+            str(data.get("spoke_id") or saved.get("spoke_id") or "").strip(),
+            allow_any=allow_any)
         if not spoke_id:
+            if system:
+                return {"status": "skipped", "reason": "no nw spoke connected",
+                        "tenant": tenant_id, "added": [], "identified": []}
             raise HTTPException(status_code=503, detail="Network Devices spoke not connected")
 
-        # Assemble the candidate credential sets (from the saved config or the
-        # request), overlaying each set's vault secret just before the push.
+        # Assemble the candidate credential sets (from the request or saved
+        # config), overlaying each set's vault secret just before the push.
         cred_ids = [str(x) for x in (data.get("credential_ids") or saved.get("credential_ids") or [])]
         all_sets = (hub.state.system_state.get("global_config", {}) or {}).get("nw_scan_credentials", []) or []
         chosen = [c for c in all_sets if isinstance(c, dict) and c.get("id") in set(cred_ids)]
-        # Tenant-admin may only use credential sets visible to them.
-        if not _is_admin(sess):
+        if system:
+            shared_tid = access.shared_tenant_id()
+            chosen = [c for c in chosen if c.get("tenant_id", "") in (tenant_id, shared_tid)]
+        elif not _is_admin(sess):
             chosen = [c for c in chosen
                       if access.spoke_visible_to_session(sess, c.get("tenant_id", ""))]
         if not chosen:
+            if system:
+                return {"status": "skipped", "reason": "no accessible scan credential set",
+                        "tenant": tenant_id, "added": [], "identified": []}
             raise HTTPException(status_code=400,
                                 detail="Select at least one accessible scan credential set")
         overlaid = await instance_vault.overlay_many(hub, chosen, "nw_scan_credentials")
@@ -1053,7 +1207,8 @@ def register(app, hub, ctx):
             data.get("targets") or [], cap)
         if not targets:
             return {"status": "ok", "message": "No candidate IPs found for this tenant.",
-                    "targets": 0, "sources": per_source, "identified": [], "added": []}
+                    "tenant": tenant_id, "targets": 0, "sources": per_source,
+                    "identified": [], "added": []}
 
         options = {
             "tcp_ports": saved.get("tcp_ports") or [22, 443, 80, 23],
@@ -1072,7 +1227,10 @@ def register(app, hub, ctx):
                 timeout=max(60.0, min(len(targets) * 2.0, 900.0)))
             scan = access.unwrap_spoke(result)
         except Exception as e:
-            logger.exception("run_nw_scan failed")
+            logger.exception("nw scan failed (tenant=%s)", tenant_id)
+            if system:
+                return {"status": "error", "reason": str(e), "tenant": tenant_id,
+                        "added": [], "identified": []}
             raise HTTPException(status_code=500, detail=f"scan failed: {e}")
 
         identified = (scan or {}).get("identified", []) if isinstance(scan, dict) else []
@@ -1145,6 +1303,66 @@ def register(app, hub, ctx):
             "preview": preview,
             "added": added,
         }
+
+    async def _run_nw_scheduled_scan(tenant_id):
+        """System-initiated recurring scan for one tenant (called by the hub's
+        run_nw_scan_schedule_loop). Uses the tenant's saved scan config +
+        schedule; ``dry_run`` honors the schedule's preview flag (else the scan
+        config's auto_add)."""
+        saved = _nw_scan_config(hub, tenant_id)
+        sched = _nw_scan_schedule(hub, tenant_id)
+        data = {"dry_run": bool(sched.get("dry_run", True)),
+                "auto_add": bool(saved.get("auto_add", False))}
+        return await _execute_nw_scan(tenant_id, saved, sess=None, data=data)
+
+    # Expose the system scan executor + schedule reader to the hub so the
+    # background run_nw_scan_schedule_loop (a mixin method) can drive scans
+    # without re-implementing the credential/target/add pipeline.
+    hub.run_nw_scheduled_scan = _run_nw_scheduled_scan
+    hub.nw_scan_schedule_for_tenant = lambda tid: _nw_scan_schedule(hub, tid)
+
+    @app.post("/setup/nw-scan/run")
+    async def run_nw_scan(request: Request):
+        """Run a fingerprint scan on the nw spoke and (optionally) auto-add the
+        identified manageable devices to the tenant fleet.
+
+        Body (all optional; falls back to the saved ``nw_scan`` config):
+          ``tenant``, ``credential_ids``, ``ip_sources``, ``subnets`` (CIDRs),
+          ``targets`` (explicit IPs), ``crawl``, ``dry_run`` (default true —
+          preview only), ``spoke_id``.
+
+        Tenant-scoped: a tenant-admin scans only their own tenant (targets are
+        aggregated from that tenant's inventory + they may only add devices bound
+        to their tenant's spoke). Admin may scan any tenant / the shared tenant.
+        Devices are added tagged ``source="scanned"`` with the winning scan
+        credential's vault reference so future fleet pushes overlay the secret."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not (_is_admin(sess) or _is_tenant_admin(sess)):
+            raise HTTPException(status_code=403, detail="admin or tenant-admin required")
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+
+        # Resolve the tenant to scan. A tenant-admin is pinned to their own
+        # tenant; an admin may name any tenant (default: the shared tenant).
+        req_tenant = str(data.get("tenant") or "").strip()
+        if _is_admin(sess):
+            tenant_id = req_tenant or access.shared_tenant_id() or ""
+        else:
+            own = ((sess or {}).get("user", {}).get("tenants")
+                   or [(sess or {}).get("user", {}).get("tenant_id")])
+            own = [t for t in own if t]
+            if req_tenant and req_tenant not in own:
+                raise HTTPException(status_code=403, detail="You may only scan your own tenant")
+            tenant_id = req_tenant or (own[0] if own else "")
+            if not tenant_id:
+                raise HTTPException(status_code=400, detail="No tenant to scan")
+
+        # Per-tenant scan config (falls back to the global admin config).
+        saved = _nw_scan_config(hub, tenant_id)
+        return await _execute_nw_scan(tenant_id, saved, sess=sess, data=data)
 
     @app.post("/setup/nw-devices")
     async def add_nw_device(request: Request):

@@ -534,3 +534,102 @@ def test_poll_non_admin_view_user_is_403(monkeypatch, tmp_path):
     tok = _mint(hub, "other-user", tenants=["othercorp"], rights=("nw",))
     r = c.post("/api/nw/acme-sw/poll", cookies={"lm_session": tok})
     assert r.status_code == 403
+
+# ── Per-tenant NW config: /api/nw/tenant-config + poll overlay ───────────────
+# The tenant Scan tab reads/writes its OWN tenant's scan config, poll jitter/
+# caps, and recurring-scan schedule via these routes. Overrides live under
+# global_config.nw_tenant_cfg[tenant] and never touch the global admin config.
+
+def _noop_push(hub):
+    """Give the fake hub the send_to_spoke used by _nw_push_fleet (POST
+    re-pushes the tenant's spoke). Records the pushed payloads."""
+    hub.pushed = []
+
+    async def _send(msg):
+        hub.pushed.append(msg)
+    hub.send_to_spoke = _send
+
+
+def test_tenant_config_get_tenant_admin_own_tenant(monkeypatch, tmp_path):
+    c, hub = _build(monkeypatch, tmp_path, shared=False)
+    tok = _mint(hub, "acme-admin", tenants=["acme"], role="tenant_admin")
+    r = c.get("/api/nw/tenant-config", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["tenant_id"] == "acme"
+    assert "scan" in body and "poll" in body and "scan_schedule" in body
+    # No override yet → schedule off, poll knobs not overridden.
+    assert body["scan_schedule"]["enabled"] is False
+    assert body["poll"]["overridden"] == {
+        "default_interval": False, "jitter_frac": False,
+        "max_per_tick": False, "max_concurrency": False}
+
+
+def test_tenant_config_get_other_tenant_forbidden(monkeypatch, tmp_path):
+    c, hub = _build(monkeypatch, tmp_path, shared=False)
+    tok = _mint(hub, "acme-admin", tenants=["acme"], role="tenant_admin")
+    r = c.get("/api/nw/tenant-config?tenant=othercorp", cookies={"lm_session": tok})
+    assert r.status_code == 403
+
+
+def test_tenant_config_post_scan_persists_without_clobbering_global(monkeypatch, tmp_path):
+    c, hub = _build(monkeypatch, tmp_path, shared=False)
+    _noop_push(hub)
+    gc = hub.state.system_state["global_config"]
+    gc["nw_scan"] = {"enabled": True, "max_targets": 99}  # global admin config
+    tok = _mint(hub, "acme-admin", tenants=["acme"], role="tenant_admin")
+    r = c.post("/api/nw/tenant-config",
+               json={"scan": {"crawl": True, "max_targets": 256,
+                              "credential_ids": ["cred-1"]}},
+               cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    # Persisted under the tenant override, NOT the global config.
+    ov = gc["nw_tenant_cfg"]["acme"]["scan"]
+    assert ov["crawl"] is True and ov["max_targets"] == 256
+    assert gc["nw_scan"] == {"enabled": True, "max_targets": 99}  # untouched
+    # Effective config for acme now reflects the override.
+    assert r.json()["scan"]["max_targets"] == 256
+
+
+def test_tenant_config_post_poll_overlay_takes_effect(monkeypatch, tmp_path):
+    c, hub = _build(monkeypatch, tmp_path, shared=False)
+    _noop_push(hub)
+    tok = _mint(hub, "acme-admin", tenants=["acme"], role="tenant_admin")
+    r = c.post("/api/nw/tenant-config",
+               json={"poll": {"jitter_frac": 0.3, "max_per_tick": 10}},
+               cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    eff = access_mod.nw_poll_cfg_for_tenant(hub, "acme")
+    assert eff["poll_jitter_frac"] == 0.3
+    assert eff["max_poll_per_tick"] == 10
+    # Re-push happened for acme's bound spoke.
+    assert hub.pushed  # UPDATE_CONFIG fanned to the tenant's spoke
+
+
+def test_tenant_config_post_poll_null_clears_override(monkeypatch, tmp_path):
+    c, hub = _build(monkeypatch, tmp_path, shared=False)
+    _noop_push(hub)
+    tok = _mint(hub, "acme-admin", tenants=["acme"], role="tenant_admin")
+    c.post("/api/nw/tenant-config", json={"poll": {"jitter_frac": 0.3}},
+           cookies={"lm_session": tok})
+    r = c.post("/api/nw/tenant-config", json={"poll": {"jitter_frac": None}},
+               cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    ov = hub.state.system_state["global_config"]["nw_tenant_cfg"]["acme"].get("poll", {})
+    assert "jitter_frac" not in ov  # cleared → inherits global
+
+
+def test_tenant_config_scan_schedule_interval_floored_1h(monkeypatch, tmp_path):
+    c, hub = _build(monkeypatch, tmp_path, shared=False)
+    _noop_push(hub)
+    tok = _mint(hub, "acme-admin", tenants=["acme"], role="tenant_admin")
+    # 60s requested → floored to 3600 (1h). 0 stays off.
+    r = c.post("/api/nw/tenant-config",
+               json={"scan_schedule": {"enabled": True, "interval_seconds": 60}},
+               cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    assert r.json()["scan_schedule"]["interval_seconds"] == 3600
+    r2 = c.post("/api/nw/tenant-config",
+                json={"scan_schedule": {"interval_seconds": 0}},
+                cookies={"lm_session": tok})
+    assert r2.json()["scan_schedule"]["interval_seconds"] == 0

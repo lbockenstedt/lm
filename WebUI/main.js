@@ -1455,7 +1455,7 @@ const VIEW_SUBMENUS = {
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
     dns: ['Records', 'Statistics', 'Forwarders', 'External DNS'],
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations'],
-    nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'Other'],
+    nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'Other', 'Scan'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
 };
 
@@ -3522,6 +3522,10 @@ function renderTopNav(viewId) {
     const rawSubmenus = (viewId === 'logs') ? logsSubmenu() : (VIEW_SUBMENUS[viewId] || []);
     const subMenus = rawSubmenus.filter(m => {
         if (m === 'Simulations' && !isAdmin()) return false;
+        // The NW "Scan" tab lets a tenant configure + run discovery scans on
+        // their own NW spoke(s) and set a recurring scan schedule + poll
+        // jitter/caps — admin & tenant-admin only (writes tenant config).
+        if (m === 'Scan' && currentView === 'nw' && !(isAdmin() || isTenantAdmin())) return false;
         // The External DNS subtab (under DNS) now has real per-tenant records
         // (each carries an explicit tenant_id) — visible to anyone with the
         // 'dns' right (DNS is "all things DNS", internal + external) OR the
@@ -16633,6 +16637,14 @@ async function loadNwData(category) {
     // data-type tabs, or a deep link) onto a real category so the page never
     // blanks. 'Overview' is the tenant-wide summary landing tab.
     const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'Other'];
+    if (category === 'Scan') {
+        window._nwView = null;
+        window._nwDetail = null;
+        const actions = document.getElementById('top-nav-actions');
+        if (actions) actions.innerHTML = '';
+        _renderNwScanTab();
+        return;
+    }
     if (category !== 'Overview' && !CATEGORIES.includes(category)) category = 'Overview';
     window._nwDetail = null;
     container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Loading ${escapeHtml(category)}…</div>`;
@@ -16759,6 +16771,268 @@ function _renderNwOverview(devices, counts) {
                 </table>
             </div>
         </div>`;
+}
+
+// ── Tenant NW "Scan" tab ─────────────────────────────────────────────────────
+// A per-tenant surface (admin & tenant-admin only) to configure + run network
+// discovery scans on THIS tenant's NW spoke(s), plus per-tenant poll jitter/caps
+// and a recurring scan schedule. All state is read/written via
+// /api/nw/tenant-config (tenant-scoped; never clobbers the global admin config);
+// scans run via /setup/nw-scan/run (also tenant-scoped). Poll knobs left on
+// "Inherit global" clear the tenant override so the admin default applies.
+const _NW_JITTER_OPTS = [['', 'Inherit global'], ['0', 'Off'], ['0.05', '±5%'],
+    ['0.15', '±15%'], ['0.3', '±30%'], ['0.5', '±50%']];
+const _NW_SCHED_INTERVALS = [['0', 'Off'], ['3600', 'Every hour'],
+    ['21600', 'Every 6 hours'], ['43200', 'Every 12 hours'],
+    ['86400', 'Daily'], ['604800', 'Weekly']];
+
+async function _renderNwScanTab() {
+    const c = document.getElementById('nw-table-container');
+    if (!c) return;
+    c.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Loading scan settings…</div>`;
+
+    // Pull the tenant's effective config + its visible scan-credential sets in
+    // parallel. Both are tenant-scoped server-side (tenant-admins see only their
+    // own tenant + shared).
+    let cfg = {}, creds = [];
+    const tenantQs = currentTenant ? `?tenant=${encodeURIComponent(currentTenant)}` : '';
+    try {
+        const [cfgR, credR] = await Promise.all([
+            setupFetch(`/api/nw/tenant-config${tenantQs}`),
+            setupFetch('/setup/nw-scan-credentials'),
+        ]);
+        if (cfgR.ok) cfg = await cfgR.json();
+        if (credR.ok) creds = (await credR.json()).instances || [];
+    } catch (e) {
+        c.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Could not load scan settings: ${escapeHtml(e.message)}</div>`;
+        return;
+    }
+    window._nwScanCfg = cfg;
+
+    const scan = cfg.scan || {};
+    const poll = cfg.poll || {};
+    const sched = cfg.scan_schedule || {};
+    const chk = v => v ? 'checked' : '';
+    const srcs = new Set(scan.ip_sources || ['netbox']);
+    const selectedCreds = new Set((scan.credential_ids || []).map(String));
+
+    const credRows = creds.length
+        ? creds.map(cr => `<label class="flex items-center gap-2 text-sm text-slate-600">
+            <input type="checkbox" class="nwt-cred rounded border-slate-300 text-[#01A982] focus:ring-green-500" value="${escapeHtml(String(cr.id))}" ${selectedCreds.has(String(cr.id)) ? 'checked' : ''}>
+            <span class="font-mono">${escapeHtml(cr.name || cr.id)}</span>${cr.username ? `<span class="text-slate-400">· ${escapeHtml(cr.username)}</span>` : ''}
+          </label>`).join('')
+        : `<p class="text-xs text-slate-400 italic">No scan credential sets available. Add one in Setup → Network Devices → Scan Credentials.</p>`;
+
+    const opt = (opts, cur) => opts.map(([v, l]) =>
+        `<option value="${escapeHtml(v)}" ${String(cur) === v ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('');
+    const pollVal = (k) => (poll.overridden && poll.overridden[k]) ? String(poll[k]) : '';
+
+    const card = 'bg-white rounded-xl border border-slate-200 p-5';
+    const lblCls = 'block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1';
+    const inCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
+    const selCls = inCls;
+
+    c.innerHTML = `<div class="space-y-5 max-w-4xl">
+      <div class="${card}">
+        <h3 class="text-sm font-bold text-slate-700 mb-1">Network Discovery Scan</h3>
+        <p class="text-xs text-slate-400 mb-4">Discover manageable devices on your network and (optionally) add them to your fleet. Scans run on your tenant's Network Devices spoke.</p>
+        <div class="mb-4">
+          <p class="${lblCls}">Scan Credential Sets</p>
+          <div id="nwt-creds" class="space-y-1.5">${credRows}</div>
+        </div>
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-crawl" class="rounded border-slate-300 text-[#01A982]" ${chk(scan.crawl)}> Crawl LLDP neighbors</label>
+          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-snmp" class="rounded border-slate-300 text-[#01A982]" ${chk(scan.try_snmp !== false)}> Try SNMP</label>
+          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-autoadd" class="rounded border-slate-300 text-[#01A982]" ${chk(scan.auto_add)}> Auto-add discovered</label>
+        </div>
+        <div class="mb-4">
+          <p class="${lblCls}">IP Sources</p>
+          <div class="flex flex-wrap gap-4">
+            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-src-netbox" class="rounded border-slate-300 text-[#01A982]" ${chk(srcs.has('netbox'))}> NetBox prefixes</label>
+            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-src-nac" class="rounded border-slate-300 text-[#01A982]" ${chk(srcs.has('nac'))}> NAC endpoints</label>
+            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-src-dhcp" class="rounded border-slate-300 text-[#01A982]" ${chk(srcs.has('dhcp'))}> DHCP leases</label>
+            <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-src-dns" class="rounded border-slate-300 text-[#01A982]" ${chk(srcs.has('dns'))}> DNS records</label>
+          </div>
+        </div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+          <div><label class="${lblCls}">Extra Subnets (optional)</label><textarea id="nwt-subnets" rows="2" placeholder="10.0.0.0/24, 192.168.1.0/24" class="${inCls} font-mono"></textarea></div>
+          <div><label class="${lblCls}">Extra Targets (optional)</label><textarea id="nwt-targets" rows="2" placeholder="10.0.0.1, 10.0.0.2" class="${inCls} font-mono"></textarea></div>
+        </div>
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 mb-4">
+          <div><label class="${lblCls}">TCP Ports</label><input type="text" id="nwt-ports" value="${escapeHtml((scan.tcp_ports || [22,443,80,23]).join(', '))}" class="${inCls}"></div>
+          <div><label class="${lblCls}">Max Targets</label><input type="number" id="nwt-maxtargets" min="1" max="4096" value="${escapeHtml(String(scan.max_targets || 1024))}" class="${inCls}"></div>
+          <div><label class="${lblCls}">Concurrency</label><input type="number" id="nwt-concurrency" min="1" max="128" value="${escapeHtml(String(scan.concurrency || 32))}" class="${inCls}"></div>
+        </div>
+        <div class="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
+          <button onclick="saveNwTenantScanConfig(this)" class="px-4 py-2 rounded-md bg-[#01A982] text-white text-sm font-bold hover:bg-[#018f6f]">Save config</button>
+          <button onclick="runNwTenantScan(this, true)" class="px-4 py-2 rounded-md bg-slate-100 text-slate-700 text-sm font-bold hover:bg-slate-200">Preview scan</button>
+          <button onclick="runNwTenantScan(this, false)" class="px-4 py-2 rounded-md bg-blue-600 text-white text-sm font-bold hover:bg-blue-700">Scan &amp; add</button>
+        </div>
+        <div id="nwt-results" class="text-xs mt-3"></div>
+      </div>
+
+      <div class="${card}">
+        <h3 class="text-sm font-bold text-slate-700 mb-1">Recurring Scan Schedule</h3>
+        <p class="text-xs text-slate-400 mb-4">Automatically re-scan your network on a schedule. Preview-only runs report discoveries without adding them.</p>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-sched-enabled" class="rounded border-slate-300 text-[#01A982]" ${chk(sched.enabled)}> Enable schedule</label>
+          <div><label class="${lblCls}">Interval</label><select id="nwt-sched-interval" class="${selCls}">${opt(_NW_SCHED_INTERVALS, sched.interval_seconds || 0)}</select></div>
+          <label class="flex items-center gap-2 text-sm text-slate-600"><input type="checkbox" id="nwt-sched-dryrun" class="rounded border-slate-300 text-[#01A982]" ${chk(sched.dry_run !== false)}> Preview only (don't add)</label>
+        </div>
+      </div>
+
+      <div class="${card}">
+        <h3 class="text-sm font-bold text-slate-700 mb-1">Poll Cadence &amp; Anti-Stampede</h3>
+        <p class="text-xs text-slate-400 mb-4">Tune how your NW spoke polls your devices. Leave a control on "Inherit global" to use the platform default.</p>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div><label class="${lblCls}">Default Poll Interval</label><select id="nwt-poll-default" class="${selCls}">${opt([['', 'Inherit global'], ['900', '15 minutes'], ['3600', '1 hour'], ['21600', '6 hours'], ['43200', '12 hours'], ['86400', 'Daily']], pollVal('default_interval'))}</select></div>
+          <div><label class="${lblCls}">Poll Jitter</label><select id="nwt-poll-jitter" class="${selCls}">${opt(_NW_JITTER_OPTS, pollVal('jitter_frac'))}</select></div>
+          <div><label class="${lblCls}">Max Devices / Tick</label><select id="nwt-poll-maxtick" class="${selCls}">${opt([['', 'Inherit global'], ['5', '5'], ['10', '10'], ['25', '25'], ['50', '50'], ['100', '100']], pollVal('max_per_tick'))}</select></div>
+          <div><label class="${lblCls}">Max Concurrent Polls</label><select id="nwt-poll-maxconc" class="${selCls}">${opt([['', 'Inherit global'], ['2', '2'], ['5', '5'], ['10', '10'], ['20', '20'], ['50', '50']], pollVal('max_concurrency'))}</select></div>
+        </div>
+        <div class="pt-3 mt-3 border-t border-slate-100">
+          <button onclick="saveNwTenantPollSchedule(this)" class="px-4 py-2 rounded-md bg-[#01A982] text-white text-sm font-bold hover:bg-[#018f6f]">Save schedule &amp; cadence</button>
+        </div>
+      </div>
+    </div>`;
+}
+
+function _nwtSources() {
+    const s = [];
+    if (document.getElementById('nwt-src-netbox')?.checked) s.push('netbox');
+    if (document.getElementById('nwt-src-nac')?.checked) s.push('nac');
+    if (document.getElementById('nwt-src-dhcp')?.checked) s.push('dhcp');
+    if (document.getElementById('nwt-src-dns')?.checked) s.push('dns');
+    return s;
+}
+function _nwtSelectedCreds() {
+    return Array.from(document.querySelectorAll('.nwt-cred'))
+        .filter(el => el.checked).map(el => el.value);
+}
+function _nwtParseList(str) {
+    return String(str || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+}
+function _nwtScanConfigBody() {
+    return {
+        crawl: !!document.getElementById('nwt-crawl')?.checked,
+        try_snmp: !!document.getElementById('nwt-snmp')?.checked,
+        auto_add: !!document.getElementById('nwt-autoadd')?.checked,
+        credential_ids: _nwtSelectedCreds(),
+        ip_sources: _nwtSources(),
+        tcp_ports: _nwtParseList(document.getElementById('nwt-ports')?.value)
+            .map(p => parseInt(p, 10)).filter(n => !isNaN(n)),
+        max_targets: parseInt(document.getElementById('nwt-maxtargets')?.value, 10) || 1024,
+        concurrency: parseInt(document.getElementById('nwt-concurrency')?.value, 10) || 32,
+    };
+}
+
+async function saveNwTenantScanConfig(btn) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    const body = { scan: _nwtScanConfigBody() };
+    if (currentTenant) body.tenant = currentTenant;
+    try {
+        const r = await setupFetch('/api/nw/tenant-config', {
+            method: 'POST', body: JSON.stringify(body),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) showToast('Scan configuration saved.', 'success');
+        else showToast('Failed to save: ' + (d.detail || r.status), 'error');
+    } catch (e) {
+        showToast('Error saving: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save config'; }
+    }
+}
+
+async function saveNwTenantPollSchedule(btn) {
+    const numOrNull = (id, parse) => {
+        const el = document.getElementById(id);
+        if (!el || el.value === '') return null;
+        const n = parse(el.value);
+        return isNaN(n) ? null : n;
+    };
+    const body = {
+        poll: {
+            default_interval: numOrNull('nwt-poll-default', v => parseInt(v, 10)),
+            jitter_frac: numOrNull('nwt-poll-jitter', parseFloat),
+            max_per_tick: numOrNull('nwt-poll-maxtick', v => parseInt(v, 10)),
+            max_concurrency: numOrNull('nwt-poll-maxconc', v => parseInt(v, 10)),
+        },
+        scan_schedule: {
+            enabled: !!document.getElementById('nwt-sched-enabled')?.checked,
+            interval_seconds: parseInt(document.getElementById('nwt-sched-interval')?.value, 10) || 0,
+            dry_run: !!document.getElementById('nwt-sched-dryrun')?.checked,
+        },
+    };
+    if (currentTenant) body.tenant = currentTenant;
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        const r = await setupFetch('/api/nw/tenant-config', {
+            method: 'POST', body: JSON.stringify(body),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok) showToast(`Schedule & cadence saved${d.pushed ? ` (pushed to ${d.pushed} spoke${d.pushed === 1 ? '' : 's'})` : ''}.`, 'success');
+        else showToast('Failed to save: ' + (d.detail || r.status), 'error');
+    } catch (e) {
+        showToast('Error saving: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Save schedule & cadence'; }
+    }
+}
+
+async function runNwTenantScan(btn, dryRun) {
+    const out = document.getElementById('nwt-results');
+    const label = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = dryRun ? 'Scanning…' : 'Scanning & adding…'; }
+    if (out) out.innerHTML = '<p class="text-slate-400 italic animate-pulse">Scanning — this can take a while for large subnets…</p>';
+    const body = {
+        dry_run: !!dryRun,
+        auto_add: !dryRun,
+        crawl: !!document.getElementById('nwt-crawl')?.checked,
+        credential_ids: _nwtSelectedCreds(),
+        ip_sources: _nwtSources(),
+        subnets: _nwtParseList(document.getElementById('nwt-subnets')?.value),
+        targets: _nwtParseList(document.getElementById('nwt-targets')?.value),
+        max_targets: parseInt(document.getElementById('nwt-maxtargets')?.value, 10) || 1024,
+    };
+    if (currentTenant) body.tenant = currentTenant;
+    try {
+        const r = await setupFetch('/setup/nw-scan/run', {
+            method: 'POST', body: JSON.stringify(body),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { if (out) out.innerHTML = `<p class="text-red-500">Scan failed: ${escapeHtml(d.detail || String(r.status))}</p>`; return; }
+        _renderNwScanResults2(out, d);
+        if (!dryRun && (d.added || []).length) showToast(`Added ${d.added.length} discovered device(s).`, 'success');
+    } catch (e) {
+        if (out) out.innerHTML = `<p class="text-red-500">Error: ${escapeHtml(e.message)}</p>`;
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = label; }
+    }
+}
+
+// Tenant-tab variant of _renderNwScanResults (renders into a passed element).
+function _renderNwScanResults2(out, d) {
+    if (!out) return;
+    if (d.status === 'ok' && d.message && !(d.identified || []).length) {
+        out.innerHTML = `<p class="text-slate-500 italic mt-1">${escapeHtml(d.message)}</p>`;
+        return;
+    }
+    const rows = (d.added && d.added.length) ? d.added : (d.preview || []);
+    const srcTxt = Object.entries(d.sources || {}).map(([k, v]) => `${k}:${v}`).join(' · ') || 'none';
+    let html = `<div class="mt-2 p-3 bg-slate-50 border border-slate-200 rounded-md">
+        <p class="text-slate-600"><b>${d.targets || 0}</b> target(s) scanned (${escapeHtml(srcTxt)}) · <b>${(d.identified || []).length}</b> identified · <b>${d.dry_run ? (d.preview || []).length + ' to add (preview)' : (d.added || []).length + ' added'}</b></p>`;
+    if (rows.length) {
+        html += '<table class="w-full mt-2 text-left"><thead><tr class="text-slate-400 uppercase text-[10px]"><th class="py-1">Address</th><th>Type</th><th>Name</th><th>OS</th><th>Via</th></tr></thead><tbody>';
+        for (const dev of rows) {
+            html += `<tr class="border-t border-slate-100"><td class="py-1 font-mono">${escapeHtml(dev.address || '')}</td><td>${escapeHtml(dev.object_type || '')}</td><td>${escapeHtml(dev.name || dev.hostname || '')}</td><td>${escapeHtml(dev.os || '')}</td><td>${escapeHtml(dev.method || '')}</td></tr>`;
+        }
+        html += '</tbody></table>';
+    } else {
+        html += '<p class="text-slate-400 italic mt-1">No new manageable devices identified.</p>';
+    }
+    html += '</div>';
+    out.innerHTML = html;
 }
 
 // Render the device list for one category (click a row to open its detail).

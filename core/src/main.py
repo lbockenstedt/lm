@@ -2510,16 +2510,14 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 import access as _access
                 import instance_vault as _instance_vault
                 mine = await _instance_vault.overlay_many(self, mine, "nw_devices")
+                # Per-tenant poll knobs (jitter/caps/cadence): overlay the
+                # owning tenant's overrides on the global admin defaults so each
+                # tenant's spoke self-schedules with that tenant's settings.
+                _poll_cfg = _access.nw_poll_cfg_for_tenant(
+                    self, _access.nw_spoke_tenant(self, spoke_id))
                 config = {"devices": _project_nw_devices(mine),
                           "shared_tenant_id": _access.shared_tenant_id() or "",
-                          "default_poll_interval":
-                              self.state.get_global_config().get("nw_poll_default_interval"),
-                          "poll_jitter_frac":
-                              self.state.get_global_config().get("nw_poll_jitter_frac"),
-                          "max_poll_per_tick":
-                              self.state.get_global_config().get("nw_poll_max_per_tick"),
-                          "max_poll_concurrency":
-                              self.state.get_global_config().get("nw_poll_max_concurrency")}
+                          **_poll_cfg}
             elif module_key == 'truenas':
                 # TrueNAS (storage) fleet: one storage spoke manages many
                 # appliances. Push the appliances bound to this spoke; fall back
@@ -9387,6 +9385,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # on-demand "Sync now" via /setup/nw-netbox-import/run. See
         # run_nw_netbox_import_loop (NwDiscoverySyncMixin).
         nw_netbox_import_task = asyncio.create_task(self.run_nw_netbox_import_loop())
+        # Per-tenant recurring network scans: for each tenant that enabled a scan
+        # schedule (Network → Scan tab), run its scan on its nw spoke once per
+        # configured interval (≥1h). Shares the interactive scan pipeline via
+        # hub.run_nw_scheduled_scan (wired in routes/nw.py). See
+        # run_nw_scan_schedule_loop (NwDiscoverySyncMixin).
+        nw_scan_schedule_task = asyncio.create_task(self.run_nw_scan_schedule_loop())
         # TrueNAS → NetBox inventory-discovery sync: per schedule (or on-demand
         # "Sync now") pull the TrueNAS appliance fleet from every connected
         # storage spoke, map each appliance to a NetBox dcim.device record

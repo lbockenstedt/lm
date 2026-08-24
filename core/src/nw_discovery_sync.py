@@ -40,6 +40,7 @@ import asyncio
 import datetime as _dt
 import logging
 import re
+import time
 from typing import Any, Dict, List, Tuple
 
 try:
@@ -847,3 +848,52 @@ class NwDiscoverySyncMixin:
                             body=self.run_nw_netbox_import_all, delay=_delay,
                             error_label="nw netbox import loop failed",
                             error_delay=120)
+
+    # ── Recurring per-tenant network scans ───────────────────────────────────
+    async def run_nw_scan_schedule_loop(self):
+        """Drive per-tenant recurring network scans.
+
+        Each tenant may enable a schedule (``nw_tenant_cfg[tenant].scan_schedule``
+        with its own ``interval_seconds`` ≥ 1h, set from the tenant's Network →
+        Scan tab). This loop checks every 5 min and runs a tenant's scan once its
+        interval has elapsed. A tenant's FIRST scan is deferred one full interval
+        after enable/boot (anti-stampede). The scan itself is executed by
+        ``hub.run_nw_scheduled_scan`` (wired up in ``routes/nw.py`` at route
+        registration) so the credential/target/auto-add pipeline is shared with
+        the interactive scan — this loop only decides *when*.
+        """
+        await asyncio.sleep(150)  # stagger after boot (let spokes connect)
+        last_run: Dict[str, float] = {}
+        CHECK_INTERVAL = 300
+        while True:
+            try:
+                runner = getattr(self, "run_nw_scheduled_scan", None)
+                sched_for = getattr(self, "nw_scan_schedule_for_tenant", None)
+                if runner and sched_for and self.get_all_spokes_by_type("nw"):
+                    tenants = list((getattr(self.state, "tenant_state", {}) or {})
+                                   .get("tenants", {}) or {})
+                    now = time.monotonic()
+                    for tid in tenants:
+                        try:
+                            sc = sched_for(tid)
+                        except Exception:
+                            continue
+                        if not sc.get("enabled") or int(sc.get("interval_seconds") or 0) <= 0:
+                            last_run.pop(tid, None)
+                            continue
+                        if tid not in last_run:
+                            last_run[tid] = now  # first sight → defer one interval
+                            continue
+                        if (now - last_run[tid]) < int(sc["interval_seconds"]):
+                            continue
+                        last_run[tid] = now
+                        try:
+                            res = await runner(tid)
+                            logger.info("nw scheduled scan tenant=%s status=%s added=%d",
+                                        tid, (res or {}).get("status"),
+                                        len((res or {}).get("added", []) or []))
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("nw scheduled scan tenant=%s failed: %s", tid, e)
+            except Exception as e:  # noqa: BLE001 - loop must never die
+                logger.debug("nw scan schedule loop tick error: %s", e)
+            await asyncio.sleep(CHECK_INTERVAL)

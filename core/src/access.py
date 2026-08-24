@@ -916,6 +916,44 @@ def tenant_is_shared(tenant_id) -> bool:
     return bool(tenant_id) and tenant_id == _SHARED_TENANT_ID
 
 
+# ── NW per-tenant poll config (jitter / caps / default cadence) ──────────────
+# Global admin defaults live in global_config.nw_poll_* (set on Setup → Module
+# Management). A tenant-admin may override them for THEIR tenant under
+# global_config.nw_tenant_cfg[tenant_id]["poll"]; the override wins per-key,
+# else the global default applies. Both sites that build a spoke's UPDATE_CONFIG
+# payload (main.py on connect, routes/nw.py _nw_push_fleet on re-push) call this
+# with the spoke's owning tenant so each tenant's spoke gets that tenant's knobs.
+def nw_spoke_tenant(hub, spoke_id) -> str:
+    """Owning tenant_id of ``spoke_id`` from module_metadata ('' if unassigned)."""
+    try:
+        md = hub.state.system_state.get("module_metadata", {}) or {}
+        return (md.get(spoke_id, {}) or {}).get("tenant_id") or ""
+    except Exception:
+        return ""
+
+
+def nw_poll_cfg_for_tenant(hub, tenant_id) -> dict:
+    """Merged NW poll knobs for ``tenant_id``: per-tenant override
+    (``nw_tenant_cfg[tenant]['poll']``) falling back per-key to the global
+    admin defaults (``nw_poll_*``). Values may be None → the spoke applies its
+    own built-in default. Returns the four UPDATE_CONFIG payload keys."""
+    gc = hub.state.system_state.get("global_config", {}) or {}
+    ov = {}
+    if tenant_id:
+        ov = (((gc.get("nw_tenant_cfg") or {}).get(tenant_id) or {}).get("poll") or {})
+
+    def pick(okey, gkey):
+        v = ov.get(okey)
+        return v if v is not None else gc.get(gkey)
+
+    return {
+        "default_poll_interval": pick("default_interval", "nw_poll_default_interval"),
+        "poll_jitter_frac": pick("jitter_frac", "nw_poll_jitter_frac"),
+        "max_poll_per_tick": pick("max_per_tick", "nw_poll_max_per_tick"),
+        "max_poll_concurrency": pick("max_concurrency", "nw_poll_max_concurrency"),
+    }
+
+
 def spoke_visible_to_session(sess, tenant_id) -> bool:
     """Authoritative spoke/resource-LIST visibility by its owning tenant_id.
 
