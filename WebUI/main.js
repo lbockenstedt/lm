@@ -15366,8 +15366,11 @@ async function _myDevGenPsk() {
 }
 
 // Proxmox Host Agent install-command builder: lets a tenant-admin pick one of
-// their own connected hypervisor (pxmx) spokes from a dropdown instead of
-// hand-typing an IP, and pins --spoke-ip accordingly. uninstall.sh has no
+// their own connected agent-listener-hosting spokes from a dropdown instead of
+// hand-typing an IP, and pins --spoke-ip accordingly. The target listener is
+// hosted by EITHER a hypervisor (pxmx) spoke (always on) OR a simulation (cs)
+// spoke with the agent-listener role loaded (opt-in) — see the card's own
+// prose above — so both module types are offered here. uninstall.sh has no
 // remote/spoke-targeting flag at all (it only runs locally on the box being
 // removed), so only the install command is dynamic here.
 async function loadMyPxmxSpokes() {
@@ -15377,10 +15380,14 @@ async function loadMyPxmxSpokes() {
     if (!tenant) { _myDevPxmxUpdateInstall(); return; }
     try {
         const r = await apiJson(`/tenant/${encodeURIComponent(tenant)}/spokes`);
-        const rows = ((r && r.spokes) || []).filter((s) => s.module_type === 'hypervisor' && s.connected && s.approved && s.ip);
+        const rows = ((r && r.spokes) || []).filter((s) =>
+            (s.module_type === 'hypervisor' || s.module_type === 'simulation') && s.connected && s.approved && s.ip);
         const prior = sel.value;
         sel.innerHTML = '<option value="">— auto-discover (omit --spoke-ip) —</option>'
-            + rows.map((s) => `<option value="${escapeHtml(s.ip)}">${escapeHtml(s.display_name || s.spoke_id)} (${escapeHtml(s.ip)})</option>`).join('');
+            + rows.map((s) => {
+                const kind = s.module_type === 'hypervisor' ? 'pxmx' : 'cs';
+                return `<option value="${escapeHtml(s.ip)}">${escapeHtml(s.display_name || s.spoke_id)} (${kind}, ${escapeHtml(s.ip)})</option>`;
+            }).join('');
         if (prior && rows.some((s) => s.ip === prior)) sel.value = prior;
     } catch (e) {
         console.error('loadMyPxmxSpokes failed', e);
