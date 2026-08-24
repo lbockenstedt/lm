@@ -1455,7 +1455,7 @@ const VIEW_SUBMENUS = {
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
     dns: ['Records', 'Statistics', 'Forwarders', 'External DNS'],
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations'],
-    nw: ['Devices', 'IP Addresses', 'VLANs', 'MAC Table', 'ARP', 'Interfaces'],
+    nw: ['Gateways', 'Switches', 'Firewalls', 'Other'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
 };
 
@@ -4556,7 +4556,7 @@ function initView(viewId, subView) {
             loadDHCPData(subView || 'Overview');
             break;
         case 'nw':
-            loadNwData(subView || 'Devices');
+            loadNwData(subView || 'Gateways');
             break;
         case 'console':
             loadConsoleData();
@@ -16388,9 +16388,10 @@ const _NW_SUBVIEW_KEYS = {
 
 // Render one NW sub-resource table (shared by the per-device tabs and the
 // fused "All" tab so both look identical).
-function _nwSubViewTableHtml(subMenu, items) {
+function _nwSubViewTableHtml(subMenu, items, hideDevice) {
     let keys = _NW_SUBVIEW_KEYS[subMenu];
     if (!keys) keys = ['device', ...Object.keys(items[0] || {}).filter(k => k !== 'id' && k !== 'device' && !k.startsWith('_'))];
+    if (hideDevice) keys = keys.filter(k => k !== 'device');
     const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace(/_/g, ' ')}</th>`).join('');
     const rows = items.map(item => {
         const cells = keys.map(k => {
@@ -16412,54 +16413,164 @@ function _nwSubViewTableHtml(subMenu, items) {
     </div>`;
 }
 
-// Tab strip (one tab per device that returned rows, plus a fused "All") + the
-// active tab's table. In a large fleet the sub-views used to dump every
-// device's hundreds of rows into one table at once; tabbing scopes the display
-// to a single device by default (first tab active) so the page stays light.
-// This is display-only — cross-module search still queries every device
-// server-side (/api/search), so nothing is hidden from a lookup.
-function _nwSubViewHtml() {
-    const st = window._nwSubView;
+// Device-centric drill-down (replaces the old fleet-wide per-device tabs, which
+// didn't scale past a handful of devices). Flow: category tab (Gateways /
+// Switches / Firewalls / Other) → device list → a single device's detail with
+// lazy-loaded inner tabs (Overview / Interfaces / VLANs / MAC Table / ARP / IP
+// Addresses). Each detail tab fetches /api/nw/{id}/{suffix} for just that one
+// device on demand, so the page stays light no matter how large the fleet is.
+// Cross-module search still queries every device server-side (/api/search), so
+// nothing is hidden from a lookup.
+
+// object_type → category tab. Unknown/blank types fall through to 'Other' so a
+// new device kind still surfaces somewhere instead of vanishing.
+function _nwCategoryOf(objectType) {
+    switch (objectType) {
+        case 'gateway':
+            return 'Gateways';
+        case 'aos_switch': case 'cx_switch': case 'ex_switch':
+            return 'Switches';
+        case 'firewall': case 'opnsense':
+            return 'Firewalls';
+        default:
+            return 'Other';
+    }
+}
+
+// Inner detail tabs and the /api/nw/{id}/<suffix> each one fetches. 'Overview'
+// has no fetch (it renders the device meta already in hand).
+const _NW_DETAIL_TABS = ['Overview', 'Interfaces', 'VLANs', 'MAC Table', 'ARP', 'IP Addresses'];
+const _NW_DETAIL_SUFFIX = {
+    'Interfaces':   'interfaces',
+    'VLANs':        'vlans',
+    'MAC Table':    'macs',
+    'ARP':          'arp',
+    'IP Addresses': 'endpoints',  // fused ARP+MAC
+};
+
+// Open one device's detail view inside the nw container. Reuses the device meta
+// from the list we already fetched, plus a small per-tab cache so re-clicking a
+// tab doesn't refetch.
+window.nwOpenDevice = function (deviceId) {
+    const list = (window._nwView && window._nwView.devices) || [];
+    const dev = list.find(d => String(d.id) === String(deviceId));
+    if (!dev) return;
+    window._nwDetail = { dev, activeTab: 'Overview', cache: {} };
+    const c = document.getElementById('nw-table-container');
+    if (c) c.innerHTML = _nwDetailHtml();
+};
+
+// Back to the current category's device list (no refetch).
+window.nwBackToList = function () {
+    window._nwDetail = null;
+    if (window._nwView) _renderNwDeviceList(window._nwView.category, window._nwView.devices);
+};
+
+window.nwSelectDetailTab = function (tab) {
+    const st = window._nwDetail;
+    if (!st) return;
+    st.activeTab = tab;
+    const c = document.getElementById('nw-table-container');
+    if (c) c.innerHTML = _nwDetailHtml();
+    if (tab !== 'Overview') _nwLoadDetailTab(tab);
+};
+
+function _nwDetailHtml() {
+    const st = window._nwDetail;
     if (!st) return '';
-    const { subMenu, groups, order, active } = st;
-    const tabBtn = (devId, label, count, isActive) =>
-        `<button onclick="nwSelectDeviceTab('${escJsAttr(devId)}')" class="px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${isActive ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}">${escapeHtml(label)} <span class="opacity-60">(${count})</span></button>`;
-    const allCount = order.reduce((n, id) => n + groups[id].items.length, 0);
-    const tabs = [tabBtn('__all__', 'All', allCount, active === '__all__')]
-        .concat(order.map(id => tabBtn(id, groups[id].name, groups[id].items.length, active === id)))
-        .join('');
-    const items = active === '__all__'
-        ? order.reduce((acc, id) => acc.concat(groups[id].items), [])
-        : (groups[active] ? groups[active].items : []);
-    const errBanner = st.errorsCount ? `<div class="text-xs text-amber-600">${st.errorsCount} of ${st.devTotal} device(s) unreachable.</div>` : '';
-    const body = items.length
-        ? _nwSubViewTableHtml(subMenu, items)
-        : `<div class="py-12 text-center text-slate-400 italic">No ${escapeHtml(subMenu)} on this device.</div>`;
+    const dev = st.dev;
+    const typeLabel = _NW_OBJECT_TYPES[dev.object_type] || dev.object_type || '—';
+    const transport = _NW_TRANSPORTS[dev.transport] || dev.transport || 'auto';
+    const reachable = dev.reachable;
+    const rcell = reachable === true || reachable === 'up'
+        ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">up</span>'
+        : reachable === false || reachable === 'down'
+            ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
+            : '<span class="text-slate-400 text-xs">—</span>';
+    const cat = (window._nwView && window._nwView.category) || 'Devices';
+    const tabs = _NW_DETAIL_TABS.map(t =>
+        `<button onclick="nwSelectDetailTab('${escJsAttr(t)}')" class="px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${t === st.activeTab ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}">${escapeHtml(t)}</button>`
+    ).join('');
+
+    let body;
+    if (st.activeTab === 'Overview') {
+        const cfg = (isAdmin() || isTenantAdmin())
+            ? `<div class="flex gap-2 mt-3 pt-3 border-t border-slate-100">
+                 <button onclick="pollNwDevice('${escJsAttr(dev.id)}','${escJsAttr(dev.name || dev.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium">Poll Now</button>
+                 <button onclick="showNwConfigModal('${escJsAttr(dev.id)}','${escJsAttr(dev.name || dev.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Configure</button>
+               </div>`
+            : '';
+        const metaRow = (k, v) => `<div class="flex justify-between py-1.5 border-b border-slate-100 last:border-0"><span class="text-xs text-slate-400 uppercase tracking-wider">${k}</span><span class="text-xs text-slate-700 font-mono">${v}</span></div>`;
+        body = `<div class="rounded-md border border-slate-200 bg-white p-4 max-w-lg">
+            ${metaRow('Type', escapeHtml(typeLabel))}
+            ${metaRow('Transport', escapeHtml(transport))}
+            ${metaRow('Address', escapeHtml(dev.address || '—'))}
+            ${metaRow('Reachable', rcell)}
+            ${cfg}
+        </div>`;
+    } else {
+        body = st.cache[st.activeTab] !== undefined
+            ? st.cache[st.activeTab]
+            : `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching ${escapeHtml(st.activeTab)}…</div>`;
+    }
+
     return `<div class="space-y-3">
-        ${errBanner}
+        <div class="flex items-center gap-3">
+            <button onclick="nwBackToList()" class="text-xs text-slate-500 hover:text-slate-700 font-medium">← ${escapeHtml(cat)}</button>
+            <h3 class="text-sm font-bold text-slate-700">${escapeHtml(dev.name || dev.id)}</h3>
+            ${rcell}
+        </div>
         <div class="flex flex-wrap gap-1.5">${tabs}</div>
         ${body}
     </div>`;
 }
-window.nwSelectDeviceTab = function (devId) {
-    if (window._nwSubView) window._nwSubView.active = devId;
-    const c = document.getElementById('nw-table-container');
-    if (c) c.innerHTML = _nwSubViewHtml();
-};
 
-// Devices → fleet list (/api/nw/devices); IP Addresses / VLANs / MAC Table / ARP
-// / Interfaces → per-device fetch merged across the fleet
-// (/api/nw/{id}/{endpoints|vlans|macs|arp|interfaces}); IP Addresses fuses the
-// ARP/user-table with the MAC/bridge table on MAC (unique IP+MAC per client),
-// each row tagged with its source device (_deviceId / device). Results are
-// rendered as per-device tabs (see _nwSubViewHtml). ?tenant= scopes the
-// server-side subnet filter to the selected tenant (incl. admins via the
-// switcher); without it admins bypass the filter (see access.filter_nw).
-async function loadNwData(subMenu) {
+// Lazy-fetch a single device's sub-resource for the active detail tab, cache the
+// rendered table, then repaint if the user is still on that tab. Best-effort: a
+// device/spoke error renders an inline note instead of blanking the page.
+async function _nwLoadDetailTab(tab) {
+    const st = window._nwDetail;
+    if (!st) return;
+    if (st.cache[tab] !== undefined) return;  // already rendered by _nwDetailHtml
+    const suffix = _NW_DETAIL_SUFFIX[tab];
+    if (!suffix) return;
+    const tenantQs = currentTenant ? `?tenant=${encodeURIComponent(currentTenant)}` : '';
+    let html;
+    try {
+        const r = await fetch(`/api/nw/${st.dev.id}/${suffix}${tenantQs}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = await r.json();
+        let items = Array.isArray(data)
+            ? data
+            : (Array.isArray(data?.data) ? data.data : (Array.isArray(data?.payload?.data) ? data.payload.data : []));
+        html = items.length
+            ? _nwSubViewTableHtml(tab, items, true)
+            : `<div class="py-12 text-center text-slate-400 italic">No ${escapeHtml(tab)} on this device.</div>`;
+    } catch (err) {
+        html = `<div class="py-12 text-center text-amber-600 italic">Could not load ${escapeHtml(tab)}: ${escapeHtml(err.message)}</div>`;
+    }
+    st.cache[tab] = html;
+    if (window._nwDetail === st && st.activeTab === tab) {
+        const c = document.getElementById('nw-table-container');
+        if (c) c.innerHTML = _nwDetailHtml();
+    }
+}
+// Category tab loader (Gateways / Switches / Firewalls / Other). Lists the fleet
+// once, filters to the selected category, and renders a device list; drilling
+// into a device lazy-loads its per-resource detail (see nwOpenDevice). ?tenant=
+// scopes the server-side subnet filter to the selected tenant (incl. admins via
+// the switcher); without it admins bypass the filter (see access.filter_nw).
+async function loadNwData(category) {
     const container = document.getElementById('nw-table-container');
     if (!container) return;
-    subMenu = subMenu || currentSubView;
-    container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching ${subMenu} data…</div>`;
+    category = category || currentSubView;
+    // Map any stale/legacy submenu value (a cached currentSubView from the old
+    // data-type tabs, or a deep link) onto a real category so the page never
+    // blanks.
+    const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'Other'];
+    if (!CATEGORIES.includes(category)) category = 'Gateways';
+    window._nwDetail = null;
+    container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Loading ${escapeHtml(category)}…</div>`;
 
     // Suppress the per-view "+ Add" action strip for nw (no add-from-view flow;
     // devices are managed on Setup → Network Devices).
@@ -16467,145 +16578,78 @@ async function loadNwData(subMenu) {
     if (actions) actions.innerHTML = '';
 
     const tenantQs = currentTenant ? `?tenant=${encodeURIComponent(currentTenant)}` : '';
-
+    let r;
     try {
-        if (subMenu === 'Devices') {
-            let r;
-            try {
-                r = await fetch(`/api/nw/devices${tenantQs}`);
-            } catch (e) {
-                container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Network Devices spoke not connected. Approve one in Setup → Spokes & Agents.</div>`;
-                return;
-            }
-            if (!r.ok) {
-                container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Network Devices spoke not connected (HTTP ${r.status}).</div>`;
-                return;
-            }
-            const data = await r.json();
-            const items = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
-            const addServerRow = `<div class="flex justify-end mb-2">${addServerButtonHtml('nw', 'Network Devices')}</div>`;
-            if (!items.length) {
-                container.innerHTML = addServerRow +
-                    `<div class="py-12 text-center text-slate-400 italic">No network devices configured. Add one in Setup → Network Devices.</div>`;
-                return;
-            }
-            const keys = ['device', 'object_type', 'transport', 'address', 'reachable'];
-            const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace(/_/g, ' ')}</th>`).join('');
-            const rows = items.map((it, idx) => {
-                const typeLabel = _NW_OBJECT_TYPES[it.object_type] || it.object_type || '—';
-                const transport = _NW_TRANSPORTS[it.transport] || it.transport || 'auto';
-                const reachable = it.reachable;
-                const rcell = reachable === true || reachable === 'up'
-                    ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">up</span>'
-                    : reachable === false || reachable === 'down'
-                        ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
-                        : `<span class="text-slate-400 text-xs">—</span>`;
-                const cfg = (isAdmin() || isTenantAdmin())
-                    ? `<button onclick="pollNwDevice('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3">Poll Now</button>` +
-                      `<button onclick="showNwConfigModal('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Configure</button>`
-                    : '';
-                return `<tr class="hover:bg-slate-50 transition-colors">
-                    <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}</td>
-                    <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(typeLabel)}</td>
-                    <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(transport)}</td>
-                    <td class="px-4 py-3 text-slate-600 font-mono text-xs">${escapeHtml(it.address || '—')}</td>
-                    <td class="px-4 py-3">${rcell}</td>
-                    <td class="px-4 py-3 text-right">${cfg}</td>
-                </tr>`;
-            }).join('');
-            container.innerHTML = addServerRow + `
-                <div class="space-y-4">
-                    <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
-                        <table class="w-full text-left text-sm">
-                            <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}<th class="px-4 py-3"></th></tr></thead>
-                            <tbody class="divide-y divide-slate-200">${rows}</tbody>
-                        </table>
-                    </div>
-                </div>`;
-            return;
-        }
-
-        const suffixFor = sm => {
-            if (sm === 'MAC Table') return 'macs';
-            if (sm === 'ARP') return 'arp';
-            if (sm === 'Interfaces') return 'interfaces';
-            if (sm === 'IP Addresses') return 'endpoints';  // fused ARP+MAC
-            if (sm === 'VLANs') return 'vlans';
-            return null;
-        };
-        const suffix = suffixFor(subMenu);
-        if (!suffix) return;
-
-        // List the fleet first, then fetch the per-device sub-resource in
-        // parallel and merge into one table tagged with _deviceId.
-        let devList = [];
-        try {
-            const dr = await fetch(`/api/nw/devices`);
-            if (dr.ok) {
-                const dd = await dr.json();
-                devList = Array.isArray(dd) ? dd : (Array.isArray(dd?.data) ? dd.data : []);
-            }
-        } catch (e) { /* spoke down handled below */ }
-        if (!devList.length) {
-            container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Network Devices spoke not connected or no devices configured.</div>`;
-            return;
-        }
-
-        const results = await Promise.allSettled(devList.map(d =>
-            fetch(`/api/nw/${d.id}/${suffix}${tenantQs}`)
-                .then(r => r.ok ? r.json() : Promise.reject(new Error(`${r.status} ${r.statusText}`)))
-                .then(data => ({ dev: d, data }))
-        ));
-        const extractItems = data => {
-            if (Array.isArray(data)) return data;
-            if (data && typeof data === 'object') {
-                if (Array.isArray(data.data)) return data.data;
-                if (Array.isArray(data.payload?.data)) return data.payload.data;
-            }
-            return [];
-        };
-        let items = [];
-        const errors = [];
-        results.forEach(res => {
-            if (res.status === 'fulfilled') {
-                items = items.concat(extractItems(res.value.data).map(it => ({
-                    ...it, _deviceId: res.value.dev.id, device: res.value.dev.name || res.value.dev.id
-                })));
-            } else {
-                errors.push(String((res.reason && res.reason.message) || res.reason));
-            }
-        });
-
-        if (!items.length) {
-            const errNote = errors.length ? `<div class="text-xs text-amber-600 mt-2">${errors.length} device(s) unreachable.</div>` : '';
-            container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No ${subMenu} found.${errNote}</div>`;
-            return;
-        }
-
-        // Group rows by source device and render as tabs (default: first
-        // device) so a large fleet doesn't dump every device's rows at once.
-        const byDev = {};
-        items.forEach(it => { (byDev[it._deviceId] = byDev[it._deviceId] || []).push(it); });
-        const order = [];
-        const groups = {};
-        devList.forEach(d => {
-            const rows = byDev[d.id];
-            if (rows && rows.length) {
-                order.push(d.id);
-                groups[d.id] = { name: d.name || d.id, items: rows };
-            }
-        });
-        window._nwSubView = {
-            subMenu, groups, order,
-            active: order[0] || '__all__',
-            errorsCount: errors.length,
-            devTotal: devList.length,
-        };
-        container.innerHTML = _nwSubViewHtml();
+        r = await fetch(`/api/nw/devices${tenantQs}`);
+    } catch (e) {
+        container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Network Devices spoke not connected. Approve one in Setup → Spokes & Agents.</div>`;
+        return;
+    }
+    if (!r.ok) {
+        container.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Network Devices spoke not connected (HTTP ${r.status}).</div>`;
+        return;
+    }
+    let items;
+    try {
+        const data = await r.json();
+        items = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
     } catch (err) {
         console.error(`[Network] Error in loadNwData:`, err);
-        container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading ${subMenu}: ${err.message}</div>`;
+        container.innerHTML = `<div class="py-12 text-center text-red-500 font-medium">Error loading devices: ${escapeHtml(err.message)}</div>`;
+        return;
     }
+    const devices = items.filter(it => _nwCategoryOf(it.object_type) === category);
+    window._nwView = { category, devices };
+    _renderNwDeviceList(category, devices);
+}
+
+// Render the device list for one category (click a row to open its detail).
+// Kept separate from loadNwData so the detail back-button can repaint the list
+// without a refetch.
+function _renderNwDeviceList(category, devices) {
+    const container = document.getElementById('nw-table-container');
+    if (!container) return;
+    const addServerRow = `<div class="flex justify-end mb-2">${addServerButtonHtml('nw', 'Network Devices')}</div>`;
+    if (!devices.length) {
+        container.innerHTML = addServerRow +
+            `<div class="py-12 text-center text-slate-400 italic">No ${escapeHtml(category.toLowerCase())} configured. Add one in Setup → Network Devices.</div>`;
+        return;
+    }
+    const keys = ['device', 'object_type', 'transport', 'address', 'reachable'];
+    const headers = keys.map(k => `<th class="px-4 py-3">${k.toUpperCase().replace(/_/g, ' ')}</th>`).join('');
+    const rows = devices.map(it => {
+        const typeLabel = _NW_OBJECT_TYPES[it.object_type] || it.object_type || '—';
+        const transport = _NW_TRANSPORTS[it.transport] || it.transport || 'auto';
+        const reachable = it.reachable;
+        const rcell = reachable === true || reachable === 'up'
+            ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">up</span>'
+            : reachable === false || reachable === 'down'
+                ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
+                : `<span class="text-slate-400 text-xs">—</span>`;
+        // event.stopPropagation() keeps the Poll/Configure buttons from also
+        // triggering the row's drill-into-detail click.
+        const cfg = (isAdmin() || isTenantAdmin())
+            ? `<button onclick="event.stopPropagation();pollNwDevice('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3">Poll Now</button>` +
+              `<button onclick="event.stopPropagation();showNwConfigModal('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Configure</button>`
+            : '';
+        return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer">
+            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}</td>
+            <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(typeLabel)}</td>
+            <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(transport)}</td>
+            <td class="px-4 py-3 text-slate-600 font-mono text-xs">${escapeHtml(it.address || '—')}</td>
+            <td class="px-4 py-3">${rcell}</td>
+            <td class="px-4 py-3 text-right whitespace-nowrap">${cfg}<span class="text-slate-300 ml-2">›</span></td>
+        </tr>`;
+    }).join('');
+    container.innerHTML = addServerRow + `
+        <div class="space-y-4">
+            <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
+                <table class="w-full text-left text-sm">
+                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}<th class="px-4 py-3"></th></tr></thead>
+                    <tbody class="divide-y divide-slate-200">${rows}</tbody>
+                </table>
+            </div>
+        </div>`;
 }
 
 // Storage (TrueNAS) — Appliances → fleet list (/api/truenas/appliances);
