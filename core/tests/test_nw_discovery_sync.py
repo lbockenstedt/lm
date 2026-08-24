@@ -129,6 +129,29 @@ def _global_config():
     }
 
 
+# ── reconcile_nw_device_name: reset stored display name to the box hostname ───
+
+def test_reconcile_name_updates_when_hostname_differs():
+    hub = _SyncHub(global_config=_global_config())
+    cfg = {"id": "core-sw1", "name": "core-sw1"}
+    changed = hub.reconcile_nw_device_name(cfg, {"hostname": "DIST-SW"})
+    assert changed is True
+    assert cfg["name"] == "DIST-SW"
+
+
+def test_reconcile_name_noop_when_matching_or_absent():
+    hub = _SyncHub(global_config=_global_config())
+    # Already matches → no change.
+    cfg = {"id": "x", "name": "DIST-SW"}
+    assert hub.reconcile_nw_device_name(cfg, {"hostname": "DIST-SW"}) is False
+    assert cfg["name"] == "DIST-SW"
+    # Poll read no hostname → never clobbers the existing name.
+    cfg2 = {"id": "y", "name": "friendly-name"}
+    assert hub.reconcile_nw_device_name(cfg2, {"hostname": ""}) is False
+    assert hub.reconcile_nw_device_name(cfg2, {}) is False
+    assert cfg2["name"] == "friendly-name"
+
+
 def _hub_with_responses(netbox_spoke="netbox-1", nw_spokes=None):
     return _SyncHub(
         responses={

@@ -395,6 +395,26 @@ def register(app, hub, ctx):
                    and (is_admin or access.spoke_visible_to_session(sess, d.get("tenant_id", "")))]
         visible_ids = {d.get("id") for d in visible if d.get("id")}
 
+        # The hub config ``name`` is authoritative for the DISPLAY name (it's
+        # reconciled to the box's real hostname on each poll —
+        # reconcile_nw_device_name). Overlay it onto the served rows so a name
+        # reset shows immediately, regardless of what the spoke row / cache
+        # still carries. Builds fresh row dicts (never mutates the cache).
+        name_by_id = {d.get("id"): str(d.get("name")).strip()
+                      for d in visible
+                      if d.get("id") and str(d.get("name") or "").strip()}
+
+        def _overlay_names(env):
+            if not isinstance(env, dict):
+                return env
+            rows = env.get("data")
+            if isinstance(rows, list):
+                env = {**env, "data": [
+                    ({**r, "name": name_by_id[r.get("id")]}
+                     if isinstance(r, dict) and name_by_id.get(r.get("id")) else r)
+                    for r in rows]}
+            return env
+
         # Resolve the connected, approved nw spoke(s) to query for live data.
         # Admin → every connected nw spoke (whole fleet per spoke, no tenant
         # filter). Non-admin → the spoke(s) bound to the reader's own tenant(s)
@@ -430,7 +450,7 @@ def register(app, hub, ctx):
                      or access.spoke_visible_to_session(sess, r.get("tenant_id", "")))
         cached = None if force else hub.nw_cache_get_fleet_filtered(predicate)
         if cached is not None:
-            out = dict((cached.get("devices") or {}))
+            out = dict(_overlay_names(dict(cached.get("devices") or {})))
             out["cached"] = True
             out["fetched_at"] = cached.get("fetched_at")
             if not spokes:
@@ -483,7 +503,7 @@ def register(app, hub, ctx):
                 await hub.nw_cache_set_fleet(env)
             except Exception:
                 logger.debug("nw_list_devices: cache set failed", exc_info=True)
-        return env
+        return _overlay_names(env)
 
     @app.get("/api/nw/{device_id}/{endpoint}")
     async def nw_get_device_data(request: Request, device_id: str, endpoint: str,

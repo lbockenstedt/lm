@@ -469,6 +469,9 @@ class NwDiscoverySyncMixin:
                            and d.get("id") == device_id), None)
         if not device_cfg:
             return
+        # Reconcile the stored display name to the hostname actually configured
+        # on the box (best-effort; only when the poll read one and it differs).
+        self.reconcile_nw_device_name(device_cfg, pdata.get("device_info") or {})
         try:
             _push, errs, _slug = await self.push_nw_device_inventory(
                 device_cfg, pdata.get("device_info") or {},
@@ -478,6 +481,32 @@ class NwDiscoverySyncMixin:
         except Exception as e:
             logger.warning("[sync-error] nw auto-poll NetBox push %s: %s",
                            device_id, e)
+
+    def reconcile_nw_device_name(self, device_cfg: Dict[str, Any],
+                                 device_info: Dict[str, Any]) -> bool:
+        """Reset a device's stored NW Devices display ``name`` to the hostname
+        actually configured on the box, read from a poll/info gather
+        (``device_info["hostname"]`` — AOS-S 'System Name', SNMP sysName, or the
+        CLI prompt token). No-op when the poll read no hostname or it already
+        matches. The hub config is the authoritative display name; the list
+        route overlays it onto the served rows so the change shows immediately.
+        Returns True iff the name changed (persisted via ``_mark_dirty``)."""
+        if not isinstance(device_info, dict):
+            return False
+        hostname = str(device_info.get("hostname") or "").strip()
+        if not hostname:
+            return False
+        current = str(device_cfg.get("name") or "").strip()
+        if hostname == current:
+            return False
+        device_cfg["name"] = hostname
+        try:
+            self.state._mark_dirty()
+        except Exception:  # noqa: BLE001 - persistence is best-effort
+            logger.debug("nw name reconcile: mark_dirty failed", exc_info=True)
+        logger.info("nw: reset device %s display name '%s' -> '%s' (device hostname)",
+                    device_cfg.get("id"), current or "(unset)", hostname)
+        return True
 
     async def poll_nw_device(self, device_id: str) -> Dict[str, Any]:
         """POLL NOW for one network device: send ``NW_POLL`` to the owning nw
@@ -548,6 +577,7 @@ class NwDiscoverySyncMixin:
         # 2+3) Attribute tenant + push the device inventory to NetBox (shared
         # with the spoke-driven auto-poll via push_nw_device_inventory, which
         # also returns the resolved tenant_slug for the poll report).
+        self.reconcile_nw_device_name(device_cfg, device_info)
         netbox_push, push_errors, tenant_slug = await self.push_nw_device_inventory(
             device_cfg, device_info, interfaces)
         errors.extend(push_errors)
