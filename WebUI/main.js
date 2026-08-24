@@ -16610,23 +16610,14 @@ async function loadNwData(category) {
 
 // Render the device list for one category (click a row to open its detail).
 // Kept separate from loadNwData so the detail back-button can repaint the list
-// without a refetch. `counts` (per-category fleet totals) drives a small
-// summary strip so devices in OTHER categories are always visible + one click
-// away — a single-device category never looks empty/"removed".
+// without a refetch. `counts` (per-category fleet totals) feeds only the
+// empty-state hint (points at where devices actually are); the always-visible
+// top-level category tabs (VIEW_SUBMENUS.nw) are the single category nav.
 function _renderNwDeviceList(category, devices, counts) {
     const container = document.getElementById('nw-table-container');
     if (!container) return;
     counts = counts || (window._nwView && window._nwView.counts) || {};
-    // Clickable breadcrumb of every category that has devices (active one
-    // highlighted). setSubView keeps the top-nav tab state in sync.
     const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'Other'];
-    const total = CATEGORIES.reduce((n, c) => n + (counts[c] || 0), 0);
-    const summary = total ? `<div class="flex flex-wrap items-center gap-1.5 mb-3 text-xs">
-        <span class="text-slate-400 mr-1">${total} device${total === 1 ? '' : 's'}:</span>
-        ${CATEGORIES.filter(c => counts[c]).map(c =>
-            `<button onclick="setSubView('${c}')" class="px-2 py-0.5 rounded-full font-semibold transition-colors ${c === category ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'text-slate-500 hover:bg-slate-100 border border-slate-200'}">${escapeHtml(c)} <span class="opacity-60">(${counts[c]})</span></button>`
-        ).join('')}
-    </div>` : '';
     const addServerRow = `<div class="flex justify-end mb-2">${addServerButtonHtml('nw', 'Network Devices')}</div>`;
     if (!devices.length) {
         // Point the user at where devices actually are instead of a dead end.
@@ -16634,7 +16625,7 @@ function _renderNwDeviceList(category, devices, counts) {
         const hint = elsewhere.length
             ? `No ${escapeHtml(category.toLowerCase())} configured — devices are under ${elsewhere.map(c => `<button onclick="setSubView('${c}')" class="text-[#01A982] hover:underline font-semibold">${escapeHtml(c)} (${counts[c]})</button>`).join(', ')}.`
             : `No ${escapeHtml(category.toLowerCase())} configured. Add one in Setup → Network Devices.`;
-        container.innerHTML = addServerRow + summary +
+        container.innerHTML = addServerRow +
             `<div class="py-12 text-center text-slate-400 italic">${hint}</div>`;
         return;
     }
@@ -16664,7 +16655,7 @@ function _renderNwDeviceList(category, devices, counts) {
             <td class="px-4 py-3 text-right whitespace-nowrap">${cfg}<span class="text-slate-300 ml-2">›</span></td>
         </tr>`;
     }).join('');
-    container.innerHTML = addServerRow + summary + `
+    container.innerHTML = addServerRow + `
         <div class="space-y-4">
             <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
                 <table class="w-full text-left text-sm">
