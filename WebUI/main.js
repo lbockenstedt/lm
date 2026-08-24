@@ -15325,7 +15325,7 @@ async function loadMyDeviceAgents() {
                 ? `<button onclick="_myDevApproveAgent('${eSpk}', '${eAid}')" class="px-2.5 py-1 rounded-md text-[11px] font-bold bg-white hover:bg-green-50 text-green-700 border border-green-300 transition-colors">Approve</button>`
                 : '';
             return `<div class="flex items-center justify-between border border-slate-100 rounded-md px-3 py-2">
-                <div><span class="text-sm font-medium text-slate-700">${escapeHtml(a.hostname || a.agent_id)}</span>
+                <div><span class="text-sm font-medium text-slate-700">${escapeHtml(String(a.hostname || a.agent_id || '').toUpperCase())}</span>
                 <span class="ml-2 text-[11px] text-slate-400 font-mono">via ${escapeHtml(a.spoke_id || '—')}</span></div>
                 <div class="flex items-center gap-2">${badge}${approveBtn}</div></div>`;
         }).join('');
