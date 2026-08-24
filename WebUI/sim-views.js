@@ -1616,26 +1616,17 @@ let csClientTier = 'all'; // 'all' | 't1' | 't2' | 't3' | 'offline'
 // counts reflect the OTHER active facets (standard faceted counting).
 let csFacet = { sim: null, tier: null, site: null, notWorking: null };
 
-// Sims that DELIBERATELY break association/auth — a client running one is
-// SUPPOSED to be unreachable, so it's excluded from "not working" the same
-// way it's excluded from the Fleet Health working/eligible ratio (see
-// service.py's _fleet_health — keep this list in exact sync with that one).
-const CS_FLEET_HEALTH_EXCLUSIVE_SIMS = new Set(
-    ['ssidpw_fail', 'auth_fail', 'mac_auth_fail', 'assoc_fail', 'port_flap']);
-
-// "Not working" = the Clients::Offline tab's filter — the same criterion
-// Fleet Health counts against eligible (online AND gateway_reachable),
-// inverted, MINUS clients intentionally running an exclusive failure sim
-// (those are supposed to be unreachable — nothing to troubleshoot there).
-// Uses the RAW active_simulations field, not the override-resolved
-// csClientActiveSims(), to match _fleet_health's own c.get("active_simulations")
-// exactly — a client's resolved/effective flags aren't what it's actually
-// doing on the wire right now.
+// "Not working" = the Clients::Offline tab's filter. Matches _fleet_health's
+// API-check-in basis EXACTLY: a client is WORKING iff it is checking into the
+// API (online == a recent heartbeat). That heartbeat rides a backend network
+// independent of any SSID/gateway, so EVERY client must report in — even ones
+// intentionally running a connectivity-failure sim (auth_fail, ssidpw_fail,
+// assoc_fail, mac_auth_fail, port_flap, …). Previously this ANDed in
+// gateway_reachable (false-by-design for a client that never associates) and
+// excluded those failure sims, which wrongly listed API-healthy/green clients
+// (reporting fine) under "offline / not working" — the reported bug.
 function csClientNotWorking(c) {
-    const sims = (Array.isArray(c.active_simulations) ? c.active_simulations : [])
-        .map(s => String(s).toLowerCase());
-    if (sims.some(s => CS_FLEET_HEALTH_EXCLUSIVE_SIMS.has(s))) return false;
-    return !(c.online && c.gateway_reachable);
+    return !c.online;
 }
 // Client-list paging: 10 per page by default; the user can pick up to 100 from
 // a selector at the bottom of the table. Capping the page size at 100 also keeps
