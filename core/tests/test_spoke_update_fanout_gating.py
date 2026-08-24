@@ -412,3 +412,79 @@ async def test_relayed_cs_agent_without_metadata_not_fanned_out(patched_clock):
     assert all(_RELAYED_CS_AGENT not in r for r in agents)
     # The legit module spoke still fans out normally.
     assert "lm-opnsense-spoke-1" in pushed_ids
+
+
+# --- In-lm-repo spoke static-asset gate (proxy/dns/dhcp share the hub repo) ---
+_AGENT_REPO = "https://github.com/lbockenstedt/agent-src.git"
+
+
+class _ProxyStubHub(_StubHub):
+    """A PROXY spoke (module_type in _IN_LM_REPO_MODULE_TYPES) sourced from the
+    'agent' update_sources key. That key is pointed at a DISTINCT repo (not the
+    lm/hub repo) so the hub's own self-update stays dormant while the proxy's
+    tip is independently controllable via ``remote_tip``. The real git-diff
+    probe is replaced by ``static_only`` so the WebUI/docs-only vs real-code
+    decision is deterministic."""
+
+    def __init__(self, remote_tip, static_only=False):
+        super().__init__(remote_tip)
+        self.state = _State({
+            "update_sources": {"opnsense": OPNSENSE_REPO, "agent": _AGENT_REPO},
+            "global_branch": "main",
+        })
+        self.state.system_state["module_metadata"] = {
+            "lm-proxy-spoke-1": {"module_type": "proxy"}}
+        self.approved_modules = {"lm-proxy-spoke-1": True}
+        self.active_connections = {"lm-proxy-spoke-1": object()}
+        self._static_only = static_only
+
+    def latest_version_for_module(self, module_type):
+        return None  # never "behind" → isolates the static-asset gate branch
+
+    async def _only_static_paths_between(self, hub_root, from_commit, to_commit):
+        if not from_commit or not to_commit:
+            return False  # fail-closed like the real probe (no prior marker)
+        return self._static_only
+
+
+@pytest.mark.asyncio
+async def test_inrepo_static_only_change_suppresses_push_but_advances_marker(patched_clock):
+    hub = _ProxyStubHub(remote_tip="ddd1", static_only=True)
+    # First cycle: no marker yet → gate fails closed → normal push, marker=ddd1.
+    await hub.perform_update()
+    assert len(hub.pushes) == 1
+    assert hub.state.get_global_config()["spoke_update_commits"][
+        "lm-proxy-spoke-1"] == "ddd1"
+    # Tip advances but the whole delta is static assets → suppress the restart,
+    # yet advance the marker so we don't re-evaluate the same delta forever.
+    hub._remote_tip = "ddd2"
+    patched_clock.advance(_COOLDOWN_S + 1)
+    await hub.perform_update()
+    assert len(hub.pushes) == 1  # no restart
+    assert hub.state.get_global_config()["spoke_update_commits"][
+        "lm-proxy-spoke-1"] == "ddd2"  # marker still advanced
+
+
+@pytest.mark.asyncio
+async def test_inrepo_real_code_change_still_pushes(patched_clock):
+    hub = _ProxyStubHub(remote_tip="ddd1", static_only=False)
+    await hub.perform_update()
+    assert len(hub.pushes) == 1
+    # Tip advances with a real (non-static) code change → must still fan out.
+    hub._remote_tip = "ddd2"
+    patched_clock.advance(_COOLDOWN_S + 1)
+    await hub.perform_update()
+    assert len(hub.pushes) == 2
+    assert hub.state.get_global_config()["spoke_update_commits"][
+        "lm-proxy-spoke-1"] == "ddd2"
+
+
+@pytest.mark.asyncio
+async def test_inrepo_static_gate_bypassed_by_force(patched_clock):
+    hub = _ProxyStubHub(remote_tip="ddd1", static_only=True)
+    await hub.perform_update()
+    assert len(hub.pushes) == 1
+    # A manual Update (force) must ALWAYS push, even for a static-only delta.
+    hub._remote_tip = "ddd2"
+    await hub.perform_update(force=True)
+    assert len(hub.pushes) == 2

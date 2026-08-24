@@ -1107,6 +1107,33 @@ class UpdatePipelineMixin:
             logger.warning(f"_git_changed_paths failed ({_e}) — assuming a restart is needed")
             return None
 
+    async def _only_static_paths_between(self, hub_root: str, from_commit, to_commit) -> bool:
+        """True iff EVERY path changed between *from_commit* and *to_commit* is a
+        no-restart static asset (WebUI/docs/etc, per ``_paths_need_restart``).
+
+        FAIL-CLOSED: returns False (→ the spoke IS pushed/restarted) on any
+        uncertainty — unknown/missing endpoints, a git failure, or an empty
+        diff. Mis-suppressing a needed update strands a spoke on stale runtime
+        code, which is far worse than an unnecessary bounce; so we only suppress
+        when we can positively prove the whole delta is inert static assets.
+        """
+        if not from_commit or not to_commit or from_commit in ("", "unknown") or to_commit in ("", "unknown"):
+            return False
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                f"cd {hub_root} && git diff --name-only {from_commit}..{to_commit}",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            out, _err = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+            if proc.returncode != 0:
+                return False
+            paths = [ln for ln in out.decode("utf-8", "replace").splitlines() if ln.strip()]
+            if not paths:
+                return False
+            return not self._paths_need_restart(paths)
+        except Exception as _e:  # noqa: BLE001 — never fatal; caller pushes on failure
+            logger.warning(f"_only_static_paths_between failed ({_e}) — assuming a restart is needed")
+            return False
+
     async def _detect_stale_process(self) -> bool:
         """True when the RUNNING process is older than the code on disk.
 
@@ -1618,6 +1645,7 @@ class UpdatePipelineMixin:
         for _stale in [sid for sid in pushed_ts if sid not in _approved_ids]:
             pushed_ts.pop(_stale, None)
             commits_changed = True
+        _selfupdate_hub_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../"))
         for repo_url, spoke_ids in repo_spokes.items():
             tip = await self.get_remote_commit(repo_url, branch)
             for sid in spoke_ids:
@@ -1641,6 +1669,24 @@ class UpdatePipelineMixin:
                 at_tip = tip != "unknown" and last_pushed.get(sid) == tip
                 if not spoke_force and at_tip and not behind:
                     update_results.append(f"{sid}: up-to-date ({repo_url})")
+                    continue
+                # In-lm-repo spokes (proxy/dns/dhcp/etc) share the hub's own repo,
+                # so ANY lm-repo tip advance would otherwise bounce them — even a
+                # WebUI/docs-only commit that changes nothing they run. When the
+                # entire delta between the tip we last pushed and the current tip
+                # is inert static assets, suppress the SPOKE_UPDATE (no restart)
+                # but still advance the marker so we don't re-evaluate it forever.
+                # Fail-closed inside _only_static_paths_between → a real code
+                # change (incl. any core/src/ the proxy imports) still fans out.
+                if (not spoke_force and not behind and tip != "unknown"
+                        and self._effective_module_type(sid) in _IN_LM_REPO_MODULE_TYPES
+                        and await self._only_static_paths_between(
+                            _selfupdate_hub_root, last_pushed.get(sid), tip)):
+                    update_results.append(
+                        f"{sid}: up-to-date — only static assets changed, no restart ({repo_url})")
+                    if last_pushed.get(sid) != tip:
+                        last_pushed[sid] = tip
+                        commits_changed = True
                     continue
                 # A spoke we ALREADY pushed the current tip to but that is STILL
                 # provably behind (received-but-didn't-apply) is re-pushed on the
