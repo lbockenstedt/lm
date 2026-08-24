@@ -201,9 +201,12 @@ def register(app, hub, ctx):
         entry["client_simulation"] = cs_cfg
         store[agent_pk] = entry
         hub.state._mark_dirty()
-        from routes.pxmx import push_pxmx_agent_config  # lazy: avoid import cycle
+        from routes.pxmx import push_pxmx_agent_config, bust_pxmx_agents_cache  # lazy: avoid import cycle
         pushed, queued = await push_pxmx_agent_config(
             hub, agent_id, {"client_simulation": cs_cfg})
+        # So the toggle reflects immediately on the next My Devices refresh
+        # instead of a cached pre-toggle snapshot for up to 30s.
+        bust_pxmx_agents_cache()
         logger.info("tenant agent cs-config: agent '%s' enabled=%s set by tenant %s",
                     agent_id, enabled, tenant)
         return {"status": "ok", "enabled": enabled, "pushed": pushed, "queued": queued}

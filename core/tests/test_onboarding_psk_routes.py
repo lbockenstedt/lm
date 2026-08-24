@@ -2,6 +2,8 @@
 (the "Add Server" button's backend). A tenant-admin generates/lists/revokes
 a PSK for their OWN tenant only; a Global Admin may act on any tenant.
 """
+import time
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from types import SimpleNamespace
@@ -482,3 +484,22 @@ def test_cs_config_cross_tenant_path_denied():
     c, _ = _build(_tenant_admin(["tenantA"]))
     r = c.post("/tenant/tenantB/agents/agent-1/cs-config", json={"enabled": True})
     assert r.status_code == 403
+
+
+def test_cs_config_busts_the_agents_cache_so_the_toggle_shows_immediately(monkeypatch):
+    """Regression: a stale _AGENTS_CACHE (fresh for 5s, servable-stale for
+    30s) meant clicking Enable/Disable CS and immediately re-loading My
+    Devices could still show the PRE-toggle state for up to 30s."""
+    async def _fake_push(hub, agent_id, push_cfg, owning_spoke=None):
+        return True, False
+
+    monkeypatch.setattr(pxmx_routes, "push_pxmx_agent_config", _fake_push)
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.state.system_state.setdefault("agent_config", {})["agent-1"] = {
+        "client_simulation": {"tenant_id": "tenantA"}}
+    pxmx_routes._AGENTS_CACHE["data"] = {"agents": [{"agent_id": "stale"}], "pending_agents": []}
+    pxmx_routes._AGENTS_CACHE["ts"] = time.time()
+    r = c.post("/tenant/tenantA/agents/agent-1/cs-config", json={"enabled": True})
+    assert r.status_code == 200
+    assert pxmx_routes._AGENTS_CACHE["data"] is None
+    assert pxmx_routes._AGENTS_CACHE["ts"] == 0.0

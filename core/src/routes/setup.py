@@ -337,6 +337,14 @@ async def _perform_agent_approval(hub, spoke_id: str, agent_id: str,
                 f"(will still apply once the spoke re-pushes stored config on the "
                 f"agent's next register)")
 
+    # So the Agents tile / My Devices reflect this approval (pending →
+    # approved, tenant bound, CS maybe auto-enabled) immediately instead of a
+    # cached pre-approval snapshot for up to _AGENTS_STALE_S (30s). Shared by
+    # all three approval callers (admin click, PSK auto-approve, tenant-admin
+    # self-service), so this fix applies everywhere at once.
+    from routes.pxmx import bust_pxmx_agents_cache  # lazy: avoid import cycle
+    bust_pxmx_agents_cache()
+
     connected = hub._primary_key(target_spoke) in hub.active_connections
     _disp = await _deliver_agent_approval(hub, target_spoke, agent_id)
     if connected:

@@ -235,3 +235,17 @@ def test_cs_auto_enable_resolves_module_type_from_module_metadata_fallback(monke
     hub.state.system_state["module_metadata"] = {"spoke-1": {"module_type": "simulation"}}
     summary = _run(_perform_agent_approval(hub, "spoke-1", "agent-1"))
     assert summary["cs_auto_enabled"] is True
+
+
+def test_approval_busts_the_agents_cache_so_it_shows_immediately():
+    """Regression: an approval (pending -> connected, tenant bound, maybe CS
+    auto-enabled) left the shared _AGENTS_CACHE stale for up to
+    _AGENTS_STALE_S (30s) — an admin/tenant-admin approving an agent and
+    immediately refreshing Setup/My Devices could still see it as pending."""
+    import time
+    pxmx_routes._AGENTS_CACHE["data"] = {"agents": [], "pending_agents": [{"agent_id": "agent-1"}]}
+    pxmx_routes._AGENTS_CACHE["ts"] = time.time()
+    hub = FakeHub()
+    _run(_perform_agent_approval(hub, "spoke-1", "agent-1", explicit_tenant="tenantA"))
+    assert pxmx_routes._AGENTS_CACHE["data"] is None
+    assert pxmx_routes._AGENTS_CACHE["ts"] == 0.0
