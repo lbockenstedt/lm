@@ -65,6 +65,23 @@ _PXMX_FRESH_S = 10.0
 _ttl_locks: dict = {}
 
 
+def bust_pxmx_agents_cache():
+    """Cold-invalidate ``_AGENTS_CACHE`` so the next ``GET /api/pxmx/agents``
+    (or ``GET /tenant/{tenant}/agents``, which shares the same cache via
+    ``pxmx_agents_payload``) recomputes instead of serving a payload from
+    before the mutation. Mirrors the existing bust-on-mutation sites
+    (decommission/restore/delete below) — extracted so approve/config-save
+    mutations (previously left the cache stale for up to
+    ``_AGENTS_STALE_S`` = 30s, e.g. a just-toggled CS enable/disable not
+    reflecting on an immediate page refresh) get the same treatment without
+    duplicating the try/except at each call site. Never raises."""
+    try:
+        _AGENTS_CACHE["data"] = None
+        _AGENTS_CACHE["ts"] = 0.0
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _agents_lock() -> "asyncio.Lock":
     loop = asyncio.get_running_loop()
     lk = _agents_locks.get(id(loop))
@@ -1051,6 +1068,9 @@ def register(app, hub, ctx):
             # Best-effort push to a live agent — see push_pxmx_agent_config's
             # docstring for the persist-spoke-side / mailbox-queue contract.
             pushed, queued = await push_pxmx_agent_config(hub, agent_id, push_cfg)
+            # So the Agents tile reflects this save immediately instead of a
+            # cached pre-save snapshot for up to _AGENTS_STALE_S (30s).
+            bust_pxmx_agents_cache()
 
             return {
                 "status": "ok" if pushed else "partial_success",
