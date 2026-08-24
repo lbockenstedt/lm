@@ -64,6 +64,10 @@ async function triggerUpdate(evt) {
             // reload after observing the restart actually happen (the old process
             // stops responding) AND the new process reports ready — so we never
             // reload the pre-restart process, and never reload a half-up server.
+            // Flag it so the periodic status poll doesn't ALSO pop its own
+            // "update in progress" sticky toast on top of this button's own
+            // "Restarting…" narration (the page reloads out of this state anyway).
+            window.__lmUpdateInProgress = true;
             _waitForHubReadyThenReload(btn);
         } else {
             btn.disabled = false;

@@ -942,6 +942,50 @@ function showToast(message, type = 'success') {
     setTimeout(dismiss, window.TOAST_DURATION_MS || 10000);
 }
 
+// Sticky toast — like showToast but it NEVER auto-dismisses; the caller holds
+// the returned handle and dismisses it explicitly (or updates its text in
+// place). Used for "an update/restart is in progress — please wait" while the
+// hub is unreachable, so the user gets the same reassuring in-flight message we
+// show for the button-driven update, instead of a silent blank screen. Only one
+// is ever shown at a time (updateStatus reuses the single handle).
+function showStickyToast(message, type = 'info') {
+    const colors = { success: '#01A982', error: '#e53e3e', info: '#263040' };
+    const toast = document.createElement('div');
+    toast.className = 'lm-toast';
+    toast.style.cssText = `
+        display:flex;align-items:center;gap:.75rem;
+        background:${colors[type] || colors.info};color:#fff;
+        padding:.75rem 1rem .75rem 1.25rem;border-radius:.5rem;font-size:.875rem;
+        box-shadow:0 4px 12px rgba(0,0,0,.2);opacity:0;
+        transition:opacity .2s ease;width:100%;box-sizing:border-box;`;
+    const spinner = document.createElement('span');
+    spinner.style.cssText = 'width:.9rem;height:.9rem;border:2px solid rgba(255,255,255,.4);' +
+        'border-top-color:#fff;border-radius:50%;flex:none;animation:lm-spin .8s linear infinite;';
+    toast.appendChild(spinner);
+    if (!document.getElementById('lm-spin-kf')) {
+        const st = document.createElement('style');
+        st.id = 'lm-spin-kf';
+        st.textContent = '@keyframes lm-spin{to{transform:rotate(360deg)}}';
+        document.head.appendChild(st);
+    }
+    const text = document.createElement('span');
+    text.style.cssText = 'flex:1;white-space:pre-line;';
+    text.textContent = message;
+    toast.appendChild(text);
+    _lmToastRegion().appendChild(toast);
+    requestAnimationFrame(() => { toast.style.opacity = '1'; });
+    let removed = false;
+    return {
+        update(msg) { text.textContent = msg; },
+        dismiss() {
+            if (removed) return;
+            removed = true;
+            toast.style.opacity = '0';
+            toast.addEventListener('transitionend', () => toast.remove());
+        },
+    };
+}
+
 // Interactive confirm toast — a non-blocking replacement for window.confirm()
 // on destructive actions (e.g. delete spoke/agent). Renders a toast carrying
 // Cancel + Confirm buttons and returns a Promise<boolean>: true on Confirm,
@@ -2412,6 +2456,9 @@ function _renderSpokeAgentRow(label, mod, status, spokeVariant, tenant, idTitle,
 // outer try/catch are preserved exactly from the pre-refactor body — note
 // _renderDashboardLists is awaited so its errors surface in this catch.
 let _statusBackoffUntil = 0;   // hub-requested polling backoff (protect mode)
+let _statusDownToast = null;   // sticky "update/restart in progress" toast handle
+let _statusDownTicks = 0;      // consecutive unreachable poll ticks (×10s)
+let _statusDownFromVersion = null; // hub version observed just before it went down
 async function updateStatus() {
     // Honor hub overload backpressure: if the hub told us to back off, skip
     // this tick instead of hammering a saturated loop.
@@ -2442,9 +2489,49 @@ async function updateStatus() {
         }
         const [statusRes, approvalsRes, diagRes] = await Promise.all(requests);
 
-        // /status itself unreachable this tick → keep the current UI, retry next
-        // tick (don't tear down the nav over one dropped poll).
-        if (!statusRes) return;
+        // /status itself unreachable this tick → the hub is (re)starting or
+        // briefly unreachable. Surface the SAME reassuring "please wait" message
+        // the button-driven update shows, instead of a silent blank screen — the
+        // user asked for parity with those in-flight messages. Sticky toast that
+        // self-dismisses on reconnect below. Suppressed while a button-driven
+        // update is already narrating its own "Restarting…" progress.
+        if (!statusRes) {
+            _statusDownTicks++;
+            if (!window.__lmUpdateInProgress && !_statusDownToast && typeof showStickyToast === 'function') {
+                // Remember the version we were on so we can tell, on reconnect,
+                // whether this outage was an actual update (version advanced).
+                _statusDownFromVersion = window.__lmHubVersion || null;
+                _statusDownToast = showStickyToast(
+                    'Hub unavailable — an update or restart is in progress. Please wait…', 'info');
+            } else if (_statusDownToast) {
+                _statusDownToast.update(
+                    `Hub unavailable — an update or restart is in progress. Please wait… (${_statusDownTicks * 10}s)`);
+            }
+            return;
+        }
+
+        // /status answered again with 200 (ready). If we were showing the
+        // "please wait" toast, the hub just came back: clear it, and if its
+        // version advanced during the outage this WAS an update — reload so the
+        // browser picks up the new WebUI assets (the stale-asset blank-screen
+        // the user hit otherwise). A 503 here (protect mode, still starting) is
+        // NOT a full recovery — leave the toast up and let the 503 branch below
+        // back off; we dismiss only once it truly answers 200.
+        if (_statusDownToast && statusRes.ok) {
+            _statusDownToast.dismiss();
+            _statusDownToast = null;
+            _statusDownTicks = 0;
+            try {
+                const sd = await statusRes.clone().json();
+                const newVer = sd && sd.metrics ? sd.metrics.version : null;
+                if (newVer && _statusDownFromVersion && newVer !== _statusDownFromVersion) {
+                    showToast(`Hub updated (${_statusDownFromVersion} → ${newVer}) — reloading to load the new version…`, 'success');
+                    setTimeout(() => window.location.reload(), 1500);
+                    return;
+                }
+                showToast('Hub reconnected.', 'success');
+            } catch (e) { /* non-fatal — recovery toast is best-effort */ }
+        }
 
         // 503 + Retry-After = hub in protect mode → back off polling.
         if (statusRes.status === 503) {
