@@ -798,16 +798,6 @@ def register(app, hub, ctx):
         _bust_spokes_cache()
         return {"status": "ok", "removed": removed, "prefix": prefix}
 
-    @app.post("/setup/spokes/{spoke_id}/rotate-secret")
-    async def rotate_spoke_secret(spoke_id: str):
-        hub = app.state.hub
-        try:
-            new_key = hub.key_manager.rotate_key(hub._primary_key(spoke_id))
-            return {"status": "ok", "new_secret": new_key.secret}
-        except Exception as e:
-            logger.exception("rotate_spoke_secret failed")
-            raise HTTPException(status_code=500, detail=str(e))
-
     @app.post("/setup/spokes/{spoke_id}/ack-change")
     async def ack_identity_change(spoke_id: str):
         """Dismiss the amber "renamed" banner for a spoke/agent.

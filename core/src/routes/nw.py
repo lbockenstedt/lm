@@ -611,20 +611,6 @@ def register(app, hub, ctx):
                 return filtered
             logger.exception("nw_get_device_data failed (%s/%s)", device_id, endpoint)
             raise HTTPException(status_code=500, detail=str(e))
-            # A slow/timed-out live fetch shouldn't blank the tab — serve the
-            # last-known cached value (marked stale, scope-filtered) if we have
-            # one, so a heavy gateway that occasionally overruns still shows data.
-            cached = hub.nw_cache_get_device(device_id, endpoint)
-            if cached is not None:
-                logger.warning("nw_get_device_data live fetch failed (%s/%s: %s)"
-                               " — serving cached", device_id, endpoint, e)
-                filtered = await _filter_nw_optional(scope, request, cached, endpoint, tenant, dedicated)
-                if isinstance(filtered, dict):
-                    filtered = dict(filtered)
-                    filtered["stale"] = True
-                return filtered
-            logger.exception("nw_get_device_data failed (%s/%s)", device_id, endpoint)
-            raise HTTPException(status_code=500, detail=str(e))
 
     @app.post("/api/nw/{device_id}/config")
     async def nw_run_config(device_id: str, request: Request):
