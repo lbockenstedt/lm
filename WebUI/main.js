@@ -27719,6 +27719,8 @@ const DEVICE_TYPES = {
             { id: 'enable_secret', label: 'Enable Secret', type: 'password' },
             { id: 'api_token', label: 'API Token', type: 'password' },
             { id: 'snmp_community', label: 'SNMP Community' },
+            { id: 'poll_interval', label: 'Auto-Poll Interval', type: 'select', coerce: 'nullableInt',
+              options: [['','Inherit module default'],['0','Off (manual Poll Now only)'],['60','Every 1 minute'],['300','Every 5 minutes'],['900','Every 15 minutes'],['1800','Every 30 minutes'],['3600','Every hour'],['21600','Every 6 hours'],['86400','Every day']] },
         ],
     },
     // nac/ipam/ldap inherit `alsoBareAgent: true` from INSTANCE_PRODUCTS above
@@ -28084,7 +28086,7 @@ function _deviceFieldHtml(t, field, values) {
     const val = values ? (values[field.id] ?? '') : '';
     const cls = 'w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     if (field.type === 'select') {
-        const opts = (field.options || []).map(([v, lbl]) => `<option value="${v}"${v === val ? ' selected' : ''}>${lbl}</option>`).join('');
+        const opts = (field.options || []).map(([v, lbl]) => `<option value="${v}"${String(v) === String(val) ? ' selected' : ''}>${lbl}</option>`).join('');
         return `                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">${field.label}</label><select id="${id}" class="${cls}">${opts}</select></div>`;
     }
     const type = field.type || 'text';
@@ -28186,6 +28188,9 @@ async function saveDevice() {
         const el = document.getElementById('dev-' + f.id);
         let v = el ? el.value : '';
         if (f.coerce === 'int') v = parseInt(v, 10) || (f.default != null ? f.default : null);
+        // Nullable-int (e.g. nw Auto-Poll Interval): blank = inherit (null);
+        // an explicit 0 (Off) must survive, so don't collapse it to null.
+        else if (f.coerce === 'nullableInt') v = (v === '' ? null : (parseInt(v, 10) || 0));
         config[f.id] = v;
     });
     if (t.vaultPicker) {
