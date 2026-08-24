@@ -908,6 +908,14 @@ function startApiFieldObserver() {
 }
 
 function showToast(message, type = 'success') {
+    // Swallow transient connectivity-failure error toasts. These fire the moment
+    // the hub blinks out for an update/restart (a view's fetch rejects with
+    // "Failed to fetch" / "Load failed" / etc.) and are pure noise — the sticky
+    // "an update or restart is in progress — please wait…" toast already explains
+    // the outage. Real, actionable errors (with a real message) still show.
+    if (type === 'error' && /load failed|failed to fetch|networkerror|could not connect|connection refused|err_connection|net::/i.test(String(message || ''))) {
+        return;
+    }
     // Green for everything except errors (red) — no grey/info toasts.
     const colors = { success: '#01A982', error: '#e53e3e', info: '#01A982' };
     const toast = document.createElement('div');
@@ -949,7 +957,9 @@ function showToast(message, type = 'success') {
 // show for the button-driven update, instead of a silent blank screen. Only one
 // is ever shown at a time (updateStatus reuses the single handle).
 function showStickyToast(message, type = 'info') {
-    const colors = { success: '#01A982', error: '#e53e3e', info: '#263040' };
+    // Brand green (#01A982) for the informative "please wait" case, matching the
+    // other success/info toasts — it's a reassurance message, not an error.
+    const colors = { success: '#01A982', error: '#e53e3e', info: '#01A982' };
     const toast = document.createElement('div');
     toast.className = 'lm-toast';
     toast.style.cssText = `
