@@ -329,30 +329,63 @@ class HubCertDistributionMixin:
 
     async def _hub_self_restart(self) -> str:
         """Schedule ``lm-self-restart`` via the loopback hub-self agent's
-        ``RUN_COMMAND`` — uniformity with spoke-side cert deploys. The command is
-        backgrounded (``&``) so the agent responds BEFORE the restart kills the
-        hub process (an awaited foreground restart would drop the WS mid-reply
-        and the caller's ``send_to_agent`` would time out + double-restart on
-        fallback). Falls back to a direct fire-and-forget ``subprocess.Popen`` if
-        the hub-self agent isn't connected. Returns a status message."""
+        ``RUN_COMMAND`` — uniformity with spoke-side cert deploys. Falls back
+        to a direct subprocess call if the hub-self agent isn't connected.
+        Returns a status message on genuine success; RAISES ``RuntimeError``
+        on a genuine failure (e.g. sudo denied/misconfigured) instead of the
+        old optimistic "launched, so it must be fine" behavior — callers
+        already handle this exception (``routes/setup.py``'s
+        ``/setup/hub/restart``, ``routes/key_vault.py``'s
+        ``/configure-tier1``, and ``_install_cert_on_hub`` below).
+
+        NOT backgrounded — this command is awaited to completion. That's safe
+        despite restarting the very process running this code: ``lm-self-
+        restart`` (see install_all.sh) itself only runs ``systemd-run
+        --no-block ... systemctl restart lm``, which returns almost instantly
+        having merely SCHEDULED a transient unit — the actual kill/restart
+        happens ~3s later from that separate unit, outside lm's cgroup. So
+        awaiting THIS command's own exit status doesn't risk dropping the
+        response mid-restart; it only waits for the (fast) scheduling step,
+        which is exactly what lets us see whether sudo actually succeeded.
+
+        Previously this checked ``resp.get("status") == "SUCCESS"`` on the
+        RUN_COMMAND envelope — but that field reflects the RPC TRANSPORT
+        succeeding (the loopback agent responded at all), not whether the
+        command it ran actually exited 0. The real result lives nested at
+        ``resp["result"]["rc"]``/``["stderr"]`` (see
+        ``command_runner.run_local_command``), which is what's checked below."""
         hub_self = getattr(self, "_hub_self", None)
         if hub_self is not None:
             try:
-                cmd = f"sudo -n {_LM_SELF_RESTART} >/dev/null 2>&1 &"
-                resp = await hub_self.run_command(cmd, allow_shell=True, timeout=10.0)
-                if resp.get("status") == "SUCCESS":
+                resp = await hub_self.run_command(f"sudo -n {_LM_SELF_RESTART}",
+                                                  allow_shell=True, timeout=10.0)
+                result = resp.get("result") or {}
+                if resp.get("status") == "SUCCESS" and result.get("ok") and result.get("rc") == 0:
                     return "lm.service restarting to apply"
-                cert_log.debug("[cert] hub-self RUN_COMMAND restart non-success → direct fallback (resp=%s)",
-                               resp)
+                detail = (result.get("stderr") or result.get("error")
+                         or result.get("stdout") or "no output").strip()[:300]
+                cert_log.warning("[cert] hub-self restart command failed (rc=%s): %s → direct fallback",
+                                 result.get("rc"), detail)
             except Exception as e:  # noqa: BLE001
-                cert_log.debug("[cert] hub-self RUN_COMMAND restart error → direct fallback: %s", e)
+                cert_log.warning("[cert] hub-self RUN_COMMAND restart error → direct fallback: %s", e)
         try:
-            subprocess.Popen(["sudo", "-n", _LM_SELF_RESTART],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return "lm.service restarting to apply"
-        except Exception as e:
-            return (f"cert written; could not schedule self-restart ({e}) — "
-                    "restart lm.service manually")
+            proc = await asyncio.create_subprocess_exec(
+                "sudo", "-n", _LM_SELF_RESTART,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                raise RuntimeError("self-restart command timed out after 10s "
+                                  "waiting for sudo/systemd-run to schedule it")
+            if proc.returncode == 0:
+                return "lm.service restarting to apply"
+            detail = (err or out or b"").decode(errors="replace").strip()[:300]
+            raise RuntimeError(f"self-restart exited {proc.returncode}: {detail or 'no output captured'}")
+        except RuntimeError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"could not schedule self-restart: {e}") from e
 
     async def _install_cert_on_hub(self, domain: str, fullchain: str,
                                    privkey: str, chain: str,
@@ -491,13 +524,17 @@ class HubCertDistributionMixin:
         elif chain:
             cert_log.debug("[cert] %s → hub: chain present but not PEM — CA bundle not written", domain)
 
-        # Schedule a non-blocking self-restart via the loopback hub-self agent's
-        # RUN_COMMAND (uniformity with spoke-side cert deploys), backgrounded so
-        # the agent responds before the restart kills the hub; direct fire-and-
-        # forget subprocess.Popen fallback when the hub-self agent isn't
-        # connected. uvicorn reloads the cert (and, if mTLS is on, arms client-
-        # cert verification against the new CA — see api.build_server).
-        restart_msg = await self._hub_self_restart()
+        # Schedule a self-restart via the loopback hub-self agent's RUN_COMMAND
+        # (uniformity with spoke-side cert deploys), direct subprocess fallback
+        # when the hub-self agent isn't connected. uvicorn reloads the cert
+        # (and, if mTLS is on, arms client-cert verification against the new
+        # CA — see api.build_server). The cert write already succeeded by this
+        # point, so a restart failure degrades the message rather than failing
+        # the whole install — matches the ca_msg pattern just above.
+        try:
+            restart_msg = await self._hub_self_restart()
+        except Exception as e:  # noqa: BLE001
+            restart_msg = f"restart could not be scheduled ({e}) — restart lm.service manually"
         cert_log.info("[cert] %s → hub: installed on %s — %s", domain, cert_path, restart_msg)
         return {"status": "SUCCESS", "message": f"installed to {cert_path}{ca_msg}; {restart_msg}"}
 
