@@ -3713,7 +3713,9 @@ function _viewTemplate(viewId) {
 
   <div class="${card}">
     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Proxmox Host Agent</h3>
-    <p class="text-xs text-slate-400 mb-3">Runs on a <b>Proxmox host</b> to report hypervisor telemetry (VM inventory, metrics, host actions) <b>and</b> execute client-sim provisioning on that node. It reports to a spoke's <code>/ws/agent</code> listener, not the hub, so it uses its own installer and does <b>not</b> need an onboarding key. The target listener is hosted by <b>either</b> a <b>pxmx (hypervisor) spoke</b>, <b>or</b> an agent running the <b>simulation role</b> — onboard that box with the key above and add <code>--roles simulation</code>, which makes it host the client-sim listener. <b>Prerequisite:</b> that target must already be running — if the installer reports <em>“no agent listener answered”</em>, no listener is up yet (deploy a pxmx spoke via <code>install_pxmx.sh</code>, or load the <code>simulation</code> role on the target). Run this on the Proxmox node — omit <code>--spoke-ip</code> to auto-discover a co-located spoke via DNS/mDNS, or add <code>--spoke-ip &lt;spoke-ip&gt;</code> to pin one.</p>
+    <p class="text-xs text-slate-400 mb-3">Runs on a <b>Proxmox host</b> to report hypervisor telemetry (VM inventory, metrics, host actions) <b>and</b> execute client-sim provisioning on that node. It reports to a spoke's <code>/ws/agent</code> listener, not the hub, so it uses its own installer and does <b>not</b> need an onboarding key. The target listener is hosted by <b>either</b> a <b>pxmx (hypervisor) spoke</b>, <b>or</b> an agent running the <b>simulation role</b> — onboard that box with the key above and add <code>--roles simulation</code>, which makes it host the client-sim listener. <b>Prerequisite:</b> that target must already be running — if the installer reports <em>“no agent listener answered”</em>, no listener is up yet (deploy a pxmx spoke via <code>install_pxmx.sh</code>, or load the <code>simulation</code> role on the target). Run this on the Proxmox node — pick one of your tenant's connected hypervisor spokes below to pin <code>--spoke-ip</code>, or leave it on auto-discover to find a co-located spoke via DNS/mDNS.</p>
+    <p class="text-[11px] font-bold text-slate-500 mb-1">Target spoke:</p>
+    <select id="my-pxmx-spoke" onchange="_myDevPxmxUpdateInstall()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-1.5 text-xs outline-none focus:ring-2 focus:ring-green-500 mb-2"><option value="">— auto-discover (omit --spoke-ip) —</option></select>
     <p class="text-[11px] font-bold text-slate-500 mb-1">Install command:</p>
     <pre id="my-pxmx-install" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install_agent.sh \\
   | sudo bash</pre>
@@ -3722,6 +3724,7 @@ function _viewTemplate(viewId) {
     <pre id="my-pxmx-uninstall" class="bg-slate-50 border border-slate-200 rounded-md p-3 text-[11px] font-mono overflow-x-auto whitespace-pre-wrap">curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/uninstall.sh \\
   | sudo bash -s -- --yes</pre>
     <button onclick="_myDevCopyEl('my-pxmx-uninstall')" class="mt-1 text-xs text-[#01A982] hover:underline">Copy uninstall</button>
+    <p class="text-[11px] text-slate-400 mt-2"><code>uninstall.sh</code> has no remote/spoke targeting — always run it locally on the box being removed. Other flags, not included above (add manually if needed): <code>--dry-run</code>/<code>-n</code> preview only, no changes; <code>--ollama</code> also remove the shared Ollama install; <code>--letsencrypt</code> also remove Let's Encrypt/certbot state; <code>--netbox-db</code> also <b>drop the NetBox Postgres database</b> (destructive); <code>--nginx-site</code> also remove the NetBox nginx site config; <code>--keep-ab</code> skip removing AppBuilder (removed by default).</p>
   </div>
 </div>`;
 
@@ -4544,6 +4547,7 @@ function initView(viewId, subView) {
             loadAllDevices();
             loadMyDeviceSpokes();
             loadMyDevicePsks();
+            loadMyPxmxSpokes();
             break;
         case 'cppm':
             loadCPPMNACStatus();
@@ -15361,6 +15365,39 @@ async function _myDevGenPsk() {
     }
 }
 
+// Proxmox Host Agent install-command builder: lets a tenant-admin pick one of
+// their own connected hypervisor (pxmx) spokes from a dropdown instead of
+// hand-typing an IP, and pins --spoke-ip accordingly. uninstall.sh has no
+// remote/spoke-targeting flag at all (it only runs locally on the box being
+// removed), so only the install command is dynamic here.
+async function loadMyPxmxSpokes() {
+    const sel = document.getElementById('my-pxmx-spoke');
+    if (!sel) return;
+    const tenant = _myDevTenant();
+    if (!tenant) { _myDevPxmxUpdateInstall(); return; }
+    try {
+        const r = await apiJson(`/tenant/${encodeURIComponent(tenant)}/spokes`);
+        const rows = ((r && r.spokes) || []).filter((s) => s.module_type === 'hypervisor' && s.connected && s.approved && s.ip);
+        const prior = sel.value;
+        sel.innerHTML = '<option value="">— auto-discover (omit --spoke-ip) —</option>'
+            + rows.map((s) => `<option value="${escapeHtml(s.ip)}">${escapeHtml(s.display_name || s.spoke_id)} (${escapeHtml(s.ip)})</option>`).join('');
+        if (prior && rows.some((s) => s.ip === prior)) sel.value = prior;
+    } catch (e) {
+        console.error('loadMyPxmxSpokes failed', e);
+    }
+    _myDevPxmxUpdateInstall();
+}
+
+function _myDevPxmxUpdateInstall() {
+    const pre = document.getElementById('my-pxmx-install');
+    if (!pre) return;
+    const sel = document.getElementById('my-pxmx-spoke');
+    const ip = sel ? sel.value.trim() : '';
+    pre.textContent = ip
+        ? `curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install_agent.sh \\\n  | sudo bash -s -- --spoke-ip ${ip}`
+        : `curl -sSL https://raw.githubusercontent.com/lbockenstedt/pxmx/main/agent/install_agent.sh \\\n  | sudo bash`;
+}
+
 function _myDevCopyEl(id) {
     const el = document.getElementById(id);
     if (!el) return;
@@ -15392,6 +15429,7 @@ async function _myDevDeleteSpoke(spokeId, label) {
     try {
         await apiJson(`/tenant/${encodeURIComponent(tenant)}/spokes/${encodeURIComponent(spokeId)}`, { method: 'DELETE' });
         loadMyDeviceSpokes();
+        if (typeof loadMyPxmxSpokes === 'function' && document.getElementById('my-pxmx-spoke')) loadMyPxmxSpokes();
         if (typeof showToast === 'function') showToast(`Spoke “${name}” removed`, 'success');
     } catch (e) {
         console.error('_myDevDeleteSpoke failed', e);
