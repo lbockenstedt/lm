@@ -76,6 +76,12 @@ def _patch_reconcile(monkeypatch):
             return {"applied": True, "prefixes": [], "deleted": True}
         return {"applied": True, "prefixes": list(ips), "deleted": False}
     monkeypatch.setattr(_nsg_mod, "reconcile_allowlist", _fake)
+
+    # Stub the priority-slot sweep so tests never touch ARM. Default: nothing to
+    # clear (returns []). test_slot_clear_* override this with a recorder.
+    async def _fake_clear(cfg, azcfg, *, priority, direction, keep_name, http=None):
+        return []
+    monkeypatch.setattr(_nsg_mod, "clear_priority_slot", _fake_clear)
     return calls
 
 
@@ -172,3 +178,51 @@ def test_fresh_process_boot_does_not_self_delete(tmp_path, monkeypatch):
 
     assert len(calls) == 1  # just the PUT, no delete-old-name call
     assert calls[0]["rule_name"] == "lm-threat-block"
+
+
+def test_slot_clear_runs_with_configured_name_and_priority(tmp_path, monkeypatch):
+    """The deny reconcile must sweep the (block_priority, Inbound) slot,
+    keeping the CONFIGURED (new) name — this is what deletes a live rule that
+    sits in the slot under ANY other name (e.g. an older-version or renamed
+    'lm-threat-block') so the subsequent PUT of 'Threat-Monitor-Blocked' does
+    not hit SecurityRuleConflict. Regression for: rename saved in config but
+    the live Azure rule kept its old name."""
+    calls = _patch_reconcile(monkeypatch)
+    slot = {}
+
+    async def _rec_clear(cfg, azcfg, *, priority, direction, keep_name, http=None):
+        slot.update(priority=priority, direction=direction, keep_name=keep_name,
+                    rule_name=azcfg.get("rule_name"))
+        return ["lm-threat-block"]  # simulate clearing the stale live rule
+    monkeypatch.setattr(_nsg_mod, "clear_priority_slot", _rec_clear)
+
+    tm = _tm_for(tmp_path, block_rule_name="lm-threat-block", block_priority=200)
+    tm._blocks = {"203.0.113.5": {}}
+    tm.set_config({"block_rule_name": "Threat-Monitor-Blocked"})
+    res = _run(tm.reconcile_nsg())
+
+    assert res["status"] == "SUCCESS"
+    # Slot swept at the deny priority + Inbound, keeping the NEW configured name.
+    assert slot == {"priority": 200, "direction": "Inbound",
+                    "keep_name": "Threat-Monitor-Blocked",
+                    "rule_name": "Threat-Monitor-Blocked"}
+    # And the new-named rule is then PUT with the blocked IP.
+    assert calls[-1] == {"rule_name": "Threat-Monitor-Blocked", "ips": ["203.0.113.5"]}
+
+
+def test_slot_clear_failure_does_not_abort_reconcile(tmp_path, monkeypatch):
+    """The slot sweep is best-effort: an ARM hiccup while clearing must not
+    prevent the deny rule from being (re)written."""
+    calls = _patch_reconcile(monkeypatch)
+
+    async def _boom(cfg, azcfg, *, priority, direction, keep_name, http=None):
+        raise RuntimeError("ARM 500")
+    monkeypatch.setattr(_nsg_mod, "clear_priority_slot", _boom)
+
+    tm = _tm_for(tmp_path, block_rule_name="lm-threat-block", block_priority=200)
+    tm._blocks = {"203.0.113.5": {}}
+    tm.set_config({"threshold": 7})  # no rename
+    res = _run(tm.reconcile_nsg())
+
+    assert res["status"] == "SUCCESS"
+    assert calls[-1] == {"rule_name": "lm-threat-block", "ips": ["203.0.113.5"]}

@@ -636,7 +636,26 @@ class ThreatMonitor:
         deny_cfg["priority"] = int(self._cfg.get("block_priority") or 400)
         ips = sorted(self._blocks.keys())
         old_name = self._nsg_live_rule_name
+        block_prio = int(self._cfg.get("block_priority") or 400)
         try:
+            # Clear whatever rule currently occupies the deny slot
+            # (block_priority + Inbound) under ANY name other than the one we're
+            # about to write. Azure enforces uniqueness on (priority, direction),
+            # not name, so a renamed / older-version / hand-made rule sitting in
+            # this slot (e.g. 'Threat-Monitor-Blocked') makes the PUT fail with
+            # SecurityRuleConflict. This "drop the slot, then recreate" sweep is
+            # 404-tolerant and supersedes the tracked-name delete below (kept as
+            # belt-and-suspenders for the empty-IP DELETE-by-name path).
+            try:
+                cleared = await _nsg.clear_priority_slot(
+                    get_oidc_config(self.hub), deny_cfg,
+                    priority=block_prio, direction="Inbound", keep_name=new_name)
+                if cleared:
+                    sec_log.info("THREAT NSG deny-slot cleared conflicting rule(s) %s "
+                                 "at priority %d before writing '%s'",
+                                 cleared, block_prio, new_name)
+            except Exception as e:  # noqa: BLE001 — slot-clear is best-effort
+                logger.warning("threat NSG deny-slot clear failed: %s", e)
             if old_name and old_name != new_name:
                 # Delete is 404-tolerant (reconcile_allowlist treats a missing
                 # rule as already-gone), so this is safe even if the old rule

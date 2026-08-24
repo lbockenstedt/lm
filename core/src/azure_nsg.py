@@ -230,3 +230,60 @@ async def reconcile_allowlist(cfg: OidcConfig, azcfg: Dict[str, Any], ips,
     logger.info("Azure NSG allow-list reconciled: %d prefix(es) on %s/%s",
                 len(prefixes), azcfg.get("nsg_name"), _cfg_get(azcfg, "rule_name", "lm-allowlist"))
     return {"applied": True, "prefixes": prefixes, "deleted": False}
+
+
+async def clear_priority_slot(cfg: OidcConfig, azcfg: Dict[str, Any], *,
+                              priority: int, direction: str, keep_name: str,
+                              http: Optional[httpx.AsyncClient] = None) -> List[str]:
+    """Delete any security rule occupying the ``priority`` + ``direction`` slot
+    whose name is NOT ``keep_name`` — clearing stale/renamed managed rules that
+    would otherwise collide.
+
+    Azure keys rules by name but enforces uniqueness on (priority, direction):
+    PUTing a renamed rule while the old-named one still lives at the same
+    priority+direction fails with ``SecurityRuleConflict``. Deleting purely by
+    the *tracked* previous name misses a rule created under any other name
+    (e.g. a hand-made or older-version 'Threat-Monitor-Blocked'). This sweeps
+    the slot by its real conflict key so the subsequent PUT always succeeds.
+
+    Best-effort + idempotent: reads the NSG, deletes matching rules by name
+    (404-tolerant). Returns the list of deleted rule names."""
+    _require(azcfg)
+    want_dir = str(direction or "Inbound").capitalize()
+    if want_dir not in ("Inbound", "Outbound"):
+        want_dir = "Inbound"
+    try:
+        want_prio = int(priority)
+    except (TypeError, ValueError):
+        return []
+    token = await _arm_token(cfg, http=http)
+    headers = {"Authorization": f"Bearer {token}"}
+    deleted: List[str] = []
+    async with (http or httpx.AsyncClient(timeout=30.0)) as client:
+        resp = await client.get(f"{_nsg_base(azcfg)}?api-version={_API_VERSION}", headers=headers)
+        if resp.status_code != 200:
+            raise AzureNsgError(f"ARM GET NSG failed: HTTP {resp.status_code} — {resp.text[:300]}")
+        rules = (resp.json().get("properties", {}) or {}).get("securityRules", []) or []
+        for r in rules:
+            name = r.get("name") or ""
+            props = r.get("properties", {}) or {}
+            if not name or name == keep_name:
+                continue
+            try:
+                r_prio = int(props.get("priority"))
+            except (TypeError, ValueError):
+                continue
+            if r_prio != want_prio:
+                continue
+            if str(props.get("direction", "")).capitalize() != want_dir:
+                continue
+            del_url = f"{_nsg_base(azcfg)}/securityRules/{name}?api-version={_API_VERSION}"
+            dresp = await client.delete(del_url, headers=headers)
+            if dresp.status_code not in (200, 202, 204, 404):
+                raise AzureNsgError(
+                    f"ARM DELETE conflicting rule '{name}' failed: "
+                    f"HTTP {dresp.status_code} — {dresp.text[:300]}")
+            deleted.append(name)
+            logger.info("Azure NSG: cleared conflicting rule '%s' at priority %d/%s on %s",
+                        name, want_prio, want_dir, azcfg.get("nsg_name"))
+    return deleted
