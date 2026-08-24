@@ -123,6 +123,55 @@ def register(app, hub, ctx):
         out.sort(key=lambda s: (s["module_type"], s["spoke_id"]))
         return {"tenant_id": tenant, "spokes": out}
 
+    @app.get("/tenant/{tenant}/agents", operation_id="tenant_list_own_agents")
+    async def list_tenant_agents(request: Request, tenant: str):
+        """Relayed node-agents (a Proxmox host agent dialing a hypervisor/
+        simulation spoke's ``/ws/agent`` — NOT a hub-direct spoke, see
+        ``list_tenant_spokes`` for that) scoped to ``tenant``, so a
+        tenant-admin can see — and approve, via
+        ``approve_tenant_agent`` below — their own pending agents from My
+        Devices, without the Global-Admin-only Setup screen AND without
+        needing the ``pxmx`` module right (``GET /api/pxmx/agents`` requires
+        it; this route doesn't, since My Devices is the generic self-service
+        surface independent of per-module rights). Reuses the same cached
+        aggregation + tenant filter as the admin tile
+        (``routes.pxmx.pxmx_agents_payload``) — one cache, two surfaces."""
+        _require_owns_tenant(request, tenant)
+        from routes.pxmx import pxmx_agents_payload  # lazy: avoid import cycle
+        payload = await pxmx_agents_payload(hub, tenant)
+        return {"tenant_id": tenant,
+                "agents": payload.get("agents", []),
+                "pending_agents": payload.get("pending_agents", []),
+                "offline_agents": payload.get("offline_agents", [])}
+
+    @app.post("/tenant/{tenant}/agents/{spoke_id}/{agent_id}/approve",
+              operation_id="tenant_approve_own_agent")
+    async def approve_tenant_agent(request: Request, tenant: str, spoke_id: str, agent_id: str):
+        """Tenant-admin self-service approval for a relayed node-agent pending
+        on one of THEIR OWN spokes — the tenant-admin counterpart to Setup →
+        Spokes & Agents' admin-only Approve button. Restricted to a spoke
+        ALREADY bound to ``tenant`` (anti-IDOR, and matches the "an agent
+        auto-ties to the tenant of the spoke it connects through, unless that
+        spoke is shared" rule) — a spoke bound to another tenant, unbound, or
+        the SHARED tenant (ambiguous — it can serve agents belonging to
+        different tenants) must still go through an admin, or the agent can
+        skip this click entirely with a tenant-scoped onboarding PSK (see
+        main.py's ``_try_psk_agent_auto_approve``)."""
+        _require_owns_tenant(request, tenant)
+        bound = hub.state.get_spoke_tenant(spoke_id) or ""
+        if bound != tenant:
+            raise HTTPException(status_code=404, detail="Not found")
+        from routes.setup import _perform_agent_approval  # lazy: avoid import cycle
+        try:
+            summary = await _perform_agent_approval(hub, spoke_id, agent_id,
+                                                     explicit_tenant=tenant)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("approve_tenant_agent failed")
+            raise HTTPException(status_code=500, detail=str(e))
+        logger.info("tenant agent approve: agent '%s' approved by tenant %s via spoke '%s'",
+                    agent_id, tenant, spoke_id)
+        return {"status": "ok", **summary}
+
     @app.delete("/tenant/{tenant}/spokes/{spoke_id}", operation_id="tenant_delete_own_spoke")
     async def delete_tenant_spoke(request: Request, tenant: str, spoke_id: str):
         """Permanently remove a spoke/agent bound to ``tenant`` — the tenant-admin

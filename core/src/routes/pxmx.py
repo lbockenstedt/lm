@@ -376,6 +376,79 @@ async def _maybe_refresh_agents(hub, agent_spokes, force=False):
             _AGENTS_CACHE["refreshing"] = False
 
 
+async def pxmx_agents_payload(hub, tid):
+    """Aggregates GET_AGENTS across EVERY agent-hosting spoke (hypervisor=pxmx,
+    simulation=cs — both subclass AgentHostingControlPlane), not just pxmx: a
+    Proxmox host agent can dial a cs spoke's ``/ws/agent`` directly (the
+    split-topology work), and those agents would otherwise be invisible here
+    entirely. Each agent is tagged with its own owning spoke_id so approve/
+    revoke route correctly regardless of which spoke it's actually connected
+    to. ``tid`` is an ALREADY-RESOLVED tenant id (or None/"default" for the
+    unscoped/admin roster) — the caller (the ``/api/pxmx/agents`` route via
+    ``_resolve_tenant``, or the tenant-self-service ``/tenant/{tenant}/agents``
+    route in onboarding.py) owns picking it; this function only filters.
+
+    Serves a stale-while-revalidate cache (``_AGENTS_CACHE``): fresh within
+    ``_AGENTS_FRESH_S`` (instant serve), servable-stale until
+    ``_AGENTS_STALE_S`` (instant serve + one background refresh), and a forced
+    refresh only when there's no servable cache. This keeps Setup → Spokes &
+    Agents (and My Devices) instant on repeat loads and stops a single slow /
+    reconnecting spoke from blocking the tile every page view. Module-level
+    (not a route closure) so both callers share the ONE cache."""
+    agent_spokes = list(dict.fromkeys(
+        hub.get_all_spokes_by_type("hypervisor") + hub.get_all_spokes_by_type("simulation")
+    ))
+
+    if not agent_spokes:
+        # No agent-hosting spoke connected → no live roster, but STILL surface
+        # any relayed agents whose parent spoke is offline so they can be
+        # seen + deleted (was: empty, agents invisible/undeletable).
+        live = {"agents": [], "pending_agents": [], "spoke_connected": False}
+    else:
+        cached = _AGENTS_CACHE["data"]
+        age = (time.time() - _AGENTS_CACHE["ts"]) if cached is not None else None
+        # Inside the stale window → serve instantly; past fresh-TTL, kick ONE
+        # background refresh (the ``not refreshing`` guard avoids a pile-up).
+        if cached is not None and age is not None and age < _AGENTS_STALE_S:
+            if age >= _AGENTS_FRESH_S and not _AGENTS_CACHE["refreshing"]:
+                asyncio.create_task(_maybe_refresh_agents(hub, agent_spokes))
+            live = cached
+        else:
+            # No servable cache → forced refresh. The lock serializes concurrent
+            # first-loaders into a single fan-out; each re-checks under the lock.
+            live = await _maybe_refresh_agents(hub, agent_spokes, force=True) \
+                or {"agents": [], "pending_agents": [], "spoke_connected": True}
+
+    # Append the offline relayed-agent roster (reconstructed from persisted
+    # side-data) without mutating the shared SWR cache object.
+    live_ids = {a.get("agent_id") for a in live.get("agents", []) if a.get("agent_id")}
+    live_ids |= {a.get("agent_id") for a in live.get("pending_agents", []) if a.get("agent_id")}
+    out = dict(live)
+    out["offline_agents"] = _offline_relay_agents(hub, live_ids)
+    # Tenant scope (picker): an explicit tenant shows ONLY agents EFFECTIVELY
+    # scoped to it — the agent's OWN pinned tenant (per-agent Tenant button →
+    # agent_config.client_simulation.tenant_id, the same value the tile
+    # DISPLAYS via _tenantOf) wins over its owning spoke's module_metadata
+    # binding. A Proxmox agent pinned to LRB on a SHARED spoke must appear
+    # under LRB (matching its shown tenant), not under the shared spoke's
+    # tenant — otherwise the roster filtered by the spoke binding disagreed
+    # with the tenant label rendered next to each agent. Admin with none
+    # selected ("All") or a tenantless resolve → unchanged (full roster). The
+    # SWR cache stays the full roster; we filter this per-request copy.
+    if tid and tid != "default":
+        md = hub.state.system_state.get("module_metadata", {}) or {}
+        def _agent_tid(a):
+            pin = str(((a.get("client_simulation") or {})
+                       .get("tenant_id")) or "").strip()
+            if pin:
+                return pin
+            return (md.get(a.get("spoke_id"), {}) or {}).get("tenant_id")
+        for _k in ("agents", "pending_agents", "offline_agents"):
+            if isinstance(out.get(_k), list):
+                out[_k] = [a for a in out[_k] if _agent_tid(a) == tid]
+    return out
+
+
 async def _aggregate_pxmx_vms(hub, spokes, payload, timeout=30.0):
     """Fan ``PXMX_LIST_VMS`` out to EVERY given agent-hosting spoke CONCURRENTLY
     and merge the responses into one ``{vms, nodes, spoke_connected}`` envelope.
@@ -795,75 +868,12 @@ def register(app, hub, ctx):
 
     @app.get("/api/pxmx/agents")
     async def get_pxmx_agents(request: Request, tenant: str = None):
-        """Agents tile data source. Aggregates GET_AGENTS across EVERY
-        agent-hosting spoke (hypervisor=pxmx, simulation=cs — both subclass
-        AgentHostingControlPlane), not just pxmx: a Proxmox host agent can now
-        dial a cs spoke's /ws/agent directly (the split-topology work), and
-        those agents were previously invisible here entirely — the tile only
-        ever asked the pxmx spoke. Each agent is tagged with its own owning
-        spoke_id so approve/revoke route correctly regardless of which spoke
-        it's actually connected to.
-
-        Serves a stale-while-revalidate cache (``_AGENTS_CACHE``): fresh
-        within ``_AGENTS_FRESH_S`` (instant serve), servable-stale until
-        ``_AGENTS_STALE_S`` (instant serve + one background refresh), and a
-        forced refresh only when there's no servable cache. This keeps Setup →
-        Spokes & Agents instant on repeat loads and stops a single slow /
-        reconnecting spoke from blocking the tile every page view."""
+        """Agents tile data source. See ``pxmx_agents_payload`` (module-level,
+        reused by the tenant-self-service ``/tenant/{tenant}/agents`` route in
+        onboarding.py) for the aggregation + tenant-scoping logic itself."""
         hub = app.state.hub
-        agent_spokes = list(dict.fromkeys(
-            hub.get_all_spokes_by_type("hypervisor") + hub.get_all_spokes_by_type("simulation")
-        ))
-
-        if not agent_spokes:
-            # No agent-hosting spoke connected → no live roster, but STILL surface
-            # any relayed agents whose parent spoke is offline so they can be
-            # seen + deleted (was: empty, agents invisible/undeletable).
-            live = {"agents": [], "pending_agents": [], "spoke_connected": False}
-        else:
-            cached = _AGENTS_CACHE["data"]
-            age = (time.time() - _AGENTS_CACHE["ts"]) if cached is not None else None
-            # Inside the stale window → serve instantly; past fresh-TTL, kick ONE
-            # background refresh (the ``not refreshing`` guard avoids a pile-up).
-            if cached is not None and age is not None and age < _AGENTS_STALE_S:
-                if age >= _AGENTS_FRESH_S and not _AGENTS_CACHE["refreshing"]:
-                    asyncio.create_task(_maybe_refresh_agents(hub, agent_spokes))
-                live = cached
-            else:
-                # No servable cache → forced refresh. The lock serializes concurrent
-                # first-loaders into a single fan-out; each re-checks under the lock.
-                live = await _maybe_refresh_agents(hub, agent_spokes, force=True) \
-                    or {"agents": [], "pending_agents": [], "spoke_connected": True}
-
-        # Append the offline relayed-agent roster (reconstructed from persisted
-        # side-data) without mutating the shared SWR cache object.
-        live_ids = {a.get("agent_id") for a in live.get("agents", []) if a.get("agent_id")}
-        live_ids |= {a.get("agent_id") for a in live.get("pending_agents", []) if a.get("agent_id")}
-        out = dict(live)
-        out["offline_agents"] = _offline_relay_agents(hub, live_ids)
-        # Tenant scope (picker): an explicit tenant shows ONLY agents EFFECTIVELY
-        # scoped to it — the agent's OWN pinned tenant (per-agent Tenant button →
-        # agent_config.client_simulation.tenant_id, the same value the tile
-        # DISPLAYS via _tenantOf) wins over its owning spoke's module_metadata
-        # binding. A Proxmox agent pinned to LRB on a SHARED spoke must appear
-        # under LRB (matching its shown tenant), not under the shared spoke's
-        # tenant — otherwise the roster filtered by the spoke binding disagreed
-        # with the tenant label rendered next to each agent. Admin with none
-        # selected ("All") or a tenantless resolve → unchanged (full roster). The
-        # SWR cache stays the full roster; we filter this per-request copy.
         tid = _resolve_tenant(request, tenant)
-        if tid and tid != "default":
-            md = hub.state.system_state.get("module_metadata", {}) or {}
-            def _agent_tid(a):
-                pin = str(((a.get("client_simulation") or {})
-                           .get("tenant_id")) or "").strip()
-                if pin:
-                    return pin
-                return (md.get(a.get("spoke_id"), {}) or {}).get("tenant_id")
-            for _k in ("agents", "pending_agents", "offline_agents"):
-                if isinstance(out.get(_k), list):
-                    out[_k] = [a for a in out[_k] if _agent_tid(a) == tid]
-        return out
+        return await pxmx_agents_payload(hub, tid)
 
     @app.post("/api/pxmx/agents/{agent_id}/revoke")
     async def revoke_pxmx_agent(agent_id: str, request: Request):

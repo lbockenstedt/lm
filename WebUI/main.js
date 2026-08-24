@@ -3704,6 +3704,15 @@ function _viewTemplate(viewId) {
 
   <div class="${card}">
     <div class="flex items-center justify-between mb-4">
+      <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Proxmox Node Agents</h3>
+      <button onclick="loadMyDeviceAgents()" class="text-xs text-[#01A982] hover:underline">Refresh</button>
+    </div>
+    <p class="text-xs text-slate-400 mb-3">Proxmox host agents relayed through one of your tenant's spokes (see Proxmox Host Agent below) — connected, pending, or offline. A pending agent relayed through a spoke already bound to your tenant can be approved right here, no admin needed. An agent relayed through a spoke NOT bound to your tenant (e.g. a shared spoke) still needs an admin — or install it with an onboarding key's <code>--onboarding-psk</code>/<code>--tenant-hint</code> to skip approval entirely.</p>
+    <div id="my-pxmx-agents-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
+  </div>
+
+  <div class="${card}">
+    <div class="flex items-center justify-between mb-4">
       <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Onboarding Keys</h3>
       <button onclick="_myDevGenPsk()" class="${btn}">+ Generate Key</button>
     </div>
@@ -4546,6 +4555,7 @@ function initView(viewId, subView) {
         case 'mydevices':
             loadAllDevices();
             loadMyDeviceSpokes();
+            loadMyDeviceAgents();
             loadMyDevicePsks();
             loadMyPxmxSpokes();
             break;
@@ -15279,6 +15289,63 @@ async function loadMyDeviceSpokes() {
     } catch (e) {
         console.error('loadMyDeviceSpokes failed', e);
         el.innerHTML = `<p class="text-xs text-red-500 italic">Failed to load spokes: ${escapeHtml(e.message || 'error')}</p>`;
+    }
+}
+
+// Relayed Proxmox node agents (dial a hypervisor/simulation spoke's /ws/agent
+// directly, not the hub) scoped to this tenant — the tenant-admin self-service
+// counterpart to Setup → Spokes & Agents' Agents tile, backed by
+// /tenant/{tenant}/agents (routes/onboarding.py), which does NOT require the
+// `pxmx` module right the admin tile's /api/pxmx/agents does.
+async function loadMyDeviceAgents() {
+    const el = document.getElementById('my-pxmx-agents-list');
+    if (!el) return;
+    const tenant = _myDevTenant();
+    if (!tenant) { el.innerHTML = '<p class="text-xs text-slate-400 italic">Select a tenant first.</p>'; return; }
+    try {
+        const r = await apiJson(`/tenant/${encodeURIComponent(tenant)}/agents`);
+        const rows = [
+            ...(r.pending_agents || []).map((a) => ({ ...a, _status: 'pending' })),
+            ...(r.agents || []).map((a) => ({ ...a, _status: 'connected' })),
+            ...(r.offline_agents || []).map((a) => ({ ...a, _status: 'offline' })),
+        ];
+        if (!rows.length) {
+            el.innerHTML = '<p class="text-xs text-slate-400 italic">No Proxmox node agents relayed through your tenant\'s spokes yet.</p>';
+            return;
+        }
+        el.innerHTML = rows.map((a) => {
+            const badge = a._status === 'pending'
+                ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-700">pending</span>'
+                : a._status === 'connected'
+                ? '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-green-100 text-green-700">connected</span>'
+                : '<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-500">offline</span>';
+            const eAid = String(a.agent_id).replace(/'/g, "\\'");
+            const eSpk = String(a.spoke_id || '').replace(/'/g, "\\'");
+            const approveBtn = a._status === 'pending'
+                ? `<button onclick="_myDevApproveAgent('${eSpk}', '${eAid}')" class="px-2.5 py-1 rounded-md text-[11px] font-bold bg-white hover:bg-green-50 text-green-700 border border-green-300 transition-colors">Approve</button>`
+                : '';
+            return `<div class="flex items-center justify-between border border-slate-100 rounded-md px-3 py-2">
+                <div><span class="text-sm font-medium text-slate-700">${escapeHtml(a.hostname || a.agent_id)}</span>
+                <span class="ml-2 text-[11px] text-slate-400 font-mono">via ${escapeHtml(a.spoke_id || '—')}</span></div>
+                <div class="flex items-center gap-2">${badge}${approveBtn}</div></div>`;
+        }).join('');
+    } catch (e) {
+        console.error('loadMyDeviceAgents failed', e);
+        el.innerHTML = `<p class="text-xs text-red-500 italic">Failed to load agents: ${escapeHtml(e.message || 'error')}</p>`;
+    }
+}
+
+async function _myDevApproveAgent(spokeId, agentId) {
+    const tenant = _myDevTenant();
+    if (!tenant) return;
+    try {
+        await apiJson(`/tenant/${encodeURIComponent(tenant)}/agents/${encodeURIComponent(spokeId)}/${encodeURIComponent(agentId)}/approve`,
+            { method: 'POST' });
+        if (typeof showToast === 'function') showToast('Agent approved', 'success');
+        loadMyDeviceAgents();
+    } catch (e) {
+        console.error('_myDevApproveAgent failed', e);
+        if (typeof showToast === 'function') showToast(e.message, 'error');
     }
 }
 
