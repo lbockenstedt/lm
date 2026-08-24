@@ -1455,7 +1455,7 @@ const VIEW_SUBMENUS = {
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
     dns: ['Records', 'Statistics', 'Forwarders', 'External DNS'],
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations'],
-    nw: ['Gateways', 'Switches', 'Firewalls', 'Other'],
+    nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'Other'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
 };
 
@@ -4556,7 +4556,7 @@ function initView(viewId, subView) {
             loadDHCPData(subView || 'Overview');
             break;
         case 'nw':
-            loadNwData(subView || 'Gateways');
+            loadNwData(subView || 'Overview');
             break;
         case 'console':
             loadConsoleData();
@@ -16463,7 +16463,10 @@ window.nwOpenDevice = function (deviceId) {
 // Back to the current category's device list (no refetch).
 window.nwBackToList = function () {
     window._nwDetail = null;
-    if (window._nwView) _renderNwDeviceList(window._nwView.category, window._nwView.devices, window._nwView.counts);
+    if (window._nwView) {
+        if (window._nwView.category === 'Overview') _renderNwOverview(window._nwView.devices, window._nwView.counts);
+        else _renderNwDeviceList(window._nwView.category, window._nwView.devices, window._nwView.counts);
+    }
 };
 
 window.nwSelectDetailTab = function (tab) {
@@ -16566,9 +16569,9 @@ async function loadNwData(category) {
     category = category || currentSubView;
     // Map any stale/legacy submenu value (a cached currentSubView from the old
     // data-type tabs, or a deep link) onto a real category so the page never
-    // blanks.
+    // blanks. 'Overview' is the tenant-wide summary landing tab.
     const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'Other'];
-    if (!CATEGORIES.includes(category)) category = 'Gateways';
+    if (category !== 'Overview' && !CATEGORIES.includes(category)) category = 'Overview';
     window._nwDetail = null;
     container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Loading ${escapeHtml(category)}…</div>`;
 
@@ -16604,8 +16607,96 @@ async function loadNwData(category) {
     // Gateways) makes devices under another category look "missing".
     const counts = { Gateways: 0, Switches: 0, Firewalls: 0, Other: 0 };
     items.forEach(it => { counts[_nwCategoryOf(it.object_type)]++; });
+    if (category === 'Overview') {
+        // Tenant-wide summary landing (mirrors the Hypervisor Overview): keep the
+        // full fleet on _nwView so a row click can drill into device detail and
+        // the detail back-button repaints the overview without a refetch.
+        window._nwView = { category: 'Overview', devices: items, counts };
+        _renderNwOverview(items, counts);
+        return;
+    }
     window._nwView = { category, devices, counts };
     _renderNwDeviceList(category, devices, counts);
+}
+
+// Tenant-wide summary landing for the NW module (first tab), mirroring the
+// Hypervisor Overview: reachability stat cards + clickable per-category cards +
+// a compact fleet table (click a row → device detail). All figures are scoped
+// to the selected tenant by the /api/nw/devices?tenant= fetch in loadNwData.
+function _renderNwOverview(devices, counts) {
+    const container = document.getElementById('nw-table-container');
+    if (!container) return;
+    counts = counts || { Gateways: 0, Switches: 0, Firewalls: 0, Other: 0 };
+    const isUp   = it => it.reachable === true  || it.reachable === 'up';
+    const isDown = it => it.reachable === false || it.reachable === 'down';
+    const total = devices.length;
+    const up    = devices.filter(isUp).length;
+    const down  = devices.filter(isDown).length;
+    const unknown = total - up - down;
+
+    if (!total) {
+        container.innerHTML = `<div class="py-12 text-center text-slate-400 italic">No network devices configured for this tenant. Add one in Setup → Network Devices.</div>`;
+        return;
+    }
+
+    // Reachability stat cards (non-clickable summary).
+    const stat = (label, n, valueCls) => `
+        <div class="bg-white rounded-xl border border-slate-200 p-5">
+            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">${label}</p>
+            <p class="text-3xl font-bold ${valueCls || 'text-[#263040]'}">${n}</p>
+        </div>`;
+    const statCards = `<div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        ${stat('Total Devices', total)}
+        ${stat('Reachable', up, 'text-green-600')}
+        ${stat('Unreachable', down, 'text-red-500')}
+        ${stat('Unknown', unknown, 'text-slate-400')}
+    </div>`;
+
+    // Per-category cards → click navigates to that category tab.
+    const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'Other'];
+    const catCard = c => `
+        <div onclick="setSubView('${c}')" class="cursor-pointer bg-white rounded-xl border border-slate-200 p-5 hover:border-[#01A982] hover:shadow-md transition-all">
+            <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">${c}</p>
+            <p class="text-3xl font-bold text-[#263040]">${counts[c] || 0}</p>
+        </div>`;
+    const catCards = `<div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        ${CATEGORIES.map(catCard).join('')}
+    </div>`;
+
+    // Compact fleet table — every device in the tenant, click to drill in.
+    const rows = devices.map(it => {
+        const typeLabel = _NW_OBJECT_TYPES[it.object_type] || it.object_type || '—';
+        const category  = _nwCategoryOf(it.object_type);
+        const rcell = isUp(it)
+            ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">up</span>'
+            : isDown(it)
+                ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
+                : '<span class="text-slate-400 text-xs">—</span>';
+        return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer">
+            <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}</td>
+            <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(typeLabel)}</td>
+            <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(category)}</td>
+            <td class="px-4 py-3 text-slate-600 font-mono text-xs">${escapeHtml(it.address || '—')}</td>
+            <td class="px-4 py-3">${rcell}</td>
+            <td class="px-4 py-3 text-right"><span class="text-slate-300">›</span></td>
+        </tr>`;
+    }).join('');
+    const headers = ['device', 'type', 'category', 'address', 'reachable']
+        .map(k => `<th class="px-4 py-3">${k.toUpperCase()}</th>`).join('');
+
+    container.innerHTML = `
+        <div class="space-y-4">
+            <h3 class="text-base font-semibold text-[#263040] px-1">Fleet Overview
+                <span class="text-xs text-slate-400 font-normal">(${total} device${total === 1 ? '' : 's'} in this tenant)</span></h3>
+            ${statCards}
+            ${catCards}
+            <div class="overflow-x-auto overflow-hidden rounded-md border border-slate-200 bg-white">
+                <table class="w-full text-left text-sm">
+                    <thead class="bg-slate-100 text-slate-600 uppercase text-xs"><tr>${headers}<th class="px-4 py-3"></th></tr></thead>
+                    <tbody class="divide-y divide-slate-200">${rows}</tbody>
+                </table>
+            </div>
+        </div>`;
 }
 
 // Render the device list for one category (click a row to open its detail).
