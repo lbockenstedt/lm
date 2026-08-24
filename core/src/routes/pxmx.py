@@ -376,6 +376,54 @@ async def _maybe_refresh_agents(hub, agent_spokes, force=False):
             _AGENTS_CACHE["refreshing"] = False
 
 
+async def push_pxmx_agent_config(hub, agent_id, push_cfg, owning_spoke=None):
+    """Best-effort push of a ``SET_AGENT_CONFIG`` payload down to a pxmx-
+    relayed agent's owning spoke. ``SET_AGENT_CONFIG`` persists spoke-side
+    (``proxmox_spoke.py``'s ``self.agent_configs[agent_id] = cfg``) even when
+    the agent itself is offline — the spoke re-pushes it as ``UPDATE_CONFIG``
+    the next time that agent registers (``_on_agent_registered``), so a
+    failure here just means the config applies on the agent's next connect/
+    reconnect. Uses ``push_or_queue_to_spoke`` (mailbox-backed) when
+    available so a momentarily-unreachable SPOKE (mid self-update restart,
+    brief reconnect blip) still gets it delivered the moment it returns,
+    instead of the command being dropped outright. Returns ``(pushed,
+    queued)``. Module-level (not a route closure) so it's shared by the
+    admin config route, the tenant-self-service CS toggle (onboarding.py),
+    and the CS-spoke auto-enable-on-approval path (routes/setup.py).
+
+    ``owning_spoke``, when given, is used verbatim instead of the default
+    resolution — the approval path already knows the CORRECT owning spoke
+    (freshly resolved, possibly before the agent's first relayed frame, so
+    ``get_spoke_for_agent`` can't yet resolve it and the default's hypervisor
+    fallback would be wrong for a cs-dialed agent)."""
+    pushed = False
+    queued = False
+    owning_spoke = owning_spoke or hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
+        or hub.get_hypervisor_spoke()
+    if owning_spoke:
+        try:
+            push = getattr(hub, "push_or_queue_to_spoke", None)
+            if callable(push):
+                outcome = await push(owning_spoke, "SET_AGENT_CONFIG", {
+                    "agent_id": agent_id,
+                    "config": push_cfg,
+                })
+                queued = bool(outcome.get("queued"))
+                rdata = outcome.get("result") or {}
+                rdata = rdata.get("payload", {}).get("data", rdata) if isinstance(rdata, dict) else rdata
+                pushed = queued or (isinstance(rdata, dict) and rdata.get("status") == "SUCCESS")
+            else:
+                res = await hub.request_response(owning_spoke, "SET_AGENT_CONFIG", {
+                    "agent_id": agent_id,
+                    "config": push_cfg,
+                })
+                rdata = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
+                pushed = rdata.get("status") == "SUCCESS"
+        except Exception as e:
+            logger.info(f"SET_AGENT_CONFIG push for '{agent_id}' failed (will re-push on reconnect): {e}")
+    return pushed, queued
+
+
 async def pxmx_agents_payload(hub, tid):
     """Aggregates GET_AGENTS across EVERY agent-hosting spoke (hypervisor=pxmx,
     simulation=cs — both subclass AgentHostingControlPlane), not just pxmx: a
@@ -1000,43 +1048,9 @@ def register(app, hub, ctx):
             if has_cron:
                 push_cfg["managed_crontab"] = cron_val
 
-            # Best-effort push to a live agent. SET_AGENT_CONFIG persists spoke-side
-            # even when the agent is offline, so a failure here just means the agent
-            # picks up the config on its next connect/reconnect — but that only
-            # works if the OWNING SPOKE actually received this SET_AGENT_CONFIG in
-            # the first place. If the spoke itself was momentarily unreachable
-            # (mid self-update restart, brief reconnect blip — the same window
-            # that made hub-config saves report "0 spokes"), a bare
-            # request_response would raise immediately and this command would
-            # just be dropped with nothing spoke-side to push down once the
-            # agent reconnects. push_or_queue_to_spoke queues it via the Mailbox
-            # instead, so it's delivered (and persists spoke-side) the moment the
-            # spoke itself comes back.
-            pushed = False
-            queued = False
-            owning_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
-                or hub.get_hypervisor_spoke()
-            if owning_spoke:
-                try:
-                    push = getattr(hub, "push_or_queue_to_spoke", None)
-                    if callable(push):
-                        outcome = await push(owning_spoke, "SET_AGENT_CONFIG", {
-                            "agent_id": agent_id,
-                            "config": push_cfg,
-                        })
-                        queued = bool(outcome.get("queued"))
-                        rdata = outcome.get("result") or {}
-                        rdata = rdata.get("payload", {}).get("data", rdata) if isinstance(rdata, dict) else rdata
-                        pushed = queued or (isinstance(rdata, dict) and rdata.get("status") == "SUCCESS")
-                    else:
-                        res = await hub.request_response(owning_spoke, "SET_AGENT_CONFIG", {
-                            "agent_id": agent_id,
-                            "config": push_cfg,
-                        })
-                        rdata = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
-                        pushed = rdata.get("status") == "SUCCESS"
-                except Exception as e:
-                    logger.info(f"SET_AGENT_CONFIG push for '{agent_id}' failed (will re-push on reconnect): {e}")
+            # Best-effort push to a live agent — see push_pxmx_agent_config's
+            # docstring for the persist-spoke-side / mailbox-queue contract.
+            pushed, queued = await push_pxmx_agent_config(hub, agent_id, push_cfg)
 
             return {
                 "status": "ok" if pushed else "partial_success",

@@ -298,16 +298,44 @@ async def _perform_agent_approval(hub, spoke_id: str, agent_id: str,
         spoke_tenant = hub.state.get_spoke_tenant(target_spoke)
         from access import tenant_is_shared  # lazy: avoid import cycle
         tenant_to_bind = spoke_tenant if (spoke_tenant and not tenant_is_shared(spoke_tenant)) else None
-    if tenant_to_bind:
+
+    # Auto-enable Client-Simulation when this agent connects through a
+    # simulation (cs) spoke — dialing that spoke's /ws/agent listener at all
+    # is itself a strong signal of intent (the box was specifically pointed
+    # at a cs spoke, typically because the operator wants it hosting
+    # client-sim traffic), so no separate manual toggle should be required.
+    # Set ONCE, here at approval time only — never re-forced on a later
+    # approval/reconnect, so a subsequent manual disable (Setup's Agent
+    # Config modal, or the tenant-admin CS toggle) sticks.
+    spoke_pk = hub._primary_key(target_spoke)
+    spoke_module_type = (getattr(hub, "spoke_module_types", {}) or {}).get(spoke_pk) \
+        or hub.state.system_state.get("module_metadata", {}).get(target_spoke, {}).get("module_type")
+    auto_enable_cs = (spoke_module_type == "simulation")
+
+    cs_cfg = None
+    if tenant_to_bind or auto_enable_cs:
         agent_cfg_store = hub.state.system_state.setdefault("agent_config", {})
         agent_pk = hub._agent_primary_key(agent_id)
         entry = dict(agent_cfg_store.get(agent_pk, {}))
         cs_cfg = dict(entry.get("client_simulation") or {})
-        if explicit_tenant or not cs_cfg.get("tenant_id"):
+        if tenant_to_bind and (explicit_tenant or not cs_cfg.get("tenant_id")):
             cs_cfg["tenant_id"] = tenant_to_bind
-            entry["client_simulation"] = cs_cfg
-            agent_cfg_store[agent_pk] = entry
-            hub.state._mark_dirty()
+        if auto_enable_cs:
+            cs_cfg["enabled"] = True
+        entry["client_simulation"] = cs_cfg
+        agent_cfg_store[agent_pk] = entry
+        hub.state._mark_dirty()
+
+    if auto_enable_cs:
+        from routes.pxmx import push_pxmx_agent_config  # lazy: avoid import cycle
+        try:
+            await push_pxmx_agent_config(hub, agent_id, {"client_simulation": cs_cfg},
+                                         owning_spoke=target_spoke)
+        except Exception:  # noqa: BLE001 — best-effort; persisted state above still applies on reconnect
+            logger.exception(
+                f"approve_agent: CS auto-enable push failed for agent={agent_id} "
+                f"(will still apply once the spoke re-pushes stored config on the "
+                f"agent's next register)")
 
     connected = hub._primary_key(target_spoke) in hub.active_connections
     _disp = await _deliver_agent_approval(hub, target_spoke, agent_id)
@@ -332,7 +360,8 @@ async def _perform_agent_approval(hub, spoke_id: str, agent_id: str,
             target_spoke, agent_id, _disp)
     return {"agent_id": agent_id, "target_spoke": target_spoke,
             "spoke_connected": connected, "disposition": _disp,
-            "tenant_inherited": tenant_to_bind or None}
+            "tenant_inherited": tenant_to_bind or None,
+            "cs_auto_enabled": auto_enable_cs}
 
 
 def _bust_spokes_cache():

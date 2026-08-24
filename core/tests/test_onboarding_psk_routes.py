@@ -40,6 +40,7 @@ class FakeHub:
             system_state={"known_modules": [], "module_names": {}, "module_metadata": {}},
             get_spoke_tenant=lambda sid: self._tenants.get(sid, ""),
             remove_module=self._remove_module,
+            _mark_dirty=lambda: None,
         )
         self._tenants = {}
         self.evicted = []
@@ -50,6 +51,9 @@ class FakeHub:
 
     def _primary_key(self, sid):
         return sid
+
+    def _agent_primary_key(self, aid):
+        return aid
 
     async def _clear_spoke(self, pk):
         self.cleared_mail.append(pk)
@@ -382,3 +386,99 @@ def test_approve_agent_propagates_failure_as_500(monkeypatch):
     hub.add_spoke("spoke-1", "tenantA")
     r = c.post("/tenant/tenantA/agents/spoke-1/agent-1/approve")
     assert r.status_code == 500
+
+
+# ── POST /tenant/{tenant}/agents/{agent_id}/cs-config ───────────────────────
+# Tenant-admin self-service Client-Simulation toggle on an agent ALREADY
+# pinned to their tenant (via client_simulation.tenant_id — the agent's own
+# ownership signal, set at approval time, independent of its owning spoke's
+# CURRENT binding).
+
+def test_cs_config_enables_and_pushes(monkeypatch):
+    pushes = []
+
+    async def _fake_push(hub, agent_id, push_cfg, owning_spoke=None):
+        pushes.append((agent_id, push_cfg))
+        return True, False
+
+    monkeypatch.setattr(pxmx_routes, "push_pxmx_agent_config", _fake_push)
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.state.system_state.setdefault("agent_config", {})["agent-1"] = {
+        "client_simulation": {"tenant_id": "tenantA"}}
+    r = c.post("/tenant/tenantA/agents/agent-1/cs-config", json={"enabled": True})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["enabled"] is True
+    cfg = hub.state.system_state["agent_config"]["agent-1"]["client_simulation"]
+    assert cfg["enabled"] is True
+    assert cfg["tenant_id"] == "tenantA"  # untouched
+    assert pushes == [("agent-1", {"client_simulation": cfg})]
+
+
+def test_cs_config_can_disable(monkeypatch):
+    async def _fake_push(hub, agent_id, push_cfg, owning_spoke=None):
+        return True, False
+
+    monkeypatch.setattr(pxmx_routes, "push_pxmx_agent_config", _fake_push)
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.state.system_state.setdefault("agent_config", {})["agent-1"] = {
+        "client_simulation": {"tenant_id": "tenantA", "enabled": True}}
+    r = c.post("/tenant/tenantA/agents/agent-1/cs-config", json={"enabled": False})
+    assert r.status_code == 200
+    assert r.json()["enabled"] is False
+    cfg = hub.state.system_state["agent_config"]["agent-1"]["client_simulation"]
+    assert cfg["enabled"] is False
+
+
+def test_cs_config_preserves_usb_config(monkeypatch):
+    async def _fake_push(hub, agent_id, push_cfg, owning_spoke=None):
+        return True, False
+
+    monkeypatch.setattr(pxmx_routes, "push_pxmx_agent_config", _fake_push)
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.state.system_state.setdefault("agent_config", {})["agent-1"] = {
+        "client_simulation": {"tenant_id": "tenantA", "usb_config": {"vidpids": ["1:2"]}}}
+    r = c.post("/tenant/tenantA/agents/agent-1/cs-config", json={"enabled": True})
+    assert r.status_code == 200
+    cfg = hub.state.system_state["agent_config"]["agent-1"]["client_simulation"]
+    assert cfg["usb_config"] == {"vidpids": ["1:2"]}
+
+
+def test_cs_config_rejects_agent_bound_to_another_tenant(monkeypatch):
+    calls = []
+
+    async def _fake_push(hub, agent_id, push_cfg, owning_spoke=None):
+        calls.append(1)
+        return True, False
+
+    monkeypatch.setattr(pxmx_routes, "push_pxmx_agent_config", _fake_push)
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.state.system_state.setdefault("agent_config", {})["agent-1"] = {
+        "client_simulation": {"tenant_id": "tenantB"}}
+    r = c.post("/tenant/tenantA/agents/agent-1/cs-config", json={"enabled": True})
+    assert r.status_code == 404
+    assert calls == []
+
+
+def test_cs_config_rejects_agent_with_no_tenant_pin(monkeypatch):
+    """An agent that was never approved (or approved with no tenant at all,
+    e.g. via a shared spoke with no explicit routing) has no tenant_id to
+    match against — reject rather than silently no-op."""
+    calls = []
+
+    async def _fake_push(hub, agent_id, push_cfg, owning_spoke=None):
+        calls.append(1)
+        return True, False
+
+    monkeypatch.setattr(pxmx_routes, "push_pxmx_agent_config", _fake_push)
+    c, _ = _build(_tenant_admin(["tenantA"]))
+    r = c.post("/tenant/tenantA/agents/never-approved/cs-config", json={"enabled": True})
+    assert r.status_code == 404
+    assert calls == []
+
+
+def test_cs_config_cross_tenant_path_denied():
+    c, _ = _build(_tenant_admin(["tenantA"]))
+    r = c.post("/tenant/tenantB/agents/agent-1/cs-config", json={"enabled": True})
+    assert r.status_code == 403
