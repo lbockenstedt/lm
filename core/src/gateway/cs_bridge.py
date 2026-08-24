@@ -84,7 +84,6 @@ def _is_timeout_message(message: Any) -> bool:
         "timed out", "timeout", "time-out", "timed-out",
         "did not respond", "didn't respond", "no response",
     ))
-    return {}
 
 
 class CSBridgePoller:

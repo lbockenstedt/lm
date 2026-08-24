@@ -753,7 +753,6 @@ async def distribute_wildcard_to_all_spokes(
     logger.info("[cert] wildcard %s: fanned out %d/%d target(s) OK",
                 domain, ok, len(summary))
     return summary
-    return aggregate
 
 
 def build_available_targets(spoke_module_types: Dict[str, str],
