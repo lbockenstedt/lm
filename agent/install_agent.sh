@@ -525,7 +525,7 @@ Wants=network-online.target
 # and on crash-recovery. systemd's default start limiter (DefaultStartLimitBurst
 # = 5 starts within DefaultStartLimitIntervalSec = 10s) would trip during a burst
 # of such restarts and then REFUSE to revive the unit — stranding the agent in
-# `failed` for good (the "clean exit — systemd did not revive" / RED-for-minutes
+# 'failed' for good (the "clean exit — systemd did not revive" / RED-for-minutes
 # symptom). Disable the limiter so a self-updating unit is ALWAYS brought back;
 # Restart=always + RestartSec=10 already paces the restarts.
 StartLimitIntervalSec=0
