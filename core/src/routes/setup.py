@@ -232,11 +232,18 @@ async def _deliver_agent_approval(hub, target_spoke: str, agent_id: str) -> str:
     return "queued"
 
 
-async def _perform_agent_approval(hub, spoke_id: str, agent_id: str) -> dict:
+async def _perform_agent_approval(hub, spoke_id: str, agent_id: str,
+                                  explicit_tenant: str = None) -> dict:
     """Approve a relayed node-agent (persist the flag + durably relay
     ``APPROVAL_SUCCESS`` to its owning agent-hosting spoke). The single source
-    of truth shared by the WebUI approve route and the loopback admin ops API
-    so both behave identically. Returns a summary dict for the caller."""
+    of truth shared by the WebUI approve route, the loopback admin ops API,
+    and the PSK auto-approve path (``main.py::_try_psk_agent_auto_approve``)
+    so all three behave identically. Returns a summary dict for the caller.
+
+    ``explicit_tenant``, when given, is an already-validated tenant (e.g. from
+    a matched onboarding PSK) that WINS over the spoke-tenant-inherit logic
+    below — the credential is the authoritative signal, not the parent spoke's
+    binding."""
     # A Proxmox node agent connects THROUGH the pxmx hypervisor spoke,
     # not directly to the hub, so it must NOT be registered as a
     # hub-direct spoke (known_modules). Doing so made /setup/diagnostics
@@ -272,21 +279,32 @@ async def _perform_agent_approval(hub, spoke_id: str, agent_id: str) -> dict:
         "agent_info index" if _resolved else "fallback to requested spoke_id",
         spoke_id)
 
-    # Inherit the parent spoke's tenant binding (Setup → Spokes &
-    # Agents' "Tenant" button / Simulations → Spoke Management) so an
-    # agent connecting to a tenant-bound spoke is assigned to that
-    # tenant automatically — no per-agent config needed. Only seeds
-    # when the agent has no explicit tenant of its own yet (an
-    # existing override, e.g. set via the Agent Configuration modal,
-    # is left alone) and the spoke actually has a tenant to inherit.
-    spoke_tenant = hub.state.get_spoke_tenant(target_spoke)
-    if spoke_tenant:
+    # Bind a tenant onto the agent's client_simulation.tenant_id — either the
+    # caller-supplied explicit_tenant (an already-validated onboarding PSK,
+    # which always wins and OVERRIDES any existing pin) or, absent that,
+    # inherit the parent spoke's tenant binding (Setup → Spokes & Agents'
+    # "Tenant" button / Simulations → Spoke Management) so an agent connecting
+    # to a tenant-bound spoke is assigned automatically — no per-agent config
+    # needed. The inherit-only path seeds ONLY when the agent has no explicit
+    # tenant of its own yet (an existing override, e.g. set via the Agent
+    # Configuration modal, is left alone), and skips the SHARED tenant: a
+    # shared spoke can serve agents belonging to different tenants, so
+    # inheriting it here would silently mis-tag every agent as "shared"
+    # instead of leaving it for an admin (or a tenant-scoped onboarding PSK)
+    # to route explicitly.
+    if explicit_tenant:
+        tenant_to_bind = explicit_tenant
+    else:
+        spoke_tenant = hub.state.get_spoke_tenant(target_spoke)
+        from access import tenant_is_shared  # lazy: avoid import cycle
+        tenant_to_bind = spoke_tenant if (spoke_tenant and not tenant_is_shared(spoke_tenant)) else None
+    if tenant_to_bind:
         agent_cfg_store = hub.state.system_state.setdefault("agent_config", {})
         agent_pk = hub._agent_primary_key(agent_id)
         entry = dict(agent_cfg_store.get(agent_pk, {}))
         cs_cfg = dict(entry.get("client_simulation") or {})
-        if not cs_cfg.get("tenant_id"):
-            cs_cfg["tenant_id"] = spoke_tenant
+        if explicit_tenant or not cs_cfg.get("tenant_id"):
+            cs_cfg["tenant_id"] = tenant_to_bind
             entry["client_simulation"] = cs_cfg
             agent_cfg_store[agent_pk] = entry
             hub.state._mark_dirty()
@@ -314,7 +332,7 @@ async def _perform_agent_approval(hub, spoke_id: str, agent_id: str) -> dict:
             target_spoke, agent_id, _disp)
     return {"agent_id": agent_id, "target_spoke": target_spoke,
             "spoke_connected": connected, "disposition": _disp,
-            "tenant_inherited": spoke_tenant or None}
+            "tenant_inherited": tenant_to_bind or None}
 
 
 def _bust_spokes_cache():
