@@ -4749,7 +4749,7 @@ function _csKnobFloorFromLearned(v) {
 // values stay in their own block.
 function _csKnobInheritCheckbox(r) {
     const inherit = r.inherit_learned_knobs !== false;   // default ON
-    return `<span class="flex items-center gap-1" title="Learned + 20%, capped at double. Uncheck to pin your own value per knob below."><input data-cs-sq="inherit_learned_knobs" type="checkbox" onchange="csSimQuotaOnInheritKnobsChange(this)" ${inherit ? 'checked' : ''}> Inherit learned values (config)</span>`;
+    return `<label class="flex items-center gap-1" title="Learned + 20%, capped at double. Uncheck to pin your own value per knob below."><input data-cs-sq="inherit_learned_knobs" type="checkbox" onchange="csSimQuotaOnInheritKnobsChange(this)" ${inherit ? 'checked' : ''}> Inherit learned values (config)</label>`;
 }
 
 // One row per declared knob. Inheriting shows the computed floor read-only;
@@ -4798,7 +4798,7 @@ function _csKnobInheritRows(r, cat) {
 // not a block that can move into the flex-wrap toggle row.
 function _csCountInheritCheckbox(r) {
     const inherit = r.inherit_learned_count !== false;   // default ON
-    return `<span class="flex items-center gap-1" title="Min = learned+20%, Max = double the learned floor, both computed fresh each tick. Uncheck to pin your own Min/Max."><input data-cs-sq="inherit_learned_count" type="checkbox" onchange="csSimQuotaOnInheritCountChange(this)" ${inherit ? 'checked' : ''}> Inherit learned values (count)</span>`;
+    return `<label class="flex items-center gap-1" title="Min = learned+20%, Max = double the learned floor, both computed fresh each tick. Uncheck to pin your own Min/Max."><input data-cs-sq="inherit_learned_count" type="checkbox" onchange="csSimQuotaOnInheritCountChange(this)" ${inherit ? 'checked' : ''}> Inherit learned values (count)</label>`;
 }
 
 function csRenderSimQuotaEditor() {
@@ -4924,16 +4924,16 @@ function csRenderSimQuotaEditor() {
             </select>
           </label>
           <button onclick="csSimQuotaDel(${i})" class="text-red-600 hover:text-red-800 text-xs font-bold py-1">Remove</button>
-          <label class="text-xs text-slate-500 md:col-span-6 flex flex-wrap gap-x-3 gap-y-1">
-            ${!isPresence ? `<span class="flex items-center gap-1 font-semibold text-slate-600"><input data-cs-sq="tied" type="checkbox" onchange="csSimQuotaOnTiedChange(this)" ${tied ? 'checked' : ''}> Tied to alert/insight</span>` : ''}
-            ${(!isPresence && tied) ? `<span class="flex items-center gap-1" title="Production consumer: ramps clients UP to trigger + keep the alert alive, seeded from the learned base + config, CAPPED at Max. Hits Max and still not firing → max-hit alert (lab/prod divergence). Mutually exclusive with Learning."><input data-cs-sq="adaptive" type="checkbox" onchange="csSimQuotaOnAdaptiveChange(this)" ${r.adaptive ? 'checked' : ''}> Adaptive (keep firing)</span>` : ''}
-            ${(!isPresence && tied) ? `<span class="flex items-center gap-1" title="The lab: ramps up AND down continuously to re-evaluate the floor (what it takes), tunes the sim's config knobs (e.g. dns_fail_rate/duration), and publishes the learned count + knobs so production goes straight to learned + 20%. Mutually exclusive with Adaptive."><input data-cs-sq="learning" type="checkbox" onchange="csSimQuotaOnLearningChange(this)" ${r.learning ? 'checked' : ''}> Learning</span>` : ''}
+          <div class="text-xs text-slate-500 md:col-span-6 flex flex-wrap gap-x-3 gap-y-1">
+            ${!isPresence ? `<label class="flex items-center gap-1 font-semibold text-slate-600"><input data-cs-sq="tied" type="checkbox" onchange="csSimQuotaOnTiedChange(this)" ${tied ? 'checked' : ''}> Tied to alert/insight</label>` : ''}
+            ${(!isPresence && tied) ? `<label class="flex items-center gap-1" title="Production consumer: ramps clients UP to trigger + keep the alert alive, seeded from the learned base + config, CAPPED at Max. Hits Max and still not firing → max-hit alert (lab/prod divergence). Mutually exclusive with Learning."><input data-cs-sq="adaptive" type="checkbox" onchange="csSimQuotaOnAdaptiveChange(this)" ${r.adaptive ? 'checked' : ''}> Adaptive (keep firing)</label>` : ''}
+            ${(!isPresence && tied) ? `<label class="flex items-center gap-1" title="The lab: ramps up AND down continuously to re-evaluate the floor (what it takes), tunes the sim's config knobs (e.g. dns_fail_rate/duration), and publishes the learned count + knobs so production goes straight to learned + 20%. Mutually exclusive with Adaptive."><input data-cs-sq="learning" type="checkbox" onchange="csSimQuotaOnLearningChange(this)" ${r.learning ? 'checked' : ''}> Learning</label>` : ''}
             ${(r.learning && knobSims.has(r.sim_id)) ? `<span class="text-slate-400 italic" title="The lab ratchets these [simulation] knobs down to the floor that still fires the alert.">tunes ${csEscape(((cat.meta[r.sim_id] || {}).knobs || []).join(', '))}</span>` : ''}
-            <span class="flex items-center gap-1"><input data-cs-sq="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</span>
-            <span class="flex items-center gap-1"><input data-cs-sq="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</span>
+            <label class="flex items-center gap-1"><input data-cs-sq="rehome" type="checkbox" ${r.rehome ? 'checked' : ''}> Re-home</label>
+            <label class="flex items-center gap-1"><input data-cs-sq="enabled" type="checkbox" ${r.enabled ? 'checked' : ''}> Enabled</label>
             ${(!isPresence && tied && r.adaptive && !r.learning && knobSims.has(r.sim_id)) ? _csKnobInheritCheckbox(r) : ''}
             ${(!isPresence && tied && _consumerLearnedCount) ? _csCountInheritCheckbox(r) : ''}
-          </label>
+          </div>
           ${(() => {
               // Bottom-of-tile block: the learned-op line (moved off Min/Max)
               // grouped with the per-knob fail-rate rows, when either exists.
@@ -5278,9 +5278,16 @@ function csSimQuotaSyncFromDom() {
         // (they're replaced by static labels) — nullish-guard so the sync
         // doesn't throw and preserves alert_type/alert_id defaults.
         const sim_id = g('sim_id').value;
-        const tied = sim_id ? !!(g('tied') || {}).checked : false;
-        const adaptive = (sim_id && tied) ? !!(g('adaptive') || {}).checked : false;
-        const learning = (sim_id && tied) ? !!(g('learning') || {}).checked : false;
+        // Adaptive & Learning are alert-consumer modes — they only exist on a
+        // tied (alert-bound) row. Read them first, then treat either as implying
+        // "tied": this keeps the row tethered even if the Tied checkbox itself
+        // reads stale/unchecked for a tick, so toggling Adaptive can never
+        // silently untether the row into the "presence — no alert" state.
+        const _adaptiveChecked = sim_id ? !!(g('adaptive') || {}).checked : false;
+        const _learningChecked = sim_id ? !!(g('learning') || {}).checked : false;
+        const tied = sim_id ? (!!(g('tied') || {}).checked || _adaptiveChecked || _learningChecked) : false;
+        const adaptive = tied ? _adaptiveChecked : false;
+        const learning = tied ? _learningChecked : false;
         const row = {
             alert_type: (g('alert_type') || {}).value || 'alert',
             // An untethered row (not tied) carries no alert_id.
