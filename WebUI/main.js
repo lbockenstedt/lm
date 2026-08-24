@@ -7589,6 +7589,7 @@ function _renderSetupModuleMgmtTile(content) {
                     <button onclick="showAddDeviceModal()" class="${btnCls}">+ Add Device</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">Every managed module device in one place — firewalls, network devices, NAC, IPAM, directory, DNS, and DHCP instances. Click <strong>Add Device</strong> then choose the module type to attach.</p>
+                <div id="all-devices-tabs" class="mb-3"></div>
                 <div id="all-devices-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
@@ -28477,27 +28478,138 @@ async function loadAllDevices() {
     const all = results.flat();
     window._allDevices = all;
     if (all.length === 0) {
+        const tabsEl = document.getElementById('all-devices-tabs');
+        if (tabsEl) tabsEl.innerHTML = '';
         listEl.innerHTML = '<p class="text-xs text-slate-400 italic">No managed devices yet. Click <strong>Add Device</strong> to attach one.</p>';
         return;
     }
-    // Map spoke_id -> friendly name so each row shows the spoke NAME, not the GUID
-    // (spoke_id is a GUID post guid-migration). loadApprovedSpokes() is tenant-safe.
+    // Map spoke_id -> friendly name AND -> tenant so each row shows the spoke
+    // NAME (not the GUID) and so devices can be grouped/filtered by tenant.
+    // loadApprovedSpokes() is tenant-safe; ensureTenants() gives tenant display
+    // names (admin only — tenant-admins see just their own devices).
     const _spokeNameById = {};
+    const _spokeTenantById = {};
     try {
         (await loadApprovedSpokes()).forEach(s => {
             _spokeNameById[s.spoke_id] = _spokeName(s);
+            _spokeTenantById[s.spoke_id] = _tenantOf(s) || '';
         });
     } catch (e) { /* best-effort — fall back to the id below */ }
-    listEl.innerHTML = all.map(d => {
+    if (isAdmin()) { try { await ensureTenants(); } catch (_e) { /* names optional */ } }
+    const _tenantNames = window._allTenantsName || {};
+    // Decorate each device with its resolved spoke name + tenant so both the
+    // tab bar and the row renderer can read them without re-deriving.
+    all.forEach(d => {
+        d._spokeName = d.spoke_id ? (_spokeNameById[d.spoke_id] || d.spoke_id) : '';
+        d._tenant = d.spoke_id ? (_spokeTenantById[d.spoke_id] || '') : '';
+        d._tenantLabel = d._tenant ? (_tenantNames[d._tenant] || d._tenant) : '';
+    });
+    if (!window._mdFilter) window._mdFilter = { type: 'all', tenant: 'all' };
+    // Self-heal a stale filter after a delete/add: if the selected type or
+    // tenant no longer owns any device, fall back to 'all' so the user isn't
+    // stranded on an empty tab.
+    const f = window._mdFilter;
+    if (f.type !== 'all' && !all.some(d => d._typeKey === f.type)) f.type = 'all';
+    if (f.tenant !== 'all' && !all.some(d => (d._tenant || '') === f.tenant)) f.tenant = 'all';
+    _renderManagedDeviceTabs();
+    _renderManagedDeviceList();
+}
+
+// Filter state for the Managed Devices list. Two independent, AND-combined
+// dimensions: module TYPE (_typeKey) and TENANT (tenant id). 'all' = no filter.
+// Kept on window so the tab click handlers survive re-renders.
+function _mdFilteredDevices() {
+    const f = window._mdFilter || { type: 'all', tenant: 'all' };
+    return (window._allDevices || []).filter(d =>
+        (f.type === 'all' || d._typeKey === f.type) &&
+        (f.tenant === 'all' || (d._tenant || '') === f.tenant));
+}
+
+// Build the two-row sub-nav for Managed Devices: a device-TYPE row (always) and
+// a TENANT row (admin only, when >1 tenant owns devices). Counts are contextual
+// — a type tab shows how many match under the current tenant filter, and vice
+// versa — so the numbers always reflect what a click would reveal. Mirrors the
+// Setup → Simulations sub-tab idiom (.sub-nav-item.active = HPE-green underline).
+function _renderManagedDeviceTabs() {
+    const wrap = document.getElementById('all-devices-tabs');
+    if (!wrap) return;
+    const all = window._allDevices || [];
+    const f = window._mdFilter || (window._mdFilter = { type: 'all', tenant: 'all' });
+
+    // Type tabs: only types that actually have a device, ordered by DEVICE_TYPES.
+    const underTenant = all.filter(d => f.tenant === 'all' || (d._tenant || '') === f.tenant);
+    const typeCounts = {};
+    underTenant.forEach(d => { typeCounts[d._typeKey] = (typeCounts[d._typeKey] || 0) + 1; });
+    const typeKeys = Object.keys(DEVICE_TYPES).filter(k =>
+        all.some(d => d._typeKey === k));
+    const chip = (active, onclick, label, count) =>
+        `<div onclick="${onclick}" class="sub-nav-item ${active ? 'active ' : ''}px-2 py-1 text-xs uppercase tracking-normal cursor-pointer select-none">${escapeHtml(label)}<span class="ml-1 text-[10px] text-slate-400 normal-case">${count}</span></div>`;
+    let typeRow = chip(f.type === 'all', "_mdSelectType('all')", 'All', underTenant.length);
+    typeRow += typeKeys.map(k => chip(f.type === k, `_mdSelectType('${k}')`,
+        DEVICE_TYPES[k].badgeLabel || DEVICE_TYPES[k].title, typeCounts[k] || 0)).join('');
+
+    // Tenant tabs (admin only): tenants that own ≥1 device, under the current
+    // type filter. A single tenant (or none) makes the row pointless → hide it.
+    let tenantRow = '';
+    if (isAdmin()) {
+        const underType = all.filter(d => f.type === 'all' || d._typeKey === f.type);
+        const tenantCounts = {};
+        underType.forEach(d => {
+            const t = d._tenant || '';
+            if (t) tenantCounts[t] = (tenantCounts[t] || 0) + 1;
+        });
+        const tenantIds = Object.keys(tenantCounts).sort((a, b) =>
+            (a).localeCompare(b));
+        if (tenantIds.length > 1) {
+            const names = window._allTenantsName || {};
+            let row = chip(f.tenant === 'all', "_mdSelectTenant('all')", 'All Tenants', underType.length);
+            row += tenantIds.map(tid => chip(f.tenant === tid,
+                `_mdSelectTenant('${escJsAttr(tid)}')`, names[tid] || tid, tenantCounts[tid])).join('');
+            tenantRow = `<div class="flex flex-wrap items-center gap-x-1 gap-y-1 border-b border-slate-100 pb-1 mb-1">
+                <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Tenant</span>${row}</div>`;
+        }
+    }
+
+    wrap.innerHTML = tenantRow +
+        `<div class="flex flex-wrap items-center gap-x-1 gap-y-1">
+            <span class="text-[10px] font-bold text-slate-400 uppercase tracking-wider mr-1">Type</span>${typeRow}</div>`;
+}
+
+function _mdSelectType(key) {
+    (window._mdFilter || (window._mdFilter = { type: 'all', tenant: 'all' })).type = key;
+    _renderManagedDeviceTabs();
+    _renderManagedDeviceList();
+}
+
+function _mdSelectTenant(tid) {
+    (window._mdFilter || (window._mdFilter = { type: 'all', tenant: 'all' })).tenant = tid;
+    _renderManagedDeviceTabs();
+    _renderManagedDeviceList();
+}
+
+// Render the (filtered) device rows into #all-devices-list. Reads the decorated
+// window._allDevices; the spoke name + tenant were resolved in loadAllDevices.
+function _renderManagedDeviceList() {
+    const listEl = document.getElementById('all-devices-list');
+    if (!listEl) return;
+    const rows = _mdFilteredDevices();
+    if (rows.length === 0) {
+        listEl.innerHTML = '<p class="text-xs text-slate-400 italic">No devices match this filter.</p>';
+        return;
+    }
+    listEl.innerHTML = rows.map(d => {
         const t = DEVICE_TYPES[d._typeKey];
         const name = d.name || d.id;
         const summary = t.rowSummary(d);
         const spoke = d.spoke_id
-            ? ` · <span title="${escapeHtml(d.spoke_id)}">${escapeHtml(_spokeNameById[d.spoke_id] || d.spoke_id)}</span>`
+            ? ` · <span title="${escapeHtml(d.spoke_id)}">${escapeHtml(d._spokeName || d.spoke_id)}</span>`
+            : '';
+        const tenant = (isAdmin() && d._tenantLabel)
+            ? `<span class="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700" title="Tenant: ${escapeHtml(d._tenant)}">${escapeHtml(d._tenantLabel)}</span>`
             : '';
         const eId = String(d._id).replace(/'/g, "\\'");
         return `<div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
-            <div><span class="text-sm font-medium text-slate-700">${escapeHtml(name)}</span><span class="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">${t.badgeLabel}</span><span class="ml-2 text-xs text-slate-400">${escapeHtml(summary)}${spoke}</span>${(d.vault_credential && d.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(d.vault_credential.bucket)} › ${escapeHtml(d.vault_credential.name)}">🔐 vault</span>` : ''}</div>
+            <div><span class="text-sm font-medium text-slate-700">${escapeHtml(name)}</span><span class="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700">${t.badgeLabel}</span>${tenant}<span class="ml-2 text-xs text-slate-400">${escapeHtml(summary)}${spoke}</span>${(d.vault_credential && d.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(d.vault_credential.bucket)} › ${escapeHtml(d.vault_credential.name)}">🔐 vault</span>` : ''}</div>
             <div class="flex gap-2">
                 <button onclick="editDevice('${d._typeKey}','${eId}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
                 <button onclick="deleteDevice('${d._typeKey}','${eId}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
