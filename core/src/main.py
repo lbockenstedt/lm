@@ -2513,7 +2513,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 config = {"devices": _project_nw_devices(mine),
                           "shared_tenant_id": _access.shared_tenant_id() or "",
                           "default_poll_interval":
-                              self.state.get_global_config().get("nw_poll_default_interval")}
+                              self.state.get_global_config().get("nw_poll_default_interval"),
+                          "poll_jitter_frac":
+                              self.state.get_global_config().get("nw_poll_jitter_frac"),
+                          "max_poll_per_tick":
+                              self.state.get_global_config().get("nw_poll_max_per_tick"),
+                          "max_poll_concurrency":
+                              self.state.get_global_config().get("nw_poll_max_concurrency")}
             elif module_key == 'truenas':
                 # TrueNAS (storage) fleet: one storage spoke manages many
                 # appliances. Push the appliances bound to this spoke; fall back

@@ -293,11 +293,13 @@ def register(app, hub, ctx):
         # plaintext lives only in the vault, not in global_config.
         slice_ = await instance_vault.overlay_many(
             hub, _nw_devices_for_spoke(hub, spoke_id), "nw_devices")
+        gc = (hub.state.system_state.get("global_config", {}) or {})
         payload = {"devices": _project_nw_devices_for_push(slice_),
                    "shared_tenant_id": access.shared_tenant_id() or "",
-                   "default_poll_interval":
-                       (hub.state.system_state.get("global_config", {}) or {})
-                       .get("nw_poll_default_interval")}
+                   "default_poll_interval": gc.get("nw_poll_default_interval"),
+                   "poll_jitter_frac": gc.get("nw_poll_jitter_frac"),
+                   "max_poll_per_tick": gc.get("nw_poll_max_per_tick"),
+                   "max_poll_concurrency": gc.get("nw_poll_max_concurrency")}
         msg = _hub_msg(spoke_id, "UPDATE_CONFIG", payload)
         await hub.send_to_spoke(msg)
         return True
@@ -699,12 +701,18 @@ def register(app, hub, ctx):
 
     @app.get("/setup/nw-poll-config")
     async def get_nw_poll_config(request: Request):
-        """Module-level nw poll cadence. ``default_poll_interval`` (seconds) is
-        the fallback each nw spoke applies to any device that doesn't set its own
-        (device-level always wins). null/absent → the spoke's built-in 15m."""
+        """Module-level nw poll cadence + anti-stampede knobs. ``default_poll_interval``
+        (seconds) is the fallback each nw spoke applies to any device that doesn't
+        set its own (device-level always wins); null/absent → the spoke's built-in
+        6h. ``poll_jitter_frac`` (0..0.9), ``max_poll_per_tick`` (1..100) and
+        ``max_poll_concurrency`` (1..50) tune the spoke's stampede protection;
+        null → the spoke's built-in defaults."""
         hub = app.state.hub
         gc = hub.state.system_state.get("global_config", {}) or {}
-        return {"default_poll_interval": gc.get("nw_poll_default_interval")}
+        return {"default_poll_interval": gc.get("nw_poll_default_interval"),
+                "poll_jitter_frac": gc.get("nw_poll_jitter_frac"),
+                "max_poll_per_tick": gc.get("nw_poll_max_per_tick"),
+                "max_poll_concurrency": gc.get("nw_poll_max_concurrency")}
 
     @app.post("/setup/nw-poll-config")
     async def set_nw_poll_config(request: Request):
@@ -718,16 +726,37 @@ def register(app, hub, ctx):
             val = None if raw in (None, "", "null") else int(raw)
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="default_poll_interval must be an integer or null")
+
+        def _opt_num(key, cast, lo, hi):
+            """Parse an optional numeric knob: null/absent → None (spoke default),
+            else cast + clamp to [lo, hi]."""
+            v = data.get(key)
+            if v in (None, "", "null"):
+                return None
+            try:
+                return max(lo, min(cast(v), hi))
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail=f"{key} must be numeric or null")
+
+        jitter = _opt_num("poll_jitter_frac", float, 0.0, 0.9)
+        per_tick = _opt_num("max_poll_per_tick", int, 1, 100)
+        concurrency = _opt_num("max_poll_concurrency", int, 1, 50)
+
         gc = hub.state.system_state.get("global_config", {})
         gc["nw_poll_default_interval"] = val
+        gc["nw_poll_jitter_frac"] = jitter
+        gc["nw_poll_max_per_tick"] = per_tick
+        gc["nw_poll_max_concurrency"] = concurrency
         hub.state.system_state["global_config"] = gc
         hub.state._mark_dirty()
-        # Re-push every connected nw spoke so the new module default takes effect.
+        # Re-push every connected nw spoke so the new module config takes effect.
         pushed = 0
         for sid in (hub.get_all_spokes_by_type("nw") or []):
             if await _nw_push_fleet(hub, sid):
                 pushed += 1
-        return {"status": "ok", "default_poll_interval": val, "pushed": pushed}
+        return {"status": "ok", "default_poll_interval": val,
+                "poll_jitter_frac": jitter, "max_poll_per_tick": per_tick,
+                "max_poll_concurrency": concurrency, "pushed": pushed}
 
     @app.get("/setup/nw-netbox-import")
     async def get_nw_netbox_import(request: Request):

@@ -7592,7 +7592,7 @@ function _renderSetupModuleMgmtTile(content) {
                 <p class="text-xs text-slate-400 mb-3">Module-level poll cadence applied to every network device that inherits it. A device's own Auto-Poll Interval always overrides this. The nw spoke polls on this cycle to warm the hub cache and sync device inventory into NetBox.</p>
                 <div class="flex items-center gap-3">
                     <select id="nw-module-poll-default" class="bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
-                        <option value="">Built-in default (15 minutes)</option>
+                        <option value="">Built-in default (6 hours)</option>
                         <option value="0">Off (no auto-poll)</option>
                         <option value="60">Every 1 minute</option>
                         <option value="300">Every 5 minutes</option>
@@ -7603,6 +7603,45 @@ function _renderSetupModuleMgmtTile(content) {
                         <option value="86400">Every day</option>
                     </select>
                     <button onclick="saveNwPollConfig(this)" class="${btnCls} ml-auto">Save</button>
+                </div>
+                <div class="mt-4 pt-4 border-t border-slate-200">
+                    <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Anti-Stampede (Jitter &amp; Caps)</h4>
+                    <p class="text-xs text-slate-400 mb-3">Spreads the fleet's polls so devices never all poll at once. <b>Jitter</b> randomizes each device's cadence so schedules drift apart; the <b>caps</b> bound how many devices poll per 10-second tick and how many run at the same time. Leave on defaults unless a large fleet is causing load spikes.</p>
+                    <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <label class="text-xs font-medium text-slate-600">Poll Jitter
+                            <select id="nw-poll-jitter" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                                <option value="">Default (±15%)</option>
+                                <option value="0">Off (no jitter)</option>
+                                <option value="0.05">Low (±5%)</option>
+                                <option value="0.15">Medium (±15%)</option>
+                                <option value="0.3">High (±30%)</option>
+                                <option value="0.5">Very high (±50%)</option>
+                            </select>
+                        </label>
+                        <label class="text-xs font-medium text-slate-600">Max devices / tick
+                            <select id="nw-poll-max-per-tick" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                                <option value="">Default (8)</option>
+                                <option value="2">2</option>
+                                <option value="4">4</option>
+                                <option value="8">8</option>
+                                <option value="16">16</option>
+                                <option value="32">32</option>
+                            </select>
+                        </label>
+                        <label class="text-xs font-medium text-slate-600">Max concurrent polls
+                            <select id="nw-poll-max-concurrency" class="mt-1 w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                                <option value="">Default (5)</option>
+                                <option value="1">1</option>
+                                <option value="3">3</option>
+                                <option value="5">5</option>
+                                <option value="10">10</option>
+                                <option value="20">20</option>
+                            </select>
+                        </label>
+                    </div>
+                    <div class="flex justify-end mt-3">
+                        <button onclick="saveNwPollConfig(this)" class="${btnCls}">Save</button>
+                    </div>
                 </div>
             </div>
             <div class="${card}">
@@ -8310,7 +8349,8 @@ function _renderNwScanResults(d) {
     out.innerHTML = html;
 }
 
-// Module-level nw auto-poll default (Setup → Module Management). Device-level wins.
+// Module-level nw auto-poll default + anti-stampede knobs (Setup → Module
+// Management). Device-level cadence always wins over the module default.
 async function loadNwPollConfig() {
     const sel = document.getElementById('nw-module-poll-default');
     if (!sel) return;
@@ -8320,14 +8360,36 @@ async function loadNwPollConfig() {
         const d = await r.json();
         sel.value = (d.default_poll_interval === null || d.default_poll_interval === undefined)
             ? '' : String(d.default_poll_interval);
-    } catch (e) { /* leave built-in default selected */ }
+        // Anti-stampede knobs — null/absent → the '' (built-in default) option.
+        const setOpt = (id, v) => {
+            const el = document.getElementById(id);
+            if (el) el.value = (v === null || v === undefined) ? '' : String(v);
+        };
+        setOpt('nw-poll-jitter', d.poll_jitter_frac);
+        setOpt('nw-poll-max-per-tick', d.max_poll_per_tick);
+        setOpt('nw-poll-max-concurrency', d.max_poll_concurrency);
+    } catch (e) { /* leave built-in defaults selected */ }
 }
 
 async function saveNwPollConfig(btn) {
     const sel = document.getElementById('nw-module-poll-default');
     if (!sel) return;
     const raw = sel.value;
-    const body = { default_poll_interval: raw === '' ? null : (parseInt(raw, 10) || 0) };
+    // '' → null (inherit built-in); numeric knobs pass '' through as null too so
+    // the spoke falls back to its own defaults. parseFloat keeps the jitter
+    // fraction (e.g. 0.15); the caps are ints.
+    const numOrNull = (id, parse) => {
+        const el = document.getElementById(id);
+        if (!el || el.value === '') return null;
+        const n = parse(el.value);
+        return isNaN(n) ? null : n;
+    };
+    const body = {
+        default_poll_interval: raw === '' ? null : (parseInt(raw, 10) || 0),
+        poll_jitter_frac: numOrNull('nw-poll-jitter', parseFloat),
+        max_poll_per_tick: numOrNull('nw-poll-max-per-tick', v => parseInt(v, 10)),
+        max_poll_concurrency: numOrNull('nw-poll-max-concurrency', v => parseInt(v, 10)),
+    };
     if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
     try {
         const r = await setupFetch('/setup/nw-poll-config', {
@@ -27322,7 +27384,7 @@ function showAddNwDeviceModal(prefillDevice) {
                         <option value="21600">Every 6 hours</option>
                         <option value="86400">Every day</option>
                     </select>
-                    <p class="text-[11px] text-slate-400">The nw spoke polls this device on its own cycle (probe + info + ARP/MAC/interfaces), warms the hub cache so sub-views load instantly, and syncs the device + interfaces into NetBox. <b>This device setting overrides the module default</b> (set under Setup → Module Management). Inherit uses the module default (15 min if unset).</p>
+                    <p class="text-[11px] text-slate-400">The nw spoke polls this device on its own cycle (probe + info + ARP/MAC/interfaces), warms the hub cache so sub-views load instantly, and syncs the device + interfaces into NetBox. <b>This device setting overrides the module default</b> (set under Setup → Module Management). Inherit uses the module default (6 hours if unset).</p>
                 </div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
