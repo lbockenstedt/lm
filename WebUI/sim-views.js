@@ -1830,6 +1830,7 @@ async function csRenderClients(tier) {
         csDemoCard(),
     ]);
     csClientCache = csNormalizeClients(data);
+    csClientCache = csMergeNotReporting(csClientCache, data && data.fleet_health);
     const fhBadge = csFleetHealthBadge(data && data.fleet_health);
     // Faceted drill-down: fleet-health banner, the demo card, then the
     // Simulation/Tier/Site facet bar, then the (drill-gated, capped) client list,
@@ -1986,6 +1987,33 @@ function csNormalizeClients(data) {
     return [];
 }
 
+// The Fleet Health badge counts RUNNING sim VMs whose client never checked into
+// the API as "not checking in" — but those VMs have NO client row (the payload
+// only carries clients that DID report), so the Clients/Offline view had nothing
+// to list and the count looked like a mystery gap (78 shown vs 98 counted).
+// Synthesize a lightweight, clearly-flagged row for each such VM (from
+// fleet_health.not_reporting_names) so it's visible AND verifiable under Offline
+// (never_reported → !online → csClientNotWorking). Deduped against real rows: a
+// VM that has a stale-but-present offline client keeps its real row.
+function csMergeNotReporting(rows, fh) {
+    const missing = fh && Array.isArray(fh.not_reporting_names) ? fh.not_reporting_names : [];
+    if (!missing.length) return rows;
+    const have = new Set((rows || []).map(c =>
+        String((c && (c.hostname || c.id)) || '').trim().toLowerCase()).filter(Boolean));
+    const synth = [];
+    for (const m of missing) {
+        const name = String((m && m.hostname) || '').trim();
+        if (!name || have.has(name.toLowerCase())) continue;
+        synth.push({
+            hostname: name, id: name, vmid: (m && m.vmid) || null,
+            online: false, last_seen: null,
+            never_reported: true,
+            active_simulations: [], simulation_id: '', config: {},
+        });
+    }
+    return synth.length ? (rows || []).concat(synth) : rows;
+}
+
 // Clients render as TWO rows each (ported from webui-hub's client + control-row
 // pair): a data row — no Spoke column — plus a second "sim bar" row of clickable
 // per-simulation override buttons. Columns: Hostname (with a status dot), Site,
@@ -1997,6 +2025,9 @@ const CS_CLIENT_COLS = 10;
 //   yellow = offline, last seen < 30 min ago (just dropped)
 //   red    = offline, last seen > 30 min ago (stale)
 function csClientStatusDot(c) {
+    if (c && c.never_reported) {
+        return `<span class="inline-block w-2 h-2 rounded-full bg-red-500 mr-1.5 align-middle" title="Running sim VM that has NEVER checked into the API — dead/silent, a reclone candidate"></span>`;
+    }
     const ls = csLastSeenAgo(c.last_seen);
     let color, label;
     if (c.online) { color = 'bg-green-500'; label = 'Online'; }
@@ -2053,19 +2084,19 @@ function csRenderClientRows(rows, targetId) {
         const cfg = c.config || {};
         const _demoOn = window._csDemoActive && window._csDemoActive[host];
         const _ls = csLastSeenAgo(c.last_seen);
-        const line1 = `<tr class="border-t border-slate-100 ${_demoOn ? 'bg-amber-50' : ''}">
-          <td class="px-4 py-2 font-mono text-xs whitespace-nowrap">${csClientStatusDot(c)}${csEscape(host || '—')}${c.dns_ceiling ? `<span class="ml-1 text-[10px] font-semibold text-amber-600" title="Current DNS self-throttle rate (failures/min) the AIMD ratchet settled on for this dongle">DNS≤${csEscape(c.dns_ceiling)}/m</span>` : ''}${csHealthBadge(c)}</td>
+        const line1 = `<tr class="border-t border-slate-100 ${_demoOn ? 'bg-amber-50' : ''}${c.never_reported ? ' bg-red-50/40' : ''}">
+          <td class="px-4 py-2 font-mono text-xs whitespace-nowrap">${csClientStatusDot(c)}${csEscape(host || '—')}${c.dns_ceiling ? `<span class="ml-1 text-[10px] font-semibold text-amber-600" title="Current DNS self-throttle rate (failures/min) the AIMD ratchet settled on for this dongle">DNS≤${csEscape(c.dns_ceiling)}/m</span>` : ''}${csHealthBadge(c)}${c.never_reported ? `<span class="ml-1 text-[10px] font-semibold text-red-600" title="This running sim VM has never checked into the API — dead/silent, a reclone candidate. It has no client record yet.">never checked in${c.vmid ? ` · vm ${csEscape(c.vmid)}` : ''}</span>` : ''}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(cfg.wsite || '—')}</td>
           <td class="px-4 py-2 font-mono text-xs text-slate-500">${csEscape(c.simulation_id || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(cfg.sim_phy || '—')}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(c.platform || c.hw_type || '—')}</td>
           <td class="px-4 py-2 text-xs font-semibold text-slate-600">${t.toUpperCase()}</td>
           <td class="px-4 py-2 text-slate-500">${csEscape(c.connected_ssid || '—')}</td>
-          <td class="px-4 py-2 ${_ls.mins != null && _ls.mins > 30 ? 'text-red-600 font-bold' : 'text-slate-500'}" title="${csEscape(csLastSeen(c.last_seen))}">${csEscape(_ls.text)}</td>
+          <td class="px-4 py-2 ${c.never_reported ? 'text-red-600 font-bold' : (_ls.mins != null && _ls.mins > 30 ? 'text-red-600 font-bold' : 'text-slate-500')}" title="${csEscape(c.never_reported ? 'Never checked into the API' : csLastSeen(c.last_seen))}">${csEscape(c.never_reported ? 'never' : _ls.text)}</td>
           <td class="px-4 py-2 ${c.error_count > 0 ? 'text-amber-600 font-bold' : 'text-slate-400'}">${csEscape(c.error_count || 0)}</td>
-          ${host ? csDemoCell(host) : '<td class="px-4 py-2 text-slate-300">—</td>'}
+          ${host && !c.never_reported ? csDemoCell(host) : '<td class="px-4 py-2 text-slate-300">—</td>'}
         </tr>`;
-        const line2 = host ? `<tr>
+        const line2 = (host && !c.never_reported) ? `<tr>
           <td colspan="${CS_CLIENT_COLS}" class="px-4 pb-3 pt-0">
             <div class="flex flex-wrap items-center justify-between gap-2">
               ${csClientSimBar(c, host)}

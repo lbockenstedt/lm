@@ -445,6 +445,13 @@ class SimulationsService:
             if reporting == 0 and online_names:
                 use_vms = False
 
+        # The RUNNING sim VMs with no live (online) client — these are the ones
+        # the Fleet Health badge counts as "not checking in". A VM whose client
+        # never reported has NO client row at all, so the Clients/Offline view
+        # can't surface it from the client payload alone; publish the names+vmids
+        # so the UI can synthesize a verifiable "never checked in" row for each.
+        not_reporting_names: List[dict] = []
+
         if use_vms:
             total = len(sim_vms)
             reporting = sum(1 for name in sim_vms if name in online_names)
@@ -452,6 +459,11 @@ class SimulationsService:
             eligible = total
             provisioned = total
             not_reporting = max(0, total - reporting)
+            not_reporting_names = [
+                {"hostname": name, "vmid": sim_vms[name]}
+                for name in sorted(sim_vms)
+                if name not in online_names
+            ]
             basis = "vm_checkin"
         else:
             registered = len(clients)
@@ -472,6 +484,7 @@ class SimulationsService:
             status = "critical"
         return {"provisioned": provisioned, "exclusive": 0, "eligible": eligible,
                 "working": working, "not_reporting": not_reporting,
+                "not_reporting_names": not_reporting_names,
                 "pct": pct, "status": status, "basis": basis}
 
     async def get_simulations_data(self, tenant_id: str) -> Dict[str, Any]:

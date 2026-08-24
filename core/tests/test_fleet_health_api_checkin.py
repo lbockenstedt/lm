@@ -106,6 +106,10 @@ def test_never_reporting_vm_counts_against_health():
     assert fh["not_reporting"] == 2
     assert fh["pct"] == 50.0
     assert fh["status"] == "critical"
+    # The two silent VMs are named so the Clients/Offline view can synthesize a
+    # verifiable "never checked in" row for each (they have no client record).
+    names = {n["hostname"]: n["vmid"] for n in fh["not_reporting_names"]}
+    assert names == {"c90003": 90003, "c90004": 90004}
 
 
 def test_offline_client_is_not_reporting():
