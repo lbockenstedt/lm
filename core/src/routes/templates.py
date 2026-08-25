@@ -570,6 +570,122 @@ def register(app, hub, ctx):
         return {"status": "SUCCESS" if ok else "ERROR",
                 "refreshed": ok, "total": len(results), "results": results}
 
+    @app.post("/tenant/templates/backup")
+    async def trigger_backup_tenant(request: Request):
+        """Tenant-admin/admin: back up a live Proxmox template VM to the hub repo
+        from the Simulations module. This is the tenant-gated mirror of the
+        Global-Admin ``/setup/templates/backup`` — same agent/vmid resolution,
+        pending record, one-time upload token and START_BACKUP relay — but gated
+        by tenant ownership of the resolved host instead of ``_require_admin``.
+
+        A tenant-admin has no Setup/Hypervisors access, so this is their only way
+        to seed a template backup. Anti-IDOR: the resolved host's tenant
+        (``_agent_tenant_id``) must be one the caller owns (admin → any)."""
+        sess = _session_user(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        agent_id = str(body.get("agent_id") or "").strip()
+        vmid = body.get("vmid")
+        node = str(body.get("node") or "").strip()
+        unique_id = str(body.get("unique_id") or "").strip()
+        # Optional Proxmox storage target for vzdump (file-based only — the
+        # WebUI filters out PBS). When set, the agent uses --storage <X> and
+        # deletes the archive after streaming. Empty → legacy tempdir fallback.
+        storage = str(body.get("storage") or "").strip()
+        # The WebUI passes the VM's unique_id ("cluster/node/vmid"); derive vmid +
+        # node from it when not given explicitly (mirrors the VM-action routes).
+        if unique_id and "/" in unique_id:
+            parts = unique_id.split("/")
+            if len(parts) >= 3:
+                node = node or parts[-2]
+                if vmid is None:
+                    try:
+                        vmid = int(parts[-1])
+                    except (TypeError, ValueError):
+                        pass
+        # Resolve the owning agent by node hostname (agent_info index) when the
+        # caller didn't hand us an explicit agent_id.
+        if not agent_id and node:
+            for aid, info in (getattr(hub, "agent_info", {}) or {}).items():
+                if str((info or {}).get("hostname") or "").lower() == node.lower():
+                    agent_id = aid
+                    break
+        name = str(body.get("name") or "").strip() or (f"vmid-{vmid}" if vmid is not None else "")
+        if not agent_id or vmid is None:
+            raise HTTPException(status_code=400,
+                                detail="could not resolve the owning agent/vmid (need agent_id+vmid or a unique_id)")
+
+        # Anti-IDOR: the resolved host must belong to a tenant the caller owns.
+        # Admin short-circuits _owns_tenant for any tenant; a tenant-admin may
+        # only back up hosts bound to one of their assigned tenants (a
+        # foreign/unassigned host → 403).
+        host_tenant = _agent_tenant_id(agent_id)
+        if not _owns_tenant(sess, host_tenant):
+            raise HTTPException(status_code=403, detail="not permitted for this host's tenant")
+
+        owning_spoke = hub.get_spoke_for_agent(agent_id, fallback_hypervisor=False) \
+            or hub.get_hypervisor_spoke()
+        if not owning_spoke:
+            raise HTTPException(status_code=503, detail="no connected spoke owns this agent")
+
+        # Tenant is DRIVEN by the PXMX host, per host: prefer the agent's own
+        # tenant binding (Agent Config → Client Simulation tenant_id), else the
+        # owning spoke's tenant. Resolve a display name so the repo stays readable
+        # even if the tenant is later renamed/removed.
+        agent_cfg = (hub.state.system_state.get("agent_config", {}) or {}).get(
+            hub._agent_primary_key(agent_id), {})
+        tenant_id = str((agent_cfg.get("client_simulation") or {}).get("tenant_id") or "").strip()
+        if not tenant_id:
+            try:
+                tenant_id = str(hub.state.get_spoke_tenant(owning_spoke) or "").strip()
+            except Exception:  # noqa: BLE001
+                tenant_id = ""
+        tenant_name = tenant_id
+        if tenant_id:
+            try:
+                trec = hub.state.get_tenant(tenant_id) if hasattr(hub.state, "get_tenant") else None
+                if trec:
+                    tenant_name = trec.get("name") or tenant_id
+            except Exception:  # noqa: BLE001
+                pass
+
+        rec = _repo().create_pending(
+            name=name, source_vmid=vmid, source_node=node,
+            source_agent=hub._agent_relay_name(agent_id), source_spoke=owning_spoke,
+            created_by=_username(sess), tenant=tenant_name, tenant_id=tenant_id)
+        tid, token = rec["id"], rec["_upload_token"]
+
+        # The agent streams straight to the hub's HTTPS endpoint. Prefer an
+        # explicit public URL (browser-facing and agent-facing can differ);
+        # otherwise use the URL the caller's browser reached us on.
+        base = (os.environ.get("LM_HUB_PUBLIC_URL") or str(request.base_url)).rstrip("/")
+        upload_url = f"{base}/api/templates/{tid}/upload"
+
+        try:
+            result = await hub.request_response(owning_spoke, "SPOKE_RELAY", {
+                "target_agent_id": hub._agent_relay_name(agent_id),
+                "command": "START_BACKUP",
+                "data": {"template_id": tid, "vmid": vmid, "node": node,
+                         "upload_url": upload_url, "upload_token": token,
+                         "storage": storage},
+            })
+            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            accepted = isinstance(data, dict) and data.get("status") in ("SUCCESS", "ACCEPTED")
+            if not accepted:
+                msg = (data.get("message") if isinstance(data, dict) else None) or "agent did not accept the backup"
+                _repo().set_status(tid, "failed", error=msg)
+                return {"status": "ERROR", "id": tid, "message": msg}
+        except Exception as e:  # noqa: BLE001
+            _repo().set_status(tid, "failed", error=f"relay failed: {e}")
+            raise HTTPException(status_code=502, detail=f"START_BACKUP relay failed: {e}")
+
+        logger.info("[template-repo] backup queued (tenant) %s (vmid=%s agent=%s by=%s)",
+                    tid, vmid, agent_id, _username(sess))
+        return {"status": "SUCCESS", "id": tid,
+                "message": "Backup queued — the agent is running vzdump and will stream it to the hub."}
+
     # ── agent-facing download + refresh progress (token-authed) ──────────────
     def _check_refresh_token(tid: str, request: Request):
         token = request.headers.get("x-refresh-token") or request.query_params.get("token") or ""

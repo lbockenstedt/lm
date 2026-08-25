@@ -8949,13 +8949,14 @@ async function csRenderVmServer() {
            </div>`
         : '';
 
-    csSet(`<div class="space-y-4">${summary}<div id="cs-live-ops"></div>${fleetCards}${bulkBar}${table}</div>`);
+    csSet(`<div class="space-y-4">${summary}<div id="cs-live-ops"></div>${fleetCards}${bulkBar}${_canRefresh ? '<div id="cs-my-templates"></div>' : ''}${table}</div>`);
     csRenderLiveOps();
     // populate auto-provision status + the live panels (host data from csVmLoad).
     csRefreshAutoProvStatus();
     csAutoProvLivePanel();
     csFleetRecloneProgress();
     csRefreshStatusTick();   // template-refresh status chip (polls refresh_status)
+    if (_canRefresh) csRenderMyTemplates();   // visible "My Templates" list for tenant-admins
 }
 
 // ── Fleet Reclone / Auto-Provisioning live progress panels ───────────────────
@@ -9198,7 +9199,7 @@ window.csFleetRefreshTemplates = async function () {
     document.body.appendChild(modal);
 
     if (none) {
-        if (typeof showToast === 'function') showToast('No completed backups in the Template Repo — back one up first (Setup → Hypervisors → ⬆ Back up to Hub)', 'error');
+        if (typeof showToast === 'function') showToast('No completed backups in the Template Repo — back one up first with “⬆ Back up to Hub” on a template VM (VMs → Templates tab), or “⬆ Upload template”.', 'error');
         return;
     }
 
@@ -9267,7 +9268,7 @@ window.csUploadTemplate = async function () {
                 </button>
             </div>
             <div class="p-6 space-y-4">
-                <p class="text-[11px] text-slate-400 leading-relaxed">Upload a vzdump archive (.vma.zst / .vma / .gz / .lzo) straight into the hub Template Repo — the offline alternative to “⬆ Back up to Hub” when the source Proxmox host is unavailable. Stamped to tenant <span class="font-mono text-slate-500">${esc(csTenant())}</span>.</p>
+                <p class="text-[11px] text-slate-400 leading-relaxed">Upload a vzdump archive (.vma.zst / .vma / .gz / .lzo) straight into the hub Template Repo — the offline alternative to “⬆ Back up to Hub” (VMs → Templates tab) when the source Proxmox host is unavailable. Stamped to tenant <span class="font-mono text-slate-500">${esc(csTenant())}</span>.</p>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Archive file</label>
                     <input id="cs-up-file" type="file" accept=".zst,.vma,.vma.zst,.gz,.lzo" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
@@ -9363,6 +9364,206 @@ window.csUploadTemplate = async function () {
         if (typeof showToast === 'function') showToast('Template uploaded', 'success');
         modal.remove();
         if (typeof csRenderVmServer === 'function') csRenderVmServer();
+    });
+};
+
+// Shared gate for the tenant-admin template controls in this module (matches the
+// bulkBar _canRefresh check): Global Admin OR tenant-admin. A tenant admin has
+// no Setup/Hypervisors/Template-Repo nav, so these in-module controls are their
+// only window into templates.
+function csCanManageTemplates() {
+    return (typeof isAdmin === 'function' && isAdmin())
+        || (typeof isTenantAdmin === 'function' && isTenantAdmin());
+}
+
+// Status→badge mapping for the "My Templates" list — mirrors main.js
+// _tplStatusBadge semantics (complete = green, failed = red w/ error tooltip,
+// otherwise an in-progress dumping/uploading/pending badge with %). Kept local
+// per LM's per-view status-badge convention (no central status registry).
+function csTplStatusBadge(t) {
+    const s = String((t && t.status) || '').toLowerCase();
+    if (s === 'complete') return '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">Complete</span>';
+    if (s === 'failed') return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700" title="${csEscape((t && t.error) || '')}">Failed</span>`;
+    const label = s === 'dumping' ? 'Dumping' : (s === 'uploading' ? 'Uploading' : 'Pending');
+    const pct = Math.max(0, Math.min(100, Number(t && t.progress) || 0));
+    return `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-sky-100 text-sky-700"><span class="animate-spin inline-block w-2.5 h-2.5 rounded-full border-2 border-sky-500 border-t-transparent align-middle mr-1"></span>${label} ${pct}%</span>`;
+}
+
+function csTplBytes(n) {
+    n = Number(n) || 0;
+    if (n < 1024) return n + ' B';
+    const u = ['KB', 'MB', 'GB', 'TB']; let i = -1;
+    do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+    return n.toFixed(1) + ' ' + u[i];
+}
+
+// ── "My Templates" read-only panel (tenant-admin / admin) ────────────────────
+// A plain, visible list of the caller's templates on the VM Server Overview, so
+// a tenant admin (who can't reach the admin Template Repo nav) can actually SEE
+// their templates instead of only finding them buried in the Refresh dropdown.
+// Read-only: NO edit/delete here — those are Global-Admin-only (Template Repo).
+async function csRenderMyTemplates() {
+    const host = csEl('cs-my-templates');
+    if (!host) return;
+    let templates = [];
+    try {
+        const r = await fetch('/tenant/templates', { credentials: 'same-origin' });
+        const d = await r.json().catch(() => ({}));
+        templates = (d.templates || []).slice().sort((a, b) =>
+            String(a.source_node || '').localeCompare(String(b.source_node || '')) ||
+            String(a.name || '').localeCompare(String(b.name || '')));
+    } catch (e) {
+        host.innerHTML = `<div class="text-xs text-red-600">Could not load templates: ${csEscape(String((e && e.message) || e))}</div>`;
+        return;
+    }
+    const esc = csEscape;
+    let rows;
+    if (!templates.length) {
+        rows = `<tr><td colspan="7" class="px-4 py-4 text-center text-xs text-slate-400 italic">No templates yet — back up a template VM with “⬆ Back up to Hub” (VMs → Templates tab) or “⬆ Upload template”.</td></tr>`;
+    } else {
+        rows = templates.map(t => {
+            const src = `${esc(t.source_node || '—')} · vmid ${esc(String(t.source_vmid == null ? '—' : t.source_vmid))}`;
+            const when = t.created_at ? new Date(t.created_at).toLocaleString() : '';
+            return `<tr class="border-t border-slate-100 hover:bg-slate-50">
+              <td class="px-4 py-2 font-medium text-slate-700">${esc(t.name || '—')}<div class="text-[11px] text-slate-400">${esc(when)}</div></td>
+              <td class="px-4 py-2 text-slate-600">${esc(t.os || '—')}</td>
+              <td class="px-4 py-2 text-slate-600">${esc(t.version || '—')}</td>
+              <td class="px-4 py-2 text-slate-600">${esc(t.purpose || '—')}</td>
+              <td class="px-4 py-2 text-xs text-slate-500">${src}</td>
+              <td class="px-4 py-2 text-right text-slate-600">${t.size ? csTplBytes(t.size) : '—'}</td>
+              <td class="px-4 py-2">${csTplStatusBadge(t)}</td>
+            </tr>`;
+        }).join('');
+    }
+    host.innerHTML = `
+      <div class="hpe-card rounded-lg overflow-hidden border border-slate-200">
+        <div class="flex items-center justify-between px-4 py-2 bg-slate-50 border-b border-slate-200">
+          <h3 class="text-sm font-bold text-[#263040]">My Templates <span class="text-slate-400 font-normal">(${templates.length})</span></h3>
+          <button onclick="csRenderMyTemplates()" class="px-2 py-1 rounded text-[11px] font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200" title="Reload the list of templates backed up to the hub for your tenant.">↻ Refresh</button>
+        </div>
+        <div class="overflow-x-auto"><table class="w-full text-sm">
+          <thead class="bg-white text-xs text-slate-500 uppercase"><tr>
+            <th class="px-4 py-2 text-left font-medium">Name</th>
+            <th class="px-4 py-2 text-left font-medium">OS</th>
+            <th class="px-4 py-2 text-left font-medium">Version</th>
+            <th class="px-4 py-2 text-left font-medium">Purpose</th>
+            <th class="px-4 py-2 text-left font-medium">Source (host · vmid)</th>
+            <th class="px-4 py-2 text-right font-medium">Size</th>
+            <th class="px-4 py-2 text-left font-medium">Status</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table></div>
+      </div>`;
+}
+
+// ── "⬆ Back up to Hub" for a template VM (tenant-admin / admin) ──────────────
+// Mirrors main.js pxmxBackupToHub, but posts to the NEW tenant-gated
+// /tenant/templates/backup (the admin /setup/templates/backup is Global-Admin
+// only). The row already carries _host (node hostname) + vmid; the hub resolves
+// the owning agent from the node hostname and enforces tenant ownership. The
+// storage list is loaded from the tenant-reachable hypervisor-storages endpoint
+// (same as main.js); storage is OPTIONAL server-side (blank → tempdir fallback),
+// so if storages don't load we still allow submitting with a blank storage.
+window.csBackupTemplateToHub = async function (key) {
+    if (!csCanManageTemplates()) { if (typeof showToast === 'function') showToast('Not permitted', 'error'); return; }
+    const v = (window._csVmByKey && window._csVmByKey[key])
+           || (window._csVmByVmid && window._csVmByVmid[key]) || {};
+    if (v.vmid == null) { if (typeof showToast === 'function') showToast('VM not found', 'error'); return; }
+    const node = v._host || '';
+    const vmid = v.vmid;
+    const name = v.name || '';
+
+    // One modal at a time.
+    const existing = document.getElementById('cs-backup-tpl-modal');
+    if (existing) { existing.remove(); return; }
+
+    const esc = csEscape;
+    const modal = document.createElement('div');
+    modal.id = 'cs-backup-tpl-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm p-4';
+    modal.innerHTML = `
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                <h3 class="text-lg font-bold text-[#263040]">⬆ Back up to Hub</h3>
+                <button onclick="this.closest('#cs-backup-tpl-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div class="p-6 space-y-4">
+                <p class="text-[11px] text-slate-400 leading-relaxed">Run vzdump on template <span class="font-mono text-slate-500">${esc(name || ('vmid ' + vmid))}</span> (vmid ${esc(String(vmid))} on <span class="font-mono text-slate-500">${esc(node || '—')}</span>) and stream a copy into the hub Template Repo. The archive is deleted from the chosen storage after streaming. This can take several minutes for a large template.</p>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">vzdump storage <span class="font-normal normal-case text-slate-400">(optional — file-based only; blank = hub tempdir fallback)</span></label>
+                    <select id="cs-backup-storage" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading storages…</option></select>
+                    <p id="cs-backup-storage-note" class="text-[11px] text-slate-400 leading-relaxed"></p>
+                </div>
+                <div id="cs-backup-status" class="text-xs text-slate-500 hidden"></div>
+                <div class="pt-2 flex justify-end gap-3">
+                    <button onclick="this.closest('#cs-backup-tpl-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
+                    <button id="cs-backup-go" class="bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300 px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Back up</button>
+                </div>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+
+    // Load the host's file-based storages (best-effort). If this fails or the
+    // host has none, we keep a "(no storage — hub tempdir)" option so the
+    // operator can still queue the backup with blank storage.
+    (async () => {
+        const sel = document.getElementById('cs-backup-storage');
+        const note = document.getElementById('cs-backup-storage-note');
+        const fallbackOnly = () => {
+            if (sel) sel.innerHTML = '<option value="">(no storage — hub tempdir fallback)</option>';
+        };
+        if (!node) { fallbackOnly(); if (note) note.textContent = 'No node recorded for this VM — will use the hub tempdir fallback.'; return; }
+        try {
+            const sdata = await csFetch(`/tenant/${csTenant()}/hypervisor-storages`) || { hosts: [] };
+            const hostRec = (sdata.hosts || []).find(h =>
+                String(h.hostname || '').toLowerCase() === String(node).toLowerCase());
+            const types = (hostRec && hostRec.storage_types) || {};
+            const all = (hostRec && hostRec.storages) || [];
+            const fileBased = all.filter(s => types[s] !== 'pbs');
+            if (!fileBased.length) {
+                fallbackOnly();
+                if (note) note.textContent = `No file-based backup storage found on ${node} — will use the hub tempdir fallback.`;
+                return;
+            }
+            const opts = fileBased.map(s => `<option value="${esc(s)}">${esc(s)}${types[s] ? ' (' + esc(types[s]) + ')' : ''}</option>`).join('');
+            if (sel) sel.innerHTML = `<option value="">— hub tempdir fallback —</option>${opts}`;
+            if (note) note.textContent = 'Pick a file-based storage (PBS excluded), or leave blank to stream via the hub tempdir.';
+        } catch (e) {
+            fallbackOnly();
+            if (note) note.textContent = 'Could not load storages — will use the hub tempdir fallback.';
+        }
+    })();
+
+    modal.querySelector('#cs-backup-go').addEventListener('click', async () => {
+        const sel = document.getElementById('cs-backup-storage');
+        const storage = sel ? String(sel.value || '').trim() : '';
+        const goBtn = document.getElementById('cs-backup-go');
+        const statusEl = document.getElementById('cs-backup-status');
+        if (goBtn) { goBtn.disabled = true; goBtn.classList.add('opacity-50', 'cursor-not-allowed'); }
+        if (statusEl) { statusEl.classList.remove('hidden'); statusEl.textContent = `Queuing backup${storage ? ' (' + storage + ')' : ''}…`; }
+        try {
+            const r = await fetch('/tenant/templates/backup', {
+                method: 'POST', credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ vmid: Number(vmid), node, name, storage })
+            });
+            const d = await r.json().catch(() => ({}));
+            if (r.ok && d && d.status === 'SUCCESS') {
+                if (typeof showToast === 'function') showToast(d.message || 'Backup queued — check My Templates in a few minutes.', 'success');
+                modal.remove();
+                if (typeof csRenderMyTemplates === 'function') { const p = csEl('cs-my-templates'); if (p) csRenderMyTemplates(); }
+            } else {
+                if (typeof showToast === 'function') showToast(`Backup failed: ${(d && (d.message || d.detail)) || r.status}`, 'error');
+                if (goBtn) { goBtn.disabled = false; goBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+                if (statusEl) statusEl.textContent = 'Backup failed.';
+            }
+        } catch (e) {
+            if (typeof showToast === 'function') showToast('Backup failed: ' + ((e && e.message) || e), 'error');
+            if (goBtn) { goBtn.disabled = false; goBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
+            if (statusEl) statusEl.textContent = 'Backup failed.';
+        }
     });
 };
 
@@ -10131,6 +10332,12 @@ function csVmRow(v) {
     const menuBtn = busy
         ? `<button disabled class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-300 cursor-not-allowed">⋯ Actions ▾</button>`
         : `<button onclick="event.stopPropagation(); csToggleVmActionMenu(event, '${key}')" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 hover:bg-slate-200">⋯ Actions ▾</button>`;
+    // Tenant-admin/admin: back a TEMPLATE VM up to the hub Template Repo. This is
+    // the in-module equivalent of the Global-Admin "⬆ Back up to Hub" — the only
+    // path a tenant admin (no Setup/Hypervisors nav) has to seed a template.
+    const backupBtn = (!busy && v.is_template && csCanManageTemplates())
+        ? `<button onclick="csBackupTemplateToHub('${key}')" title="vzdump this template and store a copy in the hub Template Repo (My Templates). The archive is deleted from the chosen storage after streaming." class="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300">⬆ Back up to Hub</button>`
+        : '';
     const selCell = isPlaceholder
         ? `<span class="inline-block w-3.5"></span> ${vid}`
         : `<input type="checkbox" class="cs-vm-sel" data-vmkey="${key}" data-vmid="${vid}" onchange="csVmSelUpdateHeader()"/> ${vid}`;
@@ -10144,6 +10351,7 @@ function csVmRow(v) {
       <td class="px-3 py-2"><div class="flex flex-wrap gap-1">
         ${consoleBtn}
         ${menuBtn}
+        ${backupBtn}
         ${act('Delete','delete_vm','bg-red-100 text-red-700')}
       </div></td>
     </tr>`;
