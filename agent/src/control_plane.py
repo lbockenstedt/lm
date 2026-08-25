@@ -319,7 +319,59 @@ class RoleConnection(AgentHostingControlPlane):
         PxmxControlPlane.run (pxmx/src/control_plane.py)."""
         if self._agent_listener_enabled():
             self._start_agent_server_task()
-        await super().run()
+        self._start_role_local_services()
+        try:
+            await super().run()
+        finally:
+            self._stop_role_local_services()
+
+    def _start_role_local_services(self) -> None:
+        """Invoke the hosted role module's PROCESS-scoped startup hooks once.
+
+        Parallel to :meth:`_create_spoke_tasks` (per-connection), but for
+        always-on, reconnect-surviving services a role owns. A module MAY expose:
+
+        * ``start_background_loops()`` — start its local poll/sweep/quota loops.
+        * ``start_client_api_server()`` — open its client-facing listener.
+
+        This is what makes a generic-agent-HOSTED simulation (cs) spoke actually
+        serve the 8080 client check-in API and run its Central/Mist pollers +
+        quota engine — the exact set the standalone ``CSControlPlane.run`` starts.
+        Without it the role only ran the per-connection telemetry relay, so the
+        sim VMs on that box got DHCP but had nowhere to check in and every one
+        showed "never checked in". Other roles (dns/ldap/…) expose neither hook,
+        so this no-ops for them. Best-effort: a hook failure must never take down
+        the role connection.
+        """
+        mod = self.modules.get(self.role_name)
+        if mod is None:
+            return
+        # Control-plane back-reference (some CS handlers reach connected_agents /
+        # send_to_agent via it; standalone CSControlPlane sets the same).
+        if getattr(mod, "control_plane", "unset") is None:
+            try:
+                mod.control_plane = self
+            except Exception:  # noqa: BLE001
+                pass
+        for hook_name in ("start_background_loops", "start_client_api_server"):
+            hook = getattr(mod, hook_name, None)
+            if callable(hook):
+                try:
+                    hook()
+                except Exception as e:  # noqa: BLE001 - best-effort
+                    logger.warning(
+                        f"role '{self.role_name}' {hook_name} failed: {e}")
+
+    def _stop_role_local_services(self) -> None:
+        """Signal the hosted role module's client API server to exit, if any."""
+        mod = self.modules.get(self.role_name)
+        stop = getattr(mod, "stop_client_api_server", None) if mod else None
+        if callable(stop):
+            try:
+                stop()
+            except Exception as e:  # noqa: BLE001
+                logger.debug(
+                    f"role '{self.role_name}' stop_client_api_server failed: {e}")
 
     def _create_spoke_tasks(self, websocket):
         """Surface any per-connection background tasks the hosted role module
