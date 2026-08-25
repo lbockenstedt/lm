@@ -240,3 +240,41 @@ async def test_fleet_filtered_preserves_envelope_shape_and_message(tmp_path):
     assert got["devices"]["status"] == "SUCCESS"
     assert got["devices"]["message"] == "3 device(s)"
     assert [r["id"] for r in got["devices"]["data"]] == ["a"]
+
+
+# ── reachability sweep folds into the cached fleet row ────────────────────────
+
+async def test_set_reachability_updates_fleet_row(tmp_path):
+    hub = _CacheHub(str(tmp_path))
+    await hub.nw_cache_set_fleet(_envelope([
+        {"id": "sw1", "name": "core-sw", "reachable": True, "latency_ms": 5},
+        {"id": "sw2", "name": "edge-sw", "reachable": True, "latency_ms": 7}]))
+    # A confirmed-down sweep flips just that row.
+    await hub.nw_cache_set_reachability("sw1", False, None)
+    rows = hub.nw_cache_get_fleet()["devices"]["data"]
+    by_id = {r["id"]: r for r in rows}
+    assert by_id["sw1"]["reachable"] is False
+    assert by_id["sw1"]["latency_ms"] is None
+    assert by_id["sw2"]["reachable"] is True   # untouched
+
+
+async def test_set_reachability_unknown_is_none(tmp_path):
+    hub = _CacheHub(str(tmp_path))
+    await hub.nw_cache_set_fleet(_envelope([
+        {"id": "sw1", "reachable": True, "latency_ms": 5}]))
+    await hub.nw_cache_set_reachability("sw1", None, None)
+    assert hub.nw_cache_get_fleet()["devices"]["data"][0]["reachable"] is None
+
+
+async def test_set_reachability_noop_when_no_fleet(tmp_path):
+    hub = _CacheHub(str(tmp_path))
+    # No fleet snapshot yet → silently no-ops (the first list seeds it).
+    await hub.nw_cache_set_reachability("sw1", False, None)
+    assert hub.nw_cache_get_fleet() is None
+
+
+async def test_set_reachability_noop_when_device_absent(tmp_path):
+    hub = _CacheHub(str(tmp_path))
+    await hub.nw_cache_set_fleet(_envelope([{"id": "sw1", "reachable": True}]))
+    await hub.nw_cache_set_reachability("ghost", False, None)
+    assert hub.nw_cache_get_fleet()["devices"]["data"][0]["reachable"] is True

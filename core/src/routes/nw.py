@@ -480,10 +480,24 @@ def register(app, hub, ctx):
             out["cached"] = True
             out["fetched_at"] = cached.get("fetched_at")
             if not spokes:
-                # Offline: no live spoke for the reader's slice — last-known.
+                # Offline: no live spoke for the reader's slice. The cached rows
+                # still carry their LAST up/down, which is now unknowable (the
+                # spoke that probes them is gone) — showing it stale would badge
+                # a since-crashed box as 'up'. Flip every served row to UNKNOWN
+                # (reachable=None → the UI's yellow 'unknown' badge) so the
+                # operator sees "can't tell" rather than a stale green. Fresh
+                # dicts — never mutate the shared cache.
+                rows = out.get("data")
+                if isinstance(rows, list):
+                    out["data"] = [
+                        {**r, "reachable": None, "latency_ms": None}
+                        if isinstance(r, dict) else r
+                        for r in rows
+                    ]
                 out["stale"] = True
-                out["message"] = (out.get("message") or
-                                  "Network Devices spoke offline — showing last-known data")
+                out["message"] = (
+                    "Network Devices spoke offline — reachability unknown "
+                    "(showing last-known inventory)")
             else:
                 age = time.time() - float(cached.get("fetched_at") or 0.0)
                 if age > _NW_SERVE_MAX_AGE_S:
@@ -722,7 +736,8 @@ def register(app, hub, ctx):
         return {"default_poll_interval": gc.get("nw_poll_default_interval"),
                 "poll_jitter_frac": gc.get("nw_poll_jitter_frac"),
                 "max_poll_per_tick": gc.get("nw_poll_max_per_tick"),
-                "max_poll_concurrency": gc.get("nw_poll_max_concurrency")}
+                "max_poll_concurrency": gc.get("nw_poll_max_concurrency"),
+                "ping_interval": gc.get("nw_ping_interval")}
 
     @app.post("/setup/nw-poll-config")
     async def set_nw_poll_config(request: Request):
@@ -751,12 +766,26 @@ def register(app, hub, ctx):
         jitter = _opt_num("poll_jitter_frac", float, 0.0, 0.9)
         per_tick = _opt_num("max_poll_per_tick", int, 1, 100)
         concurrency = _opt_num("max_poll_concurrency", int, 1, 50)
+        # Reachability sweep cadence: 0 disables the ICMP ping sweep, else
+        # clamp to a sane [30s, 24h] band; null → the spoke's 5-min default.
+        ping_raw = data.get("ping_interval")
+        if ping_raw in (None, "", "null"):
+            ping_interval = None
+        else:
+            try:
+                ping_interval = int(ping_raw)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400,
+                                    detail="ping_interval must be an integer or null")
+            if ping_interval != 0:
+                ping_interval = max(30, min(ping_interval, 86400))
 
         gc = hub.state.system_state.get("global_config", {})
         gc["nw_poll_default_interval"] = val
         gc["nw_poll_jitter_frac"] = jitter
         gc["nw_poll_max_per_tick"] = per_tick
         gc["nw_poll_max_concurrency"] = concurrency
+        gc["nw_ping_interval"] = ping_interval
         hub.state.system_state["global_config"] = gc
         hub.state._mark_dirty()
         # Re-push every connected nw spoke so the new module config takes effect.
@@ -766,7 +795,8 @@ def register(app, hub, ctx):
                 pushed += 1
         return {"status": "ok", "default_poll_interval": val,
                 "poll_jitter_frac": jitter, "max_poll_per_tick": per_tick,
-                "max_poll_concurrency": concurrency, "pushed": pushed}
+                "max_poll_concurrency": concurrency,
+                "ping_interval": ping_interval, "pushed": pushed}
 
     @app.get("/setup/nw-netbox-import")
     async def get_nw_netbox_import(request: Request):

@@ -951,6 +951,9 @@ def nw_poll_cfg_for_tenant(hub, tenant_id) -> dict:
         "poll_jitter_frac": pick("jitter_frac", "nw_poll_jitter_frac"),
         "max_poll_per_tick": pick("max_per_tick", "nw_poll_max_per_tick"),
         "max_poll_concurrency": pick("max_concurrency", "nw_poll_max_concurrency"),
+        # Reachability-sweep cadence (seconds; 0 = disable the ICMP ping sweep).
+        # None → the spoke's built-in 5-min default.
+        "ping_interval": pick("ping_interval", "nw_ping_interval"),
     }
 
 

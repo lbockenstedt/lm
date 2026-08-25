@@ -7756,6 +7756,20 @@ function _renderSetupModuleMgmtTile(content) {
                             </select>
                         </label>
                     </div>
+                    <div class="mt-4 pt-4 border-t border-slate-200">
+                        <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Reachability Sweep (ICMP Ping)</h4>
+                        <p class="text-xs text-slate-400 mb-3">A lightweight ICMP ping of every device, on its own cadence (jittered with the same anti-stampede caps above), keeps the fleet <b>up/down</b> badge fresh between the slower data polls. A device the sweep finds offline is <b>not</b> SSH/SNMP/REST-polled. When the spoke itself is offline the badge shows <b>unknown</b> (yellow).</p>
+                        <label class="text-xs font-medium text-slate-600">Ping cadence
+                            <select id="nw-ping-interval" class="mt-1 w-full sm:w-1/3 bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                                <option value="">Built-in default (5 minutes)</option>
+                                <option value="0">Off (no ping sweep)</option>
+                                <option value="60">Every 1 minute</option>
+                                <option value="300">Every 5 minutes</option>
+                                <option value="600">Every 10 minutes</option>
+                                <option value="900">Every 15 minutes</option>
+                            </select>
+                        </label>
+                    </div>
                     <div class="flex justify-end mt-3">
                         <button onclick="saveNwPollConfig(this)" class="${btnCls}">Save</button>
                     </div>
@@ -8485,6 +8499,7 @@ async function loadNwPollConfig() {
         setOpt('nw-poll-jitter', d.poll_jitter_frac);
         setOpt('nw-poll-max-per-tick', d.max_poll_per_tick);
         setOpt('nw-poll-max-concurrency', d.max_poll_concurrency);
+        setOpt('nw-ping-interval', d.ping_interval);
     } catch (e) { /* leave built-in defaults selected */ }
 }
 
@@ -8506,6 +8521,7 @@ async function saveNwPollConfig(btn) {
         poll_jitter_frac: numOrNull('nw-poll-jitter', parseFloat),
         max_poll_per_tick: numOrNull('nw-poll-max-per-tick', v => parseInt(v, 10)),
         max_poll_concurrency: numOrNull('nw-poll-max-concurrency', v => parseInt(v, 10)),
+        ping_interval: numOrNull('nw-ping-interval', v => parseInt(v, 10)),
     };
     if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
     try {
@@ -16792,7 +16808,7 @@ function _nwDetailHtml() {
         ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">up</span>'
         : reachable === false || reachable === 'down'
             ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
-            : '<span class="text-slate-400 text-xs">—</span>';
+            : '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-amber-100 text-amber-700" title="Reachability unknown — the Network Devices spoke is offline, so up/down can\'t be probed">unknown</span>';
     const cat = (window._nwView && window._nwView.category) || 'Devices';
     const tabs = _NW_DETAIL_TABS.map(t =>
         `<button onclick="nwSelectDetailTab('${escJsAttr(t)}')" class="px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${t === st.activeTab ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}">${escapeHtml(t)}</button>`
@@ -16968,7 +16984,7 @@ function _renderNwOverview(devices, counts) {
         ${stat('Total Devices', total)}
         ${stat('Reachable', up, 'text-green-600')}
         ${stat('Unreachable', down, 'text-red-500')}
-        ${stat('Unknown', unknown, 'text-slate-400')}
+        ${stat('Unknown', unknown, 'text-amber-500')}
     </div>`;
 
     // Per-category cards → click navigates to that category tab.
@@ -17311,7 +17327,7 @@ function _renderNwDeviceList(category, devices, counts) {
             ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-green-100 text-green-700">up</span>'
             : reachable === false || reachable === 'down'
                 ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
-                : `<span class="text-slate-400 text-xs">—</span>`;
+                : `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-amber-100 text-amber-700" title="Reachability unknown — the Network Devices spoke is offline, so up/down can't be probed">unknown</span>`;
         // event.stopPropagation() keeps the Poll/Configure buttons from also
         // triggering the row's drill-into-detail click.
         const cfg = (isAdmin() || isTenantAdmin())

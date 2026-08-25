@@ -173,6 +173,33 @@ class NwCacheMixin:
         self.nw_fleet_cache = {"devices": data, "fetched_at": time.time()}
         self._nw_cache_schedule_save()
 
+    async def nw_cache_set_reachability(self, device_id: str,
+                                        reachable: Optional[bool],
+                                        latency_ms: Optional[float] = None
+                                        ) -> None:
+        """Fold a lightweight ICMP-reachability result (spoke ``NW_REACHABILITY``
+        sweep) into the cached fleet row for ``device_id`` so the up/down badge
+        stays fresh between the hours-apart data polls WITHOUT a full
+        NW_LIST_DEVICES round-trip. Updates the row's ``reachable`` +
+        ``latency_ms`` in place (no-op if the fleet snapshot or the row is not
+        cached yet — the first fleet list seeds it). ``reachable`` may be
+        ``None`` (UNKNOWN) which surfaces as the yellow 'unknown' badge."""
+        f = self.nw_fleet_cache
+        if not f or not isinstance(f.get("devices"), dict):
+            return
+        rows = f["devices"].get("data")
+        if not isinstance(rows, list):
+            return
+        touched = False
+        for r in rows:
+            if isinstance(r, dict) and r.get("id") == device_id:
+                r["reachable"] = reachable
+                r["latency_ms"] = latency_ms
+                touched = True
+                break
+        if touched:
+            self._nw_cache_schedule_save()
+
     async def nw_cache_set_device(self, device_id: str, endpoint: str,
                                   data: Any) -> None:
         """Store a fresh per-device endpoint envelope + persist (best-effort)."""

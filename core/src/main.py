@@ -5701,6 +5701,21 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         asyncio.create_task(self.apply_nw_auto_poll(_nw_did, _nw_pdata))
                     continue
 
+                # --- NW lightweight reachability sweep result (spoke-driven) ---
+                # The nw spoke ICMP-pings each device on a ~5-min cadence and
+                # pushes just the up/down/unknown verdict (no datums). Fold it
+                # into the cached fleet row so the badge stays fresh between the
+                # hours-apart data polls. ``reachable`` may be None (UNKNOWN).
+                # Fire-and-forget (must not block the dispatch loop).
+                if payload.get("type") == "NW_REACHABILITY":
+                    _nwr = payload.get("data", {}) or {}
+                    _nwr_did = _nwr.get("device_id")
+                    if _nwr_did:
+                        asyncio.create_task(self.nw_cache_set_reachability(
+                            _nwr_did, _nwr.get("reachable"),
+                            _nwr.get("latency_ms")))
+                    continue
+
                 # --- TrueNAS autonomous per-appliance poll result (spoke-driven)
                 # A truenas spoke polled an appliance on its configured
                 # poll_interval and pushed the fused result. Fold it into the

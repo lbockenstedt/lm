@@ -633,3 +633,25 @@ def test_tenant_config_scan_schedule_interval_floored_1h(monkeypatch, tmp_path):
                 json={"scan_schedule": {"interval_seconds": 0}},
                 cookies={"lm_session": tok})
     assert r2.json()["scan_schedule"]["interval_seconds"] == 0
+
+
+def test_list_offline_marks_rows_unknown(monkeypatch, tmp_path):
+    """Spoke offline → the cached rows still carry their last up/down, which is
+    now UNKNOWABLE (the prober is gone). The route flips every served row to
+    reachable=None (the UI's yellow 'unknown' badge) instead of a stale green,
+    without mutating the shared cache."""
+    c, hub = _build(monkeypatch, tmp_path, shared=True)
+    asyncio.get_event_loop().run_until_complete(
+        hub.nw_cache_set_fleet({"status": "SUCCESS",
+                                "data": [_R_ACME, _R_OTHER, _R_SHARED]}))
+    hub.active_connections = {"ipam-spoke"}   # every nw spoke offline
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    r = c.get("/api/nw/devices", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body.get("stale") is True
+    assert all(d.get("reachable") is None for d in body["data"])
+    assert all(d.get("latency_ms") is None for d in body["data"])
+    # The shared cache is untouched (rows still carry their real reachability).
+    cached = hub.nw_cache_get_fleet()["devices"]["data"]
+    assert any(d.get("reachable") is True for d in cached)
