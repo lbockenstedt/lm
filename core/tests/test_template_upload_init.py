@@ -1,8 +1,10 @@
-"""``POST /setup/templates/upload-init`` — the MANUAL (browser) template upload
-entry point. It mints a pending record + one-time upload token (no source host/
-agent) so the admin's browser can PUT a vzdump archive straight to the existing
-token-authed ``/api/templates/{id}/upload`` endpoint. Used when the source
-Proxmox host is offline or only the archive file is available.
+"""``POST /tenant/templates/upload-init`` — the MANUAL (browser) template upload
+entry point used from the Simulations UI. It mints a pending record + one-time
+upload token (no source host/agent) so a tenant-admin's (or admin's) browser can
+PUT a vzdump archive straight to the existing token-authed
+``/api/templates/{id}/upload`` endpoint. Used when the source Proxmox host is
+offline or only the archive file is available. Tenant-admins are confined to the
+tenants they own (anti-IDOR).
 """
 import os
 import sys
@@ -37,20 +39,23 @@ class FakeHub:
         return agent_id
 
 
-def _build(tmp, *, is_admin=True):
+def _build(tmp, *, is_admin=False, tenants=("acme",)):
+    """Build a test client. ``is_admin`` → Global Admin (owns any tenant);
+    otherwise a tenant-admin confined to ``tenants``."""
     app = FastAPI()
     hub = FakeHub(tmp)
+    sess = {"username": "operator", "user": {"tenants": list(tenants)}}
     ctx = SimpleNamespace(
-        _session_user=lambda req: {"username": "admin"},
-        _is_admin=lambda sess: is_admin,
+        _session_user=lambda req: sess,
+        _is_admin=lambda s: is_admin,
     )
     register(app, hub, ctx)
     return TestClient(app), hub
 
 
-def test_upload_init_mints_token_and_url(tmp_path):
-    c, hub = _build(tmp_path)
-    r = c.post("/setup/templates/upload-init", json={
+def test_tenant_upload_init_mints_token_and_url(tmp_path):
+    c, hub = _build(tmp_path, tenants=("acme",))
+    r = c.post("/tenant/templates/upload-init", json={
         "name": "offline-golden", "os": "Debian 12", "version": "v3",
         "purpose": "manual", "tenant_id": "acme",
     })
@@ -77,32 +82,41 @@ def test_upload_init_mints_token_and_url(tmp_path):
     assert rec["tenant_id"] == "acme"
 
 
-def test_upload_init_tenant_optional(tmp_path):
-    c, hub = _build(tmp_path)
-    r = c.post("/setup/templates/upload-init", json={"name": "unassigned-tpl"})
+def test_tenant_upload_init_requires_name(tmp_path):
+    c, _ = _build(tmp_path, tenants=("acme",))
+    r = c.post("/tenant/templates/upload-init", json={"tenant_id": "acme", "os": "Debian 12"})
+    assert r.status_code == 400
+
+
+def test_tenant_upload_init_rejects_foreign_tenant(tmp_path):
+    """A tenant-admin cannot stamp an upload to a tenant they don't own."""
+    c, _ = _build(tmp_path, tenants=("acme",))
+    r = c.post("/tenant/templates/upload-init", json={"name": "x", "tenant_id": "other"})
+    assert r.status_code == 403
+
+
+def test_tenant_upload_init_rejects_unassigned_for_tenant_admin(tmp_path):
+    """A tenant-admin must supply an owned tenant (empty tenant_id → 403)."""
+    c, _ = _build(tmp_path, tenants=("acme",))
+    r = c.post("/tenant/templates/upload-init", json={"name": "x"})
+    assert r.status_code == 403
+
+
+def test_admin_upload_init_any_tenant(tmp_path):
+    """Global Admin may stamp any tenant, including unassigned."""
+    c, hub = _build(tmp_path, is_admin=True, tenants=())
+    r = c.post("/tenant/templates/upload-init", json={"name": "adm", "tenant_id": ""})
     assert r.status_code == 200, r.text
     rec = hub.template_repo.get(r.json()["id"])
     assert rec["tenant"] == ""
     assert rec["tenant_id"] == ""
 
 
-def test_upload_init_requires_name(tmp_path):
-    c, _ = _build(tmp_path)
-    r = c.post("/setup/templates/upload-init", json={"os": "Debian 12"})
-    assert r.status_code == 400
-
-
-def test_upload_init_admin_only(tmp_path):
-    c, _ = _build(tmp_path, is_admin=False)
-    r = c.post("/setup/templates/upload-init", json={"name": "x"})
-    assert r.status_code == 403
-
-
-def test_upload_init_then_put_completes(tmp_path):
+def test_tenant_upload_init_then_put_completes(tmp_path):
     """End-to-end: init → PUT the file to the returned url with the token →
     the existing upload endpoint finalizes it to complete."""
-    c, hub = _build(tmp_path)
-    d = c.post("/setup/templates/upload-init", json={"name": "e2e"}).json()
+    c, hub = _build(tmp_path, tenants=("acme",))
+    d = c.post("/tenant/templates/upload-init", json={"name": "e2e", "tenant_id": "acme"}).json()
     tid, token = d["id"], d["upload_token"]
     body = b"fake-vzdump-archive-bytes"
     r = c.put(f"/api/templates/{tid}/upload", content=body,

@@ -11,8 +11,9 @@ path — the archive lives on the hub, not in cloud storage.
   (routes). `hub.template_repo` is instantiated in `main.py`.
 - Agent: the pxmx agent's `START_BACKUP` + `REFRESH_TEMPLATE` handlers (`pxmx/agent/src/agent.py`).
 - WebUI: **Template Repo** admin page (`renderTemplateRepo`, `WebUI/main.js`) + a
-  "⬆ Back up to Hub" button on a VM, an "⬆ Upload template" button on the Template
-  Repo page (manual browser upload — `templateRepoUploadOpen`/`templateRepoUploadSubmit`),
+  "⬆ Back up to Hub" button on a VM, an "⬆ Upload template" button in the
+  **Simulations → VM Server** overview toolbar (manual browser upload — `csUploadTemplate`
+  in `WebUI/sim-views.js`, next to "↻ Refresh Template(s)"),
   and a multi-select **Refresh Template(s)** action
   on **VM Server / VMs** (`WebUI/sim-views.js`).
 
@@ -45,24 +46,28 @@ Private (never in the API view): `_upload_token`, `_refresh_token`.
 The upload/progress/download endpoints are **token-authed** (agents have no browser
 session); the access-control middleware exempts exactly those paths.
 
-## Manual upload flow (Global Admin browser → hub)
+## Manual upload flow (browser → hub, Simulations UI)
 
-When the source Proxmox host is offline (no live agent to run vzdump) or the admin
-only has the archive as a **file**, the "⬆ Upload template" button on the Template
-Repo page uploads it directly:
+When the source Proxmox host is offline (no live agent to run vzdump) or the operator
+only has the archive as a **file**, the "⬆ Upload template" button in the
+**Simulations → VM Server** overview toolbar (`csUploadTemplate`, next to
+"↻ Refresh Template(s)") uploads it directly. It is available to **tenant-admins and
+Global Admins** (same `isAdmin() || isTenantAdmin()` gate as Refresh Template(s)):
 
-1. The browser POSTs `/setup/templates/upload-init {name, os?, version?, purpose?,
-   tenant_id?}` (session-authed, Global Admin). The hub creates a *pending* record
-   with **no source host/agent** (`source_vmid=None`, empty node/agent/spoke) + a
-   one-time `_upload_token`, persists any supplied metadata, and returns
-   `{id, upload_url, upload_token}`.
+1. The browser POSTs `/tenant/templates/upload-init {name, os?, version?, purpose?,
+   tenant_id}` (session-authed, `/tenant/*` middleware = tenant-admin + admin). The
+   hub validates the caller **owns** `tenant_id` (anti-IDOR: `_owns_tenant`), creates
+   a *pending* record with **no source host/agent** (`source_vmid=None`, empty
+   node/agent/spoke) + a one-time `_upload_token`, persists any supplied metadata,
+   resolves the tenant display name, and returns `{id, upload_url, upload_token}`.
 2. The browser **PUT-streams the raw File** to `upload_url`
    (`/api/templates/{id}/upload`) with the `X-Upload-Token` header — the *same*
    token-authed endpoint the agent uses (unchanged), so size cap / sha256 / status
    transitions are identical. A plain `XMLHttpRequest` reports upload progress %.
 
-Tenant is **admin-chosen** here (optional — may be left Unassigned), unlike the
-agent backup flow where tenant is derived from the source host.
+Tenant is the caller's **current sim tenant** (`csTenant()` / `currentTenant`), stamped
+automatically (no picker) — a tenant-admin may only upload to a tenant they own; a
+Global Admin may upload to any (or leave it unassigned).
 
 ## Tenant binding
 
@@ -101,7 +106,7 @@ The agent runs the sequence (background task, reports each step via
 | `GET /setup/templates` | Global Admin | list all |
 | `GET /tenant/templates` | tenant-admin | list own-tenant (admin sees all) |
 | `POST /setup/templates/backup` | Global Admin | trigger a backup |
-| `POST /setup/templates/upload-init` | Global Admin | register a manual file upload (mint token) |
+| `POST /tenant/templates/upload-init` | tenant-admin (own) / admin | register a manual file upload (mint token) |
 | `PATCH /setup/templates/{id}` | Global Admin | edit version/os/purpose/name |
 | `DELETE /setup/templates/{id}` | Global Admin | delete a stored template |
 | `POST /setup/templates/{id}/refresh` | Global Admin | refresh one template's host |

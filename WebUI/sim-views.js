@@ -8943,6 +8943,7 @@ async function csRenderVmServer() {
     const bulkBar = _canRefresh
         ? `<div class="flex items-center gap-2 flex-wrap">
              <button onclick="csFleetRefreshTemplates()" class="bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-300 px-3 py-1.5 rounded-md text-xs font-bold" title="Distribute a seed template backup from the hub onto the selected host(s): pause auto-provisioning, delete each host's sim VMs + template, qmrestore the seed backup, then resume auto-provisioning.">↻ Refresh Template(s)</button>
+             <button onclick="csUploadTemplate()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200 px-3 py-1.5 rounded-md text-xs font-bold" title="Upload a vzdump template archive (.vma.zst) from your browser straight into the hub Template Repo — for when the source Proxmox host is offline or you only have the archive as a file. Stamped to the current tenant.">⬆ Upload template</button>
              <span class="text-[11px] text-slate-400">Select target host(s), then push a seed template backup from the hub onto them. This wipes each target's sim VMs.</span>
              <span id="cs-refresh-status-chip" class="hidden text-[11px] font-bold px-2 py-1 rounded-full border"></span>
            </div>`
@@ -9234,6 +9235,134 @@ window.csFleetRefreshTemplates = async function () {
             if (goBtn) { goBtn.disabled = false; goBtn.classList.remove('opacity-50', 'cursor-not-allowed'); }
             if (statusEl) statusEl.classList.add('hidden');
         }
+    });
+};
+
+// ── Manual template upload (tenant-admin / admin) ────────────────────────────
+// Two-step: POST /tenant/templates/upload-init (session-authed, stamped to the
+// current sim tenant, mints a pending record + one-time upload token) → PUT the
+// raw File to the returned upload_url with the x-upload-token header (that route
+// is token-authed / middleware-exempt, so NO session goes on the PUT). Uses
+// XMLHttpRequest for the PUT so it can surface upload progress % — the archives
+// are large. Mirrors csFleetRefreshTemplates' modal pattern.
+window.csUploadTemplate = async function () {
+    const _canRefresh = (typeof isAdmin === 'function' && isAdmin())
+        || (typeof isTenantAdmin === 'function' && isTenantAdmin());
+    if (!_canRefresh) { if (typeof showToast === 'function') showToast('Not permitted', 'error'); return; }
+
+    // One modal at a time.
+    const existing = document.getElementById('cs-upload-tpl-modal');
+    if (existing) { existing.remove(); return; }
+
+    const esc = csEscape;  // shared escaper (escapes &<>"')
+    const modal = document.createElement('div');
+    modal.id = 'cs-upload-tpl-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm p-4';
+    modal.innerHTML = `
+        <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
+            <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+                <h3 class="text-lg font-bold text-[#263040]">⬆ Upload template to hub</h3>
+                <button onclick="this.closest('#cs-upload-tpl-modal').remove()" class="text-slate-400 hover:text-slate-600 transition-colors">
+                    <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                </button>
+            </div>
+            <div class="p-6 space-y-4">
+                <p class="text-[11px] text-slate-400 leading-relaxed">Upload a vzdump archive (.vma.zst / .vma / .gz / .lzo) straight into the hub Template Repo — the offline alternative to “⬆ Back up to Hub” when the source Proxmox host is unavailable. Stamped to tenant <span class="font-mono text-slate-500">${esc(csTenant())}</span>.</p>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Archive file</label>
+                    <input id="cs-up-file" type="file" accept=".zst,.vma,.vma.zst,.gz,.lzo" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Name <span class="text-red-500">*</span></label>
+                    <input id="cs-up-name" placeholder="t2-golden…" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-500 uppercase font-bold">OS</label>
+                        <input id="cs-up-os" placeholder="Debian 12, Windows 11…" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs text-slate-500 uppercase font-bold">Version</label>
+                        <input id="cs-up-version" placeholder="v3, 2026-07 golden…" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    </div>
+                </div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Purpose</label>
+                    <textarea id="cs-up-purpose" rows="2" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></textarea>
+                </div>
+                <div id="cs-up-status" class="text-xs text-slate-500 font-mono hidden"></div>
+                <div class="pt-2 flex justify-end gap-3">
+                    <button onclick="this.closest('#cs-upload-tpl-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
+                    <button id="cs-up-go" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Upload</button>
+                </div>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+
+    modal.querySelector('#cs-up-go').addEventListener('click', async () => {
+        const g = i => (document.getElementById(i) || {}).value || '';
+        const fileEl = document.getElementById('cs-up-file');
+        const file = fileEl && fileEl.files && fileEl.files[0];
+        const name = g('cs-up-name').trim();
+        if (!file) { if (typeof showToast === 'function') showToast('Choose an archive file first', 'error'); return; }
+        if (!name) { if (typeof showToast === 'function') showToast('A template name is required', 'error'); return; }
+        const goBtn = document.getElementById('cs-up-go');
+        const statusEl = document.getElementById('cs-up-status');
+        const setBusy = b => { if (goBtn) { goBtn.disabled = b; goBtn.classList.toggle('opacity-50', b); goBtn.classList.toggle('cursor-not-allowed', b); } };
+        setBusy(true);
+        if (statusEl) { statusEl.classList.remove('hidden'); statusEl.textContent = 'Registering upload…'; }
+        // Step 1 — mint a pending record + one-time upload token, stamped to the
+        // caller's current sim tenant (session-authed).
+        let init;
+        try {
+            const r = await fetch('/tenant/templates/upload-init', {
+                method: 'POST', credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name, tenant_id: csTenant(),
+                    os: g('cs-up-os'), version: g('cs-up-version'), purpose: g('cs-up-purpose')
+                })
+            });
+            init = await r.json().catch(() => ({}));
+            if (!r.ok || init.status !== 'SUCCESS') {
+                if (typeof showToast === 'function') showToast(init.detail || init.message || 'Could not start upload', 'error');
+                setBusy(false); if (statusEl) statusEl.classList.add('hidden'); return;
+            }
+        } catch (e) {
+            if (typeof showToast === 'function') showToast('Could not start upload: ' + (e.message || e), 'error');
+            setBusy(false); if (statusEl) statusEl.classList.add('hidden'); return;
+        }
+        // Step 2 — PUT the raw File to the token-authed upload endpoint. Plain XHR
+        // (NOT csFetch) so this stays session-less and can report progress %.
+        try {
+            await new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                xhr.open('PUT', init.upload_url, true);
+                xhr.setRequestHeader('x-upload-token', init.upload_token);
+                xhr.upload.onprogress = e => {
+                    if (statusEl && e.lengthComputable) {
+                        const pct = Math.floor((e.loaded / e.total) * 100);
+                        statusEl.textContent = `Uploading… ${pct}%`;
+                    }
+                };
+                xhr.onload = () => {
+                    if (xhr.status >= 200 && xhr.status < 300) resolve();
+                    else {
+                        let msg = `upload failed (HTTP ${xhr.status})`;
+                        try { const j = JSON.parse(xhr.responseText || '{}'); if (j.detail) msg = j.detail; } catch (_e) { }
+                        reject(new Error(msg));
+                    }
+                };
+                xhr.onerror = () => reject(new Error('network error during upload'));
+                xhr.send(file);
+            });
+        } catch (e) {
+            if (typeof showToast === 'function') showToast('Upload failed: ' + (e.message || e), 'error');
+            setBusy(false); if (statusEl) statusEl.textContent = 'Upload failed.'; return;
+        }
+        if (typeof showToast === 'function') showToast('Template uploaded', 'success');
+        modal.remove();
+        if (typeof csRenderVmServer === 'function') csRenderVmServer();
     });
 };
 
