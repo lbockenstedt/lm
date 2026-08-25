@@ -11,7 +11,9 @@ path — the archive lives on the hub, not in cloud storage.
   (routes). `hub.template_repo` is instantiated in `main.py`.
 - Agent: the pxmx agent's `START_BACKUP` + `REFRESH_TEMPLATE` handlers (`pxmx/agent/src/agent.py`).
 - WebUI: **Template Repo** admin page (`renderTemplateRepo`, `WebUI/main.js`) + a
-  "⬆ Back up to Hub" button on a VM, and a multi-select **Refresh Template(s)** action
+  "⬆ Back up to Hub" button on a VM, an "⬆ Upload template" button on the Template
+  Repo page (manual browser upload — `templateRepoUploadOpen`/`templateRepoUploadSubmit`),
+  and a multi-select **Refresh Template(s)** action
   on **VM Server / VMs** (`WebUI/sim-views.js`).
 
 ## Storage layout
@@ -42,6 +44,25 @@ Private (never in the API view): `_upload_token`, `_refresh_token`.
 
 The upload/progress/download endpoints are **token-authed** (agents have no browser
 session); the access-control middleware exempts exactly those paths.
+
+## Manual upload flow (Global Admin browser → hub)
+
+When the source Proxmox host is offline (no live agent to run vzdump) or the admin
+only has the archive as a **file**, the "⬆ Upload template" button on the Template
+Repo page uploads it directly:
+
+1. The browser POSTs `/setup/templates/upload-init {name, os?, version?, purpose?,
+   tenant_id?}` (session-authed, Global Admin). The hub creates a *pending* record
+   with **no source host/agent** (`source_vmid=None`, empty node/agent/spoke) + a
+   one-time `_upload_token`, persists any supplied metadata, and returns
+   `{id, upload_url, upload_token}`.
+2. The browser **PUT-streams the raw File** to `upload_url`
+   (`/api/templates/{id}/upload`) with the `X-Upload-Token` header — the *same*
+   token-authed endpoint the agent uses (unchanged), so size cap / sha256 / status
+   transitions are identical. A plain `XMLHttpRequest` reports upload progress %.
+
+Tenant is **admin-chosen** here (optional — may be left Unassigned), unlike the
+agent backup flow where tenant is derived from the source host.
 
 ## Tenant binding
 
@@ -80,6 +101,7 @@ The agent runs the sequence (background task, reports each step via
 | `GET /setup/templates` | Global Admin | list all |
 | `GET /tenant/templates` | tenant-admin | list own-tenant (admin sees all) |
 | `POST /setup/templates/backup` | Global Admin | trigger a backup |
+| `POST /setup/templates/upload-init` | Global Admin | register a manual file upload (mint token) |
 | `PATCH /setup/templates/{id}` | Global Admin | edit version/os/purpose/name |
 | `DELETE /setup/templates/{id}` | Global Admin | delete a stored template |
 | `POST /setup/templates/{id}/refresh` | Global Admin | refresh one template's host |

@@ -18347,7 +18347,7 @@ async function renderTemplateRepo() {
     // so a host's templates cluster together.
     let rows;
     if (!templates.length) {
-        rows = `<tr><td colspan="8" class="px-4 py-6 text-center text-sm text-slate-400 italic">No templates yet — use “⬆ Back up to Hub” on a Proxmox template VM (Hypervisors → open a template).</td></tr>`;
+        rows = `<tr><td colspan="8" class="px-4 py-6 text-center text-sm text-slate-400 italic">No templates yet — use “⬆ Back up to Hub” on a Proxmox template VM (Hypervisors → open a template), or “⬆ Upload template” above to upload a vzdump archive file directly.</td></tr>`;
     } else {
         const groups = {};
         templates.forEach(t => { const k = t.tenant || '— Unassigned —'; (groups[k] = groups[k] || []).push(t); });
@@ -18363,9 +18363,12 @@ async function renderTemplateRepo() {
       <div class="flex items-center justify-between">
         <div>
           <h2 class="text-lg font-bold text-[#263040]">Template Repo</h2>
-          <p class="text-sm text-slate-500">Proxmox template backups (vzdump) stored on the hub. Trigger one with “⬆ Back up to Hub” on a template VM; edit each template’s metadata here.</p>
+          <p class="text-sm text-slate-500">Proxmox template backups (vzdump) stored on the hub. Trigger one with “⬆ Back up to Hub” on a template VM, or upload an archive file directly with “⬆ Upload template”; edit each template’s metadata here.</p>
         </div>
-        <button onclick="renderTemplateRepo()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">↻ Refresh</button>
+        <div class="flex items-center gap-2">
+          ${isAdmin() ? `<button onclick="templateRepoUploadOpen()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982]" title="Upload a vzdump template archive (.vma.zst) from your browser straight into the hub Template Repo — for when the source Proxmox host is offline or you only have the archive as a file">⬆ Upload template</button>` : ''}
+          <button onclick="renderTemplateRepo()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200">↻ Refresh</button>
+        </div>
       </div>
       <div class="hpe-card rounded-lg overflow-hidden">
         <div class="overflow-x-auto"><table class="w-full text-sm">
@@ -18455,6 +18458,116 @@ async function templateRepoDelete(id) {
         if (r.ok && d.status === 'SUCCESS') { showToast('Template deleted', 'success'); renderTemplateRepo(); }
         else showToast(d.detail || 'Delete failed', 'error');
     } catch (e) { showToast('Delete failed: ' + (e.message || e), 'error'); }
+}
+
+// ── Manual template upload (Global Admin) ────────────────────────────────────
+// Two-step: POST /setup/templates/upload-init (session-authed, mints a pending
+// record + one-time upload token) → PUT the raw File to the returned upload_url
+// with the x-upload-token header (that route is token-authed / middleware-exempt,
+// so NO session goes on the PUT). XMLHttpRequest is used for the PUT so we can
+// surface upload progress % — the archives are large.
+async function templateRepoUploadOpen() {
+    if (!isAdmin()) { showToast('Global Admin only', 'error'); return; }
+    const esc = escapeHtml;
+    // Populate the (optional) tenant selector the same way other admin modals do.
+    let tenantOptions = '<option value="">— Unassigned —</option>';
+    try {
+        const res = await setupFetch('/setup/tenants');
+        if (res.ok) {
+            const tenants = (await res.json()).tenants || [];
+            tenantOptions += tenants.map(t =>
+                `<option value="${esc(t.id)}">${esc(t.name || t.id)}</option>`).join('');
+        }
+    } catch (_e) { /* leave just the Unassigned option */ }
+    const modal = document.createElement('div');
+    modal.id = 'template-upload-modal';
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    modal.innerHTML = `
+      <div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+        <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+          <h3 class="text-lg font-bold text-[#263040]">Upload template to hub</h3>
+          <button onclick="this.closest('#template-upload-modal').remove()" class="text-slate-400 hover:text-slate-600">✕</button>
+        </div>
+        <div class="p-6 space-y-3">
+          <p class="text-[11px] text-slate-400">Upload a vzdump archive (.vma.zst / .vma / .gz / .lzo) straight into the hub Template Repo — the offline alternative to “⬆ Back up to Hub” when the source Proxmox host is unavailable.</p>
+          <div><label class="text-xs text-slate-500 uppercase font-bold">Archive file</label><input id="tpl-up-file" type="file" accept=".zst,.vma,.vma.zst,.gz,.lzo" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
+          <div><label class="text-xs text-slate-500 uppercase font-bold">Name <span class="text-red-500">*</span></label><input id="tpl-up-name" placeholder="t2-golden…" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
+          <div><label class="text-xs text-slate-500 uppercase font-bold">Tenant</label><select id="tpl-up-tenant" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm">${tenantOptions}</select></div>
+          <div><label class="text-xs text-slate-500 uppercase font-bold">OS</label><input id="tpl-up-os" placeholder="Debian 12, Windows 11…" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
+          <div><label class="text-xs text-slate-500 uppercase font-bold">Version</label><input id="tpl-up-version" placeholder="v3, 2026-07 golden…" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></div>
+          <div><label class="text-xs text-slate-500 uppercase font-bold">Purpose</label><textarea id="tpl-up-purpose" rows="2" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm"></textarea></div>
+          <div id="tpl-up-progress" class="text-xs text-slate-500 font-mono hidden"></div>
+          <div class="pt-3 flex justify-end gap-3">
+            <button id="tpl-up-cancel" onclick="this.closest('#template-upload-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
+            <button id="tpl-up-submit" onclick="templateRepoUploadSubmit()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Upload</button>
+          </div>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+}
+async function templateRepoUploadSubmit() {
+    const g = i => (document.getElementById(i) || {}).value || '';
+    const fileEl = document.getElementById('tpl-up-file');
+    const file = fileEl && fileEl.files && fileEl.files[0];
+    const name = g('tpl-up-name').trim();
+    if (!file) { showToast('Choose an archive file first', 'error'); return; }
+    if (!name) { showToast('A template name is required', 'error'); return; }
+    const submitBtn = document.getElementById('tpl-up-submit');
+    const cancelBtn = document.getElementById('tpl-up-cancel');
+    const prog = document.getElementById('tpl-up-progress');
+    const setBusy = b => { if (submitBtn) submitBtn.disabled = b; if (cancelBtn) cancelBtn.disabled = b; };
+    setBusy(true);
+    if (prog) { prog.classList.remove('hidden'); prog.textContent = 'Registering upload…'; }
+    // Step 1 — mint a pending record + one-time upload token (session-authed).
+    let init;
+    try {
+        const r = await setupFetch('/setup/templates/upload-init', {
+            method: 'POST',
+            body: JSON.stringify({
+                name, tenant_id: g('tpl-up-tenant'),
+                os: g('tpl-up-os'), version: g('tpl-up-version'), purpose: g('tpl-up-purpose')
+            })
+        });
+        init = await r.json().catch(() => ({}));
+        if (!r.ok || init.status !== 'SUCCESS') {
+            showToast(init.detail || init.message || 'Could not start upload', 'error');
+            setBusy(false); if (prog) prog.classList.add('hidden'); return;
+        }
+    } catch (e) {
+        showToast('Could not start upload: ' + (e.message || e), 'error');
+        setBusy(false); if (prog) prog.classList.add('hidden'); return;
+    }
+    // Step 2 — PUT the raw File to the token-authed upload endpoint. Plain XHR
+    // (NOT setupFetch) so this stays session-less and can report progress %.
+    try {
+        await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open('PUT', init.upload_url, true);
+            xhr.setRequestHeader('x-upload-token', init.upload_token);
+            xhr.upload.onprogress = e => {
+                if (prog && e.lengthComputable) {
+                    const pct = Math.floor((e.loaded / e.total) * 100);
+                    prog.textContent = `Uploading… ${pct}%`;
+                }
+            };
+            xhr.onload = () => {
+                if (xhr.status >= 200 && xhr.status < 300) resolve();
+                else {
+                    let msg = `upload failed (HTTP ${xhr.status})`;
+                    try { const j = JSON.parse(xhr.responseText || '{}'); if (j.detail) msg = j.detail; } catch (_e) { }
+                    reject(new Error(msg));
+                }
+            };
+            xhr.onerror = () => reject(new Error('network error during upload'));
+            xhr.send(file);
+        });
+    } catch (e) {
+        showToast('Upload failed: ' + (e.message || e), 'error');
+        setBusy(false); if (prog) prog.textContent = 'Upload failed.'; return;
+    }
+    showToast('Template uploaded', 'success');
+    document.getElementById('template-upload-modal')?.remove();
+    renderTemplateRepo();
 }
 
 // Clone-from-template: opens a small modal prompting for the new VM's name (a

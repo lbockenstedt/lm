@@ -161,6 +161,56 @@ def register(app, hub, ctx):
         return {"status": "SUCCESS", "id": tid,
                 "message": "Backup queued — the agent is running vzdump and will stream it to the hub."}
 
+    @app.post("/setup/templates/upload-init")
+    async def upload_init(request: Request):
+        """Global Admin: register a MANUAL (browser) template upload. Creates a
+        pending record + one-time upload token so the admin's browser can PUT a
+        vzdump archive straight to the token-authed upload endpoint. This is the
+        offline counterpart to ``/setup/templates/backup`` — used when the source
+        Proxmox host is offline (no live agent to run vzdump) or the admin only
+        has the archive as a file. There is no source host/agent, so those fields
+        are empty and the tenant is chosen by the admin (optional)."""
+        sess = _require_admin(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        name = str(body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="a template name is required")
+        # Tenant is optional for a manual upload (may be left unassigned). When
+        # given, resolve a readable display name the same way trigger_backup does.
+        tenant_id = str(body.get("tenant_id") or "").strip()
+        tenant_name = tenant_id
+        if tenant_id:
+            try:
+                trec = hub.state.get_tenant(tenant_id) if hasattr(hub.state, "get_tenant") else None
+                if trec:
+                    tenant_name = trec.get("name") or tenant_id
+            except Exception:  # noqa: BLE001
+                pass
+
+        rec = _repo().create_pending(
+            name=name, source_vmid=None, source_node="", source_agent="",
+            source_spoke="", created_by=_username(sess),
+            tenant=tenant_name, tenant_id=tenant_id)
+        tid, token = rec["id"], rec["_upload_token"]
+
+        # Persist optional operator metadata via the same path edit_template uses.
+        meta = {k: body.get(k) for k in ("os", "version", "purpose") if body.get(k)}
+        if meta:
+            _repo().update_meta(tid, meta)
+
+        # Same URL derivation as trigger_backup — prefer an explicit public URL,
+        # else the URL the admin's browser reached us on.
+        base = (os.environ.get("LM_HUB_PUBLIC_URL") or str(request.base_url)).rstrip("/")
+        upload_url = f"{base}/api/templates/{tid}/upload"
+
+        logger.info("[template-repo] manual upload init %s (name=%s by=%s tenant=%s)",
+                    tid, name, _username(sess), tenant_id or "-")
+        return {"status": "SUCCESS", "id": tid,
+                "upload_url": upload_url, "upload_token": token}
+
     @app.patch("/setup/templates/{tid}")
     async def edit_template(tid: str, request: Request):
         _require_admin(request)
