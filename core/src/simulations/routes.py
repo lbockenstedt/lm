@@ -4395,6 +4395,16 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         cfg["usb_auto_provision"] = "on" if enabled else "off"
         await store.set_hub_config(tenant_id, bool(hc.get("hub_config_enabled", False)) or enabled, cfg)
         pushed = await _push_config(tenant_id, {"usb_auto_provision": cfg["usb_auto_provision"]})
+        # Nudge the cs_bridge to re-sync usb_config to this tenant's connected
+        # pxmx agents on its very next poll cycle instead of waiting up to the
+        # passive usb_interval (60s) sweep — so a disable/enable reaches the
+        # hosts within one cycle rather than lagging minutes behind the toggle.
+        try:
+            br = getattr(hub, "cs_bridge", None)
+            if br is not None:
+                br.request_usb_resync(tenant_id)
+        except Exception:  # noqa: BLE001 — best-effort; passive sweep still applies
+            pass
         return {"saved": True, "usb_auto_provision": cfg["usb_auto_provision"], "pushed_to_spokes": pushed, "queued": bool(getattr(pushed, "queued", False))}
 
     @app.get("/sim/api/{tenant}/usb-provisioning-status")

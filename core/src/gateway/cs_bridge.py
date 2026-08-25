@@ -145,6 +145,18 @@ class CSBridgePoller:
         self._last_usb_cfg: Dict[str, str] = {}   # agent_id -> canonical blob sig
         self._last_usb_push: Dict[str, float] = {}  # agent_id -> ts (last check)
         self._last_actual_push: Dict[str, float] = {}  # agent_id -> ts (last SEND)
+        # Proactive usb_config re-sync windows. A usb_config-affecting hub-config
+        # change (e.g. the auto-provision toggle) calls request_usb_resync() to
+        # force the next tick(s) to poll+push the tenant's agents immediately,
+        # bypassing the passive usb_interval (60s) gate — otherwise a disable
+        # took up to 60s (bridge sweep) + up to 60s (agent loop) to reach the
+        # host. A short WINDOW (not a one-shot flag) covers the race where the
+        # cs spoke hasn't finished applying the CS_CONFIG_UPDATE by the first
+        # post-toggle tick: we force a re-poll every tick until the deadline, so
+        # the sig-diff fires the moment the spoke's usb_config actually flips.
+        # tenant_id -> deadline ts; _usb_resync_until_all covers all tenants.
+        self._usb_resync_until: Dict[str, float] = {}
+        self._usb_resync_until_all: float = 0.0
         self._last_diag: Dict[str, str] = {}  # agent_id -> last [cs-bridge] decision (throttle)
         self._last_cycle_diag: str = ""  # last [cs-bridge] cycle summary (throttle)
         # Per-agent relay outcome counters (for the WebUI "CS Bridge Status"
@@ -200,6 +212,31 @@ class CSBridgePoller:
         if self._configured_fast is not None:
             self.relay_timeout = max(self._env_relay_timeout,
                                       self._configured_fast + margin)
+
+    def request_usb_resync(self, tenant_id: Optional[str] = None,
+                           window_s: float = 15.0) -> None:
+        """Force the next poll cycle(s) to re-sync usb_config to the given
+        tenant's connected agents immediately, bypassing the passive
+        usb_interval (60s) gate. Called by the hub routes right after a
+        usb_config-affecting hub-config change (the auto-provision toggle,
+        certify/ignore vidpid, etc.) so the change reaches connected pxmx
+        agents within one poll cycle (~poll_interval) instead of up to
+        usb_interval. ``window_s`` keeps the force active for a short window so
+        a tick that races ahead of the cs spoke applying the CS_CONFIG_UPDATE
+        still re-polls once the spoke's usb_config actually flips. tenant_id
+        None → all tenants (rarely needed)."""
+        deadline = time.time() + max(0.0, window_s)
+        if tenant_id:
+            self._usb_resync_until[str(tenant_id)] = deadline
+        else:
+            self._usb_resync_until_all = deadline
+
+    def _usb_resync_forced(self, tenant_id: Optional[str], now: float) -> bool:
+        """True while a request_usb_resync() window is open for this tenant."""
+        if now < self._usb_resync_until_all:
+            return True
+        td = self._usb_resync_until.get(str(tenant_id or ""), 0.0)
+        return now < td
 
     async def _tick(self) -> None:
         hub = self.hub
@@ -267,8 +304,14 @@ class CSBridgePoller:
 
                 await self._relay_inbox(host_spoke, cs_spoke, aid, hostname)
 
-                if now - self._last_usb_push.get(aid, 0.0) >= self.usb_interval:
+                if (self._usb_resync_forced(tenant_id, now)
+                        or now - self._last_usb_push.get(aid, 0.0) >= self.usb_interval):
                     await self._sync_usb_config(host_spoke, cs_spoke, aid, hostname, now)
+
+        # Prune lapsed usb-resync windows so the map stays bounded.
+        if self._usb_resync_until:
+            self._usb_resync_until = {
+                t: d for t, d in self._usb_resync_until.items() if d > now}
 
         # Cycle heartbeat so "the bridge saw N agents, M active" is visible in the
         # hub log / WebUI Logs even when it does nothing (0 spokes / 0 agents /

@@ -127,6 +127,49 @@ def test_tick_dedupes_a_spoke_advertised_under_both_types():
     assert len(get_agents_calls) == 1
 
 
+# ── proactive usb_config re-sync window (auto-prov toggle no longer lags) ─────
+
+def test_resync_window_forces_usb_sync_within_one_poll_cycle():
+    """A recent passive check normally holds the 60s usb_interval gate; a
+    request_usb_resync() (fired by the auto-prov toggle route) must force
+    _sync_usb_config on the very next _tick so a disable/enable reaches the
+    pxmx agent within one poll cycle instead of up to usb_interval."""
+    hub = _FakeHub(
+        spokes_by_type={"simulation": ["cs-svr-02-spoke"]},
+        agent_config={"pxmx-cs-svr-02-agent": {"client_simulation": {"enabled": True}}},
+        spoke_tenants={"cs-svr-02-spoke": "default"},
+        tenant_to_cs_spoke={"default": "cs-svr-02-spoke"},
+    )
+    poller = CSBridgePoller(hub)
+    synced = []
+
+    async def _fake_sync(host_spoke, cs_spoke, aid, hostname, now):
+        synced.append(aid)
+
+    poller._sync_usb_config = _fake_sync
+    import time as _t
+    poller._last_usb_push["pxmx-cs-svr-02-agent"] = _t.time()  # just checked → gate holds
+
+    _run(poller._tick())
+    assert synced == []                                    # no nudge → passive gate holds
+
+    poller.request_usb_resync("default")                   # operator toggled auto-prov
+    _run(poller._tick())
+    assert synced == ["pxmx-cs-svr-02-agent"]              # forced within one cycle
+
+
+def test_request_usb_resync_scopes_to_tenant_and_lapses():
+    poller = CSBridgePoller(_MiniHub({}))
+    now = 1000.0
+    poller.request_usb_resync("t1", window_s=15.0)
+    poller._usb_resync_until["t1"] = now + 15.0            # deterministic deadline
+    assert poller._usb_resync_forced("t1", now + 5.0) is True
+    assert poller._usb_resync_forced("t2", now + 5.0) is False   # scoped to t1 only
+    assert poller._usb_resync_forced("t1", now + 20.0) is False  # window lapsed
+    poller._usb_resync_until_all = now + 15.0             # tenant None → all tenants
+    assert poller._usb_resync_forced("whatever", now + 5.0) is True
+
+
 # ── agent_config key tolerance + migration (hostname → runtime agent_id) ──────
 
 class _MiniState:
