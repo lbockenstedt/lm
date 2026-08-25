@@ -1380,8 +1380,75 @@ def register(app, hub, ctx):
                 out["spoke_connected"] = False
             return out
 
+        async def _merge_offline_hosts(data):
+            """Fold known-but-OFFLINE hosts into the node list so a host whose
+            agent (and its co-located parent spoke) is down still appears in the
+            Overview — marked offline — instead of vanishing.
+
+            The node aggregation only sees CONNECTED agents: a host reported by
+            no live cluster peer (a standalone box, or one whose own spoke is
+            down) produces no node row, so the online spokes answer
+            GET_NODE_STATS and the Overview silently drops the dead host — even
+            though it stays visible (offline) in the Agents / Simulations roster
+            (the reported gap: '05 is offline; it shows in the CS module but not
+            the Hypervisor module'). We source those hosts from the SAME
+            persisted offline roster the Agents tile shows
+            (``_offline_relay_agents``, tenant-filtered here the same way), dedup
+            by hostname against the live/cached nodes, and honor
+            ``pxmx_hidden_nodes`` (an
+            operator-deleted host stays gone). Never raises — a roster failure
+            leaves the live node list untouched."""
+            if not isinstance(data, dict) or not isinstance(data.get("nodes"), list):
+                return data
+            try:
+                offline = _offline_relay_agents(hub, set())
+            except Exception:  # noqa: BLE001
+                logger.debug("merge offline hosts: roster unavailable", exc_info=True)
+                return data
+            if not offline:
+                return data
+            # Tenant scope: mirror pxmx_agents_payload's per-agent filter (the
+            # offline record already carries its effective ``tenant_id``: the
+            # agent's own pin, else its parent spoke's binding). Admin "All"
+            # (no tid / "default") keeps the full roster.
+            if tid and tid != "default":
+                offline = [a for a in offline
+                           if str((a or {}).get("tenant_id") or "") == tid]
+                if not offline:
+                    return data
+            present = {str(n.get("node") or "").strip().lower()
+                       for n in data["nodes"] if isinstance(n, dict)}
+            hidden = {str(h).strip().lower() for h in
+                      (hub.state.system_state.get("pxmx_hidden_nodes", []) or [])}
+            added = []
+            for a in offline:
+                if not isinstance(a, dict):
+                    continue
+                host = str(a.get("hostname") or a.get("display_name")
+                           or a.get("agent_id") or "").strip()
+                if not host:
+                    continue
+                hl = host.lower()
+                if hl in present or hl in hidden:
+                    continue
+                present.add(hl)
+                last = a.get("last_seen")
+                added.append({
+                    "node": host,
+                    "cluster": str(a.get("cluster_name") or a.get("cluster") or "").strip(),
+                    "status": "offline",
+                    "offline": True,
+                    "agent_id": a.get("agent_id"),
+                    "telemetry_ts": last if isinstance(last, (int, float)) else 0,
+                })
+            if not added:
+                return data
+            out = dict(data)
+            out["nodes"] = list(data["nodes"]) + added
+            return out
+
         if not node_spokes:
-            return _warm_or_empty()
+            return await _merge_offline_hosts(_warm_or_empty())
         try:
             # 30s (not the 5s relay default): a cold telemetry cache makes the
             # spoke orchestrate live per-agent pvesh round-trips; the warm cache
@@ -1393,7 +1460,7 @@ def register(app, hub, ctx):
                 lambda: _aggregate_pxmx_nodes(hub, node_spokes, timeout=30.0))
             if isinstance(data, dict) and isinstance(data.get("nodes"), list):
                 await hub.warm_set("pxmx_nodes", warm_key, data)  # cache raw (pre hidden-filter)
-            return _apply_hidden(data)
+            return await _merge_offline_hosts(_apply_hidden(data))
         except Exception as e:
             logger.exception("get_pxmx_nodes failed")
             # Live fetch failed (timeout / spoke error) — serve stale from the
@@ -1404,7 +1471,15 @@ def register(app, hub, ctx):
                 if isinstance(out, dict):
                     out = dict(out)
                     out["stale"] = True
-                return out
+                return await _merge_offline_hosts(out)
+            # No cache to fall back on — still surface offline hosts (from the
+            # Agents roster) rather than a bare 500 when the only knowledge of
+            # this tenant's fleet is the persisted offline roster.
+            merged = await _merge_offline_hosts({"nodes": [], "spoke_connected": False})
+            if isinstance(merged, dict) and merged.get("nodes"):
+                merged = dict(merged)
+                merged["stale"] = True
+                return merged
             raise HTTPException(status_code=500, detail=str(e))
 
     # ── pxmx / Proxmox: VMs + agent commands (/api/pxmx/*) ───────────────────

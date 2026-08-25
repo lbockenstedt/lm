@@ -44,12 +44,16 @@ class _State:
     def _mark_dirty(self):
         pass
 
+    def is_agent_decommissioned(self, apk):
+        return False
+
 
 class _Hub:
     """Minimal hub: records which spoke GET_NODE_STATS was relayed to."""
 
     def __init__(self, bound_spoke=None, global_spoke="pxmx-global",
-                 nodes=None, raise_on_relay=False, global_spoke_tenant=None):
+                 nodes=None, raise_on_relay=False, global_spoke_tenant=None,
+                 offline_hosts=None):
         self.state = _State()
         self._bound = bound_spoke
         self._global = global_spoke
@@ -58,6 +62,20 @@ class _Hub:
         self.relayed_to = None
         self.raise_on_relay = raise_on_relay
         self.warm_cache = {}
+        # Persisted offline relay-agent roster (reconstructed by
+        # _offline_relay_agents): a host whose parent spoke is DOWN. Seed the
+        # exact side-data that helper reads (agent_config + composite heartbeat
+        # keys) so the Overview merge can surface it as an offline node.
+        self.heartbeat = SimpleNamespace(last_seen={})
+        for oh in (offline_hosts or []):
+            aid = oh["agent_id"]
+            self.state.system_state.setdefault("agent_config", {})[aid] = {
+                "agent_id": aid,
+                "hostname": oh["hostname"],
+                "client_simulation": {"tenant_id": oh.get("tenant", "")},
+            }
+            self.heartbeat.last_seen[f"{oh.get('spoke', 'sp-' + aid)}:{aid}"] = \
+                oh.get("last_seen", 100.0)
         # A global hypervisor spoke BOUND to a specific tenant — used to prove
         # the Overview fallback never leaks a bound host into another tenant.
         if global_spoke and global_spoke_tenant is not None:
@@ -79,6 +97,11 @@ class _Hub:
 
     def get_hypervisor_spoke(self):
         return self._global
+
+    def is_spoke_in_contact(self, spoke_pk):
+        # Seeded offline hosts are treated as parent-spoke-down so
+        # _offline_relay_agents surfaces them.
+        return False
 
     def warm_get(self, ns, key):
         return (self.warm_cache.get(ns) or {}).get(key)
@@ -225,3 +248,81 @@ def test_live_fetch_failure_falls_back_to_warm_cache():
     assert r.status_code == 200
     body = r.json()
     assert len(body["nodes"]) == 1 and body["stale"] is True
+
+
+# ── Offline-host merge (reported gap: '05 is offline; shows in CS module but ──
+# not the Hypervisor module') ─────────────────────────────────────────────────
+# A host whose agent (and co-located parent spoke) is down is reported by no
+# live cluster peer, so GET_NODE_STATS from the online spokes drops it — yet it
+# stays visible (offline) in the Agents/Simulations roster. get_pxmx_nodes now
+# folds that persisted offline roster back into the node list, marked offline.
+
+def test_offline_host_merged_into_live_nodes():
+    hub = _Hub(bound_spoke="pxmx-acme", global_spoke="pxmx-global",
+               offline_hosts=[{"hostname": "svr-05", "agent_id": "agent-05",
+                               "tenant": "acme", "spoke": "pxmx-05"}])
+    c = _build(hub, admin=True, tenant="acme")
+    r = c.get("/api/pxmx/nodes?tenant=acme")
+    assert r.status_code == 200
+    nodes = r.json()["nodes"]
+    by_name = {str(n["node"]).lower(): n for n in nodes}
+    assert "pve1" in by_name              # the live node still present
+    assert "svr-05" in by_name            # the offline host now surfaced
+    off = by_name["svr-05"]
+    assert off["status"] == "offline" and off["offline"] is True
+    assert off["agent_id"] == "agent-05"
+
+
+def test_offline_host_not_leaked_across_tenants():
+    """An offline host pinned to 'acme' must not appear in tenant 'ra' — the
+    same effective-tenant filter the Agents roster applies."""
+    hub = _Hub(bound_spoke="pxmx-ra", global_spoke="pxmx-global",
+               offline_hosts=[{"hostname": "svr-05", "agent_id": "agent-05",
+                               "tenant": "acme", "spoke": "pxmx-05"}])
+    c = _build(hub, admin=True, tenant="ra")
+    r = c.get("/api/pxmx/nodes?tenant=ra")
+    assert r.status_code == 200
+    names = {str(n["node"]).lower() for n in r.json()["nodes"]}
+    assert "svr-05" not in names
+
+
+def test_offline_host_deduped_against_live_node():
+    """If a live cluster peer already reports the (now-offline) node by
+    hostname, the merge must NOT add a duplicate row."""
+    hub = _Hub(bound_spoke="pxmx-acme", global_spoke="pxmx-global",
+               nodes=[{"node": "svr-05", "status": "offline", "cluster": "lab"}],
+               offline_hosts=[{"hostname": "svr-05", "agent_id": "agent-05",
+                               "tenant": "acme", "spoke": "pxmx-05"}])
+    c = _build(hub, admin=True, tenant="acme")
+    r = c.get("/api/pxmx/nodes?tenant=acme")
+    assert r.status_code == 200
+    names = [str(n["node"]).lower() for n in r.json()["nodes"]]
+    assert names.count("svr-05") == 1
+
+
+def test_offline_host_hidden_when_operator_deleted():
+    """A host the operator explicitly removed (pxmx_hidden_nodes) stays gone
+    even though its offline roster entry survives."""
+    hub = _Hub(bound_spoke="pxmx-acme", global_spoke="pxmx-global",
+               offline_hosts=[{"hostname": "svr-05", "agent_id": "agent-05",
+                               "tenant": "acme", "spoke": "pxmx-05"}])
+    hub.state.system_state["pxmx_hidden_nodes"] = ["svr-05"]
+    c = _build(hub, admin=True, tenant="acme")
+    r = c.get("/api/pxmx/nodes?tenant=acme")
+    assert r.status_code == 200
+    names = {str(n["node"]).lower() for n in r.json()["nodes"]}
+    assert "svr-05" not in names
+
+
+def test_offline_host_surfaced_when_no_spoke_and_no_cache():
+    """No connected spoke and no warm cache used to yield an empty Overview;
+    the offline host is now surfaced from persisted state (marked stale)."""
+    hub = _Hub(bound_spoke=None, global_spoke=None,
+               offline_hosts=[{"hostname": "svr-05", "agent_id": "agent-05",
+                               "tenant": "acme", "spoke": "pxmx-05"}])
+    c = _build(hub, admin=True, tenant="acme")
+    r = c.get("/api/pxmx/nodes?tenant=acme")
+    assert r.status_code == 200
+    body = r.json()
+    names = {str(n["node"]).lower() for n in body["nodes"]}
+    assert "svr-05" in names
