@@ -15509,7 +15509,7 @@ async function loadMyDevicePsks() {
         } catch (e) { console.error('loadMyDevicePsks hub-url fetch failed', e); }
         el.innerHTML = keys.map((k, i) => {
             const cmd = _myDevInstallCmd(k, tenant, hubUrl);
-            const uninstall = 'curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/uninstall.sh \\\n  | sudo bash -s -- --yes';
+            const uninstall = 'curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/uninstall.sh \\\n  | bash -s -- --yes';
             return `<div class="border border-slate-100 rounded-md px-3 py-2">
                 <div class="flex items-center justify-between gap-3">
                     <code class="text-[11px] font-mono text-slate-600 break-all">${escapeHtml(k)}</code>
@@ -15546,6 +15546,13 @@ function _myDevHubArg(configuredHubUrl) {
         // Normalize to wss://host[:port] — accept a bare host, a scheme-prefixed
         // URL, or one carrying a /ws/... path, and keep only the authority.
         u = u.replace(/^wss?:\/\//i, '').replace(/\/.*$/, '');
+        // Legacy-alias canonicalization: the hub's canonical DNS short-name is
+        // `lm-hub` (HUB_SHORT_NAME — the installer sets the hub host's hostname
+        // to it), so rewrite the older `labmanager` alias to `lm-hub` in the
+        // copy/paste install command. Anchored to the first host label + only
+        // when followed by `.`/`:`/end, so it rewrites labmanager.<domain>[:port]
+        // and never a host that merely contains the substring.
+        u = u.replace(/^labmanager(?=[.:]|$)/i, 'lm-hub');
         return `wss://${u}`;
     }
     return (typeof location !== 'undefined' && location.host) ? `wss://${location.host}` : 'auto';
@@ -15554,7 +15561,7 @@ function _myDevHubArg(configuredHubUrl) {
 function _myDevInstallCmd(psk, tenant, configuredHubUrl) {
     const hub = _myDevHubArg(configuredHubUrl);
     return `curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/agent/install_agent.sh \\\n`
-        + `  | sudo bash -s -- --hub ${hub} --onboarding-psk ${psk} --tenant-hint ${tenant}`;
+        + `  | bash -s -- --hub ${hub} --onboarding-psk ${psk} --tenant-hint ${tenant}`;
 }
 
 async function _myDevGenPsk() {
