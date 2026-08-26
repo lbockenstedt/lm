@@ -16,6 +16,7 @@ endpoint → the hub writes it to disk, verifies size/sha256, and marks it compl
 """
 import hashlib
 import os
+import re
 import shutil
 import time
 
@@ -276,14 +277,42 @@ def register(app, hub, ctx):
             return True
         return bool(tenant_id) and tenant_id in _acting_tenants(sess)
 
-    async def _orchestrate_refresh(tid, request, target_agent_id=None, target_vmid=None):
+    def _clean_storage(raw):
+        """Validate + normalise an optional destination-storage id from a request
+        body. Blank/None → None (keep the backup's recorded storage). A Proxmox
+        storage id is ``[A-Za-z0-9._-]`` only; reject anything else so a bogus
+        value can't reach ``qmrestore --storage``."""
+        s = str(raw or "").strip()
+        if not s:
+            return None
+        if not re.fullmatch(r"[A-Za-z0-9._-]+", s):
+            raise HTTPException(status_code=400,
+                                detail="target_storage must be a valid Proxmox storage id")
+        return s
+
+    async def _body_storage(request):
+        """Optional ``target_storage`` from a JSON body (endpoints that used to
+        take no body still work — a missing/blank value yields None)."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return _clean_storage((body or {}).get("target_storage"))
+
+    async def _orchestrate_refresh(tid, request, target_agent_id=None, target_vmid=None,
+                                   target_storage=None):
         """Queue a REFRESH_TEMPLATE on the owning agent. By default this is a
         self-restore — the backup goes back to its own ``source_agent`` at the
         original ``source_vmid`` (used by the per-template Refresh buttons on the
         Template Repo page). The fleet seed-distribute path passes an explicit
         ``target_agent_id`` + ``target_vmid`` so the seed backup is restored onto
         a DIFFERENT host at that host's VMID (the agent restores to whatever
-        ``template_vmid`` it is given)."""
+        ``template_vmid`` it is given).
+
+        ``target_storage`` (opt) is the Proxmox storage id the restored disks land
+        on (``qmrestore --storage``). Blank keeps the backup's recorded storage —
+        needed when a seed backed up from a host whose storage id does not exist
+        on the target, which otherwise made the restore fail."""
         rec = _repo().get(tid, public=False)
         if rec is None:
             raise HTTPException(status_code=404, detail="template not found")
@@ -306,13 +335,16 @@ def register(app, hub, ctx):
         base = (os.environ.get("LM_HUB_PUBLIC_URL") or str(request.base_url)).rstrip("/")
         download_url = f"{base}/api/templates/{tid}/download"
         _repo().set_refresh_status(tid, "pending", step="queued")
+        refresh_data = {"template_id": tid, "template_vmid": template_vmid,
+                        "download_url": download_url, "refresh_token": dl_token,
+                        "archive_name": rec.get("filename") or ""}
+        if target_storage:
+            refresh_data["storage"] = target_storage
         try:
             result = await hub.request_response(owning_spoke, "SPOKE_RELAY", {
                 "target_agent_id": hub._agent_relay_name(agent_id),
                 "command": "REFRESH_TEMPLATE",
-                "data": {"template_id": tid, "template_vmid": template_vmid,
-                         "download_url": download_url, "refresh_token": dl_token,
-                         "archive_name": rec.get("filename") or ""},
+                "data": refresh_data,
             })
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
             if not (isinstance(data, dict) and data.get("status") in ("SUCCESS", "ACCEPTED")):
@@ -330,7 +362,8 @@ def register(app, hub, ctx):
     @app.post("/setup/templates/{tid}/refresh")
     async def refresh_template_admin(tid: str, request: Request):
         _require_admin(request)
-        return await _orchestrate_refresh(tid, request)
+        return await _orchestrate_refresh(tid, request,
+                                          target_storage=await _body_storage(request))
 
     @app.get("/tenant/templates")
     async def list_templates_tenant(request: Request):
@@ -350,7 +383,8 @@ def register(app, hub, ctx):
         # Anti-IDOR: a template the caller can't own reads as not-found.
         if rec is None or not _owns_tenant(sess, rec.get("tenant_id")):
             raise HTTPException(status_code=404, detail="template not found")
-        return await _orchestrate_refresh(tid, request)
+        return await _orchestrate_refresh(tid, request,
+                                          target_storage=await _body_storage(request))
 
     @app.post("/tenant/templates/upload-init")
     async def upload_init_tenant(request: Request):
@@ -469,6 +503,10 @@ def register(app, hub, ctx):
             newest COMPLETE template in a tenant the caller owns.
           * ``target_vmid`` (opt int) — override the restore VMID on every
             target. Default: each target host's configured ``image1_template_id``.
+          * ``target_storage`` (opt str) — Proxmox storage id the restored disks
+            land on (``qmrestore --storage``) for every target. Default: the
+            storage recorded in the backup (which may not exist on a target host,
+            the reason a cross-host restore could fail).
 
         Tenant isolation: the seed backup AND every target host must be in a
         tenant the caller owns (admin = any). Anti-IDOR: an un-ownable seed
@@ -520,6 +558,9 @@ def register(app, hub, ctx):
         else:
             target_vmid = None
 
+        # ── destination storage override (applies to every target) ───────────
+        target_storage = _clean_storage(body.get("target_storage"))
+
         results = []
         for sid in ids:
             sid = str(sid or "")
@@ -559,7 +600,8 @@ def register(app, hub, ctx):
 
             try:
                 r = await _orchestrate_refresh(template_id, request,
-                                               target_agent_id=agent_id, target_vmid=vmid)
+                                               target_agent_id=agent_id, target_vmid=vmid,
+                                               target_storage=target_storage)
                 results.append({"spoke_id": sid, "host": sid, "template_id": template_id,
                                 "name": rec.get("name"), "target_vmid": vmid,
                                 "status": r.get("status"), "message": r.get("message")})

@@ -9184,6 +9184,13 @@ window.csFleetRefreshTemplates = async function () {
                     <input id="cs-refresh-vmid" type="number" min="1" placeholder="blank = each host's configured template VMID (VM Image 1)" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
                     <p class="text-[11px] text-slate-400 leading-relaxed">Override the VMID the backup is restored to on each host (e.g. backup is vmid 100, restore to 200). Leave blank to use each host's own configured template VMID.</p>
                 </div>
+                <div class="space-y-2">
+                    <label class="text-xs text-slate-500 uppercase font-bold">Destination storage <span class="font-normal normal-case text-slate-400">(optional)</span></label>
+                    <select id="cs-refresh-storage" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                        <option value="">— keep the backup's original storage —</option>
+                    </select>
+                    <p class="text-[11px] text-slate-400 leading-relaxed">Where the restored disks land on each target host (<code>qmrestore --storage</code>). Options are read from the first selected host. Leave as-is when every target already has the backup's original storage; set it when the target's storage id differs (which otherwise makes the restore fail).</p>
+                </div>
                 <div class="space-y-1">
                     <label class="text-xs text-slate-500 uppercase font-bold">Target host(s) — ${hostIds.length}</label>
                     <div class="bg-slate-50 border border-slate-200 rounded-md p-2 text-xs text-slate-600 max-h-24 overflow-y-auto">${esc(names.join(', '))}</div>
@@ -9203,11 +9210,34 @@ window.csFleetRefreshTemplates = async function () {
         return;
     }
 
+    // Populate the destination-storage dropdown from the FIRST selected host's
+    // images-capable storages (the qmrestore --storage targets). Best-effort:
+    // on any failure the field keeps only "keep original", the safe default.
+    (async () => {
+        const firstHost = hostIds[0];
+        if (!firstHost) return;
+        try {
+            const rs = await fetch(`/api/pxmx/storages?node=${encodeURIComponent(firstHost)}&content=images`, { credentials: 'same-origin' });
+            const ds = await rs.json().catch(() => ({}));
+            const sel = document.getElementById('cs-refresh-storage');
+            if (!sel || !Array.isArray(ds.storages)) return;
+            ds.storages.forEach(s => {
+                const id = (s && (s.storage || s.name)) || s;
+                if (!id) return;
+                const opt = document.createElement('option');
+                opt.value = id;
+                opt.textContent = (s && s.type) ? `${id} (${s.type})` : String(id);
+                sel.appendChild(opt);
+            });
+        } catch (e) { /* keep the default option only */ }
+    })();
+
     modal.querySelector('#cs-refresh-go').addEventListener('click', async () => {
         const template_id = (document.getElementById('cs-refresh-src') || {}).value || '';
         const rawVmid = ((document.getElementById('cs-refresh-vmid') || {}).value || '').trim();
         const target_vmid = rawVmid ? parseInt(rawVmid, 10) : null;
         if (rawVmid && (!Number.isFinite(target_vmid) || target_vmid <= 0)) { if (typeof showToast === 'function') showToast('Target VMID must be a positive integer', 'error'); return; }
+        const target_storage = ((document.getElementById('cs-refresh-storage') || {}).value || '').trim();
         if (!template_id) { if (typeof showToast === 'function') showToast('Pick a seed backup first', 'error'); return; }
         const goBtn = document.getElementById('cs-refresh-go');
         const statusEl = document.getElementById('cs-refresh-status');
@@ -9216,6 +9246,7 @@ window.csFleetRefreshTemplates = async function () {
         try {
             const body = { host_ids: hostIds, template_id };
             if (target_vmid != null) body.target_vmid = target_vmid;
+            if (target_storage) body.target_storage = target_storage;
             const r = await fetch('/tenant/templates/refresh-hosts', {
                 method: 'POST', credentials: 'same-origin',
                 headers: { 'Content-Type': 'application/json' },
