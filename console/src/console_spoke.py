@@ -74,6 +74,17 @@ class ConsoleSpoke(BaseSpoke):
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.store = PortStore()
         self.sessions = SessionManager(on_data=self._on_serial_data)
+        # Serial-port enumeration cache. enumerate_ports() calls pyserial
+        # comports() + a sysfs walk, which BLOCKS and — on a host with a wedged
+        # USB-serial adapter — can stall for many seconds. Running it directly on
+        # the asyncio loop froze the whole spoke (heartbeats + every CONSOLE_*
+        # command), so CONSOLE_LIST_PORTS blew past the hub's 15s timeout and the
+        # console "errored out". Enumeration is now always offloaded off-loop (via
+        # asyncio.to_thread / the monitor thread); the cache holds the last result
+        # so the synchronous helpers never touch the bus on the event loop.
+        self._ports_cache: Optional[List[Dict[str, Any]]] = None
+        self._ports_cache_ts: float = 0.0
+        self._enum_lock: Optional[asyncio.Lock] = None
         # Auto-identify (fingerprint) state. Credentials are pushed (signed) by
         # the hub via CONSOLE_SET_CREDENTIALS and held in memory only (never
         # logged/persisted). The background loop probes each newly-seen port once.
@@ -175,8 +186,48 @@ class ConsoleSpoke(BaseSpoke):
         elif cmd == "CONSOLE_CLOSE":
             self.sessions.close(sid)
 
+    def _enumerate_ports_sync(self) -> List[Dict[str, Any]]:
+        """Blocking serial enumeration + cache refresh. MUST run off the event
+        loop (worker thread) — see the cache note in __init__."""
+        ports = enumerate_ports()
+        self._ports_cache = ports
+        self._ports_cache_ts = time.monotonic()
+        return ports
+
+    async def _enumerate_ports(self, max_age: float = 0.0) -> List[Dict[str, Any]]:
+        """Serial-port inventory WITHOUT blocking the event loop. pyserial's
+        ``comports()`` blocks (and, on a host with a wedged USB-serial adapter,
+        can stall for many seconds), so the actual enumeration is offloaded to a
+        worker thread via ``asyncio.to_thread`` — a hung bus can slow *this*
+        request but can never freeze the spoke's asyncio loop (heartbeats + every
+        other CONSOLE_* command), which is what made CONSOLE_LIST_PORTS blow past
+        the hub's 15s timeout. Defaults to always-fresh (``max_age=0``); pass a
+        ``max_age`` to accept a recent cached result and coalesce bursts. The
+        result is stashed in ``self._ports_cache`` for the sync helpers.
+
+        A concurrent enumeration is serialised (never two ``comports()`` on the
+        bus at once); a waiter that acquires the lock after a just-completed fresh
+        enumeration reuses it."""
+        if self._ports_cache is not None and (time.monotonic() - self._ports_cache_ts) <= max_age:
+            return self._ports_cache
+        if self._enum_lock is None:
+            self._enum_lock = asyncio.Lock()
+        async with self._enum_lock:
+            if self._ports_cache is not None and (time.monotonic() - self._ports_cache_ts) <= max_age:
+                return self._ports_cache
+            return await asyncio.to_thread(self._enumerate_ports_sync)
+
+    def _enum_cached(self) -> List[Dict[str, Any]]:
+        """Last-known port list from the warm cache, without touching the serial
+        bus. Falls back to a one-off blocking enumeration only on a cold start
+        (cache never populated yet) — safe because that only happens before the
+        first list/monitor cycle."""
+        if self._ports_cache is not None:
+            return self._ports_cache
+        return self._enumerate_ports_sync()
+
     def _port_device(self, port_id: str) -> Optional[str]:
-        for p in enumerate_ports():
+        for p in self._enum_cached():
             if p["port_id"] == port_id:
                 return p["device"]
         return None
@@ -184,7 +235,7 @@ class ConsoleSpoke(BaseSpoke):
     def _port_product(self, port_id: str) -> str:
         """The USB/adapter product string for a port (e.g. 'USB Serial
         Controller') — a friendlier fallback name than the raw port id."""
-        for p in enumerate_ports():
+        for p in self._enum_cached():
             if p["port_id"] == port_id:
                 return (p.get("product") or "").strip()
         return ""
@@ -201,7 +252,7 @@ class ConsoleSpoke(BaseSpoke):
 
         if cmd == "CONSOLE_LIST_PORTS":
             ports = []
-            for p in enumerate_ports():
+            for p in await self._enumerate_ports():
                 pid = p["port_id"]
                 # Hide ports the automated system can't open (faulty/non-real
                 # serial devices) so the operator never sees a broken port or its
@@ -815,7 +866,7 @@ class ConsoleSpoke(BaseSpoke):
         that has vanished has its retry state cleared so re-plugging starts fresh."""
         if not self.config.get("auto_identify", True):
             return
-        live = {p["port_id"]: p for p in enumerate_ports()}
+        live = {p["port_id"]: p for p in await self._enumerate_ports()}
         # First-seen / re-plug: reset retry state so a freshly connected cable is
         # attempted right away instead of inheriting a stale backoff.
         for pid in set(self._seen_ports) - set(live):
@@ -940,7 +991,7 @@ class ConsoleSpoke(BaseSpoke):
         self._local_sinks.pop(session_id, None)
 
     def _port_device(self, port_id: str):
-        for p in enumerate_ports():
+        for p in self._enum_cached():
             if p["port_id"] == port_id:
                 return p["device"]
         return None
@@ -953,7 +1004,7 @@ class ConsoleSpoke(BaseSpoke):
         ident = (saved.get("probe") or {}).get("identity") or {}
         if ident.get("hostname"):
             return ident["hostname"]
-        for p in enumerate_ports():
+        for p in self._enum_cached():
             if p["port_id"] == port_id:
                 return p.get("product") or port_id
         return port_id
@@ -985,7 +1036,7 @@ class ConsoleSpoke(BaseSpoke):
             allow = [a for a in allow.replace(",", " ").split() if a]
         self._dpa = DpaManager(
             store=self.store,
-            enumerate_ports=enumerate_ports,
+            enumerate_ports=self._enum_cached,
             open_session=self.sessions.open,
             write_session=self.sessions.write,
             close_session=self.sessions.close,
@@ -1030,7 +1081,7 @@ class ConsoleSpoke(BaseSpoke):
         shared backoff (:meth:`_identify_due`) keeps us from hammering creds."""
         if not self.config.get("auto_identify", True) or not self._credentials:
             return
-        for p in enumerate_ports():
+        for p in await self._enumerate_ports():
             pid = p["port_id"]
             if self.sessions.has_user_sessions(pid) or pid in self._probing:
                 continue
@@ -1050,7 +1101,7 @@ class ConsoleSpoke(BaseSpoke):
         being retried here so it recovers if it ever starts working."""
         if not self.config.get("console_monitor", True):
             return
-        for p in enumerate_ports():
+        for p in self._enumerate_ports_sync():
             pid = p["port_id"]
             # A human/relay owns the handle, or an exclusive probe is mid-flight —
             # don't interfere; the live session already fans bytes into capture.
@@ -1372,7 +1423,7 @@ class ConsoleSpoke(BaseSpoke):
             "credentials_loaded": creds,
             "factory_default_creds": factory,
             "monitor": bool(self.config.get("console_monitor", True)),
-            "port_count": len(enumerate_ports()),
+            "port_count": len(self._enum_cached()),
             # Login is only ever attempted when auto-identify is on AND there is at
             # least one credential to try (operator creds or the factory defaults).
             "login_enabled": auto and (creds > 0 or factory),
@@ -1428,7 +1479,7 @@ class ConsoleSpoke(BaseSpoke):
         via active login (so the operator can see WHY it isn't being logged into
         and when the next attempt is due). Newest/worst first. Includes ports that
         have vanished from enumeration (``present=False`` — device pulled)."""
-        live = {p["port_id"]: p for p in enumerate_ports()}
+        live = {p["port_id"]: p for p in self._enum_cached()}
         rows: List[Dict[str, Any]] = []
         for pid in set(self._health) | set(live):
             h = self._health.get(pid, {})
@@ -1545,7 +1596,7 @@ class ConsoleSpoke(BaseSpoke):
     async def get_status(self) -> Dict[str, Any]:
         self._ensure_autoprobe_task()
         self._ensure_monitor_task()
-        ports = enumerate_ports()
+        ports = await self._enumerate_ports()
         return {
             "spoke_id": self.spoke_id,
             "module": "console",
