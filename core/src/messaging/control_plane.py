@@ -141,6 +141,15 @@ _KEEPALIVE_CMDS = {
     "NW_POLL", "NW_PROBE", "NW_LIST_DEVICES", "NW_GET_DEVICE_INFO",
     "NW_GET_MAC_TABLE", "NW_GET_ARP", "NW_GET_INTERFACES", "NW_GET_ENDPOINTS",
     "NW_GET_VLANS", "NW_RUN_CONFIG", "NW_SCAN", "NW_DISCOVER", "INSTALL_CERT",
+    # Console (serial console server): every one of these does live serial I/O
+    # to attached gear (enumerate USB-serial adapters, cycle baud rates, log in
+    # and read a banner to fingerprint a device, collect diagnostics). A host
+    # with many adapters — or a single wedged one — makes CONSOLE_LIST_PORTS run
+    # well past a short base timeout; without keepalives the hub killed it and
+    # the WebUI showed "agent connected but no serial ports". The console spoke
+    # extends BaseControlPlane, so listing them here is enough to emit progress.
+    "CONSOLE_LIST_PORTS", "CONSOLE_AUTOPROBE", "CONSOLE_DETECT_BAUD",
+    "CONSOLE_DIAGNOSTICS",
     # AppBuilder log analysis: genuinely long (LLM on a CPU model, queued behind
     # the single fix slot — 600s base) so it must keep the deadline alive.
     "ANALYZE_LOGS",

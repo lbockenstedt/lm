@@ -164,3 +164,24 @@ def test_slow_nw_poll_emits_progress():
     for f in ws.frames:
         if f.get("payload", {}).get("type") == "SPOKE_PROGRESS":
             assert f.get("correlation_id") == "corr-123"
+
+
+def test_slow_console_list_ports_emits_progress():
+    """Regression: a serial-console host with many USB-serial adapters (or one
+    wedged adapter) makes CONSOLE_LIST_PORTS run past a short base timeout, so
+    the hub logged ``Request Timeout: [CONSOLE_LIST_PORTS]`` and the WebUI showed
+    "agent connected but no serial ports". CONSOLE_LIST_PORTS/AUTOPROBE/
+    DETECT_BAUD/DIAGNOSTICS are now in _KEEPALIVE_CMDS, so a slow enumeration
+    emits SPOKE_PROGRESS keepalives that extend the hub's 60s base window."""
+    for c in ("CONSOLE_LIST_PORTS", "CONSOLE_AUTOPROBE",
+              "CONSOLE_DETECT_BAUD", "CONSOLE_DIAGNOSTICS"):
+        assert c in cp._KEEPALIVE_CMDS
+    spoke = _Spoke(_StubModule(delay=0.18), module_name="console")
+    ws = _dispatch(spoke, "CONSOLE_LIST_PORTS", delay_interval=0.05)
+
+    types = ws.types()
+    assert "SPOKE_PROGRESS" in types
+    assert types[-1] == "COMMAND_RESULT"
+    for f in ws.frames:
+        if f.get("payload", {}).get("type") == "SPOKE_PROGRESS":
+            assert f.get("correlation_id") == "corr-123"

@@ -72,7 +72,8 @@ class HubVncConsoleMixin:
     # routes/console.py::_list_visible_console_ports). Raw (pre tenant-filter)
     # per the warm-cache contract; the route re-applies visibility per reader.
     CONSOLE_PORTS_REFRESH_INTERVAL = 30.0   # seconds between fleet refresh sweeps
-    CONSOLE_PORTS_REFRESH_TIMEOUT = 30.0    # generous per-spoke poll timeout
+    CONSOLE_PORTS_REFRESH_TIMEOUT = 60.0    # generous per-spoke poll timeout (base;
+    # extended by SPOKE_PROGRESS keepalives — CONSOLE_LIST_PORTS is in _KEEPALIVE_CMDS)
     # A healthy spoke is re-polled every REFRESH_INTERVAL, so an entry older than
     # this window means the background poll can't reach it (wedged/offline) — the
     # route then serves it marked ``stale``. ~4× the interval to avoid flagging a

@@ -382,7 +382,7 @@ def register(app, hub, ctx):
         override, device_ip = "", None
         if pid:
             try:
-                lr = await hub.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=15.0)
+                lr = await hub.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=60.0)
                 match = next((x for x in (_console_unwrap(lr).get("ports") or [])
                               if str(x.get("port_id", "")) == pid), None)
                 override = (match or {}).get("tenant_id") or ""
@@ -787,10 +787,11 @@ def register(app, hub, ctx):
 
         # Cold-start: a connected spoke with no cache yet. Do ONE bounded live
         # fetch so the first-ever page load isn't blank, then it's cache-served
-        # (and the background loop keeps it warm) from here on.
+        # (and the background loop keeps it warm) from here on. 60s base window,
+        # extended by the spoke's SPOKE_PROGRESS keepalives while it enumerates.
         for sid in cold:
             try:
-                r = await hub.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=15.0)
+                r = await hub.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=60.0)
                 raw_ports = _console_unwrap(r).get("ports") or []
                 await hub.warm_set("console_ports", sid, raw_ports)
                 _emit_ports(sid, raw_ports, stale=False)
@@ -1413,7 +1414,7 @@ def register(app, hub, ctx):
         if not admin:
             override, device_ip = "", None
             try:
-                lr = await hub.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=15.0)
+                lr = await hub.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=60.0)
                 match = next((x for x in (_console_unwrap(lr).get("ports") or [])
                               if x.get("port_id") == port_id), None)
                 override = (match or {}).get("tenant_id") or ""
