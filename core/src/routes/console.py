@@ -106,9 +106,12 @@ def register(app, hub, ctx):
     """Register console routes on the Hub app."""
     _session_user = ctx._session_user
     _is_admin = ctx._is_admin
+    _is_tenant_admin = getattr(ctx, "_is_tenant_admin", lambda s: False)
     _has_console_write_access = ctx._has_console_write_access
     _has_console_access = ctx._has_console_access
     _resolve_tenant = ctx._resolve_tenant
+    _effective_tenant = getattr(ctx, "_effective_tenant",
+                                lambda req, explicit=None: None)
 
     @app.websocket("/ws/console/{session_id}")
     async def pxmx_console_ws(websocket: WebSocket, session_id: str):
@@ -534,6 +537,28 @@ def register(app, hub, ctx):
             except Exception:  # noqa: BLE001 — absent / unreadable
                 pass
         except Exception:  # noqa: BLE001 — vault not configured
+            pass
+        return creds
+
+    async def _console_creds_in_bucket(hub, bucket):
+        """Console auto-login creds from ONE explicit vault bucket only — no
+        ``__admin__`` fallback and no legacy list secret. Used to show a tenant
+        admin exactly the logins it manages (its own tenant bucket), kept
+        separate from the inherited global logins it may not enumerate."""
+        creds, seen = [], set()
+
+        def _add(items):
+            for c in items:
+                key = (c["username"], c["password"])
+                if key not in seen:
+                    seen.add(key)
+                    creds.append(c)
+
+        try:
+            import cred_vault as _cv
+            for rec in await _cv.automation_list_by_type(hub, "console", [bucket]):
+                _add(_console_creds_from_cred_vault(rec.get("value")))
+        except Exception:  # noqa: BLE001 — vault not configured / unreadable
             pass
         return creds
 
@@ -1256,18 +1281,52 @@ def register(app, hub, ctx):
 
     @app.get("/api/console/credentials")
     async def console_get_credentials(request: Request):
-        """Return the global auto-identify credential list with passwords MASKED
+        """Return the auto-identify credential list with passwords MASKED
         (usernames + has_password only). Admin-gated by the /api/console/* rule +
-        this explicit admin check (credentials are privileged).
+        this explicit role check (credentials are privileged).
 
         Creating credentials here is DISABLED: console logins are managed in the
         Credential Vault (Global Admin slot → ``console-auto-credentials``) and
         pulled unattended by the seed loop. ``creation_disabled`` tells the WebUI
-        to show the read-only, vault-managed view (no password entry)."""
+        to show the read-only, vault-managed view (no password entry).
+
+        A **tenant Admin** gets a READ-ONLY, tenant-scoped view: the credentials
+        that will actually be pushed to THIS tenant's console spokes (the tenant's
+        own vault bucket + the shared global ``__admin__`` slot). They never see
+        or manage the global LOCAL legacy passwords — deletion (the POST) stays
+        Global-Admin-only; a tenant admin manages its own console logins in the
+        Credential Vault (their tenant bucket)."""
         sess = _session_user(request)
-        if not _is_admin(sess):
+        is_global = _is_admin(sess)
+        is_ta = (not is_global) and _is_tenant_admin(sess)
+        if not is_global and not is_ta:
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
+        if is_ta:
+            tenant = _effective_tenant(request, request.query_params.get("tenant"))
+            if not tenant:
+                raise HTTPException(status_code=403,
+                                    detail="no tenant scope — select one of your tenants")
+            # Show ONLY the tenant's own vault-bucket logins (the ones a tenant
+            # admin actually manages). The inherited global ``__admin__`` logins
+            # are also pushed to this tenant's console spokes, but a tenant admin
+            # may not enumerate that privileged bucket — surface them as an
+            # aggregate count only (no usernames), matching the vault's reach
+            # model (tenant-admin → own bucket; __admin__ is Global-Admin-only).
+            own = await _console_creds_in_bucket(hub, tenant)
+            resolved = await _console_creds_for_tenant(hub, tenant)
+            own_keys = {(c.get("username", ""), c.get("password", "")) for c in own}
+            shared_global_count = sum(
+                1 for c in resolved
+                if (c.get("username", ""), c.get("password", "")) not in own_keys)
+            return {"credentials": [{"username": c.get("username", ""),
+                                     "has_password": bool(c.get("password"))} for c in own],
+                    "source": "cred_vault", "read_only": True, "creation_disabled": True,
+                    "vault_enabled": _vault_enabled(hub),
+                    "local_passwords_present": False, "migrate_warning": "",
+                    "local_credentials": [], "tenant": tenant,
+                    "shared_global_count": shared_global_count,
+                    "vault_bucket": tenant, "vault_secret": _CONSOLE_VAULT_SECRET}
         creds = await _console_load_credentials_resolved(hub)
         vault_backed = await _console_vault_secret_present(hub)
         vault_on = _vault_enabled(hub)

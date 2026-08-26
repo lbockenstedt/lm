@@ -18857,7 +18857,7 @@ function _renderConsolePorts(el, data) {
     const diagBtn = hasConsoleView()
         ? `<button onclick="openConsoleDiagnosticsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50" title="Serial connections that keep failing or disconnecting">🩺 Diagnostics</button>`
         : '';
-    const adminTools = diagBtn + (admin
+    const adminTools = diagBtn + ((admin || isTenantAdmin())
         ? `<button onclick="openConsoleCredentialsModal()" class="text-[11px] px-3 py-1.5 rounded border border-slate-300 hover:bg-slate-50">🔑 Credentials</button>`
         : '');
     const tools = (profileAllBtn || adminTools)
@@ -19409,8 +19409,11 @@ async function openConsoleCredentialsModal() {
     let source = 'hub';
     let migrateWarning = '';
     let localCreds = [];
+    let tenantScope = '';
+    let sharedGlobalCount = 0;
+    let loadFailed = false;
     try {
-        const res = await fetch('/api/console/credentials', { credentials: 'same-origin' });
+        const res = await fetch('/api/console/credentials' + _taTenantQuery(), { credentials: 'same-origin' });
         if (res.ok) {
             const j = await res.json();
             existing = j.credentials || [];
@@ -19418,8 +19421,16 @@ async function openConsoleCredentialsModal() {
             source = j.source || 'hub';
             migrateWarning = j.migrate_warning || '';
             localCreds = j.local_credentials || [];
+            tenantScope = j.tenant || '';
+            sharedGlobalCount = j.shared_global_count || 0;
+        } else {
+            loadFailed = true;
         }
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error(e); loadFailed = true; }
+    if (loadFailed) {
+        showToast('Unable to load console credentials (access denied or error).', 'error');
+        return;
+    }
     if (vaultBacked) {
         // Creation is disabled: console logins are managed in the Credential
         // Vault (or a legacy Key Vault ref). The hub only reads them here, so
@@ -19428,7 +19439,9 @@ async function openConsoleCredentialsModal() {
         const list = existing.length
             ? existing.map(c => `<li class="font-mono text-xs text-slate-600">${escapeHtml(c.username)}${c.has_password ? '' : ' <span class="text-amber-500">(no password)</span>'}</li>`).join('')
             : '<li class="text-xs text-slate-400 italic">no credentials resolved from the vault</li>';
-        const srcLabel = source === 'cred_vault' ? 'the <b>Credential Vault</b> (Global Admin slot)'
+        const srcLabel = tenantScope
+            ? `the <b>Credential Vault</b> (tenant <b>${escapeHtml(tenantScope)}</b> bucket + shared global slot)`
+            : source === 'cred_vault' ? 'the <b>Credential Vault</b> (Global Admin slot)'
             : source === 'keyvault' ? 'a legacy <b>Azure Key Vault</b> reference'
             : 'the <b>hub</b> (legacy local store)';
         const warnBanner = migrateWarning
@@ -19446,6 +19459,9 @@ async function openConsoleCredentialsModal() {
                    </div>`).join('')}</div>
                </div>`
             : '';
+        const sharedNote = sharedGlobalCount
+            ? `<div class="text-[11px] px-3 py-2 rounded bg-slate-50 text-slate-500 border border-slate-200">➕ ${sharedGlobalCount} shared global login${sharedGlobalCount === 1 ? '' : 's'} (managed by a Global Admin) also appl${sharedGlobalCount === 1 ? 'ies' : 'y'} to your console devices.</div>`
+            : '';
         modal.innerHTML = `<div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
               <h3 class="text-lg font-bold text-[#263040]">Console Credential Library</h3>
@@ -19455,6 +19471,7 @@ async function openConsoleCredentialsModal() {
               <div class="text-xs px-3 py-2 rounded bg-blue-50 text-blue-700 border border-blue-100">🔐 Resolved from ${srcLabel} (read-only here). New raw passwords can no longer be created — manage credentials in the Credential Vault.</div>
               ${warnBanner}
               <ul class="space-y-1 list-disc list-inside">${list}</ul>
+              ${sharedNote}
               ${localSection}
               <div class="pt-3 flex justify-end"><button onclick="this.closest('#console-creds-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Close</button></div>
             </div></div>`;
