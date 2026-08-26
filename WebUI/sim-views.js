@@ -8992,7 +8992,7 @@ async function csRefreshStatusTick() {
     if (!chip) { return; }
     let hosts = [];
     try {
-        const r = await fetch('/tenant/templates/refresh-status', { credentials: 'same-origin' });
+        const r = await fetch('/tenant/templates/refresh-status?tenant=' + csTenant(), { credentials: 'same-origin' });
         const d = await r.json().catch(() => ({}));
         hosts = (d && d.hosts) || [];
     } catch (e) { /* keep last chip state; retry next tick */ }
@@ -9211,24 +9211,44 @@ window.csFleetRefreshTemplates = async function () {
     }
 
     // Populate the destination-storage dropdown from the FIRST selected host's
-    // images-capable storages (the qmrestore --storage targets). Best-effort:
-    // on any failure the field keeps only "keep original", the safe default.
+    // image-capable storages (the qmrestore --storage targets). Primary source
+    // is the cached pxmx node telemetry (proxmox.node.storages) already loaded
+    // for the VM Server table — no per-open round-trip, and it works even when
+    // there is no dedicated hypervisor spoke for the live /api/pxmx/storages
+    // endpoint. Falls back to that live endpoint only when telemetry carries no
+    // storages. Best-effort: on any failure the field keeps only "keep original".
     (async () => {
         const firstHost = hostIds[0];
         if (!firstHost) return;
+        const sel = document.getElementById('cs-refresh-storage');
+        if (!sel) return;
+        const addOpt = (s) => {
+            const id = (s && (s.storage || s.name)) || s;
+            if (!id) return false;
+            const opt = document.createElement('option');
+            opt.value = id;
+            opt.textContent = (s && s.type) ? `${id} (${s.type})` : String(id);
+            sel.appendChild(opt);
+            return true;
+        };
+        // 1) Cached telemetry: match the host row by its Proxmox node hostname.
+        const row = (csVmHosts || []).find(h => {
+            const node = (h && h.proxmox && h.proxmox.node) || {};
+            return node.hostname === firstHost || csVmHostId(h) === firstHost;
+        });
+        const fromTelemetry = ((row && row.proxmox && row.proxmox.node
+            && row.proxmox.node.storages) || []);
+        let added = 0;
+        if (Array.isArray(fromTelemetry)) {
+            fromTelemetry.forEach(s => { if (addOpt(s)) added++; });
+        }
+        if (added) return;
+        // 2) Fallback: live per-node lookup via the hypervisor spoke.
         try {
             const rs = await fetch(`/api/pxmx/storages?node=${encodeURIComponent(firstHost)}&content=images`, { credentials: 'same-origin' });
             const ds = await rs.json().catch(() => ({}));
-            const sel = document.getElementById('cs-refresh-storage');
-            if (!sel || !Array.isArray(ds.storages)) return;
-            ds.storages.forEach(s => {
-                const id = (s && (s.storage || s.name)) || s;
-                if (!id) return;
-                const opt = document.createElement('option');
-                opt.value = id;
-                opt.textContent = (s && s.type) ? `${id} (${s.type})` : String(id);
-                sel.appendChild(opt);
-            });
+            if (!Array.isArray(ds.storages)) return;
+            ds.storages.forEach(addOpt);
         } catch (e) { /* keep the default option only */ }
     })();
 

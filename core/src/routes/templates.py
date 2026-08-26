@@ -794,16 +794,30 @@ def register(app, hub, ctx):
         """Live per-host template-refresh state for the VM Server status chip.
         Returns entries updated within the last 10 min (terminal complete/failed
         states linger briefly so the UI can show the outcome before they clear).
-        Tenant-admin sees only their tenants; admin sees all."""
+
+        Scoped to the header tenant picker: the Simulations views are per-tenant,
+        so an explicit ``?tenant=`` narrows the chip to that tenant. A global
+        admin sees only the SELECTED tenant's refreshes (not every tenant's);
+        with no ``?tenant=`` an admin sees all. A tenant-admin is always confined
+        to their own tenants, then narrowed to the selected one when provided."""
         sess = _session_user(request)
+        sel = (request.query_params.get("tenant") or "").strip()
         reg = _refresh_hosts_registry()
         now = time.time()
         # Prune stale entries (>10 min) so the registry can't grow unbounded.
         for k in [k for k, v in reg.items() if now - (v.get("updated_at") or 0) > 600]:
             reg.pop(k, None)
         entries = list(reg.values())
-        if not _is_admin(sess):
+        if _is_admin(sess):
+            # Admin may see any tenant, but the sim view is per-tenant — when a
+            # tenant is selected in the picker, scope the chip to it so a global
+            # admin viewing tenant A doesn't see tenant B's refresh.
+            if sel:
+                entries = [e for e in entries if (e.get("tenant_id") or "") == sel]
+        else:
             mine = set(_acting_tenants(sess))
             entries = [e for e in entries if (e.get("tenant_id") or "") in mine]
+            if sel and sel in mine:
+                entries = [e for e in entries if (e.get("tenant_id") or "") == sel]
         entries.sort(key=lambda e: e.get("updated_at") or 0, reverse=True)
         return {"hosts": entries}
