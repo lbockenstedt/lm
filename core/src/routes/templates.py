@@ -311,7 +311,8 @@ def register(app, hub, ctx):
                 "target_agent_id": hub._agent_relay_name(agent_id),
                 "command": "REFRESH_TEMPLATE",
                 "data": {"template_id": tid, "template_vmid": template_vmid,
-                         "download_url": download_url, "refresh_token": dl_token},
+                         "download_url": download_url, "refresh_token": dl_token,
+                         "archive_name": rec.get("filename") or ""},
             })
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
             if not (isinstance(data, dict) and data.get("status") in ("SUCCESS", "ACCEPTED")):
