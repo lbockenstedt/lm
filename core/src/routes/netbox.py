@@ -260,7 +260,7 @@ def register(app, hub, ctx):
         if not (sess and _is_admin(sess)):
             raise HTTPException(status_code=403, detail="Admin only")
         spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
-        result = await hub.request_response(spoke_id, "NETBOX_GET_TENANTS", {}, timeout=15.0)
+        result = await hub.request_response(spoke_id, "NETBOX_GET_TENANTS", {}, timeout=60.0)
         return _unwrap_netbox(result)
 
     @app.post("/api/netbox/migrate-tenant")
@@ -435,7 +435,7 @@ def register(app, hub, ctx):
             # form-options for the mapping UI + defaults (parallel picklist read).
             try:
                 fo = await hub.request_response(spoke_id, "NETBOX_GET_DEVICE_FORM_OPTIONS",
-                                                {}, timeout=20.0)
+                                                {}, timeout=60.0)
                 fo = _unwrap_netbox(fo)
                 form_options = fo if fo.get("status") == "SUCCESS" else {}
             except Exception:  # noqa: BLE001
@@ -565,7 +565,7 @@ def register(app, hub, ctx):
         hub = app.state.hub
         spoke_id = get_spoke_or_503(hub, "ipam", "NetBox")
         result = await hub.request_response(
-            spoke_id, "NETBOX_GET_RACK_ELEVATION", {"rack_id": rack_id}, timeout=30.0)
+            spoke_id, "NETBOX_GET_RACK_ELEVATION", {"rack_id": rack_id}, timeout=60.0)
         return _unwrap_netbox(result)
 
     @app.get("/api/netbox/devices")
@@ -753,7 +753,7 @@ def register(app, hub, ctx):
             if exact:
                 payload["exact"] = exact
             result = await hub.request_response(spoke_id, "NETBOX_FIND_AVAILABLE_PREFIXES",
-                                                 payload, timeout=30.0)
+                                                 payload, timeout=60.0)
             return _unwrap_netbox(result)
         except HTTPException:
             raise
@@ -790,7 +790,7 @@ def register(app, hub, ctx):
                 "site": body.get("site"),
                 "status": body.get("status", "active"),
             }
-            result = await hub.request_response(spoke_id, "NETBOX_CLAIM_PREFIX", payload, timeout=30.0)
+            result = await hub.request_response(spoke_id, "NETBOX_CLAIM_PREFIX", payload, timeout=60.0)
             data = _unwrap_netbox(result)
             if isinstance(data, dict) and data.get("status") == "SUCCESS":
                 _refresh_module_all_tenants(hub, "netbox_prefixes")

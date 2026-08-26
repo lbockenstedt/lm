@@ -2857,7 +2857,7 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 continue
             seen_hosts.add(sid)
             try:
-                r = await hub.request_response(sid, "PXMX_LIST_STORAGE", {}, timeout=15.0)
+                r = await hub.request_response(sid, "PXMX_LIST_STORAGE", {}, timeout=60.0)
                 data = r.get("payload", {}).get("data", {}) if isinstance(r, dict) else {}
                 for h in (data.get("hosts") or []):
                     if isinstance(h, dict) and h.get("hostname"):

@@ -158,7 +158,7 @@ def register(app, hub, ctx):
             payload = {"tenant": tid} if tid else {}
             try:
                 result = await hub.request_response(sid, "TRUENAS_LIST_APPLIANCES",
-                                                    payload, timeout=20.0)
+                                                    payload, timeout=60.0)
                 env = access.unwrap_spoke(result)
                 rows = env.get("data") if isinstance(env, dict) else None
                 if isinstance(rows, list):
@@ -289,7 +289,7 @@ def register(app, hub, ctx):
                                              "pool": d["pool"], "name": d["name"],
                                              "options": d.get("options"),
                                              "tenant": app_.get("tenant_id", "")},
-                                            timeout=30.0)
+                                            timeout=60.0)
         return access.unwrap_spoke(result)
 
     @app.delete("/api/truenas/{appliance_id}/dataset")
@@ -311,7 +311,7 @@ def register(app, hub, ctx):
                                              "dataset": dataset,
                                              "options": d.get("options"),
                                              "tenant": app_.get("tenant_id", "")},
-                                            timeout=30.0)
+                                            timeout=60.0)
         return access.unwrap_spoke(result)
 
     @app.post("/api/truenas/{appliance_id}/share")
@@ -335,7 +335,7 @@ def register(app, hub, ctx):
                                              "kind": kind, "dataset": d["dataset"],
                                              "options": d.get("options"),
                                              "tenant": app_.get("tenant_id", "")},
-                                            timeout=30.0)
+                                            timeout=60.0)
         return access.unwrap_spoke(result)
 
     @app.post("/api/truenas/{appliance_id}/snapshot")
@@ -356,7 +356,7 @@ def register(app, hub, ctx):
                                              "dataset": d["dataset"], "name": d.get("name", ""),
                                              "options": d.get("options"),
                                              "tenant": app_.get("tenant_id", "")},
-                                            timeout=30.0)
+                                            timeout=60.0)
         return access.unwrap_spoke(result)
 
     @app.post("/api/truenas/{appliance_id}/scrub")

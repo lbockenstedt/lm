@@ -1282,7 +1282,7 @@ def register(app, hub, ctx):
             if hub._primary_key(sid) not in getattr(hub, "active_connections", {}):
                 continue
             try:
-                fres = await hub.request_response(sid, "OPNSENSE_GET_DNS_RECORDS", {}, timeout=10.0)
+                fres = await hub.request_response(sid, "OPNSENSE_GET_DNS_RECORDS", {}, timeout=60.0)
                 any_source = True
                 recs = (fres or {}).get("data") or (fres or {}).get("dns_records") \
                     or (fres or {}).get("records") or (fres if isinstance(fres, list) else [])
@@ -2304,7 +2304,7 @@ def register(app, hub, ctx):
                        "own tenant, and only if the certificate is shared.")
         spoke_id = get_spoke_or_503(hub, "nw", "Network Devices")
         le_spoke = _get_le_spoke(hub)
-        mat = await hub.request_response(le_spoke, "LE_GET_CERT", {"domain": domain}, timeout=15.0)
+        mat = await hub.request_response(le_spoke, "LE_GET_CERT", {"domain": domain}, timeout=60.0)
         m = access.unwrap_spoke(mat) or {}
         if not (isinstance(m, dict) and m.get("status") == "SUCCESS"):
             raise HTTPException(status_code=502, detail=(m or {}).get("message", "LE_GET_CERT failed"))

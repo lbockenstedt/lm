@@ -101,3 +101,33 @@ def test_hard_ceiling_bounds_a_hung_spoke():
     res, elapsed = _run(scenario())
     assert res.get("status") == "ERROR"
     assert 0.4 < elapsed < 1.5  # ~ hard ceiling (0.2 * 3), not forever
+
+
+def test_default_base_timeout_is_cloud_generous():
+    """Regression: the request_response base window defaults to the fleet
+    default (env LM_REQUEST_DEFAULT_TIMEOUT_S, 60s) when a caller omits
+    ``timeout=`` — NOT the old 5s. 5s was below the 8s SPOKE_PROGRESS interval,
+    so keepalive commands called with the default could never emit a heartbeat
+    before the base deadline fired, and a live-but-busy spoke on a cloud fleet
+    was killed at 5s. A disconnected spoke still fails fast (send_to_spoke
+    raises), so the larger default only extends patience for a slow-but-live
+    spoke."""
+    hub = _Hub()
+    hub._default_request_timeout = 60.0
+
+    async def scenario():
+        # Reply lands at ~0.05s; capture the base soft deadline the waiter set.
+        async def reply():
+            await asyncio.sleep(0.05)
+            msg_id = next(iter(hub._progress_deadlines))
+            pd = hub._progress_deadlines[msg_id]
+            # No SPOKE_PROGRESS was sent, so soft is purely the base window.
+            assert pd["grace"] == 60.0
+            assert pd["soft"] - pd["hard"] < 0  # hard = base * mult > soft
+            hub.response_cache[msg_id] = {"status": "SUCCESS"}
+
+        res, _ = await asyncio.gather(
+            hub.request_response("spoke-1", "PXMX_LIST_VMS", {}), reply())
+        return res
+
+    assert _run(scenario()).get("status") == "SUCCESS"

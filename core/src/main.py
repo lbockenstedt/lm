@@ -789,6 +789,23 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 1.0, float(os.environ.get("LM_REQUEST_PROGRESS_HARD_MULT", "6") or 6))
         except (TypeError, ValueError):
             self._request_progress_hard_mult = 6.0
+        # Default per-request base window when a caller does not pass an explicit
+        # `timeout=`. Historically 5s, which is wrong for a cloud fleet: a live
+        # spoke with a lot to process (a big Proxmox cluster answering
+        # PXMX_LIST_VMS, a role/deploy-status query on a busy console box, a
+        # relayed sub-agent enumeration via SPOKE_RELAY) routinely needs longer
+        # than 5s, and 5s is *below* the 8s SPOKE_PROGRESS keepalive interval, so
+        # a keepalive command with the old default could never emit its first
+        # heartbeat before the base deadline fired. 60s gives ~a minute of
+        # no-communication tolerance before we call it a timeout; a genuinely
+        # DISCONNECTED spoke still fails fast (send_to_spoke raises
+        # ConnectionError immediately), so this only extends patience for a
+        # connected-but-slow spoke. Env-overridable.
+        try:
+            self._default_request_timeout = max(
+                1.0, float(os.environ.get("LM_REQUEST_DEFAULT_TIMEOUT_S", "60") or 60))
+        except (TypeError, ValueError):
+            self._default_request_timeout = 60.0
         # request_response msg_ids whose waiter already returned without a reply
         # (timeout or cancel), retained briefly (TTL below) so a late ack arriving
         # after the waiter left can be recognized + logged as "late" (DEBUG) rather
@@ -1510,14 +1527,22 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             raise
 
 
-    async def request_response(self, spoke_id: str, command_type: str, data: Dict[str, Any], timeout: float = 5.0, signing_secret: Optional[str] = None) -> Dict[str, Any]:
+    async def request_response(self, spoke_id: str, command_type: str, data: Dict[str, Any], timeout: Optional[float] = None, signing_secret: Optional[str] = None) -> Dict[str, Any]:
         """
         Sends a command to a spoke and waits for its acknowledgement.
+
+        ``timeout`` is the base wait window in seconds; when ``None`` the fleet
+        default (``self._default_request_timeout``, env
+        ``LM_REQUEST_DEFAULT_TIMEOUT_S``, 60s) is used. A ``SPOKE_PROGRESS``
+        keepalive for this msg_id extends the soft deadline up to the hard
+        ceiling, so a long-but-live command is not killed at the base window.
 
         ``signing_secret`` is passed through to ``send_to_spoke`` and is used
         only for ``SPOKE_UPDATE_SESSION_KEY`` delivery (sign with the
         pre-rotation secret the spoke still holds).
         """
+        if timeout is None:
+            timeout = self._default_request_timeout
         msg_id = str(uuid.uuid4())
         logger.debug(f"Request: {msg_id} -> {spoke_id} [{command_type}] data={_redact(command_type, data)}")
         msg = Message(
@@ -1581,7 +1606,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 self._prune_recent_timeouts()
 
     async def push_or_queue_to_spoke(self, spoke_id: str, command_type: str,
-                                     data: Dict[str, Any], timeout: float = 5.0) -> Dict[str, Any]:
+                                     data: Dict[str, Any], timeout: Optional[float] = None) -> Dict[str, Any]:
         """Best-effort synchronous push to a spoke, with a durable queue-on-
         reconnect fallback instead of an outright failure.
 
@@ -1698,7 +1723,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             self._draining_spokes.pop(spoke_id, None)
 
     async def _drain_aware_config_push(self, spoke_id: str, command_type: str,
-                                       data: Dict[str, Any], timeout: float = 5.0) -> Dict[str, Any]:
+                                       data: Dict[str, Any], timeout: Optional[float] = None) -> Dict[str, Any]:
         """Config-push (CS_CONFIG_UPDATE) that respects spoke drain state.
 
         While the spoke is DRAINING (mid self-update — about to os._exit +
@@ -2815,7 +2840,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         for sid in spokes:
             try:
                 await self.request_response(sid, "LDAP_PROVISION_TENANT_OU",
-                                            {"tenant_slug": slug}, timeout=20.0)
+                                            {"tenant_slug": slug}, timeout=60.0)
             except Exception as e:  # noqa: BLE001
                 logger.warning("provision_tenant_ou %s on %s: %s", slug, sid, e)
 
@@ -7787,7 +7812,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             try:
                 spoke_id = self.get_spoke_by_type("ipam")
                 if spoke_id:
-                    result = await self.request_response(spoke_id, "NETBOX_GET_TENANTS", {}, timeout=30.0)
+                    result = await self.request_response(spoke_id, "NETBOX_GET_TENANTS", {}, timeout=60.0)
                     data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else {}
                     if isinstance(data, dict) and data.get("status") == "SUCCESS":
                         for t in data.get("tenants", []):

@@ -162,7 +162,7 @@ class HenetSyncMixin:
         if local:
             try:
                 await self.request_response(spoke_id, "HENET_WEB_RECORD",
-                                            {"records": local}, timeout=30.0)
+                                            {"records": local}, timeout=60.0)
             except Exception as e:  # noqa: BLE001 — spoke persist is best-effort
                 logger.warning("henet scheduled sync: HENET_WEB_RECORD relay failed: %s", e)
         errors = sum(1 for r in result.get("results", []) if not r.get("ok"))

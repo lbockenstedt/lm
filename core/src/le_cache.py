@@ -155,7 +155,7 @@ class LeCacheMixin:
                        if v.get("he_username") and v.get("he_password")), None)
             if not he:
                 return
-            await self.request_response(spoke_id, "LE_SYNC_VAULT_DNS", he, timeout=15)
+            await self.request_response(spoke_id, "LE_SYNC_VAULT_DNS", he, timeout=60)
             logger.info("le vault sync: pushed HE DNS-01 creds to %s", spoke_id)
         except Exception as e:  # noqa: BLE001
             logger.debug("le vault sync to %s skipped: %s", spoke_id, e)

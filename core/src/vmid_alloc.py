@@ -75,7 +75,7 @@ async def allocate_vmid(hub, tenant_id: str) -> Optional[int]:
     # 1) Range + NetBox-claimed VMIDs for this tenant.
     try:
         r = await hub.request_response(netbox, "NETBOX_TENANT_VMID_RANGE",
-                                       {"tenant_slug": slug}, timeout=20.0)
+                                       {"tenant_slug": slug}, timeout=60.0)
         rd = r.get("payload", {}).get("data", r) if isinstance(r, dict) else r
     except Exception as e:
         logger.debug("vmid-alloc tenant=%s: range read failed: %s", tenant_id, e)

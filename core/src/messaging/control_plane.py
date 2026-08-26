@@ -153,6 +153,28 @@ _KEEPALIVE_CMDS = {
     # AppBuilder log analysis: genuinely long (LLM on a CPU model, queued behind
     # the single fix slot — 600s base) so it must keep the deadline alive.
     "ANALYZE_LOGS",
+    # Additional data-heavy hub↔spoke reads/provisioning whose runtime scales
+    # with backend size on a cloud fleet. Each is one live API/SSH round-trip to
+    # a backend that can be slow to answer when it has a lot to enumerate or
+    # provision; without keepalives a big enough backend hard-fails at the base
+    # window (the recurring "Request Timeout" on a live-but-busy spoke). Listing
+    # them here is a no-op for a fast reply (finishes before the first interval)
+    # and for a spoke whose control plane can't emit progress — it only helps the
+    # slow case. Base windows at their call sites were also raised to 60s.
+    "NETBOX_GET_TENANTS", "NETBOX_GET_SITES", "NETBOX_GET_RACK_ELEVATION",
+    "NETBOX_FIND_AVAILABLE_PREFIXES", "NETBOX_CLAIM_PREFIX", "NETBOX_CLAIM_DEVICE",
+    "NETBOX_GET_DEVICE_FORM_OPTIONS", "NETBOX_TENANT_VMID_RANGE",
+    "PXMX_LIST_ISOS", "PXMX_LIST_POOLS", "PXMX_LIST_STORAGE", "PXMX_LIST_STORAGES",
+    "PXMX_VM_ACTION", "PXMX_VM_ACTION_BULK", "GET_VM_INFO",
+    "GET_SYSTEM_HEALTH", "GET_INTERFACE_STATUS",
+    "TRUENAS_LIST_APPLIANCES", "TRUENAS_CREATE_DATASET", "TRUENAS_DELETE_DATASET",
+    "TRUENAS_CREATE_SHARE", "TRUENAS_CREATE_SNAPSHOT", "TRUENAS_POLL",
+    "LE_GET_CERT", "LE_SYNC_VAULT_DNS", "LE_LIST_CERTS",
+    "OPNSENSE_GET_DNS_RECORDS", "OPNSENSE_GET_ALIASES", "OPNSENSE_GET_RULES_BY_IP",
+    "OPNSENSE_GET_DHCP_LEASES",
+    "LDAP_PROVISION_TENANT_OU", "LIST_OUS",
+    "LOAD_ROLE", "GET_AVAILABLE_ROLES", "GET_DEPLOY_STATUS",
+    "HENET_WEB_RECORD", "HELP_ASK",
 }
 
 # Seconds between SPOKE_PROGRESS keepalive frames while a slow command runs.

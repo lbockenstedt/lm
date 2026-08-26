@@ -250,7 +250,7 @@ def register(app, hub, ctx):
         if spoke_id:
             try:
                 result = await hub.request_response(spoke_id, "LIST_OUS",
-                                                    {}, timeout=5.0)
+                                                    {}, timeout=60.0)
                 if isinstance(result, dict) and \
                         str(result.get("status", "")).upper() == "ERROR":
                     ldap = {"status": "down",

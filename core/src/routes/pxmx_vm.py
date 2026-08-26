@@ -214,7 +214,7 @@ def register(app, hub, ctx):
             prefix = str(hv.get("snapshot_prefix") or "lm").strip() or "lm"
             payload["snapshot_name"] = f"{prefix}-{int(_time.time())}"
         try:
-            result = await hub.request_response(pxmx_spoke, "PXMX_VM_ACTION", payload, timeout=35.0)
+            result = await hub.request_response(pxmx_spoke, "PXMX_VM_ACTION", payload, timeout=60.0)
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
             # Best-effort: a VM lifecycle change (start/stop/restart/snapshot)
             # may change the NetBox VM-record view (status at minimum), so re-sync
@@ -368,7 +368,7 @@ def register(app, hub, ctx):
         if not pxmx_spoke:
             return {"pools": [], "spoke_connected": False}
         try:
-            result = await hub.request_response(pxmx_spoke, "PXMX_LIST_POOLS", {}, timeout=20.0)
+            result = await hub.request_response(pxmx_spoke, "PXMX_LIST_POOLS", {}, timeout=60.0)
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
             pools = (data or {}).get("pools", []) if isinstance(data, dict) else []
             return {"pools": pools, "spoke_connected": True}
@@ -398,7 +398,7 @@ def register(app, hub, ctx):
             return {"isos": [], "node": node, "spoke_connected": False}
         try:
             result = await hub.request_response(pxmx_spoke, "PXMX_LIST_ISOS",
-                                                {"node": node}, timeout=25.0)
+                                                {"node": node}, timeout=60.0)
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
             isos = (data or {}).get("isos", []) if isinstance(data, dict) else []
             return {"isos": isos, "node": node, "spoke_connected": True}
@@ -428,7 +428,7 @@ def register(app, hub, ctx):
         try:
             result = await hub.request_response(pxmx_spoke, "PXMX_LIST_STORAGES",
                                                 {"node": node, "content": content},
-                                                timeout=25.0)
+                                                timeout=60.0)
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
             storages = (data or {}).get("storages", []) if isinstance(data, dict) else []
             return {"storages": storages, "node": node, "spoke_connected": True}
@@ -838,7 +838,7 @@ def register(app, hub, ctx):
                     "node": data.get("node") or node,
                     "type": data.get("type") or vm_type or "qemu",
                     "action": "start",
-                }, timeout=35.0)
+                }, timeout=60.0)
                 sdata = sres.get("payload", {}).get("data", sres) if isinstance(sres, dict) else sres
                 if isinstance(sdata, dict) and sdata.get("status") == "ERROR":
                     start_error = sdata.get("message", "start failed")
