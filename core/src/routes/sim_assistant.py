@@ -16,10 +16,11 @@ one on it, instead of guessing at behavior it can't see.
 
 HARD SCOPE BOUNDARY, enforced two ways: (1) retrieval — the only docs ever
 loaded into context are a fixed whitelist of Simulations-module docs
-(_CS_DOCS), and the only source code ever reachable is the ``clients/linux``
-and ``clients/windows`` directories of the canonical ``cs`` repo (read-only,
-via the tool loop below) — mTLS, Azure, core hub systems, and every other
-module/repo are structurally unreachable, there is nothing to retrieve.
+(_CS_DOCS), and the only source code ever reachable is the ``clients/`` tree
+(``linux``, ``windows``, ``lib``, ``t3``, ``tests``) of the canonical ``cs``
+repo (read-only, via the tool loop below) — mTLS, Azure, core hub systems,
+and every other module/repo are structurally unreachable, there is nothing
+to retrieve.
 (2) prompt — the system prompt explicitly instructs the model to decline and
 redirect any off-topic question rather than answer from its general
 training. Neither alone is airtight (an LLM can still say something wrong),
@@ -160,6 +161,97 @@ async def _tool_read_sim_source(args):
     return out
 
 
+# ── general codebase browse/read (read-only, hub-side tool loop) ────────────
+# read_sim_source above is the fast path for the exact "copy this sim" flow,
+# but it can only ever see a sim's {name}.sh / {name}.ps1 — and those are
+# usually thin wrappers: they `source` shared libs (common.sh, ini-parser.sh,
+# network_common.sh) and `exec` a companion Python sender (collab.py,
+# collab_pcap.py, dhcp_fire.py, dns_flood_test.py, cloud_nac_onboard.py, …)
+# where the actual behavior lives. To ANSWER questions about how the sim code
+# really works — not just scaffold a copy — the model needs to read those
+# companion files too. These two tools give it a read-only browse+read of the
+# whole clients/ tree. The scope boundary is unchanged in spirit: still only
+# the canonical cs repo, still only under clients/ — _safe_cs_path blocks
+# absolute paths, traversal, and anything outside clients/ before the value
+# ever becomes a Contents-API path.
+_CS_SEG_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _safe_cs_path(path):
+    """Normalize a repo-relative path and confirm it stays inside the cs
+    repo's clients/ tree. Returns the cleaned path, ``"clients"`` for the
+    root, or None if it escapes the boundary (absolute, traversal, or outside
+    clients/). This is the actual security boundary for the browse/read tools
+    below — every path is validated here before it reaches _github_get_contents."""
+    p = str(path or "").strip().strip("/")
+    if not p or p == "clients":
+        return "clients"
+    if not p.startswith("clients/"):
+        return None
+    segs = p.split("/")
+    if any(s in (".", "..") or not _CS_SEG_RE.match(s) for s in segs):
+        return None
+    return p
+
+
+async def _tool_list_cs_dir(args):
+    """List a directory anywhere under the cs repo's clients/ tree, so the
+    model can discover the companion files (the .py senders, shared libs,
+    config templates) a sim's .sh/.ps1 wrapper actually sources or execs."""
+    path = _safe_cs_path(args.get("path") or "clients")
+    if path is None:
+        return {"error": "invalid path — must be a directory under clients/"}
+    try:
+        resp = await _github_get_contents(path)
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"could not list {path}: {e}"}
+    if resp.status_code == 404:
+        return {"error": f"no such directory: {path}"}
+    if resp.status_code != 200:
+        return {"error": f"GitHub returned {resp.status_code} listing {path}"}
+    try:
+        entries = resp.json()
+    except Exception:  # noqa: BLE001
+        return {"error": "could not parse listing"}
+    if not isinstance(entries, list):
+        return {"error": f"{path} is a file, not a directory — use read_cs_file"}
+    items = [{"name": e.get("name"), "type": e.get("type")}
+             for e in entries if isinstance(e, dict) and e.get("name")]
+    items.sort(key=lambda x: (x.get("type") != "dir", x.get("name") or ""))
+    return {"path": path, "entries": items}
+
+
+async def _tool_read_cs_file(args):
+    """Read any single file under the cs repo's clients/ tree, read-only —
+    the general counterpart to read_sim_source, for the companion .py/.conf
+    files and shared libs where the real sim behavior lives. Path is validated
+    by _safe_cs_path before it ever becomes a path."""
+    path = _safe_cs_path(args.get("path"))
+    if path is None or path == "clients":
+        return {"error": "invalid path — give a file under clients/, "
+                         "e.g. clients/linux/collab.py"}
+    try:
+        resp = await _github_get_contents(path)
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"fetch error: {e}"}
+    if resp.status_code == 404:
+        return {"error": f"not found: {path}"}
+    if resp.status_code != 200:
+        return {"error": f"GitHub returned {resp.status_code}"}
+    try:
+        node = resp.json()
+    except Exception:  # noqa: BLE001
+        return {"error": "could not parse response"}
+    if isinstance(node, list):
+        return {"error": f"{path} is a directory — use list_cs_dir"}
+    try:
+        b64 = (node.get("content") or "").replace("\n", "")
+        return {"path": path,
+                "content": base64.b64decode(b64).decode("utf-8", "replace")[:16000]}
+    except Exception:  # noqa: BLE001
+        return {"error": "could not decode file"}
+
+
 _SIM_TOOLS = [
     {"type": "function", "function": {
         "name": "list_available_sims",
@@ -182,6 +274,38 @@ _SIM_TOOLS = [
                        },
                        "required": ["sim_name"]},
     }},
+    {"type": "function", "function": {
+        "name": "list_cs_dir",
+        "description": "List a directory in the client-simulation codebase (the cs repo's "
+                       "clients/ tree: linux/, windows/, lib/, t3/, tests/). Use this to "
+                       "discover the companion files a sim depends on — the .py senders, the "
+                       "shared libs (common.sh, ini-parser.sh, network_common.sh), and the "
+                       "config templates a sim's .sh/.ps1 wrapper sources or execs. Pass a "
+                       "path like 'clients/linux' or 'clients/lib'; omit path to list "
+                       "clients/ itself.",
+        "parameters": {"type": "object",
+                       "properties": {
+                           "path": {"type": "string",
+                                   "description": "Directory under clients/, e.g. 'clients/linux'"},
+                       }},
+    }},
+    {"type": "function", "function": {
+        "name": "read_cs_file",
+        "description": "Read any single file in the client-simulation codebase, read-only — "
+                       "the general counterpart to read_sim_source. Use this for the "
+                       "companion files where a sim's real behavior actually lives (e.g. "
+                       "clients/linux/collab.py, clients/linux/dhcp_fire.py) and shared libs "
+                       "(clients/lib/common.sh), which a bare .sh/.ps1 wrapper only sources "
+                       "or execs. Prefer reading the real code over guessing. Path must be "
+                       "under clients/.",
+        "parameters": {"type": "object",
+                       "properties": {
+                           "path": {"type": "string",
+                                   "description": "File path under clients/, e.g. "
+                                                  "'clients/linux/collab.py'"},
+                       },
+                       "required": ["path"]},
+    }},
 ]
 
 
@@ -190,6 +314,10 @@ async def _exec_sim_tool(name, args):
         return await _tool_list_available_sims(args)
     if name == "read_sim_source":
         return await _tool_read_sim_source(args)
+    if name == "list_cs_dir":
+        return await _tool_list_cs_dir(args)
+    if name == "read_cs_file":
+        return await _tool_read_cs_file(args)
     return {"error": f"unknown tool: {name}"}
 
 
@@ -273,13 +401,21 @@ def register(app, hub, ctx):
             "ONE focused clarifying question at a time whenever something needed is "
             "missing or ambiguous. Do NOT dump a long checklist up front — have a "
             "natural back-and-forth, like a teammate scoping the work with them.\n"
-            "2. General Q&A about how the Simulations module and its engine work, using "
-            "the reference material below.\n"
+            "2. General Q&A about how the Simulations module, its engine, AND the actual "
+            "client-sim code work. Beyond the reference docs below, you can READ THE REAL "
+            "SOURCE to answer accurately: browse the codebase with list_cs_dir and read "
+            "any file with read_cs_file. A sim's .sh/.ps1 is usually just a thin wrapper "
+            "that sources shared libs (common.sh, ini-parser.sh) and execs a companion "
+            "Python sender (e.g. collab.py, dhcp_fire.py, dns_flood_test.py) where the real "
+            "behavior lives — so when a question is about how a specific sim or mechanism "
+            "actually behaves, READ the relevant files (including those companions) instead "
+            "of answering from memory or guessing.\n"
             "3. COPYING/VARYING an existing sim for a specific deployment (e.g. the user "
             "wants a 'dns_fail_lrb' variant of 'dns_fail' with a tweaked target/threshold "
             "for one site) — use list_available_sims to find the real name, then "
             "read_sim_source to read its ACTUAL Linux/Windows source before proposing "
-            "anything. Never guess at existing sim behavior — always read it first. "
+            "anything (and read_cs_file for any companion .py/shared-lib it depends on). "
+            "Never guess at existing sim behavior — always read it first. "
             "Present the proposed new/changed script content directly in the chat; you "
             "cannot write files or commit anything yourself.\n\n"
             "What a complete, buildable simulation spec needs (per this platform's "

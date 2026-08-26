@@ -106,13 +106,15 @@ def test_chat_forwards_the_full_message_history():
 
 def test_chat_offers_the_sim_source_reading_tools():
     """The model can look up real sim source (list_available_sims /
-    read_sim_source) before answering — not the old tools:None single-shot."""
+    read_sim_source) and browse/read the wider codebase (list_cs_dir /
+    read_cs_file) before answering — not the old tools:None single-shot."""
     hub = _FakeHub(replies=["ok"])
     c = _build(hub)
     c.post("/api/sim-assistant/chat", json={"messages": [{"role": "user", "content": "hi"}]})
     tools = hub.last_request[2]["tools"]
     names = {t["function"]["name"] for t in tools}
-    assert names == {"list_available_sims", "read_sim_source"}
+    assert names == {"list_available_sims", "read_sim_source",
+                     "list_cs_dir", "read_cs_file"}
 
 
 def test_chat_system_prompt_references_the_add_simulation_requirements():
@@ -355,3 +357,107 @@ def test_system_prompt_instructs_reading_before_copying_a_variant():
     system = hub.last_request[2]["system"]
     assert "read_sim_source" in system
     assert "never guess" in system.lower() or "always read it first" in system.lower()
+
+
+# ── general codebase browse/read (companion .py files, shared libs) ──────────
+# read_sim_source only ever sees {name}.sh / {name}.ps1, but those are thin
+# wrappers that source shared libs and exec companion Python senders where the
+# real behavior lives. list_cs_dir / read_cs_file let the assistant reach that
+# actual code to ANSWER questions — still hard-bounded to the cs repo clients/
+# tree (traversal / outside-clients paths rejected before any fetch).
+
+def test_tool_loop_reads_a_companion_python_file(monkeypatch):
+    """The real ask: answering "how does collab actually work" needs the
+    companion collab.py, which read_sim_source (only .sh/.ps1) can't reach."""
+    async def fake_get(path):
+        assert path == "clients/linux/collab.py"
+        return _FakeGithubResp(200, {"content": _b64("import socket  # real collab sender")})
+    monkeypatch.setattr(sim_assistant_module, "_github_get_contents", fake_get)
+
+    hub = _FakeHub(replies=[
+        {"content": "", "tool_calls": [
+            {"id": "1", "function": {
+                "name": "read_cs_file",
+                "arguments": '{"path": "clients/linux/collab.py"}'}}]},
+        "collab.py opens a socket and sends traffic...",
+    ])
+    c = _build(hub)
+    r = c.post("/api/sim-assistant/chat", json={"messages": [
+        {"role": "user", "content": "how does the collab sim actually generate traffic?"}]})
+    assert r.status_code == 200
+    second_round_messages = hub.all_requests[1][2]["messages"]
+    tool_msg = next(m for m in second_round_messages if m["role"] == "tool")
+    assert "real collab sender" in tool_msg["content"]
+
+
+def test_tool_loop_lists_a_codebase_directory(monkeypatch):
+    async def fake_get(path):
+        assert path == "clients/lib"
+        return _FakeGithubResp(200, [
+            {"type": "file", "name": "common.sh"},
+            {"type": "file", "name": "ini-parser.sh"},
+        ])
+    monkeypatch.setattr(sim_assistant_module, "_github_get_contents", fake_get)
+
+    result = asyncio.run(sim_assistant_module._tool_list_cs_dir({"path": "clients/lib"}))
+    assert result["path"] == "clients/lib"
+    assert {e["name"] for e in result["entries"]} == {"common.sh", "ini-parser.sh"}
+
+
+def test_list_cs_dir_defaults_to_the_clients_root(monkeypatch):
+    seen = []
+
+    async def fake_get(path):
+        seen.append(path)
+        return _FakeGithubResp(200, [{"type": "dir", "name": "linux"}])
+    monkeypatch.setattr(sim_assistant_module, "_github_get_contents", fake_get)
+
+    asyncio.run(sim_assistant_module._tool_list_cs_dir({}))
+    assert seen == ["clients"]
+
+
+def test_read_cs_file_rejects_paths_outside_clients(monkeypatch):
+    """The scope boundary: anything not under clients/ (other repos, hub
+    source, secrets) must be rejected before any fetch is attempted."""
+    called = []
+
+    async def fake_get(path):
+        called.append(path)
+        return _FakeGithubResp(200, {"content": _b64("secret")})
+    monkeypatch.setattr(sim_assistant_module, "_github_get_contents", fake_get)
+
+    for bad in ("core/src/main.py", "/etc/passwd", "clients/../.github/workflows/x.yml",
+                "clients/linux/../../secrets.env", "..", ""):
+        result = asyncio.run(sim_assistant_module._tool_read_cs_file({"path": bad}))
+        assert "error" in result, bad
+    assert not called  # no path outside clients/ ever reached a fetch
+
+
+def test_read_cs_file_reads_a_valid_clients_path(monkeypatch):
+    async def fake_get(path):
+        assert path == "clients/lib/common.sh"
+        return _FakeGithubResp(200, {"content": _b64("# shared helpers")})
+    monkeypatch.setattr(sim_assistant_module, "_github_get_contents", fake_get)
+
+    result = asyncio.run(sim_assistant_module._tool_read_cs_file(
+        {"path": "clients/lib/common.sh"}))
+    assert result["path"] == "clients/lib/common.sh"
+    assert "shared helpers" in result["content"]
+
+
+def test_read_cs_file_on_a_directory_is_redirected_to_list(monkeypatch):
+    async def fake_get(path):
+        return _FakeGithubResp(200, [{"type": "file", "name": "collab.py"}])
+    monkeypatch.setattr(sim_assistant_module, "_github_get_contents", fake_get)
+
+    result = asyncio.run(sim_assistant_module._tool_read_cs_file({"path": "clients/linux"}))
+    assert "error" in result and "list_cs_dir" in result["error"]
+
+
+def test_system_prompt_tells_the_model_it_can_read_the_real_code():
+    hub = _FakeHub(replies=["ok"])
+    c = _build(hub)
+    c.post("/api/sim-assistant/chat", json={"messages": [
+        {"role": "user", "content": "how does the collab sim work?"}]})
+    system = hub.last_request[2]["system"]
+    assert "read_cs_file" in system and "list_cs_dir" in system
