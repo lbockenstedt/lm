@@ -868,7 +868,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # first second.
         self._seen_prune_last_mono = float("-inf")  # monotonic ts of last seen-set prune
         self._REPLAY_WINDOW_S = float(os.environ.get("LM_REPLAY_WINDOW_S", "120"))
-        self._REPLAY_FUTURE_SKEW_S = 5.0  # accept up to Ns clock skew into the future
+        # Max clock skew (seconds) a signed frame's timestamp may be into the
+        # future before it's dropped as forged. Env-configurable like the replay
+        # window above. Default 15s (was a hardcoded 5s): real fleet console/edge
+        # hosts routinely drift a few seconds off NTP, and a too-tight bound drops
+        # their legitimate signed responses — a single ~5s-fast console host had
+        # every CONSOLE_LIST_PORTS reply discarded, surfacing as "agent connected
+        # but no serial ports". Replay is still bounded by _REPLAY_WINDOW_S +
+        # message_id dedupe; this only caps forged-future timestamps.
+        self._REPLAY_FUTURE_SKEW_S = float(os.environ.get("LM_REPLAY_FUTURE_SKEW_S", "15"))
         self._REPLAY_SEEN_TTL = self._REPLAY_WINDOW_S  # seen-set lives for the window
         # Per-spoke throttle for replay/stale warnings so a replay flood doesn't
         # spam the log: { spoke_id: last_warn_ts }.

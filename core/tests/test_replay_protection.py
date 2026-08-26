@@ -13,10 +13,13 @@ import uuid
 import main  # noqa: E402  (core/src on sys.path via conftest)
 
 
-def _fake_hub(window=120.0, skew=5.0, warn_interval=10.0):
+def _fake_hub(window=120.0, skew=15.0, warn_interval=10.0):
     """A LabManagerHub subclass that skips the heavy real __init__ and sets only
     the replay attrs. Subclassing (not a bare object) so ``self._replay_warn``
-    / ``_prune_seen_message_ids`` resolve through the MRO to the real methods."""
+    / ``_prune_seen_message_ids`` resolve through the MRO to the real methods.
+
+    ``skew`` defaults to 15.0 to MIRROR the production default
+    (``LM_REPLAY_FUTURE_SKEW_S``, main.py) so these tests track real behavior."""
     class _FakeHub(main.LabManagerHub):
         def __init__(self):
             self._seen_message_ids = {}
@@ -76,6 +79,18 @@ def test_future_within_skew_accepted():
     hub = _fake_hub(window=120.0, skew=5.0)
     fut = time.time() + 3  # within the 5s skew allowance
     assert _check(hub, _frame(ts=fut, msg_id="ok-fut")) is True
+
+
+def test_realistic_console_host_skew_accepted_at_default():
+    """Regression for the RA console-server outage: a signed frame ~5s in the
+    future (a console/edge host a few seconds fast on NTP) must be ACCEPTED at
+    the default tolerance. A too-tight 5s bound dropped every CONSOLE_LIST_PORTS
+    reply from a ~5s-fast host, surfacing as 'agent connected but no ports'. The
+    default now allows real-world drift; keep it comfortably above 5s."""
+    hub = _fake_hub()  # default skew mirrors production (LM_REPLAY_FUTURE_SKEW_S)
+    assert hub._REPLAY_FUTURE_SKEW_S >= 15.0
+    fut = time.time() + 6  # a host ~6s fast — the failing real-world case
+    assert _check(hub, _frame(ts=fut, msg_id="ra-con")) is True
 
 
 def test_timestamp_just_inside_window_accepted():
