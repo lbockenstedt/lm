@@ -11,7 +11,7 @@ Signals fed in from the auth layer (api.py):
     ``/ws/spoke`` directly, so the WebSocket peer is the real client IP.
 
 Policy (all configurable via ``global_config["threat_monitor"]``):
-  * ``> threshold`` failures from one IP within ``window_s`` → BLOCK (default: >5).
+  * ``> threshold`` failures from one IP within ``window_s`` → BLOCK (default: >20).
   * A block auto-expires after ``ttl_s`` (default 24h) unless it is permanent.
   * Repeat offender: an IP blocked → auto-released → re-blocked
     ``permanent_after`` times becomes a PERMANENT block (never expires).
@@ -55,11 +55,20 @@ sec_log = logging.getLogger("Security")  # dedicated audit stream (relayed + on-
 _DEFAULTS = {
     "enabled": True,          # detect + log
     "auto_block": False,      # actually edit the NSG (opt-in; log-only until on)
-    "threshold": 5,           # > this many failures in the window → block
+    "threshold": 20,          # > this many failures in the window → block. Set
+                              # generously so ordinary self-inflicted noise (e.g.
+                              # a still-open dashboard tab replaying an EXPIRED
+                              # session cookie — recorded as "session" failures —
+                              # after the 8h session lapses or a hub redeploy)
+                              # never trips a block for legitimate operators.
     "window_s": 600,          # failure counting window (10 min)
     "ttl_s": 86400,           # temporary block lifetime (24h)
     "permanent_after": 3,     # re-blocks after auto-release → permanent
-    "success_grace_s": 3600,  # a recently-authenticated IP is exempt for this long
+    "success_grace_s": 28800, # a recently-authenticated IP is exempt for this
+                              # long (8h) — matches the session TTL so a valid
+                              # operator IP stays exempt for the whole life of
+                              # its session, incl. the stale-cookie window right
+                              # after it expires.
     "block_rule_name": "lm-threat-block",
     # Allow is evaluated first; Deny sits just above it (a HIGHER number), both
     # below the 1000 default-allow on 443 → allow(300) < block(400) < 1000.
