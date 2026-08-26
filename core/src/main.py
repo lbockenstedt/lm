@@ -9568,6 +9568,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Setup → Azure → Key Vault. See run_key_vault_loop.
         key_vault_task = asyncio.create_task(self.run_key_vault_loop())
         pxmx_diag_task = asyncio.create_task(self.run_pxmx_diag_loop())
+        # Console-ports warm-cache refresh (HubVncConsoleMixin): keeps the
+        # last-known CONSOLE_LIST_PORTS list fresh for every connected console
+        # spoke with a generous timeout, so /api/console/ports serves instantly
+        # from RAM instead of live-polling each spoke per request (a wedged
+        # console host used to block the whole page). See routes/console.py.
+        console_ports_refresh_task = asyncio.create_task(self.run_console_ports_refresh_loop())
         # Per-module health heartbeat for the Hub itself. Emits a greppable
         # [heartbeat] line into self.logs (module="hub" in collect_all_logs)
         # every ~60s so AppBuilder can confirm the Hub is alive and triage when

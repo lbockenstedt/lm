@@ -51,20 +51,33 @@ class _Hub:
         self._fail = set(fail or [])
         self.warm_cache = {}                 # {ns: {key: {"data": ...}}}
         self._console_creds_seeded = set(self._connected)  # skip cred seeding
+        self._rr_calls = []                  # CONSOLE_LIST_PORTS live-poll audit
+        self._scheduled = []                 # background-refresh schedule audit
 
     # warm cache surface (mirrors WarmCacheMixin)
     def warm_get(self, namespace, key="_"):
         entry = self.warm_cache.get(namespace, {}).get(str(key))
         return entry.get("data") if isinstance(entry, dict) else None
 
+    def warm_fetched_at(self, namespace, key="_"):
+        entry = self.warm_cache.get(namespace, {}).get(str(key))
+        ts = entry.get("fetched_at") if isinstance(entry, dict) else None
+        return ts if isinstance(ts, (int, float)) else None
+
     async def warm_set(self, namespace, key, data):
-        self.warm_cache.setdefault(namespace, {})[str(key)] = {"data": data}
+        import time as _t
+        self.warm_cache.setdefault(namespace, {})[str(key)] = {
+            "data": data, "fetched_at": _t.time()}
+
+    def schedule_console_ports_refresh(self, sids):
+        self._scheduled.extend(sids)
 
     def get_all_spokes_by_type(self, kind):
         return list(self._connected) if kind == "console" else []
 
     async def request_response(self, sid, cmd, payload, timeout=15.0,
                                signing_secret=None):
+        self._rr_calls.append((sid, cmd))
         if sid in self._fail:
             raise RuntimeError(f"{sid} unreachable")
         return {"payload": {"data": {"status": "SUCCESS",
@@ -182,3 +195,45 @@ def test_spoke_down_no_cache_falls_back_to_error():
     assert body["ports"] == []
     assert "con-1" in body["errors"]
     assert body["stale_spokes"] == []
+
+
+def test_fresh_cache_served_without_live_poll():
+    """The core of the caching change: a connected spoke whose warm entry is
+    FRESH (refreshed by the background loop) is served straight from RAM — the
+    request path must NOT live-poll CONSOLE_LIST_PORTS, and the ports are not
+    stale."""
+    import time as _t
+    hub = _Hub(connected=["con-1"])
+    hub.warm_cache["console_ports"] = {
+        "con-1": {"data": [_port("ttyUSB0", "cached-live", "sw01")],
+                  "fetched_at": _t.time()}}                # fresh
+    c = _build(hub)
+    r = c.get("/api/console/ports")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["ports"]) == 1
+    assert body["ports"][0]["alias"] == "cached-live"
+    assert body["ports"][0].get("stale") is not True
+    assert body["stale_spokes"] == []
+    assert hub._rr_calls == []              # served from cache — no live poll
+    assert hub._scheduled == []             # fresh — no background refresh needed
+
+
+def test_aging_cache_served_and_refreshed_in_background():
+    """An entry older than the stale window is still served instantly (marked
+    stale) and a background refresh is scheduled — never a blocking live poll on
+    the request path."""
+    import time as _t
+    hub = _Hub(connected=["con-1"])
+    hub.warm_cache["console_ports"] = {
+        "con-1": {"data": [_port("ttyUSB0", "aging", "sw01")],
+                  "fetched_at": _t.time() - 999}}          # well past stale window
+    c = _build(hub)
+    r = c.get("/api/console/ports")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["ports"]) == 1
+    assert body["ports"][0]["stale"] is True
+    assert "con-1" in body["stale_spokes"]
+    assert hub._rr_calls == []              # still no blocking live poll
+    assert "con-1" in hub._scheduled        # refreshed in the background instead

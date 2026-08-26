@@ -64,6 +64,86 @@ class HubVncConsoleMixin:
         """Per-tenant console→NetBox sync status rows for the UI."""
         return list(getattr(self, "_console_sync_status", {}).values())
 
+    # ── Console ports warm-cache refresh (background) ─────────────────────────
+    # /api/console/ports used to live-poll CONSOLE_LIST_PORTS on every request
+    # (15s per spoke, so a single wedged console host blocked the whole page).
+    # Instead this background loop keeps the warm cache fresh with a generous
+    # timeout, and the route serves the last-known list instantly (see
+    # routes/console.py::_list_visible_console_ports). Raw (pre tenant-filter)
+    # per the warm-cache contract; the route re-applies visibility per reader.
+    CONSOLE_PORTS_REFRESH_INTERVAL = 30.0   # seconds between fleet refresh sweeps
+    CONSOLE_PORTS_REFRESH_TIMEOUT = 30.0    # generous per-spoke poll timeout
+    # A healthy spoke is re-polled every REFRESH_INTERVAL, so an entry older than
+    # this window means the background poll can't reach it (wedged/offline) — the
+    # route then serves it marked ``stale``. ~4× the interval to avoid flagging a
+    # spoke that merely missed one sweep.
+    CONSOLE_PORTS_STALE_AFTER = 120.0
+
+    @staticmethod
+    def _console_unwrap_ports(result: Any) -> list:
+        """request_response envelope → the spoke's ``ports`` list (mirror of
+        routes/console.py::_console_unwrap so the loop and the route agree)."""
+        if isinstance(result, dict):
+            data = result.get("payload", {}).get("data", result)
+            if isinstance(data, dict):
+                return data.get("ports") or []
+        return []
+
+    async def refresh_console_ports_cache(self, sids=None, timeout: Optional[float] = None) -> set:
+        """Poll CONSOLE_LIST_PORTS for the given (or all connected) console
+        spokes and store each raw port list in the warm cache under
+        ``("console_ports", sid)``. Best-effort: a wedged/offline spoke is
+        skipped so its last-known snapshot survives. Returns the refreshed sids."""
+        if timeout is None:
+            timeout = self.CONSOLE_PORTS_REFRESH_TIMEOUT
+        if sids is None:
+            sids = self.get_all_spokes_by_type("console") or []
+        refreshed: set = set()
+        for sid in sids:
+            try:
+                r = await self.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=timeout)
+                await self.warm_set("console_ports", sid, self._console_unwrap_ports(r))
+                refreshed.add(sid)
+            except Exception as exc:  # noqa: BLE001 - one dead console mustn't stall the sweep
+                logger.debug("console ports refresh: %s unreachable (%s)", sid, exc)
+        return refreshed
+
+    def schedule_console_ports_refresh(self, sids) -> None:
+        """Fire-and-forget warm-cache refresh for ``sids``, deduped so a burst of
+        page loads (or an aging entry served on every request) doesn't stack
+        duplicate polls. Never blocks the caller (the route)."""
+        inflight = getattr(self, "_console_ports_refresh_inflight", None)
+        if inflight is None:
+            inflight = self._console_ports_refresh_inflight = set()
+        todo = [s for s in sids if s not in inflight]
+        if not todo:
+            return
+        inflight.update(todo)
+
+        async def _run():
+            try:
+                await self.refresh_console_ports_cache(todo)
+            finally:
+                for s in todo:
+                    inflight.discard(s)
+
+        try:
+            asyncio.create_task(_run())
+        except RuntimeError:  # pragma: no cover - no running loop
+            for s in todo:
+                inflight.discard(s)
+
+    async def run_console_ports_refresh_loop(self):
+        """Keep the console-ports warm cache fresh for every connected console
+        spoke, so /api/console/ports serves from RAM instead of live-polling."""
+        logger.info("Console ports warm-cache refresh loop started.")
+        while True:
+            try:
+                await self.refresh_console_ports_cache()
+            except Exception as exc:  # noqa: BLE001 - loop must never die
+                logger.error("console ports refresh loop error: %s", exc)
+            await asyncio.sleep(self.CONSOLE_PORTS_REFRESH_INTERVAL)
+
 
     def register_vnc_session(self, session_id: str, meta: Dict[str, Any]) -> None:
         """Create the session's frame queue and store its metadata."""

@@ -73,6 +73,15 @@ class WarmCacheMixin:
         entry = self.warm_cache.get(namespace, {}).get(str(key))
         return entry.get("data") if isinstance(entry, dict) and "data" in entry else None
 
+    def warm_fetched_at(self, namespace: str, key: str = "_") -> Optional[float]:
+        """Epoch seconds when ``(namespace, key)`` was last stored, or None.
+
+        Lets a read handler decide a cache entry is aging and schedule a
+        background refresh instead of re-polling the spoke on every request."""
+        entry = self.warm_cache.get(namespace, {}).get(str(key))
+        ts = entry.get("fetched_at") if isinstance(entry, dict) else None
+        return ts if isinstance(ts, (int, float)) else None
+
     async def warm_set(self, namespace: str, key: str, data: Any) -> None:
         """Store a fresh envelope for ``(namespace, key)`` + persist (best-effort)."""
         self.warm_cache.setdefault(namespace, {})[str(key)] = {

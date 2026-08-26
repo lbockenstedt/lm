@@ -1,6 +1,7 @@
 """VNC + serial console relay routes and helpers."""
 import logging
 import os
+import time
 
 from api import (
     HTTPException, Request, WebSocket, WebSocketDisconnect, WebSocketState, access, asyncio,
@@ -755,24 +756,51 @@ def register(app, hub, ctx):
                 ports.append(p)
                 visible_spokes.add(sid)
 
+        # Serve from the warm cache: a background loop
+        # (run_console_ports_refresh_loop) keeps the last-known CONSOLE_LIST_PORTS
+        # list fresh for every connected console spoke with a generous timeout,
+        # so a page load never blocks on a live per-spoke poll (a single wedged
+        # console host used to stall the whole page for 15s). Freshness is judged
+        # by cache AGE: a healthy spoke is re-polled every refresh interval, so an
+        # entry older than the stale window means the background poll can't reach
+        # it (wedged/offline) → serve it marked ``stale`` and kick a refresh. Raw
+        # (pre tenant-filter) per the warm-cache contract; _emit_ports re-applies
+        # visibility per reader.
+        refresh_after = getattr(hub, "CONSOLE_PORTS_REFRESH_INTERVAL", 30.0)
+        stale_after = getattr(hub, "CONSOLE_PORTS_STALE_AFTER", 120.0)
+        _fetched_at = getattr(hub, "warm_fetched_at", None)
+        now = time.time()
+        cold, aging = [], []
         for sid in spokes:
+            cached = hub.warm_get("console_ports", sid)
+            if cached is None:
+                cold.append(sid)          # never fetched — first-ever load below
+                continue
+            ts = _fetched_at("console_ports", sid) if _fetched_at else None
+            age = (now - ts) if ts else None
+            is_stale = age is None or age > stale_after
+            _emit_ports(sid, cached, stale=is_stale)
+            if is_stale:
+                stale_spokes.add(sid)     # background refresh can't keep it warm
+            if age is None or age > refresh_after:
+                aging.append(sid)         # cache is aging → refresh in background
+
+        # Cold-start: a connected spoke with no cache yet. Do ONE bounded live
+        # fetch so the first-ever page load isn't blank, then it's cache-served
+        # (and the background loop keeps it warm) from here on.
+        for sid in cold:
             try:
                 r = await hub.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=15.0)
                 raw_ports = _console_unwrap(r).get("ports") or []
-                # Persist the last-known port list (aliases + fingerprint identity)
-                # so the page warm-starts after a hub restart / brief disconnect
-                # instead of blanking until the spoke re-answers — mirrors the
-                # pxmx/netbox warm cache. Raw (pre tenant-filter) per the cache
-                # contract; _emit_ports re-applies visibility per reader.
                 await hub.warm_set("console_ports", sid, raw_ports)
                 _emit_ports(sid, raw_ports, stale=False)
             except Exception as e:  # noqa: BLE001 - one dead console shouldn't blank the rest
-                cached = hub.warm_get("console_ports", sid)
-                if cached:
-                    stale_spokes.add(sid)
-                    _emit_ports(sid, cached, stale=True)  # names survive the outage
-                else:
-                    errors[sid] = str(e)
+                errors[sid] = str(e)
+
+        # Aging entries → refresh in the background (never blocks the response).
+        # Deduped by the hub so repeated page loads don't stack polls.
+        if aging and hasattr(hub, "schedule_console_ports_refresh"):
+            hub.schedule_console_ports_refresh(aging)
 
         # Known console spokes that are fully DISCONNECTED (not in the live list)
         # but have a warm-cached port list: surface their last-known device names
