@@ -23,7 +23,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("Console")
 
 _FILE_NAME = "console_fingerprints.json"
 _VERSION = 1

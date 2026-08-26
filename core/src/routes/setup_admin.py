@@ -635,6 +635,12 @@ def register(app, hub, ctx):
                 # Off the hub loop — same I/O reason as get_all_logs.
                 return await asyncio.to_thread(hub.collect_error_logs)
 
+            if module == "console":
+                # Console module is hub-native (VNC/serial relay, credential
+                # handling, learn/identify) with no spoke — its "Console" logger
+                # feeds hub.console_logs directly (see main.py ConsoleLogHandler).
+                return {"logs": list(hub.console_logs)[-500:]}
+
             if module == "agents":
                 flat = []
                 for agent_id, logs in hub.agent_logs.items():

@@ -1,10 +1,17 @@
 """VNC + serial console relay routes and helpers."""
+import logging
 import os
 
 from api import (
     HTTPException, Request, WebSocket, WebSocketDisconnect, WebSocketState, access, asyncio,
-    base64, json, logger, secrets, uuid,
+    base64, json, secrets, uuid,
 )
+
+# The console module is hub-native but logs under a dedicated "Console" logger
+# (not the shared "Hub" logger imported above) so its lines roll up into the
+# WebUI Logs → Console tab via hub.console_logs. See main.py ConsoleLogHandler +
+# setup_admin.get_module_logs (module == "console"). Shadows the imported name.
+logger = logging.getLogger("Console")
 
 # Idle keepalive cadence for the browser console WS relays. When no device
 # output flows for this many seconds, the relay sends a control "ping" frame so

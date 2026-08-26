@@ -7,7 +7,7 @@ import logging
 import time
 from typing import Any, Dict, Optional
 
-logger = logging.getLogger("Hub")
+logger = logging.getLogger("Console")
 
 
 class HubVncConsoleMixin:

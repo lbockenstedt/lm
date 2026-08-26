@@ -1499,7 +1499,7 @@ async function refreshModuleCache(moduleKey) {
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
     settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'Diagnostics', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons'],
-    logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs', 'logs-features'],
+    logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-console', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs', 'logs-features'],
     setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'OS Updates'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines', 'Settings'],
@@ -1559,6 +1559,7 @@ const SUBMENU_LABELS = {
     'logs-netbox': 'IPAM',
     'logs-nw': 'Network',
     'logs-cs': 'Simulations',
+    'logs-console': 'Console',
     'logs-le': 'Certificates',
     'logs-ldap': 'Directory',
     'logs-agents': 'Agents',
@@ -1586,9 +1587,9 @@ function logsSubmenu() {
     const hasAgents = !!window.hasAgents;
     // Preserve the canonical order: hub first, then installed module tabs in
     // their fixed sequence, agents, then the hub-native filtered views last.
-    const order = ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-nw', 'logs-cppm', 'logs-cs', 'logs-le', 'logs-truenas', 'logs-ldap', 'logs-agents', 'logs-recovery', 'logs-errors'];
+    const order = ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-nw', 'logs-cppm', 'logs-cs', 'logs-console', 'logs-le', 'logs-truenas', 'logs-ldap', 'logs-agents', 'logs-recovery', 'logs-errors'];
     return order.filter(m => {
-        if (m === 'logs-hub' || m === 'logs-recovery' || m === 'logs-errors') return true;
+        if (m === 'logs-hub' || m === 'logs-recovery' || m === 'logs-errors' || m === 'logs-console') return true;
         if (m === 'logs-agents') return hasAgents;
         const product = LOG_MODULE_PRODUCT[m];
         return !product || products.has(product);

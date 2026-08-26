@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import console_learn
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("Console")
 
 # ── Privacy scrubber ───────────────────────────────────────────────────────────
 # Everything sent to the (external) LLM for device identification passes through

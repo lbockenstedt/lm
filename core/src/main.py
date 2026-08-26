@@ -496,6 +496,17 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # place. Mirrors cert_dist_logs → Certificates. See CSBridgeLogHandler
         # below + setup_admin.get_module_logs (module == "cs").
         self.cs_bridge_logs = deque(maxlen=500)
+        # Hub-side Console-module activity (the "Console" logger used by
+        # routes/console.py, hub_vnc_console.py, routes/console_learn.py and
+        # routes/console_llm_identify.py — VNC/serial relay setup + teardown,
+        # credential decrypt failures, port-profiling, learn/identify outcomes).
+        # The console module runs ENTIRELY on the hub (no spoke), so without a
+        # dedicated buffer its lines only land in the general "Hub" view and
+        # there is no Console log tab at all. Merge them into GET
+        # /setup/logs/console so they surface under WebUI Logs → Console.
+        # Mirrors cert_dist_logs → Certificates / cs_bridge_logs → Simulations.
+        # See ConsoleLogHandler below + setup_admin.get_module_logs (== "console").
+        self.console_logs = deque(maxlen=500)
         self.max_log_size = 1000
         # Per-host cap for client_debug_logs rings (see init near agent_logs
         # above). Advanced level (journal+dmesg) is chatty; the deque cap is the
@@ -653,6 +664,32 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # these modules are logged at DEBUG so they don't flood either view.)
         for _sim_logger_name in ("SimRoutes", "SimQuota", "CentralHubPoller", "MistHubPoller"):
             logging.getLogger(_sim_logger_name).addHandler(cs_bridge_handler)
+
+        # Route hub-side Console-module activity (the "Console" logger) into a
+        # dedicated buffer merged into GET /setup/logs/console so it surfaces
+        # under WebUI Logs → Console. The console module is hub-native (VNC +
+        # serial relay, credential handling, port learn/identify) with no spoke
+        # of its own, so without this its lines land ONLY in the general "Hub"
+        # view and the Console tab would be empty/absent. Same canonical format
+        # as HubLogHandler; pin the logger to INFO so setup/teardown + outcome
+        # lines are ALWAYS captured regardless of the root level (mirrors the
+        # le.distribution / CSBridge pins above).
+        class ConsoleLogHandler(logging.Handler):
+            def __init__(self, hub):
+                super().__init__()
+                self.hub = hub
+            def emit(self, record):
+                try:
+                    self.hub.console_logs.append(self.format(record))
+                except Exception:  # noqa: BLE001 — never block a log emit
+                    pass
+        console_handler = ConsoleLogHandler(self)
+        console_handler.setFormatter(logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'))
+        _console_log = logging.getLogger("Console")
+        _console_log.setLevel(logging.INFO)
+        _console_log.addHandler(console_handler)
 
         # Route uncaught SYNC exceptions through the "Hub" logger so they land in
         # self.logs → Error Log tab (collect_error_logs) + AppBuilder, instead of
@@ -3111,6 +3148,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         self.cert_dist_logs.clear()
         cs_bridge_lines = len(self.cs_bridge_logs)
         self.cs_bridge_logs.clear()
+        console_lines = len(self.console_logs)
+        self.console_logs.clear()
         agent_counts = {}
         for aid, dq in list(self.agent_logs.items()):
             agent_counts[aid] = len(dq)
@@ -3128,15 +3167,16 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
 
         logger.warning(
             "[diag] Clear Logs: hub deque %d + cert-dist %d + cs-bridge %d + "
-            "agent/spoke %d lines across %d buffer(s); truncated %d on-disk "
-            "file(s) on hub; broadcast to %d connected spoke(s)",
-            hub_lines, cert_dist_lines, cs_bridge_lines, agent_lines,
+            "console %d + agent/spoke %d lines across %d buffer(s); truncated %d "
+            "on-disk file(s) on hub; broadcast to %d connected spoke(s)",
+            hub_lines, cert_dist_lines, cs_bridge_lines, console_lines, agent_lines,
             len(agent_counts), len(files), spoke_count)
         return {
             "status": "ok",
             "hub_lines": hub_lines,
             "cert_dist_lines": cert_dist_lines,
             "cs_bridge_lines": cs_bridge_lines,
+            "console_lines": console_lines,
             "agent_buffers": len(agent_counts),
             "agent_lines": agent_lines,
             "disk_files_truncated": files,
