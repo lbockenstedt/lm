@@ -19411,6 +19411,8 @@ async function openConsoleCredentialsModal() {
     let localCreds = [];
     let tenantScope = '';
     let sharedGlobalCount = 0;
+    let canManage = false;
+    let bucketHasPsk = false;
     let loadFailed = false;
     try {
         const res = await fetch('/api/console/credentials' + _taTenantQuery(), { credentials: 'same-origin' });
@@ -19423,6 +19425,8 @@ async function openConsoleCredentialsModal() {
             localCreds = j.local_credentials || [];
             tenantScope = j.tenant || '';
             sharedGlobalCount = j.shared_global_count || 0;
+            canManage = (j.can_manage === true);
+            bucketHasPsk = (j.bucket_has_psk === true);
         } else {
             loadFailed = true;
         }
@@ -19482,21 +19486,57 @@ async function openConsoleCredentialsModal() {
         <input class="console-cred-user flex-1 border border-slate-300 rounded-md px-3 py-2 text-sm" placeholder="username" value="${(u || '').replace(/"/g, '&quot;')}">
         <input class="console-cred-pass flex-1 border border-slate-300 rounded-md px-3 py-2 text-sm" type="password" placeholder="password (blank = keep)">
         <button onclick="this.closest('.console-cred-row').remove()" class="px-2 text-red-400 hover:text-red-600">&times;</button></div>`;
+    const pskRow = bucketHasPsk
+        ? `<div class="pt-1"><label class="block text-[11px] text-slate-500 mb-1">Vault pass-phrase (required to save — this bucket is PSK-protected)</label>
+             <input id="console-cred-psk" type="password" class="w-full border border-slate-300 rounded-md px-3 py-2 text-sm" placeholder="bucket pass-phrase"></div>`
+        : '';
+    const scopeNote = tenantScope
+        ? `<div class="text-xs px-3 py-2 rounded bg-blue-50 text-blue-700 border border-blue-100">🔐 These are the console scan logins for tenant <b>${escapeHtml(tenantScope)}</b>, stored in your <b>Credential Vault</b> bucket and pushed to this tenant's console agents. ${sharedGlobalCount ? `${sharedGlobalCount} shared global login${sharedGlobalCount === 1 ? '' : 's'} also appl${sharedGlobalCount === 1 ? 'ies' : 'y'} (managed by a Global Admin).` : ''}</div>`
+        : '';
     modal.innerHTML = `<div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
         <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-          <h3 class="text-lg font-bold text-[#263040]">Console Credential Library</h3>
+          <h3 class="text-lg font-bold text-[#263040]">Console Scan Credentials</h3>
           <button onclick="this.closest('#console-creds-modal').remove()" class="text-slate-400 hover:text-slate-600 text-2xl leading-none">&times;</button>
         </div>
         <div class="p-6 space-y-3">
-          <p class="text-[11px] text-slate-400">Tried in order during auto-identify. Stored encrypted on the hub and pushed to Console agents; passwords are never displayed back. Leave a password blank to keep the stored one.</p>
+          ${scopeNote}
+          <p class="text-[11px] text-slate-400">Tried in order when scanning/auto-identifying serial-attached devices. Stored in the Credential Vault; passwords are never displayed back. Leave a password blank to keep the stored one. Remove all rows to clear this tenant's console logins.</p>
           <div id="console-cred-rows" class="space-y-2">${(existing.length ? existing.map(c => rowFor(c.username)).join('') : rowFor(''))}</div>
           <button onclick="document.getElementById('console-cred-rows').insertAdjacentHTML('beforeend', _consoleCredRowHtml())" class="text-[11px] px-3 py-1 rounded border border-slate-300 hover:bg-slate-50">+ Add credential</button>
+          ${pskRow}
           <div class="pt-3 flex justify-end gap-3">
             <button onclick="this.closest('#console-creds-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Cancel</button>
-            <button onclick="saveConsoleCredentials()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Save</button>
+            <button onclick="saveConsoleVaultCredentials('${escJsAttr(tenantScope)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Save</button>
           </div>
         </div></div>`;
     document.body.appendChild(modal);
+}
+
+// Save the tenant's console SCAN credentials into the Credential Vault (tenant
+// bucket, automation-readable) via /api/console/credentials/set. A blank
+// password keeps the stored one; removing every row clears the list. Sends the
+// bucket pass-phrase when the bucket is PSK-protected.
+async function saveConsoleVaultCredentials(tenant) {
+    const rows = Array.from(document.querySelectorAll('#console-creds-modal .console-cred-row'));
+    const credentials = [];
+    for (const row of rows) {
+        const u = (row.querySelector('.console-cred-user')?.value || '').trim();
+        const p = row.querySelector('.console-cred-pass')?.value || '';
+        if (!u) continue;
+        credentials.push({ username: u, password: p });
+    }
+    const psk = document.getElementById('console-cred-psk')?.value || '';
+    try {
+        const res = await fetch('/api/console/credentials/set', {
+            method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tenant: tenant || undefined, psk, credentials }),
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(d.detail || 'Could not save console credentials', 'error'); return; }
+        showToast(`🔑 Saved ${d.count || 0} console scan credential(s).`, 'success');
+        document.getElementById('console-creds-modal')?.remove();
+    } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
 }
 
 function _consoleCredRowHtml() {

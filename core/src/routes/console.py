@@ -586,6 +586,15 @@ def register(app, hub, ctx):
         except Exception:  # noqa: BLE001
             return "__admin__"
 
+    def _cv_bucket_has_psk(hub, bucket):
+        """True when ``bucket`` has a pass-phrase set — the WebUI then prompts for
+        it before a console-credential save (writing a secret needs the PSK)."""
+        try:
+            import cred_vault as _cv
+            return bool(_cv.bucket_has_psk(hub, bucket))
+        except Exception:  # noqa: BLE001
+            return False
+
     def _vault_enabled(hub):
         """True when the Credential Vault is usable as a credential store — i.e.
         an Azure Key Vault is configured (:func:`cred_vault._vault_available`).
@@ -1321,7 +1330,8 @@ def register(app, hub, ctx):
                 if (c.get("username", ""), c.get("password", "")) not in own_keys)
             return {"credentials": [{"username": c.get("username", ""),
                                      "has_password": bool(c.get("password"))} for c in own],
-                    "source": "cred_vault", "read_only": True, "creation_disabled": True,
+                    "source": "cred_vault", "read_only": False, "creation_disabled": False,
+                    "can_manage": True, "bucket_has_psk": _cv_bucket_has_psk(hub, tenant),
                     "vault_enabled": _vault_enabled(hub),
                     "local_passwords_present": False, "migrate_warning": "",
                     "local_credentials": [], "tenant": tenant,
@@ -1446,6 +1456,100 @@ def register(app, hub, ctx):
         logger.info("console: %d credential(s) migrated into the Credential Vault by %s",
                     len(creds), (sess.get("user", {}) or {}).get("username", "?"))
         return {"status": "ok", "count": len(creds), "bucket": _cv.ADMIN_BUCKET,
+                "name": _CONSOLE_VAULT_SECRET}
+
+    @app.post("/api/console/credentials/set")
+    async def console_set_credentials(request: Request):
+        """Set the console auto-identify (device scan) login list for a bucket the
+        caller manages, stored in the Credential Vault as a single
+        automation-readable (``hub``-mode) ``console``-typed secret
+        (``console-auto-credentials``) that the seed loop pushes to that tenant's
+        console spokes unattended.
+
+        A **tenant admin** may set ONLY their own tenant bucket — the credentials
+        used to scan THIS tenant's console devices — never another tenant's and
+        never the shared ``__admin__`` slot. A **Global Admin** sets ``__admin__``
+        by default (or a named ``tenant`` bucket). Writing requires the bucket
+        pass-phrase only when the bucket has one (``psk``). Passwords are never
+        displayed back, so an entry submitted with a BLANK password keeps that
+        username's currently-stored password; an empty list clears the bucket's
+        console logins. Scoped re-seed pushes the change to the affected console
+        spokes immediately."""
+        sess = _session_user(request)
+        is_global = _is_admin(sess)
+        is_ta = (not is_global) and _is_tenant_admin(sess)
+        if not is_global and not is_ta:
+            raise HTTPException(status_code=403, detail="admin only")
+        hub = app.state.hub
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        import cred_vault as _cv
+        if is_ta:
+            # A tenant admin is locked to their own tenant bucket — never the
+            # privileged __admin__ slot, never a sibling tenant.
+            bucket = _effective_tenant(request, (body or {}).get("tenant"))
+            if not bucket:
+                raise HTTPException(status_code=403,
+                                    detail="no tenant scope — select one of your tenants")
+        else:
+            bucket = str((body or {}).get("tenant") or "").strip() or _cv.ADMIN_BUCKET
+        psk = str((body or {}).get("psk") or "")
+        # Merge blank passwords with the currently-stored login (a kept row
+        # submits an empty password because secrets are never echoed back).
+        existing = await _console_creds_in_bucket(hub, bucket)
+        existing_pw = {c.get("username", ""): c.get("password", "") for c in existing}
+        creds, seen = [], set()
+        for c in ((body or {}).get("credentials") or []):
+            if not isinstance(c, dict):
+                continue
+            u = str(c.get("username", "")).strip()
+            if not u or u in seen:
+                continue
+            seen.add(u)
+            p = c.get("password", "")
+            if p == "" and u in existing_pw:
+                p = existing_pw[u]
+            creds.append({"username": u, "password": str(p)})
+        actor = (sess.get("user", {}) or {}).get("username", "?")
+        try:
+            if creds:
+                await _cv.put_secret(
+                    hub, bucket, _CONSOLE_VAULT_SECRET, {"credentials": creds},
+                    mode="hub", sec_type="console",
+                    description="Console auto-identify (device scan) login list",
+                    psk=psk, actor=actor)
+            else:
+                # Empty list → remove the bucket's console login secret entirely.
+                try:
+                    await _cv.delete_secret(hub, bucket, _CONSOLE_VAULT_SECRET,
+                                            psk=psk, actor=actor)
+                except _cv.CredVaultError:
+                    pass  # absent → nothing to clear
+        except _cv.CredVaultError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        # Re-seed console spokes so the change lands immediately. A tenant bucket
+        # only re-seeds that tenant's console spokes; __admin__ re-seeds all
+        # (its logins are shared across every tenant's console spoke).
+        hub._console_creds_seeded = set()
+        for sid in (hub.get_all_spokes_by_type("console") or []):
+            try:
+                stenant = hub.state.get_spoke_tenant(sid) or ""
+            except Exception:  # noqa: BLE001
+                stenant = ""
+            if bucket != _cv.ADMIN_BUCKET and stenant != bucket:
+                continue
+            try:
+                resolved = await _console_load_credentials_resolved(hub, stenant)
+                await hub.send_to_spoke_command(sid, "CONSOLE_SET_CREDENTIALS",
+                                                {"credentials": resolved})
+                _console_mark_seeded(hub, sid)
+            except Exception:  # noqa: BLE001
+                pass
+        logger.info("console: %d scan credential(s) set in vault bucket %s by %s",
+                    len(creds), bucket, actor)
+        return {"status": "ok", "count": len(creds), "bucket": bucket,
                 "name": _CONSOLE_VAULT_SECRET}
 
     @app.post("/api/console/open")
