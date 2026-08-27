@@ -387,13 +387,35 @@ def register(app, hub, ctx):
         hub = app.state.hub
         sess = _session_user(request)
         is_admin = _is_admin(sess)
+        # Tenant selector scoping: when the caller explicitly selects a SPECIFIC
+        # tenant (the WebUI tenant picker sends ``?tenant=``; ``default`` is the
+        # built-in global/"All tenants" scope, NOT a real tenant), scope the
+        # fleet to that tenant — even for a Global Admin. Without this an admin
+        # sees the whole fleet regardless of the selector (the cross-tenant leak
+        # this closes). Only honored when the caller may access that tenant
+        # (always true for a Global Admin; a tenant-admin/user is bounded to
+        # their own tenants). ``default``/blank → no acting scope (global view).
+        acting_tenant = None
+        if tenant and tenant != "default" and access.check_tenant_access(sess, tenant):
+            acting_tenant = tenant
+
+        def _row_visible(tid):
+            """Whether an nw_devices row (by ``tenant_id``) is visible to this
+            request. Acting-as a specific tenant → only that tenant's dedicated
+            devices + shared devices. Otherwise the existing rule: admin → all,
+            non-admin → own-tenant + shared (``spoke_visible_to_session``)."""
+            if acting_tenant is not None:
+                return tid == acting_tenant or access.tenant_is_shared(tid)
+            return is_admin or access.spoke_visible_to_session(sess, tid)
+
         # Authoritative visibility: the hub config is the source of truth for
         # the device list (addresses/creds/tenant_id); the spoke adds live
         # reachability. A row is visible iff its tenant_id is admin / shared /
-        # the reader's own (spoke_visible_to_session).
+        # the reader's own (spoke_visible_to_session) — or, when acting-as a
+        # selected tenant, only that tenant's + shared devices.
         all_devs = (hub.state.system_state.get("global_config", {}) or {}).get("nw_devices", []) or []
         visible = [d for d in all_devs if isinstance(d, dict)
-                   and (is_admin or access.spoke_visible_to_session(sess, d.get("tenant_id", "")))]
+                   and _row_visible(d.get("tenant_id", ""))]
         visible_ids = {d.get("id") for d in visible if d.get("id")}
 
         # The hub config ``name`` is authoritative for the DISPLAY name (it's
@@ -472,8 +494,7 @@ def register(app, hub, ctx):
         # WITHOUT blocking on live SSH, then revalidate in the background when
         # it's aging and a spoke is up. ``?refresh=1`` forces a live fetch.
         force = _nw_truthy(request.query_params.get("refresh"))
-        predicate = (lambda r: is_admin
-                     or access.spoke_visible_to_session(sess, r.get("tenant_id", "")))
+        predicate = (lambda r: _row_visible(r.get("tenant_id", "")))
         cached = None if force else hub.nw_cache_get_fleet_filtered(predicate)
         if cached is not None:
             out = dict(_overlay_names(dict(cached.get("devices") or {})))
@@ -529,16 +550,20 @@ def register(app, hub, ctx):
                 logger.warning("nw_list_devices: spoke %s fetch failed: %s", sid, e)
 
         # Authoritative gate: drop any row not in the reader's visible config
-        # set (defense-in-depth against a stale/leaky spoke).
-        if visible_ids:
+        # set (defense-in-depth against a stale/leaky spoke). When acting-as a
+        # selected tenant we ALWAYS gate — even if the tenant has zero visible
+        # devices (empty ``visible_ids``) — so an empty scope yields an empty
+        # list rather than falling through to the unfiltered fleet.
+        if visible_ids or acting_tenant is not None:
             merged = [r for r in merged if r.get("id") in visible_ids]
 
         env = {"status": "SUCCESS", "data": merged,
                "message": f"{len(merged)} device(s)"}
         # The global cache holds the WHOLE fleet (last admin fetch) so the
         # offline path serves a complete, filterable snapshot — only update it
-        # from a whole-fleet (admin) fetch, never a non-admin subset.
-        if is_admin:
+        # from a whole-fleet (admin) fetch, never a non-admin subset NOR an
+        # admin acting-as a single tenant (``env`` is a scoped subset there).
+        if is_admin and acting_tenant is None:
             try:
                 await hub.nw_cache_set_fleet(env)
             except Exception:

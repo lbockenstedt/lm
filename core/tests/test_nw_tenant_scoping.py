@@ -286,6 +286,55 @@ def test_list_admin_sees_all_devices(monkeypatch, tmp_path):
     assert ids == {"acme-sw", "other-sw", "shared-sw"}
 
 
+def test_list_admin_acting_as_tenant_scopes_to_that_tenant(monkeypatch, tmp_path):
+    """Tenant selector: a Global Admin with an explicit ``?tenant=acme`` sees
+    ONLY acme + shared devices — NOT othercorp's (the cross-tenant leak the
+    selector is supposed to close). Mirrors the Simulations behavior."""
+    c, hub = _build(monkeypatch, tmp_path, shared=True)
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    r = c.get("/api/nw/devices?tenant=acme", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    ids = {d["id"] for d in r.json()["data"]}
+    assert ids == {"acme-sw", "shared-sw"}   # NOT other-sw
+
+
+def test_list_admin_default_tenant_is_global(monkeypatch, tmp_path):
+    """``default`` is the built-in global/"All tenants" scope — an admin with
+    ``?tenant=default`` still sees the whole fleet (no scoping)."""
+    c, hub = _build(monkeypatch, tmp_path, shared=True)
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    r = c.get("/api/nw/devices?tenant=default", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    ids = {d["id"] for d in r.json()["data"]}
+    assert ids == {"acme-sw", "other-sw", "shared-sw"}
+
+
+def test_list_admin_acting_as_empty_tenant_is_empty_not_fleet(monkeypatch, tmp_path):
+    """Acting-as a tenant with no devices (and no shared tenant) yields an
+    EMPTY list — the always-gate must not fall through to the unfiltered
+    fleet when the scoped visible set is empty."""
+    c, hub = _build(monkeypatch, tmp_path, shared=False)
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    r = c.get("/api/nw/devices?tenant=nobody", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    assert r.json()["data"] == []
+
+
+def test_list_offline_cache_admin_acting_as_tenant_scoped(monkeypatch, tmp_path):
+    """Offline cache path also honors the selector: an admin acting-as acme is
+    served the whole-fleet cache TENANT-FILTERED to acme + shared."""
+    c, hub = _build(monkeypatch, tmp_path, shared=True)
+    asyncio.get_event_loop().run_until_complete(
+        hub.nw_cache_set_fleet({"status": "SUCCESS",
+                                "data": [_R_ACME, _R_OTHER, _R_SHARED]}))
+    hub.active_connections = {"ipam-spoke"}
+    tok = _mint(hub, "admin", tenants=[], admin=True)
+    r = c.get("/api/nw/devices?tenant=acme", cookies={"lm_session": tok})
+    assert r.status_code == 200, r.text
+    ids = {d["id"] for d in r.json()["data"]}
+    assert ids == {"acme-sw", "shared-sw"}   # NOT other-sw
+
+
 def test_list_non_admin_sees_own_plus_shared_only(monkeypatch, tmp_path):
     """An acme user sees acme + shared; othercorp's device never surfaces."""
     c, hub = _build(monkeypatch, tmp_path, shared=True)
