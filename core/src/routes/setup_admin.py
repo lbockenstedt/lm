@@ -1032,6 +1032,10 @@ def register(app, hub, ctx):
                 _c = data.get("context") or {}
                 if isinstance(_c, dict):
                     _tid = str(_c.get("currentTenant") or "").strip()
+            # 'default' is the WebUI's no-tenant sentinel, not a real tenant —
+            # store it as untagged (Global-Admin-only) rather than a bogus tenant.
+            if _tid == "default":
+                _tid = ""
             data["tenant_id"] = _tid
             rid = await asyncio.to_thread(hub._store_bug_report, data)
             if not rid:
@@ -1123,14 +1127,32 @@ def register(app, hub, ctx):
     def _bug_acting_tenants(sess):
         return (sess or {}).get("user", {}).get("tenants") or []
 
+    def _bug_report_tenant(r):
+        """The tenant a report is attributed to. Prefer the authoritative,
+        server-resolved top-level ``tenant_id`` (set at file time, browser can't
+        spoof it); fall back to the tenant captured in the report's
+        ``context.currentTenant`` so LEGACY reports — filed before tenant_id was
+        recorded — still scope by the tenant that's already in the bug."""
+        r = r or {}
+        tid = str(r.get("tenant_id") or "").strip()
+        if tid:
+            return tid
+        cmeta = r.get("context") or {}
+        if isinstance(cmeta, dict):
+            ctid = str(cmeta.get("currentTenant") or "").strip()
+            # 'default' is the WebUI no-tenant sentinel, not a real tenant.
+            return "" if ctid == "default" else ctid
+        return ""
+
     def _bug_report_visible(sess, r):
-        """Global Admin → every report; tenant-admin → only reports tagged with
-        one of their tenants. Untagged (legacy) reports stay Global-Admin-only,
-        so a tenant admin never sees a report not attributed to their tenant
-        (mirrors tenant_devices._owns)."""
+        """Global Admin → every report; tenant-admin → only reports attributed
+        to one of their tenants (top-level tenant_id, else the tenant in the
+        report's context). Untagged reports stay Global-Admin-only, so a tenant
+        admin never sees a report not attributed to their tenant (mirrors
+        tenant_devices._owns)."""
         if ctx._is_admin(sess):
             return True
-        tid = str((r or {}).get("tenant_id") or "")
+        tid = _bug_report_tenant(r)
         return bool(tid) and tid in _bug_acting_tenants(sess)
 
     @app.get("/tenant/bug-reports")
