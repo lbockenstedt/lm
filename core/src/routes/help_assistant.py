@@ -366,7 +366,9 @@ def register(app, hub, ctx):
             "explain it in plain, non-technical language (what it simulates, why, what "
             "the user sees), THEN show a few short CODE SNIPPETS from search_source as "
             "fenced code blocks, each labeled with its `file:line`, so the user can go "
-            "look at the actual implementation. If, after checking docs, source, and "
+            "look at the actual implementation. Be efficient with tools: a couple of "
+            "focused searches is enough — once you have the relevant docs/code, STOP "
+            "calling tools and write the answer. If, after checking docs, source, and "
             "live data, the answer genuinely isn't there, say so plainly. Be concise "
             "and concrete.\n\n"
             "=== DOCUMENTATION ===\n" + doc_ctx
@@ -374,7 +376,7 @@ def register(app, hub, ctx):
         messages = [{"role": "user", "content": question}]
         used_tools = []
         answer = ""
-        for _ in range(5):
+        for _ in range(8):
             try:
                 res = await hub.request_response(
                     agent, "HELP_ASK",
@@ -408,8 +410,32 @@ def register(app, hub, ctx):
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                  "name": name, "content": json.dumps(out)[:8000]})
         else:
-            answer = answer or ("The assistant reached the tool-iteration limit "
-                                "without a final answer.")
+            # Hit the tool-call budget without a text answer (the model kept
+            # searching). Don't give up — force ONE final turn with tools
+            # DISABLED so it must synthesize an answer from everything the tools
+            # already returned (all of it is in `messages`).
+            logger.info("help_ask: tool budget reached (%d calls) — forcing a "
+                        "tool-free synthesis turn", len(used_tools))
+            try:
+                res = await hub.request_response(
+                    agent, "HELP_ASK",
+                    {"messages": messages + [{"role": "user", "content": (
+                        "Stop searching and answer my question NOW using the "
+                        "documentation, code snippets, and data you already gathered "
+                        "above. Quote the most relevant code with its file:line. If "
+                        "something is still unknown, explain what you DO know and note "
+                        "the gap.")}],
+                     "tools": None, "system": system},
+                    timeout=90.0)
+                data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
+                if isinstance(data, dict) and data.get("status") == "SUCCESS":
+                    answer = (data.get("assistant") or {}).get("content") or answer
+            except Exception as e:  # noqa: BLE001
+                logger.warning("help_ask forced-synthesis turn failed: %s", e)
+            if not answer:
+                answer = ("I gathered documentation and code for this but couldn't "
+                          "compose a final answer. Please try rephrasing, or ask about "
+                          "a narrower part of it.")
 
         def _degenerate(a):
             # Some local models emit a broken/empty function call instead of a real
