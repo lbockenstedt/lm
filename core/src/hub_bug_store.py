@@ -166,6 +166,16 @@ class HubBugStoreMixin:
     def _mark_bug_filed(self, rid: str, issue_url: str) -> bool:
         return self._update_bug_status(rid, filed=True, issue_url=issue_url, status="filed")
 
+    def _mark_bug_in_progress(self, rid: str, issue_url: str = "") -> bool:
+        """ab has STARTED actively working this report's GitHub issue (fix /
+        build attempts underway) → mark it 'in_progress' so the LM UI shows the
+        user it is being worked on, distinct from the passive 'filed' (issue
+        opened, not yet worked) and terminal 'fixed'. filed stays True. Sent by
+        ab at the top of process_single_issue once the issue is deemed
+        actionable; the eventual MARK_BUG_FIXED/CLOSED overwrites it."""
+        return self._update_bug_status(rid, filed=True, issue_url=issue_url or None,
+                                       status="in_progress")
+
     def _mark_bug_duplicate(self, rid: str, issue_url: str) -> bool:
         """ab detected this report is a duplicate/recurrence of an EXISTING
         GitHub issue instead of filing a fresh one → mark it 'duplicate' + link that
@@ -182,7 +192,7 @@ class HubBugStoreMixin:
         if (r.get("type") or "bug") != "feature":
             return False
         st = str(r.get("status") or "").lower()
-        return not (st in ("approved", "filed", "fixed") or bool(r.get("filed")))
+        return not (st in ("approved", "in_progress", "filed", "fixed") or bool(r.get("filed")))
 
     def _approve_bug_report(self, rid: str) -> bool:
         """Admin approved a feature request → mark it 'approved' so GET_BUG_REPORTS

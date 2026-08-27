@@ -5650,6 +5650,12 @@ async function loadBugReports(typeFilter) {
                 // Recurrence: ab matched this to an existing issue instead of
                 // filing a new one — link the SAME issue (must win over r.filed).
                 status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-slate-500 font-semibold hover:underline" title="Duplicate — links the same GitHub issue">⧉ Duplicate ↗</a>`;
+            } else if (_st === 'in_progress') {
+                // ab is actively working the issue right now — must win over
+                // r.filed (a report being worked is also filed).
+                status = r.issue_url
+                    ? `<a href="${escapeHtml(r.issue_url)}" target="_blank" class="text-amber-600 font-semibold hover:underline" title="AppBuilder is actively working on this">⚙ In Progress ↗</a>`
+                    : `<span class="text-amber-600 font-semibold" title="AppBuilder is actively working on this">⚙ In Progress</span>`;
             } else if (r.filed) {
                 status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline">Filed ↗</a>`;
             } else if (isFeat && _st !== 'approved') {
