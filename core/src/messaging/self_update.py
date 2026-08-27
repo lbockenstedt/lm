@@ -272,22 +272,40 @@ class SelfUpdateMixin:
         ``LOCK_NB`` so we can give up after ``timeout`` (warn + skip core this
         cycle) instead of blocking the loop indefinitely. Never held across
         ``os._exit(3)`` — the ``finally`` releases before the caller exits.
-        Falls back to a repo-local lock file when /var/lib/lm isn't writable."""
-        lock_path = "/var/lib/lm/.lm-core-update.lock"
-        try:
-            os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-        except OSError:
-            lock_path = os.path.join(self._repo_root(), ".lm-state",
-                                     "core-update.lock")
-            try:
-                os.makedirs(os.path.dirname(lock_path), exist_ok=True)
-            except OSError:
-                lock_path = os.path.join(self._repo_root(), ".lm-core-update.lock")
+        Falls back to a repo-local lock file when /var/lib/lm isn't writable —
+        including the case where the dir exists but the lock FILE was created by
+        another user (root/the hub) and this (non-root ``svc_lm``) process gets
+        ``[Errno 13] Permission denied`` opening it. makedirs succeeding does NOT
+        prove the file is openable, so the fallback is driven by the open()."""
+        candidates = [
+            "/var/lib/lm/.lm-core-update.lock",
+            os.path.join(self._repo_root(), ".lm-state", "core-update.lock"),
+            os.path.join(self._repo_root(), ".lm-core-update.lock"),
+        ]
         fd = None
+        lock_path = candidates[0]
+        for i, cand in enumerate(candidates):
+            try:
+                os.makedirs(os.path.dirname(cand), exist_ok=True)
+                fd = os.open(cand, os.O_CREAT | os.O_RDWR, 0o644)
+                lock_path = cand
+                if i > 0:
+                    logger.warning("core-update lock %s not usable — using "
+                                   "repo-local fallback %s (run the installer to "
+                                   "fix /var/lib/lm perms)", candidates[0], cand)
+                break
+            except OSError:
+                continue
+        if fd is None:
+            # No writable lock anywhere — fail open so a perms glitch can never
+            # brick the update channel; core just isn't serialized this cycle.
+            logger.warning("no writable core-update lock (tried %s); proceeding "
+                           "without host-wide serialization", candidates)
+            yield True
+            return
         acquired = False
         deadline_ts = time.monotonic() + timeout
         try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
             while True:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
