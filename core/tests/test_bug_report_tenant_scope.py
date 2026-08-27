@@ -56,11 +56,25 @@ def test_warm_load_rebuilds_tenant_id_from_disk(tmp_path):
 
 
 # ── Visibility rule (mirrors routes.setup_admin._bug_report_visible) ──────────
+def _report_tenant(report):
+    """Standalone copy of the route's tenant-resolution: top-level tenant_id,
+    else the tenant in context.currentTenant ('default' sentinel → untagged)."""
+    r = report or {}
+    tid = str(r.get("tenant_id") or "").strip()
+    if tid:
+        return tid
+    cmeta = r.get("context") or {}
+    if isinstance(cmeta, dict):
+        ctid = str(cmeta.get("currentTenant") or "").strip()
+        return "" if ctid == "default" else ctid
+    return ""
+
+
 def _visible(is_admin, acting_tenants, report):
     """Standalone copy of the route's scoping predicate for unit testing."""
     if is_admin:
         return True
-    tid = str((report or {}).get("tenant_id") or "")
+    tid = _report_tenant(report)
     return bool(tid) and tid in (acting_tenants or [])
 
 
@@ -77,3 +91,24 @@ def test_tenant_admin_sees_only_own_tenant():
 def test_tenant_admin_never_sees_untagged_legacy_report():
     assert _visible(False, ["lrb"], {"tenant_id": ""}) is False
     assert _visible(False, ["lrb"], {}) is False
+
+
+def test_legacy_report_scopes_by_context_tenant():
+    """A report with no top-level tenant_id still scopes by the tenant captured
+    in its context (the tenant that's 'in the bug')."""
+    own = {"tenant_id": "", "context": {"currentTenant": "lrb"}}
+    other = {"tenant_id": "", "context": {"currentTenant": "dxp"}}
+    assert _visible(False, ["lrb"], own) is True
+    assert _visible(False, ["lrb"], other) is False
+
+
+def test_top_level_tenant_id_wins_over_context():
+    r = {"tenant_id": "lrb", "context": {"currentTenant": "dxp"}}
+    assert _visible(False, ["lrb"], r) is True
+    assert _visible(False, ["dxp"], r) is False
+
+
+def test_default_sentinel_context_is_untagged():
+    r = {"tenant_id": "", "context": {"currentTenant": "default"}}
+    assert _visible(False, ["default"], r) is False
+    assert _visible(False, ["lrb"], r) is False
