@@ -1700,13 +1700,15 @@ def create_app(hub):
         #                            are diagnostic spoke relays unused by the WebUI. The
         #                            real cppm *data* routes (devices/sessions/nac-status/…)
         #                            stay authed-read for tenant users.
-        #   /api/help/ask     — the LLM help assistant's hub-side tools run with a
-        #                        hub-wide (cross-tenant) view (search_devices hardcodes
-        #                        tenant "default"; get_spokes_status returns the whole
-        #                        fleet). Admin-only; /api/help/available stays authed-read.
+        #   /api/help/ask     — the LLM help assistant. Its live tools are now
+        #                        tenant-scoped to the CALLER (search_devices
+        #                        delegates to the scoped /api/search; get_spokes
+        #                        _status filters to the caller's spokes), so it
+        #                        is authed-read like /api/help/available — any
+        #                        signed-in user may use Ask AI.
         _ADMIN_API_PREFIXES = ("/api/agent/", "/api/generic/", "/api/pxmx/agents/",
                                "/api/cppm/probe", "/api/cppm/test-auth", "/cppm/refresh", "/cppm/health",
-                               "/api/help/ask", "/api/exec", "/api/os-updates")
+                               "/api/exec", "/api/os-updates")
         if any(path.startswith(p) for p in _ADMIN_API_PREFIXES):
             if not _is_admin(sess):
                 return JSONResponse(status_code=403, content={"detail": "Admin access required"})

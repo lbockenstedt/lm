@@ -11,10 +11,13 @@ HARD REQUIREMENT: the feature is only usable when ab is connected —
 otherwise. Routes live under ``/api/help/*`` so the access-control middleware
 gates them (valid session required) like every other ``/api/`` route.
 """
-from api import HTTPException, Request, logger, os, json, asyncio
+from api import HTTPException, Request, logger, os, json, asyncio, access
 
 
 def register(app, hub, ctx):
+
+    _session_user = ctx._session_user
+    _is_admin = ctx._is_admin
 
     _DOCS_DIR = next(
         (d for d in (
@@ -90,15 +93,24 @@ def register(app, hub, ctx):
             picked = [n for n in ("README", "architecture-topology", "lm-hub") if n in docs][:2]
         return picked
 
-    # ── Phase 2 tools (executed hub-side) ────────────────────────────────────
-    def _tool_spokes_status(_args):
+    # ── Phase 2 tools (executed hub-side, scoped to the CALLER) ──────────────
+    def _tool_spokes_status(_args, request):
         """Every known spoke/agent + connected/approved/type — answers
-        'what's connected' / 'why is my <x> spoke offline'."""
+        'what's connected' / 'why is my <x> spoke offline'. Tenant-scoped: an
+        admin sees the whole fleet; a non-admin sees only spokes bound to their
+        own tenant(s) (+ shared), so opening Ask AI to every user can't reveal
+        another tenant's infrastructure."""
+        sess = _session_user(request)
+        is_admin = _is_admin(sess)
         known = hub.state.system_state.get("known_modules", []) or []
         meta = hub.state.system_state.get("module_metadata", {}) or {}
         conns = getattr(hub, "active_connections", {}) or {}
         out = []
         for sid in known:
+            if not is_admin:
+                tid = hub.state.get_spoke_tenant(sid) or ""
+                if not access.spoke_visible_to_session(sess, tid):
+                    continue
             out.append({
                 "spoke_id": sid,
                 "connected": hub._primary_key(sid) in conns,
@@ -108,12 +120,31 @@ def register(app, hub, ctx):
             })
         return {"spokes": out, "connected_count": sum(1 for s in out if s["connected"])}
 
-    async def _tool_search_devices(args):
-        """Fan a query to every searchable spoke type (mirrors /api/search's
-        core, minus tenant scoping — the assistant runs with hub-wide view)."""
+    async def _tool_search_devices(args, request):
+        """Search the lab for devices/VMs/leases/users/sessions. Delegates to
+        the shared, tenant-scoped /api/search handler (cross_system_search) with
+        the CALLER's own request, so a non-admin only ever sees their tenant's
+        resources — never a hub-wide view. Falls back to a hub-wide fan-out only
+        for admins if the shared handler isn't wired up."""
         q = str(args.get("query") or "").strip()
         if not q:
             return {"error": "query required"}
+
+        scoped = getattr(app.state, "cross_system_search", None)
+        if scoped is not None:
+            try:
+                env = await scoped(request, q=q, tenant=None)
+                results = (env or {}).get("results", []) if isinstance(env, dict) else []
+                return {"query": q, "total": len(results), "results": results[:50]}
+            except HTTPException:
+                raise
+            except Exception as e:  # noqa: BLE001
+                return {"query": q, "total": 0, "results": [],
+                        "error": f"search failed: {e}"}
+
+        # Fallback (shared handler unavailable): admins only, hub-wide.
+        if not _is_admin(_session_user(request)):
+            return {"query": q, "total": 0, "results": []}
         payload = {"q": q, "tenant": "default"}
 
         async def _call(spoke, cmd):
@@ -285,11 +316,11 @@ def register(app, hub, ctx):
         }},
     ]
 
-    async def _exec_tool(name, args):
+    async def _exec_tool(name, args, request):
         if name == "get_spokes_status":
-            return _tool_spokes_status(args)
+            return _tool_spokes_status(args, request)
         if name == "search_devices":
-            return await _tool_search_devices(args)
+            return await _tool_search_devices(args, request)
         if name == "search_docs":
             return _tool_search_docs(args)
         if name == "search_source":
@@ -373,7 +404,7 @@ def register(app, hub, ctx):
                 except Exception:
                     args = {}
                 used_tools.append(name)
-                out = await _exec_tool(name, args)
+                out = await _exec_tool(name, args, request)
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                  "name": name, "content": json.dumps(out)[:8000]})
         else:

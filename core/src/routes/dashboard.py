@@ -680,3 +680,9 @@ def register(app, hub, ctx):
         merged.extend(console_hits)
         merged.extend(credvault_hits)
         return _envelope(merged, False)
+
+    # Expose the tenant-scoped global search so other routes can reuse it. The
+    # help assistant's search_devices tool calls this (with the caller's own
+    # request) so a non-admin gets a properly tenant-scoped answer instead of
+    # the hub-wide fan-out — this is what makes Ask AI safe for any user.
+    app.state.cross_system_search = cross_system_search
