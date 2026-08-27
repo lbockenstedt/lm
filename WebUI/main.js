@@ -4361,7 +4361,7 @@ async function loadSecurityData() {
     const evts = d.events || [];
     const evtRows = evts.slice(0, 60).map((e, i) => `<tr class="border-b border-slate-100 cursor-pointer hover:bg-slate-50" onclick="securityEventDetail(${i})" title="Click for full details">
         <td class="px-2 py-1 text-slate-400 whitespace-nowrap">${fmtTs(e.ts)}</td>
-        <td class="px-2 py-1 font-mono">${escapeHtml(e.ip)}</td>
+        <td class="px-2 py-1 font-mono">${escapeHtml(e.ip)}${e.ip ? `<div class="text-[10px] font-sans font-normal" data-geo-ip="${escapeHtml(e.ip)}"></div>` : ''}</td>
         <td class="px-2 py-1"><span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] uppercase">${escapeHtml(e.kind)}</span></td>
         <td class="px-2 py-1 text-slate-500">${escapeHtml(e.username || '')}</td>
         <td class="px-2 py-1 text-slate-400 truncate max-w-[180px]" title="${escapeHtml(e.detail || '')}">${e.meta ? '<span class="text-[#01A982] mr-1" title="has evidence">🔍</span>' : ''}${escapeHtml(e.detail || '')}</td></tr>`).join('');
@@ -4377,6 +4377,52 @@ async function loadSecurityData() {
       ${neverTile}
       ${events}`;
     _secPrioLive();
+    // Best-effort origin enrichment (country / ISP / reverse-DNS) for every IP
+    // shown in the blocked-IP preview and the recent-attempt feed. Lazy + cached
+    // server-side, so it never blocks the initial paint.
+    _secDecorateGeo([...allBlocks.map(b => b.ip), ...evts.map(e => e.ip)], el);
+}
+
+// ── IP origin enrichment (reverse DNS + geolocation) ─────────────────────────
+// Decorates blocked-IP rows and recent-attempt rows with the source IP's
+// country / ISP / reverse-DNS, fetched lazily from /api/security/geo (cached
+// server-side). Results are stashed on window._secGeo and painted into any
+// [data-geo-ip] slot, so modals opened later reuse the same cache.
+window._secGeo = window._secGeo || {};
+function _secGeoFmt(g) {
+    if (!g) return '';
+    if (g.scope === 'private') return '<span class="text-slate-400" title="Internal / LAN address — not geolocated">🏠 private/LAN</span>';
+    if (g.scope === 'reserved' || g.scope === 'invalid') return `<span class="text-slate-400">${escapeHtml(g.label || g.scope)}</span>`;
+    const loc = [g.city, g.region, g.country].filter(Boolean).join(', ');
+    const bits = [];
+    if (loc) bits.push((g.flag ? g.flag + ' ' : '🌐 ') + escapeHtml(loc));
+    if (g.isp) bits.push(escapeHtml(g.isp));
+    if (!bits.length && g.ptr) bits.push(escapeHtml(g.ptr));
+    if (!bits.length) return '';
+    const title = [g.ptr ? 'PTR: ' + g.ptr : '', g.asn ? 'ASN: ' + g.asn : '',
+                   g.org && g.org !== g.isp ? 'Org: ' + g.org : ''].filter(Boolean).join(' · ');
+    return `<span class="text-slate-500"${title ? ` title="${escapeHtml(title)}"` : ''}>${bits.join(' · ')}</span>`;
+}
+async function _secFetchGeo(ips) {
+    const need = [...new Set(ips)].filter(ip => ip && !(ip in window._secGeo));
+    if (!need.length) return;
+    try {
+        const d = await apiJson('/api/security/geo', { method: 'POST', body: JSON.stringify({ ips: need }) });
+        Object.assign(window._secGeo, (d && d.geo) || {});
+        // Cache misses as 'unknown' so a repeated poll doesn't refetch them.
+        need.forEach(ip => { if (!(ip in window._secGeo)) window._secGeo[ip] = { ip, scope: 'unknown' }; });
+    } catch (e) { /* best-effort — geo is purely advisory */ }
+}
+function _secApplyGeo(root) {
+    (root || document).querySelectorAll('[data-geo-ip]').forEach(el => {
+        const html = _secGeoFmt(window._secGeo[el.getAttribute('data-geo-ip')]);
+        if (html) el.innerHTML = html;
+    });
+}
+async function _secDecorateGeo(ips, root) {
+    _secApplyGeo(root);            // paint anything already cached, instantly
+    await _secFetchGeo(ips);
+    _secApplyGeo(root);            // repaint with freshly-fetched records
 }
 
 // ── Security event drill-down ───────────────────────────────────────────────
@@ -4405,7 +4451,7 @@ function securityEventsModal(filter, title) {
         const e = all[i];
         return `<tr class="border-b border-slate-100 cursor-pointer hover:bg-slate-50" onclick="securityEventDetail(${i})" title="Click for full details">
             <td class="px-2 py-1 text-slate-400 whitespace-nowrap">${_secFmtTs(e.ts)}</td>
-            <td class="px-2 py-1 font-mono">${escapeHtml(e.ip || '')}</td>
+            <td class="px-2 py-1 font-mono">${escapeHtml(e.ip || '')}${e.ip ? `<div class="text-[10px] font-sans font-normal" data-geo-ip="${escapeHtml(e.ip)}"></div>` : ''}</td>
             <td class="px-2 py-1"><span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 text-[10px] uppercase">${escapeHtml(e.kind || '')}</span></td>
             <td class="px-2 py-1 text-slate-500">${escapeHtml(e.username || '')}</td>
             <td class="px-2 py-1 text-slate-400 truncate max-w-[220px]" title="${escapeHtml(e.detail || '')}">${e.meta ? '<span class="text-[#01A982] mr-1">🔍</span>' : ''}${escapeHtml(e.detail || '')}</td></tr>`;
@@ -4418,6 +4464,7 @@ function securityEventsModal(filter, title) {
         <p class="text-[11px] text-slate-400">Showing the recent-events evidence feed (capped, newest first). Lifetime totals may be higher; click any row for full details.</p>
         <div class="overflow-x-auto max-h-[60vh] overflow-y-auto"><table class="w-full text-xs"><thead class="text-slate-400 text-[10px] uppercase sticky top-0 bg-white"><tr><th class="px-2 py-1 text-left">When</th><th class="px-2 py-1 text-left">Source IP</th><th class="px-2 py-1 text-left">Kind</th><th class="px-2 py-1 text-left">User</th><th class="px-2 py-1 text-left">Detail</th></tr></thead><tbody>${rows || '<tr><td colspan="5" class="px-2 py-3 text-slate-400 italic">no matching events retained</td></tr>'}</tbody></table></div>`;
     openModal('sec-events-modal', body, { backdropClose: true, card: 'w-full max-w-3xl p-6 space-y-3 max-h-[90vh] overflow-y-auto' });
+    _secDecorateGeo(idx.map(i => all[i].ip), document.getElementById('sec-events-modal'));
 }
 
 function securityEventDetail(i) {
@@ -4433,6 +4480,17 @@ function securityEventDetail(i) {
         + (e.severity ? row('Severity', e.severity) : '')
         + row('Category', e.anomaly ? 'anomaly' : 'auth failure')
         + (e.detail ? row('Detail', e.detail) : '');
+    const g = (window._secGeo || {})[e.ip];
+    if (g && g.scope === 'public') {
+        const loc = [g.city, g.region, g.country].filter(Boolean).join(', ');
+        core += (loc ? row('Origin', (g.flag ? g.flag + ' ' : '') + loc) : '')
+            + (g.isp ? row('ISP', g.isp) : '')
+            + (g.org && g.org !== g.isp ? row('Org', g.org) : '')
+            + (g.asn ? row('ASN', g.asn) : '')
+            + (g.ptr ? row('Reverse DNS', g.ptr) : '');
+    } else if (g && (g.scope === 'private' || g.scope === 'reserved')) {
+        core += row('Origin', g.label || g.scope);
+    }
     const meta = e.meta || {};
     const metaRows = Object.keys(meta).map(k => row(k, meta[k])).join('');
     const body = `
@@ -4475,6 +4533,7 @@ function _secBlockRowHtml(b) {
     return `<div class="flex items-center justify-between gap-3 py-1.5 border-b border-slate-100 last:border-0">
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-2 flex-wrap"><span class="font-mono text-slate-700 text-sm">${escapeHtml(b.ip || '')}</span>${_secBlockBadges(b)}${b.permanent ? '' : `<span class="text-[10px] text-slate-400">expires ${_secExpIn(b)}</span>`}</div>
+          <div class="text-[11px]" data-geo-ip="${escapeHtml(b.ip || '')}"></div>
           <div class="text-[11px] text-slate-400 truncate" title="${escapeHtml(b.reason || '')}">${escapeHtml(b.reason || '')}</div>
         </div>
         <button onclick="_secModalUnblock('${escapeHtml(b.ip || '')}')" class="text-[11px] text-red-500 hover:text-red-700 font-medium shrink-0">Unblock</button>
@@ -4516,6 +4575,7 @@ function _secBlocksRender() {
     const cnt = document.getElementById('sec-blocks-count');
     if (cnt) cnt.textContent = `(${rows.length}${(term || f !== 'all') ? ` of ${all.length}` : ''})`;
     listEl.innerHTML = rows.length ? rows.map(_secBlockRowHtml).join('') : '<p class="text-slate-400 italic py-3 text-sm">no matching blocked IPs</p>';
+    _secDecorateGeo(rows.map(b => b.ip), listEl);
 }
 async function _secModalUnblock(ip) {
     await _securityReq('/api/security/unblock', 'POST', { ip }, `Unblocked ${ip}`);

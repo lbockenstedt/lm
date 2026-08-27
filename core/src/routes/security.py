@@ -97,6 +97,21 @@ def register(app, hub, ctx):
         hub.threat_monitor._nsg_dirty = True
         return await hub.threat_monitor.reconcile_nsg()
 
+    @app.post("/api/security/geo")
+    async def security_geo(request: Request):
+        """Best-effort origin enrichment for a set of IPs (reverse DNS + country/
+        ISP/ASN) surfaced next to the blocked-IP tiles and the recent-attempt
+        feed. Body: {ips: [...]}. Returns {ip: {scope, ptr, country, isp, ...}}.
+        Purely advisory (never blocks); private/LAN IPs are classified locally
+        and never sent to the external provider."""
+        _guard(request)
+        from security import ip_geo
+        body = await request.json() or {}
+        ips = body.get("ips") or []
+        if not isinstance(ips, list):
+            raise HTTPException(status_code=400, detail="ips must be a list")
+        return {"geo": await ip_geo.enrich_many([str(x) for x in ips[:256]])}
+
     @app.post("/api/security/selftest")
     async def security_selftest(request: Request):
         """Record a synthetic detection signal so the operator can verify the
