@@ -366,7 +366,12 @@ class StateManager:
                 self._save_file(self.tenants_path, self.tenant_state)
             with self._dirty_lock:
                 self._dirty = False
-            logger.info("State persisted to disk (system & tenants) atomically")
+            # DEBUG, not INFO: this fires on every save_state() call (request
+            # handlers, key rotation, the update pipeline), which made it ~96%
+            # of all hub log lines and buried real events. A successful,
+            # routine persist is not news — failures still log at ERROR below,
+            # and Debug Mode re-reveals this line when tracing persistence.
+            logger.debug("State persisted to disk (system & tenants) atomically")
         except Exception as e:
             logger.error(f"Failed to save state to disk: {e}")
             raise
@@ -429,7 +434,9 @@ class StateManager:
             sys_json = json.dumps(self.system_state, indent=2, default=str)
             ten_json = json.dumps(self.tenant_state, indent=2, default=str)
             await asyncio.to_thread(self._write_both_locked, sys_json, ten_json)
-            logger.info("State persisted to disk (dirty-flagged flush, offloaded)")
+            # DEBUG for the same reason as save_state's line: a routine 60s
+            # flush succeeding is not news. Errors below still log at ERROR.
+            logger.debug("State persisted to disk (dirty-flagged flush, offloaded)")
             return True
         except Exception as e:
             logger.error(f"Persistence loop error: {e}")
