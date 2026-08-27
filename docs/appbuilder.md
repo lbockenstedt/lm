@@ -130,6 +130,20 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
   per unique 200-char message signature per browser session (a `Set` in
   `main.js`) so a spammy handler doesn't open a GitHub issue on every throw; the
   banner's status span shows "Filing Bug with AppBuilder…" → "Bug filed (id …)".
+- **Per-log-line "File bug" affordance.** Every log event row in the Logs view
+  (`WebUI/main.js` — `_renderLogLineRow`, plus the Recovery tab's `recoveryRow`)
+  carries an unobtrusive HPE-green **🐞 Bug** button, hidden until the row is
+  hovered/focused so it doesn't clutter the dense log stream. Clicking it calls
+  `fileBugFromLog(event, btn)`, which opens the SAME editable File-a-Bug modal
+  (`fileBug(prefill)`) pre-filled with the raw log line, its level and
+  source/module, and the active view/tenant/URL/user-agent — so the user can add
+  detail and pick severity before submitting through the normal `/api/bug-report`
+  pipeline. Unlike the runtime-error auto-file, the explanation is framed
+  honestly as *user-initiated* ("Filing a bug from a specific log event"), NOT
+  with `fileBugAuto`'s "the user did not type this" preamble. The button uses
+  `event.stopPropagation()` so clicking it never toggles a grouped-log (×N) row's
+  expand/collapse, and the raw line rides in `data-*` attributes so grouped
+  expand/collapse, copy-logs, and the ×N badge are all preserved.
 - **Connecting to the hub.** AppBuilder is a hub **agent**, never a spoke: it authenticates
   the same zero-touch/admin-approval + HMAC session-key flow every spoke uses, but
   registers as `module_type="agent"` and does not handle any `CS_*`/`PXMX_*`/`LE_*`
