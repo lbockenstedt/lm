@@ -1121,10 +1121,12 @@ function showPromptToast(message, opts = {}) {
 // [bug-report] marker and stores the full artifacts on disk; ab then
 // files a (clean-body) GitHub issue and pulls the artifacts from the hub to use
 // as AI-fix context. See plan bright-launching-thompson.md.
-async function fileBug() {
-    // One modal at a time.
+async function fileBug(prefill = '') {
+    // One modal at a time. The footer "File a bug" button toggles the modal
+    // closed on a second click; a `prefill` (e.g. from a log-line 🐞 button)
+    // always reopens it fresh so the pre-filled text takes effect.
     const existing = document.getElementById('file-bug-modal');
-    if (existing) { existing.remove(); return; }
+    if (existing) { existing.remove(); if (!prefill) return; }
 
     const modal = document.createElement('div');
     modal.id = 'file-bug-modal';
@@ -1170,7 +1172,17 @@ async function fileBug() {
             </div>
         </div>`;
     document.body.appendChild(modal);
-    setTimeout(() => document.getElementById('bug-description')?.focus(), 50);
+    // Pre-fill the textarea (via .value, not template content, so the raw text
+    // — newlines and all — lands verbatim and stays user-editable).
+    const _ta = document.getElementById('bug-description');
+    if (_ta && prefill) _ta.value = prefill;
+    setTimeout(() => {
+        const t = document.getElementById('bug-description');
+        t?.focus();
+        // Drop the caret at the end so the user types their detail after the
+        // pre-filled log context rather than in front of it.
+        if (t && prefill) t.setSelectionRange(t.value.length, t.value.length);
+    }, 50);
 }
 
 // Shared capture for manual + auto bug filing: console buffer + truncated DOM
@@ -1293,6 +1305,38 @@ async function fileBugAuto(message, where, onStatus) {
     }
 }
 window.fileBugAuto = fileBugAuto;
+
+// User-initiated bug filing from a specific log event row (the per-row 🐞 "Bug"
+// button in the Logs view). Unlike fileBugAuto — the runtime-error autopilot
+// whose explanation is prefixed "the user did not type this" — THIS is
+// explicitly the user's deliberate choice, so the explanation is framed
+// honestly as user-initiated. Opens the editable File-a-Bug modal pre-filled
+// from the log line so the user can add detail and pick severity before
+// submitting (the modal path is the nicer UX than a silent one-click file).
+// `event.stopPropagation()` stops the click from ALSO toggling a grouped-log
+// row's expand/collapse (grouped headers carry an onclick=toggleLogGroup).
+function fileBugFromLog(event, btn) {
+    if (event && typeof event.stopPropagation === 'function') event.stopPropagation();
+    // getAttribute decodes the escapeHtml'd entities back to the ORIGINAL raw
+    // line/level/source, so the bug report carries the real log text.
+    const line = (btn && btn.getAttribute('data-logline')) || '';
+    const level = (btn && btn.getAttribute('data-level')) || '';
+    const source = (btn && btn.getAttribute('data-source')) || '';
+    const viewCtx = [currentView, currentSubView].filter(Boolean).join(' / ') || '(unknown)';
+    const tenantCtx = currentTenant || '(none)';
+    const explanation =
+        `Filing a bug from a specific log event (user-initiated from the Logs view).\n\n`
+        + `Log line: ${line}\n`
+        + (level ? `Level: ${level}\n` : '')
+        + (source ? `Source: ${source.trim()}\n` : '')
+        + `View: ${viewCtx}\n`
+        + `Tenant: ${tenantCtx}\n`
+        + `URL: ${location.href}\n`
+        + `User agent: ${navigator.userAgent}\n\n`
+        + `What went wrong / what I expected (please add detail):\n`;
+    fileBug(explanation);
+}
+window.fileBugFromLog = fileBugFromLog;
 
 function userAllowedTenants() {
     return currentUser?.tenants || [];
@@ -5604,7 +5648,7 @@ async function loadRecoveryLogs() {
             const body = tsMatch
                 ? `${tsMatch[1] ? `<span class="text-slate-400">[${tsMatch[1]}]</span> ` : ''}<span class="text-slate-400">${tsMatch[2]}</span> <span class="font-semibold">${tsMatch[3].trim()}</span> <span class="opacity-60">${tsMatch[4]}</span>${badge}<div class="pl-4 mt-0.5 break-all">${escapeHtml(tsMatch[5])}</div>`
                 : `${escapeHtml(log)}${badge}`;
-            return `<div class="px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls}${clsExtra}"${onClick}>${body}</div>`;
+            return `<div class="group relative px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls}${clsExtra}"${onClick}>${_logBugBtn(log, tsMatch ? tsMatch[4] : '', tsMatch ? (tsMatch[1] || tsMatch[3]) : '')}${body}</div>`;
         };
         container.innerHTML = _renderGroupedLogs(rec, recoveryRow);
     } catch (err) {
@@ -16030,6 +16074,21 @@ function _logLineKey(log) {
         .replace(/(\b\w+)=\d+\b/g, '$1=<N>');                                 // counter (queue=16 / uptime_s=0)
 }
 
+// A subtle per-row "file a bug from this log line" affordance. Appears only on
+// row hover (opacity-0 group-hover:opacity-100, plus focus:opacity-100 for
+// keyboard users) so it never clutters the dense log view, and is pinned to the
+// row's right. The raw line/level/source ride in data-* attributes (escaped
+// here, decoded back by the handler's getAttribute) so no fragile inline-quote
+// escaping is needed. Styled with the HPE-green accent used on the bug Submit
+// button. NOTE: onclick is its OWN attribute — never inside class="…", or the
+// inner quote closes the class early and the handler is silently swallowed.
+function _logBugBtn(log, level, source) {
+    return `<button type="button" title="File a bug report pre-filled from this log line"`
+        + ` data-logline="${escapeHtml(log)}" data-level="${escapeHtml(level || '')}" data-source="${escapeHtml(source || '')}"`
+        + ` onclick="fileBugFromLog(event, this)"`
+        + ` class="lm-logbug-btn absolute right-1.5 top-1 z-10 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] rounded px-1.5 py-0.5 text-[10px] leading-none font-bold shadow-sm">🐞 Bug</button>`;
+}
+
 // One log line → a highlighted row. `count` (>1) adds a "×N" badge and wires the
 // click-to-expand handler used by grouped rows. `lineRowFn` override lets the
 // recovery view pass its own GAVE_UP styling while still collapsing repeats.
@@ -16064,9 +16123,9 @@ function _renderLogLineRow(log, count, lineRowFn) {
     // Copy still emits the original single-line `<ts> - Source - LEVEL - msg`.
     if (tsMatch) {
         const head = `${tsMatch[1] ? `<span class="text-slate-400">[${tsMatch[1]}]</span> ` : ''}<span class="text-slate-400">${tsMatch[2]}</span> <span class="text-indigo-500 font-semibold">${tsMatch[3].trim()}</span> <span class="opacity-60">${tsMatch[4]}</span>${badge}`;
-        return `<div class="px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls} ${bg}${clsExtra}"${onClick}>${head}<div class="pl-4 mt-0.5 break-all">${tsMatch[5]}</div></div>`;
+        return `<div class="group relative px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls} ${bg}${clsExtra}"${onClick}>${_logBugBtn(log, tsMatch[4], tsMatch[1] || tsMatch[3])}${head}<div class="pl-4 mt-0.5 break-all">${tsMatch[5]}</div></div>`;
     }
-    return `<div class="px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls} ${bg}${clsExtra}"${onClick}>${log}${badge}</div>`;
+    return `<div class="group relative px-4 py-0.5 border-b border-slate-100 text-xs font-mono ${cls} ${bg}${clsExtra}"${onClick}>${_logBugBtn(log, '', '')}${log}${badge}</div>`;
 }
 
 // Group `logs` (newest-first) by message key; render each group once at its
