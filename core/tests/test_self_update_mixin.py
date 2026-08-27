@@ -207,3 +207,45 @@ def test_clear_noop_without_git_dir(tmp_path):
     # No .git directory (or a .git file for a worktree) → nothing to do, no raise.
     n = _Repo(str(tmp_path))._clear_stale_git_locks(str(tmp_path))
     assert n == 0
+
+
+# --- _core_update_lock permission fallback (netbox [Errno 13] on the lock FILE) -
+import messaging.self_update as _su  # noqa: E402
+
+
+def test_core_lock_falls_back_when_lock_file_unopenable(tmp_path, monkeypatch):
+    """The dir /var/lib/lm exists (makedirs succeeds) but the lock FILE was
+    created by root/the hub, so this process gets [Errno 13] opening it. The
+    lock must fall back to a repo-local file and still acquire — never abort
+    the whole update (the netbox regression)."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    real_open, real_makedirs = os.open, os.makedirs
+
+    def _fake_open(path, *a, **k):
+        if str(path).startswith("/var/lib/lm"):
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *a, **k)
+
+    def _fake_makedirs(path, **k):
+        if str(path).startswith("/var/lib/lm"):
+            return  # pretend the system dir already exists
+        return real_makedirs(path, **k)
+
+    monkeypatch.setattr(_su.os, "open", _fake_open)
+    monkeypatch.setattr(_su.os, "makedirs", _fake_makedirs)
+
+    with _Repo(str(repo))._core_update_lock(timeout=5.0) as got:
+        assert got is True
+    assert (repo / ".lm-state" / "core-update.lock").exists()
+
+
+def test_core_lock_fail_open_when_no_writable_path(tmp_path, monkeypatch):
+    """If NO candidate lock path is openable, fail OPEN (yield True, unserialized)
+    rather than bricking the update channel over a perms glitch."""
+    def _boom(*a, **k):
+        raise PermissionError(13, "denied")
+    monkeypatch.setattr(_su.os, "makedirs", lambda *a, **k: None)
+    monkeypatch.setattr(_su.os, "open", _boom)
+    with _Repo(str(tmp_path))._core_update_lock(timeout=5.0) as got:
+        assert got is True
