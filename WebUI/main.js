@@ -3225,8 +3225,8 @@ function _rebuildMainNav(allSpokes, connections) {
         ${isAdmin() ? _securityNavHtml() : ''}
         ${(isAdmin() || isTenantAdmin()) ? _credVaultNavHtml() : ''}
         ${isAdmin() ? _templateRepoNavHtml() : ''}
-        ${isAdmin() ? _bugReportNavHtml() : ''}
-        ${isAdmin() ? _featureRequestNavHtml() : ''}
+        ${(isAdmin() || isTenantAdmin()) ? _bugReportNavHtml() : ''}
+        ${(isAdmin() || isTenantAdmin()) ? _featureRequestNavHtml() : ''}
         ${(!isAdmin() && isTenantAdmin()) ? _myDevicesNavHtml() : ''}
     `;
 
@@ -3462,8 +3462,13 @@ function renderSpokeIndicators() {
 }
 
 async function setView(viewId) {
-    if ((viewId === 'setup' || viewId === 'settings' || viewId === 'logs' || viewId === 'bugs' || viewId === 'features') && !isAdmin()) {
+    if ((viewId === 'setup' || viewId === 'settings' || viewId === 'logs') && !isAdmin()) {
         return;  // silently block — nav items are hidden, this guards deep-links
+    }
+    // Bug Report / Feature Request — Global Admin (full) OR tenant-admin (their
+    // own tenant, read-only). Guards deep-links for everyone else.
+    if ((viewId === 'bugs' || viewId === 'features') && !(isAdmin() || isTenantAdmin())) {
+        return;
     }
     // My Devices is the tenant-admin device surface — reachable only by a
     // tenant-admin (or a Global Admin); guards deep-links for everyone else.
@@ -5361,6 +5366,14 @@ function _renderLogsSection(subMenu) {
     // it's hidden on the Bug Reports / Feature Requests tabs.
     const analysisBtn = (isBugs || isFeatures) ? '' :
         `<button id="lm-log-analysis-btn" onclick="runLmLogAnalysis('${module}')" class="text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 px-2 py-1 rounded">✨ Log Analysis</button>`;
+    // Debug-logging toggle is a Global-Admin log control, not a bug-store action —
+    // hidden on Bug Reports / Feature Requests (and it would 403 for a read-only
+    // tenant admin who now reaches those tabs).
+    const debugToggleBtn = (isBugs || isFeatures) ? '' :
+        `<button id="debug-toggle-btn" onclick="toggleDebugLogging()"
+                        class="text-[10px] bg-white border border-slate-300 px-2 py-1 rounded hover:bg-slate-50 transition-colors font-medium flex items-center gap-1">
+                        <span id="debug-mode-text">Debug Logging: OFF</span>
+                    </button>`;
     const analysisPanel = (isBugs || isFeatures) ? '' : `
             <div id="lm-log-analysis-panel" class="px-4 py-3 border-b border-slate-200 bg-indigo-50/40">
                 <div class="flex items-center gap-2 mb-1 flex-wrap">
@@ -5377,10 +5390,7 @@ function _renderLogsSection(subMenu) {
             <div class="px-4 py-3 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-sm font-bold text-slate-600">${title} ${helpIcon('logging-observability-contract', null, 'Logs help')}</h3>
                 <div class="flex gap-3 items-center">
-                    <button id="debug-toggle-btn" onclick="toggleDebugLogging()"
-                        class="text-[10px] bg-white border border-slate-300 px-2 py-1 rounded hover:bg-slate-50 transition-colors font-medium flex items-center gap-1">
-                        <span id="debug-mode-text">Debug Logging: OFF</span>
-                    </button>
+                    ${debugToggleBtn}
                     ${analysisBtn}
                     <button onclick="copyLogs()" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Copy</button>
                     ${clearBtn}
@@ -5608,6 +5618,14 @@ async function loadRecoveryLogs() {
 // feature → enhancement, no auto-fix) and flips `filed` to true with the
 // issue_url. ``typeFilter`` ('bug' | 'feature') restricts the list to one kind
 // so the Bug Report and Feature Request nav items each show only their own.
+// A tenant admin gets a READ-ONLY, tenant-scoped view of their own tenant's
+// reports via /tenant/bug-reports; a Global Admin keeps the full /setup/ view
+// (all tenants + approve/delete). Approve/Delete are hidden for tenant admins
+// (the /setup/ mutate routes are Global-Admin-only server-side anyway).
+function _bugReportsBase() {
+    return (typeof isAdmin === 'function' && isAdmin()) ? '/setup/bug-reports' : '/tenant/bug-reports';
+}
+
 async function loadBugReports(typeFilter) {
     const container = document.getElementById('system-logs-container');
     if (!container) return;
@@ -5617,7 +5635,7 @@ async function loadBugReports(typeFilter) {
     const kindLabel = typeFilter === 'feature' ? 'feature request' : 'bug report';
     container.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Fetching ${kindLabel}s...</div>`;
     try {
-        const data = await apiJson('/setup/bug-reports');
+        const data = await apiJson(_bugReportsBase());
         let reports = data.reports || [];
         // Legacy reports (pre-type-field) default to "bug"; only filter when a
         // typeFilter is given (the two nav views). No filter = show everything.
@@ -5659,8 +5677,11 @@ async function loadBugReports(typeFilter) {
             } else if (r.filed) {
                 status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline">Filed ↗</a>`;
             } else if (isFeat && _st !== 'approved') {
-                // Awaiting admin approval — offer the Approve action inline.
-                status = `<button onclick="event.stopPropagation(); approveBugReport('${escapeHtml(r.id)}')" class="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700" title="Approve this feature so AppBuilder can file &amp; work it">Approve</button>`;
+                // Awaiting admin approval — offer the Approve action inline
+                // (Global Admin only; a tenant admin's view is read-only).
+                status = (typeof isAdmin === 'function' && isAdmin())
+                    ? `<button onclick="event.stopPropagation(); approveBugReport('${escapeHtml(r.id)}')" class="px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700" title="Approve this feature so AppBuilder can file &amp; work it">Approve</button>`
+                    : `<span class="text-amber-600" title="Awaiting a Global Admin's approval">Pending approval</span>`;
             } else if (isFeat && _st === 'approved') {
                 status = `<span class="text-emerald-600 font-medium" title="Approved — AppBuilder will file &amp; work it">Approved</span>`;
             } else {
@@ -5673,7 +5694,7 @@ async function loadBugReports(typeFilter) {
                 <span class="flex-1 truncate text-slate-700">${escapeHtml(r.summary || '(no summary)')}</span>
                 <span class="shrink-0 text-[10px] text-slate-400 font-mono">${escapeHtml(r.id)}</span>
                 <span class="shrink-0 w-20 text-center text-xs font-medium">${status}</span>
-                <button onclick="event.stopPropagation(); deleteBugReport('${escapeHtml(r.id)}')" title="Delete report" class="shrink-0 p-1 text-slate-300 hover:text-red-500 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+                ${(typeof isAdmin === 'function' && isAdmin()) ? `<button onclick="event.stopPropagation(); deleteBugReport('${escapeHtml(r.id)}')" title="Delete report" class="shrink-0 p-1 text-slate-300 hover:text-red-500 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>` : ''}
             </div>`;
         }).join('');
     } catch (err) {
@@ -5809,7 +5830,7 @@ async function showBugReport(rid) {
     document.body.appendChild(overlay);
     const body = overlay.querySelector('#bug-detail-body');
     try {
-        const r = await apiJson(`/setup/bug-reports/${encodeURIComponent(rid)}`);
+        const r = await apiJson(`${_bugReportsBase()}/${encodeURIComponent(rid)}`);
         const ctx = r.context || {};
         let report = {};
         try { report = JSON.parse(r.report_json || '{}'); } catch { report = {}; }
@@ -5830,7 +5851,10 @@ async function showBugReport(rid) {
         } else if (r.filed) {
             status = `<a href="${escapeHtml(r.issue_url || '#')}" target="_blank" class="text-blue-500 hover:underline break-all">${escapeHtml(r.issue_url || 'Filed')}</a>`;
         } else if (isFeat && _dst !== 'approved') {
-            status = `<span class="text-amber-600">Awaiting approval</span> <button onclick="approveBugReport('${escapeHtml(rid)}')" class="ml-2 px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700">Approve</button>`;
+            const _approveBtn = (typeof isAdmin === 'function' && isAdmin())
+                ? ` <button onclick="approveBugReport('${escapeHtml(rid)}')" class="ml-2 px-2 py-0.5 rounded text-[11px] font-semibold bg-emerald-600 text-white hover:bg-emerald-700">Approve</button>`
+                : '';
+            status = `<span class="text-amber-600">Awaiting approval</span>${_approveBtn}`;
         } else if (isFeat && _dst === 'approved') {
             status = `<span class="text-emerald-600 font-medium">Approved — AppBuilder will file &amp; work it</span>`;
         } else {

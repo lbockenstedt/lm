@@ -1005,6 +1005,20 @@ def register(app, hub, ctx):
                 f"console={len(str(data.get('console_logs') or ''))} "
                 f"html={len(str(data.get('html') or ''))} screenshot={shot_kind}"
             )
+            # Attribute the report to the filer's tenant (authoritative, server-
+            # side) so the read-only tenant-admin view can scope to it. Prefer the
+            # session tenant; for a Global Admin with no active tenant, fall back
+            # to the header tenant picker carried in context.currentTenant. The
+            # browser can't spoof this — we overwrite whatever it sent.
+            try:
+                _tid = ctx._resolve_tenant(request) or ""
+            except Exception:  # noqa: BLE001
+                _tid = ""
+            if not _tid:
+                _c = data.get("context") or {}
+                if isinstance(_c, dict):
+                    _tid = str(_c.get("currentTenant") or "").strip()
+            data["tenant_id"] = _tid
             rid = await asyncio.to_thread(hub._store_bug_report, data)
             if not rid:
                 logger.error("bug-report: _store_bug_report returned no id (data keys=%s)", list(data.keys()))
@@ -1083,5 +1097,45 @@ def register(app, hub, ctx):
         if not ok:
             raise HTTPException(status_code=404, detail="Bug report not found")
         return {"status": "ok", "id": rid, "state": "approved"}
+
+    # ── Tenant-admin READ-ONLY view (/tenant/bug-reports) ─────────────────────
+    # A tenant admin sees Bug Reports + Feature Requests filed under their own
+    # tenant(s) — never any other tenant's, and never the mutate actions
+    # (approve/delete stay Global-Admin-only under /setup/). The /tenant/* prefix
+    # is gated to tenant-admins + Global Admins by the access-control middleware;
+    # per-report ownership is enforced here (anti cross-tenant IDOR).
+    def _bug_acting_tenants(sess):
+        return (sess or {}).get("user", {}).get("tenants") or []
+
+    def _bug_report_visible(sess, r):
+        """Global Admin → every report; tenant-admin → only reports tagged with
+        one of their tenants. Untagged (legacy) reports stay Global-Admin-only,
+        so a tenant admin never sees a report not attributed to their tenant
+        (mirrors tenant_devices._owns)."""
+        if ctx._is_admin(sess):
+            return True
+        tid = str((r or {}).get("tenant_id") or "")
+        return bool(tid) and tid in _bug_acting_tenants(sess)
+
+    @app.get("/tenant/bug-reports")
+    async def tenant_list_bug_reports(request: Request):
+        """Tenant-scoped, read-only mirror of /setup/bug-reports. Returns only
+        reports filed under one of the caller's tenants (Global Admin sees all)."""
+        hub = app.state.hub
+        sess = ctx._session_user(request)
+        reports = [r for r in hub._list_bug_reports() if _bug_report_visible(sess, r)]
+        reports.sort(key=lambda r: r.get("ts", 0), reverse=True)
+        return {"reports": reports}
+
+    @app.get("/tenant/bug-reports/{rid}")
+    async def tenant_get_bug_report(request: Request, rid: str):
+        """Tenant-scoped detail. A report the caller's tenant doesn't own is
+        reported as 404 (never 403) so existence never leaks across tenants."""
+        hub = app.state.hub
+        sess = ctx._session_user(request)
+        rep = await asyncio.to_thread(hub._get_bug_report, rid)
+        if not rep or not _bug_report_visible(sess, rep):
+            raise HTTPException(status_code=404, detail="Bug report not found")
+        return rep
 
     # ── LDAP relay (/api/ldap/*) ──────────────────────────────────────────────
