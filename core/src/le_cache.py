@@ -155,6 +155,21 @@ class LeCacheMixin:
                        if v.get("he_username") and v.get("he_password")), None)
             if not he:
                 return
+            # Fired from the connect handler a beat before the spoke finishes
+            # authenticating; wait (up to ~10s) until it can actually take a
+            # command. Without this the request sits unanswered until the 60s
+            # timeout ("Request Timeout: [LE_SYNC_VAULT_DNS] … after 60.1s").
+            can_check = getattr(self, "spoke_can_accept_commands", None)
+            if callable(can_check):
+                for _ in range(20):
+                    ok, _reason = can_check(spoke_id)
+                    if ok:
+                        break
+                    await asyncio.sleep(0.5)
+                else:
+                    logger.info("le vault sync: %s never became command-ready; "
+                                "skipping this connect", spoke_id)
+                    return
             await self.request_response(spoke_id, "LE_SYNC_VAULT_DNS", he, timeout=60)
             logger.info("le vault sync: pushed HE DNS-01 creds to %s", spoke_id)
         except Exception as e:  # noqa: BLE001

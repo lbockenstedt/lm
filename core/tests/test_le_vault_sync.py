@@ -87,3 +87,47 @@ def test_sync_never_raises_on_vault_error(monkeypatch):
     monkeypatch.setattr(cred_vault, "automation_get", _boom)
     _run(hub._le_sync_vault_dns_creds("le-spoke-1"))  # must not raise
     assert hub.sent == []
+
+
+async def _nosleep(*_a, **_k):
+    return None
+
+
+class _ReadyHub(_Hub):
+    """Hub whose command-readiness flips True after ``ready_after`` checks."""
+    def __init__(self, refs, ready_after=0, ever_ready=True):
+        super().__init__(refs)
+        self._checks = 0
+        self._ready_after = ready_after
+        self._ever_ready = ever_ready
+
+    def spoke_can_accept_commands(self, spoke_id):
+        self._checks += 1
+        if self._ever_ready and self._checks > self._ready_after:
+            return True, "ok"
+        return False, "not_ready"
+
+
+def test_sync_waits_for_command_readiness_then_sends(monkeypatch):
+    # Not command-ready on the first two checks, then ready — the sync must wait
+    # (not time out) and still push the creds once.
+    monkeypatch.setattr("le_cache.asyncio.sleep", _nosleep)
+    hub = _ReadyHub({"x.example": {"bucket": "__admin__", "name": "he"}},
+                    ready_after=2)
+    _patch_vault(monkeypatch, {("__admin__", "he"): {
+        "provider": "he-login", "he_username": "u@e", "he_password": "pw"}})
+    _run(hub._le_sync_vault_dns_creds("le-spoke-1"))
+    assert len(hub.sent) == 1
+    assert hub._checks >= 3
+
+
+def test_sync_skips_when_never_command_ready(monkeypatch):
+    # A spoke that never becomes command-ready must be SKIPPED (no request that
+    # would sit unanswered until the 60s timeout), not pushed to.
+    monkeypatch.setattr("le_cache.asyncio.sleep", _nosleep)
+    hub = _ReadyHub({"x.example": {"bucket": "__admin__", "name": "he"}},
+                    ever_ready=False)
+    _patch_vault(monkeypatch, {("__admin__", "he"): {
+        "provider": "he-login", "he_username": "u@e", "he_password": "pw"}})
+    _run(hub._le_sync_vault_dns_creds("le-spoke-1"))
+    assert hub.sent == []

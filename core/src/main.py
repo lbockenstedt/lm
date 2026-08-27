@@ -2480,7 +2480,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # so autonomous renewals keep working with no operator action.
             try:
                 if self.spoke_module_types.get(self._primary_key(spoke_id)) == "certificates":
-                    await self._le_sync_vault_dns_creds(spoke_id)
+                    # Background it: the sync waits for the spoke to become
+                    # command-ready and does a 60s request/response, neither of
+                    # which should stall the rest of this connect handler.
+                    asyncio.create_task(self._le_sync_vault_dns_creds(spoke_id))
             except Exception as e:
                 logger.warning(f"Failed to sync le vault DNS creds to {spoke_id}: {e}")
 
