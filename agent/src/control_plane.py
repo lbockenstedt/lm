@@ -640,6 +640,33 @@ class RoleConnection(AgentHostingControlPlane):
         the hub rejected) writes the empty value so the next boot reconnects
         zero-touch and the hub re-provisions."""
         self._persist_secret_to_env(self._role_env_key(), new_secret or "")
+        # Self-heal LOADED_ROLES: a non-empty secret means this sub-spoke is
+        # LIVE and authenticated, so its role MUST be in the durable boot set. If
+        # something cleared LOADED_ROLES at runtime (a lost .env upsert, a manual
+        # edit), re-add this role here so the next self-update restart re-spawns
+        # it instead of stranding it "out of contact" until a manual reload — the
+        # recurring console/role-vanished outage. Union-only (never shrinks); an
+        # explicit UNLOAD_ROLE still removes it (that path blanks the secret, so
+        # this only fires while genuinely authenticated).
+        if new_secret:
+            self._selfheal_loaded_role()
+
+    def _selfheal_loaded_role(self) -> None:
+        """Ensure this role is present in the durable LOADED_ROLES set. Mirrors
+        GenericAgent._persist_loaded_roles' union semantics but self-contained
+        (a RoleConnection has no back-ref to the base agent). Best-effort."""
+        try:
+            existing = {r for r in self._read_env_value("LOADED_ROLES").split(",")
+                        if r.strip()}
+            if self.role_name in existing:
+                return
+            existing.add(self.role_name)
+            self._persist_secret_to_env("LOADED_ROLES", ",".join(sorted(existing)))
+            logger.info("self-healed LOADED_ROLES with live role '%s'",
+                        self.role_name)
+        except Exception as e:  # noqa: BLE001 — best-effort durability top-up
+            logger.debug("LOADED_ROLES self-heal for %s failed: %s",
+                         self.role_name, e)
 
     def _persist_hub_secret(self, new_secret: str) -> None:  # noqa: D401
         """No-op: sub-spokes don't verify hub identity (they rely on TLS), so

@@ -1579,6 +1579,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     result = self.response_cache.pop(msg_id)
                     logger.debug(f"Response: {msg_id} received from {spoke_id}: {_redact(command_type, result)}")
                     settled = True
+                    # Single choke point for the durable agent→role registry:
+                    # EVERY hub-issued LOAD_ROLE / UNLOAD_ROLE flows through here
+                    # (WebUI load, provision, tenant install, role-pool auto-load,
+                    # relocate), so recording the assignment here keeps the
+                    # persisted set consistent across all of them — the role
+                    # sub-spoke is re-pushed on the agent's next reconnect.
+                    self._track_role_rpc(spoke_id, command_type, data, result)
                     return result
 
             # Subject (the hostname/appliance/device the request operates on)
@@ -3757,6 +3764,58 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                                     f"parent={parent_spoke_id}")
         self.known_modules = self.state.system_state["known_modules"]
 
+    async def _readopt_agent_roles(self, agent_spoke_id: str) -> None:
+        """Re-push ``LOAD_ROLE`` for every role the hub has on record for this
+        base agent whose role sub-spoke is not currently connected.
+
+        This is the hub half of role self-healing (paired with the spoke's own
+        ``LOADED_ROLES`` re-seed). If an agent loses its ``.env`` role record it
+        boots ``roles=none`` and the sub-spoke never returns on its own — the
+        role silently vanishes until a human re-loads it. Here the hub, on the
+        agent's reconnect, re-assigns each durably-recorded role from
+        ``agent_roles`` whose sub-spoke (``{base}-{role}``) isn't live. Waits
+        (bounded) for the agent to prove its session key so ``LOAD_ROLE`` won't
+        503, then re-pushes the missing roles one at a time. Best-effort and
+        single-flight per agent; a role already running is skipped."""
+        roles = self.agent_assigned_roles(agent_spoke_id)
+        if not roles:
+            return
+        inflight = getattr(self, "_readopt_inflight", None)
+        if inflight is None:
+            inflight = self._readopt_inflight = set()
+        pk = self._primary_key(agent_spoke_id)
+        if pk in inflight:
+            return
+        inflight.add(pk)
+        try:
+            # The agent authenticates a beat after the connect handler pushes its
+            # session key; give it up to ~10s to become command-ready.
+            for _ in range(20):
+                ok, _reason = self.spoke_can_accept_commands(agent_spoke_id)
+                if ok:
+                    break
+                await asyncio.sleep(0.5)
+            else:
+                logger.info("readopt[%s]: agent never became command-ready; "
+                            "skipping role re-adoption this connect", agent_spoke_id)
+                return
+            for role in roles:
+                sub_pk = self._primary_key(f"{agent_spoke_id}-{role}")
+                if sub_pk in self.active_connections:
+                    continue  # role sub-spoke already live — nothing to heal
+                try:
+                    logger.info("readopt[%s]: re-pushing LOAD_ROLE %s "
+                                "(sub-spoke offline)", agent_spoke_id, role)
+                    await self.request_response(agent_spoke_id, "LOAD_ROLE",
+                                                {"role": role}, timeout=120.0)
+                    self.record_spoke_event(agent_spoke_id, "role_readopt",
+                                            f"role={role}")
+                except Exception:  # noqa: BLE001 — one role's failure ≠ stop
+                    logger.exception("readopt[%s]: LOAD_ROLE %s failed",
+                                     agent_spoke_id, role)
+        finally:
+            inflight.discard(pk)
+
     # Reasons returned by spoke_can_accept_commands for the False cases.
     _CMD_NOT_CONNECTED = "not_connected"
     _CMD_UNAUTHENTICATED = "unauthenticated"
@@ -5304,6 +5363,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             data={"secret": session_secret}))
                     await self.send_to_spoke(key_msg, signing_secret=None)
                 await self.push_config_to_spoke(spoke_id)
+
+                # Role self-heal (hub half): if this is a base agent, re-push
+                # LOAD_ROLE for any role the hub durably assigned to it whose
+                # sub-spoke isn't currently connected (the agent may have booted
+                # roles=none after losing its .env LOADED_ROLES). Fire-and-forget
+                # so it never blocks the connect path; it waits for the agent to
+                # authenticate before pushing.
+                if module_type == "agent":
+                    asyncio.create_task(self._readopt_agent_roles(spoke_id))
 
                 # Fleet mTLS: deliver a Hub-Local-CA clientAuth client cert so the
                 # spoke can present a VERIFIED mTLS identity (public CAs no longer

@@ -830,3 +830,102 @@ class SpokeRegistryMixin:
         firewalls = self.state.get_global_config().get("firewalls", [])
         fw = next((f for f in firewalls if f["id"] == firewall_id), None)
         return fw.get("spoke_id") if fw else None
+
+    # ------------------------------------------------------------------
+    # Durable per-agent role registry (hub side of role re-adoption).
+    #
+    # A runtime-loaded role (a WebUI ``LOAD_ROLE``) makes a base ``agent`` spoke
+    # host a role sub-spoke (``{base}-{role}``). Today that role only survives
+    # an agent restart if the AGENT re-seeds it from its own ``.env``
+    # (``LOADED_ROLES``); if that spoke-side record is ever lost the role
+    # silently vanishes and the sub-spoke strands "out of contact" until a human
+    # re-loads it (the recurring console-vanished outage). This registry is the
+    # hub-side source of truth: every role the hub assigns to an agent is
+    # persisted here (keyed by the agent's PRIMARY KEY so it is stable across a
+    # raw→guid re-key), so on the agent's next (re)connect the hub re-pushes
+    # ``LOAD_ROLE`` for any assigned role whose sub-spoke isn't connected —
+    # self-healing the role with no human. Persisted in ``system_state`` so it
+    # survives a hub restart; the write is eventual (``_mark_dirty`` + the
+    # offloaded flush), never a synchronous encrypt+write on the connect path.
+    # ------------------------------------------------------------------
+    def _agent_roles_store(self) -> dict:
+        """The persisted ``{agent_pk: [role, ...]}`` map (created on first use)."""
+        return self.state.system_state.setdefault("agent_roles", {})
+
+    def agent_assigned_roles(self, agent_id: str) -> list:
+        """Sorted role names the hub has on record for ``agent_id``."""
+        pk = self._primary_key(agent_id)
+        return list(self._agent_roles_store().get(pk, []) or [])
+
+    def _record_agent_role(self, agent_id: str, role: str) -> None:
+        """Durably remember ``role`` is assigned to ``agent_id`` so the hub
+        re-pushes it on the agent's next reconnect. Idempotent + no-op when the
+        role is already on record (so a reconnect storm doesn't churn state)."""
+        role = (role or "").strip()
+        if not role:
+            return
+        pk = self._primary_key(agent_id)
+        store = self._agent_roles_store()
+        roles = set(store.get(pk, []) or [])
+        if role in roles:
+            return
+        roles.add(role)
+        store[pk] = sorted(roles)
+        try:
+            self.state._mark_dirty()
+        except Exception:  # noqa: BLE001 — never let bookkeeping crash a connect
+            pass
+        logger.info("agent_roles: recorded role %r for agent %s", role, agent_id)
+
+    def _forget_agent_role(self, agent_id: str, role: str) -> None:
+        """Drop ``role`` from an agent's assigned set (explicit ``UNLOAD_ROLE``).
+        The role is then no longer re-pushed on reconnect."""
+        role = (role or "").strip()
+        if not role:
+            return
+        pk = self._primary_key(agent_id)
+        store = self._agent_roles_store()
+        roles = set(store.get(pk, []) or [])
+        if role not in roles:
+            return
+        roles.discard(role)
+        if roles:
+            store[pk] = sorted(roles)
+        else:
+            store.pop(pk, None)
+        try:
+            self.state._mark_dirty()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.info("agent_roles: forgot role %r for agent %s", role, agent_id)
+
+    def _track_role_rpc(self, spoke_id: str, command_type: str,
+                        data: dict, result) -> None:
+        """Update the durable agent→role registry from a completed hub RPC.
+
+        Called from ``request_response`` for every settled command; only
+        ``LOAD_ROLE`` / ``UNLOAD_ROLE`` do anything. A LOAD that reports SUCCESS
+        records the role for the target agent; an UNLOAD that didn't hard-ERROR
+        forgets it. Fully fail-open — role bookkeeping must never disturb the
+        command's own result."""
+        try:
+            if command_type not in ("LOAD_ROLE", "UNLOAD_ROLE"):
+                return
+            role = (data or {}).get("role")
+            if not role:
+                return
+            pl = result.get("payload", {}).get("data", result) \
+                if isinstance(result, dict) else result
+            # LOAD_ROLE payload.data may itself nest the handler dict under
+            # ``data`` (COMMAND_RESULT envelope); unwrap one more level.
+            if isinstance(pl, dict) and "status" not in pl and isinstance(pl.get("data"), dict):
+                pl = pl["data"]
+            status = pl.get("status") if isinstance(pl, dict) else None
+            if command_type == "LOAD_ROLE":
+                if status == "SUCCESS":
+                    self._record_agent_role(spoke_id, role)
+            else:  # UNLOAD_ROLE — forget unless it explicitly failed
+                if status != "ERROR":
+                    self._forget_agent_role(spoke_id, role)
+        except Exception:  # noqa: BLE001
+            logger.debug("_track_role_rpc bookkeeping failed", exc_info=True)
