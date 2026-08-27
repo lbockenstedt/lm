@@ -1633,9 +1633,11 @@ async function setTenant(tenant) {
             // Fall back to setView() only if the recorded sub-view isn't valid
             // for the current view (e.g. view changed mid-flight).
             const subs = VIEW_SUBMENUS[currentView] || [];
-            if (subs.includes(currentSubView)) {
+            if (subs.includes(currentSubView) && VIEW_LOADERS[currentView]) {
                 setSubView(currentSubView);
             } else {
+                // No loader for this view: setSubView would no-op and leave the
+                // OLD tenant's data on screen, so do a full re-render instead.
                 setView(currentView);
             }
         }
@@ -3561,12 +3563,22 @@ async function setView(viewId) {
 // Dispatch table for setSubView: maps the active module (currentView) to the
 // loader that renders its primary sub-view. Each loader receives `subMenu`
 // except where noted. Mirrors the former if/else chain exactly — only one
-// entry ever matches per call, and unknown views (e.g. dashboard) have no
-// entry and intentionally no-op. cs is wrapped because its loader
+// entry ever matches per call; a view with no entry here intentionally no-ops
+// (and is re-rendered via setView instead). cs is wrapped because its loader
 // (loadCSData, defined in sim-views.js) takes (subMenu, currentSubChild);
 // the child is resolved above via _csDefaultChild. opnsense is wrapped because
 // loadOpnsenseManagement() takes no argument (it reads the currentSubView global).
 const VIEW_LOADERS = {
+    // dashboard has real per-tenant content (summary tiles + infra status), so it
+    // needs a loader too. A tenant switch re-renders through setSubView (not
+    // setView, which would reset the active tab), and with no entry here the
+    // Overview silently kept showing the PREVIOUS tenant's data until a manual
+    // reload. Mirrors initView('dashboard') without re-rendering the layout.
+    dashboard: () => {
+        updateStatus();
+        if (isAdmin()) loadAllTenantsOverview(); else loadDashboardSummary();
+        loadInfraStatus();
+    },
     opnsense: () => loadOpnsenseManagement(),
     cppm:     loadCPPMData,
     pxmx:     loadPxmxData,
@@ -3603,8 +3615,8 @@ async function setSubView(subMenu) {
     // Show/hide + populate the secondary child strip for this primary.
     renderSecondaryNav(currentView);
 
-    // Dispatch to the active module's loader (see VIEW_LOADERS above). Unknown
-    // views (e.g. dashboard) have no entry and intentionally no-op, matching
+    // Dispatch to the active module's loader (see VIEW_LOADERS above). Views
+    // with no entry (mydevices, credvault, ...) intentionally no-op, matching
     // the previous fall-through behavior of the if/else chain.
     const loader = VIEW_LOADERS[currentView];
     if (loader) loader(subMenu);
