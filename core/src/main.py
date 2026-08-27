@@ -8300,6 +8300,35 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 logger.debug(f"[log-sentinel] cycle error: {e}")
             await _aio.sleep(30)
 
+    # Re-arm a given-up spoke recovery after this many seconds so the hub keeps
+    # retrying instead of abandoning a stranded box until a manual reboot.
+    # 0 disables re-arm (permanent give-up). Overridable via env for tests/ops.
+    _RECOVERY_GIVEUP_REARM_S = 1800
+
+    def _recovery_giveup_rearm_s(self) -> int:
+        try:
+            return max(0, int(os.environ.get("LM_RECOVERY_GIVEUP_REARM_S",
+                                             self._RECOVERY_GIVEUP_REARM_S)))
+        except (TypeError, ValueError):
+            return self._RECOVERY_GIVEUP_REARM_S
+
+    def _recovery_giveup_action(self, st: dict, now: float) -> str:
+        """Decide what to do with a spoke whose recovery previously gave up.
+
+        Returns one of:
+          - "skip":  still within the give-up cooldown (or re-arm disabled) —
+                     leave it abandoned this cycle.
+          - "rearm": cooldown elapsed — the caller should reset the recovery
+                     state and retry reset-failed + restart.
+
+        Pure/side-effect-free so the strand-recovery decision is unit-testable
+        without driving the async loop. `manual_pause` is handled by the caller
+        (operator intent is terminal and never re-arms)."""
+        rearm = self._recovery_giveup_rearm_s()
+        if rearm <= 0 or (now - st.get("gave_up_ts", 0)) < rearm:
+            return "skip"
+        return "rearm"
+
     async def run_spoke_recovery_loop(self):
         """Watchdog: recover approved-but-stranded spokes and surface it.
 
@@ -8319,6 +8348,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             fix it — e.g. a missing venv — so don't burn all 3 retries),
           - StartLimitBurst (unit failed with high NRestarts and re-failing),
           - a manual_pause flag (set from the WebUI Diagnostics "Pause" button).
+
+        A give-up is NOT permanent (except manual_pause): it re-arms after
+        `_RECOVERY_GIVEUP_REARM_S` so the hub keeps periodically retrying
+        reset-failed + restart. A one-time give-up would otherwise strand the
+        box (its only other clear path, recovery_cleared, needs a reconnect the
+        stranded box can't make) until a human reboots it.
 
         Every action is recorded as a spoke_event (WebUI timeline) AND a
         greppable [recovery] log line (hub log -> WebUI Logs + ab GET_LOGS)
@@ -8352,8 +8387,27 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     if not unit:
                         continue
                     st = self.spoke_recovery.setdefault(sid, {"attempts": 0})
-                    if st.get("manual_pause") or st.get("gave_up"):
+                    if st.get("manual_pause"):
                         continue
+                    # `gave_up` must NOT be terminal. The only other clear path
+                    # (recovery_cleared) fires on reconnect — but a stranded box
+                    # can't reconnect, so a one-time give-up would abandon it
+                    # until a human reboots (the "systemd did not revive;
+                    # rebooting fixes it" outage). Re-arm after a cooldown so the
+                    # hub keeps periodically retrying reset-failed + restart,
+                    # which is exactly what clears a StartLimitBurst-failed unit.
+                    if st.get("gave_up"):
+                        if self._recovery_giveup_action(st, now) == "skip":
+                            continue
+                        rearm = self._recovery_giveup_rearm_s()
+                        st.update({"gave_up": False, "attempts": 0,
+                                   "last_crash_sig": "", "next_retry_ts": 0})
+                        self.record_spoke_event(
+                            sid, "recovery_rearmed",
+                            f"retrying after give-up cooldown ({rearm}s)")
+                        logger.info(
+                            f"[recovery] spoke_id={sid} action=rearmed "
+                            f"reason=giveup_cooldown_elapsed rearm_s={rearm}")
                     if now < st.get("next_retry_ts", 0):
                         continue
 
@@ -8383,7 +8437,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         give_up, reason = True, "3 failed restarts"
 
                     if give_up:
-                        st.update({"gave_up": True, "in_progress": False,
+                        st.update({"gave_up": True, "gave_up_ts": now,
+                                   "in_progress": False,
                                    "last_action": "gave_up", "last_error": reason,
                                    "last_crash_sig": crash_sig})
                         self.record_spoke_event(sid, "recovery_gave_up", reason)
