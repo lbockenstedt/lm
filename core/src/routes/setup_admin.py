@@ -7,29 +7,43 @@ from update_pipeline import _version_behind
 
 # Cap for the WebUI "What's New" popover (GET /api/whats-new).
 _WHATS_NEW_LIMIT = 15
+# Only surface updates merged within this many days ("the last 2 weeks").
+_WHATS_NEW_DAYS = 14
 
 
-def _committed_features(reports: list) -> list:
-    """Pick the recently committed features out of the bug-store index.
+def _committed_features(reports: list, *, now: float = None,
+                        within_days: int = _WHATS_NEW_DAYS) -> list:
+    """Recently merged bug fixes AND features for the "What's New" popover.
 
-    "Committed feature" = a report with ``type=="feature"`` that AppBuilder has
-    built & closed (its MARK_BUG_FIXED cascade sets ``status=="fixed"`` +
-    ``fixed_at``). Newest-first by ``fixed_at`` (falls back to ``ts``), a
-    non-empty ``summary`` required, capped at ``_WHATS_NEW_LIMIT``. Pure
-    function of the index list so it's unit-testable without a FastAPI app."""
+    An item qualifies when it's a bug-store report AppBuilder has built &
+    closed — its MARK_BUG_FIXED cascade sets ``status=="fixed"`` + a
+    ``fixed_at`` epoch — of ``type`` bug or feature (an untyped legacy report
+    counts as a bug, matching the WebUI's ``r.type || 'bug'`` convention), with
+    a non-empty ``summary``, fixed within the last ``within_days`` days.
+    Newest-first by ``fixed_at`` (falls back to ``ts``), capped at
+    ``_WHATS_NEW_LIMIT``. Each item carries a ``type`` so the UI can badge
+    "Bug fix" vs "Feature". Pure function (inject ``now`` in tests)."""
+    if now is None:
+        now = time.time()
+    cutoff = now - within_days * 86400
     items = []
     for r in reports or []:
-        if str(r.get("type") or "").lower() != "feature":
+        rtype = str(r.get("type") or "bug").lower()
+        if rtype not in ("bug", "feature"):
             continue
         if str(r.get("status") or "").lower() != "fixed":
             continue
         summary = str(r.get("summary") or "").strip()
         if not summary:
             continue
+        when = r.get("fixed_at") or r.get("ts") or 0
+        if not when or when < cutoff:
+            continue
         items.append({
             "id": r.get("id"),
             "summary": summary,
-            "fixed_at": r.get("fixed_at") or r.get("ts") or 0,
+            "type": "feature" if rtype == "feature" else "bug",
+            "fixed_at": when,
             "issue_url": r.get("issue_url") or "",
         })
     items.sort(key=lambda x: x.get("fixed_at") or 0, reverse=True)
@@ -1042,15 +1056,17 @@ def register(app, hub, ctx):
 
     @app.get("/api/whats-new")
     async def whats_new():
-        """List recently committed features for the WebUI "What's New" popover.
+        """List recently merged bug fixes + features for the "What's New" popover.
 
-        "Committed features" = bug-store reports with type=="feature" that ab
-        has built & closed — its MARK_BUG_FIXED cascade flips the report to
-        status=="fixed" with a fixed_at epoch + the closed issue_url. Readable
-        by ANY authenticated user: the /api/ prefix is session-gated but not
-        admin-only (unlike /setup/bug-reports, which is global-admin gated).
-        Newest-first by fixed_at (falls back to ts), capped at 15, summary
-        required. _list_bug_reports is an in-memory read, so no to_thread.
+        Surfaces bug-store reports ab has built & closed — its MARK_BUG_FIXED
+        cascade flips the report to status=="fixed" with a fixed_at epoch + the
+        closed issue_url — of type bug or feature, merged within the last 2
+        weeks (see _committed_features). Each item carries a ``type`` so the UI
+        can badge "Bug fix" vs "Feature". Readable by ANY authenticated user:
+        the /api/ prefix is session-gated but not admin-only (unlike
+        /setup/bug-reports, which is global-admin gated). Newest-first by
+        fixed_at (falls back to ts), capped at 15, summary required.
+        _list_bug_reports is an in-memory read, so no to_thread.
         """
         hub = app.state.hub
         return {"features": _committed_features(hub._list_bug_reports())}

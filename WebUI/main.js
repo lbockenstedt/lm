@@ -30191,13 +30191,15 @@ async function loadWhatsNew() {
         if (!d) { body.innerHTML = '<p class="text-xs text-red-400 px-2 py-1">Could not load updates.</p>'; return; }
         const feats = Array.isArray(d.features) ? d.features : [];
         if (feats.length === 0) {
-            body.innerHTML = '<p class="text-xs text-slate-400 italic px-2 py-1">No new features yet.</p>';
+            body.innerHTML = '<p class="text-xs text-slate-400 italic px-2 py-1">No bug fixes or features merged in the last 2 weeks.</p>';
             return;
         }
         body.innerHTML = feats.map(f => {
             const when    = f.fixed_at ? fmtDate(f.fixed_at) : '';
             const summary = escapeHtml(String(f.summary || ''));
-            const inner   = `<div class="text-xs font-medium text-slate-800">${summary}</div>`
+            const isBug   = f.type === 'bug';
+            const badge   = `<span class="inline-block shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide ${isBug ? 'bg-red-50 text-red-600' : 'bg-emerald-50 text-emerald-600'}">${isBug ? 'Bug fix' : 'Feature'}</span>`;
+            const inner   = `<div class="flex items-start gap-1.5">${badge}<div class="text-xs font-medium text-slate-800">${summary}</div></div>`
                 + (when ? `<div class="text-[10px] text-slate-400 mt-0.5">${escapeHtml(when)}</div>` : '');
             if (f.issue_url) {
                 return `<a href="${escapeHtml(String(f.issue_url))}" target="_blank" rel="noopener noreferrer"
