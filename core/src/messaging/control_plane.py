@@ -2489,30 +2489,83 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         with _ENV_FILE_LOCK:
             try:
                 env_path = os.path.join(self._repo_root(), ".env")
-                lines: list = []
-                mode = 0o600
-                if os.path.exists(env_path):
-                    try:
-                        mode = os.stat(env_path).st_mode & 0o777
-                    except OSError:
-                        pass
-                    with open(env_path, "r") as f:
-                        lines = f.readlines()
-                updated = []
-                found = False
-                prefix = f"{key}="
-                for line in lines:
-                    if line.startswith(prefix):
+                # Cross-process lock: _ENV_FILE_LOCK only serializes THREADS in
+                # one process, but multiple agent PROCESSES share this .env
+                # during a self-update restart (the old process draining while
+                # systemd starts the new one, plus each hosted role's control
+                # plane). Two processes doing read-modify-write concurrently lose
+                # each other's lines — the "roles randomly vanishing from
+                # LOADED_ROLES (and per-role secrets)" outage: a key written by
+                # one process (e.g. SPOKE_SECRET_CONSOLE / LOADED_ROLES) is
+                # clobbered when another process rewrites .env from a snapshot it
+                # read before that write landed. An advisory flock held across
+                # the whole read-modify-write serializes processes too.
+                with self._env_file_flock(env_path):
+                    lines: list = []
+                    mode = 0o600
+                    if os.path.exists(env_path):
+                        try:
+                            mode = os.stat(env_path).st_mode & 0o777
+                        except OSError:
+                            pass
+                        with open(env_path, "r") as f:
+                            lines = f.readlines()
+                    updated = []
+                    found = False
+                    prefix = f"{key}="
+                    for line in lines:
+                        if line.startswith(prefix):
+                            updated.append(f"{prefix}{value}\n")
+                            found = True
+                        else:
+                            updated.append(line)
+                    if not found:
                         updated.append(f"{prefix}{value}\n")
-                        found = True
-                    else:
-                        updated.append(line)
-                if not found:
-                    updated.append(f"{prefix}{value}\n")
-                self._atomic_write_lines(env_path, updated, mode)
+                    self._atomic_write_lines(env_path, updated, mode)
                 logger.info("Persisted %s to %s", key, env_path)
             except Exception as e:
                 logger.warning("Failed to persist %s to .env: %s", key, e)
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _env_file_flock(env_path: str):
+        """Advisory exclusive ``flock`` on a sidecar ``.env.lock`` held across a
+        read-modify-write of ``.env`` so concurrent agent PROCESSES (base agent +
+        hosted-role control planes + an overlapping self-update restart) can't
+        lose each other's upserts. A sidecar lockfile (not ``.env`` itself) keeps
+        the lock fd stable across the atomic ``os.replace`` that swaps ``.env``.
+
+        Fail-open: if the lock dir/file can't be created or ``flock`` is
+        unsupported (some network filesystems), proceed without the cross-process
+        lock — the in-process ``_ENV_FILE_LOCK`` + atomic write still hold, so
+        this is never worse than before."""
+        lock_fd = None
+        try:
+            lock_path = env_path + ".lock"
+            try:
+                lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            except OSError as e:
+                logger.debug("env flock unavailable (%s); proceeding without "
+                             "cross-process lock", e)
+                if lock_fd is not None:
+                    try:
+                        os.close(lock_fd)
+                    except OSError:
+                        pass
+                    lock_fd = None
+            yield
+        finally:
+            if lock_fd is not None:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+                try:
+                    os.close(lock_fd)
+                except OSError:
+                    pass
+
 
     @staticmethod
     def _atomic_write_lines(path: str, lines: list, mode: int) -> None:
