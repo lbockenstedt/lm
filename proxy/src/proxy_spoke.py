@@ -21,6 +21,7 @@ Commands (hub → spoke):
 Phase 2 (console shortcut) is NOT here yet — console still relays through the hub.
 """
 import asyncio
+import errno
 import logging
 import os
 import ssl
@@ -39,6 +40,14 @@ except ImportError:  # loaded as a package by the agent role loader
     from .proxy_app import build_proxy_app  # type: ignore
 
 logger = logging.getLogger("ProxySpoke")
+
+# A self-update / systemd restart can briefly overlap with the outgoing proxy
+# process that still holds :443, so the successor's first bind can hit
+# EADDRINUSE. Retry a few times (≈4s total) so the new listener waits for the
+# predecessor to release instead of coming up with NO front door until the next
+# hub poll re-triggers _ensure_web_server.
+_BIND_MAX_ATTEMPTS = 5
+_BIND_RETRY_DELAY = 1.0  # seconds between bind attempts
 
 
 def _ws_to_http(url: str) -> str:
@@ -203,18 +212,35 @@ class ProxySpoke(BaseSpoke):
         self._runner = web.AppRunner(self._proxy_app, access_log=None)
         await self._runner.setup()
         ctx = self._listener_ssl()
-        try:
-            self._site = web.TCPSite(self._runner, self.web_host, self.web_port,
-                                     ssl_context=ctx)
-            await self._site.start()
-            self._bind = bind
-            logger.info("Edge proxy serving on %s://%s:%d → %s (no client-cert prompt)",
-                        "https" if ctx else "http", self.web_host, self.web_port,
-                        self.upstream_url or "?")
-        except Exception as e:  # noqa: BLE001
-            logger.error("edge proxy failed to bind %s:%d: %s",
-                         self.web_host, self.web_port, e)
-            self._site = None
+        last_err: Optional[BaseException] = None
+        for attempt in range(_BIND_MAX_ATTEMPTS):
+            site = web.TCPSite(self._runner, self.web_host, self.web_port,
+                               ssl_context=ctx)
+            try:
+                await site.start()
+                self._site = site
+                self._bind = bind
+                logger.info("Edge proxy serving on %s://%s:%d → %s (no client-cert prompt)",
+                            "https" if ctx else "http", self.web_host, self.web_port,
+                            self.upstream_url or "?")
+                return
+            except OSError as e:
+                last_err = e
+                if (getattr(e, "errno", None) == errno.EADDRINUSE
+                        and attempt < _BIND_MAX_ATTEMPTS - 1):
+                    logger.warning("edge proxy %s:%d in use (predecessor draining?); "
+                                   "retry %d/%d in %.1fs",
+                                   self.web_host, self.web_port, attempt + 1,
+                                   _BIND_MAX_ATTEMPTS - 1, _BIND_RETRY_DELAY)
+                    await asyncio.sleep(_BIND_RETRY_DELAY)
+                    continue
+                break
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                break
+        logger.error("edge proxy failed to bind %s:%d: %s",
+                     self.web_host, self.web_port, last_err)
+        self._site = None
 
     # ── command dispatch (hub → spoke) ───────────────────────────────────────
     async def handle_command(self, command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
