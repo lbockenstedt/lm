@@ -88,6 +88,30 @@ def test_hub_mode_automation_readable(hub):
         run(cv.reveal_secret(hub, cv.ADMIN_BUCKET, "he-dns", psk="wrongpass"))
 
 
+def test_automation_list_by_type_multi_type(hub):
+    """The console resolver now passes a tuple of types so ordinary ``login``
+    secrets work as device-console logins alongside the dedicated ``console``
+    type. Verify a multi-type scan returns both (automation-readable only)."""
+    run(cv.set_bucket_psk(hub, cv.ADMIN_BUCKET, "adminpass1"))
+    run(cv.put_secret(hub, cv.ADMIN_BUCKET, "dev-console",
+                      {"username": "c", "password": "p1"},
+                      mode="hub", sec_type="console", psk="adminpass1"))
+    run(cv.put_secret(hub, cv.ADMIN_BUCKET, "switch-login",
+                      {"username": "l", "password": "p2"},
+                      mode="hub", sec_type="login", psk="adminpass1"))
+    # A pass-phrase-only login must NOT be swept (hub can't read it unattended).
+    run(cv.put_secret(hub, cv.ADMIN_BUCKET, "psk-login",
+                      {"username": "z", "password": "p3"},
+                      mode="psk", sec_type="login", psk="adminpass1"))
+    names = {r["name"] for r in
+             run(cv.automation_list_by_type(hub, ("console", "login"), [cv.ADMIN_BUCKET]))}
+    assert names == {"dev-console", "switch-login"}
+    # A single-type string still works (back-compat with other callers).
+    only_console = {r["name"] for r in
+                    run(cv.automation_list_by_type(hub, "console", [cv.ADMIN_BUCKET]))}
+    assert only_console == {"dev-console"}
+
+
 def test_ciphertext_never_plaintext_in_vault(hub):
     run(cv.set_bucket_psk(hub, "t1", "hunter2pass"))
     run(cv.put_secret(hub, "t1", "he", {"password": "s3cr3t-value"},

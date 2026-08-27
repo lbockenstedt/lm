@@ -482,6 +482,12 @@ def register(app, hub, ctx):
     # that holds the console auto-identify login list as a hub-mode
     # (automation-readable) secret ``{"credentials": [{username,password}, …]}``.
     _CONSOLE_VAULT_SECRET = "console-auto-credentials"
+    # Vault secret types the console module accepts as device auto-login logins.
+    # ``console`` is the dedicated device-console type; ``login`` is an ordinary
+    # username+password secret — a normal login now works for the console too, so
+    # an operator no longer has to duplicate it under a separate "Console login"
+    # type. Both are swept from the reachable buckets (automation-readable only).
+    _CONSOLE_CRED_TYPES = ("console", "login")
 
     def _console_creds_from_cred_vault(creds_dict):
         """Normalise a Credential Vault secret value into ``[{username,password}]``.
@@ -505,9 +511,10 @@ def register(app, hub, ctx):
 
     async def _console_creds_for_tenant(hub, tenant):
         """Aggregate console auto-login credentials from the Credential Vault for
-        a console spoke bound to ``tenant``. ONLY secrets explicitly typed
-        ``console`` count — so an operator marks exactly which vault logins are
-        for device auto-identify (we never sweep unrelated ``login`` secrets in).
+        a console spoke bound to ``tenant``. Secrets typed ``console`` OR ``login``
+        count (see ``_CONSOLE_CRED_TYPES``) — an ordinary username+password login
+        now works for the console, so an operator no longer has to re-enter it
+        under a separate "Console login" type.
 
         Reachable slots: the spoke's own tenant bucket + the global ``__admin__``
         slot — so a tenant's console password is never pushed to another tenant's
@@ -528,7 +535,7 @@ def register(app, hub, ctx):
             buckets = [_cv.ADMIN_BUCKET]
             if tenant and tenant not in buckets:
                 buckets.append(tenant)
-            for rec in await _cv.automation_list_by_type(hub, "console", buckets):
+            for rec in await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, buckets):
                 _add(_console_creds_from_cred_vault(rec.get("value")))
             # Legacy single named list secret in the admin slot.
             try:
@@ -556,7 +563,7 @@ def register(app, hub, ctx):
 
         try:
             import cred_vault as _cv
-            for rec in await _cv.automation_list_by_type(hub, "console", [bucket]):
+            for rec in await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, [bucket]):
                 _add(_console_creds_from_cred_vault(rec.get("value")))
         except Exception:  # noqa: BLE001 — vault not configured / unreadable
             pass
@@ -570,7 +577,7 @@ def register(app, hub, ctx):
 
         ``tenant`` scopes the vault lookup to that tenant's bucket + ``__admin__``
         (the per-spoke seed passes the spoke's tenant); ``None`` aggregates every
-        reachable ``console``-type secret (used by diagnostics/reporting)."""
+        reachable console/login secret (used by diagnostics/reporting)."""
         try:
             creds = await _console_creds_for_tenant(hub, tenant)
             if creds:
@@ -608,8 +615,9 @@ def register(app, hub, ctx):
 
     async def _console_vault_secret_present(hub):
         """True when at least one console login lives in the Credential Vault —
-        any ``console``-type automation-readable secret (any reachable bucket) or
-        the legacy ``__admin__``/``console-auto-credentials`` list secret."""
+        any ``console``- or ``login``-type automation-readable secret (any
+        reachable bucket) or the legacy ``__admin__``/``console-auto-credentials``
+        list secret."""
         try:
             return bool(await _console_creds_for_tenant(hub, None))
         except Exception:  # noqa: BLE001
@@ -1195,21 +1203,22 @@ def register(app, hub, ctx):
         seeded = getattr(hub, "_console_creds_seeded", None) or set()
         # Console credential inventory available to the CALLER — a hub-level fact
         # independent of which console spokes are currently connected: the
-        # Credential-Vault ``console``-typed secrets in the buckets the caller can
-        # reach (a tenant admin → its own tenants + the admin slot; a Global Admin
-        # → every bucket), plus the legacy hub-state / keyvault-ref list. Mirrors
-        # what _console_seed_credentials pushes, so the banner never falsely warns
+        # Credential-Vault ``console``- or ``login``-typed secrets (see
+        # ``_CONSOLE_CRED_TYPES``) in the buckets the caller can reach (a tenant
+        # admin → its own tenants + the admin slot; a Global Admin → every
+        # bucket), plus the legacy hub-state / keyvault-ref list. Mirrors what
+        # _console_seed_credentials pushes, so the banner never falsely warns
         # "0 saved / factory defaults only" when the creds live in the vault.
         # Counts only — never values.
         saved_creds, _seen_c, vault_present = [], set(), False
         try:
             import cred_vault as _cv
             if admin:
-                _recs = await _cv.automation_list_by_type(hub, "console", None)
+                _recs = await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, None)
             else:
                 _reach = list((sess or {}).get("user", {}).get("tenants") or [])
                 _buckets = list(dict.fromkeys([_cv.ADMIN_BUCKET] + _reach))
-                _recs = await _cv.automation_list_by_type(hub, "console", _buckets)
+                _recs = await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, _buckets)
             for _rec in _recs:
                 _cc = _console_creds_from_cred_vault(_rec.get("value"))
                 if _cc:

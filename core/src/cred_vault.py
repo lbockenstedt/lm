@@ -387,12 +387,17 @@ async def automation_get(hub, bucket: str, name: str) -> Dict[str, Any]:
     return value
 
 
-async def automation_list_by_type(hub, sec_type: str,
+async def automation_list_by_type(hub, sec_type,
                                   buckets: Optional[List[str]] = None
                                   ) -> List[Dict[str, Any]]:
     """Unattended bulk retrieval for tooling — return every AUTOMATION-READABLE
     (``hub``-mode) secret of a given ``type`` in the requested ``buckets`` (or
     all buckets when ``buckets`` is None), decrypted. NO pass-phrase.
+
+    ``sec_type`` may be a single type string OR an iterable of type strings
+    (e.g. ``("console", "login")``) — a secret matches when its type is in the
+    requested set. This lets the console resolver accept ordinary ``login``
+    secrets as device-console logins, not only the dedicated ``console`` type.
 
     Each item is ``{"bucket","name","value"}``. Unreadable / pass-phrase-only /
     wrong-type secrets are skipped silently — this is a best-effort scan used by
@@ -400,14 +405,16 @@ async def automation_list_by_type(hub, sec_type: str,
 
     Unlike :func:`automation_get` it does NOT stamp ``last_accessed_*`` (a seed
     can run on every spoke connect, so we avoid churning hub state on each scan)."""
-    sentinel.guard("vault.automation_list_by_type", detail=f"type={sec_type}")
+    want_types = ({sec_type} if isinstance(sec_type, str) else set(sec_type))
+    sentinel.guard("vault.automation_list_by_type",
+                   detail=f"type={','.join(sorted(want_types))}")
     want = set(buckets) if buckets is not None else None
     out: List[Dict[str, Any]] = []
     for bucket, secrets in (_meta(hub)["secrets"] or {}).items():
         if want is not None and bucket not in want:
             continue
         for name, sm in (secrets or {}).items():
-            if sm.get("type") != sec_type or sm.get("mode") != _MODE_HUB:
+            if sm.get("type") not in want_types or sm.get("mode") != _MODE_HUB:
                 continue
             try:
                 value = await _fetch_and_decrypt(hub, bucket, name, psk=None)

@@ -39,8 +39,9 @@ _BY_BUCKET = {
 
 
 async def _automation_list_by_type(hub, kind, buckets):
+    want = {kind} if isinstance(kind, str) else set(kind)
     out = []
-    if kind == "console":
+    if "console" in want:
         for b in buckets:
             out.extend(_BY_BUCKET.get(b, []))
     return out
