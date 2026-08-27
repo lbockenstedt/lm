@@ -238,8 +238,9 @@ class ProxySpoke(BaseSpoke):
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 break
-        logger.error("edge proxy failed to bind %s:%d: %s",
-                     self.web_host, self.web_port, last_err)
+        logger.warning("edge proxy could not bind %s:%d yet: %s "
+                       "(will retry on next status poll)",
+                       self.web_host, self.web_port, last_err)
         self._site = None
 
     # ── command dispatch (hub → spoke) ───────────────────────────────────────
