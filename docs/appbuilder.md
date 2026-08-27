@@ -107,6 +107,18 @@ FastAPI dashboard on **8000** (HTTP). No WS listener — it is a WS **client** t
   stored report can be deleted from the same view via `DELETE /setup/bug-reports/{rid}`
   (admin-only) — removes the hub's local copy only; the public GitHub issue
   AppBuilder may already have filed is NOT touched.
+- **"What's New" popover surfaces committed features to everyone.** The WebUI
+  top banner carries an info-icon (ⓘ) next to **Help** that opens a small
+  "What's New" popover listing recently shipped features. It reads
+  `GET /api/whats-new` — session-gated but NOT admin-only (unlike the
+  `/setup/bug-reports` admin view) — which returns the bug-store reports with
+  `type=="feature"` and `status=="fixed"` (i.e. AppBuilder built & closed the
+  issue), newest-first by `fixed_at`, capped at 15, each `{id, summary,
+  fixed_at, issue_url}`. A row links to its closed GitHub issue when
+  `issue_url` is present; with no committed features yet it shows "No new
+  features yet." Nothing writes to the store here — it is a read-only view of
+  the same feature-request lifecycle above (`toggleWhatsNew`/`loadWhatsNew` in
+  `WebUI/main.js`).
 - **Runtime-error banner auto-files a bug.** The WebUI's error boundary
   (`WebUI/index.html`) shows a dismissible red "⚠ Runtime error" banner for any
   uncaught runtime JS error (distinct from the one-shot fatal page-load banner,

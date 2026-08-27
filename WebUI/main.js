@@ -30107,4 +30107,75 @@ document.addEventListener('click', e => {
     if (dd && inp && !inp.contains(e.target) && !dd.contains(e.target)) {
         dd.classList.add('hidden');
     }
+    // Same treatment for the "What's New" popover.
+    const wnWrap  = document.getElementById('whats-new-wrap');
+    const wnPanel = document.getElementById('whats-new-panel');
+    if (wnPanel && wnWrap && !wnWrap.contains(e.target) && !wnPanel.classList.contains('hidden')) {
+        closeWhatsNew();
+    }
 });
+
+// ── "What's New" popover ────────────────────────────────────────────────────
+// A header info-icon that lists recently committed features (bug-store reports
+// with type=feature + status=fixed, served by GET /api/whats-new — readable by
+// any signed-in user). Mirrors the header search-results dropdown: click
+// toggles, click-outside/Esc dismisses, data fetched on open.
+function toggleWhatsNew(evt) {
+    if (evt) evt.stopPropagation();
+    const panel = document.getElementById('whats-new-panel');
+    if (!panel) return;
+    if (panel.classList.contains('hidden')) openWhatsNew();
+    else closeWhatsNew();
+}
+
+function openWhatsNew() {
+    const panel = document.getElementById('whats-new-panel');
+    const btn   = document.getElementById('whats-new-btn');
+    if (!panel) return;
+    panel.classList.remove('hidden');
+    if (btn) btn.setAttribute('aria-expanded', 'true');
+    loadWhatsNew();
+}
+
+function closeWhatsNew() {
+    const panel = document.getElementById('whats-new-panel');
+    const btn   = document.getElementById('whats-new-btn');
+    if (panel) panel.classList.add('hidden');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+
+// Esc dismisses the "What's New" popover (only acts when it's open).
+document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    const panel = document.getElementById('whats-new-panel');
+    if (panel && !panel.classList.contains('hidden')) closeWhatsNew();
+});
+
+async function loadWhatsNew() {
+    const body = document.getElementById('whats-new-body');
+    if (!body) return;
+    body.innerHTML = '<p class="text-xs text-slate-400 italic px-2 py-1">Loading…</p>';
+    try {
+        const r = await fetch('/api/whats-new');
+        const d = r.ok ? await r.json() : null;
+        if (!d) { body.innerHTML = '<p class="text-xs text-red-400 px-2 py-1">Could not load updates.</p>'; return; }
+        const feats = Array.isArray(d.features) ? d.features : [];
+        if (feats.length === 0) {
+            body.innerHTML = '<p class="text-xs text-slate-400 italic px-2 py-1">No new features yet.</p>';
+            return;
+        }
+        body.innerHTML = feats.map(f => {
+            const when    = f.fixed_at ? fmtDate(f.fixed_at) : '';
+            const summary = escapeHtml(String(f.summary || ''));
+            const inner   = `<div class="text-xs font-medium text-slate-800">${summary}</div>`
+                + (when ? `<div class="text-[10px] text-slate-400 mt-0.5">${escapeHtml(when)}</div>` : '');
+            if (f.issue_url) {
+                return `<a href="${escapeHtml(String(f.issue_url))}" target="_blank" rel="noopener noreferrer"
+                            class="block px-2 py-1.5 rounded-lg hover:bg-slate-50 cursor-pointer no-underline">${inner}</a>`;
+            }
+            return `<div class="px-2 py-1.5 rounded-lg">${inner}</div>`;
+        }).join('');
+    } catch (err) {
+        body.innerHTML = `<p class="text-xs text-red-400 px-2 py-1">Error: ${escapeHtml(err.message || String(err))}</p>`;
+    }
+}

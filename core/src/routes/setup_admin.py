@@ -5,6 +5,36 @@ from api import (
 )
 from update_pipeline import _version_behind
 
+# Cap for the WebUI "What's New" popover (GET /api/whats-new).
+_WHATS_NEW_LIMIT = 15
+
+
+def _committed_features(reports: list) -> list:
+    """Pick the recently committed features out of the bug-store index.
+
+    "Committed feature" = a report with ``type=="feature"`` that AppBuilder has
+    built & closed (its MARK_BUG_FIXED cascade sets ``status=="fixed"`` +
+    ``fixed_at``). Newest-first by ``fixed_at`` (falls back to ``ts``), a
+    non-empty ``summary`` required, capped at ``_WHATS_NEW_LIMIT``. Pure
+    function of the index list so it's unit-testable without a FastAPI app."""
+    items = []
+    for r in reports or []:
+        if str(r.get("type") or "").lower() != "feature":
+            continue
+        if str(r.get("status") or "").lower() != "fixed":
+            continue
+        summary = str(r.get("summary") or "").strip()
+        if not summary:
+            continue
+        items.append({
+            "id": r.get("id"),
+            "summary": summary,
+            "fixed_at": r.get("fixed_at") or r.get("ts") or 0,
+            "issue_url": r.get("issue_url") or "",
+        })
+    items.sort(key=lambda x: x.get("fixed_at") or 0, reverse=True)
+    return items[:_WHATS_NEW_LIMIT]
+
 # ── /setup/diagnostics cache (stale-while-revalidate) ───────────────────────
 # The Diagnostics card + the Spokes & Agents page poll /setup/diagnostics on
 # every load/tick; the handler gathers system metrics + the local version, then
@@ -995,6 +1025,21 @@ def register(app, hub, ctx):
         except Exception as e:
             logger.error(f"[bug-report] /api/bug-report failed: {e}")
             raise HTTPException(status_code=500, detail=str(e))
+
+    @app.get("/api/whats-new")
+    async def whats_new():
+        """List recently committed features for the WebUI "What's New" popover.
+
+        "Committed features" = bug-store reports with type=="feature" that ab
+        has built & closed — its MARK_BUG_FIXED cascade flips the report to
+        status=="fixed" with a fixed_at epoch + the closed issue_url. Readable
+        by ANY authenticated user: the /api/ prefix is session-gated but not
+        admin-only (unlike /setup/bug-reports, which is global-admin gated).
+        Newest-first by fixed_at (falls back to ts), capped at 15, summary
+        required. _list_bug_reports is an in-memory read, so no to_thread.
+        """
+        hub = app.state.hub
+        return {"features": _committed_features(hub._list_bug_reports())}
 
     # Bug Reports log view (admin-only, like the rest of /setup/): lists filed
     # reports and serves the full artifacts (console/HTML/screenshot) for an
