@@ -32,6 +32,7 @@ import hmac
 import socket
 import logging
 import websockets
+from http import HTTPStatus
 from typing import Any, Dict, List, Optional
 
 try:
@@ -326,6 +327,30 @@ class AgentHostingControlPlane(BaseControlPlane):
                 return fc, pk
         return "", ""
 
+    def _agent_health_process_request(self, connection, request):
+        """websockets ``process_request`` hook for the ``/ws/agent`` listener.
+
+        Answers NON-WebSocket requests (health checks, TCP/port scanners, a
+        browser hitting the ``wss://…:443`` port) with a plain ``200 OK`` instead
+        of letting the library run its upgrade validation, which raises
+        ``InvalidUpgrade`` ("missing Connection header" / "missing Upgrade
+        header") and logs a full-traceback ``opening handshake failed`` ERROR on
+        EVERY probe — noise that buried real events in the agent-listener log.
+
+        A genuine agent sends ``Upgrade: websocket``; for those we return
+        ``None`` so the library performs the real handshake unchanged (returning
+        a Response here would SKIP ``protocol.accept``). Requests that carry an
+        ``Upgrade: websocket`` but a malformed/absent ``Connection`` header are
+        left to fail loudly — that is a real proxy misconfiguration worth seeing,
+        not a benign probe."""
+        try:
+            upgrade = (request.headers.get("Upgrade", "") or "").strip().lower()
+        except Exception:  # noqa: BLE001 — duplicate/odd headers → treat as non-WS
+            upgrade = ""
+        if upgrade == "websocket":
+            return None
+        return connection.respond(HTTPStatus.OK, "OK\n")
+
     async def run_agent_server(self):
         """Serve the agent listener. Three modes:
 
@@ -383,6 +408,10 @@ class AgentHostingControlPlane(BaseControlPlane):
                 # sharing that loop — the ~15s VNC stall.
                 serve_kwargs["ping_interval"] = _ws_keepalive_env("LM_WS_PING_INTERVAL_S", 30.0)
                 serve_kwargs["ping_timeout"] = _ws_keepalive_env("LM_WS_PING_TIMEOUT_S", 90.0)
+                # Answer non-WebSocket probes (health checks, port scanners,
+                # browsers) with a plain 200 instead of a logged InvalidUpgrade
+                # "opening handshake failed" traceback on every hit.
+                serve_kwargs["process_request"] = self._agent_health_process_request
                 async with websockets.serve(
                     self._ws_dispatch, host, port, **serve_kwargs,
                 ):
