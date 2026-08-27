@@ -449,6 +449,27 @@
                 <span class="inline-flex items-center justify-center w-4 h-4 rounded-full border border-current text-[10px] font-bold">?</span>
                 Help
             </button>
+            <!-- "What's New" — info icon + popover listing recently committed
+                 features (see toggleWhatsNew/loadWhatsNew in main.js). -->
+            <div id="whats-new-wrap" class="relative">
+                <button onclick="toggleWhatsNew(event)" id="whats-new-btn"
+                        title="See the latest features added to Lab Manager"
+                        aria-label="What's New" aria-haspopup="dialog" aria-expanded="false"
+                        class="flex items-center text-slate-300 hover:text-white transition-colors">
+                    <span class="inline-flex items-center justify-center w-4 h-4 rounded-full border border-current text-[11px] font-serif italic font-bold leading-none">i</span>
+                </button>
+                <div id="whats-new-panel"
+                     class="hidden absolute top-full right-0 mt-2 w-80 max-h-96 overflow-y-auto bg-white border border-slate-300 rounded-xl shadow-2xl z-50"
+                     role="dialog" aria-label="What's New">
+                    <div class="px-4 py-2.5 border-b border-slate-100 sticky top-0 bg-white rounded-t-xl">
+                        <h3 class="text-sm font-bold text-slate-800">What's New</h3>
+                        <p class="text-[10px] text-slate-400">Latest features added to Lab Manager</p>
+                    </div>
+                    <div id="whats-new-body" class="p-2 space-y-0.5">
+                        <p class="text-xs text-slate-400 italic px-2 py-1">Loading…</p>
+                    </div>
+                </div>
+            </div>
             <div id="user-chip" class="hidden items-center gap-2 text-xs text-slate-300">
                 <span id="user-chip-name" class="font-medium"></span>
                 <!-- Tenant badge / switcher — populated by _initApp() -->
