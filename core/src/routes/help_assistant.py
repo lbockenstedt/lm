@@ -23,6 +23,33 @@ def register(app, hub, ctx):
         ) if os.path.isdir(d)),
         os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../docs")))
 
+    # Repo root for the source-code search tool (the dir CONTAINING docs/).
+    _REPO_ROOT = os.path.dirname(_DOCS_DIR)
+    # Also search sibling repos when they're checked out next to this one (the
+    # simulations live in the ``cs`` repo, VM plumbing in ``pxmx``) so a "what
+    # does simulation X do" answer can quote the ACTUAL sim code. Best-effort:
+    # in a production hub deploy only the local repo is usually present, and the
+    # missing roots are simply skipped.
+    _SRC_ROOTS = [_REPO_ROOT]
+    for _sib in ("cs", "pxmx"):
+        _sp = os.path.join(os.path.dirname(_REPO_ROOT), _sib)
+        if os.path.isdir(_sp) and os.path.abspath(_sp) != os.path.abspath(_REPO_ROOT):
+            _SRC_ROOTS.append(os.path.abspath(_sp))
+    # Text source we let the assistant grep. Kept to human-authored code/config;
+    # binaries, vendored deps, caches, worktrees and anything that looks like a
+    # secret file are skipped so nothing sensitive leaks into an answer.
+    _SRC_EXTS = {".py", ".js", ".ts", ".tsx", ".sh", ".ps1", ".md", ".html",
+                 ".css", ".yaml", ".yml", ".json", ".toml", ".cfg", ".ini"}
+    _SRC_SKIP_DIRS = {".git", "venv", ".venv", "node_modules", "__pycache__",
+                      ".pytest_cache", ".mypy_cache", "dist", "build", ".claude",
+                      ".idea", ".vscode", "site-packages", "coverage", "htmlcov"}
+    _SRC_SKIP_FILE_HINTS = (".env", "secret", "credential", ".key", ".pem",
+                            ".crt", ".p12", ".pfx", "id_rsa", ".pyc")
+    _SRC_MAX_BYTES = 4_000_000        # main.js is ~2MB — keep it searchable
+    _SRC_MAX_MATCHES = 14
+    _SRC_MAX_FILES = 6000
+    _SRC_SNIPPET_CTX = 4              # lines of context above/below a hit
+
     def _ab_agent():
         """The connected ab agent's spoke_id, or None. ab registers
         as spoke_id 'ab' (config HUB_AGENT_ID); match that, else any
@@ -110,6 +137,112 @@ def register(app, hub, ctx):
         merged = [item for sub in results for item in sub]
         return {"query": q, "total": len(merged), "results": merged[:50]}
 
+    def _query_terms(q):
+        return [w for w in ''.join(c.lower() if c.isalnum() else ' ' for c in q).split()
+                if len(w) > 2]
+
+    def _snippets(text, terms, query, max_snips=3, ctx=160):
+        """Up to ``max_snips`` context windows around the first matches of the
+        full query (preferred) or its individual terms — collapsed to one line."""
+        tl = text.lower()
+        needles = [query.lower()] if query and query.lower() in tl else \
+                  [t for t in terms if t in tl]
+        out, seen = [], []
+        for nd in needles:
+            start = 0
+            while len(out) < max_snips:
+                i = tl.find(nd, start)
+                if i < 0:
+                    break
+                if not any(abs(i - p) < ctx for p in seen):
+                    seen.append(i)
+                    a, b = max(0, i - ctx), min(len(text), i + len(nd) + ctx)
+                    snip = ' '.join(text[a:b].split())
+                    out.append(("…" if a > 0 else "") + snip + ("…" if b < len(text) else ""))
+                start = i + len(nd)
+            if len(out) >= max_snips:
+                break
+        return out
+
+    def _tool_search_docs(args):
+        """Full-text search across the ENTIRE doc corpus (not just the 4 docs
+        pre-selected into the prompt) — lets the model pull a relevant doc the
+        keyword pre-selection missed (e.g. a Proxmox question → docs/pxmx.md)."""
+        q = str(args.get("query") or "").strip()
+        if not q:
+            return {"error": "query required"}
+        terms = _query_terms(q)
+        docs = _load_docs()
+        results = []
+        for name, text in docs.items():
+            tl = text.lower()
+            score = (tl.count(q.lower()) * 3) + sum(tl.count(t) for t in terms) \
+                + 5 * sum(t in name.lower() for t in terms)
+            if score <= 0:
+                continue
+            results.append({"doc": name, "score": score,
+                            "snippets": _snippets(text, terms, q)})
+        results.sort(key=lambda r: r["score"], reverse=True)
+        return {"query": q, "total": len(results), "results": results[:6]}
+
+    def _tool_search_source(args):
+        """Grep the platform SOURCE TREE (this repo + sibling repos like the
+        ``cs`` simulations repo; secrets/vendored deps excluded) for a literal
+        string or set of words — answers 'where/how is X implemented', 'what
+        does simulation Y do', install-command questions, etc. Returns file:line
+        hits WITH a short multi-line code snippet so the answer can quote the
+        actual implementation. File paths are prefixed with the repo name."""
+        q = str(args.get("query") or "").strip()
+        if not q:
+            return {"error": "query required"}
+        ql = q.lower()
+        terms = _query_terms(q)
+        matches, scanned, done = [], 0, False
+        for base in _SRC_ROOTS:
+            if done:
+                break
+            label = os.path.basename(base)
+            for root, dirs, files in os.walk(base):
+                dirs[:] = [d for d in dirs
+                           if d not in _SRC_SKIP_DIRS and not d.startswith(".")]
+                for fn in files:
+                    if os.path.splitext(fn)[1].lower() not in _SRC_EXTS:
+                        continue
+                    low = fn.lower()
+                    if any(h in low for h in _SRC_SKIP_FILE_HINTS):
+                        continue
+                    fp = os.path.join(root, fn)
+                    try:
+                        if os.path.getsize(fp) > _SRC_MAX_BYTES:
+                            continue
+                        with open(fp, encoding="utf-8", errors="ignore") as f:
+                            lines = f.readlines()
+                    except Exception:  # noqa: BLE001
+                        continue
+                    scanned += 1
+                    rel = f"{label}/{os.path.relpath(fp, base)}"
+                    last = -999
+                    for ln, line in enumerate(lines, 1):
+                        ll = line.lower()
+                        if not (ql in ll or (terms and all(t in ll for t in terms))):
+                            continue
+                        if ln - last < _SRC_SNIPPET_CTX:   # collapse adjacent hits
+                            continue
+                        last = ln
+                        a = max(0, ln - 1 - _SRC_SNIPPET_CTX)
+                        b = min(len(lines), ln + _SRC_SNIPPET_CTX)
+                        snippet = ''.join(lines[a:b]).rstrip("\n")[:600]
+                        matches.append({"file": rel, "line": ln, "snippet": snippet})
+                        if len(matches) >= _SRC_MAX_MATCHES:
+                            break
+                    if len(matches) >= _SRC_MAX_MATCHES or scanned >= _SRC_MAX_FILES:
+                        done = True
+                        break
+                if done:
+                    break
+        return {"query": q, "total": len(matches),
+                "files_scanned": scanned, "results": matches}
+
     _TOOLS = [
         {"type": "function", "function": {
             "name": "get_spokes_status",
@@ -127,6 +260,29 @@ def register(app, hub, ctx):
                            "properties": {"query": {"type": "string"}},
                            "required": ["query"]},
         }},
+        {"type": "function", "function": {
+            "name": "search_docs",
+            "description": "Full-text search across the ENTIRE documentation corpus "
+                           "(all docs, not just the few in the prompt). Use this when "
+                           "the documentation shown doesn't cover the question — e.g. "
+                           "install/setup commands, a feature or role (Proxmox/pxmx, "
+                           "DHCP, SSO...). Returns matching doc names + snippets.",
+            "parameters": {"type": "object",
+                           "properties": {"query": {"type": "string"}},
+                           "required": ["query"]},
+        }},
+        {"type": "function", "function": {
+            "name": "search_source",
+            "description": "Search the platform SOURCE CODE + config (this repo plus "
+                           "sibling repos like the cs simulations repo) for a string or "
+                           "words. Use for 'how/where is X implemented', 'what does "
+                           "simulation Y do', exact command flags, env var names, or when "
+                           "docs don't answer. Returns file:line hits with a short "
+                           "multi-line CODE SNIPPET you can quote back to the user.",
+            "parameters": {"type": "object",
+                           "properties": {"query": {"type": "string"}},
+                           "required": ["query"]},
+        }},
     ]
 
     async def _exec_tool(name, args):
@@ -134,6 +290,10 @@ def register(app, hub, ctx):
             return _tool_spokes_status(args)
         if name == "search_devices":
             return await _tool_search_devices(args)
+        if name == "search_docs":
+            return _tool_search_docs(args)
+        if name == "search_source":
+            return _tool_search_source(args)
         return {"error": f"unknown tool: {name}"}
 
     # ── routes ───────────────────────────────────────────────────────────────
@@ -162,10 +322,22 @@ def register(app, hub, ctx):
         doc_ctx = "\n\n".join(f"### DOC: {n}\n{docs[n]}" for n in picked)
         system = (
             "You are the Lab Manager (LM) help assistant. Answer the user's question "
-            "using ONLY the documentation below and any live data returned by the tools. "
-            "Cite the doc name(s) you used inline as [doc:<name>]. Call get_spokes_status "
-            "or search_devices when the question is about the live system. If the answer "
-            "isn't in the docs or live data, say so plainly. Be concise and concrete.\n\n"
+            "using the documentation below, the wider docs/source (via tools), and any "
+            "live data the tools return. Cite the doc name(s) you used inline as "
+            "[doc:<name>]. Tool guidance: call get_spokes_status or search_devices for "
+            "questions about the LIVE system; call search_docs to search the FULL "
+            "documentation when the docs shown here don't cover the question; call "
+            "search_source to look in the SOURCE CODE / config (install commands, flags, "
+            "env vars, how a feature works). Do NOT give up just because search_devices "
+            "returns 0 results — a question about a feature, setup, or install is a "
+            "documentation/source question, so try search_docs and search_source before "
+            "concluding. When the user asks what a SIMULATION or feature DOES, first "
+            "explain it in plain, non-technical language (what it simulates, why, what "
+            "the user sees), THEN show a few short CODE SNIPPETS from search_source as "
+            "fenced code blocks, each labeled with its `file:line`, so the user can go "
+            "look at the actual implementation. If, after checking docs, source, and "
+            "live data, the answer genuinely isn't there, say so plainly. Be concise "
+            "and concrete.\n\n"
             "=== DOCUMENTATION ===\n" + doc_ctx
         )
         messages = [{"role": "user", "content": question}]
