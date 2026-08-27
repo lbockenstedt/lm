@@ -6691,6 +6691,18 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 )
                 return {"status": "ok" if ok else "not_found"}
 
+            if req_type == "MARK_BUG_IN_PROGRESS":
+                # ab started actively working this report's issue → the LM UI
+                # shows "In Progress" so the user knows it's being worked on.
+                rid = req.get("id", "")
+                issue_url = req.get("issue_url", "")
+                ok = await asyncio.to_thread(self._mark_bug_in_progress, rid, issue_url)
+                logger.info(
+                    f"[bug-report] MARK_BUG_IN_PROGRESS id={rid} url={issue_url} "
+                    f"from {spoke_id}: {'ok' if ok else 'not_found'}"
+                )
+                return {"status": "ok" if ok else "not_found"}
+
             if req_type == "MARK_BUG_FIXED":
                 # ab closed the GitHub issue for this report → the LM UI shows
                 # "Fixed" + the issue link.
