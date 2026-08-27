@@ -39,6 +39,7 @@ _HELPERS = (
     "_core_update_lock",
     "_prepare_restart_with_watchdog",
     "_perform_self_update_sync",
+    "_clear_stale_git_locks",
 )
 
 
@@ -137,3 +138,72 @@ def test_state_dir_uses_component_sentinel_when_neither_id_present(tmp_path, mon
             return str(tmp_path)
     d = _Bare()._spoke_state_dir()
     assert "component" in d, f"sentinel not used: {d}"
+
+# ── stale git-lock self-heal (_clear_stale_git_locks) ────────────────────────
+import time as _time  # noqa: E402
+
+
+class _Repo(SelfUpdateMixin):
+    def __init__(self, repo):
+        self._repo = repo
+    def _repo_root(self):
+        return self._repo
+
+
+def _make_git(tmp_path):
+    gd = tmp_path / ".git"
+    (gd / "refs" / "heads").mkdir(parents=True)
+    return gd
+
+
+def _age(path, seconds):
+    old = _time.time() - seconds
+    os.utime(path, (old, old))
+
+
+def test_clear_removes_stale_head_lock(tmp_path):
+    gd = _make_git(tmp_path)
+    lk = gd / "HEAD.lock"
+    lk.write_text("")
+    _age(lk, 300)  # 5 min old → unambiguously abandoned
+    n = _Repo(str(tmp_path))._clear_stale_git_locks(str(tmp_path))
+    assert n == 1
+    assert not lk.exists()
+
+
+def test_clear_keeps_fresh_lock(tmp_path):
+    # A lock younger than the staleness window belongs to an in-flight git op
+    # and must NOT be removed (avoids corrupting a concurrent writer).
+    gd = _make_git(tmp_path)
+    lk = gd / "index.lock"
+    lk.write_text("")  # just created → fresh
+    n = _Repo(str(tmp_path))._clear_stale_git_locks(str(tmp_path))
+    assert n == 0
+    assert lk.exists()
+
+
+def test_clear_removes_stale_per_ref_lock(tmp_path):
+    gd = _make_git(tmp_path)
+    lk = gd / "refs" / "heads" / "main.lock"
+    lk.write_text("")
+    _age(lk, 300)
+    n = _Repo(str(tmp_path))._clear_stale_git_locks(str(tmp_path))
+    assert n == 1
+    assert not lk.exists()
+
+
+def test_clear_force_age_zero_removes_fresh_lock(tmp_path):
+    # The reactive path (after a lock failure) passes max_age_s=0 to force-clear
+    # the offending lock so the next update cycle starts clean.
+    gd = _make_git(tmp_path)
+    lk = gd / "HEAD.lock"
+    lk.write_text("")
+    n = _Repo(str(tmp_path))._clear_stale_git_locks(str(tmp_path), max_age_s=0.0)
+    assert n == 1
+    assert not lk.exists()
+
+
+def test_clear_noop_without_git_dir(tmp_path):
+    # No .git directory (or a .git file for a worktree) → nothing to do, no raise.
+    n = _Repo(str(tmp_path))._clear_stale_git_locks(str(tmp_path))
+    assert n == 0

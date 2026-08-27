@@ -80,6 +80,61 @@ class SelfUpdateMixin:
                            timeout, cwd)
             return subprocess.CompletedProcess(args, 124, "", str(e))
 
+    def _clear_stale_git_locks(self, cwd: str, max_age_s: float = 90.0) -> int:
+        """Remove STALE git lock files left by a git process that crashed
+        mid-write, which otherwise wedge the repo forever ("Unable to create
+        '.git/HEAD.lock': File exists … a git process may have crashed in this
+        repository earlier: remove the file manually to continue").
+
+        Only locks whose mtime is older than ``max_age_s`` are removed — a real
+        git op finishes in seconds, so an aged lock is unambiguously abandoned.
+        This makes automated cleanup safe even if some other git briefly runs
+        concurrently (its fresh lock is left untouched). Best-effort; never
+        raises. Returns the number of lock files removed."""
+        try:
+            git_dir = os.path.join(cwd, ".git")
+            if not os.path.isdir(git_dir):
+                # Worktree / submodule: .git may be a file pointing elsewhere.
+                return 0
+        except Exception:  # noqa: BLE001
+            return 0
+        removed = 0
+        now = time.time()
+        # Top-level single-writer locks + every per-ref lock under refs/.
+        candidates = ["HEAD.lock", "index.lock", "ORIG_HEAD.lock",
+                      "config.lock", "packed-refs.lock", "MERGE_HEAD.lock"]
+        paths = [os.path.join(git_dir, c) for c in candidates]
+        try:
+            for root, _dirs, files in os.walk(os.path.join(git_dir, "refs")):
+                for f in files:
+                    if f.endswith(".lock"):
+                        paths.append(os.path.join(root, f))
+        except Exception:  # noqa: BLE001
+            pass
+        for p in paths:
+            try:
+                st = os.stat(p)
+            except FileNotFoundError:
+                continue
+            except Exception:  # noqa: BLE001
+                continue
+            if (now - st.st_mtime) < max_age_s:
+                logger.info("self-update: leaving fresh git lock %s "
+                            "(age %.0fs < %.0fs) — a git op may be in flight",
+                            p, now - st.st_mtime, max_age_s)
+                continue
+            try:
+                os.remove(p)
+                removed += 1
+                logger.warning("self-update: removed STALE git lock %s "
+                               "(age %.0fs) — prior git process crashed mid-write",
+                               p, now - st.st_mtime)
+            except FileNotFoundError:
+                continue
+            except Exception as e:  # noqa: BLE001
+                logger.warning("self-update: could not remove git lock %s: %s", p, e)
+        return removed
+
     def _prepare_service_restart(self, reason: str = "update") -> bool:
         """Signal that this component should restart to load new code.
 
@@ -436,6 +491,7 @@ class SelfUpdateMixin:
                                            "lock; skipping core pull this cycle.")
                         else:
                             try:
+                                self._clear_stale_git_locks(core_root)
                                 self._run_git(["remote", "set-url", "origin",
                                                core_repo_url], cwd=core_root)
                                 self._run_git(["config", "pull.rebase", "true"],
@@ -486,6 +542,7 @@ class SelfUpdateMixin:
                 core_root = None
 
             # 1. Update remote origin
+            self._clear_stale_git_locks(cwd)
             subprocess.run(["git", "remote", "set-url", "origin", repo_url], cwd=cwd, check=True, timeout=15)
 
             # 2. Configure pull strategy
@@ -624,6 +681,22 @@ class SelfUpdateMixin:
                     "/etc/resolv.conf + that the DNS server is reachable. git said: %s", detail)
             else:
                 logger.error("update failed (git command exit code %s): %s", e.returncode, detail or e)
+            # Self-heal a stale-lock failure so the NEXT update cycle starts
+            # clean instead of wedging forever on a leftover .git/*.lock. We hold
+            # the update path here and just proved the op failed on the lock, so
+            # force-remove it (age 0) rather than waiting for the 90s staleness
+            # window. ("cannot lock ref … Unable to create '.git/HEAD.lock':
+            # File exists / Another git process seems to be running")
+            if any(s in _dl for s in ("unable to create", ".lock': file exists",
+                                      "cannot lock ref",
+                                      "another git process seems to be running",
+                                      "index.lock")):
+                try:
+                    n = self._clear_stale_git_locks(cwd, max_age_s=0.0)
+                    logger.warning("self-update: cleared %d stale git lock(s) in %s "
+                                   "after a lock failure; next update will retry", n, cwd)
+                except Exception:  # noqa: BLE001
+                    pass
             return {"status": "ERROR", "message": f"git operation failed: {detail}"}
         except Exception as e:
             logger.error(f"update failed: {e}")
