@@ -44,11 +44,16 @@ class HubBugStoreMixin:
         if rtype not in ("bug", "feature"):
             rtype = "bug"
         context = payload.get("context") or {}
+        # Tenant attribution for the read-only tenant-admin view. The route
+        # resolves this server-side (session tenant, else the header tenant
+        # picker) and injects it — the browser payload is NOT trusted for it.
+        # Untagged (legacy / no active tenant) reports stay Global-Admin-only.
+        tenant_id = str(payload.get("tenant_id") or "").strip()
         # Persist the structured metadata + the captured text artifacts.
         report_json = {
             "id": rid, "explanation": explanation, "severity": severity,
             "type": rtype, "context": context, "filed": False, "issue_url": "",
-            "ts": time.time(),
+            "tenant_id": tenant_id, "ts": time.time(),
         }
         try:
             with open(os.path.join(d, "report.json"), "w") as f:
@@ -75,6 +80,7 @@ class HubBugStoreMixin:
         self.bug_reports[rid] = {
             "id": rid, "summary": explanation[:120], "severity": severity,
             "type": rtype, "ts": report_json["ts"], "filed": False, "issue_url": "",
+            "tenant_id": tenant_id,
             "context": context, "has_screenshot": "screenshot_file" in report_json,
         }
         while len(self.bug_reports) > self.bug_report_limit:
@@ -102,6 +108,7 @@ class HubBugStoreMixin:
             "id": rid, "summary": meta.get("summary", ""), "severity": meta.get("severity", ""),
             "type": meta.get("type", "bug"), "ts": meta.get("ts", 0), "filed": meta.get("filed", False),
             "issue_url": meta.get("issue_url", ""), "context": meta.get("context", {}),
+            "tenant_id": meta.get("tenant_id", ""),
             # status: "" (new) → "filed" (issue opened) → "fixed" (ab closed it).
             "status": meta.get("status", ("filed" if meta.get("filed") else "")),
             "fixed_at": meta.get("fixed_at", 0),
@@ -156,6 +163,7 @@ class HubBugStoreMixin:
                     "status": r.get("status", ("filed" if r.get("filed") else "")),
                     "fixed_at": r.get("fixed_at", 0),
                     "context": r.get("context") or {},
+                    "tenant_id": str(r.get("tenant_id") or ""),
                     "has_screenshot": bool(r.get("screenshot_file")),
                 }
             if self.bug_reports:
