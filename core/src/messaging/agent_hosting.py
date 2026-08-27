@@ -333,21 +333,37 @@ class AgentHostingControlPlane(BaseControlPlane):
         Answers NON-WebSocket requests (health checks, TCP/port scanners, a
         browser hitting the ``wss://…:443`` port) with a plain ``200 OK`` instead
         of letting the library run its upgrade validation, which raises
-        ``InvalidUpgrade`` ("missing Connection header" / "missing Upgrade
-        header") and logs a full-traceback ``opening handshake failed`` ERROR on
-        EVERY probe — noise that buried real events in the agent-listener log.
+        ``InvalidUpgrade`` and logs a full-traceback ``opening handshake failed``
+        ERROR on EVERY probe — noise that buried real events in the
+        agent-listener log.
 
-        A genuine agent sends ``Upgrade: websocket``; for those we return
-        ``None`` so the library performs the real handshake unchanged (returning
-        a Response here would SKIP ``protocol.accept``). Requests that carry an
-        ``Upgrade: websocket`` but a malformed/absent ``Connection`` header are
-        left to fail loudly — that is a real proxy misconfiguration worth seeing,
-        not a benign probe."""
+        ``process_request`` (see ``websockets/server.py``) accepts a request only
+        when it carries BOTH ``Upgrade: websocket`` AND a ``Connection`` header
+        whose token list contains ``upgrade``; a request missing EITHER is
+        rejected — the Connection check runs FIRST, so a benign probe with no
+        Connection header ("missing Connection header") or ``Connection: close``
+        ("invalid Connection header: close") trips it just as a missing Upgrade
+        does. We therefore mirror the library's own acceptance test here: only a
+        well-formed upgrade (both headers present) returns ``None`` so the real
+        handshake runs unchanged; everything else — every shape of non-WS probe —
+        gets a clean 200 and never reaches the noisy validation path. This can't
+        suppress a handshake that would otherwise succeed: the library requires
+        the exact same two headers, so anything we short-circuit here would have
+        failed the handshake anyway."""
         try:
             upgrade = (request.headers.get("Upgrade", "") or "").strip().lower()
         except Exception:  # noqa: BLE001 — duplicate/odd headers → treat as non-WS
             upgrade = ""
-        if upgrade == "websocket":
+        try:
+            hdrs = request.headers
+            conn_values = hdrs.get_all("Connection") if hasattr(hdrs, "get_all") \
+                else [hdrs.get("Connection", "") or ""]
+        except Exception:  # noqa: BLE001
+            conn_values = []
+        conn_has_upgrade = any(
+            tok.strip().lower() == "upgrade"
+            for value in conn_values for tok in str(value).split(","))
+        if upgrade == "websocket" and conn_has_upgrade:
             return None
         return connection.respond(HTTPStatus.OK, "OK\n")
 

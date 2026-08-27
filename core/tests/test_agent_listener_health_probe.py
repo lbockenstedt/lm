@@ -9,8 +9,10 @@ Drives ``AgentHostingControlPlane._agent_health_process_request`` directly:
 * a real ``Upgrade: websocket`` handshake  → returns ``None`` (library accepts)
 * a plain GET (no upgrade headers)          → returns a Response (short-circuit)
 * an ``Upgrade: h2c`` non-ws upgrade         → returns a Response
-* a missing-``Connection`` but ``Upgrade: websocket`` request is LEFT to fail
-  (returns ``None``) — a real proxy bug worth surfacing, not a benign probe.
+* an ``Upgrade: websocket`` with NO ``Connection`` header, or ``Connection:
+  close`` (a benign non-WS client / probe), → returns a Response: the library
+  would reject BOTH anyway (the Connection-token check runs first), so we
+  short-circuit them to a clean 200 instead of a logged traceback.
 """
 import os
 import sys
@@ -75,10 +77,30 @@ def test_case_insensitive_upgrade_value():
     assert out is None                 # value compare is case-insensitive
 
 
-def test_missing_connection_header_still_fails_loudly():
-    # Upgrade: websocket present but no Connection header — a real proxy bug.
-    # We must NOT mask it with a 200; return None so the library reports it.
+def test_connection_upgrade_token_among_many_passes():
+    # Real clients/proxies often send "Connection: keep-alive, Upgrade".
     out, conn = _run([("Upgrade", "websocket"),
+                      ("Connection", "keep-alive, Upgrade"),
                       ("Sec-WebSocket-Key", "x"), ("Sec-WebSocket-Version", "13")])
     assert out is None
     assert conn.responded is None
+
+
+def test_missing_connection_header_gets_200():
+    # Upgrade: websocket but NO Connection header — websockets rejects this on
+    # the Connection-token check (before the Upgrade check), so it is a benign
+    # probe, not a viable handshake: answer 200, don't log a traceback.
+    out, conn = _run([("Upgrade", "websocket"),
+                      ("Sec-WebSocket-Key", "x"), ("Sec-WebSocket-Version", "13")])
+    assert out is not None
+    assert conn.responded[0] == HTTPStatus.OK
+
+
+def test_connection_close_gets_200():
+    # "invalid Connection header: close" — the exact variant seen in the field.
+    # A non-WS client sending Connection: close (even with a stray Upgrade
+    # header) can never complete the handshake; short-circuit to 200.
+    out, conn = _run([("Upgrade", "websocket"), ("Connection", "close"),
+                      ("Sec-WebSocket-Key", "x"), ("Sec-WebSocket-Version", "13")])
+    assert out is not None
+    assert conn.responded[0] == HTTPStatus.OK
