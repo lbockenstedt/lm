@@ -5103,10 +5103,10 @@ function _cvAddSecretModal(preset) {
       <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} secret — ${escapeHtml(_cvBucketLabel({ bucket: _cvCurrentBucket }))}</h3>
       <input id="cv-add-name" type="text" autocomplete="off" ${nameAttrs} title="A name to identify this secret within the bucket (e.g. 'HE.NET DDNS key', 'Cloudflare token')" class="${_CV_INP}${editing ? ' bg-slate-100 text-slate-500' : ''}">
       <div class="flex gap-2">
-        <select id="cv-add-type" onchange="_cvRenderAddFields()" class="${_CV_INP}" title="Secret shape — DNS = DNS provider creds (a 'Hurricane Electric (account login)' DNS secret is used by BOTH the External DNS / HE.NET module and certificate DNS-01 issuance, so store just one HE credential); others are generic login/key/token">
+        <select id="cv-add-type" onchange="_cvRenderAddFields()" class="${_CV_INP}" title="Secret shape. 'API key' and 'Token' are the SAME shape (one opaque secret) and are interchangeable — consumers accept either, so pick whichever describes it best. DNS = DNS provider creds (a 'Hurricane Electric (account login)' DNS secret is used by BOTH the External DNS / HE.NET module and certificate DNS-01 issuance, so store just one HE credential); Login = username+password (or an OAuth client pair).">
           <option value="login"${sel(pType, 'login')}>Login (username + password)</option>
-          <option value="apikey"${sel(pType, 'apikey')}>API key</option>
-          <option value="token"${sel(pType, 'token')}>Token</option>
+          <option value="apikey"${sel(pType, 'apikey')}>API key (single secret)</option>
+          <option value="token"${sel(pType, 'token')}>Token (single secret — same shape as API key)</option>
           <option value="dns"${sel(pType, 'dns')}>DNS</option>
           ${(editing && pType === 'henet') ? `<option value="henet" selected>HE.NET DDNS key (Hurricane Electric public DNS)</option>` : ``}
           <option value="generic"${sel(pType, 'generic')}>Generic (key + value)</option>
@@ -5151,6 +5151,15 @@ function _cvRenderAddFields() {
     if (!el) return;
     const f = (id, ph, type = 'text') => `<input id="${id}" type="${type}" autocomplete="off" placeholder="${ph}" class="${_CV_INP}">`;
     if (t === 'login') { _cvRenderLoginFields(); const ms = document.getElementById('cv-add-mode'); if (ms) ms.disabled = false; return; }
+    // 'apikey' and 'token' are the SAME shape: one opaque secret, differing only
+    // in the stored key name ({apikey} vs {token}) and the label. They are NOT
+    // functionally distinct -- every consumer accepts both spellings as aliases
+    // (see instance_vault.SECRET_FIELDS, e.g. ipam_instances.api_token accepts
+    // api_token/token/apikey/api_key/key/value), and no code branches on the
+    // type for these two (cred_vault.automation_list_by_type only ever filters
+    // on 'console'/'login'/'dns'/'henet'). Both are kept because existing
+    // secrets are stored under each, and the label is a useful human hint --
+    // but do not add behaviour that treats them differently.
     else if (t === 'apikey') el.innerHTML = f('cv-f-apikey', 'api key', 'password');
     else if (t === 'token') el.innerHTML = f('cv-f-token', 'token', 'password');
     else if (t === 'dns') {
