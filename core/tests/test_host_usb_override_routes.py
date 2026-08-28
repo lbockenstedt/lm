@@ -27,12 +27,22 @@ class _FakeSimStore:
     def __init__(self, source="hub", github=None):
         self.source = source
         self.github = github or {}
+        self.user_overrides = {}
 
     async def get_source_of_truth(self, tenant_id):
         return self.source
 
     async def get_github_config(self, tenant_id):
         return dict(self.github)
+
+    # user-overrides.conf is a real read-modify-write in the routes (edit the
+    # INI, persist, then push), so keep it a genuine in-memory round-trip
+    # rather than a no-op -- otherwise the edit logic isn't actually covered.
+    async def set_user_overrides_content(self, tenant_id, content):
+        self.user_overrides[tenant_id] = content
+
+    async def get_user_overrides_content(self, tenant_id):
+        return self.user_overrides.get(tenant_id, "")
 
 
 class FakeHub:
