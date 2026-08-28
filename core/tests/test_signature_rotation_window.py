@@ -104,8 +104,21 @@ class _ConnHub:
         # creds re-pushed. Real cache + real method (below) so this fake keeps
         # exercising production code rather than stubbing the call away.
         self._console_creds_seeded = set()
+        # Cross-IP current+backup key reuse (key-clone) detection state. The
+        # real _arm_clone_watch/_clone_watch_confirms are borrowed below so the
+        # strike-1 -> confirmed-compromise window stays honest; only the
+        # response itself is recorded rather than executed (it drives real NSG
+        # rules / threat response, out of scope for a unit fake).
+        self._clone_watch = {}
+        self.clone_compromises = []
 
     _forget_console_creds_seed = main.LabManagerHub._forget_console_creds_seed
+    _peer_ip = main.LabManagerHub.__dict__["_peer_ip"]
+    _arm_clone_watch = main.LabManagerHub._arm_clone_watch
+    _clone_watch_confirms = main.LabManagerHub._clone_watch_confirms
+
+    async def _handle_key_clone_compromise(self, *a, **kw):
+        self.clone_compromises.append((a, kw))
 
     def _primary_key(self, spoke_id):
         return self.spoke_id_alias.get(spoke_id, spoke_id)
