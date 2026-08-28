@@ -7,10 +7,14 @@ hub's ``_git_update`` no longer uses a shell (create_subprocess_exec), but the
 validator is the primary guard; these tests pin it.
 """
 
-import sys, os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "routes"))
-
-from setup_misc import _validate_update_config, _ConfigValidationError  # noqa: E402
+# Import as ``routes.setup_misc`` (conftest puts core/src on sys.path), the way
+# production loads it. Prepending ``core/src/routes`` itself would leak for the
+# whole session and let a bare ``import security`` / ``import azure_nsg``
+# resolve to routes/security.py / routes/azure_nsg.py instead of the top-level
+# security PACKAGE and the azure_nsg engine -- which broke unrelated tests
+# during a full-directory run (spawned child processes failed outright with
+# "No module named 'security.signer'; 'security' is not a package").
+from routes.setup_misc import _validate_update_config, _ConfigValidationError  # noqa: E402
 
 import pytest  # noqa: E402
 

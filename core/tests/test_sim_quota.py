@@ -65,10 +65,24 @@ def test_normalize_quota_learning_default_off_explicit_on():
 
 
 # ── validate_sim_quotas / resolve ──────────────────────────────────────────
-def test_validate_drops_missing_fields():
+def test_validate_keeps_untethered_sim_quota_but_drops_siteless_presence():
+    # alert_id is OPTIONAL: a sim quota with no alert_id is an UNTETHERED quota
+    # (the row's "Tied to alert/insight" box off) that just keeps N clients
+    # running the sim at the site -- it is kept, not dropped. A quota with no
+    # sim_id is a PRESENCE quota, which requires a site; without one it drops.
     clean, errs = sim_quota.validate_sim_quotas(
         [{"sim_id": "dns_fail"}, {"alert_id": "X"}], ["dns_fail"])
-    assert clean == [] and len(errs) == 2
+    assert [q["sim_id"] for q in clean] == ["dns_fail"]
+    assert clean[0]["alert_id"] == ""
+    assert len(errs) == 1 and "presence quota" in errs[0]
+
+
+def test_validate_keeps_presence_quota_with_a_site():
+    # No sim_id + a site = a valid presence quota (Clients Associated).
+    clean, errs = sim_quota.validate_sim_quotas(
+        [{"alert_id": "X", "site": "hq"}], ["dns_fail"])
+    assert len(clean) == 1 and clean[0]["sim_id"] == "" and clean[0]["site"] == "hq"
+    assert errs == []
 
 
 def test_validate_drops_unknown_sim_when_set_provided():

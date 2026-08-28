@@ -33,6 +33,11 @@ class _Hub:
         self._request_progress_hard_mult = hard_mult
         self.sent = []
         self.request_response = main.LabManagerHub.request_response.__get__(self)
+        # request_response now updates the durable agent->role registry for
+        # every settled command. Borrow the real hook: it early-returns for
+        # anything that isn't LOAD_ROLE/UNLOAD_ROLE (all of these tests), and
+        # is fail-open, so it can't perturb the timeout behaviour under test.
+        self._track_role_rpc = main.LabManagerHub._track_role_rpc.__get__(self)
 
     async def send_to_spoke(self, msg, signing_secret=None):
         self.sent.append(msg)

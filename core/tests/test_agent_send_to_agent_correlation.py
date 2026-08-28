@@ -41,6 +41,12 @@ class _Host(AgentHostingControlPlane):
         self.connected_agents = {}
         self.pending_agents = {}
         self.pending_responses = {}
+        # send_to_agent tracks a soft/hard progress deadline per in-flight
+        # command: an AGENT_PROGRESS frame pushes "soft" out by another grace
+        # window, capped at timeout * hard-mult. Mirror the production default
+        # (LM_AGENT_PROGRESS_HARD_MULT, 6x).
+        self.pending_progress = {}
+        self._agent_progress_hard_mult = 6.0
         self.relayed = []
         self.telemetry = []
         self.control_plane = None

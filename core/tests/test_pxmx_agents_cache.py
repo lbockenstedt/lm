@@ -46,6 +46,15 @@ class _FakeState:
     def __init__(self):
         self.system_state = {"agent_config": {}, "agent_display_names": {}}
 
+    def is_agent_decommissioned(self, agent_id):
+        """Decommissioned agents are filtered out of the tile. Real lookup
+        against the same system_state key production uses, so a test can
+        decommission an agent by appending to it -- and, critically, so the
+        call doesn't raise: _maybe_refresh_agents catches everything and
+        serves STALE on failure, which turned this into a silent
+        'cache never populates' rather than an error."""
+        return agent_id in self.system_state.get("decommissioned_agents", [])
+
 
 class _FakeHub:
     """Minimal hub: records GET_AGENTS calls per spoke with a per-spoke delay
