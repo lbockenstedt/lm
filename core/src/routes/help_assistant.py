@@ -13,6 +13,70 @@ gates them (valid session required) like every other ``/api/`` route.
 """
 from api import HTTPException, Request, logger, os, json, asyncio, access
 
+from . import github_source
+
+# Tool rounds to allow on the fast cheap model before escalating the remaining
+# tool turns to a stronger one. 2 is deliberate: one round is a normal, healthy
+# "search then answer", so escalating there would pay more for every easy
+# question. Reaching a THIRD round means the first two searches didn't settle
+# it, which is exactly when a better query is worth buying.
+_ESCALATE_AFTER = 2
+
+# Question words carry no signal in a code search but are fatal to it: the
+# strict matcher requires EVERY term on one line, so a single stopword like
+# "the" guarantees ~zero hits for any natural-language question, and the
+# partial matcher ranks by term count, so stopwords inflate the score of
+# irrelevant prose. Stripping them is what lets "what does the collab
+# simulation do" reach collab.sh.
+_STOPWORDS = {
+    "the", "and", "for", "are", "was", "were", "you", "your", "our", "its",
+    "how", "what", "why", "when", "where", "which", "who", "does", "did",
+    "can", "could", "should", "would", "will", "with", "from", "into",
+    "that", "this", "these", "those", "there", "here", "then", "than",
+    "have", "has", "had", "been", "being", "but", "not", "all", "any",
+    "get", "got", "use", "used", "using", "about", "work", "works", "show",
+    "tell", "explain", "please", "need", "want", "make", "made", "look",
+    "some", "just", "like", "much", "many", "more", "most", "very",
+}
+
+
+def _source_terms(q, query_terms):
+    """Query terms for the SOURCE search: content words only, original order.
+
+    Falls back to the unfiltered terms when every word was a stopword, so a
+    query like "how does it work" still searches something rather than matching
+    everything.
+    """
+    terms = query_terms(q)
+    kept = [t for t in terms if t not in _STOPWORDS]
+    return kept or terms
+
+
+def _empty_result(out):
+    """True when a tool turn came back with nothing useful.
+
+    This is the sharper of the two escalation signals: a round-count trigger
+    only tells us time is passing, but an empty result tells us the model's
+    QUERY was wrong -- and a model that writes one bad query tends to write the
+    next one too. Tools return a dict; treat an explicit error, or every
+    collection value in it being empty, as "found nothing". A dict with no
+    collection values at all (e.g. a scalar status) is NOT empty.
+    """
+    if not isinstance(out, dict):
+        return not out
+    if out.get("error"):
+        return True
+    # An explicit hit count is authoritative and must be checked FIRST. Tool
+    # payloads also carry metadata (diagnostics, corpus stats), and those are
+    # non-empty collections even when the search found nothing -- scanning
+    # values alone reports "not empty" for a zero-hit result and the escalation
+    # never fires.
+    total = out.get("total")
+    if isinstance(total, int):
+        return total == 0
+    seqs = [v for v in out.values() if isinstance(v, (list, tuple, dict))]
+    return bool(seqs) and all(len(v) == 0 for v in seqs)
+
 
 def register(app, hub, ctx):
 
@@ -216,27 +280,83 @@ def register(app, hub, ctx):
         results.sort(key=lambda r: r["score"], reverse=True)
         return {"query": q, "total": len(results), "results": results[:6]}
 
-    def _tool_search_source(args):
-        """Grep the platform SOURCE TREE (this repo + sibling repos like the
-        ``cs`` simulations repo; secrets/vendored deps excluded) for a literal
-        string or set of words — answers 'where/how is X implemented', 'what
-        does simulation Y do', install-command questions, etc. Returns file:line
-        hits WITH a short multi-line code snippet so the answer can quote the
-        actual implementation. File paths are prefixed with the repo name."""
-        q = str(args.get("query") or "").strip()
-        if not q:
-            return {"error": "query required"}
-        ql = q.lower()
-        terms = _query_terms(q)
-        matches, scanned, done = [], 0, False
+    _gh_source = github_source.GitHubSourceCache()
+
+    # A file may contribute at most this many PARTIAL hits. Without it a single
+    # large, generically-worded file (clients/lib/common.sh) fills the whole
+    # partial pool before the walk even reaches the file actually named after
+    # the thing being asked about.
+    _LOOSE_PER_FILE = 3
+
+    def _scan_text(rel, lines, ql, terms, cap, strict_out, loose_out):
+        """Scan one file, recording STRICT and LOOSE hits in a single pass.
+
+        Strict = the whole query appears on a line, or every query term does.
+        Loose  = enough terms appear to be plausibly relevant.
+
+        Both are collected together because the files are read once and
+        re-reading the corpus for a second pass would double the cost of every
+        miss. Exact hits always rank ahead of partial ones; partial hits only
+        fill the slots exact matching left over.
+        """
+        rl = rel.lower()
+        # A term in the PATH is a far stronger signal than one in a line --
+        # `dns_fail.sh` is almost certainly what "the dns_fail script" means --
+        # so it is computed once per file and weighted heavily.
+        path_hits = sum(1 for t in terms if t in rl)
+        # Guard against a single incidental term match. Whenever the question
+        # supplies more than one content word, ONE of them matching is noise
+        # rather than relevance -- "xyz" matches the literal alphabet inside
+        # ini-parser.sh, and any real English word in the query matches comment
+        # prose all over the tree. That is how a nonsense query used to come
+        # back with a full page of confident-looking results, which is also the
+        # case where the loop most needs to see zero hits and escalate.
+        min_hits = 1 if len(terms) <= 1 else 2
+        last_s = last_l = -999
+        loose_here = 0
+        for ln, line in enumerate(lines, 1):
+            ll = line.lower()
+            strict = ql in ll or (terms and all(t in ll for t in terms))
+            hits = sum(1 for t in terms if t in ll) if terms else 0
+            if not strict and hits < min_hits and not (path_hits and hits):
+                continue
+            a = max(0, ln - 1 - _SRC_SNIPPET_CTX)
+            b = min(len(lines), ln + _SRC_SNIPPET_CTX)
+            snip = ''.join(lines[a:b]).rstrip("\n")[:600]
+            if strict and len(strict_out) < cap and ln - last_s >= _SRC_SNIPPET_CTX:
+                last_s = ln
+                strict_out.append({"file": rel, "line": ln, "snippet": snip})
+            elif (hits and loose_here < _LOOSE_PER_FILE
+                    and len(loose_out) < cap * 20
+                    and ln - last_l >= _SRC_SNIPPET_CTX):
+                # A deliberately large pool: partial hits are ranked GLOBALLY
+                # afterwards, so a small pool would just re-introduce the
+                # first-file-wins bias the per-file cap exists to prevent.
+                last_l = ln
+                loose_here += 1
+                loose_out.append({"file": rel, "line": ln, "snippet": snip,
+                                  "score": hits + path_hits * 5})
+
+    def _iter_local(cap_files):
+        """Yield ``(rel, lines)`` for local source, giving EACH root its own file
+        budget.
+
+        The previous walk shared one global counter and one ``done`` flag that
+        broke the OUTER loop, so whichever root came first could consume the
+        entire budget and the later roots were never opened at all -- sibling
+        repos were effectively unsearchable whenever the primary repo had enough
+        content, which is always. Per-root budgets make coverage independent of
+        ordering.
+        """
         for base in _SRC_ROOTS:
-            if done:
-                break
             label = os.path.basename(base)
+            seen = 0
             for root, dirs, files in os.walk(base):
                 dirs[:] = [d for d in dirs
                            if d not in _SRC_SKIP_DIRS and not d.startswith(".")]
                 for fn in files:
+                    if seen >= cap_files:
+                        break
                     if os.path.splitext(fn)[1].lower() not in _SRC_EXTS:
                         continue
                     low = fn.lower()
@@ -250,29 +370,68 @@ def register(app, hub, ctx):
                             lines = f.readlines()
                     except Exception:  # noqa: BLE001
                         continue
-                    scanned += 1
-                    rel = f"{label}/{os.path.relpath(fp, base)}"
-                    last = -999
-                    for ln, line in enumerate(lines, 1):
-                        ll = line.lower()
-                        if not (ql in ll or (terms and all(t in ll for t in terms))):
-                            continue
-                        if ln - last < _SRC_SNIPPET_CTX:   # collapse adjacent hits
-                            continue
-                        last = ln
-                        a = max(0, ln - 1 - _SRC_SNIPPET_CTX)
-                        b = min(len(lines), ln + _SRC_SNIPPET_CTX)
-                        snippet = ''.join(lines[a:b]).rstrip("\n")[:600]
-                        matches.append({"file": rel, "line": ln, "snippet": snippet})
-                        if len(matches) >= _SRC_MAX_MATCHES:
-                            break
-                    if len(matches) >= _SRC_MAX_MATCHES or scanned >= _SRC_MAX_FILES:
-                        done = True
-                        break
-                if done:
+                    seen += 1
+                    yield f"{label}/{os.path.relpath(fp, base)}", lines
+                if seen >= cap_files:
                     break
-        return {"query": q, "total": len(matches),
-                "files_scanned": scanned, "results": matches}
+
+    async def _tool_search_source(args):
+        """Search the platform SOURCE CODE for a literal string or set of words
+        — answers 'where/how is X implemented', 'what does simulation Y do',
+        install-command questions, etc. Returns file:line hits WITH a short
+        multi-line code snippet so the answer can quote the actual
+        implementation.
+
+        Two corpora are searched. The client SIMULATION scripts are pulled
+        straight from GitHub (see ``github_source``) so they are available on a
+        real hub deploy, which has no ``cs`` checkout on disk; local repo files
+        are searched too when present. GitHub results are scanned first because
+        that corpus is small and curated, so it can't be crowded out by the much
+        larger local tree.
+        """
+        q = str(args.get("query") or "").strip()
+        if not q:
+            return {"error": "query required"}
+        ql = q.lower()
+        terms = _source_terms(q, _query_terms)
+        strict, loose = [], []
+        scanned = 0
+
+        gh = await _gh_source.files()
+        for rel, text in sorted(gh.items()):
+            if len(strict) >= _SRC_MAX_MATCHES:
+                break
+            scanned += 1
+            _scan_text(rel, text.splitlines(keepends=True), ql, terms,
+                       _SRC_MAX_MATCHES, strict, loose)
+
+        if len(strict) < _SRC_MAX_MATCHES:
+            for rel, lines in _iter_local(_SRC_MAX_FILES):
+                if len(strict) >= _SRC_MAX_MATCHES:
+                    break
+                scanned += 1
+                _scan_text(rel, lines, ql, terms, _SRC_MAX_MATCHES, strict, loose)
+
+        # Exact hits rank first, then the best partial ones FILL the remaining
+        # slots -- rather than partial being an all-or-nothing fallback. A long
+        # natural-language question can pick up one incidental exact hit (an
+        # unrelated line that happens to contain every content word), and
+        # treating that as success used to suppress the partial pass entirely,
+        # returning a single irrelevant snippet instead of the actual sim script.
+        loose.sort(key=lambda r: r["score"], reverse=True)
+        seen = {(m["file"], m["line"]) for m in strict}
+        results = list(strict)
+        for m in loose:
+            if len(results) >= _SRC_MAX_MATCHES:
+                break
+            if (m["file"], m["line"]) not in seen:
+                seen.add((m["file"], m["line"]))
+                results.append(m)
+        mode = "exact" if strict else ("partial" if results else "none")
+        return {"query": q, "match_mode": mode, "total": len(results),
+                "exact_matches": len(strict),
+                "files_scanned": scanned, "sources": _gh_source.stats(),
+                "results": results}
 
     _TOOLS = [
         {"type": "function", "function": {
@@ -324,8 +483,36 @@ def register(app, hub, ctx):
         if name == "search_docs":
             return _tool_search_docs(args)
         if name == "search_source":
-            return _tool_search_source(args)
+            return await _tool_search_source(args)
         return {"error": f"unknown tool: {name}"}
+
+    async def _final_answer(hub, agent, messages, system):
+        """Run the ONE synthesis turn that produces the user-visible answer.
+
+        Tools are disabled (everything needed is already in ``messages``) and the
+        turn is tagged ``role="final"`` so AppBuilder routes it to the strongest
+        model rather than the fast cheap one used for tool-picking. Returns "" on
+        any failure so callers can fall back to whatever text they already have
+        -- this must never be able to turn a working answer into an error.
+        """
+        try:
+            res = await hub.request_response(
+                agent, "HELP_ASK",
+                {"messages": messages + [{"role": "user", "content": (
+                    "Using ONLY the documentation, code snippets, and live data "
+                    "gathered above, write the final answer to my original "
+                    "question. Explain it in plain language first, then quote the "
+                    "most relevant code with its file:line. Cite docs as "
+                    "[doc:<name>]. If something genuinely isn't in the material "
+                    "above, say so rather than guessing.")}],
+                 "tools": None, "system": system, "role": "final"},
+                timeout=90.0)
+            data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
+            if isinstance(data, dict) and data.get("status") == "SUCCESS":
+                return (data.get("assistant") or {}).get("content") or ""
+        except Exception as e:  # noqa: BLE001
+            logger.warning("help_ask final-synthesis turn failed: %s", e)
+        return ""
 
     # ── routes ───────────────────────────────────────────────────────────────
     @app.get("/api/help/available")
@@ -376,11 +563,26 @@ def register(app, hub, ctx):
         messages = [{"role": "user", "content": question}]
         used_tools = []
         answer = ""
-        for _ in range(8):
+        # Evidence-based escalation. The gathering turns run on the fastest cheap
+        # model, which is the right call while the search is going well and the
+        # WRONG call once the loop starts flailing -- a weak model that picked a
+        # bad query will keep picking bad queries, burning the whole tool budget.
+        # So we watch for two concrete "this is not working" signals and, once
+        # either fires, ask AppBuilder for a stronger model for the REMAINING
+        # tool turns (see the `role` handling in ab/hub_agent.py):
+        #   * the loop has already used _ESCALATE_AFTER rounds without answering
+        #   * a tool came back with nothing, i.e. the query itself was bad
+        # Deliberately not a jump to the frontier tier: several tool turns may
+        # remain, and tool-picking is not the expensive part of the job. The one
+        # turn that DOES get the best model is the final one.
+        struggling = False
+        for _round in range(8):
+            role = "tool_hard" if struggling else "tool"
             try:
                 res = await hub.request_response(
                     agent, "HELP_ASK",
-                    {"messages": messages, "tools": _TOOLS, "system": system},
+                    {"messages": messages, "tools": _TOOLS, "system": system,
+                     "role": role},
                     timeout=90.0)
             except Exception as e:  # noqa: BLE001
                 logger.warning("help_ask relay failed: %s", e)
@@ -393,7 +595,16 @@ def register(app, hub, ctx):
             tool_calls = assistant.get("tool_calls") or []
             text = assistant.get("content") or ""
             if not tool_calls:
-                answer = text
+                # The model decided it has enough and wrote prose. We do NOT ship
+                # that prose: the turn that decides "I'm done searching" runs on a
+                # cheap fast model, and this is the one piece of text the user
+                # actually reads. Re-synthesize the SAME gathered evidence with the
+                # strongest model instead. Which turn ends the loop isn't knowable
+                # in advance -- the model signals it by returning no tool_calls --
+                # so this is the only place the upgrade can happen. If that call
+                # fails or comes back empty we keep the cheap text, so the worst
+                # case is exactly today's behaviour.
+                answer = await _final_answer(hub, agent, messages, system) or text
                 break
             # Echo the assistant turn, then execute + append each tool result.
             messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
@@ -407,8 +618,12 @@ def register(app, hub, ctx):
                     args = {}
                 used_tools.append(name)
                 out = await _exec_tool(name, args, request)
+                if _empty_result(out):
+                    struggling = True
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                  "name": name, "content": json.dumps(out)[:8000]})
+            if _round + 1 >= _ESCALATE_AFTER:
+                struggling = True
         else:
             # Hit the tool-call budget without a text answer (the model kept
             # searching). Don't give up — force ONE final turn with tools
@@ -425,7 +640,7 @@ def register(app, hub, ctx):
                         "above. Quote the most relevant code with its file:line. If "
                         "something is still unknown, explain what you DO know and note "
                         "the gap.")}],
-                     "tools": None, "system": system},
+                     "tools": None, "system": system, "role": "final"},
                     timeout=90.0)
                 data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
                 if isinstance(data, dict) and data.get("status") == "SUCCESS":
@@ -467,6 +682,7 @@ def register(app, hub, ctx):
                 res = await hub.request_response(
                     agent, "HELP_ASK",
                     {"messages": [{"role": "user", "content": question}], "tools": None,
+                     "role": "final",
                      "system": system + "\n\nAnswer directly in plain text using the "
                                         "documentation above. Do NOT call tools."},
                     timeout=90.0)
