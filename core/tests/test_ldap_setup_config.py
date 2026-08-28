@@ -24,13 +24,19 @@ from routes.ldap import (
 )
 
 
+import tempfile
+
 # ── fakes ────────────────────────────────────────────────────────────────────
 
 class _FakeState:
-    def __init__(self, system_state=None):
+    def __init__(self, system_state=None, data_dir=None):
         self.system_state = system_state or {}
         self.tenant_state = {"tenants": {}}
-        self.data_dir = None
+        # create_app now mints a loopback admin-ops token under data_dir, so
+        # this can no longer be None (os.path.join raised TypeError before the
+        # app was even built). Use a private temp dir per instance so nothing
+        # is written into the repo or shared between tests.
+        self.data_dir = data_dir or tempfile.mkdtemp(prefix="lm-ldap-test-")
 
     def save_state(self):
         pass
