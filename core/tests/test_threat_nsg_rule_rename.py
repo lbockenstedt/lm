@@ -70,6 +70,15 @@ def _run(coro):
 def _patch_reconcile(monkeypatch):
     calls = []
 
+    # reconcile_nsg() resolves Azure lazily (``import azure_nsg`` INSIDE the
+    # coroutine), so it picks up whatever ``sys.modules["azure_nsg"]`` holds at
+    # call time. Several sibling threat tests load their own copy of the module
+    # into that slot at import time, so patching only this file's ``_nsg_mod``
+    # silently missed and the real ARM code ran -- these tests passed alone and
+    # failed in a full run with status ERROR. Pin the slot to the object being
+    # patched (monkeypatch restores it, so this no longer leaks either).
+    monkeypatch.setitem(sys.modules, "azure_nsg", _nsg_mod)
+
     async def _fake(cfg, azcfg, ips, http=None):
         calls.append({"rule_name": azcfg.get("rule_name"), "ips": list(ips)})
         if not ips:
