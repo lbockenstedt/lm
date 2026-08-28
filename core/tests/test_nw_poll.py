@@ -17,7 +17,20 @@ import nw_discovery_sync
 from nw_discovery_sync import NwDiscoverySyncMixin
 from _fakes import FakeState
 
-logging.disable(logging.CRITICAL)
+
+# Silence the module's own noisy sync logging for THIS module's tests only.
+# NOT a bare module-level ``logging.disable(logging.CRITICAL)``: pytest imports
+# every test module during collection, so that set a GLOBAL suppression that
+# outlived this file and silently broke unrelated tests which assert on log
+# output (test_update_recovery / test_spoke_log_relay saw empty log files).
+@pytest.fixture(autouse=True)
+def _quiet_logging():
+    prev = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        yield
+    finally:
+        logging.disable(prev)
 
 
 # ── constants / contract ──────────────────────────────────────────────────────

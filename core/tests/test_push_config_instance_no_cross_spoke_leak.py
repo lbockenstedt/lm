@@ -34,8 +34,17 @@ class _FakeHub:
         self.sent = []
         self._nac_unconfigured_spokes = set()
         self._alias = alias or {}
+        # The nw/opn/... pushes now run each record through
+        # instance_vault.overlay_many, which resolves a record's optional
+        # ``vault_credential`` reference via cred_vault -> and that reads
+        # ``state.system_state["global_config"]["cred_vault"]``. None of these
+        # records carry a reference, so an empty system_state is enough to let
+        # the overlay no-op instead of raising into push_config_to_spoke's
+        # broad except (which swallowed it and pushed nothing at all).
         self.state = type("S", (), {
             "get_global_config": lambda self, _g=gc: _g,
+            "system_state": {},
+            "_mark_dirty": lambda self: None,
         })()
 
     def _primary_key(self, spoke_id):

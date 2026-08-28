@@ -52,6 +52,11 @@ class _FakeState:
             "agent_config": {},
         }
 
+    def is_module_decommissioned(self, module_id):
+        """Decommissioned spokes are filtered out of the diagnostics payload.
+        Real lookup against the same system_state key production uses."""
+        return module_id in self.system_state.get("decommissioned_spokes", [])
+
     def get_module_name(self, sid):
         return self.system_state.get("module_names", {}).get(sid, sid)
 

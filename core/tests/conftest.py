@@ -2,8 +2,11 @@
 (scripts add ``core/src`` to ``sys.path`` and import modules as top-level:
 ``import access``, ``import update_pipeline``, ``import api``, …)."""
 
+import asyncio
 import os
 import sys
+
+import pytest
 
 # At-rest encryption (security.encryption) builds its Fernet at import time and
 # requires LM_FERNET_KEY. Generate a fresh throwaway key per test run so the
@@ -30,3 +33,33 @@ if SRC not in sys.path:
 TESTS = os.path.dirname(__file__)
 if TESTS not in sys.path:
     sys.path.insert(0, TESTS)
+
+@pytest.fixture(autouse=True)
+def _current_event_loop():
+    """Guarantee the main thread has a usable current event loop.
+
+    Dozens of tests here drive async code synchronously via
+    ``asyncio.get_event_loop().run_until_complete(...)``. On Python 3.10+ that
+    raises ``RuntimeError: There is no current event loop in thread
+    'MainThread'`` as soon as anything in the session has consumed and closed
+    the default loop (``asyncio.run``, pytest-asyncio, or a test that closes it
+    deliberately). The result is order-dependent: the tests pass alone and fail
+    in a full run.
+
+    Rather than rewrite every call site, restore the invariant they were
+    written against. ``asyncio.run`` is NOT a drop-in substitute for all of
+    them: on 3.9 ``asyncio.Queue()`` binds to the current loop at construction,
+    so several tests build objects and then run coroutines that must share that
+    same loop.
+
+    A *closed* loop is also replaced — ``get_event_loop()`` returns closed
+    loops without raising, and ``run_until_complete`` on one fails with "Event
+    loop is closed".
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("closed")
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+    yield

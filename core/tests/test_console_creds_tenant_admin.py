@@ -12,6 +12,7 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -23,8 +24,6 @@ _fake_enc.hub_encryption = SimpleNamespace(
     encrypt=lambda s: (s.encode() if isinstance(s, str) else s),
     decrypt=lambda b: b,
 )
-sys.modules.setdefault("security", types.ModuleType("security"))
-sys.modules["security.encryption"] = _fake_enc
 
 # Fake cred_vault: vault "available"; console-type secrets exist per bucket so a
 # tenant's bucket returns its own login and __admin__ returns a shared login.
@@ -84,9 +83,24 @@ _fake_cv.put_secret = _put_secret
 _fake_cv.delete_secret = _delete_secret
 _fake_cv.bucket_has_psk = _bucket_has_psk
 _fake_cv.CredVaultError = _CredVaultError
-sys.modules["cred_vault"] = _fake_cv
 
 from routes import console as console_routes  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fake_modules(monkeypatch):
+    """Install the fakes for THIS module only.
+
+    They used to be assigned into sys.modules at import time and never removed,
+    so every test module collected afterwards saw the stubs instead of the real
+    packages — test_plaintext_fallback_gate then could not import
+    plaintext_fallback_allowed from a stub that has no such attribute, and the
+    whole core suite died with a collection error. routes.console imports both
+    lazily inside the handlers, so they only need to exist while a test RUNS,
+    and setitem restores the real modules afterwards.
+    """
+    monkeypatch.setitem(sys.modules, "security.encryption", _fake_enc)
+    monkeypatch.setitem(sys.modules, "cred_vault", _fake_cv)
 
 
 class _State:

@@ -49,10 +49,19 @@ class _Hub:
         self.agent_info = {}
         self.agent_logs = {}
         self.max_log_size = 100
-        self.heartbeat = type("HB", (), {"update_heartbeat": lambda *a, **k: None})()
+        # _handle_agent_relay_up also records a durable agent liveness signal
+        # under a composite "<spoke>:<agent>" key, so last_seen must exist.
+        self.heartbeat = type("HB", (), {"update_heartbeat": lambda *a, **k: None,
+                                         "last_seen": {}})()
         # Phase 2: _decrypt_inbound_payload / _handle_agent_relay_up resolve
         # state keys via _primary_key. Alias empty -> spoke_id (pre-2b2).
         self.spoke_id_alias = {}
+
+    def _agent_primary_key(self, agent_id):
+        """Hub-side primary key for a RELAYED agent (guid once migrated, else
+        the agent's self-chosen id). Mirrors _primary_key on the agent-relay
+        path; no aliases here, so identity."""
+        return agent_id
 
     def _primary_key(self, spoke_id):
         return self.spoke_id_alias.get(spoke_id, spoke_id)

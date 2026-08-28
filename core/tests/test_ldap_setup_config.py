@@ -24,13 +24,21 @@ from routes.ldap import (
 )
 
 
+import tempfile
+
+from cryptography.fernet import Fernet
+
 # ── fakes ────────────────────────────────────────────────────────────────────
 
 class _FakeState:
-    def __init__(self, system_state=None):
+    def __init__(self, system_state=None, data_dir=None):
         self.system_state = system_state or {}
         self.tenant_state = {"tenants": {}}
-        self.data_dir = None
+        # create_app now mints a loopback admin-ops token under data_dir, so
+        # this can no longer be None (os.path.join raised TypeError before the
+        # app was even built). Use a private temp dir per instance so nothing
+        # is written into the repo or shared between tests.
+        self.data_dir = data_dir or tempfile.mkdtemp(prefix="lm-ldap-test-")
 
     def save_state(self):
         pass
@@ -84,7 +92,11 @@ def _isolate(monkeypatch):
     api_mod._sessions.clear()
     for v in ("LM_TLS_CERT", "LM_TLS_KEY", "LM_CORS_ORIGINS", "LM_FERNET_KEY"):
         monkeypatch.delenv(v, raising=False)
-    monkeypatch.setenv("LM_FERNET_KEY", "z" * 44)
+    # A throwaway but STRUCTURALLY VALID key: encryption now validates the
+    # env key at import, so the old "z"*44 placeholder (right length, not
+    # decodable to 32 bytes) is rejected outright. Generated per test rather
+    # than hard-coded so no usable key is committed.
+    monkeypatch.setenv("LM_FERNET_KEY", Fernet.generate_key().decode())
 
 
 def _build(system_state, directory_spokes=None):

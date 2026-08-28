@@ -112,14 +112,28 @@ def test_client_ssl_ctx_verify_on_with_ca(tmp_path):
     assert ctx.verify_mode == ssl.CERT_REQUIRED  # verify-on → authenticate
 
 
-def test_client_ssl_ctx_verify_flag_without_ca_falls_back_to_unverified():
-    # LM_HUB_TLS_VERIFY=1 but no CA path → can't verify, fall back to the
-    # encrypt-without-auth default rather than crashing.
+def test_client_ssl_ctx_verify_flag_without_ca_uses_system_trust_store():
+    """LM_HUB_TLS_VERIFY=1 with no CA path is the PUBLIC-CA (Let's Encrypt)
+    case: trust the system store and still authenticate the hub.
+
+    This used to fall back to an unverified context, which is the footgun the
+    current implementation calls out by name -- an operator who explicitly
+    asked for verification would believe the hub cert was authenticated when
+    it wasn't. Silently downgrading is exactly what must not happen.
+    """
     bc = _stub_cp(verify=True, ca_cert="")
     ctx = bc._client_ssl_ctx()
 
     assert isinstance(ctx, ssl.SSLContext)
-    assert ctx.verify_mode == ssl.CERT_NONE
+    assert ctx.verify_mode == ssl.CERT_REQUIRED
+    assert ctx.check_hostname is True
+
+
+def test_client_ssl_ctx_missing_ca_path_fails_fast_rather_than_downgrading():
+    """A CA path that is SET but missing returns None (fail fast) instead of
+    quietly handing back an unverified context."""
+    bc = _stub_cp(verify=True, ca_cert="/nonexistent-lm-test-ca.pem")
+    assert bc._client_ssl_ctx() is None
 
 
 # ── _connect_and_serve ssl ctx selection ─────────────────────────────────────
