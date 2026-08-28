@@ -5,6 +5,8 @@ from api import (
 )
 from update_pipeline import _version_behind
 
+from . import frontmatter
+
 # Cap for the WebUI "What's New" popover (GET /api/whats-new).
 _WHATS_NEW_LIMIT = 15
 # Only surface updates merged within this many days ("the last 2 weeks").
@@ -441,15 +443,19 @@ def register(app, hub, ctx):
                     continue
                 name = fn[:-3]
                 title = name
+                summary = ""
                 try:
                     with open(os.path.join(_DOCS_DIR, fn), "r", encoding="utf-8") as f:
-                        for line in f:
-                            if line.startswith("# "):
-                                title = line[2:].strip()
-                                break
+                        head = f.read(2048)
+                    meta, body = frontmatter.split(head)
+                    summary = str(meta.get("summary") or "")
+                    for line in body.splitlines():
+                        if line.startswith("# "):
+                            title = line[2:].strip()
+                            break
                 except Exception:  # noqa: BLE001
                     pass
-                out.append({"name": name, "title": title})
+                out.append({"name": name, "title": title, "summary": summary})
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail="Docs directory not found.")
         return {"docs": out}
@@ -464,12 +470,17 @@ def register(app, hub, ctx):
         except Exception as e:  # noqa: BLE001
             logger.error(f"Error reading doc {name}: {e}")
             raise HTTPException(status_code=500, detail="Error reading document.")
+        # Strip the metadata header before it reaches the client. The client-side
+        # renderer turns '---' into <hr>, so an unstripped block renders as a
+        # rule followed by raw YAML at the top of every document.
+        meta, markdown = frontmatter.split(markdown)
         title = os.path.basename(path)[:-3]
         for line in markdown.splitlines():
             if line.startswith("# "):
                 title = line[2:].strip()
                 break
-        return {"name": os.path.basename(path)[:-3], "title": title, "markdown": markdown}
+        return {"name": os.path.basename(path)[:-3], "title": title,
+                "summary": str(meta.get("summary") or ""), "markdown": markdown}
 
     @app.get("/setup/mtls-readiness")
     async def get_mtls_readiness():

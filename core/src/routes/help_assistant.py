@@ -13,7 +13,7 @@ gates them (valid session required) like every other ``/api/`` route.
 """
 from api import HTTPException, Request, logger, os, json, asyncio, access
 
-from . import github_source
+from . import frontmatter, github_source
 
 # Tool rounds to allow on the fast cheap model before escalating the remaining
 # tool turns to a stronger one. 2 is deliberate: one round is a normal, healthy
@@ -21,6 +21,10 @@ from . import github_source
 # question. Reaching a THIRD round means the first two searches didn't settle
 # it, which is exactly when a better query is worth buying.
 _ESCALATE_AFTER = 2
+
+# Front-matter metadata per doc, populated by _load_docs. Kept out of the doc
+# bodies so it never reaches the prompt, but available to scoring.
+_DOC_META = {}
 
 # Tool rounds per question. Was 8, which is far more than the loop ever
 # productively uses: each round is a full model round-trip, and the system
@@ -146,12 +150,24 @@ def register(app, hub, ctx):
 
     # ── doc corpus (RAG-lite) ────────────────────────────────────────────────
     def _load_docs():
+        """Doc bodies, with front-matter removed and stashed in _DOC_META.
+
+        The body is what gets excerpted into the prompt, so the metadata header
+        is stripped: it is retrieval scaffolding, and spending prompt budget
+        re-sending it to the model would work against the whole point of
+        excerpting. The metadata is kept alongside for scoring instead.
+        """
         docs = {}
+        _DOC_META.clear()
         try:
             for fn in sorted(os.listdir(_DOCS_DIR)):
                 if fn.endswith(".md"):
                     with open(os.path.join(_DOCS_DIR, fn), encoding="utf-8") as f:
-                        docs[fn[:-3]] = f.read()
+                        meta, body = frontmatter.split(f.read())
+                    name = fn[:-3]
+                    docs[name] = body
+                    if meta:
+                        _DOC_META[name] = meta
         except Exception as e:  # noqa: BLE001
             logger.warning("help: could not read docs dir: %s", e)
         return docs
@@ -190,7 +206,21 @@ def register(app, hub, ctx):
             density = (1000.0 * hits) / (len(tl) + 1000.0)
             name_hits = sum(w in name.lower() for w in words)
             distinct = sum(1 for w in words if w in tl)
-            scored.append((density + 10.0 * name_hits + 0.5 * distinct, name))
+
+            # Curated metadata beats incidental prose matches. A keyword is a
+            # deliberate statement that this doc is ABOUT that term, whereas a
+            # body hit may be a passing mention -- and keywords are what bridge
+            # the gap between the user's vocabulary and the doc's, which plain
+            # full-text matching cannot do at all.
+            meta = _DOC_META.get(name) or {}
+            kws = frontmatter.keywords_of(meta)
+            kw_hits = sum(1 for w in words
+                          if any(w == k or w in k.split() for k in kws))
+            summary = str(meta.get("summary") or "").lower()
+            sum_hits = sum(1 for w in words if w in summary)
+
+            scored.append((density + 10.0 * name_hits + 0.5 * distinct
+                           + 8.0 * kw_hits + 2.0 * sum_hits, name))
         scored.sort(reverse=True)
         picked = [n for s, n in scored if s > 0][:k]
         if not picked:  # fallback to the overview docs
