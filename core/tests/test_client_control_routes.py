@@ -177,13 +177,13 @@ def test_get_client_control_reads_from_user_overrides():
     toggles write — not from the legacy per-client registry."""
     c, hub = _build({"CS_GET_CONFIG":
                      {"status": "SUCCESS",
-                      "user_overrides": "[host]\nsim_load = 50\nssid = corp\n"}})
+                      "user_overrides": "[host]\niperf = on\nssid = corp\n"}})
     r = c.get("/sim/api/10/clients/host-a/control?tenant_id=10")
     assert r.status_code == 200
     body = r.json()
     assert body["username"] == "host"
     # Only recognised sim flags are surfaced; ssid is not one.
-    assert body["overrides"] == {"sim_load": "50"}
+    assert body["overrides"] == {"iperf": "on"}
 
 
 def test_get_client_control_falls_back_to_hub_copy_when_spoke_offline():
