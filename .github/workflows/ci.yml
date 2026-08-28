@@ -13,6 +13,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,7 +21,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest
+          pip install pytest pytest-timeout
           # Requirements are NOT always at the repo root -- several repos declare
           # them per component (lm-spoke/, agent/, core/ ...). Installing only a
           # root requirements.txt silently left fastapi/httpx/websockets missing
@@ -54,7 +55,7 @@ jobs:
           failed=""
           for c in agent console core henet proxy; do
             echo "::group::$c"
-            pytest -q "$c/tests" || failed="$failed $c"
+            pytest --timeout=300 --timeout-method=thread -q "$c/tests" || failed="$failed $c"
             echo "::endgroup::"
           done
           if [ -n "$failed" ]; then
