@@ -128,6 +128,11 @@ class _Hub:
     def __init__(self):
         from collections import deque
         self.logs = deque(maxlen=500)
+        # The hub keeps three more in-memory buffers alongside its own deque;
+        # clear_all_logs empties all of them.
+        self.cert_dist_logs = deque(maxlen=500)
+        self.cs_bridge_logs = deque(maxlen=500)
+        self.console_logs = deque(maxlen=500)
         self.agent_logs = {"spoke-a": deque(maxlen=500),
                            "spoke-b": deque(maxlen=500)}
         self.active_connections = {"spoke-a": object(), "spoke-b": object()}
@@ -148,6 +153,9 @@ def test_clear_all_logs_clears_in_memory_and_broadcasts(monkeypatch):
     hub = _Hub()
     hub.logs.append("hub-line-1")
     hub.logs.append("hub-line-2")
+    hub.cert_dist_logs.append("cert-1")
+    hub.cs_bridge_logs.append("bridge-1")
+    hub.console_logs.append("console-1")
     hub.agent_logs["spoke-a"].append("a1")
     hub.agent_logs["spoke-b"].append("b1")
     hub.agent_logs["spoke-b"].append("b2")
@@ -172,4 +180,8 @@ def test_clear_all_logs_clears_in_memory_and_broadcasts(monkeypatch):
     assert len(hub.agent_logs["spoke-a"]) == 0
     assert len(hub.agent_logs["spoke-b"]) == 0
     assert len(hub.logs) == 0
+    # The cert-distribution / cs-bridge / console buffers are cleared too.
+    assert len(hub.cert_dist_logs) == 0
+    assert len(hub.cs_bridge_logs) == 0
+    assert len(hub.console_logs) == 0
     assert hub.broadcast_calls == 1
