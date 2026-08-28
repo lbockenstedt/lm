@@ -68,6 +68,12 @@ class _FakeHub:
     def get_spoke_by_type(self, t):
         return self._spokes_by_type.get(t)
 
+    def _primary_key(self, spoke_id):
+        """Spoke-id alias resolution. Routes now go through this before every
+        active_connections lookup (e.g. help_assistant's _ab_agent), so a fake
+        without it 500s the route. No aliasing here: identity."""
+        return spoke_id
+
     def get_all_spokes_by_type(self, t):
         """The DHCP list routes now consult this to decide between the normal
         single-spoke relay and the admin multi-spoke merge fan-out (2+ spokes,
@@ -725,25 +731,74 @@ def test_firewall_write_tenant_admin_other_tenant_403(tmp_path):
     assert r.status_code == 403
 
 
-def test_dns_write_tenant_admin_owned_tenant_passes(tmp_path):
-    c, hub = _build({}, tmp_path)
-    tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
-    r = c.post("/api/dns/record?tenant=tA", json={},
-               cookies={"lm_session": tok})
-    assert r.status_code != 403
+def _tenant_prefixes(monkeypatch, tenant_id="tA", prefixes=("10.20.0.0/16",)):
+    """Give the record-scope check a fixed prefix list for ``tenant_id``,
+    bypassing the NetBox round-trip."""
+    async def _fake_fetch(hub, tid):
+        return list(prefixes) if tid == tenant_id else []
+    monkeypatch.setattr(access_mod, "fetch_tenant_prefixes", _fake_fetch)
 
 
-def test_dhcp_write_tenant_admin_requires_explicit_tenant(tmp_path):
+def test_dns_write_tenant_admin_confined_to_own_subnets(monkeypatch, tmp_path):
+    """On the SHARED DNS server a tenant-admin may only touch records whose
+    ADDRESS is inside their own prefixes. Owning the tenant is necessary but
+    not sufficient — the record itself is attributed."""
     c, hub = _build({}, tmp_path)
+    _tenant_prefixes(monkeypatch)
     tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
-    # No ?tenant= → 403.
-    r = c.post("/api/dhcp/reservation", json={},
+
+    # Outside the tenant's prefixes -> refused, with the record-scope reason.
+    r = c.post("/api/dns/record?tenant=tA",
+               json={"hostname": "x", "ip": "192.168.5.10"},
                cookies={"lm_session": tok})
     assert r.status_code == 403
-    # ?tenant=tA (owned) → passes the gate.
-    r = c.post("/api/dhcp/reservation?tenant=tA", json={},
+    assert "your tenant's subnets" in r.json().get("detail", "")
+
+    # Inside them -> past the gate (the handler then runs; no spoke -> not 403).
+    r = c.post("/api/dns/record?tenant=tA",
+               json={"hostname": "x", "ip": "10.20.0.10"},
                cookies={"lm_session": tok})
     assert r.status_code != 403
+
+
+def test_dns_write_global_admin_unrestricted(monkeypatch, tmp_path):
+    """A Global Admin is exempt from the record-scope constraint."""
+    c, hub = _build({}, tmp_path)
+    _tenant_prefixes(monkeypatch)
+    admin_tok = _mint_session(hub, "admin")
+    r = c.post("/api/dns/record?tenant=tA",
+               json={"hostname": "x", "ip": "192.168.5.10"},
+               cookies={"lm_session": admin_tok})
+    assert r.status_code != 403
+
+
+def test_dhcp_write_tenant_admin_confined_to_own_subnets(monkeypatch, tmp_path):
+    """Same record-level constraint for DHCP reservations on the shared Kea."""
+    c, hub = _build({}, tmp_path)
+    _tenant_prefixes(monkeypatch)
+    tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
+
+    r = c.post("/api/dhcp/reservation?tenant=tA",
+               json={"ip": "192.168.5.10", "mac": "aa:bb:cc:dd:ee:ff"},
+               cookies={"lm_session": tok})
+    assert r.status_code == 403
+    assert "your tenant's subnets" in r.json().get("detail", "")
+
+    r = c.post("/api/dhcp/reservation?tenant=tA",
+               json={"ip": "10.20.0.10", "mac": "aa:bb:cc:dd:ee:ff"},
+               cookies={"lm_session": tok})
+    assert r.status_code != 403
+
+
+def test_dhcp_write_tenant_admin_unaddressed_record_refused(monkeypatch, tmp_path):
+    """Fail closed: a body with no address at all can't be attributed to the
+    caller's tenant, so it must be refused rather than waved through."""
+    c, hub = _build({}, tmp_path)
+    _tenant_prefixes(monkeypatch)
+    tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
+    r = c.post("/api/dhcp/reservation?tenant=tA", json={},
+               cookies={"lm_session": tok})
+    assert r.status_code == 403
 
 
 def test_firewall_write_global_admin_any_tenant(tmp_path):
@@ -1012,9 +1067,6 @@ class _DhcpHub(_FakeHub):
 
     def get_dhcp_spoke_for_shared(self):
         return self._spokes_by_type.get("dhcp")
-
-    def _primary_key(self, spoke_id):
-        return spoke_id
 
     async def request_response(self, spoke_id, cmd, data, timeout=30.0):
         if cmd == "DHCP_LIST_SUBNETS":            return {"payload": {"data": {"status": "SUCCESS", "subnets": self._subnets}}}
