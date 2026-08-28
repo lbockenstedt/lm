@@ -15,6 +15,8 @@ import socket
 import sys
 import tempfile
 
+import pytest
+
 # conftest puts core/src on sys.path so `messaging.hub_discovery` imports flat.
 from messaging import hub_discovery as hd  # noqa: E402
 
@@ -309,22 +311,36 @@ def test_cli_agent_listener_flag(monkeypatch, tmp_path, capsys):
 
 # ── install scripts parse cleanly ────────────────────────────────────────────
 
-def test_install_scripts_syntax_clean():
-    """bash -n the installers touched by the discovery / TLS wiring."""
+def _bash_n(path):
     import subprocess
-    _here = os.path.dirname(__file__)
-    # Sibling repos (cs, pxmx) live 3 levels up (vscode/); lm-internal scripts
-    # (install_menu.sh, agent/) live 2 levels up (lm/).
-    root = os.path.abspath(os.path.join(_here, "..", "..", ".."))
-    lm_root = os.path.abspath(os.path.join(_here, "..", ".."))
-    scripts = [
-        os.path.join(root, "cs", "lm-spoke", "install_cs.sh"),
-        os.path.join(root, "pxmx", "install_pxmx.sh"),
-        os.path.join(root, "pxmx", "agent", "install_agent.sh"),
-        os.path.join(lm_root, "install_menu.sh"),
-        os.path.join(lm_root, "agent", "install_agent.sh"),
-    ]
-    for s in scripts:
-        assert os.path.isfile(s), f"missing installer: {s}"
-        r = subprocess.run(["bash", "-n", s], capture_output=True, text=True)
-        assert r.returncode == 0, f"bash -n failed for {s}:\n{r.stderr}"
+    r = subprocess.run(["bash", "-n", path], capture_output=True, text=True)
+    assert r.returncode == 0, f"bash -n failed for {path}:\n{r.stderr}"
+
+
+def test_install_scripts_syntax_clean():
+    """bash -n the lm-internal installers touched by the discovery / TLS wiring."""
+    lm_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    for name in ("install_menu.sh", os.path.join("agent", "install_agent.sh")):
+        path = os.path.join(lm_root, name)
+        assert os.path.isfile(path), f"missing installer: {path}"
+        _bash_n(path)
+
+
+@pytest.mark.parametrize("rel", [
+    os.path.join("cs", "lm-spoke", "install_cs.sh"),
+    os.path.join("pxmx", "install_pxmx.sh"),
+    os.path.join("pxmx", "agent", "install_agent.sh"),
+])
+def test_sibling_repo_install_scripts_syntax_clean(rel):
+    """Same check for the installers that live in the SIBLING cs / pxmx repos.
+
+    Those are separate checkouts, present in a full multi-repo workspace but
+    NOT in CI, which clones lm alone. Asserting they exist made this test pass
+    locally and fail in CI for a reason that has nothing to do with lm. Skip
+    when the sibling checkout isn't alongside us; still bash -n it when it is.
+    """
+    workspace = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    path = os.path.join(workspace, rel)
+    if not os.path.isfile(path):
+        pytest.skip(f"sibling repo checkout not present: {rel}")
+    _bash_n(path)
