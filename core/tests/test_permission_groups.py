@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from access import (  # noqa: E402
     ENFORCED_RIGHTS,
+    MODULE_RIGHTS,
     groups_and_tenants_for_membership,
     groups_for_ldap_membership,
     resolve_effective_permissions,
@@ -143,5 +144,23 @@ def test_no_hub_state_falls_back_to_per_user():
 
 
 def test_enforced_rights_are_stable():
-    # The group editor + resolver share this list; guard against accidental drift.
-    assert set(ENFORCED_RIGHTS) == {"cs", "nw", "ipam", "le", "console", "console_write"}
+    # The group editor + resolver share this list; guard against accidental
+    # drift. dns/dhcp/firewall/nac/ldap/pxmx/henet/reports each became their
+    # own permission-gated module (dns/dhcp/firewall used to ride on ``ipam``),
+    # so adding one here is deliberate -- but dropping one silently un-gates a
+    # module, which is what this guard is for.
+    assert set(ENFORCED_RIGHTS) == {
+        "cs", "nw", "ipam", "le", "console", "console_write", "firewall",
+        "dns", "dhcp", "henet", "nac", "ldap", "pxmx", "reports", "edit"}
+    # No duplicates -- the editor renders one checkbox per entry.
+    assert len(ENFORCED_RIGHTS) == len(set(ENFORCED_RIGHTS))
+
+
+def test_module_rights_are_a_subset_of_enforced_rights():
+    # MODULE_RIGHTS gates nav + API namespace visibility and must be a strict
+    # subset: every module right is enforced, but ``edit`` (the cross-module
+    # write tier) and ``console_write`` (a per-module write tier) are NOT
+    # modules and must never appear in the nav list.
+    assert set(MODULE_RIGHTS) < set(ENFORCED_RIGHTS)
+    assert "edit" not in MODULE_RIGHTS
+    assert "console_write" not in MODULE_RIGHTS

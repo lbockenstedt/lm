@@ -1,32 +1,37 @@
-"""perform_update restart sentinel: staleness FORCES, routine auto stays GATED.
+"""perform_update restart sentinel: ONLY an explicit operator force forces.
 
-Regression for the "I keep getting stale hubs" fix. The hub's restart sentinel
-(``_request_watchdog_restart``) is consumed by the root ``lm-watchdog``, which
-gates a NON-force sentinel to the maintenance window (default 02:00) but
-restarts immediately on a FORCE sentinel. Two behaviors must hold:
+The hub's restart sentinel (``_request_watchdog_restart``) is consumed by the
+root ``lm-watchdog``, which gates a NON-force sentinel on RESTART_ALLOWED (hub
+idle / inside the maintenance window, default 02:00) but restarts immediately
+on a FORCE sentinel. The sentinel's flag is ``force=bool(force)`` -- the
+caller's explicit force and nothing else. Three behaviors must hold:
 
-1. A STALE-reload (git current but the running process is behind on-disk
-   VERSION — the recurring shape where a fix landed on disk mid-day but sat
-   UNLOADED for hours) must write a FORCE sentinel so the watchdog reloads
-   within one ~60s cycle, day or night. Staleness is an ERROR state, not
-   planned maintenance.
+1. A routine auto ``hub_updated`` (the scheduled repo_sync pulled a real hub
+   change, ``force=False``) is NON-force -- deferred to idle/window.
 
-2. A routine auto ``hub_updated`` (the scheduled repo_sync pulled a real hub
-   change, ``force=False``) must stay NON-force — GATED to the maintenance
-   window. That's the only path the gate is meant to defer, and the fix must
-   NOT widen it.
+2. A STALE-reload (git current but the running process is behind on-disk
+   VERSION) is ALSO NON-force, and there is deliberately NO force-over
+   backstop. This is a safety rule, not an oversight: a stale -- possibly
+   buggy -- build must wait until the hub is idle or the 02:00 window opens
+   rather than rebooting a logged-in operator mid-day. The yellow footer dot
+   is the signal that a reload is pending; the operator reloads on their own
+   terms via the footer Update button. (An earlier revision did force here, on
+   the theory that staleness is an error state rather than planned
+   maintenance. That traded a surprise mid-day restart for promptness and was
+   reverted -- do NOT re-add ``or stale_reload`` to the force expression.)
 
-A manual click (``force=True``) forces regardless (the "Update now" / "Sync
-now" button does what its name says).
+3. A manual click (``force=True``) forces regardless, on either path -- the
+   "Update now" / "Sync now" button does what its name says. This is the ONLY
+   thing that bypasses the gate.
 
-These drive ``perform_update`` end-to-end (git I/O + spoke fan-out stubbed)
-to the restart branch and assert the sentinel's ``force`` flag per the
-``force=(stale_reload or bool(force))`` expression.
+These drive ``perform_update`` end-to-end (git I/O + spoke fan-out stubbed) to
+the restart branch and assert the sentinel's ``force`` flag.
 """
 
 import pytest
 
 import update_pipeline as up
+from main import LabManagerHub as _MainHub
 from update_pipeline import UpdatePipelineMixin
 
 
@@ -104,6 +109,18 @@ class _RestartHub(UpdatePipelineMixin):
         self.restart_sentinels.append((reason, force))
 
 
+# ``perform_update`` decides whether an AUTO restart may fire *now* by calling
+# ``self._gate_allows_restart_now()``. That method and its ``_update_gate_config``
+# helper live on ``main.Hub``, not on ``UpdatePipelineMixin``, so this
+# mixin-only fake doesn't inherit them. Borrow the REAL ones rather than
+# stubbing: these tests are specifically about which restarts the gate defers,
+# so a stub would assert the stub's policy instead of production's. With no
+# ``update_gate`` in global_config they default to the strict 02:00 window --
+# i.e. "defer" outside the window, exactly the routine-auto case below.
+_RestartHub._update_gate_config = _MainHub._update_gate_config
+_RestartHub._gate_allows_restart_now = _MainHub._gate_allows_restart_now
+
+
 @pytest.fixture
 def _no_io(monkeypatch):
     """Stub the snapshot/recovery helpers + subprocess so perform_update's
@@ -117,20 +134,22 @@ def _no_io(monkeypatch):
     monkeypatch.setattr(up.subprocess, "Popen", lambda *a, **k: None)
 
 
-# ── stale-reload forces (the fix) ────────────────────────────────────────────
+# ── stale-reload stays GATED (no force-over backstop) ─────────────────
 
 @pytest.mark.asyncio
-async def test_stale_reload_forces_sentinel(_no_io):
+async def test_stale_reload_auto_is_non_force_gated(_no_io):
     # Git current (local==remote) → else branch → process STALE (running v.483
-    # vs on-disk v.502) → stale_reload=True. force=False (auto) MUST STILL force
-    # — staleness is an error state, not planned maintenance.
+    # vs on-disk v.502) → stale_reload=True. force=False (auto) → the sentinel
+    # is NON-force: the watchdog holds the reload until the hub is idle or the
+    # 02:00 window opens rather than restarting under a logged-in operator.
     hub = _RestartHub(startup_version="v.483", local_commit="aaa",
                       remote_commit="aaa", disk_version="v.502")
     await hub.perform_update(force=False)
     assert len(hub.restart_sentinels) == 1, hub.restart_sentinels
     reason, force = hub.restart_sentinels[0]
     assert reason == "stale-reload->restart"
-    assert force is True, "stale-reload must FORCE (bypass the maintenance gate)"
+    assert force is False, \
+        "stale-reload must stay GATED — no force-over backstop (see module docstring)"
 
 
 @pytest.mark.asyncio

@@ -92,13 +92,24 @@ def test_heartbeat_thread_logs_stall_warning_when_send_overdue(caplog):
     ws = _FakeWS("stall")  # send blocks 10s >> 0.3s deadline
     t, stop, runner = _run_target(fs, ws)
     try:
+        # The warning names BOTH causes of an overdue send -- a loop blocked
+        # on a sync call, or outbound backpressure with the loop idle in
+        # select -- because the thread-stack dump is what distinguishes them.
+        # Match on the stable "did not complete" phrasing rather than any one
+        # adjective.
+        def _stalled():
+            return [r for r in caplog.records
+                    if "heartbeat send did not complete" in r.getMessage().lower()]
+
         with caplog.at_level(logging.WARNING, logger="BaseControlPlane"):
             # Wait for the stall warning to fire (deadline 0.3s + slack).
             deadline = time.time() + 2.0
-            while not any("stalled" in r.message.lower() for r in caplog.records) \
-                    and time.time() < deadline:
+            while not _stalled() and time.time() < deadline:
                 time.sleep(0.02)
-        assert any("stalled" in r.message.lower() for r in caplog.records)
+        recs = _stalled()
+        assert recs, [r.getMessage() for r in caplog.records]
+        msg = recs[0].getMessage().lower()
+        assert "backpressure" in msg and "sync call" in msg
         # The thread survives the stall (didn't return) — it's still alive,
         # blocked in stop_event.wait(30) after the stall log.
         assert t.is_alive()

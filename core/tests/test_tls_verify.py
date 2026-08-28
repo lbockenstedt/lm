@@ -42,9 +42,23 @@ def _make_ca_pem(path):
 
 class _FakeSelf:
     """Just the TLS attributes _client_ssl_ctx touches."""
-    def __init__(self, verify, ca_cert=""):
+    def __init__(self, verify, ca_cert="", material_dir=None):
         self._tls_verify = verify
         self._tls_ca_cert = ca_cert
+        self._material_dir = material_dir
+
+    # _client_ssl_ctx now also loads this spoke's hub-issued mTLS CLIENT cert
+    # into the context, so the spoke actually PRESENTS an identity on the
+    # handshake. Borrow the real method: without it the missing attribute
+    # raised inside _client_ssl_ctx's broad try and it returned None -- which
+    # reads as "context build failed", exactly what these tests then tripped on.
+    _present_client_cert = BaseControlPlane._present_client_cert
+
+    def _mtls_material_dir(self):
+        # No hub-leg cert on disk in these tests, so nothing is presented --
+        # which is the supported cert-less case, and keeps the assertions here
+        # about SERVER verification only.
+        return self._material_dir or "/nonexistent-lm-test-mtls-dir"
 
 
 def _ctx(fake):

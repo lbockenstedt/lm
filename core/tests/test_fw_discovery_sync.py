@@ -112,6 +112,7 @@ class _SyncHub(FwDiscoverySyncMixin):
             system_state={"global_config": global_config or {}},
             tenants=tenants or {"acme": {"name": "Acme", "netbox_tenant_slug": "acme"}},
         )
+        self.refreshed_caches = []
         self.simulations_store = _FakeSimulationsStore()
         self._responses = responses or {}
         self._fw_spokes = fw_spokes if fw_spokes is not None else ["opn-fw1"]
@@ -130,6 +131,15 @@ class _SyncHub(FwDiscoverySyncMixin):
     async def request_response(self, spoke_id, command, payload, timeout=30.0):
         self.request_log.append((spoke_id, command, payload))
         return self._responses[(spoke_id, command)]
+
+
+
+    # The sync mixins invalidate the tenant module-cache at the end of a cycle
+    # that actually changed spoke data (main.Hub.refresh_module_cache). Record
+    # the keys so tests can assert the refresh fired instead of silently
+    # tolerating its absence.
+    def refresh_module_cache(self, key):
+        self.refreshed_caches.append(key)
 
 
 def _dhcp_payload():

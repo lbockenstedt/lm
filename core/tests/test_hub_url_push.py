@@ -7,7 +7,7 @@ to every agent/spoke" flow:
    — guards (loopback / auto / already-current → no-op) + apply path (persist
    ``HUB_URL`` to ``.env`` + deferred ``os._exit(3)`` so systemd relaunches
    dialed to the new URL).
-2. ``_deferred_repoint_exit`` — the 0.5s-deferred flush + exit task the apply
+2. ``_deferred_restart_exit`` — the 0.5s-deferred flush + exit task the apply
    path schedules (so the SUCCESS ack clears the mailbox BEFORE the restart).
 3. Hub-side push: ``push_config_to_spoke`` re-sends ``SPOKE_SET_HUB_URL`` on
    every connect (reconcile) when ``global_config["hub"]["url"]`` is set, and
@@ -178,10 +178,11 @@ async def test_set_hub_url_missing_or_invalid_errors():
 
 
 @pytest.mark.asyncio
-async def test_deferred_repoint_exit_flushes_then_exits_nonzero(monkeypatch):
-    """_deferred_repoint_exit sleeps briefly, flushes the log relay, then
+async def test_deferred_restart_exit_flushes_then_exits_nonzero(monkeypatch):
+    """_deferred_restart_exit sleeps briefly, flushes the log relay, then
     os._exit(3) so systemd Restart=always/on-failure relaunches dialed to the
-    new URL. Patch sleep (no-op) + flush (no-op) + os._exit (record) so the
+    new URL. (Was _deferred_repoint_exit; renamed when SPOKE_SET_MTLS_MATERIALS
+    started sharing the same deferred flush-then-exit task.) Patch sleep (no-op) + flush (no-op) + os._exit (record) so the
     test doesn't actually die or wait."""
     spoke = _BareSpoke()
     exited = []
@@ -190,7 +191,7 @@ async def test_deferred_repoint_exit_flushes_then_exits_nonzero(monkeypatch):
     monkeypatch.setattr(cp.asyncio, "sleep", _noop_sleep)
     monkeypatch.setattr(spoke, "_flush_log_relay_async", _noop_flush)
     monkeypatch.setattr(cp.os, "_exit", lambda code: exited.append(code))
-    await spoke._deferred_repoint_exit()
+    await spoke._deferred_restart_exit()
     assert exited == [3]
 
 

@@ -18,27 +18,43 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-# Fake security.encryption: identity JSON codec (encrypt(str)->bytes, decrypt
-# passes bytes through) so the local credential blob round-trips as plain JSON.
-_fake_enc = types.ModuleType("security.encryption")
-_fake_enc.hub_encryption = SimpleNamespace(
-    encrypt=lambda s: (s.encode() if isinstance(s, str) else s),
-    decrypt=lambda b: b,
-)
-sys.modules.setdefault("security", types.ModuleType("security"))
-sys.modules["security.encryption"] = _fake_enc
-
-# Fake cred_vault: vault "available" (so vault_enabled True) but no console
-# secret present (automation_get -> None) → the resolver falls back to local.
-_fake_cv = types.ModuleType("cred_vault")
-_fake_cv.ADMIN_BUCKET = "__admin__"
-async def _automation_get(hub, bucket, name):
-    return None
-_fake_cv.automation_get = _automation_get
-_fake_cv._vault_available = lambda hub: True
-sys.modules["cred_vault"] = _fake_cv
-
 from routes import console as console_routes  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fake_modules(monkeypatch):
+    """Install the fake security.encryption / cred_vault for THIS module only.
+
+    These used to be assigned into sys.modules at module import time and never
+    removed, so every test module collected afterwards saw the stubs instead of
+    the real ones — test_plaintext_fallback_gate then failed to import
+    plaintext_fallback_allowed from a stub that has no such attribute, and the
+    whole core suite died with a collection error.
+
+    routes.console imports both lazily (inside the request handlers), so the
+    fakes only need to exist while a test RUNS. monkeypatch.setitem restores
+    whatever was there before, including the real modules.
+    """
+    # Identity JSON codec (encrypt(str)->bytes, decrypt passes bytes through)
+    # so the local credential blob round-trips as plain JSON.
+    fake_enc = types.ModuleType("security.encryption")
+    fake_enc.hub_encryption = SimpleNamespace(
+        encrypt=lambda s: (s.encode() if isinstance(s, str) else s),
+        decrypt=lambda b: b,
+    )
+    monkeypatch.setitem(sys.modules, "security.encryption", fake_enc)
+
+    # Vault "available" (so vault_enabled True) but no console secret present
+    # (automation_get -> None) → the resolver falls back to local.
+    fake_cv = types.ModuleType("cred_vault")
+    fake_cv.ADMIN_BUCKET = "__admin__"
+
+    async def _automation_get(hub, bucket, name):
+        return None
+
+    fake_cv.automation_get = _automation_get
+    fake_cv._vault_available = lambda hub: True
+    monkeypatch.setitem(sys.modules, "cred_vault", fake_cv)
 
 
 class _State:
@@ -72,6 +88,10 @@ def _client(creds):
     ctx = SimpleNamespace(
         _session_user=lambda req: {"user": {"is_admin": True, "username": "root"}},
         _is_admin=lambda s: True,
+        # register() pulls the console RBAC gates off ctx; a fake without them
+        # fails at route-registration time, not in the assertion.
+        _has_console_write_access=lambda s: True,
+        _has_console_access=lambda s: True,
         _resolve_tenant=lambda req, explicit=None: "default",
     )
     console_routes.register(app, hub, ctx)

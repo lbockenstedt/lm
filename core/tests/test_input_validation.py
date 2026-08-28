@@ -101,6 +101,13 @@ class _FakeHub:
         self.approved_modules = {}
         self.spoke_module_types = {}
         self._spokes_by_type = {}
+        # Spoke state is keyed by _primary_key(spoke_id) -- the guid once a
+        # spoke has been lazily migrated to guid-primary, else the connect-id.
+        # An empty alias map is the pre-migration case: identity for everyone.
+        self.spoke_id_alias = {}
+
+    def _primary_key(self, spoke_id):
+        return self.spoke_id_alias.get(spoke_id, spoke_id)
 
     def get_spoke_by_type(self, t):
         return self._spokes_by_type.get(t)

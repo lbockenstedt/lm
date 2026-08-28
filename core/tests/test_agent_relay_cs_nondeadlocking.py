@@ -60,6 +60,10 @@ class _FakeHub:
         self.relay_block = asyncio.Event()
         self.relay_started = asyncio.Event()
         self.vm_refresh_calls = []
+        # The relay records a durable agent liveness signal under a composite
+        # "<spoke>:<agent>" key so a pxmx agent that isn't actively relaying
+        # doesn't read as "Never connected" after a disconnect/hub restart.
+        self.heartbeat = type("HB", (), {"last_seen": {}})()
 
     # The slow cs-spoke round-trip the old code awaited inline.
     async def request_response(self, spoke_id, cmd, data, timeout=5.0):
@@ -73,6 +77,11 @@ class _FakeHub:
 
     def get_client_sim_spoke(self, tenant_id=None):
         return "cs-svr-04-spoke"  # the tenant's cs spoke (also agent-hosting)
+
+    def _agent_primary_key(self, agent_id):
+        """Hub-side primary key for a relayed agent (guid once migrated, else
+        the agent's self-chosen id). No aliases here, so identity."""
+        return agent_id
 
     def _reconcile_spoke_identity(self, *a, **kw):
         pass  # noop — identity reconciliation isn't under test

@@ -127,12 +127,29 @@ async def test_repush_noop_without_tenant_binding():
     assert hub.sent == []  # unbound spoke → nothing pushed
 
 
-async def test_repush_noop_when_hub_config_disabled():
+async def test_disabled_hub_config_still_pushes_usb_approvals_only():
+    """hub_config OFF: push ONLY the effective USB lists, not the full config.
+
+    USB dongle approvals are PLATFORM-WIDE, so a globally-certified vid:pid
+    has to reach the spoke on reconnect even when the tenant never enabled
+    hub-owned sim config -- otherwise the spoke's pxmx agent reports "no
+    eligible dongles" for a dongle the admin approved globally. This used to
+    push nothing at all. What must NOT happen is the rest of the hub_config
+    (templates, auto-provision, ...) being applied to a tenant that opted out.
+    """
     hub = _Hub(_State("10"),
                _Store({"hub_config_enabled": False,
-                       "hub_config": {"usb_vidpids": json.dumps([_vidpid("1111:2222")])}}))
+                       "hub_config": {"usb_vidpids": json.dumps([_vidpid("1111:2222")]),
+                                      "vm_image_1_template_id": 100,
+                                      "usb_auto_provision": "on"}}))
     await main.LabManagerHub.push_cs_hub_config(hub, "cs-spoke-1")
-    assert hub.sent == []  # disabled → don't push (would clear spoke-side certs)
+    assert len(hub.sent) == 1
+    cmd, data = hub.sent[0]
+    assert cmd == "CS_CONFIG_UPDATE"
+    assert [d["vidpid"] for d in json.loads(data["usb_vidpids"])] == ["1111:2222"]
+    assert json.loads(data["usb_ignored_vidpids"]) == []
+    # Nothing else rides along -- the opted-out tenant keeps its own settings.
+    assert set(data) == {"usb_vidpids", "usb_ignored_vidpids"}
 
 
 async def test_repush_dedupes_overlap_between_global_and_tenant():
