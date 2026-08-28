@@ -72,4 +72,4 @@ def test_exact_keyword_match_outranks_a_compound_part_match():
 
 def test_match_score_is_zero_for_unrelated_words():
     assert fm.match_score("cat", "console") == 0.0
-    assert fm.match_score("bus", "bugfixer") == 0.0
+    assert fm.match_score("bus", "business") == 0.0
