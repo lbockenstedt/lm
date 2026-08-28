@@ -1,3 +1,8 @@
+---
+summary: "HE.NET spoke managing public-address-space A/AAAA records at Hurricane Electric's free DNS (dns.he.net)."
+keywords: [account, dns, henet, henet_manager, henet_scrape, henet_web_record, install_henet, le, lm, module_type]
+---
+
 # henet — HE.NET public DNS (Hurricane Electric)
 
 HE.NET spoke managing **public-address-space** A/AAAA records at Hurricane Electric's free DNS (`dns.he.net`). Vendored in-tree at `lm/henet/`. `module_type = "henet"`. See [architecture-topology.md](architecture-topology.md).

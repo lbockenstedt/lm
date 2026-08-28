@@ -1,3 +1,8 @@
+---
+summary: "Consolidated reference for every environment variable read across the LM system."
+keywords: [configuration, control_plane, env, environment, envvar, hub_secret, lm, pxmx, recovery, settings, spoke_id, spoke_secret, variable, variables]
+---
+
 # Environment Variables Reference
 
 Consolidated reference for every environment variable read across the LM system. Canonical copy in `lm/docs/`. See [architecture-topology.md](architecture-topology.md) for how these fit together.

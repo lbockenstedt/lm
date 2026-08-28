@@ -1,3 +1,8 @@
+---
+summary: "The hub's graceful-degradation control loop: how a single-core event loop survives a burst (or a DDoS) without going unresponsive."
+keywords: [backpressure, busy, ddos, degradation, fleet_cpu_soft, global_config, lm, load, overload, ratelimit, slow, throttle, throttling, unresponsive]
+---
+
 # lm — Backpressure, Throttling & Graceful Degradation
 
 The hub's **graceful-degradation control loop**: how a single-core event loop

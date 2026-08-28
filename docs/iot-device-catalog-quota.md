@@ -1,3 +1,8 @@
+---
+summary: "Design and investigation for feeding the IoT device catalog into the sim-quota engine so operators can drive simulations from device profiles. Not yet implemented."
+keywords: [catalog, cs, device, device_id, device_profile, iot, lm, quota, sim_id, sim_quota]
+---
+
 # IoT Device Catalog → Quota Engine (design / investigation)
 
 Status: **investigation + design** (no implementation yet). Working doc to pick

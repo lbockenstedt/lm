@@ -436,15 +436,26 @@
             if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
             // Strip raw [doc:x] citation markers from the prose; render chips below.
             const answerHtml = renderMarkdown(String(data.answer || '(no answer)')
-                .replace(/\[doc:[a-z0-9-]+\]/gi, ''));
+                .replace(/\[doc:[a-z0-9._\/-]+\]/gi, ''));
             let footer = '';
             const cites = data.citations || [];
             if (cites.length) {
                 footer += '<div style="margin-top:1.25rem;padding-top:.75rem;border-top:1px solid #e2e8f0">' +
                     '<div style="font-size:.65rem;letter-spacing:.1em;text-transform:uppercase;color:#94a3b8;font-weight:700;margin-bottom:.4rem">Sources</div>' +
                     cites.map(function (n) {
-                        return '<a href="#" class="lm-help-icon" style="width:auto;padding:.15rem .5rem;border-radius:.35rem;margin:0 .3rem .3rem 0" onclick="openHelp(\'' +
-                            n + '\');return false;">' + esc(n) + '</a>';
+                        // Docs from a sibling repo are namespaced "repo/name".
+                        // The /docs endpoint only serves the canonical lm set
+                        // and rejects a name containing a slash, so linking one
+                        // would hand the user a dead chip -- show it as a plain
+                        // label instead.
+                        const style = 'width:auto;padding:.15rem .5rem;border-radius:.35rem;margin:0 .3rem .3rem 0';
+                        if (String(n).indexOf('/') !== -1) {
+                            return '<span class="lm-help-icon" style="' + style +
+                                ';cursor:default" title="Documented in the ' +
+                                esc(String(n).split('/')[0]) + ' repo">' + esc(n) + '</span>';
+                        }
+                        return '<a href="#" class="lm-help-icon" style="' + style +
+                            '" onclick="openHelp(\'' + n + '\');return false;">' + esc(n) + '</a>';
                     }).join('') + '</div>';
             }
             if ((data.used_tools || []).length) {

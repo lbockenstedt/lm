@@ -1,3 +1,8 @@
+---
+summary: "A Global Admin backs up a Proxmox template to the hub's own disk (the hub runs on a full VM now), and a tenant refreshes a host's template from that stored backup."
+keywords: [backup, clone, data_dir, download, lm, lm_hub_public_url, repo, restore, snapshot, storage, template, tenant_id, upload_url, vmid]
+---
+
 # Template Repo — hub-local Proxmox template backups
 
 A **Global Admin backs up a Proxmox template to the hub's own disk** (the hub runs

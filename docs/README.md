@@ -1,3 +1,8 @@
+---
+summary: "Doc index for the lm repo: links to this module's feature reference and the shared LM architecture/topology page."
+keywords: [documentation, index, lm]
+---
+
 # LM Documentation
 
 Feature reference for the Lab Manager system — so you can look up what each thing does, what port it uses, what env vars/flags it takes, and its gotchas without scanning code.

@@ -1,3 +1,8 @@
+---
+summary: "Read this before creating, modifying, or 'fixing' any alert-driving simulation."
+keywords: [alarm, alert, central, collab, cs, dashboard, dhcp_fail, dns_fail, dns_latency, download, generation, lm, ping_test, trigger]
+---
+
 # Generating Alerts — the Negative-Simulation Playbook
 
 **Read this before creating, modifying, or "fixing" any alert-driving simulation.**

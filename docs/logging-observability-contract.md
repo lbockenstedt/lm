@@ -1,3 +1,8 @@
+---
+summary: "Mandatory logging and observability contract for every module and agent: relaying logs to the hub, the hub's two log views, and the required levels."
+keywords: [agent_log, configure_logging, contract, debug, lm, logging, loglevel, logs, observability, relay, set_exception_handler, set_log_level, syslog, telemetry]
+---
+
 # Logging & Observability Contract (every module & agent)
 
 **Status: MANDATORY.** Applies to every spoke, agent, and module in the platform

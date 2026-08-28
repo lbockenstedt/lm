@@ -170,13 +170,17 @@ def _helpers():
     import ast, pathlib
     src = pathlib.Path(__file__).resolve().parents[1] / "src/routes/help_assistant.py"
     tree = ast.parse(src.read_text())
-    ns = {}
+    from routes import frontmatter as _fm
+    # _select_docs consults front-matter metadata, so the module has to be in
+    # the namespace the lifted functions execute in.
+    ns = {"frontmatter": _fm}
     # The lifted functions close over module-level constants, so those have to
     # come along or the extraction fails with NameError at call time.
     consts = [n for n in tree.body
               if isinstance(n, ast.Assign)
               and any(isinstance(t, ast.Name) and t.id in
-                      {"_STOPWORDS", "_DOC_EXCERPT_BUDGET"} for t in n.targets)]
+                      {"_STOPWORDS", "_DOC_EXCERPT_BUDGET", "_DOC_META"}
+                      for t in n.targets)]
     want = {"_select_docs", "_doc_excerpt"}
     found = [n for n in ast.walk(tree)
              if isinstance(n, ast.FunctionDef) and n.name in want]

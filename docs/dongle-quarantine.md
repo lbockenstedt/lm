@@ -1,3 +1,8 @@
+---
+summary: "How never-connected USB dongle clients are detected, quarantined and shed from the VM, including 5-strike permanent quarantine and the un-quarantine path."
+keywords: [cs, dashboard, dhcp_fail, dns_fail, dongle, download, iperf, lm, offline, ping_test, quarantine, recovery, stuck, usb]
+---
+
 # Dongle quarantine — never-connected client → QT the bus + shed the VM
 
 Status: **implemented** (Chunks 1–3 done, pushed to cs + lm + pxmx).

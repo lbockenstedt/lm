@@ -1,3 +1,8 @@
+---
+summary: "Client Simulation spoke. Repo: cs. moduletype = 'simulation', label 'Agent'/'Client Simulator'."
+keywords: [client, collab, cs, dashboard, dhcp_fail, dns_fail, dns_latency, download, iperf, lm, sims, simulation, traffic, www_traffic]
+---
+
 # cs — Client Simulation
 
 Client Simulation spoke. Repo: `cs`. `module_type = "simulation"`, label "Agent"/"Client Simulator". See [architecture-topology.md](architecture-topology.md).
