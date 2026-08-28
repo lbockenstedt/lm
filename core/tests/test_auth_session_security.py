@@ -832,22 +832,36 @@ def test_firewall_write_tenant_admin_multi_tenant_owned(tmp_path):
 
 # ── 9. Help assistant admin-gate (cross-tenant LLM tools) ─────────────────────
 
-def test_help_ask_requires_admin(tmp_path):
-    # /api/help/ask runs hub-wide (cross-tenant) LLM tools — admin-only. A
-    # non-admin is 403'd; /api/help/available stays authed-read.
+def test_help_ask_is_authed_read_not_admin_only(tmp_path):
+    """Ask AI is available to ANY signed-in user, not just admins.
+
+    It used to be admin-gated because its LLM tools ran hub-wide. Those tools
+    are now tenant-scoped to the CALLER (search_devices delegates to the scoped
+    /api/search; get_spokes_status filters to the caller's spokes), so the
+    blanket admin gate was dropped — the scoping, not the gate, is what keeps
+    one tenant's data out of another tenant's answers.
+
+    Both a non-admin and an admin therefore reach the handler, which 409s with
+    no AppBuilder agent connected. A 403 here would mean the gate came back.
+    """
     c, hub = _build({}, tmp_path)
     tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam",))
     r = c.post("/api/help/ask", json={"question": "list all spokes"},
                cookies={"lm_session": tok})
-    assert r.status_code == 403
-    # available is NOT admin-gated — any authed user may read it.
+    assert r.status_code == 409
     assert c.get("/api/help/available",
                  cookies={"lm_session": tok}).status_code == 200
-    # Admin passes the gate; with no ab agent connected the handler 409s.
     admin_tok = _mint_session(hub, "admin")
     r = c.post("/api/help/ask", json={"question": "list all spokes"},
                cookies={"lm_session": admin_tok})
     assert r.status_code == 409
+
+
+def test_help_ask_still_requires_a_session(tmp_path):
+    """Authed-READ is not anonymous: no session cookie is still rejected."""
+    c, hub = _build({}, tmp_path)
+    r = c.post("/api/help/ask", json={"question": "list all spokes"})
+    assert r.status_code in (401, 403)
 
 
 # ── 10. NetBox cross-tenant mutation ownership check ──────────────────────────
@@ -858,7 +872,7 @@ def test_netbox_delete_not_owned_by_tenant_denied(tmp_path):
     # fail-closed 403.
     c, hub = _build({}, tmp_path)
     api_mod._tenant_cache["tA"] = {"netbox_devices": {"data": [{"id": 5}]}}
-    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam",))
+    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam", "edit"))
     r = c.delete("/api/netbox/devices/999", cookies={"lm_session": tok})
     assert r.status_code == 403
 
@@ -868,7 +882,7 @@ def test_netbox_delete_owned_by_tenant_passes_gate(tmp_path):
     # proceeds (fake request_response returns SUCCESS) → 200, not the 403 gate.
     c, hub = _build({}, tmp_path)
     api_mod._tenant_cache["tA"] = {"netbox_devices": {"data": [{"id": 5}]}}
-    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam",))
+    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam", "edit"))
     r = c.delete("/api/netbox/devices/5", cookies={"lm_session": tok})
     assert r.status_code == 200
 
