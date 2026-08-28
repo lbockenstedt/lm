@@ -5,18 +5,14 @@ failed with ENOENT, silently losing that persist (and, across a hub restart,
 a queued approval). ``_save`` now uses a mkstemp-unique temp per write. Hammer
 it concurrently and assert zero failures / zero leftover temps."""
 import os
-import sys
-import types
 import tempfile
 import threading
 
-# Stub the hub encryption dependency so Mailbox imports without the full app.
-_enc = types.ModuleType("security.encryption")
-_enc.hub_encryption = types.SimpleNamespace(
-    encrypt=lambda s: s.encode(), decrypt=lambda b: b.decode())
-sys.modules.setdefault("security", types.ModuleType("security"))
-sys.modules["security.encryption"] = _enc
-
+# No security.encryption stub: this module used to assign one into sys.modules
+# at import time and never remove it, so every test module collected afterwards
+# saw the stub instead of the real package. The conftest already exports a
+# throwaway LM_FERNET_KEY, which is the only reason the stub existed, so the
+# real module imports fine.
 from messaging.mailbox import Mailbox
 
 
