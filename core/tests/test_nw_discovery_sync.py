@@ -73,6 +73,7 @@ class _SyncHub(NwDiscoverySyncMixin):
             tenants=tenants or {"acme": {"name": "Acme",
                                          "netbox_tenant_slug": "acme"}},
         )
+        self.refreshed_caches = []
         self.simulations_store = _FakeSimulationsStore()
         self._responses = responses or {}
         # NOTE: do NOT name this ``_nw_spokes`` — that shadows the mixin's
@@ -97,6 +98,15 @@ class _SyncHub(NwDiscoverySyncMixin):
                                       "errors": 0, "skipped": 0, "deleted": 0,
                                       "message": "ok"}}}
         return self._responses[(spoke_id, command)]
+
+
+
+    # The sync mixins invalidate the tenant module-cache at the end of a cycle
+    # that actually changed spoke data (main.Hub.refresh_module_cache). Record
+    # the keys so tests can assert the refresh fired instead of silently
+    # tolerating its absence.
+    def refresh_module_cache(self, key):
+        self.refreshed_caches.append(key)
 
 
 def _arp_payload():
