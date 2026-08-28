@@ -823,12 +823,12 @@ function _lmToastRegion() {
     return el;
 }
 
-// ─── API-field reveal + copy (admin-only) ───────────────────────────────────
+// ─── API-field reveal + copy (admin tier) ───────────────────────────────────
 // Adds an eye (show/hide) + copy button to every API-CREDENTIAL password input
 // so an admin can view/copy a stored token/key. Auto-detects by id/name/
-// placeholder (EXCLUDES user login/admin passwords), is idempotent, admin-gated,
-// and a MutationObserver picks up dynamically-rendered Setup forms. Opt a field
-// out with data-no-api-reveal="1"; force one in with data-api-field.
+// placeholder (EXCLUDES user login/admin passwords), is idempotent, gated to the
+// admin tier, and a MutationObserver picks up dynamically-rendered Setup forms.
+// Opt a field out with data-no-api-reveal="1"; force one in with data-api-field.
 const _API_FIELD_RE = /(api|token|secret|apikey|access[-_ ]?key|client[-_ ]?secret|bearer|psk|credential|passphrase)/i;
 const _API_FIELD_EXCLUDE = /(login|sign[-_ ]?in|confirm|current[-_ ]?pass|new[-_ ]?pass|admin[-_ ]?pass)/i;
 const _EYE_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>';
@@ -846,11 +846,27 @@ function _isApiSecretInput(el) {
     return _API_FIELD_RE.test(hay);
 }
 
+// Who gets the reveal/copy control: the ADMIN TIER — a Global Admin or a tenant
+// Admin. It was Global-Admin-only, which left a tenant Admin unable to read back
+// a credential on a form they are otherwise allowed to manage.
+//
+// Widening this grants no data the user does not already hold: the eye only
+// re-types the input that is ALREADY in their browser's DOM (it fetches
+// nothing), so anyone who can load the form can read the same value from
+// devtools regardless. The real boundary stays server-side, where a tenant
+// Admin is confined to their own tenants. User login / admin passwords remain
+// excluded by _API_FIELD_EXCLUDE for both tiers.
+function _canRevealApiFields() {
+    if (typeof isAdmin === 'function' && isAdmin()) return true;
+    if (typeof isTenantAdmin === 'function' && isTenantAdmin()) return true;
+    return false;
+}
+
 function _enhanceApiField(el) {
     if (el.dataset.apiEnhanced === '1') return;
-    // Admin-only. Don't mark enhanced yet if perms haven't loaded — a later
+    // Admin tier only. Don't mark enhanced yet if perms haven't loaded — a later
     // observer tick (after /auth/me) re-checks and wires it then.
-    if (typeof isAdmin !== 'function' || !isAdmin()) return;
+    if (!_canRevealApiFields()) return;
     el.dataset.apiEnhanced = '1';
     const wrap = document.createElement('span');
     wrap.style.cssText = 'position:relative;display:block;';
