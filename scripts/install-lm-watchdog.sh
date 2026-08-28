@@ -146,17 +146,23 @@ fi
 
 # ── 1a. PULL: keep /opt/lm current from GitHub ──────────────────────────────
 # The in-process repo_sync loop has proven unreliable (dies after a cycle), so
-# the external watchdog is the authoritative PULLER too: fetch origin/main and
+# the external watchdog is the authoritative PULLER too: fetch the deployed branch and
 # hard-align (also self-heals a conflicted/half-rebased checkout). The pull runs
 # ANY time — harmless, the hub keeps serving old code — while the RESTART into it
 # stays gated by 1b's window/idle check. Runs as svc_lm to preserve /opt/lm
 # ownership; offline fetch failures are non-fatal.
 if [ -d /opt/lm/.git ]; then
-  runuser -u svc_lm -- git -C /opt/lm fetch --quiet origin main 2>/dev/null || true
+  # Follow the branch this deployment is CHECKED OUT on rather than a hardcoded
+  # "main". The watchdog is the authoritative puller and hard-resets, so pinning
+  # main here would silently drag a dev/qa instance back onto main on the next
+  # timer tick. Detached HEAD (or any failure) falls back to main.
+  br=$(runuser -u svc_lm -- git -C /opt/lm rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  case "$br" in ""|HEAD) br=main ;; esac
+  runuser -u svc_lm -- git -C /opt/lm fetch --quiet origin "$br" 2>/dev/null || true
   lc=$(runuser -u svc_lm -- git -C /opt/lm rev-parse HEAD 2>/dev/null || true)
-  rc=$(runuser -u svc_lm -- git -C /opt/lm rev-parse origin/main 2>/dev/null || true)
+  rc=$(runuser -u svc_lm -- git -C /opt/lm rev-parse "origin/$br" 2>/dev/null || true)
   if [ -n "$lc" ] && [ -n "$rc" ] && [ "$lc" != "$rc" ]; then
-    # PREFLIGHT GATE (blast-radius control): do NOT blindly adopt origin/main —
+    # PREFLIGHT GATE (blast-radius control): do NOT blindly adopt the new tip —
     # a bad push (removed API, missing dep, broken startup) would crash-loop the
     # hub and take the WebUI down. Check the new code out, self-heal deps, then
     # build-boot it with --preflight. Adopt only if it boots; otherwise revert to
@@ -164,7 +170,7 @@ if [ -d /opt/lm/.git ]; then
     # keeps serving old in-memory code throughout; the restart into new code is
     # still gated by section 1b below.
     log "pull: /opt/lm behind (local ${lc:0:7} -> remote ${rc:0:7}) — verifying before adopt"
-    runuser -u svc_lm -- git -C /opt/lm reset --hard origin/main 2>/dev/null || true
+    runuser -u svc_lm -- git -C /opt/lm reset --hard "origin/$br" 2>/dev/null || true
     # Self-heal any new/updated deps into the hub venv (additive; harmless to
     # keep even if we revert the code below). This is what turns a "new import
     # added" push from a crash into a clean adopt.
@@ -176,8 +182,8 @@ if [ -d /opt/lm/.git ]; then
     else
       log "preflight FAILED for ${rc:0:7} — reverting to ${lc:0:7}; UPDATE BLOCKED"
       runuser -u svc_lm -- git -C /opt/lm reset --hard "$lc" 2>/dev/null || true
-      printf '%s blocked: origin/main %s failed --preflight; staying on %s\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${rc:0:7}" "${lc:0:7}" > "$UPDATE_BLOCKED" 2>/dev/null || true
+      printf '%s blocked: origin/%s %s failed --preflight; staying on %s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$br" "${rc:0:7}" "${lc:0:7}" > "$UPDATE_BLOCKED" 2>/dev/null || true
     fi
   fi
 fi

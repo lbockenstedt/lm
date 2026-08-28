@@ -1539,19 +1539,25 @@ fi
 
 # ── 1a. PULL: keep /opt/lm current from GitHub (external, reliable puller) ───
 # The in-process repo_sync loop has proven unreliable; the watchdog fetches
-# origin/main and hard-aligns (also self-heals a conflicted checkout). Pull runs
+# the deployed branch and hard-aligns (also self-heals a conflicted checkout). Pull runs
 # any time (harmless); the RESTART stays gated by 1b. Runs as svc_lm. KEEP IN
 # SYNC with install-lm-watchdog.sh.
 if [ -d /opt/lm/.git ]; then
-  runuser -u svc_lm -- git -C /opt/lm fetch --quiet origin main 2>/dev/null || true
+  # Follow the branch this deployment is CHECKED OUT on rather than a hardcoded
+  # "main". The watchdog is the authoritative puller and hard-resets, so pinning
+  # main here would silently drag a dev/qa instance back onto main on the next
+  # timer tick. Detached HEAD (or any failure) falls back to main.
+  br=$(runuser -u svc_lm -- git -C /opt/lm rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  case "$br" in ""|HEAD) br=main ;; esac
+  runuser -u svc_lm -- git -C /opt/lm fetch --quiet origin "$br" 2>/dev/null || true
   lc=$(runuser -u svc_lm -- git -C /opt/lm rev-parse HEAD 2>/dev/null || true)
-  rc=$(runuser -u svc_lm -- git -C /opt/lm rev-parse origin/main 2>/dev/null || true)
+  rc=$(runuser -u svc_lm -- git -C /opt/lm rev-parse "origin/$br" 2>/dev/null || true)
   if [ -n "$lc" ] && [ -n "$rc" ] && [ "$lc" != "$rc" ]; then
-    # PREFLIGHT GATE: verify origin/main boots (--preflight) before adopting it;
+    # PREFLIGHT GATE: verify the new tip boots (--preflight) before adopting it;
     # revert to the working commit + flag UPDATE_BLOCKED if not. Prevents a bad
     # push from crash-looping the hub. KEEP IN SYNC with install-lm-watchdog.sh.
     log "pull: /opt/lm behind (local ${lc:0:7} -> remote ${rc:0:7}) — verifying before adopt"
-    runuser -u svc_lm -- git -C /opt/lm reset --hard origin/main 2>/dev/null || true
+    runuser -u svc_lm -- git -C /opt/lm reset --hard "origin/$br" 2>/dev/null || true
     runuser -u svc_lm -- /opt/lm/core/venv/bin/python3 -m pip install -q \
         -r /opt/lm/core/requirements.txt >>"$LOG" 2>&1 || true
     if preflight_ok; then
@@ -1560,8 +1566,8 @@ if [ -d /opt/lm/.git ]; then
     else
       log "preflight FAILED for ${rc:0:7} — reverting to ${lc:0:7}; UPDATE BLOCKED"
       runuser -u svc_lm -- git -C /opt/lm reset --hard "$lc" 2>/dev/null || true
-      printf '%s blocked: origin/main %s failed --preflight; staying on %s\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${rc:0:7}" "${lc:0:7}" > "$UPDATE_BLOCKED" 2>/dev/null || true
+      printf '%s blocked: origin/%s %s failed --preflight; staying on %s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$br" "${rc:0:7}" "${lc:0:7}" > "$UPDATE_BLOCKED" 2>/dev/null || true
     fi
   fi
 fi
