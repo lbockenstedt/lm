@@ -5035,6 +5035,16 @@ function _cvRenderSecretsTable() {
       </table>`;
 }
 
+// Display label for a secret's stored type. 'apikey' and 'token' are the same
+// shape and are now a single choice in the editor, but secrets stored earlier
+// still carry either spelling -- show one label so the list does not appear to
+// offer two different kinds. The STORED value is left untouched (a legacy
+// 'token' secret is only rewritten to 'apikey' if someone edits and saves it).
+function _cvTypeLabel(t) {
+    const v = t || 'generic';
+    return (v === 'apikey' || v === 'token') ? 'api key / token' : v;
+}
+
 function _cvRenderSecretRow(s) {
     const enc = encodeURIComponent(s.name);
     const mode = s.mode === 'hub'
@@ -5042,7 +5052,7 @@ function _cvRenderSecretRow(s) {
         : '<span class="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-600" title="Pass-phrase-only (psk-mode)">pass-phrase</span>';
     return `<tr class="border-b border-slate-100">
       <td class="py-2 font-mono text-slate-800">${escapeHtml(s.name)}</td>
-      <td class="text-slate-600">${escapeHtml(s.type || 'generic')}${(Array.isArray(s.fields) && s.fields.includes('client_id')) ? ' <span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 align-middle" title="OAuth2 account — Client ID + Client secret (grant_type=client_credentials)">OAuth2</span>' : ''}</td>
+      <td class="text-slate-600">${escapeHtml(_cvTypeLabel(s.type))}${(Array.isArray(s.fields) && s.fields.includes('client_id')) ? ' <span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 align-middle" title="OAuth2 account — Client ID + Client secret (grant_type=client_credentials)">OAuth2</span>' : ''}</td>
       <td>${mode}</td>
       <td class="text-slate-500">${escapeHtml(s.description || '')}</td>
       <td class="text-right whitespace-nowrap">
@@ -5103,10 +5113,9 @@ function _cvAddSecretModal(preset) {
       <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} secret — ${escapeHtml(_cvBucketLabel({ bucket: _cvCurrentBucket }))}</h3>
       <input id="cv-add-name" type="text" autocomplete="off" ${nameAttrs} title="A name to identify this secret within the bucket (e.g. 'HE.NET DDNS key', 'Cloudflare token')" class="${_CV_INP}${editing ? ' bg-slate-100 text-slate-500' : ''}">
       <div class="flex gap-2">
-        <select id="cv-add-type" onchange="_cvRenderAddFields()" class="${_CV_INP}" title="Secret shape. 'API key' and 'Token' are the SAME shape (one opaque secret) and are interchangeable — consumers accept either, so pick whichever describes it best. DNS = DNS provider creds (a 'Hurricane Electric (account login)' DNS secret is used by BOTH the External DNS / HE.NET module and certificate DNS-01 issuance, so store just one HE credential); Login = username+password (or an OAuth client pair).">
+        <select id="cv-add-type" onchange="_cvRenderAddFields()" class="${_CV_INP}" title="Secret shape. 'API key / token' holds one opaque secret (an API key, bearer token, or similar). DNS = DNS provider creds (a 'Hurricane Electric (account login)' DNS secret is used by BOTH the External DNS / HE.NET module and certificate DNS-01 issuance, so store just one HE credential); Login = username+password (or an OAuth client pair).">
           <option value="login"${sel(pType, 'login')}>Login (username + password)</option>
-          <option value="apikey"${sel(pType, 'apikey')}>API key (single secret)</option>
-          <option value="token"${sel(pType, 'token')}>Token (single secret — same shape as API key)</option>
+          <option value="apikey"${(pType === 'apikey' || pType === 'token') ? ' selected' : ''}>API key / token (single secret)</option>
           <option value="dns"${sel(pType, 'dns')}>DNS</option>
           ${(editing && pType === 'henet') ? `<option value="henet" selected>HE.NET DDNS key (Hurricane Electric public DNS)</option>` : ``}
           <option value="generic"${sel(pType, 'generic')}>Generic (key + value)</option>
@@ -5151,17 +5160,18 @@ function _cvRenderAddFields() {
     if (!el) return;
     const f = (id, ph, type = 'text') => `<input id="${id}" type="${type}" autocomplete="off" placeholder="${ph}" class="${_CV_INP}">`;
     if (t === 'login') { _cvRenderLoginFields(); const ms = document.getElementById('cv-add-mode'); if (ms) ms.disabled = false; return; }
-    // 'apikey' and 'token' are the SAME shape: one opaque secret, differing only
-    // in the stored key name ({apikey} vs {token}) and the label. They are NOT
-    // functionally distinct -- every consumer accepts both spellings as aliases
-    // (see instance_vault.SECRET_FIELDS, e.g. ipam_instances.api_token accepts
-    // api_token/token/apikey/api_key/key/value), and no code branches on the
-    // type for these two (cred_vault.automation_list_by_type only ever filters
-    // on 'console'/'login'/'dns'/'henet'). Both are kept because existing
-    // secrets are stored under each, and the label is a useful human hint --
-    // but do not add behaviour that treats them differently.
-    else if (t === 'apikey') el.innerHTML = f('cv-f-apikey', 'api key', 'password');
-    else if (t === 'token') el.innerHTML = f('cv-f-token', 'token', 'password');
+    // 'apikey' and the legacy 'token' are ONE shape: a single opaque secret.
+    // They were once two dropdown entries that rendered the same field and
+    // differed only in the stored key name, which just invited people to hunt
+    // for a difference that did not exist. Now merged into one entry stored as
+    // 'apikey'. 'token' is still accepted here (and in _cvCollectAddValue) so
+    // secrets ALREADY stored under it keep opening and saving correctly.
+    //
+    // 'apikey' is the canonical spelling deliberately: it appears in EVERY
+    // instance_vault.SECRET_FIELDS alias tuple, whereas 'token' is absent from
+    // nw_devices.password and nw_scan_credentials.password -- so canonicalising
+    // the other way would stop a re-saved secret resolving as a device password.
+    else if (t === 'apikey' || t === 'token') el.innerHTML = f('cv-f-apikey', 'api key or token', 'password');
     else if (t === 'dns') {
         // A DNS-01 credential the LE module resolves unattended at issue time.
         // Present the same friendly, per-provider fields the LE module used
@@ -5248,8 +5258,7 @@ function _cvCollectAddValue() {
     if (t === 'login') return window._cvLoginOauth
         ? { client_id: v('cv-f-client-id'), client_secret: v('cv-f-client-secret') }
         : { username: v('cv-f-username'), password: v('cv-f-password') };
-    if (t === 'apikey') return { apikey: v('cv-f-apikey') };
-    if (t === 'token') return { token: v('cv-f-token') };
+    if (t === 'apikey' || t === 'token') return { apikey: v('cv-f-apikey') };
     if (t === 'dns') {
         const p = document.getElementById('cv-f-dns-provider')?.value || '';
         const def = DNS_CRED_PROVIDERS[p];
