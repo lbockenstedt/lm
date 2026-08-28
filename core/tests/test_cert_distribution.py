@@ -644,9 +644,17 @@ def test_wildcard_get_cert_failure_returns_error():
     assert not [c for c in calls if c["cmd"] == "INSTALL_CERT"]
 
 
-def test_wildcard_includes_hub_self_install():
-    """The hub (one TLS endpoint) gets the cert via install_on_hub, tagged
-    module_type 'hub', and is tracked in push_state under '<domain>|hub'."""
+def test_wildcard_never_targets_the_hub():
+    """The hub is NEVER a wildcard target -- it keeps its OWN cert.
+
+    It used to be included via install_on_hub, which overwrote hub.crt and
+    triggered a full self-restart of lm every time a wildcard renewed. The
+    wildcard now fans out to SPOKES and AGENTS only; the hub's own cert is
+    managed separately, and its mTLS material (the CA bundle) goes via
+    distribute_mtls_materials_to_all_spokes. So install_on_hub is never
+    called, no 'hub' row appears in the summary, and no '<domain>|hub' key is
+    written to push_state -- while the connected spoke still gets the cert.
+    """
     rr, calls = _fake_rr({(_LE, "LE_GET_CERT"): _le_get_cert_ok(),
                            ("opn-1", "INSTALL_CERT"): _install_ok()})
     get_all = _wc_all_by_type({"firewall": ["opn-1"]})
@@ -660,13 +668,12 @@ def test_wildcard_includes_hub_self_install():
     summary = _run(cd.distribute_wildcard_to_all_spokes(
         rr, get_all, cd.CERT_CAPABLE_MODULES, _LE, "*.lab.example.com",
         None, push_state, install_on_hub=install_on_hub))
-    hub_entries = [s for s in summary if s["module_type"] == "hub"]
-    assert len(hub_entries) == 1 and hub_entries[0]["status"] == "SUCCESS"
-    assert hub_installs == ["hub"]  # identifier "hub" for the single TLS endpoint
-    assert push_state["*.lab.example.com|hub"] == _H
-    # hub is NOT treated as a spoke — no INSTALL_CERT relay for it.
-    assert not [c for c in calls if c["cmd"] == "INSTALL_CERT"
-                and c["spoke"] not in ("opn-1",)]
+    assert [s for s in summary if s["module_type"] == "hub"] == []
+    assert hub_installs == []
+    assert "*.lab.example.com|hub" not in push_state
+    # The real spoke target is still served.
+    assert [c["spoke"] for c in calls if c["cmd"] == "INSTALL_CERT"] == ["opn-1"]
+    assert push_state["*.lab.example.com|opn-1"] == _H
 
 
 def test_wildcard_non_wildcard_domain_is_noop():
