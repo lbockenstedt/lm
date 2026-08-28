@@ -54,10 +54,27 @@ def register(app, hub, ctx):
                                 detail="You may only manage your own tenant's onboarding PSKs")
         return sess
 
+    def _configured_hub_url() -> str:
+        """The configured hub address, echoed to the My Devices page so the
+        install command can point a new spoke at the HUB.
+
+        Served from THIS tenant-accessible route on purpose. The WebUI used to
+        read it from ``/setup/config``, which is admin-only -- so for a tenant
+        admin that fetch 403'd, the URL came back empty and the install command
+        silently fell back to ``location.host`` (the proxy serving the WebUI,
+        e.g. the legacy ``labmanager`` alias) instead of the real hub. Not a
+        secret: this exact address is printed in the install command below it."""
+        try:
+            return str((((hub.state.system_state.get("global_config") or {})
+                         .get("hub") or {}).get("url") or "")).strip()
+        except Exception:  # noqa: BLE001 -- never break the key list over this
+            return ""
+
     @app.get("/tenant/{tenant}/onboarding-psk", operation_id="tenant_list_onboarding_psks")
     async def list_onboarding_psks(request: Request, tenant: str):
         _require_owns_tenant(request, tenant)
-        return {"psks": await hub.simulations_store.get_psks(tenant)}
+        return {"psks": await hub.simulations_store.get_psks(tenant),
+                "hub_url": _configured_hub_url()}
 
     @app.post("/tenant/{tenant}/onboarding-psk", operation_id="tenant_generate_onboarding_psk")
     async def generate_onboarding_psk(request: Request, tenant: str):
