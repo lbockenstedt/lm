@@ -136,6 +136,31 @@ def test_list_returns_only_that_tenants_psks():
     assert len(r.json()["psks"]) == 1
 
 
+def test_list_returns_the_configured_hub_url_to_a_tenant_admin():
+    """REGRESSION: the My Devices install command must name the HUB.
+
+    The WebUI used to read the hub URL from /setup/config, which is
+    admin-only, so a tenant admin 403'd, got an empty URL, and the
+    install command silently fell back to the address serving the page
+    (the legacy `labmanager` proxy alias) instead of the hub. The URL
+    must therefore come from THIS tenant-reachable route."""
+    c, hub = _build(_tenant_admin(["tenantA"]))
+    hub.state.system_state["global_config"] = {
+        "hub": {"url": "wss://lm-hub.ext.example.com"}}
+    c.post("/tenant/tenantA/onboarding-psk")
+    r = c.get("/tenant/tenantA/onboarding-psk")
+    assert r.status_code == 200
+    assert r.json()["hub_url"] == "wss://lm-hub.ext.example.com"
+
+
+def test_list_returns_empty_hub_url_when_unconfigured():
+    """No global_config yet must degrade to "" -- never break the key list."""
+    c, _ = _build(_tenant_admin(["tenantA"]))
+    r = c.get("/tenant/tenantA/onboarding-psk")
+    assert r.status_code == 200
+    assert r.json()["hub_url"] == ""
+
+
 def test_tenant_admin_cannot_list_another_tenants_psks():
     c, _ = _build(_tenant_admin(["tenantA"]))
     r = c.get("/tenant/tenantB/onboarding-psk")
