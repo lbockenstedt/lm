@@ -22,6 +22,21 @@ from . import github_source
 # it, which is exactly when a better query is worth buying.
 _ESCALATE_AFTER = 2
 
+# Tool rounds per question. Was 8, which is far more than the loop ever
+# productively uses: each round is a full model round-trip, and the system
+# prompt is re-uploaded every time, so an over-generous budget is paid for in
+# latency on the questions that DO wander. 4 rounds still allows
+# search -> refine -> confirm, and the forced synthesis turn below guarantees an
+# answer when the budget runs out, so a lower ceiling degrades speed, not
+# correctness.
+_TOOL_ROUNDS = 4
+
+# Follow-up history limits. History is re-sent on every turn of the loop, so an
+# unbounded transcript would recreate the prompt-bloat that made Ask AI slow.
+_HISTORY_TURNS = 4
+_HISTORY_Q_MAX = 600
+_HISTORY_A_MAX = 1500
+
 # Question words carry no signal in a code search but are fatal to it: the
 # strict matcher requires EVERY term on one line, so a single stopword like
 # "the" guarantees ~zero hits for any natural-language question, and the
@@ -142,20 +157,93 @@ def register(app, hub, ctx):
         return docs
 
     def _select_docs(question, docs, k=4):
-        """Pick the k most relevant docs by keyword overlap (name-hits weighted).
-        Corpus is tiny (~120KB) so no embeddings are needed."""
+        """Pick the k most relevant docs by keyword DENSITY (name-hits weighted).
+
+        Density, not raw count. Scoring by raw term frequency ranks documents by
+        LENGTH: security-pentest.md (84KB, the biggest file in the corpus) came
+        back as the top "match" for literally every question, including ones it
+        has nothing to do with, simply because a long document mentions every
+        common word more often. Normalising by size makes a short, on-topic doc
+        beat a long, incidentally-matching one.
+
+        The name-hit bonus stays absolute: a question naming a doc ("the dns
+        spoke") should pull that doc in regardless of how its body scores.
+        """
         words = {w for w in ''.join(c.lower() if c.isalnum() else ' '
                                     for c in question).split() if len(w) > 2}
         scored = []
         for name, text in docs.items():
             tl = text.lower()
-            score = sum(tl.count(w) for w in words) + 5 * sum(w in name.lower() for w in words)
-            scored.append((score, name))
+            hits = sum(tl.count(w) for w in words)
+            # Per-1000-chars, so the score reflects how much of the doc is about
+            # the question rather than how big the doc is. +1 avoids /0 and stops
+            # a tiny stub from winning on a single incidental hit.
+            density = (1000.0 * hits) / (len(tl) + 1000.0)
+            name_hits = sum(w in name.lower() for w in words)
+            distinct = sum(1 for w in words if w in tl)
+            scored.append((density + 10.0 * name_hits + 0.5 * distinct, name))
         scored.sort(reverse=True)
         picked = [n for s, n in scored if s > 0][:k]
         if not picked:  # fallback to the overview docs
             picked = [n for n in ("README", "architecture-topology", "lm-hub") if n in docs][:2]
         return picked
+
+    # Per-doc budget for the primed context. The assistant used to receive the
+    # FULL text of every selected doc -- measured at ~179KB (~45k tokens) for a
+    # typical question -- and the protocol resends the system prompt on EVERY
+    # turn of the agentic loop, so a 5-turn answer re-uploaded a quarter of a
+    # million tokens of documentation. That, not the model choice, was what made
+    # Ask AI slow. Excerpts keep the orientation value of priming while the
+    # search_docs tool still reaches the full corpus on demand, so nothing is
+    # actually unreachable -- it just stops being mandatory.
+    _DOC_EXCERPT_BUDGET = 2600
+
+    def _doc_excerpt(text, terms, budget=None):
+        """The passages of ``text`` most relevant to ``terms``, within budget.
+
+        Sections are split on markdown headings so an excerpt keeps the heading
+        that gives it meaning. The document's opening is always included: it
+        states what the doc is FOR, which is what makes the rest interpretable.
+        Short docs are returned whole -- there is nothing to gain by trimming
+        something already under budget.
+        """
+        budget = budget or _DOC_EXCERPT_BUDGET
+        if len(text) <= budget:
+            return text
+        lines = text.split("\n")
+        sections, cur = [], []
+        for ln in lines:
+            if ln.startswith("#") and cur:
+                sections.append("\n".join(cur))
+                cur = [ln]
+            else:
+                cur.append(ln)
+        if cur:
+            sections.append("\n".join(cur))
+
+        head = sections[0] if sections else text[:budget // 3]
+        head = head[:budget // 3]
+        rest = sections[1:] if sections else []
+        scored = []
+        for i, sec in enumerate(rest):
+            sl = sec.lower()
+            hits = sum(sl.count(t) for t in terms)
+            if hits:
+                # Density again, for the same reason as doc selection: without it
+                # one long rambling section crowds out several precise ones.
+                scored.append(((1000.0 * hits) / (len(sl) + 500.0), i, sec))
+        scored.sort(key=lambda x: (-x[0], x[1]))
+
+        out, used = [head], len(head)
+        for _score, _i, sec in scored:
+            if used >= budget:
+                break
+            take = sec[:max(0, budget - used)]
+            if len(take) < 40:
+                break
+            out.append(take)
+            used += len(take)
+        return "\n\n[...]\n\n".join(out)
 
     # ── Phase 2 tools (executed hub-side, scoped to the CALLER) ──────────────
     def _tool_spokes_status(_args, request):
@@ -535,9 +623,33 @@ def register(app, hub, ctx):
         if not question:
             raise HTTPException(status_code=400, detail="question is required")
 
+        # Prior turns of THIS conversation, so a follow-up can say "why?" or
+        # "show me the windows one" without restating everything. Client-supplied
+        # and therefore bounded here, not trusted: only the last few exchanges are
+        # kept and each is truncated, because history is re-uploaded on every turn
+        # of the loop and an unbounded transcript would reintroduce exactly the
+        # prompt-size problem that made this slow in the first place.
+        raw_hist = body.get("history")
+        history = []
+        if isinstance(raw_hist, list):
+            for turn in raw_hist[-_HISTORY_TURNS:]:
+                if not isinstance(turn, dict):
+                    continue
+                hq = str(turn.get("question") or "").strip()[:_HISTORY_Q_MAX]
+                ha = str(turn.get("answer") or "").strip()[:_HISTORY_A_MAX]
+                if hq and ha:
+                    history.append({"question": hq, "answer": ha})
+
         docs = _load_docs()
-        picked = _select_docs(question, docs)
-        doc_ctx = "\n\n".join(f"### DOC: {n}\n{docs[n]}" for n in picked)
+        # A follow-up ("what about windows?") is often too terse to retrieve on
+        # its own, so doc selection sees the recent questions too. Only the
+        # questions: including the answers would let one bad retrieval pin the
+        # same wrong docs to the rest of the conversation.
+        retrieval_q = " ".join([h["question"] for h in history] + [question])
+        picked = _select_docs(retrieval_q, docs)
+        _doc_terms = _source_terms(retrieval_q, _query_terms)
+        doc_ctx = "\n\n".join(
+            f"### DOC: {n}\n{_doc_excerpt(docs[n], _doc_terms)}" for n in picked)
         system = (
             "You are the Lab Manager (LM) help assistant. Answer the user's question "
             "using the documentation below, the wider docs/source (via tools), and any "
@@ -558,9 +670,18 @@ def register(app, hub, ctx):
             "calling tools and write the answer. If, after checking docs, source, and "
             "live data, the answer genuinely isn't there, say so plainly. Be concise "
             "and concrete.\n\n"
-            "=== DOCUMENTATION ===\n" + doc_ctx
+            "The documentation below is EXCERPTED — if the passage you need looks "
+            "truncated, call search_docs for the full text rather than guessing.\n\n"
+            "=== DOCUMENTATION (excerpts) ===\n" + doc_ctx
         )
-        messages = [{"role": "user", "content": question}]
+        # Prior exchanges are replayed as real conversation turns so the model
+        # resolves pronouns and ellipsis naturally, instead of being handed a
+        # transcript blob it has to parse.
+        messages = []
+        for h in history:
+            messages.append({"role": "user", "content": h["question"]})
+            messages.append({"role": "assistant", "content": h["answer"]})
+        messages.append({"role": "user", "content": question})
         used_tools = []
         answer = ""
         # Evidence-based escalation. The gathering turns run on the fastest cheap
@@ -576,7 +697,7 @@ def register(app, hub, ctx):
         # remain, and tool-picking is not the expensive part of the job. The one
         # turn that DOES get the best model is the final one.
         struggling = False
-        for _round in range(8):
+        for _round in range(_TOOL_ROUNDS):
             role = "tool_hard" if struggling else "tool"
             try:
                 res = await hub.request_response(
@@ -608,6 +729,12 @@ def register(app, hub, ctx):
                 break
             # Echo the assistant turn, then execute + append each tool result.
             messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
+            # Tools requested in the SAME turn are independent of each other --
+            # the model already committed to all of them before seeing any
+            # result -- so running them serially just adds up their latencies.
+            # A GitHub corpus fetch plus a device query is the common case, and
+            # concurrently they cost the slower one instead of the sum.
+            planned = []
             for tc in tool_calls:
                 fn = tc.get("function") or {}
                 name = fn.get("name") or tc.get("name")
@@ -616,9 +743,23 @@ def register(app, hub, ctx):
                     args = json.loads(raw) if isinstance(raw, str) else (raw or {})
                 except Exception:
                     args = {}
+                planned.append((tc, name, args))
+
+            results = await asyncio.gather(
+                *[_exec_tool(name, args, request) for _tc, name, args in planned],
+                return_exceptions=True)
+
+            # Order is preserved by gather, which matters: each tool result must
+            # carry the tool_call_id the model assigned to that specific call.
+            for (tc, name, _args), out in zip(planned, results):
                 used_tools.append(name)
-                out = await _exec_tool(name, args, request)
-                if _empty_result(out):
+                if isinstance(out, Exception):
+                    # One failing tool must not abort the whole answer; report it
+                    # to the model as a result so it can adapt or route around it.
+                    logger.warning("help_ask: tool %s failed: %s", name, out)
+                    out = {"error": str(out)}
+                    struggling = True
+                elif _empty_result(out):
                     struggling = True
                 messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                  "name": name, "content": json.dumps(out)[:8000]})
