@@ -68,6 +68,16 @@ class _FakeHub:
     def get_spoke_by_type(self, t):
         return self._spokes_by_type.get(t)
 
+    def get_all_spokes_by_type(self, t):
+        """The DHCP list routes now consult this to decide between the normal
+        single-spoke relay and the admin multi-spoke merge fan-out (2+ spokes,
+        admin, no tenant selected). This fake registers at most one spoke per
+        type, so the merge never triggers and the single-spoke relay these
+        tests exercise still runs -- previously the missing method 500'd the
+        whole route."""
+        sid = self._spokes_by_type.get(t)
+        return [sid] if sid else []
+
     async def request_response(self, spoke_id, cmd, data, timeout=30.0):
         # A NETBOX_GET_* round-trip (used by _fetch_module on cache miss) returns
         # an empty list so a not-owned object is fail-closed; any other command
