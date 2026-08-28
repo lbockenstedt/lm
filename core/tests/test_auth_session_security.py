@@ -1001,9 +1001,23 @@ class _DhcpHub(_FakeHub):
             {"ip": "192.168.5.10", "mac": "bb:bb:bb:bb:bb:bb", "hostname": "other-host", "subnet": "192.168.5.0/24"},
         ]
 
+    # Once a tenant is in scope the route resolves the spoke tenant-aware
+    # (dedicated per-tenant Kea) or via the shared path. This fake models the
+    # common deployment the DHCP resolver's docstring calls out: ONE shared Kea
+    # for the whole hub, where record-level subnet filtering -- what these
+    # tests actually cover -- IS the tenant isolation. So both resolvers return
+    # the single dhcp spoke.
+    def get_dhcp_spoke_for_tenant(self, tenant_id=None):
+        return self._spokes_by_type.get("dhcp")
+
+    def get_dhcp_spoke_for_shared(self):
+        return self._spokes_by_type.get("dhcp")
+
+    def _primary_key(self, spoke_id):
+        return spoke_id
+
     async def request_response(self, spoke_id, cmd, data, timeout=30.0):
-        if cmd == "DHCP_LIST_SUBNETS":
-            return {"payload": {"data": {"status": "SUCCESS", "subnets": self._subnets}}}
+        if cmd == "DHCP_LIST_SUBNETS":            return {"payload": {"data": {"status": "SUCCESS", "subnets": self._subnets}}}
         if cmd == "DHCP_LIST_RES":
             return {"payload": {"data": {"status": "SUCCESS", "reservations": self._reservations}}}
         return await super().request_response(spoke_id, cmd, data, timeout)
