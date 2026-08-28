@@ -159,17 +159,53 @@ def register(app, hub, ctx):
         """
         docs = {}
         _DOC_META.clear()
+
+        def _add(path, name):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    meta, body = frontmatter.split(f.read())
+            except Exception as e:  # noqa: BLE001
+                logger.warning("help: could not read %s: %s", path, e)
+                return
+            docs[name] = body
+            if meta:
+                _DOC_META[name] = meta
+
         try:
             for fn in sorted(os.listdir(_DOCS_DIR)):
                 if fn.endswith(".md"):
-                    with open(os.path.join(_DOCS_DIR, fn), encoding="utf-8") as f:
-                        meta, body = frontmatter.split(f.read())
-                    name = fn[:-3]
-                    docs[name] = body
-                    if meta:
-                        _DOC_META[name] = meta
+                    _add(os.path.join(_DOCS_DIR, fn), fn[:-3])
         except Exception as e:  # noqa: BLE001
             logger.warning("help: could not read docs dir: %s", e)
+
+        # Sibling-repo docs that lm/docs does NOT already carry. Most module
+        # pages are mirrored into lm/docs, but a handful live only in their own
+        # repo -- the client-sim quota spec among them -- and were therefore
+        # invisible to the assistant no matter how the question was phrased.
+        #
+        # Best-effort by design: a production hub runs from its own clone with
+        # no siblings checked out, so absence is the normal case and must not be
+        # an error. Names are prefixed with the repo to keep them unambiguous
+        # and to stop a sibling from shadowing a canonical lm/docs page.
+        parent = os.path.dirname(_REPO_ROOT)
+        try:
+            siblings = sorted(os.listdir(parent))
+        except Exception:  # noqa: BLE001
+            siblings = []
+        for repo in siblings:
+            if repo in ("lm", ".", "..") or repo.startswith("."):
+                continue
+            sib = os.path.join(parent, repo, "docs")
+            if not os.path.isdir(sib):
+                continue
+            try:
+                names = sorted(os.listdir(sib))
+            except Exception:  # noqa: BLE001
+                continue
+            for fn in names:
+                if not fn.endswith(".md") or fn[:-3] in docs:
+                    continue
+                _add(os.path.join(sib, fn), f"{repo}/{fn[:-3]}")
         return docs
 
     def _select_docs(question, docs, k=4):
@@ -214,13 +250,28 @@ def register(app, hub, ctx):
             # full-text matching cannot do at all.
             meta = _DOC_META.get(name) or {}
             kws = frontmatter.keywords_of(meta)
-            kw_hits = sum(1 for w in words
-                          if any(w == k or w in k.split() for k in kws))
+            kw_hits = sum(max((frontmatter.match_score(w, k) for k in kws),
+                              default=0.0) for w in words)
             summary = str(meta.get("summary") or "").lower()
             sum_hits = sum(1 for w in words if w in summary)
 
-            scored.append((density + 10.0 * name_hits + 0.5 * distinct
-                           + 8.0 * kw_hits + 2.0 * sum_hits, name))
+            # Superseded pages still match well on keywords -- they described
+            # the same feature -- so without an explicit demotion a changelog
+            # for a retired implementation outranks the page documenting how
+            # the thing works today.
+            historical = str(meta.get("status") or "").lower() in {
+                "historical", "superseded", "deprecated", "legacy"}
+
+            # The name bonus is deliberately below the keyword bonus. A filename
+            # token is weak evidence once the corpus is wide: several pages have
+            # "hub" in the name, so a strong name weight let any of them win any
+            # question mentioning the hub, over the page actually keyworded for
+            # the subject.
+            score = (density + 6.0 * name_hits + 0.5 * distinct
+                     + 8.0 * kw_hits + 2.0 * sum_hits)
+            if historical:
+                score *= 0.35
+            scored.append((score, name))
         scored.sort(reverse=True)
         picked = [n for s, n in scored if s > 0][:k]
         if not picked:  # fallback to the overview docs

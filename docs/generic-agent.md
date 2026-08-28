@@ -1,3 +1,8 @@
+---
+summary: "The agent-spoke — a spoke of the hub that, on LOADROLE, clones a sibling repo and swaps in a real spoke class."
+keywords: [agent, agent_spoke, behaviors, dhcp, dns, generic, install_agent, lm, load_role, loaded_roles, loadrole, module_type, pxmx, role]
+---
+
 # Agent (lm/agent)
 
 The **agent-spoke** — a spoke of the hub that, on `LOAD_ROLE`, clones a sibling repo and swaps in a real spoke class. Not a separate repo — lives under `lm/agent/`.

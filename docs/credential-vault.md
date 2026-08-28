@@ -1,3 +1,8 @@
+---
+summary: "Hub-side encrypted store for the secrets modules need — DNS-01 credentials for Let's Encrypt, the Hurricane Electric DDNS key, serial-console logins, and generic API…"
+keywords: [api_token, apikey, automation_get, cred_vault, credential, credentials, ddns_key, lm, net_services, password, passwords, secrets, token, vault]
+---
+
 # Credential Vault
 
 Hub-side encrypted store for the secrets modules need — DNS-01 credentials for

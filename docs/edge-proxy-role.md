@@ -1,3 +1,8 @@
+---
+summary: "Design for the edge proxy role: the WebUI front door and console relay that terminate external traffic, plus the mTLS and cert-enrollment phases."
+keywords: [certificate, dashboard, download, edge, frontdoor, https, le, lm, proxy, pxmx, relay_token, reverse, session_id, tls]
+---
+
 # Edge Proxy Role — Design
 
 > Status: **Phase 1 (WebUI front door) and most of Phase 2 (console relay) SHIPPED** — see

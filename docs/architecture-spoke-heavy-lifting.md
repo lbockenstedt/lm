@@ -1,3 +1,8 @@
+---
+summary: "Architecture plan for moving heavy lifting to the spokes and leaving the hub as a reporting and control plane, with the spoke-managed-systems cache and delta model."
+keywords: [architecture, build_detail, build_summary, heavy, hub, lifting, lm, module, request_response, spoke]
+---
+
 # Architecture Plan — Spokes Do the Heavy Lifting, Hub is a Reporting + Control Plane
 
 > Status: **APPROVED — building on branch `spoke-heavy-lifting`** (dev mode).

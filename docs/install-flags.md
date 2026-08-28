@@ -1,3 +1,8 @@
+---
+summary: "Consolidated reference for every installer and its flags across the LM system."
+keywords: [agent, deploy, flags, hub, install, install_agent, install_all, install_production, installer, installers, lm, lm_cs_agent_listener, setup, spoke]
+---
+
 # Install Flags Reference
 
 Consolidated reference for every installer and its flags across the LM system. Canonical copy in `lm/docs/`. See [architecture-topology.md](architecture-topology.md) and [environment-variables.md](environment-variables.md).

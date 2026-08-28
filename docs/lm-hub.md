@@ -1,3 +1,8 @@
+---
+summary: "The LM hub: control plane, WebUI, REST API, state store, and the orchestration loops that keep every spoke/agent in sync."
+keywords: [api, controlplane, dashboard, hub, install_all, le, lm, lm_hub_tls_verify, lm_tls_cert, lm_tls_key, orchestration, pxmx, recovery, request_response]
+---
+
 # lm — Hub
 
 The LM hub: control plane, WebUI, REST API, state store, and the orchestration loops that keep every spoke/agent in sync. Repo: `lm`. See [architecture-topology.md](architecture-topology.md) for the mesh overview.

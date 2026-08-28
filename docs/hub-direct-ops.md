@@ -1,3 +1,8 @@
+---
+summary: "Hub-direct operations and the virtual hub-self spoke: how the hub, the one box that is not a spoke, manages itself via the WRITE_FILE/RUN_COMMAND primitives."
+keywords: [direct, hub, hub_self, lm, lm_hub_self_agent, ops, recovery, run_command, self, write_file]
+---
+
 # Hub-direct operations & the virtual hub-self spoke
 
 **Agent rework #5 / Phase 4.** See `core/src/hub_self.py` for the implementation

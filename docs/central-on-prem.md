@@ -1,3 +1,8 @@
+---
+summary: "Some operators run two Aruba Central planes: the public cloud Aruba Central and an on-prem Aruba Central appliance."
+keywords: [aruba, central, central_on_prem, central_on_prem_config, central_on_prem_status, central_status, cluster_url, cs, dashboard, hub, lm, on, onprem, prem]
+---
+
 # Central On-Prem — a second Aruba Central instance (full twin + sim-quota)
 
 Some operators run **two** Aruba Central planes: the public cloud Aruba Central

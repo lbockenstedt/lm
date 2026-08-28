@@ -1,3 +1,8 @@
+---
+summary: "The LM WebUI (WebUI/main.js, WebUI/sim-views.js, index.html) has an implicit design system."
+keywords: [blind, buttons, cards, consistency, css, design, drift, find, layout, lm, style, styling, theme, webui]
+---
+
 # WebUI style guide (canonical UI tokens)
 
 The LM WebUI (`WebUI/main.js`, `WebUI/sim-views.js`, `index.html`) has an implicit

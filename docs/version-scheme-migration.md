@@ -1,3 +1,8 @@
+---
+summary: "Target: production 1.00, hotfixes 1.02, 1.04, …; major release 2.00. Format ^d+.d{2}$ (2-digit zero-padded minor), compared numerically as (major, minor)."
+keywords: [bump_repo_version, cs, fleet, github_ops, lm, migration, new_commit, old_commit, scheme, update_pipeline]
+---
+
 # Version-Scheme Migration — `.NN` → `MAJOR.MM`
 
 > Target: production `1.00`, hotfixes `1.02`, `1.04`, …; major release `2.00`. Format

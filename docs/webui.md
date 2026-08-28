@@ -1,3 +1,8 @@
+---
+summary: "The hub's browser UI. Repo: lm/WebUI. Served by the hub's FastAPI app (FileResponse for index.html + static assets)."
+keywords: [ab, browser, button, cppm, dashboard, frontend, lm, page, session_id, ui, view_children, view_label, view_loaders, webui]
+---
+
 # WebUI (lm/WebUI)
 
 The hub's browser UI. Repo: `lm/WebUI`. Served by the hub's FastAPI app (FileResponse for `index.html` + static assets).

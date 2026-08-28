@@ -1,3 +1,8 @@
+---
+summary: "Autonomous bot, and an optional hub agent (not a spoke). Repo: ab. See architecture-topology.md."
+keywords: [appbuilder, dashboard, get_bug_report, hub_agent, hub_request, hub_ws_url, le, lm, monitored_labels, recovery]
+---
+
 # ab — Autonomous GitHub Issue Fixer
 
 Autonomous bot, and an optional hub **agent** (not a spoke). Repo: `ab`. See [architecture-topology.md](architecture-topology.md).

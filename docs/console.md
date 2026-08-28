@@ -1,3 +1,8 @@
+---
+summary: "An in-repo agent role (lm/console/, ROLEMAP repourl=None, staged from the /opt/lm clone like dns/dhcp) that turns any agent host with serial adapters into a…"
+keywords: [access, auto_identify, console, console_data_up, console_probe_result, console_set_tenant, console_write, consoleserver, download, lm, serial, terminal, tty, usb]
+---
+
 # Console — serial console access (`console`)
 
 An **in-repo** agent role (`lm/console/`, `_ROLE_MAP` `repo_url=None`, staged from the

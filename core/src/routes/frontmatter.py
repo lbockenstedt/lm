@@ -27,7 +27,7 @@ degrades ranking slightly; raising an exception would take the docs offline.
 
 import re
 
-__all__ = ["parse", "strip", "split"]
+__all__ = ["parse", "strip", "split", "keywords_of", "stem", "matches", "match_score"]
 
 _FM_RE = re.compile(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", re.DOTALL)
 
@@ -109,3 +109,56 @@ def keywords_of(meta):
     if isinstance(kw, str):
         kw = [k.strip() for k in kw.split(",")]
     return [str(k).strip().lower() for k in kw if str(k).strip()]
+
+
+def stem(word):
+    """Crudely normalise a word for keyword comparison.
+
+    Users and doc authors pick different inflections of the same term -- a
+    question about "how logs are sent" should match a doc keyworded "logging" --
+    and exact matching silently misses all of those. This is deliberately not a
+    real stemmer: it only strips the few endings that cause this, because an
+    aggressive stemmer would collide unrelated terms, and a false keyword match
+    is heavily weighted and therefore costly.
+    """
+    w = str(word).lower().strip()
+    if len(w) < 4:
+        return w
+    if w.endswith("ies") and len(w) > 4:
+        return w[:-3] + "y"
+    if w.endswith("ing") and len(w) > 5:
+        base = w[:-3]
+        # "logging" -> "logg" -> "log": the doubled consonant is an artifact of
+        # the -ing form, and leaving it in place defeats the whole match.
+        if len(base) > 2 and base[-1] == base[-2] and base[-1] not in "aeiou":
+            base = base[:-1]
+        return base
+    # Strip only the plural "s". Stripping "es" wholesale turns "spokes" into
+    # "spok", which then fails to match the singular "spoke".
+    if w.endswith("s") and not w.endswith("ss") and len(w) > 3:
+        return w[:-1]
+    return w
+
+
+def match_score(word, keyword):
+    """How strongly a question word matches a doc keyword: 1.0, 0.5, or 0.
+
+    Matching a *part* of a compound identifier is weaker evidence than matching
+    the whole keyword, and treating the two alike caused real misranking: a doc
+    keyworded ``get_logs`` and ``hub_agent`` scored full marks on "how are logs
+    sent to the hub" and beat the page actually about logging. The part match is
+    still worth keeping -- it is what lets "dns" find ``dns_fail`` -- just not at
+    the same confidence.
+    """
+    w, k = str(word).lower(), str(keyword).lower()
+    if w == k or stem(w) == stem(k):
+        return 1.0
+    parts = k.replace("_", " ").replace("-", " ").split()
+    if len(parts) > 1 and stem(w) in {stem(p) for p in parts}:
+        return 0.5
+    return 0.0
+
+
+def matches(word, keyword):
+    """True when a question word refers to the same thing as a doc keyword."""
+    return match_score(word, keyword) > 0

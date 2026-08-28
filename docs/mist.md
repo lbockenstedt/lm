@@ -1,3 +1,8 @@
+---
+summary: "Mist is a second monitoring product alongside Aruba Central, added as a full twin — its own API client, its own per-tenant config, its own poller, its own telemetry…"
+keywords: [alert_type_counts, available_checks, browse_all, central, cs, dashboard, dns_fail, juniper, lm, mist, mist_config, monitoring, org_id, routes]
+---
+
 # Mist — Juniper Mist API twin of Aruba Central (full twin + sim-quota)
 
 **Mist** is a second monitoring product alongside Aruba Central, added as a

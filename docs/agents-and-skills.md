@@ -1,3 +1,8 @@
+---
+summary: "'Agents' here are Claude skills — repo-committed, self-contained procedures that encode tribal knowledge so both an interactive Claude session and AppBuilder execute the…"
+keywords: [agents, dns_fail, dual, guard, live, lm, sim, simulation, skill, skills]
+---
+
 # Agents & Skills
 
 "Agents" here are **Claude skills** — repo-committed, self-contained procedures that

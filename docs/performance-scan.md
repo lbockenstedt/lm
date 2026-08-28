@@ -1,3 +1,8 @@
+---
+summary: "A deep, whole-codebase performance + caching audit."
+keywords: [caching, control_plane, dashboard, latency, le, lm, netbox, optimization, performance, pxmx, scan, slow, to_thread, wait_for]
+---
+
 # Performance & Caching Scan — 2026-07-06
 
 A deep, whole-codebase performance + caching audit. Six parallel scans ran over

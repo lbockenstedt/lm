@@ -1,3 +1,8 @@
+---
+summary: "Lab Manager can authenticate users against Microsoft Entra ID (OIDC). One app registration + certificate also powers the Azure NSG and Cloud NAC hooks, so set it up once here."
+keywords: [authentication, azure, download, entra, identity, lm, login, oidc, saml, sign, signin, signon, single, sso]
+---
+
 # Microsoft Entra ID (Azure AD) SSO — setup
 
 Lab Manager can authenticate users against **Microsoft Entra ID** (OIDC). One app

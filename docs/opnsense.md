@@ -1,3 +1,8 @@
+---
+summary: "OPNsense spoke. Repo: opnsense. moduletype = 'firewall'. See architecture-topology.md."
+keywords: [backends, behaviors, commands, install_opnsense, nat_1to1, netbox, one_to_one, opnsense, opnsense_add, update_config]
+---
+
 # opnsense — Firewall
 
 OPNsense spoke. Repo: `opnsense`. `module_type = "firewall"`. See [architecture-topology.md](architecture-topology.md).

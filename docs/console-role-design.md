@@ -1,3 +1,8 @@
+---
+summary: "Design for the Console serial-console role, which turns any lm agent host with serial adapters into a console server. Modeled on ConsolePi."
+keywords: [access, console, console_push_config, console_spoke, design, lm, module_right, port_id, push, session_id]
+---
+
 # DRAFT — "Console" Serial Console Role for lm (design)
 
 > Status: DESIGN — decisions LOCKED 2026-07-05 (see §6). Uncommitted draft.
