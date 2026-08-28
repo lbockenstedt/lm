@@ -609,13 +609,39 @@ def test_firewall_write_requires_admin(tmp_path):
     assert r.status_code != 403
 
 
+def _fw_state(fw_id="fw1", tenant_id="tA"):
+    """global_config with one firewall, so /api/firewall/* gets past the
+    id lookup and reaches the tenant authorization it is being tested for."""
+    return {"global_config": {"firewalls": [{"id": fw_id, "tenant_id": tenant_id,
+                                             "spoke_id": "fw-spoke"}]}}
+
+
 def test_firewall_read_stays_authed_not_admin(tmp_path):
-    # GET is method-gated OUT of the admin requirement — a non-admin can still
-    # view (filtered) firewall data; only writes are admin-gated.
-    c, hub = _build({}, tmp_path)
-    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam",))
+    # GET is method-gated OUT of the admin requirement — a non-admin holding
+    # the firewall right can still view (filtered) data for a firewall
+    # dedicated to their own tenant; only writes are tier-gated.
+    c, hub = _build({}, tmp_path, extra_state=_fw_state())
+    tok = _mint_tenant_session(hub, "alice", "tA", rights=("firewall",))
     r = c.get("/api/firewall/fw1/rules", cookies={"lm_session": tok})
     assert r.status_code != 403
+
+
+def test_firewall_read_requires_the_firewall_right(tmp_path):
+    """Firewall is its own permission-gated module — the ipam right no longer
+    carries access to it."""
+    c, hub = _build({}, tmp_path, extra_state=_fw_state())
+    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam",))
+    r = c.get("/api/firewall/fw1/rules", cookies={"lm_session": tok})
+    assert r.status_code == 403
+
+
+def test_firewall_read_other_tenants_firewall_denied(tmp_path):
+    """Authorization is by the firewall's OWNING tenant: a firewall dedicated
+    to another tenant is denied outright, not merely filtered."""
+    c, hub = _build({}, tmp_path, extra_state=_fw_state(tenant_id="tOther"))
+    tok = _mint_tenant_session(hub, "alice", "tA", rights=("firewall",))
+    r = c.get("/api/firewall/fw1/rules", cookies={"lm_session": tok})
+    assert r.status_code == 403
 
 
 def test_dns_dhcp_write_requires_admin(tmp_path):
@@ -703,14 +729,41 @@ def test_henet_record_writes_require_tenant_admin_tier(tmp_path):
 # owns. Without ?tenant= the write is ambiguous and rejected; a ?tenant= for a
 # tenant it doesn't own is rejected; a plain (non-tier) user is still blocked.
 
-def test_firewall_write_tenant_admin_requires_explicit_tenant(tmp_path):
-    c, hub = _build({}, tmp_path)
+def test_firewall_write_authorized_by_owning_tenant_not_query_param(tmp_path):
+    """The whole /api/firewall/* surface is authorized by the firewall's OWNING
+    tenant, not by a client-supplied ?tenant=. A tenant-admin writing to a
+    firewall dedicated to a tenant they do NOT own is refused even though they
+    are a tenant-admin — and passing ?tenant= cannot talk them past it.
+
+    An unknown firewall id 404s before any 403: ids are server-issued UUIDs, so
+    there is no meaningful existence leak (see _authz_firewall).
+    """
+    c, hub = _build({}, tmp_path, extra_state=_fw_state(tenant_id="tOther"))
     tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
-    # No ?tenant= → ambiguous → 403.
+
     r = c.post("/api/firewall/fw1/rules", json={"rule": {}},
                cookies={"lm_session": tok})
     assert r.status_code == 403
-    assert "explicit owned tenant" in r.json().get("detail", "")
+
+    # Claiming the owning tenant via the query param does not help.
+    r = c.post("/api/firewall/fw1/rules?tenant=tOther", json={"rule": {}},
+               cookies={"lm_session": tok})
+    assert r.status_code == 403
+
+    # Unknown firewall id -> 404, deliberately before the 403.
+    r = c.post("/api/firewall/nope/rules", json={"rule": {}},
+               cookies={"lm_session": tok})
+    assert r.status_code == 404
+
+
+def test_firewall_write_own_dedicated_firewall_passes(tmp_path):
+    """A tenant-admin writing to a firewall dedicated to a tenant they DO own
+    is unconstrained (scope 'full') and gets past the gate."""
+    c, hub = _build({}, tmp_path, extra_state=_fw_state(tenant_id="tA"))
+    tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
+    r = c.post("/api/firewall/fw1/rules", json={"rule": {}},
+               cookies={"lm_session": tok})
+    assert r.status_code != 403
 
 
 def test_firewall_write_tenant_admin_owned_tenant_passes(tmp_path):
