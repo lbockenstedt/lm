@@ -1025,7 +1025,7 @@ def _build_dhcp(monkeypatch, tmp_path, prefixes_for="acme", prefixes=("10.20.0.0
 
 def test_dhcp_subnets_filtered_for_non_admin(monkeypatch, tmp_path):
     c, hub = _build_dhcp(monkeypatch, tmp_path)
-    tok = _mint_tenant_session(hub, "op", "acme", rights=("ipam",))
+    tok = _mint_tenant_session(hub, "op", "acme", rights=("dhcp",))
     r = c.get("/api/dhcp/subnets", cookies={"lm_session": tok})
     assert r.status_code == 200
     subnets = r.json()["subnets"]
@@ -1035,7 +1035,7 @@ def test_dhcp_subnets_filtered_for_non_admin(monkeypatch, tmp_path):
 
 def test_dhcp_reservations_filtered_for_non_admin(monkeypatch, tmp_path):
     c, hub = _build_dhcp(monkeypatch, tmp_path)
-    tok = _mint_tenant_session(hub, "op", "acme", rights=("ipam",))
+    tok = _mint_tenant_session(hub, "op", "acme", rights=("dhcp",))
     r = c.get("/api/dhcp/reservations", cookies={"lm_session": tok})
     assert r.status_code == 200
     reservations = r.json()["reservations"]
@@ -1071,7 +1071,7 @@ def test_dhcp_subnets_empty_for_non_admin_with_no_prefixes(monkeypatch, tmp_path
     # nothing, not the fleet.
     c, hub = _build_dhcp(monkeypatch, tmp_path)
     user_data = {"user_id": "lost", "auth_type": "local",
-                 "permissions": {"ipam": True},
+                 "permissions": {"dhcp": True},
                  "tenants": [], "tenant_id": None, "protected": False}
     tok = api_mod._record_session(hub, user_data)
     r = c.get("/api/dhcp/subnets", cookies={"lm_session": tok})
