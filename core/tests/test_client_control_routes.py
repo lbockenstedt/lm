@@ -13,6 +13,27 @@ from fastapi.testclient import TestClient
 from simulations.routes import register_simulations_routes
 
 
+class _FakeSimStore:
+    """The config-ownership gate the sim routes now consult before any write.
+
+    register_simulations_routes' _require_config_writable asks the store who
+    owns the tenant's simulation config: writes are allowed when the source is
+    'hub', or 'github' with a token configured. These tests exercise a
+    hub-owned tenant, which is the writable case. Previously this was an empty
+    class, so every write 500'd on AttributeError.
+    """
+
+    def __init__(self, source="hub", github=None):
+        self.source = source
+        self.github = github or {}
+
+    async def get_source_of_truth(self, tenant_id):
+        return self.source
+
+    async def get_github_config(self, tenant_id):
+        return dict(self.github)
+
+
 class FakeHub:
     """Minimal hub: records forwarded CS_* commands + returns canned replies."""
 
@@ -22,7 +43,7 @@ class FakeHub:
         self._connected = connected
         self.simulations_cache = {}
         self.active_connections = {"cs-spoke-1"} if connected else set()
-        self.simulations_store = type("Store", (), {})()
+        self.simulations_store = _FakeSimStore()
         self.state = type("State", (),
                           {"get_spoke_tenant": lambda sid: "10"})()
 
