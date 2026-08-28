@@ -104,6 +104,46 @@ Sync-rule legend:
 
 ---
 
+## 10. CI/CD pipeline files  — 16-way copies across every repo  (byte)
+- CANONICAL: `.pipeline-templates/{bump_version.py,promote.sh,promote.yml,selftest.sh}`
+  (in the workspace-root `nw` repo)
+- COPIES: in **all 16 repos** (`lm cs pxmx ab cppm dns dhcp ldap le netbox
+  nw opnsense qa kvm truenas tsa`) as
+  `<repo>/.github/scripts/bump_version.py`, `<repo>/.github/scripts/promote.sh`,
+  `<repo>/.github/scripts/promotion_selftest.sh` (from `selftest.sh`) and
+  `<repo>/.github/workflows/promote.yml`.
+- Rule: **byte-identical**. Each repo runs its own GitHub Actions and cannot
+  import from a sibling repo, so every repo ships its own copy. Fixing a
+  promotion bug in one repo and not the rest means that repo promotes correctly
+  and the other fifteen keep the old behaviour — silently, because promotion
+  still "succeeds".
+- These enforce that **VERSION is branch-owned**: dev's version never leaks into
+  qa/main, and each promotion advances only the target's own sequence.
+- Edit the canonical, then re-run the distribute loop:
+  ```bash
+  cd /Users/lbockenstedt/vscode
+  for r in lm cs pxmx ab cppm dns dhcp ldap le netbox opnsense qa kvm truenas tsa .; do
+    cp .pipeline-templates/bump_version.py .pipeline-templates/promote.sh $r/.github/scripts/
+    cp .pipeline-templates/selftest.sh $r/.github/scripts/promotion_selftest.sh
+    cp .pipeline-templates/promote.yml  $r/.github/workflows/promote.yml
+    chmod +x $r/.github/scripts/promote.sh $r/.github/scripts/promotion_selftest.sh
+  done
+  ```
+- Verify (drift sweep):
+  ```bash
+  for r in lm cs pxmx ab cppm dns dhcp ldap le netbox opnsense qa kvm truenas tsa .; do
+    for f in scripts/bump_version.py scripts/promote.sh workflows/promote.yml; do
+      c=.pipeline-templates/$(basename $f); [ "$(basename $f)" = promote.yml ] && c=.pipeline-templates/promote.yml
+      cmp -s $c $r/.github/$f || echo "DRIFT: $r/.github/$f"
+    done
+  done
+  ```
+- `nw/tests/test_promotion_pipeline.py` pins the behaviour, but it only runs in
+  the `nw` repo — it cannot catch drift in the other fifteen copies. Use the
+  sweep above.
+
+---
+
 ## Quick audit commands
 ```bash
 cd /Users/lbockenstedt/vscode
