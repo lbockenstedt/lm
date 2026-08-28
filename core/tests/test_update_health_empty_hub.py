@@ -97,20 +97,25 @@ async def test_set_hub_up_to_date_no_warnings(monkeypatch):
     assert not any("BEHIND" in w for w in health["warnings"])
 
 
-# ── stale process → FORCE watchdog sentinel (never gated to the maint window) ──
-# Regression for the recurring "I keep getting stale hubs" shape: a fix lands on
-# disk mid-day but the running process is behind, and the stale-restart was
-# gated to the 02:00 maintenance window (non-force sentinel) → the fix sat
-# UNLOADED for hours. Staleness is an ERROR state, not planned maintenance: the
-# sentinel must be FORCE so the watchdog bypasses the gate and reloads within
-# one ~60s cycle, day or night.
+# ── stale process → NOTICE + a GATED watchdog sentinel ───────────────────
+# A fix lands on disk but the running process is behind. That is the EXPECTED
+# steady state between an auto-update and the gated restart, so it is reported
+# as a NOTICE, not an error -- a genuinely broken restart path trips the
+# separate machinery errors (missing helper / bad unit / no Restart=), which
+# stay loud, so making staleness itself an error only produced noise.
+#
+# The sentinel is NON-force: the watchdog gates it on RESTART_ALLOWED (idle or
+# the 02:00 window) with a 1h hard backstop (LM_WATCHDOG_STALE_BACKOFF_S), so
+# a stale build still reloads within the hour even behind a logged-in user
+# without booting an operator mid-day on every autobump. force=True is
+# reserved for the manual footer "Update now" button.
 
 async def _disk_v502():
     return "v.502"
 
 
 @pytest.mark.asyncio
-async def test_stale_process_writes_force_sentinel(monkeypatch):
+async def test_stale_process_reports_notice_and_gated_sentinel(monkeypatch):
     h = _HealthHub({"update_sources": {"hub": "https://github.com/lbockenstedt/lm.git"}},
                    local_commit="aaa", remote_commit="aaa")
     h._startup_version = "v.483"      # running process is BEHIND on-disk v.502
@@ -121,10 +126,13 @@ async def test_stale_process_writes_force_sentinel(monkeypatch):
 
     health = await h.check_update_health()
 
-    assert any("STALE" in e for e in health["errors"]), health["errors"]
+    # Staleness is reported as a NOTICE, not an error.
+    assert any("STALE" in n for n in health["notices"]), health["notices"]
+    assert not any("STALE" in e for e in health["errors"]), health["errors"]
     assert len(captured) == 1, captured
     reason, force = captured[0]
-    assert force is True, "stale-restart sentinel must be FORCE (bypass the gate)"
+    assert force is False, \
+        "stale-restart sentinel must stay GATED (the 1h backstop is the safety net)"
     assert "v.483" in reason and "v.502" in reason, reason
 
 
