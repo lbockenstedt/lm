@@ -60,6 +60,10 @@ class _FakeHub:
         self.relay_block = asyncio.Event()
         self.relay_started = asyncio.Event()
         self.vm_refresh_calls = []
+        # The relay records a durable agent liveness signal under a composite
+        # "<spoke>:<agent>" key so a pxmx agent that isn't actively relaying
+        # doesn't read as "Never connected" after a disconnect/hub restart.
+        self.heartbeat = type("HB", (), {"last_seen": {}})()
 
     # The slow cs-spoke round-trip the old code awaited inline.
     async def request_response(self, spoke_id, cmd, data, timeout=5.0):
