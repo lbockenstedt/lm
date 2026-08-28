@@ -372,13 +372,37 @@
     }
 
     // ── LLM "Ask AI" assistant (backed by the ab agent) ────────────────
-    function _askFormHtml(prefill) {
+    // Conversation so far: [{question, answer}, ...]. Sent back with each new
+    // question so a follow-up can rely on what was already established instead
+    // of the user having to restate the whole context.
+    let _askHistory = [];
+
+    function _askFormHtml(prefill, isFollowUp) {
+        const ph = isFollowUp ? 'Ask a follow-up…' : 'Ask about Lab Manager…';
+        const reset = isFollowUp
+            ? '<button type="button" id="lm-ask-reset" title="Start a new conversation" ' +
+              'style="background:#fff;color:#64748b;border:1px solid #cbd5e1;border-radius:.5rem;' +
+              'padding:.5rem .75rem;font-size:.8rem;cursor:pointer">New</button>'
+            : '';
         return '<form id="lm-ask-form" style="display:flex;gap:.5rem;margin-bottom:1rem">' +
-            '<input id="lm-ask-input" type="text" placeholder="Ask about Lab Manager…" value="' +
+            '<input id="lm-ask-input" type="text" placeholder="' + ph + '" value="' +
             esc(prefill || '') + '" style="flex:1;border:1px solid #cbd5e1;border-radius:.5rem;' +
             'padding:.5rem .75rem;font-size:.85rem;outline:none">' +
             '<button type="submit" style="background:#01A982;color:#fff;border:none;border-radius:.5rem;' +
-            'padding:.5rem .9rem;font-size:.8rem;font-weight:600;cursor:pointer">Ask</button></form>';
+            'padding:.5rem .9rem;font-size:.8rem;font-weight:600;cursor:pointer">Ask</button>' +
+            reset + '</form>';
+    }
+
+    // Earlier exchanges, rendered above the current one so the thread reads top
+    // to bottom and the user can see what the follow-up is building on.
+    function _transcriptHtml() {
+        if (!_askHistory.length) return '';
+        return _askHistory.map(function (t) {
+            return '<div style="margin-bottom:1rem;padding-bottom:.85rem;border-bottom:1px solid #f1f5f9">' +
+                '<div style="font-weight:600;color:#0f172a;font-size:.85rem;margin-bottom:.35rem">' +
+                esc(t.question) + '</div>' +
+                '<div style="color:#475569">' + renderMarkdown(t.answer) + '</div></div>';
+        }).join('');
     }
     function _wireAskForm() {
         const f = document.getElementById('lm-ask-form');
@@ -386,6 +410,8 @@
             e.preventDefault();
             _runAsk(document.getElementById('lm-ask-input').value);
         });
+        const r = document.getElementById('lm-ask-reset');
+        if (r) r.addEventListener('click', function () { _askHistory = []; openHelpAsk(); });
         const i = document.getElementById('lm-ask-input');
         if (i) i.focus();
     }
@@ -395,12 +421,16 @@
         ensureDom(); openDrawer();
         document.getElementById('lm-help-title').textContent = 'Ask AI';
         const body = document.querySelector('#lm-help-body .lm-doc');
-        body.innerHTML = _askFormHtml(q) + '<p style="color:#94a3b8">Thinking…</p>';
+        const prior = _transcriptHtml();
+        const asked = '<div style="font-weight:600;color:#0f172a;font-size:.85rem;' +
+            'margin-bottom:.35rem">' + esc(q) + '</div>';
+        body.innerHTML = _askFormHtml('', _askHistory.length > 0) + prior + asked +
+            '<p style="color:#94a3b8">Thinking…</p>';
         _wireAskForm();
         try {
             const res = await fetch('/api/help/ask', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ question: q }),
+                body: JSON.stringify({ question: q, history: _askHistory }),
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
@@ -421,20 +451,33 @@
                 footer += '<div style="margin-top:.6rem;font-size:.72rem;color:#94a3b8">Checked live: ' +
                     esc(data.used_tools.join(', ')) + '</div>';
             }
-            body.innerHTML = _askFormHtml('') + answerHtml + footer;
+            // Record only AFTER a successful answer: a failed turn must not
+            // enter the history, or every later follow-up would carry the error
+            // along as if it were established context.
+            _askHistory.push({ question: q, answer: String(data.answer || '') });
+            body.innerHTML = _askFormHtml('', true) + prior + asked + answerHtml + footer;
             _wireAskForm();
+            const inp = document.getElementById('lm-ask-input');
+            if (inp) inp.focus();
         } catch (err) {
-            body.innerHTML = _askFormHtml(q) + '<p style="color:#e53e3e">' + esc(err.message) + '</p>';
+            body.innerHTML = _askFormHtml(q, _askHistory.length > 0) + prior +
+                '<p style="color:#e53e3e">' + esc(err.message) + '</p>';
             _wireAskForm();
         }
     }
     function openHelpAsk() {
+        // Entering from the header button is a fresh start. Without this the
+        // intro screen would show an empty thread while _askHistory still held
+        // the previous conversation, so the next question would resurrect a
+        // transcript the user thought they had dismissed.
+        _askHistory = [];
         ensureDom(); openDrawer();
         document.getElementById('lm-help-title').textContent = 'Ask AI';
         const body = document.querySelector('#lm-help-body .lm-doc');
         body.innerHTML = '<p style="color:#64748b;margin-bottom:1rem">Ask a question about Lab ' +
-            'Manager — answers come from the docs, and I can check live spoke/device state.</p>' +
-            _askFormHtml('');
+            'Manager — answers come from the docs, and I can check live spoke/device state. ' +
+            'You can keep asking follow-ups to refine the answer.</p>' +
+            _askFormHtml('', false);
         _wireAskForm();
     }
     // Inject the header "Ask AI" button ONLY when the assistant is available
