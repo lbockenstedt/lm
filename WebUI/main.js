@@ -15662,14 +15662,21 @@ async function loadMyDevicePsks() {
         if (!keys.length) { el.innerHTML = '<p class="text-xs text-slate-400 italic">No active onboarding keys.</p>'; return; }
         // Prefer the configured Hub URL so the install command points spokes at
         // the HUB, not the proxy that may be serving this WebUI (location.host).
-        let hubUrl = '';
-        try {
-            const cr = await setupFetch('/setup/config');
-            if (cr.ok) {
-                const cfg = await cr.json();
-                hubUrl = (((cfg.global_config || {}).hub || {}).url || '').trim();
-            }
-        } catch (e) { console.error('loadMyDevicePsks hub-url fetch failed', e); }
+        // It comes from the onboarding route itself, which a TENANT ADMIN can
+        // reach. Reading it from /setup/config (admin-only) meant a tenant admin
+        // always 403'd here, fell through to location.host, and was shown the
+        // proxy alias instead of the hub. /setup/config is kept only as a
+        // fallback for an older hub that does not yet return hub_url.
+        let hubUrl = ((r && r.hub_url) || '').trim();
+        if (!hubUrl) {
+            try {
+                const cr = await setupFetch('/setup/config');
+                if (cr.ok) {
+                    const cfg = await cr.json();
+                    hubUrl = (((cfg.global_config || {}).hub || {}).url || '').trim();
+                }
+            } catch (e) { console.error('loadMyDevicePsks hub-url fetch failed', e); }
+        }
         el.innerHTML = keys.map((k, i) => {
             const cmd = _myDevInstallCmd(k, tenant, hubUrl);
             const uninstall = 'curl -sSL https://raw.githubusercontent.com/lbockenstedt/lm/main/uninstall.sh \\\n  | bash -s -- --yes';
@@ -15703,22 +15710,33 @@ async function loadMyDevicePsks() {
 // is configured do we fall back to the host serving this WebUI (location.host) —
 // which, behind an edge proxy, is the PROXY, not the hub, so spokes would wrongly
 // dial the proxy. Matches install_agent.sh's `--hub wss://HOST[:port]`.
+function _myDevHubHost(raw) {
+    // Normalize any hub address to a bare host[:port].
+    // Strips ws://, wss://, http:// AND https:// — http(s) was previously left
+    // in place, so a hub configured as `https://host` produced the nonsense
+    // `wss://https:` (the later /-strip ate everything after the scheme colon).
+    // Then drops any /path (e.g. /ws/agent), keeping only the authority.
+    let u = (raw || '').trim().replace(/^(wss?|https?):\/\//i, '').replace(/\/.*$/, '');
+    // Legacy-alias canonicalization: the hub's canonical DNS short-name is
+    // `lm-hub` (HUB_SHORT_NAME — the installer sets the hub host's hostname
+    // to it), so rewrite the older `labmanager` alias to `lm-hub` in the
+    // copy/paste install command. Anchored to the first host label + only
+    // when followed by `.`/`:`/end, so it rewrites labmanager.<domain>[:port]
+    // and never a host that merely contains the substring.
+    return u.replace(/^labmanager(?=[.:]|$)/i, 'lm-hub');
+}
+
 function _myDevHubArg(configuredHubUrl) {
-    let u = (configuredHubUrl || '').trim();
-    if (u) {
-        // Normalize to wss://host[:port] — accept a bare host, a scheme-prefixed
-        // URL, or one carrying a /ws/... path, and keep only the authority.
-        u = u.replace(/^wss?:\/\//i, '').replace(/\/.*$/, '');
-        // Legacy-alias canonicalization: the hub's canonical DNS short-name is
-        // `lm-hub` (HUB_SHORT_NAME — the installer sets the hub host's hostname
-        // to it), so rewrite the older `labmanager` alias to `lm-hub` in the
-        // copy/paste install command. Anchored to the first host label + only
-        // when followed by `.`/`:`/end, so it rewrites labmanager.<domain>[:port]
-        // and never a host that merely contains the substring.
-        u = u.replace(/^labmanager(?=[.:]|$)/i, 'lm-hub');
-        return `wss://${u}`;
-    }
-    return (typeof location !== 'undefined' && location.host) ? `wss://${location.host}` : 'auto';
+    const u = _myDevHubHost(configuredHubUrl);
+    if (u) return `wss://${u}`;
+    // Fallback: the host serving this page. This is a LAST resort -- it is the
+    // proxy/WebUI address, not necessarily the hub -- so it must go through the
+    // SAME normalization. It previously did not, which is how the legacy
+    // `labmanager` alias kept appearing in the install command for anyone whose
+    // configured hub URL came back empty.
+    const fallback = (typeof location !== 'undefined' && location.host)
+        ? _myDevHubHost(location.host) : '';
+    return fallback ? `wss://${fallback}` : 'auto';
 }
 
 function _myDevInstallCmd(psk, tenant, configuredHubUrl) {
