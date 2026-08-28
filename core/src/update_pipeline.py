@@ -436,6 +436,15 @@ class UpdatePipelineMixin:
             return
         loop.create_task(self._refresh_github_version(repo))
 
+    def _configured_branch(self) -> str:
+        """Branch this hub deploys from (``global_branch``, default ``main``).
+        Read defensively: version refresh is best-effort and must never raise."""
+        try:
+            config = self.state.get_global_config()
+            return config.get("global_branch") or "main"
+        except Exception:  # noqa: BLE001 — never break the version check
+            return "main"
+
     async def _refresh_github_version(self, repo: str) -> None:
         """Refresh ``repo``'s latest .NN in the GitHub cache. Runs the blocking
         HTTPS fetch OFF the event loop (``asyncio.to_thread``). De-duplicated via
@@ -451,7 +460,11 @@ class UpdatePipelineMixin:
             return
         inflight.add(repo)
         try:
-            text = await asyncio.to_thread(_fetch_github_version, repo)
+            # Read VERSION from the branch this deployment tracks, not a hardcoded
+            # "main": on a dev/qa instance the main VERSION is a different line of
+            # development, so comparing against it reports bogus up-to-date/behind.
+            branch = self._configured_branch()
+            text = await asyncio.to_thread(_fetch_github_version, repo, _GITHUB_OWNER, branch)
             cache = self.__dict__.setdefault("_github_version_cache", {})
             now = time.time()
             if _parse_nn(text) is not None:
