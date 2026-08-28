@@ -28,6 +28,13 @@ class _Hub:
     def get_all_spokes_by_type(self, t):
         return self._by_type.get(t, [])
 
+    # get_client_sim_spoke now holds its choice STICKY (re-electing only when
+    # the previous broker stops being a candidate) so a flapping spoke can't
+    # reassign the tenant's broker fleet-wide. Borrow the real implementation
+    # rather than stub it -- the stickiness is part of the selection behaviour
+    # these tests assert.
+    _sticky_cs_broker = main.LabManagerHub._sticky_cs_broker
+
 
 def test_tenant_without_bound_spoke_does_not_clobber_other_tenant():
     # cs-spoke-1 is bound to tenantA; tenantB has no bound spoke and no unassigned.

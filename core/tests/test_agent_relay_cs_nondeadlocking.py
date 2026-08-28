@@ -74,6 +74,11 @@ class _FakeHub:
     def get_client_sim_spoke(self, tenant_id=None):
         return "cs-svr-04-spoke"  # the tenant's cs spoke (also agent-hosting)
 
+    def _agent_primary_key(self, agent_id):
+        """Hub-side primary key for a relayed agent (guid once migrated, else
+        the agent's self-chosen id). No aliases here, so identity."""
+        return agent_id
+
     def _reconcile_spoke_identity(self, *a, **kw):
         pass  # noop — identity reconciliation isn't under test
 
