@@ -2160,43 +2160,12 @@ def register(app, hub, ctx):
             logger.exception("update_pxmx_config failed")
             raise HTTPException(status_code=500, detail=str(e))
 
-    @app.get("/setup/ldap-config")
-    async def get_ldap_config():
-        """Return the stored LDAP/directory configuration (global_config.ldap)."""
-        hub = app.state.hub
-        config = hub.state.system_state.get("global_config", {}).get("ldap", {})
-        return {"config": config}
-
-    @app.post("/setup/ldap-config")
-    async def update_ldap_config(request: Request):
-        hub = app.state.hub
-        try:
-            data = await request.json()
-            config = data.get("config", {})
-
-            spoke_config = {
-                "LDAP_SERVER_URL": config.get("server_url"),
-                "LDAP_BASE_DN": config.get("base_dn"),
-                "LDAP_ADMIN_DN": config.get("admin_dn"),
-                "LDAP_ADMIN_PW": config.get("admin_pw"),
-            }
-            spoke_config = {k: v for k, v in spoke_config.items() if v is not None}
-
-            global_config = hub.state.system_state.get("global_config", {})
-            global_config["ldap"] = config
-            hub.state.system_state["global_config"] = global_config
-            hub.state._mark_dirty()
-
-            ldap_spoke = hub.get_spoke_by_type("directory")
-            if ldap_spoke:
-                msg = _hub_msg(ldap_spoke, "UPDATE_CONFIG", spoke_config)
-                await hub.send_to_spoke(msg)
-                return {"status": "ok", "message": "LDAP configuration updated and pushed to spoke.", "pushed": True}
-            else:
-                return {"status": "partial_success", "message": "Configuration saved, but LDAP spoke is not connected.", "pushed": False}
-        except Exception as e:
-            logger.exception("update_ldap_config failed")
-            raise HTTPException(status_code=500, detail=str(e))
+    # NOTE: /setup/ldap-config (GET+POST) used to be defined here as well.
+    # Starlette dispatches to the FIRST matching route and this module is
+    # registered before routes/ldap.py, so this copy silently shadowed the
+    # real one -- returning the stored config verbatim (leaking the plaintext
+    # admin_pw to the browser) and skipping base-DN/admin-DN validation and
+    # the blank-password-keeps-existing rule. Removed; routes/ldap.py owns it.
 
     @app.get("/setup/dns-config")
     async def get_dns_config():

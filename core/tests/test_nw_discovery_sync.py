@@ -22,7 +22,20 @@ import nw_discovery_sync
 from nw_discovery_sync import NwDiscoverySyncMixin
 from _fakes import FakeState
 
-logging.disable(logging.CRITICAL)
+
+# Silence the module's own noisy sync logging for THIS module's tests only.
+# NOT a bare module-level ``logging.disable(logging.CRITICAL)``: pytest imports
+# every test module during collection, so that set a GLOBAL suppression that
+# outlived this file and silently broke unrelated tests which assert on log
+# output (test_update_recovery / test_spoke_log_relay saw empty log files).
+@pytest.fixture(autouse=True)
+def _quiet_logging():
+    prev = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        yield
+    finally:
+        logging.disable(prev)
 
 
 REQUIRED_SOURCE_KEYS = {"module_type", "arp_command", "label"}
@@ -73,6 +86,7 @@ class _SyncHub(NwDiscoverySyncMixin):
             tenants=tenants or {"acme": {"name": "Acme",
                                          "netbox_tenant_slug": "acme"}},
         )
+        self.refreshed_caches = []
         self.simulations_store = _FakeSimulationsStore()
         self._responses = responses or {}
         # NOTE: do NOT name this ``_nw_spokes`` — that shadows the mixin's
@@ -97,6 +111,15 @@ class _SyncHub(NwDiscoverySyncMixin):
                                       "errors": 0, "skipped": 0, "deleted": 0,
                                       "message": "ok"}}}
         return self._responses[(spoke_id, command)]
+
+
+
+    # The sync mixins invalidate the tenant module-cache at the end of a cycle
+    # that actually changed spoke data (main.Hub.refresh_module_cache). Record
+    # the keys so tests can assert the refresh fired instead of silently
+    # tolerating its absence.
+    def refresh_module_cache(self, key):
+        self.refreshed_caches.append(key)
 
 
 def _arp_payload():

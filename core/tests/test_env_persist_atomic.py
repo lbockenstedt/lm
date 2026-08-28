@@ -33,6 +33,12 @@ class _EnvHost:
     _persist_secret_to_env = cp.BaseControlPlane._persist_secret_to_env
     _read_env_value = cp.BaseControlPlane._read_env_value
     _atomic_write_lines = staticmethod(cp.BaseControlPlane._atomic_write_lines)
+    # The upsert now holds a cross-process advisory flock on a sidecar
+    # .env.lock across the whole read-modify-write. Borrow the real one too:
+    # without it the upsert raised AttributeError inside its own broad
+    # try/except and silently wrote nothing, so every test here saw an absent
+    # or empty .env.
+    _env_file_flock = staticmethod(cp.BaseControlPlane._env_file_flock)
 
 
 def test_upsert_round_trips_and_creates_file(tmp_path):

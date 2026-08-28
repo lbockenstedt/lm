@@ -68,6 +68,22 @@ class _FakeHub:
     def get_spoke_by_type(self, t):
         return self._spokes_by_type.get(t)
 
+    def _primary_key(self, spoke_id):
+        """Spoke-id alias resolution. Routes now go through this before every
+        active_connections lookup (e.g. help_assistant's _ab_agent), so a fake
+        without it 500s the route. No aliasing here: identity."""
+        return spoke_id
+
+    def get_all_spokes_by_type(self, t):
+        """The DHCP list routes now consult this to decide between the normal
+        single-spoke relay and the admin multi-spoke merge fan-out (2+ spokes,
+        admin, no tenant selected). This fake registers at most one spoke per
+        type, so the merge never triggers and the single-spoke relay these
+        tests exercise still runs -- previously the missing method 500'd the
+        whole route."""
+        sid = self._spokes_by_type.get(t)
+        return [sid] if sid else []
+
     async def request_response(self, spoke_id, cmd, data, timeout=30.0):
         # A NETBOX_GET_* round-trip (used by _fetch_module on cache miss) returns
         # an empty list so a not-owned object is fail-closed; any other command
@@ -593,13 +609,39 @@ def test_firewall_write_requires_admin(tmp_path):
     assert r.status_code != 403
 
 
+def _fw_state(fw_id="fw1", tenant_id="tA"):
+    """global_config with one firewall, so /api/firewall/* gets past the
+    id lookup and reaches the tenant authorization it is being tested for."""
+    return {"global_config": {"firewalls": [{"id": fw_id, "tenant_id": tenant_id,
+                                             "spoke_id": "fw-spoke"}]}}
+
+
 def test_firewall_read_stays_authed_not_admin(tmp_path):
-    # GET is method-gated OUT of the admin requirement — a non-admin can still
-    # view (filtered) firewall data; only writes are admin-gated.
-    c, hub = _build({}, tmp_path)
-    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam",))
+    # GET is method-gated OUT of the admin requirement — a non-admin holding
+    # the firewall right can still view (filtered) data for a firewall
+    # dedicated to their own tenant; only writes are tier-gated.
+    c, hub = _build({}, tmp_path, extra_state=_fw_state())
+    tok = _mint_tenant_session(hub, "alice", "tA", rights=("firewall",))
     r = c.get("/api/firewall/fw1/rules", cookies={"lm_session": tok})
     assert r.status_code != 403
+
+
+def test_firewall_read_requires_the_firewall_right(tmp_path):
+    """Firewall is its own permission-gated module — the ipam right no longer
+    carries access to it."""
+    c, hub = _build({}, tmp_path, extra_state=_fw_state())
+    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam",))
+    r = c.get("/api/firewall/fw1/rules", cookies={"lm_session": tok})
+    assert r.status_code == 403
+
+
+def test_firewall_read_other_tenants_firewall_denied(tmp_path):
+    """Authorization is by the firewall's OWNING tenant: a firewall dedicated
+    to another tenant is denied outright, not merely filtered."""
+    c, hub = _build({}, tmp_path, extra_state=_fw_state(tenant_id="tOther"))
+    tok = _mint_tenant_session(hub, "alice", "tA", rights=("firewall",))
+    r = c.get("/api/firewall/fw1/rules", cookies={"lm_session": tok})
+    assert r.status_code == 403
 
 
 def test_dns_dhcp_write_requires_admin(tmp_path):
@@ -687,14 +729,41 @@ def test_henet_record_writes_require_tenant_admin_tier(tmp_path):
 # owns. Without ?tenant= the write is ambiguous and rejected; a ?tenant= for a
 # tenant it doesn't own is rejected; a plain (non-tier) user is still blocked.
 
-def test_firewall_write_tenant_admin_requires_explicit_tenant(tmp_path):
-    c, hub = _build({}, tmp_path)
+def test_firewall_write_authorized_by_owning_tenant_not_query_param(tmp_path):
+    """The whole /api/firewall/* surface is authorized by the firewall's OWNING
+    tenant, not by a client-supplied ?tenant=. A tenant-admin writing to a
+    firewall dedicated to a tenant they do NOT own is refused even though they
+    are a tenant-admin — and passing ?tenant= cannot talk them past it.
+
+    An unknown firewall id 404s before any 403: ids are server-issued UUIDs, so
+    there is no meaningful existence leak (see _authz_firewall).
+    """
+    c, hub = _build({}, tmp_path, extra_state=_fw_state(tenant_id="tOther"))
     tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
-    # No ?tenant= → ambiguous → 403.
+
     r = c.post("/api/firewall/fw1/rules", json={"rule": {}},
                cookies={"lm_session": tok})
     assert r.status_code == 403
-    assert "explicit owned tenant" in r.json().get("detail", "")
+
+    # Claiming the owning tenant via the query param does not help.
+    r = c.post("/api/firewall/fw1/rules?tenant=tOther", json={"rule": {}},
+               cookies={"lm_session": tok})
+    assert r.status_code == 403
+
+    # Unknown firewall id -> 404, deliberately before the 403.
+    r = c.post("/api/firewall/nope/rules", json={"rule": {}},
+               cookies={"lm_session": tok})
+    assert r.status_code == 404
+
+
+def test_firewall_write_own_dedicated_firewall_passes(tmp_path):
+    """A tenant-admin writing to a firewall dedicated to a tenant they DO own
+    is unconstrained (scope 'full') and gets past the gate."""
+    c, hub = _build({}, tmp_path, extra_state=_fw_state(tenant_id="tA"))
+    tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
+    r = c.post("/api/firewall/fw1/rules", json={"rule": {}},
+               cookies={"lm_session": tok})
+    assert r.status_code != 403
 
 
 def test_firewall_write_tenant_admin_owned_tenant_passes(tmp_path):
@@ -715,25 +784,74 @@ def test_firewall_write_tenant_admin_other_tenant_403(tmp_path):
     assert r.status_code == 403
 
 
-def test_dns_write_tenant_admin_owned_tenant_passes(tmp_path):
-    c, hub = _build({}, tmp_path)
-    tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
-    r = c.post("/api/dns/record?tenant=tA", json={},
-               cookies={"lm_session": tok})
-    assert r.status_code != 403
+def _tenant_prefixes(monkeypatch, tenant_id="tA", prefixes=("10.20.0.0/16",)):
+    """Give the record-scope check a fixed prefix list for ``tenant_id``,
+    bypassing the NetBox round-trip."""
+    async def _fake_fetch(hub, tid):
+        return list(prefixes) if tid == tenant_id else []
+    monkeypatch.setattr(access_mod, "fetch_tenant_prefixes", _fake_fetch)
 
 
-def test_dhcp_write_tenant_admin_requires_explicit_tenant(tmp_path):
+def test_dns_write_tenant_admin_confined_to_own_subnets(monkeypatch, tmp_path):
+    """On the SHARED DNS server a tenant-admin may only touch records whose
+    ADDRESS is inside their own prefixes. Owning the tenant is necessary but
+    not sufficient — the record itself is attributed."""
     c, hub = _build({}, tmp_path)
+    _tenant_prefixes(monkeypatch)
     tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
-    # No ?tenant= → 403.
-    r = c.post("/api/dhcp/reservation", json={},
+
+    # Outside the tenant's prefixes -> refused, with the record-scope reason.
+    r = c.post("/api/dns/record?tenant=tA",
+               json={"hostname": "x", "ip": "192.168.5.10"},
                cookies={"lm_session": tok})
     assert r.status_code == 403
-    # ?tenant=tA (owned) → passes the gate.
-    r = c.post("/api/dhcp/reservation?tenant=tA", json={},
+    assert "your tenant's subnets" in r.json().get("detail", "")
+
+    # Inside them -> past the gate (the handler then runs; no spoke -> not 403).
+    r = c.post("/api/dns/record?tenant=tA",
+               json={"hostname": "x", "ip": "10.20.0.10"},
                cookies={"lm_session": tok})
     assert r.status_code != 403
+
+
+def test_dns_write_global_admin_unrestricted(monkeypatch, tmp_path):
+    """A Global Admin is exempt from the record-scope constraint."""
+    c, hub = _build({}, tmp_path)
+    _tenant_prefixes(monkeypatch)
+    admin_tok = _mint_session(hub, "admin")
+    r = c.post("/api/dns/record?tenant=tA",
+               json={"hostname": "x", "ip": "192.168.5.10"},
+               cookies={"lm_session": admin_tok})
+    assert r.status_code != 403
+
+
+def test_dhcp_write_tenant_admin_confined_to_own_subnets(monkeypatch, tmp_path):
+    """Same record-level constraint for DHCP reservations on the shared Kea."""
+    c, hub = _build({}, tmp_path)
+    _tenant_prefixes(monkeypatch)
+    tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
+
+    r = c.post("/api/dhcp/reservation?tenant=tA",
+               json={"ip": "192.168.5.10", "mac": "aa:bb:cc:dd:ee:ff"},
+               cookies={"lm_session": tok})
+    assert r.status_code == 403
+    assert "your tenant's subnets" in r.json().get("detail", "")
+
+    r = c.post("/api/dhcp/reservation?tenant=tA",
+               json={"ip": "10.20.0.10", "mac": "aa:bb:cc:dd:ee:ff"},
+               cookies={"lm_session": tok})
+    assert r.status_code != 403
+
+
+def test_dhcp_write_tenant_admin_unaddressed_record_refused(monkeypatch, tmp_path):
+    """Fail closed: a body with no address at all can't be attributed to the
+    caller's tenant, so it must be refused rather than waved through."""
+    c, hub = _build({}, tmp_path)
+    _tenant_prefixes(monkeypatch)
+    tok = _mint_tenant_admin_session(hub, "tadm", ["tA"])
+    r = c.post("/api/dhcp/reservation?tenant=tA", json={},
+               cookies={"lm_session": tok})
+    assert r.status_code == 403
 
 
 def test_firewall_write_global_admin_any_tenant(tmp_path):
@@ -767,22 +885,36 @@ def test_firewall_write_tenant_admin_multi_tenant_owned(tmp_path):
 
 # ── 9. Help assistant admin-gate (cross-tenant LLM tools) ─────────────────────
 
-def test_help_ask_requires_admin(tmp_path):
-    # /api/help/ask runs hub-wide (cross-tenant) LLM tools — admin-only. A
-    # non-admin is 403'd; /api/help/available stays authed-read.
+def test_help_ask_is_authed_read_not_admin_only(tmp_path):
+    """Ask AI is available to ANY signed-in user, not just admins.
+
+    It used to be admin-gated because its LLM tools ran hub-wide. Those tools
+    are now tenant-scoped to the CALLER (search_devices delegates to the scoped
+    /api/search; get_spokes_status filters to the caller's spokes), so the
+    blanket admin gate was dropped — the scoping, not the gate, is what keeps
+    one tenant's data out of another tenant's answers.
+
+    Both a non-admin and an admin therefore reach the handler, which 409s with
+    no AppBuilder agent connected. A 403 here would mean the gate came back.
+    """
     c, hub = _build({}, tmp_path)
     tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam",))
     r = c.post("/api/help/ask", json={"question": "list all spokes"},
                cookies={"lm_session": tok})
-    assert r.status_code == 403
-    # available is NOT admin-gated — any authed user may read it.
+    assert r.status_code == 409
     assert c.get("/api/help/available",
                  cookies={"lm_session": tok}).status_code == 200
-    # Admin passes the gate; with no ab agent connected the handler 409s.
     admin_tok = _mint_session(hub, "admin")
     r = c.post("/api/help/ask", json={"question": "list all spokes"},
                cookies={"lm_session": admin_tok})
     assert r.status_code == 409
+
+
+def test_help_ask_still_requires_a_session(tmp_path):
+    """Authed-READ is not anonymous: no session cookie is still rejected."""
+    c, hub = _build({}, tmp_path)
+    r = c.post("/api/help/ask", json={"question": "list all spokes"})
+    assert r.status_code in (401, 403)
 
 
 # ── 10. NetBox cross-tenant mutation ownership check ──────────────────────────
@@ -793,7 +925,7 @@ def test_netbox_delete_not_owned_by_tenant_denied(tmp_path):
     # fail-closed 403.
     c, hub = _build({}, tmp_path)
     api_mod._tenant_cache["tA"] = {"netbox_devices": {"data": [{"id": 5}]}}
-    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam",))
+    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam", "edit"))
     r = c.delete("/api/netbox/devices/999", cookies={"lm_session": tok})
     assert r.status_code == 403
 
@@ -803,7 +935,7 @@ def test_netbox_delete_owned_by_tenant_passes_gate(tmp_path):
     # proceeds (fake request_response returns SUCCESS) → 200, not the 403 gate.
     c, hub = _build({}, tmp_path)
     api_mod._tenant_cache["tA"] = {"netbox_devices": {"data": [{"id": 5}]}}
-    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam",))
+    tok = _mint_tenant_session(hub, "alice", "tA", rights=("ipam", "edit"))
     r = c.delete("/api/netbox/devices/5", cookies={"lm_session": tok})
     assert r.status_code == 200
 
@@ -991,9 +1123,20 @@ class _DhcpHub(_FakeHub):
             {"ip": "192.168.5.10", "mac": "bb:bb:bb:bb:bb:bb", "hostname": "other-host", "subnet": "192.168.5.0/24"},
         ]
 
+    # Once a tenant is in scope the route resolves the spoke tenant-aware
+    # (dedicated per-tenant Kea) or via the shared path. This fake models the
+    # common deployment the DHCP resolver's docstring calls out: ONE shared Kea
+    # for the whole hub, where record-level subnet filtering -- what these
+    # tests actually cover -- IS the tenant isolation. So both resolvers return
+    # the single dhcp spoke.
+    def get_dhcp_spoke_for_tenant(self, tenant_id=None):
+        return self._spokes_by_type.get("dhcp")
+
+    def get_dhcp_spoke_for_shared(self):
+        return self._spokes_by_type.get("dhcp")
+
     async def request_response(self, spoke_id, cmd, data, timeout=30.0):
-        if cmd == "DHCP_LIST_SUBNETS":
-            return {"payload": {"data": {"status": "SUCCESS", "subnets": self._subnets}}}
+        if cmd == "DHCP_LIST_SUBNETS":            return {"payload": {"data": {"status": "SUCCESS", "subnets": self._subnets}}}
         if cmd == "DHCP_LIST_RES":
             return {"payload": {"data": {"status": "SUCCESS", "reservations": self._reservations}}}
         return await super().request_response(spoke_id, cmd, data, timeout)
@@ -1015,7 +1158,7 @@ def _build_dhcp(monkeypatch, tmp_path, prefixes_for="acme", prefixes=("10.20.0.0
 
 def test_dhcp_subnets_filtered_for_non_admin(monkeypatch, tmp_path):
     c, hub = _build_dhcp(monkeypatch, tmp_path)
-    tok = _mint_tenant_session(hub, "op", "acme", rights=("ipam",))
+    tok = _mint_tenant_session(hub, "op", "acme", rights=("dhcp",))
     r = c.get("/api/dhcp/subnets", cookies={"lm_session": tok})
     assert r.status_code == 200
     subnets = r.json()["subnets"]
@@ -1025,7 +1168,7 @@ def test_dhcp_subnets_filtered_for_non_admin(monkeypatch, tmp_path):
 
 def test_dhcp_reservations_filtered_for_non_admin(monkeypatch, tmp_path):
     c, hub = _build_dhcp(monkeypatch, tmp_path)
-    tok = _mint_tenant_session(hub, "op", "acme", rights=("ipam",))
+    tok = _mint_tenant_session(hub, "op", "acme", rights=("dhcp",))
     r = c.get("/api/dhcp/reservations", cookies={"lm_session": tok})
     assert r.status_code == 200
     reservations = r.json()["reservations"]
@@ -1061,7 +1204,7 @@ def test_dhcp_subnets_empty_for_non_admin_with_no_prefixes(monkeypatch, tmp_path
     # nothing, not the fleet.
     c, hub = _build_dhcp(monkeypatch, tmp_path)
     user_data = {"user_id": "lost", "auth_type": "local",
-                 "permissions": {"ipam": True},
+                 "permissions": {"dhcp": True},
                  "tenants": [], "tenant_id": None, "protected": False}
     tok = api_mod._record_session(hub, user_data)
     r = c.get("/api/dhcp/subnets", cookies={"lm_session": tok})

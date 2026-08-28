@@ -62,10 +62,10 @@ def test_console_logger_lines_land_in_the_buffer():
     console_log = logging.getLogger("Console")
     console_log.setLevel(logging.INFO)
     console_log.addHandler(handler)
-    # Some sibling tests leave a global logging.disable() set, which would
-    # suppress our INFO/WARNING regardless of the logger level. Clear it for the
-    # duration of this test and restore it afterwards so we test the wiring, not
-    # another test's leftover global state.
+    # Belt-and-braces: a global logging.disable() would suppress our
+    # INFO/WARNING regardless of the logger level. Sibling modules now scope
+    # theirs to a fixture, but clear it for the duration of this test anyway so
+    # we test the wiring rather than another test's leftover global state.
     prev_disable = logging.root.manager.disable
     logging.disable(logging.NOTSET)
     try:

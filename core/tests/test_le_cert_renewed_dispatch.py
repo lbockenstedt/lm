@@ -70,6 +70,22 @@ class _Hub:
         # in-flight dict helper it uses (no other hub attrs needed).
         self._inflight_rr = main.LabManagerHub._inflight_rr.__get__(self)
         self._cert_inflight = main.LabManagerHub._cert_inflight.__get__(self)
+        # INSTALL_CERT is routed by _cert_target_spoke, not get_spoke_by_type:
+        # a non-agent-hosting type (firewall here) is one target PER connected
+        # spoke, so a specific identifier that is a currently-connected spoke
+        # of the right type is used DIRECTLY -- that is what stops a tenant's
+        # cert being pushed to the wrong firewall when two are connected. Bind
+        # the real resolver and give it the indexes it reads; the empty agent
+        # indexes keep the agent-hosting branches inert (unused here) and the
+        # get_spoke_by_type fallback is the stubbed one above.
+        self.active_connections = {}
+        self.spoke_module_types = {}
+        self.agent_info = {}
+        self.netbox_server_agents = {}
+        self.ldap_server_agents = {}
+        self.spoke_id_alias = {}
+        self._cert_target_spoke = main.LabManagerHub._cert_target_spoke.__get__(self)
+        self._primary_key = main.LabManagerHub._primary_key.__get__(self)
 
     async def request_response(self, spoke_id, cmd, data, timeout=5.0):
         return await self._rr(spoke_id, cmd, data, timeout)
