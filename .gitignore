@@ -27,3 +27,6 @@ secrets.json
 # Local console/runtime state (serial port settings, etc.)
 **/.lm-state/
 .claude/worktrees/
+
+# Local git worktrees (.wt-<name>) — never part of the repo
+.wt-*/
