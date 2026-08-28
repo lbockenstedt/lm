@@ -154,3 +154,89 @@ def test_final_synthesis_disables_tools():
     needs is already in the message history."""
     src = _loop_source()
     assert '"tools": None, "system": system, "role": "final"' in src
+
+
+# ── Ask AI latency + follow-up regressions ────────────────────────────────
+# These lock in the two behaviours that made Ask AI slow, both of which were
+# invisible in code review and only showed up when the prompt was measured.
+
+def _helpers():
+    """Lift the pure decision functions out of the route module.
+
+    Per core/tests/README.md the convention is to keep decision logic at module
+    level; _select_docs/_doc_excerpt are nested in the route factory, so they
+    are AST-extracted here rather than importing the whole FastAPI app.
+    """
+    import ast, pathlib
+    src = pathlib.Path(__file__).resolve().parents[1] / "src/routes/help_assistant.py"
+    tree = ast.parse(src.read_text())
+    ns = {}
+    # The lifted functions close over module-level constants, so those have to
+    # come along or the extraction fails with NameError at call time.
+    consts = [n for n in tree.body
+              if isinstance(n, ast.Assign)
+              and any(isinstance(t, ast.Name) and t.id in
+                      {"_STOPWORDS", "_DOC_EXCERPT_BUDGET"} for t in n.targets)]
+    want = {"_select_docs", "_doc_excerpt"}
+    found = [n for n in ast.walk(tree)
+             if isinstance(n, ast.FunctionDef) and n.name in want]
+    mod = ast.Module(consts + found, [])
+    exec(compile(ast.fix_missing_locations(mod), "<h>", "exec"), ns)
+    return ns["_select_docs"], ns["_doc_excerpt"]
+
+
+def test_select_docs_is_not_biased_by_document_length():
+    """A long, irrelevant doc must not outrank a short, on-topic one.
+
+    Regression: scoring by raw term COUNT ranked by size, so the biggest file in
+    the corpus came back as the top match for nearly every question.
+    """
+    select, _ = _helpers()
+    docs = {
+        "huge-unrelated": ("the system and a the of and the " * 4000),
+        "edge-proxy-role": "# Edge proxy\nThe edge proxy terminates TLS certificates.",
+    }
+    picked = select("how does the edge proxy handle certificates", docs)
+    assert picked[0] == "edge-proxy-role", picked
+
+
+def test_select_docs_matches_on_name():
+    select, _ = _helpers()
+    docs = {"netbox": "unrelated prose", "other": "netbox " * 50}
+    assert "netbox" in select("how do I use netbox", docs)
+
+
+def test_select_docs_falls_back_when_nothing_matches():
+    select, _ = _helpers()
+    docs = {"README": "hello", "lm-hub": "hi"}
+    assert select("zzzqqq nonexistent xyzzy", docs)
+
+
+def test_doc_excerpt_stays_within_budget_and_keeps_relevant_passage():
+    """Excerpting is what removes ~45k tokens per turn; it must actually bound
+    the output while still carrying the passage the question needs."""
+    _, excerpt = _helpers()
+    text = ("# Title\nIntro line.\n"
+            + "\n".join(f"## Section {i}\n" + ("filler text here. " * 60)
+                        for i in range(40))
+            + "\n## Certificates\nThe proxy renews certificates via ACME.\n")
+    out = excerpt(text, {"certificates"}, budget=2600)
+    assert len(out) <= 2600 + 200, len(out)
+    assert "ACME" in out
+    assert len(out) < len(text) / 4
+
+
+def test_doc_excerpt_returns_short_docs_untouched():
+    _, excerpt = _helpers()
+    short = "# Small\nnothing to trim."
+    assert excerpt(short, {"small"}, budget=2600) == short
+
+
+def test_doc_excerpt_always_includes_the_opening():
+    """The head states what the doc is FOR, which is what makes the excerpted
+    passages interpretable."""
+    _, excerpt = _helpers()
+    text = "# Purpose\nThis doc explains the widget.\n" + \
+           "\n".join(f"## S{i}\n" + ("x " * 400) for i in range(20))
+    out = excerpt(text, {"s3"}, budget=1200)
+    assert "Purpose" in out

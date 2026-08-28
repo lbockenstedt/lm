@@ -169,8 +169,17 @@ def register(app, hub, ctx):
         The name-hit bonus stays absolute: a question naming a doc ("the dns
         spoke") should pull that doc in regardless of how its body scores.
         """
+        # Stopwords matter more here than they look. A question is mostly
+        # scaffolding ("how does the ... work"), and those words appear
+        # thousands of times in a long document, so without filtering them the
+        # score still measures length -- density alone does not save you when
+        # the matched term is "the".
         words = {w for w in ''.join(c.lower() if c.isalnum() else ' '
-                                    for c in question).split() if len(w) > 2}
+                                    for c in question).split()
+                 if len(w) > 2 and w not in _STOPWORDS}
+        if not words:
+            words = {w for w in ''.join(c.lower() if c.isalnum() else ' '
+                                        for c in question).split() if len(w) > 2}
         scored = []
         for name, text in docs.items():
             tl = text.lower()
