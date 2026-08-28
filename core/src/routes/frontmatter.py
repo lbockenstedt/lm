@@ -85,7 +85,10 @@ def split(text):
     meta = _parse_block(m.group(1))
     if not isinstance(meta, dict):
         return {}, text
-    return meta, text[lead + m.end():]
+    # Drop the blank line that conventionally follows the header. It is part of
+    # the header's formatting, not the document, and leaving it in wastes the
+    # opening of every excerpt on whitespace.
+    return meta, text[lead + m.end():].lstrip("\r\n")
 
 
 def parse(text):
