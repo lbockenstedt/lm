@@ -249,3 +249,43 @@ def test_core_lock_fail_open_when_no_writable_path(tmp_path, monkeypatch):
     monkeypatch.setattr(_su.os, "open", _boom)
     with _Repo(str(tmp_path))._core_update_lock(timeout=5.0) as got:
         assert got is True
+
+
+def test_core_lock_safe_swallows_a_raising_lock(tmp_path, monkeypatch):
+    """A core lock that RAISES (the netbox `[Errno 13] Permission denied:
+    '/var/lib/lm/.lm-core-update.lock'` report) must NOT unwind the update: the
+    safe wrapper yields False (skip core) so the component still pulls its OWN
+    repo instead of wedging on old code forever."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _raises(timeout=300.0):
+        raise PermissionError(13, "Permission denied",
+                              "/var/lib/lm/.lm-core-update.lock")
+        yield True  # pragma: no cover
+
+    r = _Repo(str(tmp_path))
+    monkeypatch.setattr(r, "_core_update_lock", _raises)
+    with r._core_update_lock_safe(timeout=5.0) as got:
+        assert got is False
+
+
+def test_core_lock_safe_passes_through_and_releases(tmp_path, monkeypatch):
+    """When the lock IS obtainable the wrapper is transparent -- it yields the
+    real value and still releases on the way out."""
+    real_open, real_makedirs = os.open, os.makedirs
+
+    def _fake_open(path, *a, **k):
+        if str(path).startswith("/var/lib/lm"):
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *a, **k)
+
+    def _fake_makedirs(path, **k):
+        if str(path).startswith("/var/lib/lm"):
+            return
+        return real_makedirs(path, **k)
+
+    monkeypatch.setattr(_su.os, "open", _fake_open)
+    monkeypatch.setattr(_su.os, "makedirs", _fake_makedirs)
+    with _Repo(str(tmp_path))._core_update_lock_safe(timeout=5.0) as got:
+        assert got is True
