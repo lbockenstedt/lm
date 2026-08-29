@@ -30,3 +30,9 @@ secrets.json
 
 # Local git worktrees (.wt-<name>) — never part of the repo
 .wt-*/
+
+# mTLS material and runtime secrets issued by the hub — never commit these
+certs/
+.env.lock
+*.crt
+hub_secret.json
