@@ -945,7 +945,25 @@ class UpdatePipelineMixin:
         Alternative update mechanism for non-git installations.
         Downloads a tarball from GitHub and extracts it over the existing install.
         Returns True only if the local VERSION actually changes to match the remote.
+
+        Refuses to run against a git working tree. This path merges a tarball
+        *over* ``hub_root`` with ``copytree(dirs_exist_ok=True)``, which silently
+        overwrites every tracked file — including uncommitted local edits — with
+        whatever is at the tip of ``branch``. A git install is supposed to reach
+        ``_git_update`` instead (``perform_update`` branches on
+        ``_is_git_repo``), so arriving here with a checkout means the caller
+        mis-detected the install type; clobbering a developer's work is never the
+        right answer to that. Bailing out degrades to "update did not apply",
+        which the caller already handles. See lm#490.
         """
+        if self._is_git_repo(hub_root):
+            logger.error(
+                "Refusing tarball update: %s is a git working tree. A checkout "
+                "must update via git (_git_update), not by extracting a tarball "
+                "over it, which would discard uncommitted local changes.",
+                hub_root,
+            )
+            return False
         tmp_dir = None
         try:
             if "github.com" in repo_url:
