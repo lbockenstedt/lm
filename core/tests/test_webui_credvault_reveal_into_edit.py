@@ -146,6 +146,10 @@ _CASES = [
 ]
 
 _HARNESS = """
+// jsc exposes print(); node exposes console.log. The harness must run on both,
+// since CI has node and developer machines here have JavaScriptCore.
+var __emit = (typeof print === 'function')
+    ? print : function (s) { console.log(s); };
 %(fn)s
 var DNS_CRED_PROVIDERS = {
   'he-login': { login: true, fields: [{k:'username'},{k:'password'}] },
@@ -166,7 +170,7 @@ function _cvDnsRenderFields() { els['__dns'] = { value: '1' }; }
 _cvFillAddFields(%(value)s);
 var out = {};
 Object.keys(els).forEach(function (k) { out[k] = els[k].value; });
-print(JSON.stringify(out));
+__emit(JSON.stringify(out));
 """
 
 
