@@ -332,6 +332,38 @@ class SelfUpdateMixin:
                 except OSError:
                     pass
 
+    @contextlib.contextmanager
+    def _core_update_lock_safe(self, timeout: float = 300.0):
+        """``_core_update_lock`` that can NEVER raise into the update worker.
+
+        Taking the host-wide core lock is best-effort housekeeping, but it runs
+        INSIDE ``_perform_self_update_sync``'s single try/except: anything that
+        escapes the context manager unwinds the WHOLE update, so the component
+        pulls nothing -- not even its OWN repo -- and logs
+        ``update failed: [Errno 13] Permission denied:
+        '/var/lib/lm/.lm-core-update.lock'``. That wedges the box on old code
+        permanently, because the repo-local fallback that fixes the lock ships
+        in the very code it can no longer pull (the netbox spoke report). Every
+        failure mode of the lock therefore degrades HERE to "skip core this
+        cycle" (yield False) and the component's own repo still updates."""
+        try:
+            cm = self._core_update_lock(timeout=timeout)
+            got = cm.__enter__()
+        except Exception as e:  # noqa: BLE001 - lock setup must never kill an update
+            logger.warning("core-update lock unusable (%s); skipping the shared "
+                           "/opt/lm core pull this cycle and continuing with this "
+                           "component's OWN repo update (run the installer to fix "
+                           "/var/lib/lm permissions)", e)
+            yield False
+            return
+        try:
+            yield got
+        finally:
+            try:
+                cm.__exit__(None, None, None)
+            except Exception:  # noqa: BLE001 - release must never mask the update
+                pass
+
     # ------------------------------------------------------------------
     # external rollback watchdog arming
     # ------------------------------------------------------------------
@@ -503,7 +535,7 @@ class SelfUpdateMixin:
                                   core_root)
                     core_root = None  # don't double-record in the manifest
                 else:
-                    with self._core_update_lock() as got_lock:
+                    with self._core_update_lock_safe() as got_lock:
                         if not got_lock:
                             logger.warning("update: could not acquire core "
                                            "lock; skipping core pull this cycle.")
