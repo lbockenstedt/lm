@@ -5137,6 +5137,10 @@ function _cvAddSecretModal(preset) {
     // changed on save (put_secret overwrites both) — the value fields must be
     // re-entered regardless, so a type/mode switch is safe.
     const editing = !!(preset && preset.name);
+    // Encoded once for the Reveal button's inline onclick. encodeURIComponent
+    // leaves an apostrophe untouched, which would terminate the JS string
+    // literal, so escape it too — secret names are free text.
+    const encName = editing ? encodeURIComponent(preset.name).replace(/'/g, '%27') : '';
     const nameAttrs = editing ? `value="${escapeHtml(preset.name)}" readonly` : `placeholder="secret name (e.g. henet-dns)"`;
     const sel = (v, want) => v === want ? ' selected' : '';
     const pType = editing ? (preset.type || 'generic') : '';
@@ -5157,15 +5161,22 @@ function _cvAddSecretModal(preset) {
           <option value="hub"${sel(pMode, 'hub')}>Automation-readable</option>
         </select>
       </div>
-      ${editing ? '<p class="text-[11px] text-slate-400">Name is fixed. Re-enter the values below to overwrite this secret — you may also change the type or mode.</p>' : ''}
+      ${editing ? `<div class="flex items-start gap-2">
+        <p class="text-[11px] text-slate-400 flex-1">Name is fixed. Values are stored encrypted and are never pre-filled. Enter the bucket pass-phrase below, then <b>Reveal current values</b> to load them here for editing — or just type new ones to overwrite. You may also change the type or mode.</p>
+        <button type="button" id="cv-add-reveal-btn" onclick="_cvRevealIntoEdit('${encName}')" title="Load the stored values into this form so you can edit them instead of retyping from scratch" class="shrink-0 px-2 py-1 text-xs rounded-md border border-slate-300 hover:bg-slate-50">Reveal current values</button>
+      </div>` : ''}
       <div id="cv-add-fields"></div>
       <input id="cv-add-desc" type="text" autocomplete="off" value="${editing ? escapeHtml(preset.description || '') : ''}" placeholder="description (optional)" class="${_CV_INP}">
       <input id="cv-add-psk" type="password" autocomplete="off" placeholder="bucket pass-phrase (the one you set for this bucket)" title="The bucket pass-phrase you set — required to encrypt/store the secret" class="${_CV_INP}">
       <div class="flex justify-end gap-2 pt-2">
-        <button onclick="document.getElementById('cv-add-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button onclick="_cvClearAddSecret()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
         <button onclick="_cvDoAddSecret()" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Save</button>
       </div>`;
-    openModal('cv-add-modal', body, { backdropClose: true });
+    const m = openModal('cv-add-modal', body, { backdropClose: true });
+    // Reveal can load plaintext into these inputs, so blank them before the
+    // node is discarded rather than leaving secrets in a detached DOM node --
+    // the same hygiene _cvClearReveal applies to the reveal dialog.
+    m.addEventListener('click', e => { if (e.target === m) _cvClearAddSecret(); });
     // Seed the login OAuth toggle (client_id/client_secret vs username/password)
     // from the edited secret before rendering the type's value fields.
     window._cvLoginOauth = !!(preset && preset.oauth);
@@ -5310,6 +5321,108 @@ function _cvCollectAddValue() {
     const k = v('cv-f-key').trim();
     return k ? { [k]: v('cv-f-value') } : {};
 }
+
+// Populate the add/edit form's value inputs from a revealed secret — the exact
+// inverse of _cvCollectAddValue. Used by the edit dialog's "Reveal current
+// values" button (lm#488): before this, Edit showed the name/type/mode but no
+// values and offered no way to see them, so the only way to change one field of
+// a multi-field secret was to cancel, Reveal, copy each value, then re-open Edit
+// and retype the lot. Worse, _cvDoAddSecret upserts by name, so a partial
+// re-entry silently overwrote the untouched fields with blanks.
+function _cvFillAddFields(value) {
+    const set = (id, v) => {
+        const el = document.getElementById(id);
+        if (el && v !== undefined && v !== null) el.value = String(v);
+    };
+    const t = document.getElementById('cv-add-type')?.value || 'login';
+    if (t === 'login') {
+        // Which pair came back decides the OAuth toggle, not the other way
+        // round: a ClearPass client stores client_id/client_secret.
+        const oauth = ('client_id' in value) || ('client_secret' in value);
+        const box = document.getElementById('cv-f-login-oauth');
+        if (box) box.checked = oauth;
+        _cvLoginToggleOauth(oauth);  // re-renders the inputs to match
+        if (oauth) {
+            set('cv-f-client-id', value.client_id);
+            set('cv-f-client-secret', value.client_secret);
+        } else {
+            set('cv-f-username', value.username);
+            set('cv-f-password', value.password);
+        }
+        return;
+    }
+    // 'token' is the legacy spelling of 'apikey' and still exists in stored
+    // secrets — accept either key, matching _cvCollectAddValue.
+    if (t === 'apikey' || t === 'token') {
+        set('cv-f-apikey', value.apikey !== undefined ? value.apikey : value.token);
+        return;
+    }
+    if (t === 'henet') { set('cv-f-henet-key', value.ddns_key); return; }
+    if (t === 'dns') {
+        const provSel = document.getElementById('cv-f-dns-provider');
+        if (provSel && value.provider) {
+            provSel.value = value.provider;
+            _cvDnsRenderFields();  // provider decides which inputs exist
+        }
+        const def = DNS_CRED_PROVIDERS[(provSel && provSel.value) || value.provider];
+        if (!def) return;
+        if (def.login) {
+            set('cv-f-dns-username', value.he_username);
+            set('cv-f-dns-password', value.he_password);
+            return;
+        }
+        // Non-login providers store the assembled certbot INI in dns_creds;
+        // split it back into the friendly per-field inputs it was built from.
+        const ini = {};
+        String(value.dns_creds || '').split('\n').forEach(line => {
+            const i = line.indexOf('=');
+            if (i > 0) ini[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+        });
+        def.fields.forEach(f => {
+            if (f.ini && ini[f.ini] !== undefined) set('cv-f-dns-' + f.k, ini[f.ini]);
+        });
+        return;
+    }
+    // generic: a single {key: value} pair
+    const keys = Object.keys(value);
+    if (keys.length) { set('cv-f-key', keys[0]); set('cv-f-value', value[keys[0]]); }
+}
+
+// "Reveal current values" in the edit dialog. Same endpoint and same
+// pass-phrase requirement as the standalone Reveal dialog — this only changes
+// where the plaintext lands (the form you are editing) so a single field can be
+// corrected without retyping the others.
+async function _cvRevealIntoEdit(enc) {
+    const name = decodeURIComponent(enc);
+    const psk = document.getElementById('cv-add-psk')?.value || '';
+    if (!psk) {
+        showToast('Enter the bucket pass-phrase below, then Reveal', 'error');
+        document.getElementById('cv-add-psk')?.focus();
+        return;
+    }
+    const btn = document.getElementById('cv-add-reveal-btn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Revealing…'; }
+    try {
+        const d = await apiJson('/tenant/cred-vault/reveal', {
+            method: 'POST',
+            body: JSON.stringify({ bucket: _cvCurrentBucket, name, psk }),
+        });
+        _cvFillAddFields(d.value || {});
+        showToast('Current values loaded — edit any field and Save', 'success');
+        if (btn) btn.remove();  // single-shot, like the reveal dialog
+    } catch (e) {
+        showToast('Reveal failed: ' + e.message, 'error');
+        if (btn) { btn.disabled = false; btn.textContent = 'Reveal current values'; }
+    }
+}
+window._cvRevealIntoEdit = _cvRevealIntoEdit;
+
+// Close the add/edit dialog, blanking any revealed plaintext first.
+function _cvClearAddSecret() {
+    document.querySelectorAll('#cv-add-modal input').forEach(el => { el.value = ''; });
+    document.getElementById('cv-add-modal')?.remove();
+}
+window._cvClearAddSecret = _cvClearAddSecret;
 
 async function _cvDoAddSecret() {
     const name = (document.getElementById('cv-add-name')?.value || '').trim();
