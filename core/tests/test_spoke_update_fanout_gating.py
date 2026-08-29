@@ -17,11 +17,16 @@ backstop still nudges a genuinely-stale spoke) so a persistent GitHub
 reachability failure doesn't become an update→flap→re-push storm.
 
 These tests stub the I/O surface of ``perform_update`` (version/commit
-fetchers, the mailbox push, the git-repo probe) and exercise just the fan-out
-loop's gating decisions across cycles.
+fetchers, the mailbox push, the git-repo probe, the hub self-update and its
+pre-update snapshot) and exercise just the fan-out loop's gating decisions
+across cycles. Nothing here may touch the network or the working tree: the
+``force`` test makes ``_update_available`` return True, which reaches the hub
+self-update branch, and an unstubbed tarball update extracted the live repo
+over the developer's checkout (lm#490).
 """
 
 import asyncio
+import os
 
 import pytest
 
@@ -50,6 +55,20 @@ def patched_clock(monkeypatch):
     clock = _Clock()
     monkeypatch.setattr(update_pipeline.time, "time", clock.time)
     return clock
+
+
+@pytest.fixture(autouse=True)
+def no_real_snapshot(monkeypatch):
+    """Keep the hub-update prelude hermetic.
+
+    ``perform_update`` snapshots core/src + WebUI + dns/dhcp to disk before the
+    swap. That is real recursive copytree I/O against the actual checkout, so
+    unit tests must not trigger it. Autouse: every test in this module drives
+    ``perform_update``, and the ``force`` path reaches this prelude.
+    """
+    monkeypatch.setattr(update_pipeline, "snapshot_code",
+                        lambda *a, **k: "/nonexistent/test-backup")
+    monkeypatch.setattr(update_pipeline, "write_pending", lambda *a, **k: None)
 
 
 class _State:
@@ -95,6 +114,8 @@ class _StubHub(UpdatePipelineMixin):
         # to live. Default the spoke connected; the offline test clears it.
         self.active_connections = {"lm-opnsense-spoke-1": object()}
         self.pushes = []  # list of (spoke_id, repo_url, branch, extra_data)
+        # (kind, hub_root, repo_url, branch) for each hub self-update attempt.
+        self.hub_update_calls = []
 
     async def get_local_version(self):
         return "v.01"
@@ -115,6 +136,23 @@ class _StubHub(UpdatePipelineMixin):
         return self._remote_tip
 
     def _is_git_repo(self, path):
+        return False
+
+    async def _git_update(self, hub_root, repo_url, branch):
+        # Never let a fan-out test reach the real hub self-update. These tests
+        # exercise the SPOKE_UPDATE gating loop only; the hub-update branch is a
+        # no-op that reports "nothing applied". Recorded so a test can assert
+        # which branch was taken.
+        self.hub_update_calls.append(("git", hub_root, repo_url, branch))
+        return False
+
+    async def _download_update(self, hub_root, repo_url, branch):
+        # See _git_update. This one matters especially: unstubbed it downloaded
+        # the live lm tarball and copytree'd it over the developer's working
+        # tree, destroying uncommitted edits (lm#490). force=True makes
+        # _update_available return True, so this branch IS reached even though
+        # local_commit == remote_commit holds the hub "up to date" otherwise.
+        self.hub_update_calls.append(("download", hub_root, repo_url, branch))
         return False
 
     async def _push_spoke_update(self, spoke_id, repo_url, branch,
@@ -156,6 +194,33 @@ async def test_force_bypasses_gate(patched_clock):
     assert len(hub.pushes) == 1
     await hub.perform_update(force=True)
     assert len(hub.pushes) == 2
+
+
+@pytest.mark.asyncio
+async def test_force_reaches_hub_self_update_and_it_stays_stubbed(patched_clock):
+    """lm#490: pin the reason the hub-update stubs above are load-bearing.
+
+    ``_update_available`` returns True whenever ``force`` is set, regardless of
+    local/remote commit equality, so ``perform_update(force=True)`` enters the
+    hub self-update branch — and ``_is_git_repo`` is stubbed False, so it picks
+    the *tarball* path. Unstubbed, that downloaded the live repo and merged it
+    over the checkout this suite runs from.
+
+    If someone deletes the stubs, this test's expectation that the call was
+    merely *recorded* is the tripwire.
+    """
+    hub = _StubHub(remote_tip="cccc1")
+    await hub.perform_update(force=True)
+    kinds = [c[0] for c in hub.hub_update_calls]
+    assert kinds == ["download"], (
+        f"expected exactly one stubbed tarball hub-update, got {hub.hub_update_calls!r}")
+
+    hub_root = hub.hub_update_calls[0][1]
+    repo_root = os.path.abspath(
+        os.path.join(os.path.dirname(update_pipeline.__file__), "../../"))
+    assert os.path.abspath(hub_root) == repo_root, (
+        "hub_root is derived from __file__, so it resolves to this very "
+        "checkout — which is why an unstubbed update overwrote it")
 
 
 @pytest.mark.asyncio
