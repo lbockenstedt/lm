@@ -151,7 +151,12 @@ def spoke(tmp_path):
 
 
 @contextlib.contextmanager
-def _fake_lock():
+def _fake_lock(timeout: float = 300.0):
+    # Signature must track ``_core_update_lock(timeout=...)``. It is called as
+    # ``self._core_update_lock(timeout=timeout)``, and ``_core_update_lock_safe``
+    # catches *every* exception from lock setup -- so a stale signature here does
+    # not error, it silently degrades to "skip the core pull this cycle" and the
+    # core assertions below fail for reasons that look nothing like the cause.
     yield True
 
 
@@ -507,3 +512,30 @@ async def test_cooldown_zero_disables_limiter(spoke, tmp_path, monkeypatch):
             "repo_url": "https://example/spoke.git",
         })
     assert ei.value.code == 3
+
+
+def test_fake_lock_stays_call_compatible_with_real_core_update_lock():
+    """The ``_fake_lock`` double must accept every call shape prod uses.
+
+    ``_core_update_lock_safe`` catches *all* exceptions from lock setup and
+    degrades to "skip the core pull this cycle" (a deliberate safety property --
+    a broken lock must never wedge a box on old code). The side effect is that a
+    test double whose signature has drifted from ``_core_update_lock`` does not
+    raise: it quietly disables the core pull, and every core assertion in this
+    module fails with a message pointing nowhere near the real cause. This
+    binds the two signatures so that drift fails here, loudly, instead.
+    """
+    import inspect
+
+    real = inspect.signature(cp.BaseControlPlane._core_update_lock)
+    fake = inspect.signature(_fake_lock)
+    # Drop `self` from the bound-method signature before comparing call shapes.
+    real_params = list(real.parameters.values())[1:]
+    for p in real_params:
+        assert p.name in fake.parameters, (
+            f"_core_update_lock takes {p.name!r} but _fake_lock does not; the "
+            "core pull would be silently skipped in every test in this module"
+        )
+    # And prove the exact prod call site works against the double.
+    with _fake_lock(timeout=300.0) as got:
+        assert got is True
