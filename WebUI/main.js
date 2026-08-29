@@ -1146,7 +1146,10 @@ async function fileBug(prefill = '') {
 
     const modal = document.createElement('div');
     modal.id = 'file-bug-modal';
-    modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    // z-[70] -- above BOTH a z-50 openModal() dialog and the z-[60] footer, so
+    // the report window opens on top of whatever dialog the user is reporting
+    // about rather than behind it (lm#487).
+    modal.className = 'fixed inset-0 z-[70] flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
     modal.innerHTML = `
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
@@ -1684,6 +1687,19 @@ async function setTenant(tenant) {
             // fetch agree on the same tenant. Without this, a multi-tenant user
             // switching tenant would filter on stale session-tenant prefixes.
             await loadTenantPrefixes();
+            // Re-point the Managed Devices tenant filter at the tenant we just
+            // switched to. That filter lives on window (_mdFilter) so the tab
+            // handlers survive re-renders, which also means it survived a TENANT
+            // switch -- and for a Global Admin the device fetch is unscoped
+            // (_devEndpoint returns the bare /setup/* path, no ?tenant=), so
+            // every tenant's devices are always present. The self-heal in
+            // loadAllDevices only clears a filter whose tenant owns NO device,
+            // so it could never fire here: the old tenant still owned devices
+            // and the list stayed pinned to it. The page really did refetch --
+            // it was re-filtered back to the previous tenant, which is why this
+            // read as "My Devices does not refresh" (lm#486). loadAllDevices()
+            // falls back to 'all' if the new tenant owns nothing.
+            if (window._mdFilter) window._mdFilter.tenant = tenant;
             // Preserve the active sub-view across a tenant switch. setView()
             // re-renders the whole view and resets currentSubView to the first
             // sub-menu (Overview/Devices), so a user on Prefixes who switches
