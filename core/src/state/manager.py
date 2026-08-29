@@ -289,18 +289,6 @@ class StateManager:
                     sys_state["global_config"] = global_config
                     logger.info(f"Migrated OPNsense singleton config to multi-firewall list (ID: {firewall_id})")
 
-            # Migration: the pinned mTLS identity list for the reverse HUB_REQUEST
-            # channel was renamed global_config["bugfixer_cert_identities"] ->
-            # ["ab_cert_identities"] (BugFixer -> AppBuilder). This is admin-set
-            # persisted data (not re-derived on reconnect), so copy the legacy key
-            # forward on first load so existing deployments keep their designated
-            # AppBuilder cert(s) and the channel stays authorized.
-            if ("bugfixer_cert_identities" in global_config
-                    and "ab_cert_identities" not in global_config):
-                global_config["ab_cert_identities"] = global_config.pop("bugfixer_cert_identities")
-                sys_state["global_config"] = global_config
-                logger.info("Migrated legacy 'bugfixer_cert_identities' -> 'ab_cert_identities'")
-
             # Merge with defaults to ensure all keys exist (handles old state files)
             sys_defaults = {
                 "global_config": {},

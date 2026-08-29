@@ -22,12 +22,6 @@ from . import frontmatter, github_source
 # it, which is exactly when a better query is worth buying.
 _ESCALATE_AFTER = 2
 
-# Retired repos that may still be checked out on a developer box. Their docs
-# describe a module that no longer exists, so feeding them to the assistant
-# would have it answer confidently from superseded material. BugFixer was
-# renamed to AppBuilder, which lives in the `ab` repo.
-_RETIRED_REPOS = {"bugfixer"}
-
 # Front-matter metadata per doc, populated by _load_docs. Kept out of the doc
 # bodies so it never reaches the prompt, but available to scoring.
 _DOC_META = {}
@@ -199,7 +193,7 @@ def register(app, hub, ctx):
         except Exception:  # noqa: BLE001
             siblings = []
         for repo in siblings:
-            if repo in ("lm", ".", "..") or repo in _RETIRED_REPOS or repo.startswith("."):
+            if repo in ("lm", ".", "..") or repo.startswith("."):
                 continue
             sib = os.path.join(parent, repo, "docs")
             if not os.path.isdir(sib):
