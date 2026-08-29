@@ -539,7 +539,16 @@
         <span id="cache-status-text" class="text-[11px] text-blue-300 font-medium"></span>
     </div>
 
-    <footer class="h-10 w-full flex items-center px-6 text-white text-xs font-medium transition-all shrink-0" style="background-color: var(--hpe-navy); border-top: 3px solid var(--hpe-green);">
+    <!-- relative z-[60] keeps the footer -- and specifically the "Bug/Feature
+         Request" button -- ABOVE modal overlays. openModal() and fileBug() both
+         build a full-viewport `fixed inset-0 ... z-50` layer, and the footer is
+         otherwise an unpositioned block in normal flow, so any open modal
+         covered the button: the click landed on the backdrop instead, and for
+         the modals opened with { backdropClose: true } (which the Credential
+         Vault uses) it silently dismissed that modal. The escape hatch you use
+         to REPORT a broken dialog must stay reachable while that dialog is
+         open. See lm#487. -->
+    <footer class="relative z-[60] h-10 w-full flex items-center px-6 text-white text-xs font-medium transition-all shrink-0" style="background-color: var(--hpe-navy); border-top: 3px solid var(--hpe-green);">
         <div class="flex justify-between w-full items-center">
             <div class="flex items-center gap-4 opacity-70">
                 <span>© 2026 Lab Manager</span>
