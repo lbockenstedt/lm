@@ -148,7 +148,27 @@ class HubOsUpdatesMixin:
 
     def osu_snapshot(self) -> Dict[str, Any]:
         st = self._osu_state()
-        nodes = sorted(st["nodes"].values(), key=lambda n: (n["kind"] != "hub", n["label"]))
+        # Merge in the CURRENTLY connected targets so a spoke/agent that is
+        # installed and reporting in over the control plane always appears in
+        # the panel — even before it's ever been probed (fresh hub boot / a
+        # newly-approved node / the hub just restarted, wiping this in-memory,
+        # never-persisted cache). Without this, "checked_at == 0" or a node
+        # that connected after the last Check silently vanishes from the list,
+        # which reads as "there are no nodes" rather than "not checked yet".
+        live = {f"{t['kind']}:{t['id']}": t for t in self._osu_targets()}
+        merged: Dict[str, Any] = {}
+        for key, t in live.items():
+            cached = st["nodes"].get(key)
+            if cached is not None:
+                merged[key] = {"checked": True, **cached}
+            else:
+                merged[key] = {
+                    "kind": t["kind"], "id": t["id"], "label": t["label"],
+                    "module_type": t["module_type"], "spoke_id": t.get("spoke_id", ""),
+                    "checked": False, "eligible": None, "unmanaged": False,
+                    "unreachable": False, "reason": "not checked yet", "count": 0,
+                }
+        nodes = sorted(merged.values(), key=lambda n: (n["kind"] != "hub", n["label"]))
         pending = [n for n in nodes if n.get("eligible") and n.get("count")]
         return {
             "checked_at": st["checked_at"],
@@ -162,6 +182,7 @@ class HubOsUpdatesMixin:
                 "packages": sum(int(n.get("count") or 0) for n in nodes),
                 "security": sum(int(n.get("security_count") or 0) for n in nodes),
                 "reboot_required": sum(1 for n in nodes if n.get("reboot_required")),
+                "not_checked": sum(1 for n in nodes if not n.get("checked")),
             },
             "run": st.get("run"),
         }

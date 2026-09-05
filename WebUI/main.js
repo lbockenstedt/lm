@@ -1617,7 +1617,7 @@ const VIEW_CHILDREN = {
 const VIEW_GRANDCHILDREN = {
     settings: {
         Cloud: {
-            'Azure': ['SSO', 'NSG', 'Cloud NAC', 'Key Vault', 'NetBox SSO'],
+            'Azure': ['SSO', 'NSG', 'Cloud NAC', 'Vault', 'NetBox SSO'],
             'OCI': ['NSG', 'Vault'],
         },
     },
@@ -4165,7 +4165,7 @@ function _viewTemplate(viewId) {
             return `<div class="space-y-4">
   <div>
     <h2 class="text-xl font-bold text-slate-800">Security — Threat Monitor</h2>
-    <p class="text-sm text-slate-500">Detects brute-force / faked-credential attacks on the API, logs invalid attempts, and (opt-in) auto-blocks the source IP via an Azure NSG deny rule.</p>
+    <p class="text-sm text-slate-500">Detects brute-force / faked-credential attacks on the API, logs invalid attempts, and (opt-in) auto-blocks the source IP via a NSG deny rule.</p>
   </div>
   <div id="security-content"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
 </div>`;
@@ -4424,7 +4424,7 @@ async function loadSecurityData() {
         </div>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
           <label class="flex items-center gap-2 text-slate-600 col-span-2"><input type="checkbox" id="sec-enabled" ${c.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Detection enabled (log invalid attempts)</label>
-          <label class="flex items-center gap-2 text-amber-700 font-bold col-span-2"><input type="checkbox" id="sec-autoblock" ${c.auto_block ? 'checked' : ''} class="w-4 h-4 rounded"> Auto-block via Azure NSG (off = log-only)</label>
+          <label class="flex items-center gap-2 text-amber-700 font-bold col-span-2"><input type="checkbox" id="sec-autoblock" ${c.auto_block ? 'checked' : ''} class="w-4 h-4 rounded"> Auto-block via NSG (off = log-only)</label>
           <label class="text-slate-500">Block after &gt; N fails<input type="number" id="sec-threshold" min="1" value="${c.threshold != null ? c.threshold : 5}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
           <label class="text-slate-500">Window (min)<input type="number" id="sec-window" min="1" value="${Math.round((c.window_s || 600) / 60)}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
           <label class="text-slate-500">TTL (hours)<input type="number" id="sec-ttl" min="1" value="${Math.round((c.ttl_s || 86400) / 3600)}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
@@ -4435,7 +4435,7 @@ async function loadSecurityData() {
           ${(() => {
             const ar = d.allow_rule || {};
             return `<div class="col-span-2 md:col-span-4 text-[11px] text-slate-500 bg-slate-50 rounded px-2 py-1.5 leading-relaxed">
-              <b>Allow must be a lower number than Deny; both below 1000 (Azure's default allow on 443).</b> The <b>allow rule</b> (name <b>${escapeHtml(ar.name || 'lm-allowlist')}</b>) is also editable under <b>Settings → Cloud → Azure → NSG</b> — saving here updates <b>both</b> priorities (allow → Azure NSG, deny → threat monitor).
+              <b>Allow must be a lower number than Deny; both below 1000 (NSG's default allow on 443).</b> The <b>allow rule</b> (name <b>${escapeHtml(ar.name || 'lm-allowlist')}</b>) is also editable under <b>Settings → Cloud → Azure → NSG</b> — saving here updates <b>both</b> priorities (allow → NSG, deny → threat monitor).
               <span id="sec-prio-check"></span>
             </div>`;
           })()}
@@ -4756,8 +4756,8 @@ function _nsgPriorityCheck(allow, deny) {
     if (isNaN(a) || isNaN(d)) return { ok: false, msg: 'Enter numeric allow and deny priorities.' };
     const problems = [];
     if (!(a < d)) problems.push(`Allow (${a}) must be a LOWER number than Deny (${d}).`);
-    if (!(d < 1000)) problems.push(`Deny (${d}) must be below 1000 (Azure's default allow on 443).`);
-    if (!(a < 1000)) problems.push(`Allow (${a}) must be below 1000 (Azure's default allow on 443).`);
+    if (!(d < 1000)) problems.push(`Deny (${d}) must be below 1000 (NSG's default allow on 443).`);
+    if (!(a < 1000)) problems.push(`Allow (${a}) must be below 1000 (NSG's default allow on 443).`);
     return problems.length ? { ok: false, msg: problems.join(' ') } : { ok: true, msg: 'ordering OK' };
 }
 function _prioCheckHtml(allow, deny) {
@@ -5052,7 +5052,7 @@ function _cvRenderShell() {
     const opts = _cvBuckets.map(b =>
         `<option value="${escapeHtml(b.bucket)}"${b.bucket === _cvCurrentBucket ? ' selected' : ''}>${escapeHtml(_cvBucketLabel(b))}${b.has_psk ? '' : ' (no pass-phrase)'}</option>`).join('');
     const storageHint = _cvVaultAvailable ? '' : `
-      <div class="text-xs px-3 py-2 rounded-md bg-amber-50 text-amber-700 border border-amber-200">No Key Vault is configured — secrets are stored locally (encrypted in hub state). Configure a vault under Setup → Cloud → Azure → Key Vault or Setup → Cloud → OCI → Vault to store them there instead.</div>`;
+      <div class="text-xs px-3 py-2 rounded-md bg-amber-50 text-amber-700 border border-amber-200">No Key Vault is configured — secrets are stored locally (encrypted in hub state). Configure a vault under Setup → Cloud → Azure → Vault or Setup → Cloud → OCI → Vault to store them there instead.</div>`;
     host.innerHTML = `
       <div class="hpe-card rounded-lg p-5 shadow-sm space-y-4">
         ${storageHint}
@@ -6225,7 +6225,7 @@ function _renderSettingsSection(subMenu) {
         if (provider === 'Azure') {
             if (tile === 'NSG') _renderSettingsAzureNsgTile(content);
             else if (tile === 'Cloud NAC') _renderSettingsCloudNacTile(content);
-            else if (tile === 'Key Vault') _renderSettingsKeyVaultTile(content);
+            else if (tile === 'Vault') _renderSettingsKeyVaultTile(content);
             else if (tile === 'NetBox SSO') _renderSettingsNetboxSsoTile(content);
             else _renderSettingsSsoTile(content);
         } else {  // OCI
@@ -6881,6 +6881,7 @@ function _osuRender(d) {
         ${chip('need reboot', t.reboot_required || 0, (t.reboot_required ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'))}
         ${chip('unmanaged', t.unmanaged || 0)}
         ${chip('unreachable', t.unreachable || 0, (t.unreachable ? 'bg-red-50 border-red-200' : 'bg-white border-slate-200'))}
+        ${chip('not checked yet', t.not_checked || 0, (t.not_checked ? 'bg-slate-100 border-slate-300' : 'bg-white border-slate-200'))}
       </div>`;
     const rows = (d.nodes || []).map(n => {
         const key = `${n.kind}:${n.id}`;
@@ -6891,6 +6892,7 @@ function _osuRender(d) {
         else if (item && item.status === 'done') state = '<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">updated</span>';
         else if (n.unreachable) state = `<span class="text-[10px] font-bold text-red-700 bg-red-50 border border-red-200 rounded-full px-2 py-0.5">unreachable</span>`;
         else if (n.unmanaged) state = '<span class="text-[10px] font-bold text-slate-500 bg-slate-100 border border-slate-200 rounded-full px-2 py-0.5">unmanaged</span>';
+        else if (n.checked === false) state = '<span class="text-[10px] font-bold text-slate-500 bg-slate-100 border border-slate-300 rounded-full px-2 py-0.5">not checked yet</span>';
         else if (!n.count) state = '<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">up to date</span>';
         else state = `<span class="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">${n.count} pending</span>`;
         const reboot = n.reboot_required ? '<span class="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5" title="A kernel/PVE update needs a reboot. Nothing reboots automatically — do it deliberately.">reboot required</span>' : '';
@@ -11396,7 +11398,14 @@ function _renderSettingsOciNsgTile(content) {
                 <div class="space-y-1"><label class="${labelCls}">Tenancy OCID</label><input id="oci-nsg-tenancy" type="text" placeholder="ocid1.tenancy.oc1..…" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">User OCID</label><input id="oci-nsg-user" type="text" placeholder="ocid1.user.oc1..…" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">Key fingerprint</label><input id="oci-nsg-fp" type="text" placeholder="aa:bb:cc:…" class="${inputCls} font-mono text-xs"></div>
-                <div class="space-y-1"><label class="${labelCls}">Private key path <span class="text-slate-400 normal-case font-normal">(or kv:&lt;name&gt;)</span></label><input id="oci-nsg-key" type="text" placeholder="/etc/lm/oci/api-key.pem or kv:oci-api-key" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Private key path <span class="text-slate-400 normal-case font-normal">(or kv:&lt;name&gt;)</span></label>
+                    <div class="flex gap-2">
+                        <input id="oci-nsg-key" type="text" placeholder="/etc/lm/oci/api-key.pem or kv:oci-api-key" class="${inputCls} font-mono text-xs flex-1">
+                        <button type="button" onclick="document.getElementById('oci-nsg-key-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">Upload…</button>
+                        <input type="file" id="oci-nsg-key-file" accept=".pem,.key,text/plain,application/x-pem-file" class="hidden" onchange="uploadOciNsgKey(this)">
+                    </div>
+                    <p class="text-[11px] text-slate-400">Upload the unencrypted PEM private key generated for this OCI API user (Profile → API Keys → Add API Key). It's written to a 0600 file on this hub and the path above is filled in automatically — the key content itself is never shown or sent back to the browser.</p>
+                </div>
                 <div class="space-y-1"><label class="${labelCls}">Region</label><input id="oci-nsg-region" type="text" placeholder="us-ashburn-1" class="${inputCls}"></div>
                 <div class="space-y-1"><label class="${labelCls}">NSG OCID</label><input id="oci-nsg-id" type="text" placeholder="ocid1.networksecuritygroup.oc1..…" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">Destination port</label><input id="oci-nsg-dport" type="text" placeholder="443" class="${inputCls}"></div>
@@ -11530,6 +11539,141 @@ async function testOciNsg() {
         else { showToast('Test failed: ' + (d.message || 'error'), 'error'); if (msg) msg.textContent = d.message || 'failed'; }
     } catch (e) { showToast('Test failed: ' + (e.message || e), 'error'); if (msg) msg.textContent = String(e.message || e); }
 }
+
+// Upload the OCI API signing private key (PEM) instead of hand-typing/scp-ing
+// a path onto the hub. The server validates it parses as an unencrypted PEM
+// key, writes it to a fixed 0600 path, and persists that path into
+// oci_nsg.key_path immediately (independent of the rest of this form / the
+// Save & Apply button) -- so a partially-filled form in progress can't lose
+// the just-uploaded key.
+async function uploadOciNsgKey(input) {
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    const msg = document.getElementById('oci-nsg-msg');
+    try {
+        const fd = new FormData();
+        fd.append('file', file, file.name);
+        const d = await apiJson('/setup/oci-nsg/upload-key', { method: 'POST', body: fd });
+        const el = document.getElementById('oci-nsg-key');
+        if (el) el.value = d.key_path || '';
+        showToast('Private key uploaded and saved.', 'success');
+        if (msg) msg.textContent = 'Key uploaded — click Save & Apply to reconcile with the new key.';
+    } catch (e) { showToast('Key upload failed: ' + (e.message || e), 'error'); }
+    finally { input.value = ''; }
+}
+window.uploadOciNsgKey = uploadOciNsgKey;
+
+// OCI Vault — connection config for the OCI parity backend of Credential
+// Vault (cloud_vault.py dispatches here when oci_vault.enabled). Auth is a
+// SEPARATE OCI API signing key from oci_nsg's (a customer may reasonably
+// want a narrower-scoped user/key per integration) — see routes/oci_vault.py
+// module docstring. Mirrors _renderSettingsOciNsgTile's layout/upload pattern.
+function _renderSettingsOciVaultTile(content) {
+    const { card, inputCls, labelCls, btnCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card}">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">OCI Vault — Key Vault backend</h3>
+                <span id="oci-vault-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+            </div>
+            <p class="text-xs text-slate-400 mb-3">Connects the hub's <b>Credential Vault</b> (secret storage abstraction) to an Oracle Cloud Infrastructure <b>Vault</b>. Auth is a dedicated <b>OCI API signing key</b> — create one for a user with an IAM policy granting <code>manage secret-family</code> (create/update secrets) and <code>manage vaults</code> (read-only use is enough for Test connection) in the vault's compartment, then paste its details below. This is a <b>separate</b> OCI user/key from OCI NSG's — a narrower-scoped key per integration is fine.</p>
+            <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="oci-vault-enabled" class="w-4 h-4 text-green-600 rounded">Enable OCI Vault (this hub's Key Vault backend)</label>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="space-y-1"><label class="${labelCls}">Tenancy OCID</label><input id="oci-vault-tenancy" type="text" placeholder="ocid1.tenancy.oc1..…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">User OCID</label><input id="oci-vault-user" type="text" placeholder="ocid1.user.oc1..…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Key fingerprint</label><input id="oci-vault-fp" type="text" placeholder="aa:bb:cc:…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Private key path <span class="text-slate-400 normal-case font-normal">(or kv:&lt;name&gt;)</span></label>
+                    <div class="flex gap-2">
+                        <input id="oci-vault-key" type="text" placeholder="/etc/lm/oci/api-key.pem or kv:oci-vault-key" class="${inputCls} font-mono text-xs flex-1">
+                        <button type="button" onclick="document.getElementById('oci-vault-key-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">Upload…</button>
+                        <input type="file" id="oci-vault-key-file" accept=".pem,.key,text/plain,application/x-pem-file" class="hidden" onchange="uploadOciVaultKey(this)">
+                    </div>
+                    <p class="text-[11px] text-slate-400">Upload the unencrypted PEM private key generated for this OCI API user (Profile → API Keys → Add API Key). It's written to a 0600 file on this hub and the path above is filled in automatically — the key content itself is never shown or sent back to the browser.</p>
+                </div>
+                <div class="space-y-1"><label class="${labelCls}">Region</label><input id="oci-vault-region" type="text" placeholder="us-ashburn-1" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Compartment OCID</label><input id="oci-vault-compartment" type="text" placeholder="ocid1.compartment.oc1..…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Vault OCID</label><input id="oci-vault-vault" type="text" placeholder="ocid1.vault.oc1..…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Master encryption key OCID</label><input id="oci-vault-keyid" type="text" placeholder="ocid1.key.oc1..…" class="${inputCls} font-mono text-xs"></div>
+            </div>
+            <div class="mt-4 flex items-center justify-between gap-3">
+                <span id="oci-vault-msg" class="text-xs text-slate-400"></span>
+                <div class="flex items-center gap-3">
+                    <button onclick="testOciVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Test connection</button>
+                    <button onclick="saveOciVault()" id="oci-vault-save-btn" class="${btnCls}">Save</button>
+                </div>
+            </div>
+        </div>`;
+    loadOciVault();
+}
+
+function _ociVaultFormConfig() {
+    const v = id => (document.getElementById(id)?.value || '').trim();
+    return {
+        enabled: !!document.getElementById('oci-vault-enabled')?.checked,
+        tenancy_ocid: v('oci-vault-tenancy'), user_ocid: v('oci-vault-user'),
+        fingerprint: v('oci-vault-fp'), key_path: v('oci-vault-key'),
+        region: v('oci-vault-region'), compartment_id: v('oci-vault-compartment'),
+        vault_id: v('oci-vault-vault'), key_id: v('oci-vault-keyid'),
+    };
+}
+
+async function loadOciVault() {
+    try {
+        const r = await setupFetch('/setup/oci-vault');
+        const d = await r.json().catch(() => ({}));
+        const c = d.config || {};
+        const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val == null ? '' : val; };
+        const chk = (id, val) => { const el = document.getElementById(id); if (el) el.checked = !!val; };
+        chk('oci-vault-enabled', c.enabled);
+        set('oci-vault-tenancy', c.tenancy_ocid); set('oci-vault-user', c.user_ocid);
+        set('oci-vault-fp', c.fingerprint); set('oci-vault-key', c.key_path);
+        set('oci-vault-region', c.region); set('oci-vault-compartment', c.compartment_id);
+        set('oci-vault-vault', c.vault_id); set('oci-vault-keyid', c.key_id);
+        const pill = document.getElementById('oci-vault-state-pill');
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+    } catch (e) { console.error('loadOciVault failed', e); }
+}
+
+async function saveOciVault() {
+    const btn = document.getElementById('oci-vault-save-btn'); const msg = document.getElementById('oci-vault-msg');
+    const cfg = _ociVaultFormConfig();
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        await apiJson('/setup/oci-vault', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: cfg }) });
+        showToast('OCI Vault config saved.', 'success'); if (msg) msg.textContent = 'saved';
+        loadOciVault();
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Save'; } }
+}
+
+async function testOciVault() {
+    const msg = document.getElementById('oci-vault-msg');
+    if (msg) msg.textContent = 'Testing…';
+    try {
+        const r = await setupFetch('/setup/oci-vault/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _ociVaultFormConfig() }) });
+        const d = await r.json().catch(() => ({}));
+        if (d.status === 'ok') { showToast('Connected to OCI Vault.', 'success'); if (msg) msg.textContent = 'OK'; }
+        else { showToast('Test failed: ' + (d.message || 'error'), 'error'); if (msg) msg.textContent = d.message || 'failed'; }
+    } catch (e) { showToast('Test failed: ' + (e.message || e), 'error'); if (msg) msg.textContent = String(e.message || e); }
+}
+
+// Same upload pattern as uploadOciNsgKey, targeting the OCI Vault key path.
+async function uploadOciVaultKey(input) {
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    const msg = document.getElementById('oci-vault-msg');
+    try {
+        const fd = new FormData();
+        fd.append('file', file, file.name);
+        const d = await apiJson('/setup/oci-vault/upload-key', { method: 'POST', body: fd });
+        const el = document.getElementById('oci-vault-key');
+        if (el) el.value = d.key_path || '';
+        showToast('Private key uploaded and saved.', 'success');
+        if (msg) msg.textContent = 'Key uploaded — click Save to confirm the rest of the config.';
+    } catch (e) { showToast('Key upload failed: ' + (e.message || e), 'error'); }
+    finally { input.value = ''; }
+}
+window.testOciVault = testOciVault; window.saveOciVault = saveOciVault; window.uploadOciVaultKey = uploadOciVaultKey;
 
 function _renderSettingsSsoTile(content) {
     const { card, inputCls, labelCls, btnCls } = _SETUP_CLS;

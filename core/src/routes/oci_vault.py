@@ -20,6 +20,7 @@ needs.
 """
 from __future__ import annotations
 
+import oci_auth
 from api import HTTPException, Request, logger
 import oci_vault as _kv
 
@@ -28,6 +29,12 @@ import oci_vault as _kv
 # credential_store reference (kv:<name> / path), same as Entra's key_path.
 _FIELDS = ("enabled", "tenancy_ocid", "user_ocid", "fingerprint", "key_path",
           "region", "compartment_id", "vault_id", "key_id")
+
+# Fixed on-box path the uploaded OCI API signing key is written to (0600) via
+# oci_auth.write_uploaded_private_key — a SEPARATE file from oci_nsg's own
+# key (each OCI feature owns its own auth block; see the module docstring).
+_KEY_UPLOAD_SUBDIR = "oci"
+_KEY_UPLOAD_FILENAME = "oci-vault-api-key.pem"
 
 
 def register(app, hub, ctx):
@@ -63,6 +70,38 @@ def register(app, hub, ctx):
                                     detail="Azure Key Vault is currently enabled — disable it before enabling OCI Vault")
         _save(clean)
         return {"status": "ok", "config": clean}
+
+    @app.post("/setup/oci-vault/upload-key")
+    async def upload_oci_vault_key(request: Request):
+        """Accept an OCI API signing private key (PEM) uploaded via the WebUI
+        and write it to a fixed on-box path (0600), persisting that path into
+        ``oci_vault.key_path`` immediately -- no more hand-copying the key
+        onto the hub / typing a path. Multipart form field ``file``; falls
+        back to a raw body. Validates the upload actually parses as an
+        unencrypted PEM private key BEFORE writing anything."""
+        ctype = (request.headers.get("content-type") or "").lower()
+        try:
+            if "multipart/form-data" in ctype:
+                form = await request.form()
+                up = form.get("file")
+                if up is None:
+                    raise HTTPException(status_code=400, detail="no 'file' field in the upload")
+                data = await up.read()
+            else:
+                data = await request.body()
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"could not read upload: {e}")
+        try:
+            path = oci_auth.write_uploaded_private_key(
+                hub, _KEY_UPLOAD_SUBDIR, _KEY_UPLOAD_FILENAME, data)
+        except oci_auth.OciAuthError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        cfg = _cfg()
+        cfg["key_path"] = path
+        _save(cfg)
+        return {"status": "ok", "key_path": path}
 
     @app.post("/setup/oci-vault/test")
     async def test_oci_vault(request: Request):
