@@ -158,45 +158,55 @@ def subtract_blocked(allow_cidrs, blocked_ips, *,
         report["already_denied"] = [str(b) for b in blocks]
         return [str(n) for n in nets], report
 
-    for b in blocks:
-        # Only prefixes of the SAME family can contain this address.
-        hit = False
-        out = []
-        for n in nets:
-            if n.version != b.version:
-                out.append(n)
+    # Process each configured allow prefix INDEPENDENTLY. An entry that no
+    # block falls inside is passed through verbatim rather than collapsed:
+    # the prefixes pushed here are read back and folded into the operator's
+    # local entry DB by merge_live_prefixes, so emitting a machine-collapsed
+    # equivalent (20 /32s summarised as 6 ranges) would quietly replace what
+    # they actually typed with generated CIDRs. Only a prefix that genuinely
+    # had to be split contributes fragments, and only those are collapsed.
+    result: List[Any] = []
+    matched = set()
+    for n in nets:
+        frags = [n]
+        for b in blocks:
+            if b.version != n.version:
                 continue
-            if b.subnet_of(n):
-                # Equal networks yield [] here — the allow entry disappears.
-                out.extend(n.address_exclude(b))
-                hit = True
-            elif n.subnet_of(b):
-                hit = True  # the whole allow prefix is inside the blocked range
-            else:
-                out.append(n)
-        if hit:
-            nets = out
-            report["removed"].append(str(b))
+            out = []
+            touched = False
+            for f in frags:
+                if b.subnet_of(f):
+                    # Equal networks yield [] here — the fragment disappears.
+                    out.extend(f.address_exclude(b))
+                    touched = True
+                elif f.subnet_of(b):
+                    touched = True  # fragment sits entirely inside the block
+                else:
+                    out.append(f)
+            if touched:
+                frags = out
+                matched.add(b)
+        if len(frags) == 1 and frags[0] == n:
+            result.append(n)  # untouched — preserve the operator's entry as-is
         else:
-            report["already_denied"].append(str(b))
+            result.extend(ipaddress.collapse_addresses(frags) if frags else [])
 
-    v4 = ipaddress.collapse_addresses([n for n in nets if n.version == 4])
-    v6 = ipaddress.collapse_addresses([n for n in nets if n.version == 6])
-    result = sorted({str(n) for n in list(v4) + list(v6)})
-    report["after"] = len(result)
-    report["projected"] = len(result)
+    report["removed"] = [str(b) for b in blocks if b in matched]
+    report["already_denied"] = [str(b) for b in blocks if b not in matched]
 
-    if len(result) > max_prefixes:
+    result_strs = sorted({str(n) for n in result})
+    report["after"] = len(result_strs)
+    report["projected"] = len(result_strs)
+
+    if len(result_strs) > max_prefixes:
         # Report the projected cost so the caller can explain WHY it refused —
         # "blocking 4 IPs would need 116 allow prefixes (cap 90)" is actionable;
         # a bare "too fragmented" is not.
         report["truncated"] = True
         report["after"] = report["before"]
         report["removed"] = []
-        return [str(n) for n in (
-            [ipaddress.ip_network(str(c).strip(), strict=False)
-             for c in (allow_cidrs or [])])], report
-    return result, report
+        return [str(n) for n in nets], report
+    return result_strs, report
 
 
 def merge_live_prefixes(entries: List[Dict[str, str]], live_prefixes) -> tuple:
@@ -327,20 +337,62 @@ async def test_connection(cfg: OciConfig, occfg: Dict[str, Any],
             "nsg_id": body.get("id")}
 
 
-async def _list_managed_rules(cfg: OciConfig, occfg: Dict[str, Any],
+async def _list_ingress_rules(cfg: OciConfig, occfg: Dict[str, Any],
                               client: httpx.AsyncClient) -> Optional[List[dict]]:
-    """The NSG's current INGRESS rules that carry OUR managed-marker
-    description (None if the NSG itself doesn't exist). ``client`` must
-    already be open — see :func:`_oci_request`."""
+    """ALL of the NSG's current INGRESS rules (None if the NSG doesn't exist).
+    ``client`` must already be open — see :func:`_oci_request`."""
     url = f"{_base_url(cfg)}/networkSecurityGroups/{occfg['nsg_id']}/securityRules"
     resp = await _oci_request(cfg, client, "GET", url)
     if resp.status_code == 404:
         return None
     if resp.status_code != 200:
         raise _http_error(cfg, "OCI GET security rules", resp)
-    rules = resp.json() or []
-    return [r for r in rules if r.get("direction") == "INGRESS"
-            and _MANAGED_MARKER in (r.get("description") or "")]
+    return [r for r in (resp.json() or []) if r.get("direction") == "INGRESS"]
+
+
+def _is_managed(rule: dict) -> bool:
+    return _MANAGED_MARKER in (rule.get("description") or "")
+
+
+async def _list_managed_rules(cfg: OciConfig, occfg: Dict[str, Any],
+                              client: httpx.AsyncClient) -> Optional[List[dict]]:
+    """The NSG's current INGRESS rules that carry OUR managed-marker
+    description (None if the NSG itself doesn't exist). ``client`` must
+    already be open — see :func:`_oci_request`.
+
+    Reconcile uses THIS (never :func:`_list_ingress_rules`) so a hand-made or
+    other-tool rule on the same NSG is never added to or removed from."""
+    rules = await _list_ingress_rules(cfg, occfg, client)
+    if rules is None:
+        return None
+    return [r for r in rules if _is_managed(r)]
+
+
+async def get_live_prefixes(cfg: OciConfig, occfg: Dict[str, Any],
+                            http: Optional[httpx.AsyncClient] = None) -> Optional[Dict[str, List[str]]]:
+    """What is ACTUALLY on the NSG right now, split by ownership:
+    ``{"managed": [...], "unmanaged": [...]}`` — or None if the NSG doesn't
+    exist yet.
+
+    Reconcile deliberately only ever touches rules carrying our marker, but
+    reporting only those made the setup screen look like it had failed to read
+    OCI at all: an operator who had created ingress rules by hand in the OCI
+    console saw "0 IP(s) live" against an NSG that plainly had rules. The
+    unmanaged prefixes are surfaced for VISIBILITY only — they are never
+    auto-imported into the local list, because adopting one would cause the
+    next apply to create a second, marker-tagged rule for the same CIDR."""
+    _require(occfg)
+    async with (http or httpx.AsyncClient(timeout=20.0)) as client:
+        rules = await _list_ingress_rules(cfg, occfg, client)
+    if rules is None:
+        return None
+    managed, unmanaged = [], []
+    for r in rules:
+        src = r.get("source")
+        if not src:
+            continue
+        (managed if _is_managed(r) else unmanaged).append(src)
+    return {"managed": sorted(set(managed)), "unmanaged": sorted(set(unmanaged))}
 
 
 async def get_allowlist(cfg: OciConfig, occfg: Dict[str, Any],

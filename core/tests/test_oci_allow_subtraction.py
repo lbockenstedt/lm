@@ -177,3 +177,34 @@ def test_no_block_path_is_an_exact_identity():
     res, rep = _sub(["10.0.0.0/24", "10.0.0.0/25"], [])
     assert res == ["10.0.0.0/24", "10.0.0.0/25"]
     assert not rep["truncated"]
+
+
+# ── operator entries must survive verbatim ───────────────────────────────────
+
+def test_untouched_entries_are_not_collapsed():
+    """Regression: the pushed prefixes are read back into the operator's entry
+    DB by merge_live_prefixes. Summarising 20 configured /32s into 6 generated
+    ranges would silently replace what they typed. Only prefixes that actually
+    had to be SPLIT may change shape."""
+    allow = [f"203.0.113.{i}/32" for i in range(1, 21)]
+    res, rep = _sub(allow, ["198.51.100.99"])  # block matches nothing
+    assert sorted(res) == sorted(allow)
+    assert rep["already_denied"] == ["198.51.100.99/32"]
+
+
+def test_blocking_an_allow_listed_host_just_drops_that_entry():
+    """The target-state case: a /32 allow list where an offending IP is one of
+    the allowed devices. Costs no fragmentation at all."""
+    allow = [f"203.0.113.{i}/32" for i in range(1, 21)]
+    res, rep = _sub(allow, ["203.0.113.7"])
+    assert len(res) == 19
+    assert "203.0.113.7/32" not in res
+    assert rep["removed"] == ["203.0.113.7/32"]
+
+
+def test_only_the_split_prefix_changes_others_verbatim():
+    res, _ = _sub(["203.0.113.0/24", "198.51.100.0/24", "192.0.2.0/24"],
+                  ["203.0.113.55"])
+    assert "198.51.100.0/24" in res, "unrelated entry must be untouched"
+    assert "192.0.2.0/24" in res
+    assert "203.0.113.0/24" not in res, "the split entry is replaced by fragments"

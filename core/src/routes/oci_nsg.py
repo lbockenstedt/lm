@@ -73,17 +73,26 @@ def register(app, hub, ctx):
         # don't track yet into the local DB (empty description). Persist
         # when something new was found.
         live = None
+        unmanaged = None
         warning = ""
         if cfg.get("nsg_id") and cfg.get("region"):
             try:
-                live = await _nsg.get_allowlist(_nsg.get_oci_config(hub), cfg)
-                merged, added = _nsg.merge_live_prefixes(cfg["entries"], live)
-                if added:
-                    cfg["entries"] = merged
-                    _save(cfg)
+                split = await _nsg.get_live_prefixes(_nsg.get_oci_config(hub), cfg)
+                if split is not None:
+                    live = split["managed"]
+                    unmanaged = split["unmanaged"]
+                    # Only OUR rules are folded into the local list. An
+                    # unmanaged rule is shown but never adopted — importing it
+                    # would make the next apply create a duplicate, tagged rule
+                    # for the same CIDR alongside the operator's own.
+                    merged, added = _nsg.merge_live_prefixes(cfg["entries"], live)
+                    if added:
+                        cfg["entries"] = merged
+                        _save(cfg)
             except Exception as e:  # noqa: BLE001
                 warning = str(e)
-        return {"config": cfg, "live_prefixes": live, "warning": warning}
+        return {"config": cfg, "live_prefixes": live,
+                "unmanaged_prefixes": unmanaged, "warning": warning}
 
     @app.post("/setup/oci-nsg")
     async def set_oci_nsg(request: Request):

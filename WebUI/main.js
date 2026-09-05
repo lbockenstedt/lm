@@ -11568,7 +11568,14 @@ async function loadOciNsg() {
             else if (Array.isArray(d.live_prefixes)) {
                 const localIps = (c.entries || []).map(e => e.ip);
                 const same = JSON.stringify(d.live_prefixes.slice().sort()) === JSON.stringify(localIps.slice().sort());
-                drift.textContent = `Live in OCI: ${d.live_prefixes.length} IP(s)` + (same ? ' — in sync' : ' — differs from local (Save & Apply to sync)');
+                let txt = `Live in OCI: ${d.live_prefixes.length} IP(s) managed by LM` + (same ? ' — in sync' : ' — differs from local (Save & Apply to sync)');
+                // Rules the operator created by hand carry no LM marker. They
+                // are shown so the screen reflects what is actually on the NSG
+                // (it previously reported 0 and looked like a failed read), but
+                // LM never edits or adopts them.
+                const un = Array.isArray(d.unmanaged_prefixes) ? d.unmanaged_prefixes : [];
+                if (un.length) txt += ` · plus ${un.length} pre-existing rule(s) not managed by LM (${un.slice(0, 4).join(', ')}${un.length > 4 ? '…' : ''}) — left untouched`;
+                drift.textContent = txt;
             } else drift.textContent = 'NSG not found yet — check the NSG OCID, or Save & Apply once it exists.';
         }
     } catch (e) { console.error('loadOciNsg failed', e); }
