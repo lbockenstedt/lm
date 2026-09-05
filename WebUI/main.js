@@ -1561,7 +1561,7 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'Diagnostics', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons'],
+    settings: ['General', 'User Access', 'Cloud', 'Tenant Config', 'Sync', 'Hub Status', 'Diagnostics', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-console', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs', 'logs-features'],
     setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'OS Updates'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
@@ -1598,9 +1598,11 @@ const VIEW_CHILDREN = {
         'Setup':       ['General', 'Central API', 'Central On-Prem API', 'Mist API', 'Proxmox', 'GitHub', 'Security', 'Notifications', 'Diagnostics'],
     },
     settings: {
-        // Azure gets a second-tier strip (SSO / NSG / Cloud NAC / Key Vault /
-        // NetBox SSO) — they share the one Entra app registration + cert.
-        'Azure': ['SSO', 'NSG', 'Cloud NAC', 'Key Vault', 'NetBox SSO'],
+        // Cloud gets a second-tier strip — Azure's items (SSO / NSG / Cloud NAC /
+        // Key Vault / NetBox SSO, which share the one Entra app registration +
+        // cert) plus OCI's (NSG today). Azure moved here from its own top-level
+        // primary tab; new cloud providers are added as additional entries.
+        'Cloud': ['Azure SSO', 'Azure NSG', 'Azure Cloud NAC', 'Azure Key Vault', 'Azure NetBox SSO', 'OCI NSG'],
     },
 };
 
@@ -4364,7 +4366,7 @@ async function loadSecurityData() {
           ${(() => {
             const ar = d.allow_rule || {};
             return `<div class="col-span-2 md:col-span-4 text-[11px] text-slate-500 bg-slate-50 rounded px-2 py-1.5 leading-relaxed">
-              <b>Allow must be a lower number than Deny; both below 1000 (Azure's default allow on 443).</b> The <b>allow rule</b> (name <b>${escapeHtml(ar.name || 'lm-allowlist')}</b>) is also editable under <b>Settings → Azure → NSG</b> — saving here updates <b>both</b> priorities (allow → Azure NSG, deny → threat monitor).
+              <b>Allow must be a lower number than Deny; both below 1000 (Azure's default allow on 443).</b> The <b>allow rule</b> (name <b>${escapeHtml(ar.name || 'lm-allowlist')}</b>) is also editable under <b>Settings → Cloud → Azure NSG</b> — saving here updates <b>both</b> priorities (allow → Azure NSG, deny → threat monitor).
               <span id="sec-prio-check"></span>
             </div>`;
           })()}
@@ -4405,7 +4407,7 @@ async function loadSecurityData() {
         <button onclick="securityNeverRemove('${escapeHtml(e.ip)}')" class="text-[11px] text-slate-500 hover:text-red-600 font-medium shrink-0">Remove</button></div>`;
     const neverTile = `<div class="${card}">
         <h3 class="text-sm font-bold text-green-600 mb-1">Trusted IPs — never auto-blocked <span class="text-slate-500">AND allowed through the Azure NSG</span> <span class="text-slate-400 font-normal">(${trusted.length})</span></h3>
-        <p class="text-[11px] text-slate-400 mb-2">Shared list — the same one edited under <b>Settings → Azure → NSG</b>. Adding an entry here also opens an <b>allow rule</b> hole in the NSG when NSG management is enabled${allowOn ? '' : ' (currently disabled — entries still exempt from auto-block)'}.</p>
+        <p class="text-[11px] text-slate-400 mb-2">Shared list — the same one edited under <b>Settings → Cloud → Azure NSG</b>. Adding an entry here also opens an <b>allow rule</b> hole in the NSG when NSG management is enabled${allowOn ? '' : ' (currently disabled — entries still exempt from auto-block)'}.</p>
         <div class="flex gap-2 mb-2">
           <input id="sec-never-ip" placeholder="IP or CIDR" class="flex-1 border border-slate-300 rounded px-2 py-1 text-xs font-mono">
           <input id="sec-never-desc" placeholder="description (optional)" class="flex-1 border border-slate-300 rounded px-2 py-1 text-xs">
@@ -6143,15 +6145,19 @@ function _renderSettingsSection(subMenu) {
         return;
     }
 
-    // Azure — one primary tab; the second-tier strip (VIEW_CHILDREN.settings.Azure)
-    // provides SSO / NSG / Cloud NAC, which share the SSO app registration + cert.
-    // Render the active child's tile (currentSubChild) into the settings content.
-    if (subMenu === 'Azure') {
-        const child = ['SSO', 'NSG', 'Cloud NAC', 'Key Vault', 'NetBox SSO'].includes(currentSubChild) ? currentSubChild : 'SSO';
-        if (child === 'NSG') _renderSettingsAzureNsgTile(content);
-        else if (child === 'Cloud NAC') _renderSettingsCloudNacTile(content);
-        else if (child === 'Key Vault') _renderSettingsKeyVaultTile(content);
-        else if (child === 'NetBox SSO') _renderSettingsNetboxSsoTile(content);
+    // Cloud — one primary tab; the second-tier strip (VIEW_CHILDREN.settings.Cloud)
+    // groups every cloud-provider integration. Azure's items share the SSO app
+    // registration + cert; OCI's use its own API signing key (Settings → Cloud →
+    // OCI NSG). Render the active child's tile (currentSubChild) into the
+    // settings content.
+    if (subMenu === 'Cloud') {
+        const kids = ['Azure SSO', 'Azure NSG', 'Azure Cloud NAC', 'Azure Key Vault', 'Azure NetBox SSO', 'OCI NSG'];
+        const child = kids.includes(currentSubChild) ? currentSubChild : 'Azure SSO';
+        if (child === 'Azure NSG') _renderSettingsAzureNsgTile(content);
+        else if (child === 'Azure Cloud NAC') _renderSettingsCloudNacTile(content);
+        else if (child === 'Azure Key Vault') _renderSettingsKeyVaultTile(content);
+        else if (child === 'Azure NetBox SSO') _renderSettingsNetboxSsoTile(content);
+        else if (child === 'OCI NSG') _renderSettingsOciNsgTile(content);
         else _renderSettingsSsoTile(content);
         return;
     }
@@ -11082,7 +11088,7 @@ async function loadNetboxSso() {
         const pill = document.getElementById('nbsso-state-pill');
         if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
         const ow = document.getElementById('nbsso-oidc-warn');
-        if (ow) { if (!oidc.configured) { ow.textContent = 'Hub Entra SSO is not configured yet — set it up in Settings → Azure → SSO first (NetBox reuses its tenant + client ID).'; ow.classList.remove('hidden'); } else ow.classList.add('hidden'); }
+        if (ow) { if (!oidc.configured) { ow.textContent = 'Hub Entra SSO is not configured yet — set it up in Settings → Cloud → Azure SSO first (NetBox reuses its tenant + client ID).'; ow.classList.remove('hidden'); } else ow.classList.add('hidden'); }
         const tw = document.getElementById('nbsso-target-warn');
         if (tw) { if (!(d.netbox_server_agents || []).length) { tw.textContent = 'No connected netbox-server host found. The agent that deployed the "NetBox Server" role must be online to receive the SSO config (it will be queued until then).'; tw.classList.remove('hidden'); } else tw.classList.add('hidden'); }
     } catch (e) { console.error('loadNetboxSso failed', e); }
@@ -11292,6 +11298,162 @@ async function testAzureNsg() {
         const r = await setupFetch('/setup/azure-nsg/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _azureNsgFormConfig() }) });
         const d = await r.json().catch(() => ({}));
         if (d.status === 'ok') { showToast(`Connected — NSG has ${d.rules} rule(s).`, 'success'); if (msg) msg.textContent = `OK: ${d.location || ''}, ${d.rules} rules`; }
+        else { showToast('Test failed: ' + (d.message || 'error'), 'error'); if (msg) msg.textContent = d.message || 'failed'; }
+    } catch (e) { showToast('Test failed: ' + (e.message || e), 'error'); if (msg) msg.textContent = String(e.message || e); }
+}
+
+// ── Settings → Cloud → OCI NSG (allow-list) ─────────────────────────────────
+// OCI parity for Azure NSG above: manages a SET of allow rules (one per CIDR —
+// OCI security rules carry a single source, unlike Azure's prefix-list rule) on
+// an OCI Network Security Group. Auth is a plain OCI API signing key (tenancy +
+// user OCID + fingerprint + private key), not the Entra app cert. NOTE: OCI NSGs
+// support ALLOW rules only — there is no deny/priority to reconcile, so this tile
+// has no counterpart to the Azure tile's Allow/Deny priority fields.
+function _renderSettingsOciNsgTile(content) {
+    const { card, inputCls, labelCls, btnCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card}">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">OCI NSG — IP allow-list</h3>
+                <span id="oci-nsg-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+            </div>
+            <p class="text-xs text-slate-400 mb-3">Manages a set of <b>allow rules</b> (one per IP/CIDR, tagged so a reconcile only touches rules it created) on an Oracle Cloud Infrastructure <b>Network Security Group</b>. Auth is a dedicated <b>OCI API signing key</b> — create one for a user with an IAM policy granting <code>manage security-lists</code> (or <code>use network-security-groups</code>) in the NSG's compartment, then paste its details below. <b>OCI NSGs allow-only</b> — traffic not matched by a rule is denied by default, so there is no deny/priority to configure here (unlike Azure NSG).</p>
+            <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="oci-nsg-enabled" class="w-4 h-4 text-green-600 rounded">Enable NSG management (Save applies the IP list to OCI)</label>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="space-y-1"><label class="${labelCls}">Tenancy OCID</label><input id="oci-nsg-tenancy" type="text" placeholder="ocid1.tenancy.oc1..…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">User OCID</label><input id="oci-nsg-user" type="text" placeholder="ocid1.user.oc1..…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Key fingerprint</label><input id="oci-nsg-fp" type="text" placeholder="aa:bb:cc:…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Private key path <span class="text-slate-400 normal-case font-normal">(or kv:&lt;name&gt;)</span></label><input id="oci-nsg-key" type="text" placeholder="/etc/lm/oci/api-key.pem or kv:oci-api-key" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Region</label><input id="oci-nsg-region" type="text" placeholder="us-ashburn-1" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">NSG OCID</label><input id="oci-nsg-id" type="text" placeholder="ocid1.networksecuritygroup.oc1..…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Destination port</label><input id="oci-nsg-dport" type="text" placeholder="443" class="${inputCls}"></div>
+            </div>
+            <div class="mt-3 space-y-1">
+                <div class="flex items-center justify-between">
+                    <label class="${labelCls}">Allow-list — IP / CIDR + description <span class="text-slate-400 normal-case font-normal">(descriptions are kept in LM only — OCI has no per-IP note)</span></label>
+                    <span id="oci-nsg-drift" class="text-[11px] text-slate-400"></span>
+                </div>
+                <div class="flex gap-2 mb-2">
+                    <input id="oci-nsg-add-ip" type="text" placeholder="1.2.3.4 or 10.0.0.0/24" class="${inputCls} font-mono text-xs flex-1">
+                    <input id="oci-nsg-add-desc" type="text" placeholder="description (optional)" class="${inputCls} text-xs flex-1">
+                    <button type="button" onclick="addOciNsgEntry()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">+ Add</button>
+                </div>
+                <div id="oci-nsg-entries" class="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-72 overflow-y-auto"></div>
+            </div>
+            <div class="mt-4 flex items-center justify-between gap-3">
+                <span id="oci-nsg-msg" class="text-xs text-slate-400"></span>
+                <div class="flex items-center gap-3">
+                    <button onclick="testOciNsg()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Test connection</button>
+                    <button onclick="saveOciNsg()" id="oci-nsg-save-btn" class="${btnCls}">Save &amp; Apply</button>
+                </div>
+            </div>
+        </div>`;
+    loadOciNsg();
+}
+
+// Local allow-list DB: [{ip, description}]. IPs go to OCI; descriptions stay in
+// LM. This is a SEPARATE list from Azure's (Settings → Cloud → Azure NSG /
+// Security → Trusted IPs) — OCI has no deny/threat-monitor tie-in, so unlike
+// the Azure list it is not the never-block source.
+function renderOciNsgEntries() {
+    const box = document.getElementById('oci-nsg-entries');
+    if (!box) return;
+    const es = window._ociNsgEntries || [];
+    box.innerHTML = es.length ? es.map((e, i) => `
+      <div class="flex items-center gap-2 px-2 py-1">
+        <span class="font-mono text-xs text-slate-700 w-44 shrink-0 truncate" title="${escapeHtml(e.ip)}">${escapeHtml(e.ip)}</span>
+        <input data-oci-nsg-desc="${i}" value="${escapeHtml(e.description || '')}" placeholder="description" class="flex-1 bg-white border border-slate-200 rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-green-400">
+        <button type="button" onclick="removeOciNsgEntry(${i})" title="Remove" class="text-red-500 hover:text-red-700 text-xs font-bold px-1">✕</button>
+      </div>`).join('')
+      : '<div class="text-xs text-slate-400 italic px-2 py-2">No IPs yet. Add one above, or hit Test/Save to import what\'s already on the NSG.</div>';
+}
+function _syncOciNsgEntriesFromDom() {
+    (window._ociNsgEntries || []).forEach((e, i) => {
+        const el = document.querySelector(`[data-oci-nsg-desc="${i}"]`);
+        if (el) e.description = el.value;
+    });
+}
+window.addOciNsgEntry = function () {
+    _syncOciNsgEntriesFromDom();
+    const ipEl = document.getElementById('oci-nsg-add-ip'), dEl = document.getElementById('oci-nsg-add-desc');
+    const ip = (ipEl?.value || '').trim();
+    if (!ip) { if (typeof showToast === 'function') showToast('Enter an IP or CIDR', 'info'); return; }
+    window._ociNsgEntries = window._ociNsgEntries || [];
+    window._ociNsgEntries.push({ ip, description: (dEl?.value || '').trim() });
+    if (ipEl) ipEl.value = ''; if (dEl) dEl.value = '';
+    renderOciNsgEntries();
+};
+window.removeOciNsgEntry = function (i) {
+    _syncOciNsgEntriesFromDom();
+    (window._ociNsgEntries || []).splice(i, 1);
+    renderOciNsgEntries();
+};
+
+function _ociNsgFormConfig() {
+    const v = id => (document.getElementById(id)?.value || '').trim();
+    _syncOciNsgEntriesFromDom();
+    return {
+        enabled: !!document.getElementById('oci-nsg-enabled')?.checked,
+        tenancy_ocid: v('oci-nsg-tenancy'), user_ocid: v('oci-nsg-user'),
+        fingerprint: v('oci-nsg-fp'), key_path: v('oci-nsg-key'),
+        region: v('oci-nsg-region'), nsg_id: v('oci-nsg-id'),
+        dest_port: v('oci-nsg-dport') || '443',
+        entries: (window._ociNsgEntries || []).map(e => ({ ip: e.ip, description: e.description || '' })),
+    };
+}
+
+async function loadOciNsg() {
+    try {
+        const r = await setupFetch('/setup/oci-nsg');
+        const d = await r.json().catch(() => ({}));
+        const c = d.config || {};
+        const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val == null ? '' : val; };
+        const chk = (id, val) => { const el = document.getElementById(id); if (el) el.checked = !!val; };
+        chk('oci-nsg-enabled', c.enabled);
+        set('oci-nsg-tenancy', c.tenancy_ocid); set('oci-nsg-user', c.user_ocid);
+        set('oci-nsg-fp', c.fingerprint); set('oci-nsg-key', c.key_path);
+        set('oci-nsg-region', c.region); set('oci-nsg-id', c.nsg_id);
+        set('oci-nsg-dport', c.dest_port || '443');
+        window._ociNsgEntries = (c.entries || []).map(e => ({ ip: e.ip, description: e.description || '' }));
+        renderOciNsgEntries();
+        const pill = document.getElementById('oci-nsg-state-pill');
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        const drift = document.getElementById('oci-nsg-drift');
+        if (drift) {
+            if (d.warning) drift.textContent = 'Live read failed: ' + d.warning;
+            else if (Array.isArray(d.live_prefixes)) {
+                const localIps = (c.entries || []).map(e => e.ip);
+                const same = JSON.stringify(d.live_prefixes.slice().sort()) === JSON.stringify(localIps.slice().sort());
+                drift.textContent = `Live in OCI: ${d.live_prefixes.length} IP(s)` + (same ? ' — in sync' : ' — differs from local (Save & Apply to sync)');
+            } else drift.textContent = 'NSG not found yet — check the NSG OCID, or Save & Apply once it exists.';
+        }
+    } catch (e) { console.error('loadOciNsg failed', e); }
+}
+
+async function saveOciNsg() {
+    const btn = document.getElementById('oci-nsg-save-btn'); const msg = document.getElementById('oci-nsg-msg');
+    const cfg = _ociNsgFormConfig();
+    if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
+    try {
+        const d = await apiJson('/setup/oci-nsg', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: cfg }) });
+        if (d && d.warning) { showToast('Saved, but OCI apply failed: ' + d.warning, 'error'); if (msg) msg.textContent = d.warning; }
+        else if (d) {
+            const a = d.applied;
+            const detail = a ? `${(a.prefixes || []).length} IP(s) applied (+${a.added || 0}/-${a.removed || 0})` : 'saved (not applied)';
+            showToast('OCI NSG: ' + detail, 'success'); if (msg) msg.textContent = detail;
+        } else { showToast('Saved', 'success'); }
+        loadOciNsg();
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Save & Apply'; } }
+}
+
+async function testOciNsg() {
+    const msg = document.getElementById('oci-nsg-msg');
+    if (msg) msg.textContent = 'Testing…';
+    try {
+        const r = await setupFetch('/setup/oci-nsg/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _ociNsgFormConfig() }) });
+        const d = await r.json().catch(() => ({}));
+        if (d.status === 'ok') { showToast(`Connected — NSG is ${d.lifecycle_state || 'reachable'}.`, 'success'); if (msg) msg.textContent = `OK: ${d.lifecycle_state || ''}`; }
         else { showToast('Test failed: ' + (d.message || 'error'), 'error'); if (msg) msg.textContent = d.message || 'failed'; }
     } catch (e) { showToast('Test failed: ' + (e.message || e), 'error'); if (msg) msg.textContent = String(e.message || e); }
 }
