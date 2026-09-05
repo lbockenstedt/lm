@@ -64,6 +64,71 @@ class OciAuthConfig:
                     and self.key_path and self.region)
 
 
+# Curated list of OCI commercial ("OC1" realm) region identifiers + a
+# human-friendly label, so the WebUI can offer a dropdown instead of a
+# freeform text field (a mistyped/mis-cased region silently produces a
+# hostname that can't resolve — e.g. "iaas.US-Ashburn-1.oraclecloud.com" —
+# which surfaces as an opaque DNS error far from the actual mistake). There is
+# no unauthenticated OCI API to fetch this list (ListRegions requires a
+# working signing key + a bootstrap region — chicken-and-egg for a NEW
+# integration), so it is hand-maintained here; government/sovereign-realm
+# regions are out of scope. Shared by ``routes/oci_nsg.py`` and
+# ``routes/oci_vault.py`` (one dropdown source for both integrations).
+# Source: https://docs.oracle.com/en-us/iaas/Content/General/Concepts/regions.htm
+OCI_REGIONS = [
+    ("us-ashburn-1", "US East (Ashburn)"),
+    ("us-phoenix-1", "US West (Phoenix)"),
+    ("us-sanjose-1", "US West (San Jose)"),
+    ("us-chicago-1", "US Midwest (Chicago)"),
+    ("ca-toronto-1", "Canada Southeast (Toronto)"),
+    ("ca-montreal-1", "Canada Southeast (Montreal)"),
+    ("mx-queretaro-1", "Mexico Central (Queretaro)"),
+    ("mx-monterrey-1", "Mexico Northeast (Monterrey)"),
+    ("sa-saopaulo-1", "Brazil East (Sao Paulo)"),
+    ("sa-vinhedo-1", "Brazil Southeast (Vinhedo)"),
+    ("sa-santiago-1", "Chile Central (Santiago)"),
+    ("sa-valparaiso-1", "Chile West (Valparaiso)"),
+    ("sa-bogota-1", "Colombia Central (Bogota)"),
+    ("uk-london-1", "UK South (London)"),
+    ("uk-cardiff-1", "UK West (Cardiff/Newport)"),
+    ("eu-frankfurt-1", "Germany Central (Frankfurt)"),
+    ("eu-milan-1", "Italy Northwest (Milan)"),
+    ("eu-paris-1", "France Central (Paris)"),
+    ("eu-marseille-1", "France South (Marseille)"),
+    ("eu-zurich-1", "Switzerland North (Zurich)"),
+    ("eu-amsterdam-1", "Netherlands Northwest (Amsterdam)"),
+    ("eu-madrid-1", "Spain Central (Madrid)"),
+    ("eu-stockholm-1", "Sweden Central (Stockholm)"),
+    ("eu-jovanovac-1", "Serbia Central (Jovanovac)"),
+    ("il-jerusalem-1", "Israel Central (Jerusalem)"),
+    ("me-riyadh-1", "Saudi Arabia Central (Riyadh)"),
+    ("me-jeddah-1", "Saudi Arabia West (Jeddah)"),
+    ("me-abudhabi-1", "UAE Central (Abu Dhabi)"),
+    ("me-dubai-1", "UAE East (Dubai)"),
+    ("af-johannesburg-1", "South Africa Central (Johannesburg)"),
+    ("ap-hyderabad-1", "India South (Hyderabad)"),
+    ("ap-mumbai-1", "India West (Mumbai)"),
+    ("ap-tokyo-1", "Japan East (Tokyo)"),
+    ("ap-osaka-1", "Japan Central (Osaka)"),
+    ("ap-seoul-1", "South Korea Central (Seoul)"),
+    ("ap-chuncheon-1", "South Korea North (Chuncheon)"),
+    ("ap-sydney-1", "Australia East (Sydney)"),
+    ("ap-melbourne-1", "Australia Southeast (Melbourne)"),
+    ("ap-singapore-1", "Singapore"),
+    ("ap-singapore-2", "Singapore West"),
+    ("ap-batam-1", "Indonesia (Batam)"),
+]
+
+
+def list_regions() -> list:
+    """The curated OCI region catalog as ``[{id, label}, ...]`` for the WebUI
+    dropdown, sorted by label for a stable, readable picker."""
+    return sorted(
+        ({"id": rid, "label": f"{label} ({rid})"} for rid, label in OCI_REGIONS),
+        key=lambda r: r["label"],
+    )
+
+
 # ── request signing (Signature Version 1) ───────────────────────────────────
 # Only the subset needed here: plain GET / POST with a JSON body, no
 # query-string params, no on-behalf-of token.

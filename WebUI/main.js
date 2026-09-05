@@ -6793,7 +6793,7 @@ function _onSaTenantFilterChange() {
 let _osuPoll = null;
 
 function _renderSetupOsUpdatesTile(content) {
-    const { card, btnCls, btnSecCls } = _SETUP_CLS;
+    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
         <div class="${card} space-y-4">
             <div class="flex items-center justify-between">
@@ -6807,6 +6807,18 @@ function _renderSetupOsUpdatesTile(content) {
                 Nodes are updated <b>one at a time</b>, and the <b>hub goes last</b> (updating it restarts this page).
                 This is separate from LM code updates.
             </div>
+            <div class="flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
+                <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="osu-autocheck-enabled" class="w-4 h-4 text-green-600 rounded">Auto-check the fleet</label>
+                <div class="space-y-1">
+                    <label class="${labelCls}">Every</label>
+                    <div class="flex items-center gap-1">
+                        <input type="number" id="osu-autocheck-hours" min="1" step="1" value="6" class="${inputCls} w-20">
+                        <span class="text-xs text-slate-500">hour(s)</span>
+                    </div>
+                </div>
+                <button onclick="osuSaveAutoCheck()" class="${btnSecCls}">Save</button>
+                <span id="osu-autocheck-status" class="text-xs text-slate-400"></span>
+            </div>
             <div class="flex flex-wrap items-center gap-2">
                 <button onclick="osuCheck()" class="${btnSecCls}">↻ Check for updates</button>
                 <button id="osu-apply" onclick="osuApply()" class="${btnCls}">Approve &amp; deploy all</button>
@@ -6815,7 +6827,32 @@ function _renderSetupOsUpdatesTile(content) {
             <div id="osu-body"><p class="text-xs text-slate-400 italic">Loading…</p></div>
         </div>`;
     osuLoad();
+    osuLoadAutoCheck();
 }
+
+async function osuLoadAutoCheck() {
+    try {
+        const cfg = await apiJson('/api/os-updates/auto-check');
+        const chk = document.getElementById('osu-autocheck-enabled');
+        const hrs = document.getElementById('osu-autocheck-hours');
+        if (chk) chk.checked = cfg.enabled !== false;
+        if (hrs) hrs.value = cfg.interval_hours ?? 6;
+    } catch (e) { /* best-effort — the manual Check button still works */ }
+}
+
+window.osuSaveAutoCheck = async function () {
+    const enabled = !!document.getElementById('osu-autocheck-enabled')?.checked;
+    const hours = Math.max(1, parseInt(document.getElementById('osu-autocheck-hours')?.value, 10) || 6);
+    const st = document.getElementById('osu-autocheck-status');
+    try {
+        const cfg = await apiJson('/api/os-updates/auto-check', {
+            method: 'POST', body: JSON.stringify({ enabled, interval_hours: hours }),
+        });
+        document.getElementById('osu-autocheck-hours').value = cfg.interval_hours;
+        showToast(cfg.enabled ? `Auto-check enabled — every ${cfg.interval_hours}h.` : 'Auto-check disabled.', 'success');
+        if (st) { st.textContent = 'saved'; setTimeout(() => { if (st) st.textContent = ''; }, 2000); }
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+};
 
 async function osuLoad() {
     try { _osuRender(await apiJson('/api/os-updates')); }

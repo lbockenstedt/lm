@@ -18,6 +18,7 @@ every named logger between DEBUG and INFO.
 import logging
 import logging.handlers
 import os
+import re
 import sys
 import threading
 import time
@@ -53,17 +54,31 @@ _DEFAULT_LOG_CAP_INTERVAL = 30.0
 # 4xx/5xx responses still log (real failures), and all other requests log. In
 # debug mode the filter is bypassed so every access line shows. Tunable via env
 # (comma-separated); set LM_QUIET_ACCESS_PATHS="" to disable filtering.
-_DEFAULT_QUIET_ACCESS_PATHS = "/api/health,/api/status"
+#
+# NOTE: the hub's actual public liveness endpoint is the bare ``/status``
+# (see routes/setup.py) plus ``/api/hub/health`` — there never was an
+# ``/api/health`` or ``/api/status`` route, so the original default here never
+# matched anything and every liveness poll (e.g. an external LB hitting
+# ``/status`` once a second) logged unfiltered.
+_DEFAULT_QUIET_ACCESS_PATHS = "/status,/api/hub/health"
+
+# Matches uvicorn's access-log request line: `"<METHOD> <PATH> HTTP/x.y" <code>`.
+_ACCESS_LINE_RE = re.compile(r'"[A-Z]+\s+(?P<path>\S+)\s+HTTP/\d\S*"\s+(?P<status>\d{3})')
 
 
 class _QuietSuccessAccessFilter(logging.Filter):
     """Drop uvicorn.access lines for noisy liveness endpoints, but only on
     success (status < 400) — failing probes still log so troubleshooting isn't
-    lost. Bypassed entirely when the uvicorn.access logger is at DEBUG."""
+    lost. Bypassed entirely when the uvicorn.access logger is at DEBUG.
+
+    Matches the request path EXACTLY (query string stripped), not a raw
+    substring of the whole log line — a substring match on e.g. ``/status``
+    would also silence unrelated-but-similarly-named routes such as
+    ``/api/le/status`` or ``/setup/repo-sync/status``."""
 
     def __init__(self, quiet_paths: tuple) -> None:
         super().__init__()
-        self._quiet_paths = quiet_paths
+        self._quiet_paths = set(quiet_paths)
 
     def filter(self, record: logging.LogRecord) -> bool:
         # In debug mode show every access line.
@@ -73,14 +88,13 @@ class _QuietSuccessAccessFilter(logging.Filter):
             msg = record.getMessage()
         except Exception:  # noqa: BLE001 — never block a record on a format error
             return True
-        if not any(p in msg for p in self._quiet_paths):
+        m = _ACCESS_LINE_RE.search(msg)
+        if not m:
             return True
-        # Status code is the trailing token in uvicorn's access format:
-        # `'<client> - "<request_line>" <status_code>'. Keep non-2xx/3xx.
-        tail = msg.rsplit(" ", 1)[-1] if " " in msg else ""
-        if tail.isdigit() and int(tail) < 400:
-            return False
-        return True
+        path = m.group("path").split("?", 1)[0]
+        if path not in self._quiet_paths:
+            return True
+        return int(m.group("status")) >= 400
 
 
 def _quiet_access_paths() -> tuple:

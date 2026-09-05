@@ -9726,6 +9726,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # runs on a never-configured hub (the loop otherwise defaults disabled).
         self.seed_staleness_sweep_defaults()
         staleness_sweep_task = asyncio.create_task(self.run_staleness_sweep_loop())
+        # Fleet OS-updates auto-check (HubOsUpdatesMixin): every interval_hours
+        # (default 6, WebUI-configurable in Setup → OS Updates) re-probes every
+        # spoke/agent/hub for pending apt updates — the scheduled twin of the
+        # "Check for updates" button, so the panel's status stays fresh without
+        # an operator remembering to click it. Never applies anything itself.
+        # Seed enabled=True defaults once so a never-configured hub still gets
+        # the auto-check out of the box. See run_os_updates_check_loop.
+        self.seed_os_updates_check_defaults()
+        os_updates_check_task = asyncio.create_task(self.run_os_updates_check_loop())
         # Hub self-backup (SelfBackupMixin): on a schedule (backup_interval_hours)
         # takes a rotated, optionally Fernet-encrypted tarball of hub state +
         # the key/secret stores under <state_dir>/self-backup/, and optionally
