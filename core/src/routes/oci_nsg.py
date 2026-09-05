@@ -112,6 +112,17 @@ def register(app, hub, ctx):
         _save(clean)
         applied = None
         warning = ""
+        # Pre-flight the credentials BEFORE attempting any OCI call. A wrong
+        # OCID shape or a private key that doesn't match the fingerprint is
+        # detectable locally, and saying so at save time is far better than
+        # letting it surface as an opaque 401 from the apply below (or worse,
+        # staying silent because the apply was skipped for another reason).
+        try:
+            _problems = oci_auth.diagnose_auth(_nsg.get_oci_config(hub))
+        except Exception:  # noqa: BLE001 — diagnosis must never block a save
+            _problems = []
+        if _problems:
+            warning = " ".join(_problems)
         if clean["enabled"] and clean.get("nsg_id") and clean.get("region"):
             try:
                 applied = await _nsg.reconcile_allowlist(

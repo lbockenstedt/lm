@@ -4420,7 +4420,7 @@ async function loadSecurityData() {
       <div class="${card}">
         <div class="flex items-center justify-between mb-3">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Policy</h3>
-          <button onclick="securityReconcile()" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium" title="Push the current blocked-IP set onto the Azure NSG deny rule now">Sync NSG now</button>
+          <button onclick="securityReconcile()" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium" title="Push the trusted allow-list and the blocked-IP set onto the active cloud NSG (Azure or OCI) now">Sync NSG now</button>
         </div>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
           <label class="flex items-center gap-2 text-slate-600 col-span-2"><input type="checkbox" id="sec-enabled" ${c.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Detection enabled (log invalid attempts)</label>

@@ -91,11 +91,11 @@ def register(app, hub, ctx):
 
     @app.post("/api/security/reconcile")
     async def security_reconcile(request: Request):
-        """Force a push of the current blocked-IP set onto the Azure NSG deny
-        rule (e.g. after enabling auto-block or editing Azure config)."""
+        """Force a push of BOTH managed NSG rule sets onto whichever cloud
+        provider is active: the trusted/ALLOW list (Azure and OCI) and the
+        blocked-IP DENY rule (Azure only — OCI NSGs are allow-only)."""
         _guard(request)
-        hub.threat_monitor._nsg_dirty = True
-        return await hub.threat_monitor.reconcile_nsg()
+        return await hub.threat_monitor.sync_nsg_now()
 
     @app.post("/api/security/geo")
     async def security_geo(request: Request):

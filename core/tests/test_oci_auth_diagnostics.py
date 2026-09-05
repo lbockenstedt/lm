@@ -173,3 +173,42 @@ def test_diagnosis_failure_never_masks_original_error(keyfile, mod, monkeypatch)
     err = mod._http_error(_cfg(keyfile), "OCI GET thing",
                           httpx.Response(401, text=_401))
     assert "HTTP 401" in str(err)
+
+
+# ── OCID type naming (the Identity Domain trap) ──────────────────────────────
+
+@pytest.mark.parametrize("value,expected", [
+    ("ocid1.domain.oc1..aaa", "an Identity Domain OCID"),
+    ("ocid1.compartment.oc1..aaa", "a compartment OCID"),
+    ("ocid1.user.oc1..aaa", "a user OCID"),
+    ("ocid1.group.oc1..aaa", "a group OCID"),
+    ("ocid1.vcn.oc1..aaa", "a VCN OCID"),
+    ("ocid1.widget.oc1..aaa", "an OCID of type 'widget'"),
+    ("not-an-ocid", "not an OCID"),
+])
+def test_describe_ocid_names_the_type(value, expected):
+    assert oci_auth._describe_ocid(value) == expected
+
+
+def test_identity_domain_ocid_in_tenancy_field_is_named(keyfile):
+    """The console's Domains page shows an OCID that reads like an
+    account-level id but is NOT the tenancy — the reported real-world paste."""
+    problems = oci_auth.diagnose_auth(
+        _cfg(keyfile, tenancy_ocid="ocid1.domain.oc1..aaaaaaaao56muy"))
+    assert len(problems) == 1
+    assert "Identity Domain OCID" in problems[0]
+    assert "ocid1.tenancy." in problems[0]
+
+
+def test_wrong_ocid_message_points_at_config_file_preview(keyfile):
+    """Tell the operator where to get all four fields consistently."""
+    problems = oci_auth.diagnose_auth(
+        _cfg(keyfile, tenancy_ocid="ocid1.domain.oc1..aaa"))
+    assert "Configuration File Preview" in problems[0]
+
+
+def test_domain_ocid_in_user_field_is_named(keyfile):
+    problems = oci_auth.diagnose_auth(
+        _cfg(keyfile, user_ocid="ocid1.domain.oc1..aaa"))
+    assert any("Identity Domain OCID" in p for p in problems)
+    assert any("ocid1.user." in p for p in problems)

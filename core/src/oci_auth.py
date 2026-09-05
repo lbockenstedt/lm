@@ -276,6 +276,37 @@ def public_key_fingerprint(key_path: str) -> str:
 
 _OCID_RE = re.compile(r"^ocid1\.[a-z0-9]+\.[a-z0-9-]*\.[a-z0-9-]*\.?[a-zA-Z0-9._-]*$")
 _FINGERPRINT_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){15}$")
+_OCID_TYPE_RE = re.compile(r"^ocid1\.([a-z0-9]+)\.")
+
+# Friendly names for the OCID types that actually get pasted into the wrong
+# field. 'domain' is the big one: the newer OCI console puts Identity Domains
+# front-and-centre and their detail page shows an OCID that reads like an
+# account-level identifier — but it is NOT the tenancy.
+_OCID_TYPE_NAMES = {
+    "domain": "an Identity Domain OCID",
+    "compartment": "a compartment OCID",
+    "user": "a user OCID",
+    "tenancy": "a tenancy OCID",
+    "group": "a group OCID",
+    "policy": "a policy OCID",
+    "vcn": "a VCN OCID",
+    "networksecuritygroup": "a network security group OCID",
+}
+
+# Where to get the four signing fields, consistently, in one place.
+_CONFIG_PREVIEW_HINT = (
+    "The reliable source for all of these is the API key's Configuration File "
+    "Preview: OCI Console → Profile → User settings → API keys → Add API key, "
+    "which prints tenancy/user/fingerprint/region together and guaranteed "
+    "consistent. For the tenancy OCID alone: Profile → Tenancy.")
+
+
+def _describe_ocid(value: str) -> str:
+    """Name the resource type an OCID actually refers to, for error messages."""
+    m = _OCID_TYPE_RE.match(value)
+    if not m:
+        return "not an OCID"
+    return _OCID_TYPE_NAMES.get(m.group(1), f"an OCID of type '{m.group(1)}'")
 
 
 def diagnose_auth(cfg: OciAuthConfig) -> list:
@@ -289,14 +320,16 @@ def diagnose_auth(cfg: OciAuthConfig) -> list:
 
     if cfg.tenancy_ocid and not cfg.tenancy_ocid.startswith("ocid1.tenancy."):
         problems.append(
-            f"Tenancy OCID should start with 'ocid1.tenancy.' — got "
-            f"'{cfg.tenancy_ocid[:32]}…'. It's easy to paste the compartment "
-            f"or user OCID here by mistake.")
+            f"The Tenancy OCID is wrong: you pasted "
+            f"{_describe_ocid(cfg.tenancy_ocid)}, but this field needs the "
+            f"tenancy OCID (it starts with 'ocid1.tenancy.'). Got "
+            f"'{cfg.tenancy_ocid[:40]}…'. {_CONFIG_PREVIEW_HINT}")
     if cfg.user_ocid and not cfg.user_ocid.startswith("ocid1.user."):
         problems.append(
-            f"User OCID should start with 'ocid1.user.' — got "
-            f"'{cfg.user_ocid[:32]}…'. This must be the OCID of the USER the "
-            f"API key belongs to, not a group or compartment.")
+            f"The User OCID is wrong: you pasted "
+            f"{_describe_ocid(cfg.user_ocid)}, but this field needs the OCID of "
+            f"the USER the API key belongs to (it starts with 'ocid1.user.'). "
+            f"Got '{cfg.user_ocid[:40]}…'. {_CONFIG_PREVIEW_HINT}")
     if cfg.tenancy_ocid and cfg.tenancy_ocid == cfg.user_ocid:
         problems.append("Tenancy OCID and User OCID are identical — they must "
                         "be two different values.")

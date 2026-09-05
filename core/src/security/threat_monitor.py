@@ -659,6 +659,38 @@ class ThreatMonitor:
             logger.warning("threat allow-rule reconcile (OCI) failed: %s", e)
             return {"status": "ERROR", "message": str(e)}
 
+    async def sync_nsg_now(self) -> Dict[str, Any]:
+        """Operator-triggered "Sync NSG now": push BOTH managed rule sets onto
+        whichever cloud NSG provider is active.
+
+        The two halves are asymmetric by design:
+
+        * the ALLOW / trusted list applies to Azure AND OCI
+          (:meth:`reconcile_allow`, which dispatches on the active provider);
+        * the DENY / blocked-IP rule is Azure-only, because an OCI network
+          security group has no deny construct (:meth:`reconcile_nsg`).
+
+        Previously this endpoint ran only the deny half, so an operator on OCI
+        clicking Sync got "Azure NSG not configured" and nothing was pushed at
+        all — even though their trusted list was perfectly syncable. Running
+        both and merging the outcomes makes the button meaningful on either
+        provider, and honest about which half a given provider supports."""
+        allow = await self.reconcile_allow()
+        self._nsg_dirty = True
+        deny = await self.reconcile_nsg()
+
+        parts = [f"allow list: {allow.get('message') or allow.get('status', '').lower()}",
+                 f"blocked IPs: {deny.get('message') or deny.get('status', '').lower()}"]
+        # ERROR anywhere dominates; otherwise OK if either half actually pushed.
+        if "ERROR" in (allow.get("status"), deny.get("status")):
+            status = "ERROR"
+        elif "OK" in (allow.get("status"), deny.get("status")):
+            status = "OK"
+        else:
+            status = "SKIPPED"
+        return {"status": status, "message": " · ".join(parts),
+                "allow": allow, "deny": deny}
+
     async def reconcile_nsg(self) -> Dict[str, Any]:
         """Push the current blocked-IP set onto the Azure NSG deny rule (one
         prefix per IP). No-op unless auto_block is ON and azure_nsg is configured.
@@ -684,6 +716,21 @@ class ThreatMonitor:
         self._nsg_dirty = False
         if not self._cfg.get("auto_block"):
             return {"status": "SKIPPED", "message": "auto-block off (log-only)"}
+        # Deny rules are an Azure-only capability. If OCI is the active
+        # provider, say THAT — reporting "Azure NSG not configured" invites the
+        # operator to go configure Azure, when in fact they have deliberately
+        # chosen OCI and blocking is log-only there by design.
+        try:
+            import cloud_nsg
+            _provider = cloud_nsg.active_provider(self.hub)
+        except Exception:  # noqa: BLE001
+            _provider = None
+        if _provider == "oci":
+            return {"status": "SKIPPED",
+                    "message": "OCI is the active NSG provider — OCI network "
+                               "security groups support ALLOW rules only, so "
+                               "auto-block stays log-only. Blocked IPs are "
+                               "still recorded and enforced in-app."}
         try:
             import azure_nsg as _nsg
             from security.oidc import get_oidc_config
@@ -692,7 +739,9 @@ class ThreatMonitor:
         gc = self.hub.state.system_state.get("global_config", {}) or {}
         azcfg = dict(gc.get("azure_nsg", {}) or {})
         if not all(azcfg.get(k) for k in ("subscription_id", "resource_group", "nsg_name")):
-            return {"status": "SKIPPED", "message": "Azure NSG not configured — logged only"}
+            return {"status": "SKIPPED",
+                    "message": "no cloud NSG provider is configured — blocked "
+                               "IPs are logged and enforced in-app only"}
         deny_cfg = dict(azcfg)
         new_name = self._cfg.get("block_rule_name") or "lm-threat-block"
         deny_cfg["rule_name"] = new_name
