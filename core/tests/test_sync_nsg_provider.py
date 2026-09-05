@@ -58,7 +58,8 @@ async def test_oci_active_does_not_report_azure_not_configured():
     res = await tm.reconcile_nsg()
     assert "Azure NSG not configured" not in res["message"]
     assert "OCI" in res["message"]
-    assert "ALLOW rules only" in res["message"]
+    assert "no deny rule" in res["message"]
+    assert "allow list" in res["message"], "must point at how blocking IS done"
 
 
 @pytest.mark.asyncio
@@ -148,4 +149,4 @@ async def test_sync_sets_dirty_so_deny_half_is_not_short_circuited():
 async def test_azure_active_reaches_azure_path_not_oci_message():
     tm = _monitor(AZURE_ON)
     res = await tm.reconcile_nsg()
-    assert "ALLOW rules only" not in res.get("message", "")
+    assert "no deny rule" not in res.get("message", "")

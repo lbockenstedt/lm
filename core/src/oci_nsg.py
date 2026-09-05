@@ -111,6 +111,94 @@ def entries_to_ips(entries) -> List[str]:
     return [e["ip"] for e in (entries or []) if isinstance(e, dict) and e.get("ip")]
 
 
+# An OCI NSG allows 120 security rules by default. Cap the post-subtraction
+# prefix count well below that so a fragmenting exclusion can't consume the
+# whole budget (or get partially applied when OCI rejects the overflow).
+MAX_ALLOW_PREFIXES = 90
+
+
+def subtract_blocked(allow_cidrs, blocked_ips, *,
+                     max_prefixes: int = MAX_ALLOW_PREFIXES) -> tuple:
+    """Remove ``blocked_ips`` from ``allow_cidrs``, returning
+    ``(result_cidrs, report)``.
+
+    OCI network security groups are ALLOW-only — there is no deny rule to add
+    (this is true of OCI security lists too, so it is not an NSG-specific
+    limitation). The only way to stop traffic that a broad allow rule currently
+    admits is therefore to stop allowing it: punch the offending address out of
+    the allow set and push the complement. Azure keeps using a real deny rule;
+    this is the OCI path to the same net effect.
+
+    A blocked IP that is not inside any allow prefix needs no action at all —
+    OCI's default-deny already drops it — so it is reported as
+    ``already_denied`` rather than treated as a failure.
+
+    Exclusion fragments CIDRs: taking one /32 out of a /16 yields 16 prefixes.
+    If the result would exceed ``max_prefixes`` the subtraction is ABANDONED
+    and the original allow list is returned unchanged, with ``truncated`` set.
+    Half-applying it would silently leave some blocked traffic permitted while
+    also blowing the rule budget — refusing loudly is the safer failure."""
+    nets = []
+    for c in (allow_cidrs or []):
+        try:
+            nets.append(ipaddress.ip_network(str(c).strip(), strict=False))
+        except ValueError as e:
+            raise OciNsgError(f"invalid allow CIDR {c!r}: {e}")
+
+    blocks = []
+    for b in (blocked_ips or []):
+        try:
+            blocks.append(ipaddress.ip_network(str(b).strip(), strict=False))
+        except ValueError:
+            continue  # a malformed block record must not break the whole push
+
+    report = {"removed": [], "already_denied": [], "truncated": False,
+              "before": len(nets), "after": len(nets), "projected": len(nets)}
+    if not nets or not blocks:
+        report["already_denied"] = [str(b) for b in blocks]
+        return [str(n) for n in nets], report
+
+    for b in blocks:
+        # Only prefixes of the SAME family can contain this address.
+        hit = False
+        out = []
+        for n in nets:
+            if n.version != b.version:
+                out.append(n)
+                continue
+            if b.subnet_of(n):
+                # Equal networks yield [] here — the allow entry disappears.
+                out.extend(n.address_exclude(b))
+                hit = True
+            elif n.subnet_of(b):
+                hit = True  # the whole allow prefix is inside the blocked range
+            else:
+                out.append(n)
+        if hit:
+            nets = out
+            report["removed"].append(str(b))
+        else:
+            report["already_denied"].append(str(b))
+
+    v4 = ipaddress.collapse_addresses([n for n in nets if n.version == 4])
+    v6 = ipaddress.collapse_addresses([n for n in nets if n.version == 6])
+    result = sorted({str(n) for n in list(v4) + list(v6)})
+    report["after"] = len(result)
+    report["projected"] = len(result)
+
+    if len(result) > max_prefixes:
+        # Report the projected cost so the caller can explain WHY it refused —
+        # "blocking 4 IPs would need 116 allow prefixes (cap 90)" is actionable;
+        # a bare "too fragmented" is not.
+        report["truncated"] = True
+        report["after"] = report["before"]
+        report["removed"] = []
+        return [str(n) for n in (
+            [ipaddress.ip_network(str(c).strip(), strict=False)
+             for c in (allow_cidrs or [])])], report
+    return result, report
+
+
 def merge_live_prefixes(entries: List[Dict[str, str]], live_prefixes) -> tuple:
     """Fold the prefixes CURRENTLY managed on the OCI NSG into the local DB: any
     live IP not already tracked is added with an empty description. Returns

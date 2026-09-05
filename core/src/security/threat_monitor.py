@@ -637,9 +637,14 @@ class ThreatMonitor:
     async def _reconcile_allow_oci(self, occfg: Dict[str, Any]) -> Dict[str, Any]:
         """Push the shared trusted list onto the OCI NSG's managed ALLOW rules
         (the same rules the OCI NSG tile manages). No-op unless oci_nsg is
-        configured (``enabled`` is already checked by the caller). OCI has no
-        deny/block equivalent — see the module docstring — so this is the
-        ENTIRE OCI integration; there is no OCI counterpart to reconcile_nsg."""
+        configured (``enabled`` is already checked by the caller).
+
+        OCI has no deny rule, so when auto-block is ON the blocked set is
+        SUBTRACTED from the allow prefixes here — punching the offending
+        addresses out of what we permit is the only way to stop traffic an
+        allow rule currently admits. Azure expresses the same intent with a
+        real deny rule (:meth:`reconcile_nsg`); this is the OCI path to the
+        same net effect, so the two providers stay behaviourally equivalent."""
         try:
             import oci_nsg as _nsg
         except Exception as e:  # noqa: BLE001
@@ -650,11 +655,36 @@ class ThreatMonitor:
         # azure_nsg.entries — see the module docstring) — entries are not
         # duplicated per-provider.
         ips = _nsg.entries_to_ips(self._shared_entries())
+        block_note = ""
+        report = None
+        if self._cfg.get("auto_block") and self._blocks:
+            try:
+                ips, report = _nsg.subtract_blocked(ips, sorted(self._blocks.keys()))
+            except Exception as e:  # noqa: BLE001 — never lose the allow push
+                logger.warning("oci allow-list subtraction failed: %s", e)
+                report = None
+            if report and report.get("truncated"):
+                block_note = (
+                    f" — auto-block NOT applied: excluding "
+                    f"{len(self._blocks)} blocked IP(s) would need "
+                    f"{report['projected']} allow prefixes (cap "
+                    f"{_nsg.MAX_ALLOW_PREFIXES}, OCI NSG limit 120). This "
+                    f"happens when the allow list is broad: removing one "
+                    f"address from 0.0.0.0/0 alone costs 32 prefixes. Narrow "
+                    f"the trusted list, or block at the host/firewall layer.")
+                sec_log.warning("THREAT OCI auto-block skipped (fragmentation): "
+                                "%d block(s) would need %d prefixes",
+                                len(self._blocks), report["projected"])
+            elif report and report.get("removed"):
+                block_note = (f" — {len(report['removed'])} blocked IP(s) "
+                              f"excluded from the allow list")
         try:
             res = await _nsg.reconcile_allowlist(_nsg.get_oci_config(self.hub), occfg, ips)
             sec_log.info("THREAT NSG allow-rule reconciled: %d IP(s) on OCI NSG %s",
                          len(ips), occfg.get("nsg_id"))
-            return {"status": "SUCCESS", "count": len(ips), **res}
+            return {"status": "SUCCESS", "count": len(ips),
+                    "message": f"{len(ips)} allow prefix(es) applied to OCI NSG{block_note}",
+                    "block_report": report, **res}
         except Exception as e:  # noqa: BLE001
             logger.warning("threat allow-rule reconcile (OCI) failed: %s", e)
             return {"status": "ERROR", "message": str(e)}
@@ -728,9 +758,9 @@ class ThreatMonitor:
         if _provider == "oci":
             return {"status": "SKIPPED",
                     "message": "OCI is the active NSG provider — OCI network "
-                               "security groups support ALLOW rules only, so "
-                               "auto-block stays log-only. Blocked IPs are "
-                               "still recorded and enforced in-app."}
+                               "security groups have no deny rule, so blocked "
+                               "IPs are enforced by excluding them from the "
+                               "allow list instead (see the allow-list result)."}
         try:
             import azure_nsg as _nsg
             from security.oidc import get_oidc_config
