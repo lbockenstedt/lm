@@ -595,27 +595,22 @@ class ThreatMonitor:
             pass  # no loop (e.g. under sync test)
 
     async def reconcile_allow(self) -> Dict[str, Any]:
-        """Push the shared trusted list onto every ENABLED cloud NSG allow rule
-        (Azure NSG and/or OCI NSG — see the module docstring). The trusted list
-        itself is never gated on either provider's ``enabled`` (so never-block
-        always works); only the reach-to-the-cloud-API step is. Returns a
-        per-provider breakdown under ``providers``; when exactly one provider
-        ran, its fields are ALSO surfaced at the top level (back-compat for
-        callers that only ever knew about Azure)."""
-        gc = self.hub.state.system_state.get("global_config", {}) or {}
-        results: Dict[str, Any] = {}
-        azcfg = dict(gc.get("azure_nsg", {}) or {})
-        if azcfg.get("enabled"):
-            results["azure"] = await self._reconcile_allow_azure(azcfg)
-        occfg = dict(gc.get("oci_nsg", {}) or {})
-        if occfg.get("enabled"):
-            results["oci"] = await self._reconcile_allow_oci(occfg)
-        if not results:
+        """Push the shared trusted list onto the ONE currently-ENABLED cloud
+        NSG allow rule (Azure NSG XOR OCI NSG — see ``cloud_nsg.py``, the
+        generic dispatcher this delegates to, and this module's docstring).
+        The trusted list itself is never gated on the provider's ``enabled``
+        (so never-block always works); only the reach-to-the-cloud-API step
+        is. Azure/OCI can never both be active — ``cloud_nsg.active_provider``
+        is the single source of truth for which one is — so the result is
+        always a single flat shape, never a per-provider breakdown."""
+        import cloud_nsg
+        provider = cloud_nsg.active_provider(self.hub)
+        if provider is None:
             return {"status": "SKIPPED", "message": "no cloud NSG provider enabled — list saved, not applied"}
-        if len(results) == 1:
-            return {**next(iter(results.values())), "providers": results}
-        overall_ok = all(r.get("status") == "SUCCESS" for r in results.values())
-        return {"status": "SUCCESS" if overall_ok else "PARTIAL", "providers": results}
+        gc = self.hub.state.system_state.get("global_config", {}) or {}
+        if provider == "azure":
+            return await self._reconcile_allow_azure(dict(gc.get("azure_nsg", {}) or {}))
+        return await self._reconcile_allow_oci(dict(gc.get("oci_nsg", {}) or {}))
 
     async def _reconcile_allow_azure(self, azcfg: Dict[str, Any]) -> Dict[str, Any]:
         """Push the shared trusted list onto the Azure NSG ALLOW rule (the same

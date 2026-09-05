@@ -77,6 +77,11 @@ def register(app, hub, ctx):
         except _nsg.OciNsgError as e:
             raise HTTPException(status_code=400, detail=str(e))
         clean["enabled"] = bool(clean.get("enabled", False))
+        if clean["enabled"]:
+            import cloud_nsg
+            if cloud_nsg.other_provider_enabled(hub, "oci"):
+                raise HTTPException(status_code=400,
+                                    detail="Azure NSG is currently enabled — disable it before enabling OCI NSG")
         _save(clean)
         applied = None
         warning = ""

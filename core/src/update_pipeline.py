@@ -1207,6 +1207,22 @@ class UpdatePipelineMixin:
         """
         Performs a git-based update. Returns True only if the update actually
         changed the local version (verified post-update).
+
+        OPTION 1 FIX: force-aligns the checkout to origin/<branch> via
+        ``git fetch`` + ``git checkout -B <branch> FETCH_HEAD`` instead of
+        ``git pull --rebase``. A rebase only ever replays whatever commits are
+        already on the CURRENTLY checked-out local branch — it never switches
+        branches. If the on-disk checkout was ever cloned/checked-out onto a
+        different branch than the one configured here (e.g. still on `main`
+        from the original clone, while `global_branch` is set to `lrb`), a
+        rebase against `origin/<branch>` can exit 0 while leaving HEAD on the
+        wrong branch entirely, or leave a tree that doesn't match
+        origin/<branch> if the two histories have diverged. ``checkout -B``
+        always discards whatever is locally checked out and recreates the
+        local branch to point exactly at the fetched remote tip, so the
+        on-disk tree is guaranteed to match origin/<branch> byte-for-byte
+        (this is a pull-only deploy checkout — no local commits are expected
+        or preserved).
         """
         try:
             await asyncio.create_subprocess_shell(f"git config --global --add safe.directory {hub_root}")
@@ -1214,7 +1230,8 @@ class UpdatePipelineMixin:
             update_cmd = (
                 f"cd {hub_root} && "
                 f"git remote set-url origin {hub_repo} && "
-                f"git pull --rebase --autostash origin {branch}"
+                f"git fetch origin {branch} && "
+                f"git checkout -B {branch} FETCH_HEAD"
             )
 
             process = await asyncio.create_subprocess_shell(
@@ -1228,7 +1245,7 @@ class UpdatePipelineMixin:
             out_msg = stdout.decode().strip()
 
             if process.returncode != 0:
-                logger.error(f"Hub git pull failed (rc={process.returncode}): {err_msg}")
+                logger.error(f"Hub git fetch/checkout failed (rc={process.returncode}): {err_msg}")
                 # SELF-HEAL: a pull-only deploy checkout can wedge in a conflicted
                 # / half-rebased state (unmerged files — classically the CI VERSION
                 # bump colliding with a racing pull), which then blocks EVERY future
@@ -1250,7 +1267,7 @@ class UpdatePipelineMixin:
                         logger.warning("Hub reset --hard ran but HEAD still != remote.")
                 return False
 
-            # CRITICAL: verify the pull actually advanced HEAD to the remote tip.
+            # CRITICAL: verify the checkout actually landed HEAD on the remote tip.
             # Post the v.01 VERSION reset a VERSION-equality check is always true
             # (both ends v.01), so it can no longer confirm a real update —
             # compare commit SHAs instead, falling back to VERSION only if git
@@ -1259,12 +1276,29 @@ class UpdatePipelineMixin:
             remote_commit = await self.get_remote_commit(hub_repo, branch)
             if new_local_commit != "unknown" and remote_commit != "unknown":
                 if new_local_commit == remote_commit:
-                    logger.info(f"Hub successfully updated via git to {new_local_commit[:10]}.")
+                    logger.info(f"Hub successfully updated via git to {new_local_commit[:10]} (branch {branch}).")
                     return True
+                # OPTION 2 FIX: this used to just log-and-return-False here,
+                # leaving the checkout permanently stuck out of sync with
+                # origin/<branch> — the self-heal reset --hard was previously
+                # gated on a git-reported ERROR (nonzero rc / conflict string),
+                # so a "successful" checkout that still didn't land on the
+                # right tree (e.g. a stale FETCH_HEAD, a racing push between
+                # fetch and this comparison, or any other clean-exit mismatch)
+                # was never retried. Widen the self-heal to also cover this
+                # clean-but-mismatched case, not just hard git errors.
                 logger.warning(
-                    f"Git pull returned success but HEAD {new_local_commit[:10]} "
-                    f"!= remote tip {remote_commit[:10]}. Update verification failed."
+                    f"Git checkout returned success but HEAD {new_local_commit[:10]} "
+                    f"!= remote tip {remote_commit[:10]} for branch {branch} — "
+                    f"self-healing via reset --hard."
                 )
+                if await self._git_reset_hard_to_remote(hub_root, branch):
+                    healed_commit = await self.get_local_commit()
+                    if healed_commit != "unknown" and healed_commit == remote_commit:
+                        logger.info("Hub self-healed to %s via reset --hard.", healed_commit[:10])
+                        return True
+                    logger.warning("Hub reset --hard ran but HEAD still != remote.")
+                logger.warning("Update verification failed even after self-heal.")
                 return False
             # Fallback (git unavailable): legacy VERSION equality.
             new_local_v = await self.get_local_version()
