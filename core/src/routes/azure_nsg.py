@@ -90,6 +90,11 @@ def register(app, hub, ctx):
         except _nsg.AzureNsgError as e:
             raise HTTPException(status_code=400, detail=str(e))
         clean["enabled"] = bool(clean.get("enabled", False))
+        if clean["enabled"]:
+            import cloud_nsg
+            if cloud_nsg.other_provider_enabled(hub, "azure"):
+                raise HTTPException(status_code=400,
+                                    detail="OCI NSG is currently enabled — disable it before enabling Azure NSG")
         # Enforce the allow/deny priority ordering guard when the ALLOW priority is
         # being changed: validate the incoming allow against the CURRENT
         # threat-monitor deny priority (allow < deny < 1000). Reject before persist.

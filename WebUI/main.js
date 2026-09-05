@@ -608,6 +608,10 @@ let currentSubView = 'General';
 // within the current primary (e.g. 'VMs' under 'VM Server'). '' when the
 // current primary has no children.
 let currentSubChild = '';
+// For a three-tier nav (Settings → Cloud → Azure/OCI → SSO/NSG/…), the active
+// grandchild tab within the current child. '' when the current child has no
+// grandchildren (see VIEW_GRANDCHILDREN).
+let currentSubGrandchild = '';
 // Configured firewalls (Setup → Firewalls). The Firewalls page no longer has a
 // single-firewall selector — it aggregates every firewall's rules/NAT/etc. into
 // one table, so each item carries its source firewall id (_fwId) + name.
@@ -1598,13 +1602,32 @@ const VIEW_CHILDREN = {
         'Setup':       ['General', 'Central API', 'Central On-Prem API', 'Mist API', 'Proxmox', 'GitHub', 'Security', 'Notifications', 'Diagnostics'],
     },
     settings: {
-        // Cloud gets a second-tier strip — Azure's items (SSO / NSG / Cloud NAC /
-        // Key Vault / NetBox SSO, which share the one Entra app registration +
-        // cert) plus OCI's (NSG today). Azure moved here from its own top-level
-        // primary tab; new cloud providers are added as additional entries.
-        'Cloud': ['Azure SSO', 'Azure NSG', 'Azure Cloud NAC', 'Azure Key Vault', 'Azure NetBox SSO', 'OCI NSG'],
+        // Cloud gets a second-tier strip — one tab per cloud provider (Azure,
+        // OCI); each provider's own integrations are a THIRD tier (see
+        // VIEW_GRANDCHILDREN below) so e.g. Azure's SSO/NSG/Cloud NAC/Key Vault/
+        // NetBox SSO tiles nest under 'Azure', not flattened alongside OCI's.
+        'Cloud': ['Azure', 'OCI'],
     },
 };
+
+// Third-tier grandchild tabs (#top-nav-tertiary), nested under a VIEW_CHILDREN
+// child. Only Settings → Cloud uses this today: each provider's own set of
+// integrations (Azure shares its SSO app registration + cert across every
+// item below; OCI uses its own API signing key).
+const VIEW_GRANDCHILDREN = {
+    settings: {
+        Cloud: {
+            'Azure': ['SSO', 'NSG', 'Cloud NAC', 'Key Vault', 'NetBox SSO'],
+            'OCI': ['NSG', 'Vault'],
+        },
+    },
+};
+
+// First grandchild of a child, or '' if the child has no grandchildren.
+function _csDefaultGrandchild(viewId, primary, child) {
+    const gkids = ((VIEW_GRANDCHILDREN[viewId] || {})[primary] || {})[child];
+    return (gkids && gkids.length) ? gkids[0] : '';
+}
 
 // First child of a primary, or '' if the primary/module has no children.
 function _csDefaultChild(viewId, primary) {
@@ -3609,6 +3632,7 @@ async function setView(viewId) {
 
     currentSubView = (VIEW_SUBMENUS[currentView] || ['General'])[0];
     currentSubChild = _csDefaultChild(currentView, currentSubView);
+    currentSubGrandchild = _csDefaultGrandchild(currentView, currentSubView, currentSubChild);
 
     document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
     const navItem = document.getElementById(`nav-${isClass ? viewId : currentView}`);
@@ -3685,10 +3709,12 @@ async function setSubView(subMenu) {
     // ticker so it doesn't keep fetching /api/le/inflight in the background.
     // (loadLEData restarts them when the tab is re-entered.)
     if (currentView !== 'le') clearLeInflightPollers();
-    // Reset the child for the newly-selected primary (two-tier nav). For
-    // non-cs modules _csDefaultChild returns '' and the secondary strip is
-    // hidden by renderSecondaryNav.
+    // Reset the child (and grandchild, three-tier nav) for the newly-selected
+    // primary. For non-cs/non-Cloud modules _csDefaultChild returns '' and the
+    // secondary strip is hidden by renderSecondaryNav (same for the tertiary
+    // strip when the child has no grandchildren).
     currentSubChild = _csDefaultChild(currentView, subMenu);
+    currentSubGrandchild = _csDefaultGrandchild(currentView, subMenu, currentSubChild);
 
     // Update active state in top-nav
     document.querySelectorAll('#top-nav .sub-nav-item').forEach(el => {
@@ -3756,9 +3782,12 @@ function renderTopNav(viewId) {
 }
 
 // Render the second-tier child strip (#top-nav-secondary) for the active
-// primary of a two-tier module (cs). Populates it with the primary's children
-// and highlights currentSubChild; hides the strip entirely for primaries/modules
-// without children so non-cs modules and childless cs primaries are unaffected.
+// primary of a two-tier module (cs) — or the middle tier of a three-tier one
+// (settings/Cloud). Populates it with the primary's children and highlights
+// currentSubChild; hides the strip entirely for primaries/modules without
+// children so non-cs modules and childless cs primaries are unaffected. Also
+// keeps the tertiary (grandchild) strip in sync, since it depends on the
+// active child.
 function renderSecondaryNav(viewId) {
     const sec = document.getElementById('top-nav-secondary');
     if (!sec) return;
@@ -3766,6 +3795,7 @@ function renderSecondaryNav(viewId) {
     if (!kids || !kids.length) {
         sec.classList.add('hidden');
         sec.innerHTML = '';
+        renderTertiaryNav(viewId);
         return;
     }
     const activeChild = currentSubChild || kids[0];
@@ -3782,25 +3812,64 @@ function renderSecondaryNav(viewId) {
     if (ksSlot && typeof window.csKillSwitchMountChip === 'function') {
         window.csKillSwitchMountChip('cs-ks-chip');
     }
+    renderTertiaryNav(viewId);
 }
 
-// Select a child tab within the current cs primary (two-tier nav). Sets
-// currentSubChild, updates the secondary strip's active state, and dispatches
-// the child renderer via loadCSData.
+// Render the third-tier grandchild strip (#top-nav-tertiary), nested under the
+// active child (e.g. Settings → Cloud → Azure → SSO/NSG/…). Hides the strip
+// when the active child has no grandchildren (VIEW_GRANDCHILDREN) — every
+// module except Settings → Cloud today.
+function renderTertiaryNav(viewId) {
+    const ter = document.getElementById('top-nav-tertiary');
+    if (!ter) return;
+    const gkids = ((VIEW_GRANDCHILDREN[viewId] || {})[currentSubView] || {})[currentSubChild] || null;
+    if (!gkids || !gkids.length) {
+        ter.classList.add('hidden');
+        ter.innerHTML = '';
+        return;
+    }
+    const activeGrandchild = currentSubGrandchild || gkids[0];
+    ter.innerHTML = gkids.map((gchild) =>
+        `<div class="sub-nav-item ${gchild === activeGrandchild ? 'active' : ''} px-2 py-1 cursor-pointer select-none" data-subgrandchild="${gchild}" onclick="setSubGrandchild('${gchild.replace(/'/g, "\\'")}')">${gchild}</div>`
+    ).join('');
+    ter.classList.remove('hidden');
+}
+
+// Select a child tab within the current primary (two-tier nav, e.g. cs) — or
+// the middle tier of a three-tier nav (settings/Cloud, e.g. 'Azure'/'OCI').
+// Sets currentSubChild, resets currentSubGrandchild to the new child's first
+// grandchild, updates the secondary strip's active state + the tertiary strip,
+// and dispatches the child renderer.
 async function setSubChild(child) {
     currentSubChild = child;
+    currentSubGrandchild = _csDefaultGrandchild(currentView, currentSubView, child);
     document.querySelectorAll('#top-nav-secondary .sub-nav-item').forEach(el => {
         el.classList.toggle('active', el.dataset.subchild === child);
     });
+    renderTertiaryNav(currentView);
     if (currentView === 'cs') {
         await loadCSData(currentSubView, child);
     } else if (currentView === 'settings') {
-        // Re-render the current settings primary (e.g. Azure) — it reads
-        // currentSubChild to pick the right tile.
+        // Re-render the current settings primary (e.g. Cloud) — it reads
+        // currentSubChild/currentSubGrandchild to pick the right provider + tile.
         _renderSettingsSection(currentSubView);
     }
 }
 window.setSubChild = setSubChild;
+
+// Select a grandchild tab within the current child (three-tier nav, e.g.
+// Settings → Cloud → Azure → 'NSG'). Sets currentSubGrandchild, updates the
+// tertiary strip's active state, and re-renders the settings tile.
+function setSubGrandchild(gchild) {
+    currentSubGrandchild = gchild;
+    document.querySelectorAll('#top-nav-tertiary .sub-nav-item').forEach(el => {
+        el.classList.toggle('active', el.dataset.subgrandchild === gchild);
+    });
+    if (currentView === 'settings') {
+        _renderSettingsSection(currentSubView);
+    }
+}
+window.setSubGrandchild = setSubGrandchild;
 
 function renderView(viewId) {
     const vp = document.getElementById('viewport');
@@ -4105,7 +4174,7 @@ function _viewTemplate(viewId) {
             return `<div class="space-y-4">
   <div>
     <h2 class="text-xl font-bold text-slate-800">Credential Vault</h2>
-    <p class="text-sm text-slate-500">Per-tenant secret locker backed by Azure Key Vault. Each bucket is unlocked with its own pass-phrase — your role decides which buckets you can reach, the pass-phrase decrypts the values. Revealed secrets are shown once and never cached.</p>
+    <p class="text-sm text-slate-500">Per-tenant secret locker backed by Key Vault. Each bucket is unlocked with its own pass-phrase — your role decides which buckets you can reach, the pass-phrase decrypts the values. Revealed secrets are shown once and never cached.</p>
   </div>
   <div id="credvault-content"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
 </div>`;
@@ -4366,7 +4435,7 @@ async function loadSecurityData() {
           ${(() => {
             const ar = d.allow_rule || {};
             return `<div class="col-span-2 md:col-span-4 text-[11px] text-slate-500 bg-slate-50 rounded px-2 py-1.5 leading-relaxed">
-              <b>Allow must be a lower number than Deny; both below 1000 (Azure's default allow on 443).</b> The <b>allow rule</b> (name <b>${escapeHtml(ar.name || 'lm-allowlist')}</b>) is also editable under <b>Settings → Cloud → Azure NSG</b> — saving here updates <b>both</b> priorities (allow → Azure NSG, deny → threat monitor).
+              <b>Allow must be a lower number than Deny; both below 1000 (Azure's default allow on 443).</b> The <b>allow rule</b> (name <b>${escapeHtml(ar.name || 'lm-allowlist')}</b>) is also editable under <b>Settings → Cloud → Azure → NSG</b> — saving here updates <b>both</b> priorities (allow → Azure NSG, deny → threat monitor).
               <span id="sec-prio-check"></span>
             </div>`;
           })()}
@@ -4407,7 +4476,7 @@ async function loadSecurityData() {
         <button onclick="securityNeverRemove('${escapeHtml(e.ip)}')" class="text-[11px] text-slate-500 hover:text-red-600 font-medium shrink-0">Remove</button></div>`;
     const neverTile = `<div class="${card}">
         <h3 class="text-sm font-bold text-green-600 mb-1">Trusted IPs — never auto-blocked <span class="text-slate-500">AND allowed through the Azure NSG</span> <span class="text-slate-400 font-normal">(${trusted.length})</span></h3>
-        <p class="text-[11px] text-slate-400 mb-2">Shared list — the same one edited under <b>Settings → Cloud → Azure NSG</b>. Adding an entry here also opens an <b>allow rule</b> hole in the NSG when NSG management is enabled${allowOn ? '' : ' (currently disabled — entries still exempt from auto-block)'}.</p>
+        <p class="text-[11px] text-slate-400 mb-2">Shared list — the same one edited under <b>Settings → Cloud → Azure → NSG</b>. Adding an entry here also opens an <b>allow rule</b> hole in the NSG when NSG management is enabled${allowOn ? '' : ' (currently disabled — entries still exempt from auto-block)'}.</p>
         <div class="flex gap-2 mb-2">
           <input id="sec-never-ip" placeholder="IP or CIDR" class="flex-1 border border-slate-300 rounded px-2 py-1 text-xs font-mono">
           <input id="sec-never-desc" placeholder="description (optional)" class="flex-1 border border-slate-300 rounded px-2 py-1 text-xs">
@@ -4983,7 +5052,7 @@ function _cvRenderShell() {
     const opts = _cvBuckets.map(b =>
         `<option value="${escapeHtml(b.bucket)}"${b.bucket === _cvCurrentBucket ? ' selected' : ''}>${escapeHtml(_cvBucketLabel(b))}${b.has_psk ? '' : ' (no pass-phrase)'}</option>`).join('');
     const storageHint = _cvVaultAvailable ? '' : `
-      <div class="text-xs px-3 py-2 rounded-md bg-amber-50 text-amber-700 border border-amber-200">Azure Key Vault is not configured — secrets are stored locally (encrypted in hub state). Configure a vault under Setup → Azure → Key Vault to store them there instead.</div>`;
+      <div class="text-xs px-3 py-2 rounded-md bg-amber-50 text-amber-700 border border-amber-200">No Key Vault is configured — secrets are stored locally (encrypted in hub state). Configure a vault under Setup → Cloud → Azure → Key Vault or Setup → Cloud → OCI → Vault to store them there instead.</div>`;
     host.innerHTML = `
       <div class="hpe-card rounded-lg p-5 shadow-sm space-y-4">
         ${storageHint}
@@ -6146,19 +6215,23 @@ function _renderSettingsSection(subMenu) {
     }
 
     // Cloud — one primary tab; the second-tier strip (VIEW_CHILDREN.settings.Cloud)
-    // groups every cloud-provider integration. Azure's items share the SSO app
-    // registration + cert; OCI's use its own API signing key (Settings → Cloud →
-    // OCI NSG). Render the active child's tile (currentSubChild) into the
-    // settings content.
+    // is one tab per cloud provider (Azure, OCI), each with its own THIRD tier
+    // of integrations (VIEW_GRANDCHILDREN.settings.Cloud) — currentSubChild is
+    // the provider, currentSubGrandchild is the specific tile.
     if (subMenu === 'Cloud') {
-        const kids = ['Azure SSO', 'Azure NSG', 'Azure Cloud NAC', 'Azure Key Vault', 'Azure NetBox SSO', 'OCI NSG'];
-        const child = kids.includes(currentSubChild) ? currentSubChild : 'Azure SSO';
-        if (child === 'Azure NSG') _renderSettingsAzureNsgTile(content);
-        else if (child === 'Azure Cloud NAC') _renderSettingsCloudNacTile(content);
-        else if (child === 'Azure Key Vault') _renderSettingsKeyVaultTile(content);
-        else if (child === 'Azure NetBox SSO') _renderSettingsNetboxSsoTile(content);
-        else if (child === 'OCI NSG') _renderSettingsOciNsgTile(content);
-        else _renderSettingsSsoTile(content);
+        const provider = ['Azure', 'OCI'].includes(currentSubChild) ? currentSubChild : 'Azure';
+        const gkids = (VIEW_GRANDCHILDREN.settings.Cloud[provider] || []);
+        const tile = gkids.includes(currentSubGrandchild) ? currentSubGrandchild : gkids[0];
+        if (provider === 'Azure') {
+            if (tile === 'NSG') _renderSettingsAzureNsgTile(content);
+            else if (tile === 'Cloud NAC') _renderSettingsCloudNacTile(content);
+            else if (tile === 'Key Vault') _renderSettingsKeyVaultTile(content);
+            else if (tile === 'NetBox SSO') _renderSettingsNetboxSsoTile(content);
+            else _renderSettingsSsoTile(content);
+        } else {  // OCI
+            if (tile === 'Vault') _renderSettingsOciVaultTile(content);
+            else _renderSettingsOciNsgTile(content);
+        }
         return;
     }
 
@@ -11088,7 +11161,7 @@ async function loadNetboxSso() {
         const pill = document.getElementById('nbsso-state-pill');
         if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
         const ow = document.getElementById('nbsso-oidc-warn');
-        if (ow) { if (!oidc.configured) { ow.textContent = 'Hub Entra SSO is not configured yet — set it up in Settings → Cloud → Azure SSO first (NetBox reuses its tenant + client ID).'; ow.classList.remove('hidden'); } else ow.classList.add('hidden'); }
+        if (ow) { if (!oidc.configured) { ow.textContent = 'Hub Entra SSO is not configured yet — set it up in Settings → Cloud → Azure → SSO first (NetBox reuses its tenant + client ID).'; ow.classList.remove('hidden'); } else ow.classList.add('hidden'); }
         const tw = document.getElementById('nbsso-target-warn');
         if (tw) { if (!(d.netbox_server_agents || []).length) { tw.textContent = 'No connected netbox-server host found. The agent that deployed the "NetBox Server" role must be online to receive the SSO config (it will be queued until then).'; tw.classList.remove('hidden'); } else tw.classList.add('hidden'); }
     } catch (e) { console.error('loadNetboxSso failed', e); }
@@ -11302,7 +11375,7 @@ async function testAzureNsg() {
     } catch (e) { showToast('Test failed: ' + (e.message || e), 'error'); if (msg) msg.textContent = String(e.message || e); }
 }
 
-// ── Settings → Cloud → OCI NSG (allow-list) ─────────────────────────────────
+// ── Settings → Cloud → OCI → NSG (allow-list) ─────────────────────────────────
 // OCI parity for Azure NSG above: manages a SET of allow rules (one per CIDR —
 // OCI security rules carry a single source, unlike Azure's prefix-list rule) on
 // an OCI Network Security Group. Auth is a plain OCI API signing key (tenancy +
@@ -11352,7 +11425,7 @@ function _renderSettingsOciNsgTile(content) {
 }
 
 // Local allow-list DB: [{ip, description}]. IPs go to OCI; descriptions stay in
-// LM. This is a SEPARATE list from Azure's (Settings → Cloud → Azure NSG /
+// LM. This is a SEPARATE list from Azure's (Settings → Cloud → Azure → NSG /
 // Security → Trusted IPs) — OCI has no deny/threat-monitor tie-in, so unlike
 // the Azure list it is not the never-block source.
 function renderOciNsgEntries() {
@@ -19932,7 +20005,7 @@ async function openConsoleCredentialsModal() {
         const srcLabel = tenantScope
             ? `the <b>Credential Vault</b> (tenant <b>${escapeHtml(tenantScope)}</b> bucket + shared global slot)`
             : source === 'cred_vault' ? 'the <b>Credential Vault</b> (Global Admin slot)'
-            : source === 'keyvault' ? 'a legacy <b>Azure Key Vault</b> reference'
+            : source === 'keyvault' ? 'a legacy <b>Key Vault</b> reference'
             : 'the <b>hub</b> (legacy local store)';
         const warnBanner = migrateWarning
             ? `<div class="text-xs px-3 py-2 rounded bg-amber-50 text-amber-800 border border-amber-200">⚠ ${escapeHtml(migrateWarning)}</div>`

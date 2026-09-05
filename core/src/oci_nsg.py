@@ -11,8 +11,9 @@ https://docs.oracle.com/en-us/iaas/Content/API/Concepts/apisigningkey.htm),
 resolved through ``security.credential_store`` exactly like the Entra OIDC
 client-cert key (``kv:<name>`` / filesystem path / bare secret name), so the
 private key can live in Key Vault instead of on disk. Requests are signed
-per OCI's HTTP Signature scheme (a subset of the IETF draft — the Azure/Entra
-code doesn't need this at all: OCI has no OAuth app-token step).
+per OCI's HTTP Signature scheme via the shared ``oci_auth`` module (also used
+by ``oci_vault.py`` — the OCI parity feature for ``key_vault.py``); the
+Azure/Entra code doesn't need any of this, it uses an OAuth app-token instead.
 
 IMPORTANT ASYMMETRY vs. Azure NSG: an OCI Network Security Group only supports
 **ALLOW** security rules — traffic that matches no rule is denied by default;
@@ -31,25 +32,24 @@ each tagged with a fixed managed-marker description, added/removed via the
 NSG's bulk ``addSecurityRules`` / ``removeSecurityRules`` actions so a
 reconcile only ever touches rules it created.
 
+Only one of {Azure NSG, OCI NSG} can be ``enabled`` at a time (see
+``cloud_nsg.py`` — the generic dispatcher every other part of the hub should
+call instead of importing this module directly) — enforced by
+``routes/azure_nsg.py`` / ``routes/oci_nsg.py`` at save time.
+
 Everything is best-effort + explicit: functions raise ``OciNsgError`` with the
 OCI response body so the route/UI can show the real reason.
 """
 from __future__ import annotations
 
-import base64
-import hashlib
 import ipaddress
-import json
 import logging
-from email.utils import formatdate
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlsplit
 
 import httpx
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding
 
-from security.credential_store import resolve_private_key_material
+import oci_auth as _oci_auth
+from oci_auth import OciAuthConfig as OciConfig  # re-exported: same fields/shape
 
 logger = logging.getLogger("OciNsg")
 
@@ -62,31 +62,6 @@ _MANAGED_MARKER = "lm-hub-allowlist"
 
 class OciNsgError(Exception):
     """Raised for any NSG/OCI API failure; message is safe to surface to the admin."""
-
-
-# ── auth config ──────────────────────────────────────────────────────────────
-
-class OciConfig:
-    """Resolved OCI API-signing-key auth (``global_config['oci_nsg']``)."""
-
-    def __init__(self, stored: Optional[dict] = None):
-        stored = stored or {}
-        self.tenancy_ocid = str(stored.get("tenancy_ocid") or "").strip()
-        self.user_ocid = str(stored.get("user_ocid") or "").strip()
-        self.fingerprint = str(stored.get("fingerprint") or "").strip()
-        # Resolved via credential_store: kv:<name> / filesystem path / bare
-        # secret name — same shape as the Entra OIDC client-key path.
-        self.key_path = str(stored.get("key_path") or "").strip()
-        self.region = str(stored.get("region") or "").strip()
-
-    @property
-    def key_id(self) -> str:
-        return f"{self.tenancy_ocid}/{self.user_ocid}/{self.fingerprint}"
-
-    @property
-    def ready(self) -> bool:
-        return bool(self.tenancy_ocid and self.user_ocid and self.fingerprint
-                    and self.key_path and self.region)
 
 
 def get_oci_config(hub) -> OciConfig:
@@ -201,59 +176,15 @@ def _port_range(occfg: Dict[str, Any]) -> Dict[str, int]:
 
 
 # ── OCI request signing (Signature Version 1) ───────────────────────────────
-# https://docs.oracle.com/en-us/iaas/Content/API/Concepts/signingrequests.htm
-# Only the subset this module needs: plain GET / POST with a JSON body, no
-# query-string params, no on-behalf-of token.
-
-_key_cache: Dict[str, Any] = {}  # key_path -> loaded RSAPrivateKey
-
-
-def _load_private_key(key_path: str):
-    key = _key_cache.get(key_path)
-    if key is not None:
-        return key
-    pem = resolve_private_key_material(key_path)
-    if not pem:
-        raise OciNsgError(f"could not resolve OCI API private key {key_path!r}")
-    try:
-        key = serialization.load_pem_private_key(pem, password=None)
-    except Exception as e:  # noqa: BLE001
-        raise OciNsgError(f"could not parse OCI API private key {key_path!r}: {e}")
-    _key_cache[key_path] = key
-    return key
-
+# Shared with oci_vault.py — see oci_auth.py. Thin wrappers here just preserve
+# this module's existing OciNsgError type for callers/tests.
 
 def _signed_headers(cfg: OciConfig, method: str, url: str,
                     body: Optional[bytes]) -> Dict[str, str]:
-    """Build the ``Authorization`` header (+ every header it covers) for one
-    signed OCI API request."""
-    if not cfg.ready:
-        raise OciNsgError("OCI NSG auth incomplete: tenancy_ocid/user_ocid/"
-                          "fingerprint/key_path/region are all required")
-    parsed = urlsplit(url)
-    method_lc = method.lower()
-    request_target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
-    headers: Dict[str, str] = {
-        "date": formatdate(usegmt=True),
-        "host": parsed.netloc,
-        "(request-target)": f"{method_lc} {request_target}",
-    }
-    signed = ["(request-target)", "date", "host"]
-    if body is not None:
-        digest = base64.b64encode(hashlib.sha256(body).digest()).decode("ascii")
-        headers["content-length"] = str(len(body))
-        headers["content-type"] = "application/json"
-        headers["x-content-sha256"] = digest
-        signed += ["content-length", "content-type", "x-content-sha256"]
-    signing_string = "\n".join(f"{h}: {headers[h]}" for h in signed)
-    key = _load_private_key(cfg.key_path)
-    signature = key.sign(signing_string.encode("ascii"), padding.PKCS1v15(), hashes.SHA256())
-    sig_b64 = base64.b64encode(signature).decode("ascii")
-    auth = (f'Signature version="1",headers="{" ".join(signed)}",'
-           f'keyId="{cfg.key_id}",algorithm="rsa-sha256",signature="{sig_b64}"')
-    out = {k: v for k, v in headers.items() if k != "(request-target)"}
-    out["Authorization"] = auth
-    return out
+    try:
+        return _oci_auth.signed_headers(cfg, method, url, body)
+    except _oci_auth.OciAuthError as e:
+        raise OciNsgError(str(e)) from e
 
 
 async def _oci_request(cfg: OciConfig, client: httpx.AsyncClient, method: str, url: str, *,
@@ -262,9 +193,10 @@ async def _oci_request(cfg: OciConfig, client: httpx.AsyncClient, method: str, u
     client's lifecycle (opened once per public entry point below) — this must
     NOT close it, since a multi-request operation (e.g. reconcile_allowlist's
     list -> remove -> add) reuses the same client across several calls."""
-    body = json.dumps(json_body, separators=(",", ":")).encode("utf-8") if json_body is not None else None
-    headers = _signed_headers(cfg, method, url, body)
-    return await client.request(method, url, headers=headers, content=body)
+    try:
+        return await _oci_auth.oci_request(cfg, client, method, url, json_body=json_body)
+    except _oci_auth.OciAuthError as e:
+        raise OciNsgError(str(e)) from e
 
 
 # ── NSG operations ───────────────────────────────────────────────────────────

@@ -523,6 +523,10 @@
                  children (two-tier horizontal nav). Populated by
                  renderSecondaryNav() in main.js. -->
             <div id="top-nav-secondary" class="hidden h-9 flex items-center px-6 gap-4 text-[11px] font-medium uppercase tracking-widest text-slate-500 bg-white border-b border-slate-200 shrink-0"></div>
+            <!-- Tertiary grandchild strip — shown only under a secondary tab that
+                 itself has children (three-tier nav, e.g. Settings → Cloud →
+                 Azure → SSO/NSG/…). Populated by renderTertiaryNav() in main.js. -->
+            <div id="top-nav-tertiary" class="hidden h-8 flex items-center px-6 gap-4 text-[11px] font-medium text-slate-400 bg-white border-b border-slate-200 shrink-0"></div>
             <div id="viewport" class="flex-1 p-8 overflow-y-auto bg-[#F5F5F5]">
                 <!-- VIEWS INJECTED HERE -->
             </div>

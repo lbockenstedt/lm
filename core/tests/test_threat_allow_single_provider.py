@@ -1,17 +1,18 @@
 """ThreatMonitor.reconcile_allow() — dispatches the SAME shared trusted list
 (global_config["azure_nsg"]["entries"] — canonical, provider-agnostic name) to
-whichever cloud NSG allow rule(s) are enabled: Azure NSG and/or OCI NSG.
+whichever cloud NSG allow rule is enabled: Azure NSG XOR OCI NSG (never both —
+see ``cloud_nsg.py``, the generic dispatcher this delegates to).
 
 Root behavior this locks in:
 - Neither provider enabled -> SKIPPED, no cloud calls made.
-- Exactly one provider enabled -> that provider's result fields are ALSO
-  surfaced at the top level (back-compat for callers that only knew Azure),
-  in addition to the ``providers`` breakdown.
-- Both providers enabled -> top-level ``status`` is SUCCESS only if every
-  provider succeeded, PARTIAL otherwise; no top-level field merge (ambiguous
-  with two providers) — callers must read ``providers``.
+- Exactly one provider enabled -> that provider's result is returned directly
+  (single flat shape, no per-provider ``providers`` breakdown — Azure/OCI can
+  never both be active, so there's nothing to disambiguate).
 - OCI reconcile reuses the exact same shared entries as Azure (no separate
   OCI-only entries key).
+- If (despite the save-time exclusivity guard) BOTH somehow end up enabled at
+  once, ``cloud_nsg.active_provider`` deterministically picks Azure and logs a
+  warning — this module doesn't attempt to run both.
 """
 import asyncio
 import importlib.util
@@ -96,7 +97,7 @@ def test_neither_provider_enabled_is_skipped_and_makes_no_calls(tmp_path, monkey
     assert calls["oci"] is None
 
 
-def test_azure_only_surfaces_fields_at_top_level_for_back_compat(tmp_path, monkeypatch):
+def test_azure_only_returns_flat_result(tmp_path, monkeypatch):
     calls = _patch(monkeypatch)
     tm = _tm_for(
         tmp_path,
@@ -107,9 +108,8 @@ def test_azure_only_surfaces_fields_at_top_level_for_back_compat(tmp_path, monke
     res = _run(tm.reconcile_allow())
 
     assert res["status"] == "SUCCESS"
-    assert res["count"] == 1  # top-level merge of the single provider's result
-    assert res["providers"]["azure"]["status"] == "SUCCESS"
-    assert "oci" not in res["providers"]
+    assert res["count"] == 1
+    assert "providers" not in res  # single active provider — flat shape only
     assert calls["azure"] == ["203.0.113.5/32"]
     assert calls["oci"] is None
 
@@ -129,13 +129,16 @@ def test_oci_only_reuses_the_shared_azure_nsg_entries_key(tmp_path, monkeypatch)
     assert res["status"] == "SUCCESS"
     assert res["count"] == 1
     assert res["added"] == 1 and res["removed"] == 0
-    assert res["providers"]["oci"]["status"] == "SUCCESS"
-    assert "azure" not in res["providers"]
+    assert "providers" not in res
     assert calls["oci"] == ["198.51.100.9/32"]
     assert calls["azure"] is None
 
 
-def test_both_enabled_success_reports_overall_success_and_per_provider_breakdown(tmp_path, monkeypatch):
+def test_both_enabled_defaults_to_azure_and_warns(tmp_path, monkeypatch, caplog):
+    """Should never happen through the UI (save-time exclusivity guard — see
+    test_cloud_nsg_exclusivity.py), but if global_config is ever hand-edited
+    into this state, cloud_nsg.active_provider deterministically picks Azure
+    (and logs a warning) rather than running both."""
     calls = _patch(monkeypatch)
     tm = _tm_for(
         tmp_path,
@@ -147,29 +150,9 @@ def test_both_enabled_success_reports_overall_success_and_per_provider_breakdown
     res = _run(tm.reconcile_allow())
 
     assert res["status"] == "SUCCESS"
-    assert res["providers"]["azure"]["status"] == "SUCCESS"
-    assert res["providers"]["oci"]["status"] == "SUCCESS"
-    assert "count" not in res  # ambiguous with two providers — no top-level merge
-    # Both providers pushed the SAME shared list.
+    assert res["count"] == 1
     assert calls["azure"] == ["203.0.113.5/32"]
-    assert calls["oci"] == ["203.0.113.5/32"]
-
-
-def test_both_enabled_one_failing_reports_partial(tmp_path, monkeypatch):
-    calls = _patch(monkeypatch, oci_raises=RuntimeError("OCI 500"))
-    tm = _tm_for(
-        tmp_path,
-        azure={"enabled": True, "subscription_id": "s", "resource_group": "r", "nsg_name": "n"},
-        oci={"enabled": True, "nsg_id": "ocid1.nsg.oc1..x", "region": "us-ashburn-1"},
-        entries=[{"ip": "203.0.113.5/32", "description": ""}],
-    )
-
-    res = _run(tm.reconcile_allow())
-
-    assert res["status"] == "PARTIAL"
-    assert res["providers"]["azure"]["status"] == "SUCCESS"
-    assert res["providers"]["oci"]["status"] == "ERROR"
-    assert "OCI 500" in res["providers"]["oci"]["message"]
+    assert calls["oci"] is None  # OCI never called — Azure won the tie-break
 
 
 def test_oci_enabled_but_not_fully_configured_is_skipped_not_errored(tmp_path, monkeypatch):

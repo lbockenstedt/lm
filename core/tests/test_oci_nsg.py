@@ -105,7 +105,7 @@ def test_config_ready_requires_every_field(rsa_keypair):
 
 def test_signed_headers_signature_verifies_against_the_public_key(rsa_keypair, monkeypatch):
     key, key_path = rsa_keypair
-    monkeypatch.setattr(oci_nsg, "_key_cache", {})  # avoid cross-test key-path collisions
+    monkeypatch.setattr(oci_nsg._oci_auth, "_key_cache", {})  # avoid cross-test key-path collisions
     cfg = _cfg_for(key_path)
     body = json.dumps({"a": 1}, separators=(",", ":")).encode()
     headers = oci_nsg._signed_headers(cfg, "POST",
@@ -138,7 +138,7 @@ def test_signed_headers_signature_verifies_against_the_public_key(rsa_keypair, m
 
 def test_signed_headers_omits_body_headers_for_get(rsa_keypair, monkeypatch):
     _, key_path = rsa_keypair
-    monkeypatch.setattr(oci_nsg, "_key_cache", {})
+    monkeypatch.setattr(oci_nsg._oci_auth, "_key_cache", {})
     cfg = _cfg_for(key_path)
     headers = oci_nsg._signed_headers(cfg, "GET",
                                       "https://iaas.us-ashburn-1.oraclecloud.com/20160918/foo", None)
