@@ -11443,7 +11443,7 @@ function _renderSettingsOciNsgTile(content) {
                     </div>
                     <p class="text-[11px] text-slate-400">Upload the unencrypted PEM private key generated for this OCI API user (Profile → API Keys → Add API Key). It's written to a 0600 file on this hub and the path above is filled in automatically — the key content itself is never shown or sent back to the browser.</p>
                 </div>
-                <div class="space-y-1"><label class="${labelCls}">Region</label><input id="oci-nsg-region" type="text" placeholder="us-ashburn-1" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Region</label><select id="oci-nsg-region" class="${inputCls}"><option value="">Loading regions…</option></select></div>
                 <div class="space-y-1"><label class="${labelCls}">NSG OCID</label><input id="oci-nsg-id" type="text" placeholder="ocid1.networksecuritygroup.oc1..…" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">Destination port</label><input id="oci-nsg-dport" type="text" placeholder="443" class="${inputCls}"></div>
             </div>
@@ -11508,6 +11508,30 @@ window.removeOciNsgEntry = function (i) {
     renderOciNsgEntries();
 };
 
+// Populate an OCI Region <select> from the hub's curated catalog. Shared by the
+// OCI NSG and OCI Vault tiles. A dropdown (not free text) is deliberate: a
+// typo'd region only ever surfaces as a DNS failure at call time.
+// `current` is the stored value — kept as an extra option if it isn't in the
+// catalog, so a newer//custom region already configured isn't silently lost.
+async function _ociPopulateRegions(selectId, current) {
+    const el = document.getElementById(selectId);
+    if (!el) return;
+    let regions = [];
+    try {
+        const r = await setupFetch('/setup/oci-regions');
+        const d = await r.json().catch(() => ({}));
+        regions = d.regions || [];
+    } catch (e) { console.error('load OCI regions failed', e); }
+    const cur = (current || '').trim();
+    const opts = ['<option value="">— Select a region —</option>'];
+    if (cur && !regions.some(x => x.id === cur)) {
+        opts.push(`<option value="${escapeHtml(cur)}">${escapeHtml(cur)} (configured)</option>`);
+    }
+    regions.forEach(x => opts.push(`<option value="${escapeHtml(x.id)}">${escapeHtml(x.label)}</option>`));
+    el.innerHTML = opts.join('');
+    el.value = cur;
+}
+
 function _ociNsgFormConfig() {
     const v = id => (document.getElementById(id)?.value || '').trim();
     _syncOciNsgEntriesFromDom();
@@ -11532,6 +11556,7 @@ async function loadOciNsg() {
         set('oci-nsg-tenancy', c.tenancy_ocid); set('oci-nsg-user', c.user_ocid);
         set('oci-nsg-fp', c.fingerprint); set('oci-nsg-key', c.key_path);
         set('oci-nsg-region', c.region); set('oci-nsg-id', c.nsg_id);
+        await _ociPopulateRegions('oci-nsg-region', c.region);
         set('oci-nsg-dport', c.dest_port || '443');
         window._ociNsgEntries = (c.entries || []).map(e => ({ ip: e.ip, description: e.description || '' }));
         renderOciNsgEntries();
@@ -11627,7 +11652,7 @@ function _renderSettingsOciVaultTile(content) {
                     </div>
                     <p class="text-[11px] text-slate-400">Upload the unencrypted PEM private key generated for this OCI API user (Profile → API Keys → Add API Key). It's written to a 0600 file on this hub and the path above is filled in automatically — the key content itself is never shown or sent back to the browser.</p>
                 </div>
-                <div class="space-y-1"><label class="${labelCls}">Region</label><input id="oci-vault-region" type="text" placeholder="us-ashburn-1" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Region</label><select id="oci-vault-region" class="${inputCls}"><option value="">Loading regions…</option></select></div>
                 <div class="space-y-1"><label class="${labelCls}">Compartment OCID</label><input id="oci-vault-compartment" type="text" placeholder="ocid1.compartment.oc1..…" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">Vault OCID</label><input id="oci-vault-vault" type="text" placeholder="ocid1.vault.oc1..…" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">Master encryption key OCID</label><input id="oci-vault-keyid" type="text" placeholder="ocid1.key.oc1..…" class="${inputCls} font-mono text-xs"></div>
@@ -11665,6 +11690,7 @@ async function loadOciVault() {
         set('oci-vault-tenancy', c.tenancy_ocid); set('oci-vault-user', c.user_ocid);
         set('oci-vault-fp', c.fingerprint); set('oci-vault-key', c.key_path);
         set('oci-vault-region', c.region); set('oci-vault-compartment', c.compartment_id);
+        await _ociPopulateRegions('oci-vault-region', c.region);
         set('oci-vault-vault', c.vault_id); set('oci-vault-keyid', c.key_id);
         const pill = document.getElementById('oci-vault-state-pill');
         if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }

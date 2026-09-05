@@ -205,6 +205,23 @@ async def _oci_request(cfg: OciConfig, client: httpx.AsyncClient, method: str, u
         raise OciNsgError(str(e)) from e
 
 
+def _http_error(cfg: OciConfig, what: str, resp: httpx.Response) -> OciNsgError:
+    """Build the error for a non-success OCI HTTP response.
+
+    A 401/403 from OCI carries no indication of WHICH credential component was
+    wrong, so the locally-verifiable diagnosis (OCID shapes, and whether the
+    private key actually matches the configured fingerprint) is appended —
+    otherwise the operator is left staring at "NotAuthenticated" with five
+    correct-looking fields."""
+    msg = f"{what} failed: HTTP {resp.status_code} — {resp.text[:300]}"
+    if resp.status_code in (401, 403):
+        try:
+            msg += _oci_auth.auth_failure_help(cfg)
+        except Exception:  # diagnosis must never mask the original failure
+            pass
+    return OciNsgError(msg)
+
+
 # ── NSG operations ───────────────────────────────────────────────────────────
 
 async def test_connection(cfg: OciConfig, occfg: Dict[str, Any],
@@ -216,7 +233,7 @@ async def test_connection(cfg: OciConfig, occfg: Dict[str, Any],
     async with (http or httpx.AsyncClient(timeout=20.0)) as client:
         resp = await _oci_request(cfg, client, "GET", url)
     if resp.status_code != 200:
-        raise OciNsgError(f"OCI GET NSG failed: HTTP {resp.status_code} — {resp.text[:300]}")
+        raise _http_error(cfg, "OCI GET NSG", resp)
     body = resp.json()
     return {"lifecycle_state": body.get("lifecycleState"), "vcn_id": body.get("vcnId"),
             "nsg_id": body.get("id")}
@@ -232,7 +249,7 @@ async def _list_managed_rules(cfg: OciConfig, occfg: Dict[str, Any],
     if resp.status_code == 404:
         return None
     if resp.status_code != 200:
-        raise OciNsgError(f"OCI GET security rules failed: HTTP {resp.status_code} — {resp.text[:300]}")
+        raise _http_error(cfg, "OCI GET security rules", resp)
     rules = resp.json() or []
     return [r for r in rules if r.get("direction") == "INGRESS"
             and _MANAGED_MARKER in (r.get("description") or "")]
@@ -275,7 +292,7 @@ async def reconcile_allowlist(cfg: OciConfig, occfg: Dict[str, Any], ips,
                 cfg, client, "POST", f"{base}/actions/removeSecurityRules",
                 json_body={"securityRuleIds": to_remove_ids})
             if resp.status_code not in (200, 202):
-                raise OciNsgError(f"OCI removeSecurityRules failed: HTTP {resp.status_code} — {resp.text[:300]}")
+                raise _http_error(cfg, "OCI removeSecurityRules", resp)
         if to_add:
             rules = [{
                 "direction": "INGRESS",
@@ -290,7 +307,7 @@ async def reconcile_allowlist(cfg: OciConfig, occfg: Dict[str, Any], ips,
                 cfg, client, "POST", f"{base}/actions/addSecurityRules",
                 json_body={"securityRules": rules})
             if resp.status_code not in (200, 201, 202):
-                raise OciNsgError(f"OCI addSecurityRules failed: HTTP {resp.status_code} — {resp.text[:300]}")
+                raise _http_error(cfg, "OCI addSecurityRules", resp)
     logger.info("OCI NSG allow-list reconciled: %d prefix(es) (+%d/-%d) on %s",
                 len(prefixes), len(to_add), len(to_remove_ids), occfg.get("nsg_id"))
     return {"applied": True, "prefixes": prefixes, "added": len(to_add), "removed": len(to_remove_ids)}

@@ -50,6 +50,21 @@ def register(app, hub, ctx):
         hub.state.system_state["global_config"] = gc
         hub.state._mark_dirty()
 
+    @app.get("/setup/oci-regions")
+    async def get_oci_regions():
+        """The OCI region catalog for the Region dropdown (shared by the OCI NSG
+        and OCI Vault tiles).
+
+        There is no unauthenticated OCI API to list regions — ``ListRegions``
+        itself needs a working signing key AND a bootstrap region host, which is
+        exactly what an operator hasn't configured yet. So this serves the
+        curated catalog in ``oci_auth.OCI_REGIONS``, the same approach the
+        official OCI SDK and Terraform provider take.
+
+        A dropdown (rather than a free-text box) is the point: a typo'd region
+        is otherwise only discoverable as a DNS failure once a call is made."""
+        return {"regions": oci_auth.list_regions()}
+
     @app.get("/setup/oci-nsg")
     async def get_oci_nsg():
         cfg = _cfg()

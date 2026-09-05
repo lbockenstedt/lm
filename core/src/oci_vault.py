@@ -58,6 +58,22 @@ class OciVaultError(Exception):
     """Raised for any OCI Vault/Secrets API failure; message is safe to surface."""
 
 
+def _http_error(cfg: OciConfig, what: str, resp: httpx.Response) -> OciVaultError:
+    """Build the error for a non-success OCI HTTP response.
+
+    OCI answers a bad signing credential with a bare "NotAuthenticated" that
+    names no field, so the locally-verifiable diagnosis (OCID shapes, and
+    whether the private key actually matches the configured fingerprint) is
+    appended on 401/403."""
+    msg = f"{what} failed: HTTP {resp.status_code} — {resp.text[:300]}"
+    if resp.status_code in (401, 403):
+        try:
+            msg += _oci_auth.auth_failure_help(cfg)
+        except Exception:  # diagnosis must never mask the original failure
+            pass
+    return OciVaultError(msg)
+
+
 def get_oci_config(hub) -> OciConfig:
     """Read the stored OCI Vault auth config from ``global_config`` (admin-set
     via ``/setup/oci-vault``) and build an :class:`OciConfig`."""
@@ -136,7 +152,7 @@ async def get_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
     if resp.status_code == 404:
         return None
     if resp.status_code != 200:
-        raise OciVaultError(f"OCI GetSecretBundleByName failed: HTTP {resp.status_code} — {resp.text[:300]}")
+        raise _http_error(cfg, "OCI GetSecretBundleByName", resp)
     body = resp.json()
     content = ((body.get("secretBundleContent") or {}).get("content") or "")
     if not content:
@@ -182,7 +198,7 @@ async def _find_secret_id(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
           f"&vaultId={vcfg['vault_id']}&name={name}")
     resp = await _request(cfg, client, "GET", url)
     if resp.status_code != 200:
-        raise OciVaultError(f"OCI ListSecrets failed: HTTP {resp.status_code} — {resp.text[:300]}")
+        raise _http_error(cfg, "OCI ListSecrets", resp)
     for item in (resp.json() or []):
         if item.get("secretName") == name and item.get("lifecycleState") not in ("DELETED", "SCHEDULING_DELETION"):
             return item.get("id")
@@ -204,7 +220,7 @@ async def set_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str, value: str
                 cfg, client, "PUT", f"{_vaults_base(cfg)}/secrets/{secret_id}",
                 json_body={"secretContent": {"contentType": "BASE64", "content": content_b64, "stage": "CURRENT"}})
             if resp.status_code not in (200, 202):
-                raise OciVaultError(f"OCI UpdateSecret failed: HTTP {resp.status_code} — {resp.text[:300]}")
+                raise _http_error(cfg, "OCI UpdateSecret", resp)
             return secret_id
         key_id = str(vcfg.get("key_id") or "").strip()
         if not key_id:
@@ -218,7 +234,7 @@ async def set_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str, value: str
                 "secretContent": {"contentType": "BASE64", "content": content_b64, "stage": "CURRENT"},
             })
         if resp.status_code not in (200, 201):
-            raise OciVaultError(f"OCI CreateSecret failed: HTTP {resp.status_code} — {resp.text[:300]}")
+            raise _http_error(cfg, "OCI CreateSecret", resp)
         return resp.json().get("id", "")
 
 
@@ -248,7 +264,7 @@ async def delete_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
             cfg, client, "POST", f"{_vaults_base(cfg)}/secrets/{secret_id}/actions/scheduleDeletion",
             json_body={})
         if resp.status_code not in (200, 202, 404):
-            raise OciVaultError(f"OCI ScheduleSecretDeletion failed: HTTP {resp.status_code} — {resp.text[:300]}")
+            raise _http_error(cfg, "OCI ScheduleSecretDeletion", resp)
     return True
 
 
@@ -262,7 +278,7 @@ async def test_connection(cfg: OciConfig, vcfg: Dict[str, Any],
     async with (http or httpx.AsyncClient(timeout=20.0)) as client:
         resp = await _request(cfg, client, "GET", url)
     if resp.status_code != 200:
-        raise OciVaultError(f"OCI GET vault failed: HTTP {resp.status_code} — {resp.text[:300]}")
+        raise _http_error(cfg, "OCI GET vault", resp)
     body = resp.json()
     return {"lifecycle_state": body.get("lifecycleState"), "vault_id": body.get("id"),
             "management_endpoint": body.get("managementEndpoint")}

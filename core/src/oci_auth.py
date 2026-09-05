@@ -38,6 +38,16 @@ class OciAuthError(Exception):
     """Raised for any OCI request-signing/auth failure."""
 
 
+def _clean(v) -> str:
+    """Strip every whitespace character from a pasted identifier.
+
+    OCIDs and fingerprints are copied out of the OCI console, which wraps long
+    values across lines. A stray newline or space inside the value corrupts the
+    ``keyId`` and the ONLY symptom is a 401 NotAuthenticated that looks exactly
+    like a wrong credential — so normalise rather than trust the paste."""
+    return re.sub(r"\s+", "", str(v or ""))
+
+
 class OciAuthConfig:
     """Resolved OCI API-signing-key auth (tenancy/user/fingerprint/key/region).
 
@@ -47,9 +57,13 @@ class OciAuthConfig:
 
     def __init__(self, stored: Optional[dict] = None):
         stored = stored or {}
-        self.tenancy_ocid = str(stored.get("tenancy_ocid") or "").strip()
-        self.user_ocid = str(stored.get("user_ocid") or "").strip()
-        self.fingerprint = str(stored.get("fingerprint") or "").strip()
+        # Strip ALL internal whitespace, not just the ends: OCIDs and
+        # fingerprints are routinely copy-pasted out of the OCI console, which
+        # line-wraps them. An embedded newline/space silently corrupts keyId
+        # and the only symptom is an opaque 401 NotAuthenticated.
+        self.tenancy_ocid = _clean(stored.get("tenancy_ocid"))
+        self.user_ocid = _clean(stored.get("user_ocid"))
+        self.fingerprint = _clean(stored.get("fingerprint")).lower()
         # Resolved via credential_store: kv:<name> / filesystem path / bare
         # secret name — same shape as the Entra OIDC client-key path.
         self.key_path = str(stored.get("key_path") or "").strip()
@@ -242,6 +256,98 @@ def write_uploaded_private_key(hub, subdir: str, filename: str, data: bytes) -> 
     except OSError as e:
         raise OciAuthError(f"could not write key file: {e}")
     return path
+
+
+def public_key_fingerprint(key_path: str) -> str:
+    """The OCI API-key fingerprint OF THE CONFIGURED PRIVATE KEY.
+
+    OCI's fingerprint is the MD5 of the DER-encoded SubjectPublicKeyInfo,
+    formatted as colon-separated hex — identical to
+    ``openssl rsa -pubout -outform DER | openssl md5 -c``. Computing it locally
+    lets us tell an operator definitively whether the key they uploaded is the
+    one the pasted fingerprint refers to, which is the single most common cause
+    of a 401 NotAuthenticated that "looks right"."""
+    key = _load_private_key(key_path)
+    der = key.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
+    digest = hashlib.md5(der).hexdigest()  # noqa: S324 — OCI defines MD5 here
+    return ":".join(digest[i:i + 2] for i in range(0, len(digest), 2))
+
+
+_OCID_RE = re.compile(r"^ocid1\.[a-z0-9]+\.[a-z0-9-]*\.[a-z0-9-]*\.?[a-zA-Z0-9._-]*$")
+_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{2}(:[0-9a-f]{2}){15}$")
+
+
+def diagnose_auth(cfg: OciAuthConfig) -> list:
+    """Config problems detectable WITHOUT calling OCI, most-likely first.
+
+    A 401 ``NotAuthenticated`` from OCI is deliberately vague — it never says
+    which part was wrong. Everything checkable locally is checked here so the
+    operator gets a specific pointer instead of "the required information ...
+    was not provided or was incorrect"."""
+    problems = []
+
+    if cfg.tenancy_ocid and not cfg.tenancy_ocid.startswith("ocid1.tenancy."):
+        problems.append(
+            f"Tenancy OCID should start with 'ocid1.tenancy.' — got "
+            f"'{cfg.tenancy_ocid[:32]}…'. It's easy to paste the compartment "
+            f"or user OCID here by mistake.")
+    if cfg.user_ocid and not cfg.user_ocid.startswith("ocid1.user."):
+        problems.append(
+            f"User OCID should start with 'ocid1.user.' — got "
+            f"'{cfg.user_ocid[:32]}…'. This must be the OCID of the USER the "
+            f"API key belongs to, not a group or compartment.")
+    if cfg.tenancy_ocid and cfg.tenancy_ocid == cfg.user_ocid:
+        problems.append("Tenancy OCID and User OCID are identical — they must "
+                        "be two different values.")
+    if cfg.fingerprint and not _FINGERPRINT_RE.match(cfg.fingerprint):
+        problems.append(
+            f"Fingerprint '{cfg.fingerprint}' isn't in OCI's expected form "
+            f"(16 lowercase hex pairs separated by colons, e.g. "
+            f"'a1:b2:c3:…'). Copy it from the API key row in the OCI console.")
+
+    # The decisive check: does the uploaded key actually match the fingerprint?
+    if cfg.key_path:
+        try:
+            actual = public_key_fingerprint(cfg.key_path)
+        except OciAuthError as e:
+            problems.append(f"Private key could not be loaded: {e}")
+        else:
+            if cfg.fingerprint and actual != cfg.fingerprint:
+                problems.append(
+                    f"The private key does NOT match the configured "
+                    f"fingerprint. Key's actual fingerprint is '{actual}', but "
+                    f"'{cfg.fingerprint}' is configured. Either upload the "
+                    f"private key that pairs with that API key, or paste the "
+                    f"fingerprint OCI shows for the key you uploaded.")
+    return problems
+
+
+def _clock_skew_hint() -> str:
+    """OCI rejects a request whose Date header is more than ~5 minutes off as
+    NotAuthenticated — indistinguishable from a bad credential. Surfaced as a
+    hint because the hub can't measure OCI's clock without a successful call."""
+    return (f"If the credentials are definitely correct, check this hub's "
+            f"clock: OCI rejects requests skewed more than ~5 minutes and the "
+            f"error looks identical. Hub UTC is now "
+            f"{formatdate(usegmt=True)}.")
+
+
+def auth_failure_help(cfg: OciAuthConfig) -> str:
+    """A human-actionable explanation to append to an OCI 401/NotAuthenticated.
+
+    Returns the specific local problems when there are any, otherwise the
+    checklist of causes that can only be confirmed against OCI itself."""
+    problems = diagnose_auth(cfg)
+    if problems:
+        return " Detected: " + " ".join(problems)
+    return (" Everything checkable locally looks correct (OCID formats are "
+            "valid and the private key matches the fingerprint), so the cause "
+            "is on the OCI side. Check, in order: (1) the API key is still "
+            "ACTIVE on that user in the OCI console; (2) the user is in a "
+            "group with a policy granting this action; (3) the key was added "
+            "to the SAME user as the User OCID above; (4) the tenancy is the "
+            "one that user belongs to. " + _clock_skew_hint())
 
 
 def signed_headers(cfg: OciAuthConfig, method: str, url: str,
