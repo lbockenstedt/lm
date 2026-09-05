@@ -16,6 +16,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 from email.utils import formatdate
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
@@ -27,6 +28,9 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from security.credential_store import resolve_private_key_material
 
 logger = logging.getLogger("OciAuth")
+
+# Generous cap for an uploaded OCI API signing key PEM (~1.7 KB typical).
+MAX_KEY_UPLOAD_BYTES = 64 * 1024
 
 
 class OciAuthError(Exception):
@@ -80,6 +84,42 @@ def _load_private_key(key_path: str):
         raise OciAuthError(f"could not parse OCI API private key {key_path!r}: {e}")
     _key_cache[key_path] = key
     return key
+
+
+def write_uploaded_private_key(hub, subdir: str, filename: str, data: bytes) -> str:
+    """Validate an uploaded OCI API signing key (unencrypted PEM) and write it
+    to ``<hub data_dir>/<subdir>/<filename>`` (0600), returning the path.
+
+    Shared by ``routes/oci_nsg.py`` and ``routes/oci_vault.py`` so an admin
+    can upload the private key via the WebUI instead of hand-copying it onto
+    the hub / typing a path into ``key_path``. Not vault-backed: the OCI
+    Vault credential-store backend needs its OWN resolvable private key just
+    to authenticate to OCI in the first place, so it can't be the bootstrap
+    target for this key without a chicken-and-egg problem — a plain,
+    tightly-permissioned file is what ``key_path`` already supports via
+    ``resolve_private_key_material``'s filesystem-path branch.
+
+    Raises :class:`OciAuthError` on validation or write failure; never
+    partially writes (validated fully before anything touches disk)."""
+    if not data:
+        raise OciAuthError("empty upload")
+    if len(data) > MAX_KEY_UPLOAD_BYTES:
+        raise OciAuthError("key upload exceeds 64 KB limit")
+    try:
+        serialization.load_pem_private_key(data, password=None)
+    except Exception as e:  # noqa: BLE001
+        raise OciAuthError(f"not a valid, unencrypted PEM private key: {e}")
+    path = os.path.join(hub.state.data_dir, subdir, filename)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except OSError as e:
+        raise OciAuthError(f"could not write key file: {e}")
+    return path
 
 
 def signed_headers(cfg: OciAuthConfig, method: str, url: str,

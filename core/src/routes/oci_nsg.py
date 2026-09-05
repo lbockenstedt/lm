@@ -18,6 +18,7 @@ config (see ``oci_nsg.py``'s module docstring for the full explanation).
 """
 from __future__ import annotations
 
+import oci_auth
 from api import HTTPException, Request, logger
 import oci_nsg as _nsg
 
@@ -26,6 +27,17 @@ import oci_nsg as _nsg
 # credential_store reference (kv:<name> / path), same as Entra's key_path.
 _FIELDS = ("enabled", "tenancy_ocid", "user_ocid", "fingerprint", "key_path",
           "region", "nsg_id", "dest_port", "entries")
+
+# Fixed on-box path the uploaded OCI API signing key is written to (0600) via
+# oci_auth.write_uploaded_private_key. Not vault-backed: the OCI Vault
+# credential-store backend needs its OWN resolvable private key just to
+# authenticate to OCI in the first place, so it can't be the bootstrap
+# target for THIS key without a chicken-and-egg problem. A plain,
+# tightly-permissioned file is what ``key_path`` already supports
+# (``resolve_private_key_material``'s filesystem-path branch), so an admin
+# who uploads instead of hand-typing a path gets the same end state.
+_KEY_UPLOAD_SUBDIR = "oci"
+_KEY_UPLOAD_FILENAME = "oci-nsg-api-key.pem"
 
 
 def register(app, hub, ctx):
@@ -93,6 +105,39 @@ def register(app, hub, ctx):
                 logger.warning("oci-nsg reconcile failed: %s", e)
                 warning = str(e)
         return {"status": "ok", "config": clean, "applied": applied, "warning": warning}
+
+    @app.post("/setup/oci-nsg/upload-key")
+    async def upload_oci_nsg_key(request: Request):
+        """Accept an OCI API signing private key (PEM) uploaded via the WebUI
+        and write it to a fixed on-box path (0600), persisting that path into
+        ``oci_nsg.key_path`` immediately -- no more hand-copying the key onto
+        the hub / typing a path. Multipart form field ``file``; falls back to
+        a raw body. Validates the upload actually parses as an unencrypted PEM
+        private key BEFORE writing anything, so a bad paste/upload can't
+        silently brick the integration or leave garbage on disk."""
+        ctype = (request.headers.get("content-type") or "").lower()
+        try:
+            if "multipart/form-data" in ctype:
+                form = await request.form()
+                up = form.get("file")
+                if up is None:
+                    raise HTTPException(status_code=400, detail="no 'file' field in the upload")
+                data = await up.read()
+            else:
+                data = await request.body()
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=400, detail=f"could not read upload: {e}")
+        try:
+            path = oci_auth.write_uploaded_private_key(
+                hub, _KEY_UPLOAD_SUBDIR, _KEY_UPLOAD_FILENAME, data)
+        except oci_auth.OciAuthError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        cfg = _cfg()
+        cfg["key_path"] = path
+        _save(cfg)
+        return {"status": "ok", "key_path": path}
 
     @app.post("/setup/oci-nsg/test")
     async def test_oci_nsg(request: Request):
