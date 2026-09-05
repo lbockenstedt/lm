@@ -987,18 +987,24 @@ def register(app, hub, ctx):
 
     @app.post("/api/le/he-config")
     async def le_set_he_login(request: Request):
-        """DISABLED — storing a raw Hurricane Electric account email/password knob
-        on the le spoke is no longer allowed. Store the HE account login in the
-        Credential Vault (add a ``DNS-01`` secret, provider *Hurricane Electric
-        (account login)*, automation-readable) and select it when issuing a
-        certificate; the hub resolves it unattended. Existing spoke-stored knobs
-        are left untouched (no migration, no auto-delete)."""
-        raise HTTPException(
-            status_code=409,
-            detail=("Storing a Hurricane Electric account login in the LE module is "
-                    "disabled. Add it to the Credential Vault (DNS-01 secret, "
-                    "provider 'Hurricane Electric (account login)') and pick it "
-                    "when issuing a certificate."))
+        """Store the Hurricane Electric account-login knob on the le spoke, so the
+        email/password is reused for every he-login issue/renew instead of typed
+        each time. Admin-only (shared-infra write); the spoke persists it 0600 and
+        encrypted at rest.
+
+        Gated on the Credential Vault, same as ``le_set_dns_cred``: with a vault
+        configured the HE login belongs in it (DNS-01 secret, provider *Hurricane
+        Electric (account login)*) and this returns 409; with no vault there is
+        nowhere else to put it, so the spoke-local knob stays available."""
+        if _le_vault_enabled():
+            raise HTTPException(
+                status_code=409,
+                detail=("Storing a Hurricane Electric account login in the LE module is "
+                        "disabled. Add it to the Credential Vault (DNS-01 secret, "
+                        "provider 'Hurricane Electric (account login)') and pick it "
+                        "when issuing a certificate."))
+        _hub, _sid, payload = await _le_request("LE_SET_HE_LOGIN", await request.json())
+        return payload
 
     @app.get("/api/le/he-config")
     async def le_get_he_login():
@@ -1211,17 +1217,27 @@ def register(app, hub, ctx):
 
     @app.post("/api/le/dns-credentials")
     async def le_set_dns_cred(request: Request):
-        """DISABLED — creating raw DNS-01 credentials in the LE module is no
-        longer allowed. Store DNS credentials in the Credential Vault (add a
-        ``DNS-01`` secret, automation-readable) and select it in the issue-cert
-        form; the hub resolves it unattended at issue time. Existing spoke-stored
-        credentials are left untouched (no migration, no auto-delete) and can
-        still be used by name or deleted for cleanup."""
-        raise HTTPException(
-            status_code=409,
-            detail=("Creating DNS credentials in the LE module is disabled. Store "
-                    "them in the Credential Vault (add a 'DNS-01' secret) and pick "
-                    "the vault credential when issuing a certificate."))
+        """Add/update one of THIS tenant's DNS-01 credentials. Empty secret fields
+        keep the stored value (sentinel-merge).
+
+        Gated on the Credential Vault: when a vault IS configured, credentials
+        belong in it (add a ``DNS-01`` secret, automation-readable, and pick it
+        in the issue-cert form) and this raw-create path returns 409. With NO
+        vault configured there is nowhere else to put them, so the spoke-local
+        store is the supported path and stays open — it encrypts at rest. Either
+        way existing spoke creds are left untouched (no migration, no
+        auto-delete) and can still be used by name or deleted for cleanup."""
+        if _le_vault_enabled():
+            raise HTTPException(
+                status_code=409,
+                detail=("Creating DNS credentials in the LE module is disabled. Store "
+                        "them in the Credential Vault (add a 'DNS-01' secret) and pick "
+                        "the vault credential when issuing a certificate."))
+        body = await request.json()
+        body = dict(body) if isinstance(body, dict) else {}
+        body["tenant_id"] = _le_tenant(request)  # server-derived; ignore any client value
+        _hub, _sid, payload = await _le_request("LE_SET_DNS_CRED", body)
+        return payload
 
     @app.delete("/api/le/dns-credentials")
     async def le_delete_dns_cred(request: Request):

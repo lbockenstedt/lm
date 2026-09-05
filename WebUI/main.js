@@ -25389,9 +25389,42 @@ const DNS_CRED_PROVIDERS = {
 };
 
 async function showDnsCredentialsModal() {
+    // Whether a Credential Vault is configured decides which mode this modal
+    // runs in. With a vault, DNS-01 secrets belong there and this is a
+    // read-only list + cleanup view. With NO vault there is nowhere else to put
+    // them, so the spoke-local store (encrypted at rest) is the supported path
+    // and the add/edit form is shown. The backend enforces the same rule.
+    let vaultOn = false;
+    try {
+        const r = await _spokeFetch('/api/le/dns-credentials', { method: 'GET' });
+        const d = (r.data && r.data.data) ? r.data.data : (r.data || {});
+        vaultOn = !!(d.vault_enabled ?? (r.data && r.data.vault_enabled));
+    } catch (e) { /* fall back to showing the editor; the API is the real gate */ }
+
     const modal = document.createElement('div');
     modal.id = 'dns-creds-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    const provOpts = Object.entries(DNS_CRED_PROVIDERS).map(([k, v]) => `<option value="${k}">${escapeHtml(v.label)}</option>`).join('');
+    const note = vaultOn
+        ? `<div class="text-xs px-3 py-2 rounded bg-blue-50 text-blue-700 border border-blue-100">🔐 New DNS-01 credentials are managed in the <b>Credential Vault</b> (add a <b>DNS-01</b> secret there, then pick it in the issue-cert form). Creating raw credentials here is disabled; existing ones below still work and can be deleted.</div>
+          <p class="text-xs text-slate-500">Saved DNS-01 credentials for <b>your tenant</b> (stored on the le spoke). A certificate can still pick one of these by name when issuing via DNS-01. Delete any you've migrated to the vault.</p>`
+        : `<p class="text-xs text-slate-500">Saved DNS-01 credentials for <b>your tenant</b>. A certificate picks one by name when issuing via DNS-01. Secrets are stored on the le spoke, <b>encrypted at rest</b>, and are never shown again — leave a secret blank when editing to keep it.</p>
+           <p class="text-[11px] text-slate-400">No Credential Vault is configured, so credentials are kept locally. Configure a vault under Setup → Cloud to manage them centrally instead.</p>`;
+    const form = vaultOn ? '' : `
+          <div class="border-t border-slate-200 pt-4">
+            <h4 id="dns-cred-form-title" class="text-sm font-bold text-slate-600 mb-2">Add a credential</h4>
+            <div class="grid grid-cols-2 gap-3">
+              <div class="flex flex-col"><label class="text-[11px] text-slate-500 mb-0.5">Name</label>
+                <input id="dns-cred-name" type="text" placeholder="e.g. HE - lrbtech" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+              <div class="flex flex-col"><label class="text-[11px] text-slate-500 mb-0.5">Provider</label>
+                <select id="dns-cred-provider" onchange="dnsCredRenderFields()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${provOpts}</select></div>
+            </div>
+            <div id="dns-cred-fields" class="grid grid-cols-2 gap-3 mt-3"></div>
+            <div class="flex justify-end gap-2 mt-3">
+              <button onclick="dnsCredResetForm()" class="px-3 py-1.5 text-sm text-slate-600 hover:text-slate-800">Clear</button>
+              <button onclick="saveDnsCredential()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold">Save credential</button>
+            </div>
+          </div>`;
     modal.innerHTML = `
       <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden max-h-[90vh] flex flex-col">
         <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
@@ -25399,18 +25432,76 @@ async function showDnsCredentialsModal() {
           <button onclick="document.getElementById('dns-creds-modal').remove()" class="text-slate-400 hover:text-slate-600">✕</button>
         </div>
         <div class="p-6 space-y-4 overflow-y-auto">
-          <div class="text-xs px-3 py-2 rounded bg-blue-50 text-blue-700 border border-blue-100">🔐 New DNS-01 credentials are now managed in the <b>Credential Vault</b> (add a <b>DNS-01</b> secret there, then pick it in the issue-cert form). Creating raw credentials here is disabled; existing ones below still work and can be deleted.</div>
-          <p class="text-xs text-slate-500">Saved DNS-01 credentials for <b>your tenant</b> (stored on the le spoke). A certificate can still pick one of these by name when issuing via DNS-01. Delete any you've migrated to the vault.</p>
+          ${note}
           <div id="dns-creds-list" class="space-y-2"><p class="text-sm text-slate-400 italic">Loading…</p></div>
+          ${form}
         </div>
       </div>`;
     document.body.appendChild(modal);
+    modal.dataset.vaultOn = vaultOn ? '1' : '';
+    if (!vaultOn) dnsCredRenderFields();
     await dnsCredReloadList();
+}
+
+function dnsCredRenderFields(values) {
+    const p = document.getElementById('dns-cred-provider')?.value;
+    const def = DNS_CRED_PROVIDERS[p];
+    const box = document.getElementById('dns-cred-fields');
+    if (!def || !box) return;
+    values = values || {};
+    const secretsSet = values.__secrets__ || {};
+    box.innerHTML = def.fields.map(f => `
+      <div class="flex flex-col">
+        <label class="text-[11px] text-slate-500 mb-0.5">${escapeHtml(f.label)}</label>
+        <input id="dns-cred-f-${f.k}" type="${f.type}" value="${f.secret ? '' : escapeHtml(values[f.k] || '')}"
+               placeholder="${f.secret && secretsSet[f.k] ? '(keep stored)' : (f.placeholder ? escapeHtml(f.placeholder) : '')}"
+               autocomplete="off" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+      </div>`).join('');
+}
+
+function dnsCredEdit(c) {
+    const nameEl = document.getElementById('dns-cred-name');
+    const provEl = document.getElementById('dns-cred-provider');
+    if (nameEl) nameEl.value = c.name || '';
+    if (provEl) provEl.value = c.provider || 'he-login';
+    const title = document.getElementById('dns-cred-form-title');
+    if (title) title.textContent = 'Edit "' + (c.name || '') + '"';
+    dnsCredRenderFields({ ...(c.fields || {}), __secrets__: c.secrets_set || {} });
+}
+
+function dnsCredResetForm() {
+    const nameEl = document.getElementById('dns-cred-name'); if (nameEl) nameEl.value = '';
+    const title = document.getElementById('dns-cred-form-title'); if (title) title.textContent = 'Add a credential';
+    dnsCredRenderFields();
+}
+
+async function saveDnsCredential() {
+    const name = document.getElementById('dns-cred-name')?.value?.trim() || '';
+    const provider = document.getElementById('dns-cred-provider')?.value || '';
+    if (!name) { showToast('Credential name is required.', 'error'); return; }
+    const def = DNS_CRED_PROVIDERS[provider];
+    const fields = {};
+    def.fields.forEach(f => {
+        const v = document.getElementById('dns-cred-f-' + f.k)?.value ?? '';
+        if (v !== '' || !f.secret) fields[f.k] = v;  // empty secret → omit (keep stored)
+    });
+    try {
+        const r = await _spokeFetch('/api/le/dns-credentials', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, provider, fields }),
+        });
+        const d = (r.data && r.data.data) ? r.data.data : (r.data || {});
+        if (!r.ok || d.status === 'ERROR') { showToast('Save failed: ' + (d.message || r.detail || ''), 'error'); return; }
+        showToast('DNS credential saved', 'success');
+        dnsCredResetForm();
+        await dnsCredReloadList();
+    } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
 }
 
 async function dnsCredReloadList() {
     const box = document.getElementById('dns-creds-list');
     if (!box) return;
+    const vaultOn = !!document.getElementById('dns-creds-modal')?.dataset.vaultOn;
     let creds = [];
     let warn = '';
     try {
@@ -25422,13 +25513,22 @@ async function dnsCredReloadList() {
     const warnBanner = warn
         ? `<div class="text-xs px-3 py-2 mb-2 rounded bg-amber-50 text-amber-800 border border-amber-200">⚠ ${escapeHtml(warn)}</div>`
         : '';
-    if (!creds.length) { box.innerHTML = warnBanner + '<p class="text-sm text-slate-400 italic">No credentials yet — add one below.</p>'; return; }
+    if (!creds.length) {
+        const empty = vaultOn
+            ? 'No credentials stored here — add a DNS-01 secret in the Credential Vault.'
+            : 'No credentials yet — add one below.';
+        box.innerHTML = warnBanner + `<p class="text-sm text-slate-400 italic">${empty}</p>`;
+        return;
+    }
     box.innerHTML = warnBanner + creds.map(c => {
         const label = (DNS_CRED_PROVIDERS[c.provider] || {}).label || c.provider;
+        const editBtn = vaultOn ? '' :
+            `<button onclick='dnsCredEdit(${escapeHtml(JSON.stringify(c))})' class="text-xs text-slate-600 hover:text-slate-800 border border-slate-200 rounded px-2 py-1">Edit</button>`;
         return `<div class="flex items-center justify-between border border-slate-200 rounded-md px-3 py-2">
           <div><span class="text-sm font-medium text-slate-700">${escapeHtml(c.name)}</span>
             <span class="text-[11px] text-slate-400 ml-2">${escapeHtml(label)}</span></div>
           <div class="flex gap-2">
+            ${editBtn}
             <button onclick="deleteDnsCredential(${escapeHtml(JSON.stringify(c.name))})" class="text-xs text-red-500 hover:text-red-700 border border-red-200 rounded px-2 py-1" title="Delete this stored DNS provider credential">Delete</button>
           </div></div>`;
     }).join('');

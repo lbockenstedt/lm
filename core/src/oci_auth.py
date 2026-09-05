@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 from email.utils import formatdate
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit
@@ -129,6 +130,62 @@ def list_regions() -> list:
     )
 
 
+# An OCI region identifier is lowercase ``<area>-<city>-<n>``, e.g. us-ashburn-1,
+# eu-frankfurt-1, ap-tokyo-1. Anything else can't resolve, so we reject it BEFORE
+# building a URL out of it rather than emitting a bare DNS failure.
+_REGION_RE = re.compile(r"^[a-z]{2,3}-[a-z]+(?:-[a-z]+)*-[0-9]+$")
+
+
+def validate_region(region: str) -> str:
+    """Return the normalised region id, or raise :class:`OciAuthError` with an
+    actionable message.
+
+    Every OCI endpoint host is built by interpolating the region into
+    ``<service>.<region>.oraclecloud.com``. A typo'd or empty region therefore
+    surfaces as a bare ``[Errno -2] Name or service not known`` from the DNS
+    resolver, which tells the operator nothing about WHAT was wrong. Catching
+    the malformed case here turns that into "not a valid OCI region identifier"
+    and names the region we were handed.
+
+    A well-formed but unknown region is allowed through with no error: OCI adds
+    regions regularly and :data:`OCI_REGIONS` is a hand-maintained snapshot, so
+    refusing anything not in the list would break new regions.
+    """
+    r = (region or "").strip().lower()
+    if not r:
+        raise OciAuthError(
+            "no OCI region configured — set the region (e.g. 'us-ashburn-1') "
+            "in the OCI integration settings.")
+    if not _REGION_RE.match(r):
+        raise OciAuthError(
+            f"{region!r} is not a valid OCI region identifier. Expected a form "
+            f"like 'us-ashburn-1' or 'eu-frankfurt-1'.")
+    return r
+
+
+def _transport_error_detail(url: str, exc: Exception) -> str:
+    """Turn an httpx transport failure into a message that names the host we
+    actually tried to reach.
+
+    ``httpx.ConnectError`` for a DNS miss stringifies to just
+    ``[Errno -2] Name or service not known`` — no hostname, no URL. Surfaced
+    through a route's generic ``except Exception`` that leaves an operator with
+    no way to tell a mistyped region from a genuine egress/DNS problem."""
+    try:
+        host = httpx.URL(url).host
+    except Exception:  # noqa: BLE001
+        host = url
+    base = f"could not reach OCI endpoint {host}: {exc}"
+    name_err = ("name or service not known" in str(exc).lower()
+                or "nodename nor servname" in str(exc).lower()
+                or "temporary failure in name resolution" in str(exc).lower())
+    if name_err:
+        return (f"{base}. DNS could not resolve that host — check the OCI region "
+                f"is spelled correctly, and that this hub can resolve and reach "
+                f"*.oraclecloud.com.")
+    return f"{base}. Check network egress from the hub to *.oraclecloud.com."
+
+
 # ── request signing (Signature Version 1) ───────────────────────────────────
 # Only the subset needed here: plain GET / POST with a JSON body, no
 # query-string params, no on-behalf-of token.
@@ -225,17 +282,33 @@ async def oci_request(cfg: OciAuthConfig, client: httpx.AsyncClient, method: str
     """Issue ONE signed request on an already-open ASYNC client. Callers own
     the client's lifecycle (opened once per public entry point) — this must
     NOT close it, since a multi-request operation reuses the same client
-    across several calls."""
+    across several calls.
+
+    Transport failures are re-raised as :class:`OciAuthError` naming the host,
+    so a DNS miss reads as "could not reach OCI endpoint <host>" instead of a
+    context-free ``[Errno -2] Name or service not known``."""
     body = json.dumps(json_body, separators=(",", ":")).encode("utf-8") if json_body is not None else None
     headers = signed_headers(cfg, method, url, body)
-    return await client.request(method, url, headers=headers, content=body)
+    try:
+        return await client.request(method, url, headers=headers, content=body)
+    except httpx.HTTPStatusError:
+        raise
+    except httpx.TransportError as e:
+        raise OciAuthError(_transport_error_detail(url, e)) from e
 
 
 def oci_request_sync(cfg: OciAuthConfig, client: httpx.Client, method: str, url: str, *,
                      json_body: Optional[dict] = None) -> httpx.Response:
     """Issue ONE signed request on an already-open SYNC client. Used by the
     ``security.credential_store`` provider, whose ``get_secret`` interface is
-    synchronous (called from both sync and async call sites across the hub)."""
+    synchronous (called from both sync and async call sites across the hub).
+
+    Transport failures are wrapped the same way as :func:`oci_request`."""
     body = json.dumps(json_body, separators=(",", ":")).encode("utf-8") if json_body is not None else None
     headers = signed_headers(cfg, method, url, body)
-    return client.request(method, url, headers=headers, content=body)
+    try:
+        return client.request(method, url, headers=headers, content=body)
+    except httpx.HTTPStatusError:
+        raise
+    except httpx.TransportError as e:
+        raise OciAuthError(_transport_error_detail(url, e)) from e

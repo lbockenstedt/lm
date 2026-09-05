@@ -158,7 +158,13 @@ def _require(occfg: Dict[str, Any]) -> None:
 def _base_url(cfg: OciConfig) -> str:
     if not cfg.region:
         raise OciNsgError("OCI NSG config incomplete: 'region' is required")
-    return f"https://iaas.{cfg.region}.oraclecloud.com/{_API_VERSION}"
+    # Validate BEFORE interpolating: a typo'd region would otherwise only show
+    # up as a context-free DNS failure once the request is attempted.
+    try:
+        region = _oci_auth.validate_region(cfg.region)
+    except _oci_auth.OciAuthError as e:
+        raise OciNsgError(str(e)) from e
+    return f"https://iaas.{region}.oraclecloud.com/{_API_VERSION}"
 
 
 def _rule_description() -> str:

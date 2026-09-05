@@ -235,3 +235,61 @@ async def test_test_connection_returns_vault_summary():
     assert res == {"lifecycle_state": "ACTIVE", "vault_id": "ocid1.vault.oc1..v",
                    "management_endpoint": "https://x"}
     assert "vaults." in str(transport.requests[0].url)
+
+
+# ── endpoint hostnames ──────────────────────────────────────────────────────
+#
+# Pins a real user-reported bug: "Saved, but OCI apply failed: [Errno -2] Name
+# or service not known". The Vault base URLs were built as
+# ``vaults.<region>.oraclecloud.com`` / ``secrets.<region>.oraclecloud.com``,
+# but the OCI Vault service lives under an ``.oci.`` label and the retrieval
+# plane keeps the ``vaults.`` label too:
+#     management: vaults.<region>.oci.oraclecloud.com
+#     retrieval : secrets.vaults.<region>.oci.oraclecloud.com
+# The old hostnames do not resolve AT ALL, so every Vault call died in the
+# resolver before a request was ever signed or sent.
+
+def test_vaults_base_uses_the_oci_label():
+    url = oci_vault._vaults_base(_cfg())
+    assert url.startswith("https://vaults.us-ashburn-1.oci.oraclecloud.com/")
+
+
+def test_secrets_base_uses_the_secrets_vaults_oci_host():
+    url = oci_vault._secrets_base(_cfg())
+    assert url.startswith("https://secrets.vaults.us-ashburn-1.oci.oraclecloud.com/")
+
+
+def test_vault_hosts_are_not_the_old_unresolvable_form():
+    """Regression guard: the pre-fix hostnames must never come back."""
+    vaults = oci_vault._vaults_base(_cfg())
+    secrets = oci_vault._secrets_base(_cfg())
+    assert "vaults.us-ashburn-1.oraclecloud.com" not in vaults
+    assert "secrets.us-ashburn-1.oraclecloud.com" not in secrets
+    # Both Vault planes are distinctly NOT the Core/iaas host.
+    assert "iaas." not in vaults and "iaas." not in secrets
+
+
+def test_management_and_retrieval_are_different_hosts():
+    assert oci_vault._vaults_base(_cfg()) != oci_vault._secrets_base(_cfg())
+
+
+def test_region_is_interpolated_into_both_planes():
+    cfg = oci_vault.OciConfig({"region": "eu-frankfurt-1"})
+    assert "eu-frankfurt-1" in oci_vault._vaults_base(cfg)
+    assert "eu-frankfurt-1" in oci_vault._secrets_base(cfg)
+
+
+def test_missing_region_is_a_config_error_not_a_dns_failure():
+    cfg = oci_vault.OciConfig({"region": ""})
+    with pytest.raises(oci_vault.OciVaultError, match="region"):
+        oci_vault._vaults_base(cfg)
+    with pytest.raises(oci_vault.OciVaultError, match="region"):
+        oci_vault._secrets_base(cfg)
+
+
+def test_malformed_region_is_rejected_before_any_network_call():
+    """A typo'd region must fail as a clear config error rather than being
+    interpolated into a hostname that then fails DNS with no context."""
+    cfg = oci_vault.OciConfig({"region": "us ashburn 1"})
+    with pytest.raises(oci_vault.OciVaultError, match="not a valid OCI region"):
+        oci_vault._vaults_base(cfg)

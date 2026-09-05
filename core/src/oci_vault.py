@@ -13,13 +13,16 @@ Auth is the same OCI **API signing key** shape as ``oci_nsg.py`` (tenancy OCID
 ``global_config['oci_vault']`` block (a customer may reasonably want a
 narrower-scoped OCI user/API key for Vault access than for NSG management).
 
-OCI Vault + Secrets is actually TWO service surfaces:
-  * the **Vaults** control plane (``vaults.<region>.oraclecloud.com``) —
+OCI Vault + Secrets is actually TWO service surfaces, on two DIFFERENT hosts —
+both of which carry an ``.oci.`` label that the plain OCI Core (iaas) endpoints
+do NOT have:
+  * the **Vaults** control plane (``vaults.<region>.oci.oraclecloud.com``) —
     create/update/list secrets (management operations, need
     ``compartment_id`` + ``vault_id`` + a KMS ``key_id`` to encrypt with when
     CREATING a brand-new secret);
-  * the **Secrets** retrieval plane (``secrets.<region>.oraclecloud.com``) —
-    read a secret's current value by name (no compartment needed).
+  * the **Secrets** retrieval plane
+    (``secrets.vaults.<region>.oci.oraclecloud.com``) — read a secret's current
+    value by name (no compartment needed).
 
 Only one of {Azure Key Vault, OCI Vault} can be ``enabled`` at a time (see
 ``cloud_vault.py``) — enforced by ``routes/key_vault.py`` /
@@ -73,16 +76,34 @@ def _require(vcfg: Dict[str, Any]) -> None:
         raise OciVaultError("OCI Vault config incomplete: 'compartment_id' is required")
 
 
-def _vaults_base(cfg: OciConfig) -> str:
+def _vault_region(cfg: OciConfig) -> str:
+    """Validated region id shared by both Vault endpoint builders. Catches a
+    typo'd region here rather than letting it become a bare DNS failure."""
     if not cfg.region:
         raise OciVaultError("OCI Vault config incomplete: 'region' is required")
-    return f"https://vaults.{cfg.region}.oraclecloud.com/{_API_VERSION}"
+    try:
+        return _oci_auth.validate_region(cfg.region)
+    except _oci_auth.OciAuthError as e:
+        raise OciVaultError(str(e)) from e
+
+
+def _vaults_base(cfg: OciConfig) -> str:
+    """Secret MANAGEMENT (control plane) — create/update/list/delete secrets.
+
+    Note the ``.oci.`` label: the Vault service endpoints are
+    ``vaults.<region>.oci.oraclecloud.com``, NOT
+    ``vaults.<region>.oraclecloud.com`` (which does not resolve at all). Getting
+    this wrong surfaces only as a DNS ``Name or service not known``."""
+    return f"https://vaults.{_vault_region(cfg)}.oci.oraclecloud.com/{_API_VERSION}"
 
 
 def _secrets_base(cfg: OciConfig) -> str:
-    if not cfg.region:
-        raise OciVaultError("OCI Vault config incomplete: 'region' is required")
-    return f"https://secrets.{cfg.region}.oraclecloud.com/{_API_VERSION}"
+    """Secret RETRIEVAL (data plane) — fetch a secret's actual value.
+
+    A separate host from the management plane, and note it is
+    ``secrets.vaults.<region>.oci.oraclecloud.com`` — the ``vaults.`` label is
+    part of the retrieval host too."""
+    return f"https://secrets.vaults.{_vault_region(cfg)}.oci.oraclecloud.com/{_API_VERSION}"
 
 
 async def _request(cfg: OciConfig, client: httpx.AsyncClient, method: str, url: str, *,

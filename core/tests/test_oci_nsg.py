@@ -275,3 +275,34 @@ def test_test_connection_raises_with_oci_error_body_on_failure(rsa_keypair):
         lambda r: httpx.Response(401, text="NotAuthenticated")))
     with pytest.raises(oci_nsg.OciNsgError, match="NotAuthenticated"):
         asyncio.new_event_loop().run_until_complete(oci_nsg.test_connection(cfg, occfg, http=client))
+
+
+# ── endpoint host + region validation ───────────────────────────────────────
+# NSG talks to the OCI Core Services (iaas) plane, which — unlike the Vault
+# planes — has NO ``.oci.`` label: iaas.<region>.oraclecloud.com. Region is
+# validated before interpolation so a typo is a clear config error instead of
+# a context-free "[Errno -2] Name or service not known" from the resolver.
+
+def _nsg_cfg(region="us-ashburn-1"):
+    return oci_nsg.OciConfig({"region": region})
+
+
+def test_nsg_base_url_is_the_iaas_host():
+    url = oci_nsg._base_url(_nsg_cfg())
+    assert url.startswith("https://iaas.us-ashburn-1.oraclecloud.com/")
+    # Core is NOT under the .oci. label the Vault service uses.
+    assert ".oci.oraclecloud.com" not in url
+
+
+def test_nsg_missing_region_is_a_config_error():
+    with pytest.raises(oci_nsg.OciNsgError, match="region"):
+        oci_nsg._base_url(_nsg_cfg(""))
+
+
+def test_nsg_malformed_region_rejected_before_any_network_call():
+    with pytest.raises(oci_nsg.OciNsgError, match="not a valid OCI region"):
+        oci_nsg._base_url(_nsg_cfg("us ashburn 1"))
+
+
+def test_nsg_region_is_normalised():
+    assert "iaas.us-ashburn-1." in oci_nsg._base_url(_nsg_cfg("  US-Ashburn-1 "))
