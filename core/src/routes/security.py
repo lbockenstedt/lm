@@ -1,7 +1,12 @@
 """Security / threat-monitor routes — the auth-failure audit log, blocked-IP
 tiles (permanent / temporary / manual), config, manual block/unblock, and the
 never-block allow list. ALL ADMIN-ONLY (on top of the /api/* session gate)."""
+import logging
+import os
+
 from api import HTTPException, Request
+
+logger = logging.getLogger("Hub")
 
 
 def register(app, hub, ctx):
@@ -232,6 +237,71 @@ def register(app, hub, ctx):
                 cfg["token"] = await _store_token(hub, tok)
         hub.state.update_global_config({"site_ext": cfg})
         return {"status": "ok", **_ext_status(hub)}
+
+    @app.post("/api/security/ext-source/purge")
+    async def ext_source_purge(request: Request):
+        """Forget the source entirely: credential, config, and the checkout.
+
+        Clearing the token alone leaves the fetched module sitting in the
+        extension directory, where it keeps being imported and registered on
+        every app build. An operator who has revoked a credential reasonably
+        believes the code is gone; leaving it loaded is the gap between
+        "revoked" and "removed".
+
+        Deletes the whole extension directory rather than its ``*.py`` files.
+        A leftover ``.git`` is a working checkout with an upstream: it holds
+        the content in its object store, and any future provisioning run would
+        fast-forward it straight back.
+
+        Not merged into the PUT ``clear_token`` path, because deleting code
+        from disk should be something an operator asked for in those terms
+        rather than a side effect of unticking a box.
+        """
+        _guard(request)
+        import shutil
+        import site_ext
+
+        cfg = _ext_cfg(hub)
+        removed_token = bool(cfg.get("token"))
+        old = cfg.get("token")
+        if old and str(old).startswith("kv:"):
+            try:
+                import cloud_vault
+                await cloud_vault.delete_secret(hub, str(old)[3:])
+            except Exception:  # noqa: BLE001 — config is authoritative
+                pass
+
+        # The directory is resolved BEFORE the config is cleared: ext_dir()
+        # honours a `dir` override that lives in the very config being wiped,
+        # so clearing first would delete the pointer and then remove the
+        # default location instead of the one actually in use.
+        target = site_ext.ext_dir(hub)
+        removed_dir = False
+        detail = ""
+        if os.path.isdir(target):
+            try:
+                shutil.rmtree(target)
+                removed_dir = True
+            except Exception as e:  # noqa: BLE001 — report, never raise
+                detail = f"could not remove {target}: {e}"
+                logger.warning("ext-source purge: %s", detail)
+
+        hub.state.update_global_config({"site_ext": {"enabled": False}})
+        await hub.state.save_state_now()
+        logger.warning("ext-source purged: token_removed=%s dir_removed=%s (%s)",
+                       removed_token, removed_dir, target)
+        # _ext_status is spread FIRST so the explicit keys below win. It
+        # recomputes the extension dir from the config that was just cleared,
+        # and spreading it last would report the default location while the
+        # configured one was the thing actually deleted.
+        return {**_ext_status(hub),
+                "status": "ok", "token_removed": removed_token,
+                "dir_removed": removed_dir, "dir": target,
+                "detail": detail,
+                # Modules are imported at app build, so what is already loaded
+                # keeps serving until the process restarts. Saying otherwise
+                # would be telling an operator the code is gone while it runs.
+                "restart_required": True}
 
     @app.post("/api/security/ext-source/provision")
     async def ext_source_provision(request: Request):
