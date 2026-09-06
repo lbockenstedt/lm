@@ -1,14 +1,28 @@
-"""security/tm_client.py — Threat Monitor participant client.
+"""security/tm_client.py — Subscription Service participant client.
 
-An install reports what its own sensors saw to a central Threat Monitor service
-and receives, in return, a decoy set to arm :mod:`security.decoy_engine` with and
-a corroborated feed of attacker addresses. That exchange is what lets a
+An install reports what its own sensors saw to the Subscription Service and
+receives, in return, a decoy set to arm :mod:`security.decoy_engine` with and a
+corroborated feed of attacker addresses. That exchange is what lets a
 participant run honeypot routes and benefit from the network without ever
 holding the private sensor code — the mechanism is public, the content is data.
+
+**This client is the only way an install may obtain that content.** The sensor
+code used to be delivered as a private git checkout, which meant every
+participating install held a copy of the honeypot itself: the decoy paths, the
+bait format, the detection logic. One leaked deploy key disclosed the sensor
+for everyone at once, and nothing about a git pull is revocable after the fact.
+Moving to a data subscription makes the disclosure per-install, attributable
+and — because the credential can be revoked centrally — reversible.
 
 The service is reached as an ordinary HTTPS API client with its own credential,
 NOT as a spoke: a spoke connection is a control plane that can carry commands,
 and no amount of later hardening walks back having given a third party one.
+
+The endpoint is a constant, not configuration. A tenant chooses *whether* to
+subscribe, never *where* to subscribe: an operator-supplied URL is an operator-
+supplied place to send this install's sensor observations, and a typo or a
+tampered config file would silently redirect the feed to a third party. There
+is one exchange, so there is one address.
 
 What leaves this process is deliberately narrow
 -----------------------------------------------
@@ -40,6 +54,17 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import httpx
 
 logger = logging.getLogger("Security")
+
+# The one address of the exchange. Deliberately not read from global_config:
+# see the module docstring. Tests override it per-instance, which is why the
+# constructor still accepts a base_url at all.
+SERVICE_URL = "https://ss.ext.lrbtechnologies.com"
+
+# Channel names as the service registers them. An install publishes to and
+# subscribes from these by name; the service decides what it is allowed to see.
+CHANNEL_THREAT = "threat_monitor"
+CHANNEL_SIMULATIONS = "client_simulations"
+CHANNEL_DECOYS = "decoys"
 
 # Ordered strongest-first. A single bait hit is definitive: the value is unique
 # per install and has exactly one way to reach an attacker's hands. A generic
@@ -158,7 +183,7 @@ def filter_reports(records: Sequence[Dict[str, Any]],
 # ── service client ───────────────────────────────────────────────────────────
 
 class TMClient:
-    """HTTPS client for the Threat Monitor service.
+    """HTTPS client for the Subscription Service.
 
     Holds the participant credential and the two identifiers the service needs:
     a per-install ``install_uuid`` the credential is bound to, and a
@@ -168,12 +193,24 @@ class TMClient:
     installs for several confirmations.
     """
 
-    def __init__(self, base_url: str, tenant_id: str, install_uuid: str,
+    def __init__(self, tenant_id: str, install_uuid: str,
                  credential: str = "", enrollment_psk: str = "",
                  never_publish: Optional[Iterable[str]] = None,
                  timeout: float = _DEFAULT_TIMEOUT,
-                 verify: bool = True) -> None:
-        self.base_url = (base_url or "").rstrip("/")
+                 verify: bool = True,
+                 enabled: bool = True,
+                 base_url: str = SERVICE_URL) -> None:
+        # Opting in used to be expressed by leaving the service URL empty. With
+        # one hardcoded endpoint there is no such thing as an unconfigured URL,
+        # so the opt-in has to be stated outright: an install that has not
+        # subscribed makes no outbound request at all, rather than quietly
+        # contacting the exchange because a default happened to be present.
+        self.enabled = bool(enabled)
+        # base_url is last and defaulted because callers are not expected to
+        # pass it. It exists so tests can point at a local instance; a
+        # deployment that overrode it would be sending its sensor data
+        # somewhere other than the exchange.
+        self.base_url = (base_url or SERVICE_URL).rstrip("/")
         self.tenant_id = (tenant_id or "").strip()
         self.install_uuid = (install_uuid or "").strip()
         self.credential = (credential or "").strip()
@@ -188,8 +225,8 @@ class TMClient:
 
     def _headers(self) -> Dict[str, str]:
         h = {"Content-Type": "application/json",
-             "X-TM-Install": self.install_uuid,
-             "X-TM-Tenant": self.tenant_id}
+             "X-SS-Install": self.install_uuid,
+             "X-SS-Tenant": self.tenant_id}
         if self.credential:
             h["Authorization"] = f"Bearer {self.credential}"
         return h
@@ -210,7 +247,7 @@ class TMClient:
         outage, a timeout or a malformed reply must leave this install behaving
         exactly as it would with no service configured at all.
         """
-        if not self.base_url:
+        if not self.enabled or not self.base_url:
             return None
         url = f"{self.base_url}{path}"
         try:
@@ -227,22 +264,32 @@ class TMClient:
 
     # -- API --------------------------------------------------------------
 
-    async def enroll(self) -> Dict[str, Any]:
-        """Register this install.
+    async def enroll(self, subscriptions: Optional[Sequence[str]] = None,
+                     contact_email: str = "",
+                     contact_message: str = "") -> Dict[str, Any]:
+        """Register this install with the exchange.
 
         With an enrollment PSK the service may approve immediately; without one
         the install lands in a pending queue for manual approval. Both are
         expected outcomes — a participant that cannot safely hold a PSK is not
         thereby excluded, it just waits for a human.
 
-        Returns ``{"status": "approved"|"pending"|"error", ...}``. On approval
-        the credential is stored on the instance; the CALLER is responsible for
-        persisting it, since this module owns no storage.
+        ``contact_email`` and ``contact_message`` are how an unvouched install
+        introduces itself, since approval is a person deciding whether to admit
+        a stranger. They are ignored when a PSK is presented.
+
+        Returns ``{"status": "approved"|"pending"|"denied"|"error", ...}``. On
+        approval the credential is stored on the instance; the CALLER is
+        responsible for persisting it, since this module owns no storage.
         """
         body = await self._post("/v1/enroll", {
             "tenant_id": self.tenant_id,
             "install_uuid": self.install_uuid,
-            "enrollment_psk": self.enrollment_psk or None,
+            "psk": self.enrollment_psk or None,
+            "kind": "hub",
+            "contact_email": contact_email or "",
+            "contact_message": contact_message or "",
+            "subscriptions": list(subscriptions or ()),
         })
         if not body:
             return {"status": "error", "reason": "service unreachable"}
@@ -252,13 +299,32 @@ class TMClient:
             self.credential = cred
         return body
 
-    async def report(self, records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    async def request_subscription(self, channel: str,
+                                   mode: str = "subscribe") -> Dict[str, Any]:
+        """Ask for a feed after enrolment, as modules are turned on.
+
+        Enrolment does not have to know every channel an install will ever
+        want; a tenant enabling the threat or simulation database later says so
+        here rather than re-enrolling, which would mean a second credential for
+        the same install.
+        """
+        body = await self._post("/v1/subscriptions",
+                                {"channel": channel, "mode": mode})
+        if body is None:
+            return {"status": "error", "channel": channel}
+        return body
+
+    async def report(self, records: Sequence[Dict[str, Any]],
+                     channel: str = CHANNEL_THREAT) -> Dict[str, Any]:
         """Publish observations, after filtering.
 
         The filter runs here rather than server-side because only this install
         knows which addresses are its operator's own infrastructure. Refusals
         are logged, not silently dropped — an operator whose never-publish list
         is too broad should be able to see that they are contributing nothing.
+
+        The service re-validates everything published; this filter is not a
+        substitute for that, it is the part the service cannot do.
         """
         keep, refused = filter_reports(records, self.never_publish)
         if refused:
@@ -267,27 +333,38 @@ class TMClient:
                         "; ".join(f"{ip}: {why}" for ip, why in refused[:5]))
         if not keep:
             return {"status": "SKIPPED", "published": 0, "withheld": len(refused)}
-        body = await self._post("/v1/report", {"records": keep})
+        body = await self._post(f"/v1/publish/{channel}", {"records": keep})
         if body is None:
             return {"status": "ERROR", "published": 0, "withheld": len(refused)}
-        return {"status": "SUCCESS", "published": len(keep),
+        # The service reports what it actually stored. Trusting the local count
+        # would hide a channel that is silently rejecting everything sent.
+        return {"status": "SUCCESS",
+                "published": int(body.get("accepted", 0)),
+                "rejected": int(body.get("rejected", 0)),
                 "withheld": len(refused), "response": body}
 
     async def fetch_decoys(self) -> Optional[List[Dict[str, Any]]]:
         """The decoy set to arm the local engine with.
+
+        Served as a subscription channel like any other, so the pool stays with
+        the exchange and this install only ever holds the subset it was given.
+        Each participant receives a different subset drawn from its own install
+        id: if one install's set surfaces publicly the leak is attributable and
+        it discloses nothing about what anyone else is watching.
 
         Returns ``None`` when unavailable, which the caller must distinguish
         from an empty list: ``None`` means "keep the current set" (a fetch
         failure must not disarm a working sensor), while ``[]`` is a deliberate
         instruction to stand down.
         """
-        body = await self._get("/v1/decoys")
+        body = await self._get(f"/v1/feed/{CHANNEL_DECOYS}")
         if body is None:
             return None
-        entries = body.get("entries")
-        return list(entries) if isinstance(entries, list) else []
+        records = body.get("records")
+        return list(records) if isinstance(records, list) else []
 
-    async def fetch_feed(self, since: Optional[float] = None
+    async def fetch_feed(self, since: Optional[float] = None,
+                         channel: str = CHANNEL_THREAT
                          ) -> Optional[List[Dict[str, Any]]]:
         """Corroborated attacker records from the network.
 
@@ -295,7 +372,8 @@ class TMClient:
         the reporters, so a consumer gets the confidence signal without learning
         who else participates or what they are being hit by.
         """
-        body = await self._get("/v1/feed", {"since": since} if since else None)
+        body = await self._get(f"/v1/feed/{channel}",
+                               {"since": since} if since else None)
         if body is None:
             return None
         records = body.get("records")

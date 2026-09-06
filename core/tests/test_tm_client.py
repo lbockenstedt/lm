@@ -130,8 +130,8 @@ def test_duplicate_addresses_collapse_to_the_strongest_tier():
 # ── failure posture ──────────────────────────────────────────────────────────
 
 def _client(**kw):
-    return TMClient(base_url="https://tm.invalid", tenant_id="t1",
-                    install_uuid="u1", credential="c1", **kw)
+    return TMClient(tenant_id="t1", install_uuid="u1",
+                    credential="c1", base_url="https://ss.invalid", **kw)
 
 
 @pytest.mark.asyncio
@@ -191,8 +191,8 @@ async def test_credential_is_sent_as_bearer_with_both_identifiers(monkeypatch):
     monkeypatch.setattr(httpx.AsyncClient, "request", _ok)
     await _client().fetch_feed()
     assert seen["headers"]["Authorization"] == "Bearer c1"
-    assert seen["headers"]["X-TM-Install"] == "u1"
-    assert seen["headers"]["X-TM-Tenant"] == "t1"
+    assert seen["headers"]["X-SS-Install"] == "u1"
+    assert seen["headers"]["X-SS-Tenant"] == "t1"
 
 
 @pytest.mark.asyncio
@@ -211,7 +211,7 @@ async def test_enroll_stores_a_granted_credential(monkeypatch):
                               request=httpx.Request(method, url))
 
     monkeypatch.setattr(httpx.AsyncClient, "request", _ok)
-    c = TMClient("https://tm.invalid", "t1", "u1", enrollment_psk="psk")
+    c = TMClient("t1", "u1", enrollment_psk="psk", base_url="https://ss.invalid")
     assert (await c.enroll())["status"] == "approved"
     assert c.credential == "new-cred"
 
@@ -225,17 +225,42 @@ async def test_pending_enrollment_grants_no_credential(monkeypatch):
                               request=httpx.Request(method, url))
 
     monkeypatch.setattr(httpx.AsyncClient, "request", _pending)
-    c = TMClient("https://tm.invalid", "t1", "u1")
+    c = TMClient("t1", "u1", base_url="https://ss.invalid")
     assert (await c.enroll())["status"] == "pending"
     assert c.credential == ""
 
 
 @pytest.mark.asyncio
-async def test_no_base_url_makes_the_client_inert(monkeypatch):
-    """An install that has not opted in must make no outbound requests."""
+async def test_an_unsubscribed_install_makes_no_outbound_request(monkeypatch):
+    """An install that has not opted in must make no outbound requests.
+
+    This used to be expressed by leaving the service URL empty. The endpoint is
+    now a constant, so "unconfigured" is no longer a state that can exist —
+    which would have turned every install into a participant by default. The
+    opt-in is therefore explicit, and this test is what stops a future default
+    from quietly reversing it.
+    """
     async def _spy(*a, **kw):
         raise AssertionError("should not have been called")
 
     monkeypatch.setattr(httpx.AsyncClient, "request", _spy)
-    c = TMClient("", "t1", "u1")
+    c = TMClient("t1", "u1", enabled=False)
     assert await c.fetch_feed() is None
+    assert await c.fetch_decoys() is None
+    assert (await c.enroll())["status"] == "error"
+    assert (await c.report([{"ip": "8.8.8.8", "tier": "bait_used"}]))["status"] == "ERROR"
+
+
+def test_the_service_url_is_not_operator_configurable():
+    """A tenant chooses whether to subscribe, never where.
+
+    An operator-supplied URL is an operator-supplied place to send this
+    install's sensor observations; a typo or a tampered config file would
+    redirect the feed to a third party without anything looking wrong locally.
+    """
+    from security import tm_client as mod
+    assert mod.SERVICE_URL == "https://ss.ext.lrbtechnologies.com"
+    assert TMClient("t1", "u1").base_url == "https://ss.ext.lrbtechnologies.com"
+    # An empty override must fall back to the exchange rather than silently
+    # producing an inert client that looks subscribed.
+    assert TMClient("t1", "u1", base_url="").base_url == mod.SERVICE_URL
