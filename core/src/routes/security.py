@@ -119,3 +119,132 @@ def register(app, hub, ctx):
         Benign: no IP → never blocks anyone."""
         _guard(request)
         return hub.threat_monitor.self_test()
+
+    # ── Extension source ────────────────────────────────────────────────────
+    # Operator-set config for the out-of-band module loader (``site_ext``): a
+    # private git source the hub clones at startup, BEFORE the app is built.
+    # Deliberately named neutrally here (and in the UI) — the point of the
+    # mechanism is that a deployment doesn't advertise what it loads.
+    #
+    # The token is WRITE-ONLY across this API: it is accepted on PUT and never
+    # returned by GET (only a ``token_set`` boolean), so an admin session can
+    # configure it but can't read a stored credential back out of the browser.
+
+    _EXT_SECRET_NAME = "lm-ext-source-token"
+
+    async def _store_token(hub, tok: str) -> str:
+        """Persist the PAT and return the value to keep in config.
+
+        When a cloud vault is enabled the secret goes THERE and only a
+        ``kv:<name>`` reference is kept in config — matching the established
+        pattern (``instance_vault`` / HE.NET / LE). With no vault the literal
+        rides in ``global_config``, which the StateManager writes Fernet-
+        encrypted to a 0700 dir, so it is still encrypted at rest.
+
+        A ``kv:`` reference typed by the operator is passed through untouched."""
+        if tok.startswith("kv:"):
+            return tok
+        try:
+            import cloud_vault
+            if cloud_vault.active_provider(hub) is not None:
+                await cloud_vault.set_secret(hub, _EXT_SECRET_NAME, tok)
+                return f"kv:{_EXT_SECRET_NAME}"
+        except Exception as e:  # noqa: BLE001 — vault down must not lose the save
+            import logging
+            logging.getLogger("Hub").warning(
+                "ext-source: vault store failed (%s) — keeping token in encrypted state", e)
+        return tok
+
+    def _ext_cfg(hub) -> dict:
+        gc = hub.state.get_global_config() or {}
+        c = gc.get("site_ext") or {}
+        return dict(c) if isinstance(c, dict) else {}
+
+    def _ext_status(hub) -> dict:
+        import os
+        import site_ext
+        cfg = _ext_cfg(hub)
+        d = site_ext.ext_dir(hub)
+        tok = cfg.get("token") or ""
+        try:
+            import cloud_vault
+            vault = cloud_vault.active_provider(hub)
+        except Exception:  # noqa: BLE001
+            vault = None
+        modules = []
+        try:
+            modules = sorted(os.path.basename(p) for p in __import__("glob").glob(os.path.join(d, "*.py")))
+        except Exception:  # noqa: BLE001
+            pass
+        return {
+            "enabled": bool(cfg.get("enabled")),
+            "repo": cfg.get("repo") or "",
+            "ref": cfg.get("ref") or "main",
+            "token_set": bool(cfg.get("token")),
+            "token_storage": ("vault" if str(tok).startswith("kv:")
+                              else ("state" if tok else "")),
+            "vault_available": bool(vault),
+            "dir": d,
+            "provisioned": os.path.isdir(os.path.join(d, ".git")),
+            "modules": modules,
+        }
+
+    @app.get("/api/security/ext-source")
+    async def ext_source_get(request: Request):
+        """Current extension-source config + provisioning status. NEVER returns
+        the stored token — only ``token_set``."""
+        _guard(request)
+        return _ext_status(hub)
+
+    @app.put("/api/security/ext-source")
+    async def ext_source_put(request: Request):
+        """Save the extension source. Body: {enabled, repo, ref, token,
+        clear_token}.
+
+        ``token`` is merge-preserving: omitting it (or sending "") KEEPS the
+        stored credential, so an admin can edit the repo/branch without having
+        to re-enter the PAT (which the GET deliberately never gave them). Pass
+        ``clear_token: true`` to actually remove it."""
+        _guard(request)
+        body = await request.json() or {}
+        cfg = _ext_cfg(hub)
+        if "enabled" in body:
+            cfg["enabled"] = bool(body.get("enabled"))
+        if "repo" in body:
+            repo = (body.get("repo") or "").strip()
+            if repo and not repo.startswith("https://"):
+                raise HTTPException(status_code=400,
+                                    detail="repo must be an https:// git URL")
+            cfg["repo"] = repo
+        if "ref" in body:
+            cfg["ref"] = (body.get("ref") or "").strip() or "main"
+        if body.get("clear_token"):
+            old = cfg.pop("token", None)
+            if old and str(old).startswith("kv:"):
+                try:
+                    import cloud_vault
+                    await cloud_vault.delete_secret(hub, str(old)[3:])
+                except Exception:  # noqa: BLE001 — config is authoritative
+                    pass
+        else:
+            tok = (body.get("token") or "").strip()
+            if tok:
+                cfg["token"] = await _store_token(hub, tok)
+        hub.state.update_global_config({"site_ext": cfg})
+        return {"status": "ok", **_ext_status(hub)}
+
+    @app.post("/api/security/ext-source/provision")
+    async def ext_source_provision(request: Request):
+        """Fetch now, so a bad token/branch/URL surfaces immediately instead of
+        at the next restart. Modules are only *registered* during app build, so
+        a restart is still required for newly fetched routes to serve."""
+        _guard(request)
+        import site_ext
+        before = _ext_status(hub)
+        if not before["enabled"] or not before["repo"]:
+            raise HTTPException(status_code=400,
+                                detail="enable the source and set a repo first")
+        await site_ext.provision(hub)
+        after = _ext_status(hub)
+        return {"status": "ok", "restart_required": after["modules"] != before["modules"]
+                or not before["provisioned"], **after}

@@ -4579,18 +4579,122 @@ async function loadSecurityData() {
         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Recent invalid attempts <span class="text-slate-400 font-normal">(${evts.length})</span> <span class="text-[11px] text-slate-400 normal-case font-normal">— click a row to drill in</span></h3>
         <div class="overflow-x-auto max-h-72 overflow-y-auto"><table class="w-full text-xs"><thead class="text-slate-400 text-[10px] uppercase"><tr><th class="px-2 py-1 text-left">When</th><th class="px-2 py-1 text-left">Source IP</th><th class="px-2 py-1 text-left">Kind</th><th class="px-2 py-1 text-left">User</th><th class="px-2 py-1 text-left">Detail</th></tr></thead><tbody>${evtRows || '<tr><td colspan="5" class="px-2 py-3 text-slate-400 italic">no events yet</td></tr>'}</tbody></table></div></div>`;
 
+    const extSrc = `<div class="${card}" id="ext-src-card">
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Extension Source</h3>
+        <p class="text-sm text-slate-400 italic">Loading…</p></div>`;
+
     el.innerHTML = `
       ${stats}
       ${cfg}
       ${manualBlock}
       ${blockedTile}
       ${neverTile}
-      ${events}`;
+      ${events}
+      ${extSrc}`;
     _secPrioLive();
+    _loadExtSource();
     // Best-effort origin enrichment (country / ISP / reverse-DNS) for every IP
     // shown in the blocked-IP preview and the recent-attempt feed. Lazy + cached
     // server-side, so it never blocks the initial paint.
     _secDecorateGeo([...allBlocks.map(b => b.ip), ...evts.map(e => e.ip)], el);
+}
+
+// ── Extension source (Security) ──────────────────────────────────────────────
+// Operator-set private module source for the out-of-band loader. Kept
+// deliberately neutral in wording: a deployment shouldn't advertise what it
+// loads. The PAT is WRITE-ONLY — the API never returns it, so the field shows
+// only whether one is stored and an empty submit preserves it.
+async function _loadExtSource() {
+    const el = document.getElementById('ext-src-card');
+    if (!el) return;
+    let d = {};
+    try {
+        const r = await setupFetch('/api/security/ext-source');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        d = await r.json();
+    } catch (e) {
+        el.innerHTML = `<h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Extension Source</h3>
+            <p class="text-xs text-red-500">Failed to load: ${escapeHtml(e.message)}</p>`;
+        return;
+    }
+    const inp = 'w-full mt-1 border border-slate-300 rounded px-2 py-1 text-xs';
+    const state = d.provisioned
+        ? `<span class="text-[#01A982]">provisioned</span> — ${(d.modules || []).length} module(s)`
+        : '<span class="text-slate-400">not provisioned</span>';
+    const store = d.token_storage === 'vault'
+        ? '<span class="text-[#01A982]">stored in the cloud vault</span> (config holds only a reference)'
+        : (d.token_storage === 'state'
+            ? `<span class="text-slate-600">stored encrypted in hub state</span>${d.vault_available ? '' : ' — no vault configured'}`
+            : '<span class="text-slate-400">no token stored</span>');
+    el.innerHTML = `
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Extension Source</h3>
+        <div class="flex gap-2">
+          <button onclick="provisionExtSource(event)" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium" title="Fetch now so a bad token, branch or URL surfaces immediately">Fetch now</button>
+          <button onclick="saveExtSource(event)" class="text-xs bg-[#01A982] hover:bg-[#018f6f] text-white px-3 py-1 rounded-md font-medium">Save</button>
+        </div>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+        <label class="flex items-center gap-2 text-slate-600 md:col-span-4"><input type="checkbox" id="ext-enabled" ${d.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Enabled (fetched at hub startup, before the app is built)</label>
+        <label class="text-slate-500 md:col-span-2">Repo URL (https)<input type="text" id="ext-repo" value="${escapeHtml(d.repo || '')}" placeholder="https://github.com/owner/name.git" class="${inp}"></label>
+        <label class="text-slate-500">Branch / ref<input type="text" id="ext-ref" value="${escapeHtml(d.ref || 'main')}" placeholder="main" class="${inp}"></label>
+        <label class="text-slate-500">Access token (PAT)<input type="password" id="ext-token" autocomplete="new-password" placeholder="${d.token_set ? '•••••• stored — leave blank to keep' : 'none stored'}" class="${inp}"></label>
+        <div class="md:col-span-4 text-[11px] text-slate-500 bg-slate-50 rounded px-2 py-1.5 leading-relaxed">
+          Status: ${state}. Token: ${store}.
+          Modules must export <code>register(app, hub, ctx)</code> — anything else is ignored silently.
+          Newly fetched modules only serve after a <b>hub restart</b> (routes register during app build).
+          ${d.token_set ? '<label class="inline-flex items-center gap-1 ml-2 text-red-600"><input type="checkbox" id="ext-clear-token" class="w-3 h-3 rounded"> clear stored token</label>' : ''}
+          <span id="ext-src-status" class="ml-2"></span>
+        </div>
+      </div>`;
+}
+
+async function saveExtSource(ev) {
+    const btn = ev && ev.currentTarget;
+    if (btn) btn.disabled = true;
+    const st = document.getElementById('ext-src-status');
+    try {
+        const body = {
+            enabled: document.getElementById('ext-enabled').checked,
+            repo: document.getElementById('ext-repo').value.trim(),
+            ref: document.getElementById('ext-ref').value.trim() || 'main',
+            token: document.getElementById('ext-token').value,
+            clear_token: !!(document.getElementById('ext-clear-token') || {}).checked,
+        };
+        const r = await setupFetch('/api/security/ext-source', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+        showToast('Extension source saved', 'success');
+        _loadExtSource();
+    } catch (e) {
+        if (st) st.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`;
+        showToast('Save failed: ' + e.message, 'error');
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function provisionExtSource(ev) {
+    const btn = ev && ev.currentTarget;
+    if (btn) { btn.disabled = true; btn.textContent = 'Fetching…'; }
+    const st = document.getElementById('ext-src-status');
+    try {
+        const r = await setupFetch('/api/security/ext-source/provision', { method: 'POST' });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+        const n = (j.modules || []).length;
+        showToast(j.provisioned ? `Fetched — ${n} module(s)${j.restart_required ? '; restart required' : ''}`
+                                : 'Fetch did not complete — check the hub log', j.provisioned ? 'success' : 'error');
+        _loadExtSource();
+    } catch (e) {
+        if (st) st.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`;
+        showToast('Fetch failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Fetch now'; }
+    }
 }
 
 // ── IP origin enrichment (reverse DNS + geolocation) ─────────────────────────
