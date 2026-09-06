@@ -4211,7 +4211,7 @@ function _viewTemplate(viewId) {
             return `<div class="space-y-4">
   <div>
     <h2 class="text-xl font-bold text-slate-800">Security — Threat Monitor</h2>
-    <p class="text-sm text-slate-500">Detects brute-force / faked-credential attacks on the API, logs invalid attempts, and (opt-in) auto-blocks the source IP via a NSG deny rule.</p>
+    <p class="text-sm text-slate-500">Detects brute-force / faked-credential attacks on the API, logs invalid attempts, and (opt-in) auto-blocks the source IP via a NSG deny rule. Optionally subscribes to the shared threat database, so addresses other participants have already seen are known here before they arrive.</p>
   </div>
   <div id="security-content"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
 </div>`;
@@ -4584,17 +4584,20 @@ async function loadSecurityData() {
         <p class="text-sm text-slate-400 italic">Loading…</p></div>`;
 
     const subCard = `<div class="${card}" id="subscription-card">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Data Subscription</h3>
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Threat Monitor Subscription</h3>
         <p class="text-sm text-slate-400 italic">Loading…</p></div>`;
 
+    // The subscription sits directly under the Threat Monitor config it
+    // extends, not at the foot of the tab: it is a configuration decision, and
+    // below the 60-row event table nobody scrolls to it.
     el.innerHTML = `
       ${stats}
       ${cfg}
+      ${subCard}
       ${manualBlock}
       ${blockedTile}
       ${neverTile}
       ${events}
-      ${subCard}
       ${extSrc}`;
     _secPrioLive();
     _loadSubscription();
@@ -4605,7 +4608,7 @@ async function loadSecurityData() {
     _secDecorateGeo([...allBlocks.map(b => b.ip), ...evts.map(e => e.ip)], el);
 }
 
-// ── Data subscription (Security) ─────────────────────────────────────────────
+// ── Threat Monitor subscription (Security) ───────────────────────────────────
 // The tenant-facing counterpart to the Extension Source tile below. That one
 // fetches CODE from a private repo; this one subscribes to DATA from the
 // exchange. The sensor content is no longer distributed as source, so this is
@@ -4622,7 +4625,7 @@ async function _loadSubscription() {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         d = await r.json();
     } catch (e) {
-        el.innerHTML = `<h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Data Subscription</h3>
+        el.innerHTML = `<h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Threat Monitor Subscription</h3>
             <p class="text-xs text-red-500">Failed to load: ${escapeHtml(e.message)}</p>`;
         return;
     }
@@ -4648,7 +4651,7 @@ async function _loadSubscription() {
           ${escapeHtml(c.label)}</label>`).join('');
     el.innerHTML = `
       <div class="flex items-center justify-between mb-3">
-        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Data Subscription</h3>
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Threat Monitor Subscription</h3>
         <div class="flex gap-2">
           ${d.credential_set || d.status !== 'not_enrolled'
             ? '<button onclick="unsubscribeData(event)" class="text-xs bg-slate-100 hover:bg-red-100 text-red-600 px-3 py-1 rounded-md font-medium" title="Stop taking part and forget the stored credential">Unsubscribe</button>'
