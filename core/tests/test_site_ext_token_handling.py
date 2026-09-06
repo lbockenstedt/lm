@@ -129,3 +129,70 @@ async def test_disabled_source_is_a_no_op(tmp_path, monkeypatch):
     hub = _Hub({"enabled": False, "repo": "https://github.com/o/r.git"}, str(tmp_path))
     await site_ext.provision(hub)
     assert calls == []
+
+
+# ── provision reports WHY it failed ──────────────────────────────────────────
+# The route turns this into the operator-facing error. Before this, every
+# failure produced the same "did not complete — check the hub log", which put
+# the diagnosis behind SSH access for a fault (bad token, wrong branch, no
+# egress) the operator can usually fix from the UI.
+
+@pytest.mark.asyncio
+async def test_provision_reports_success(tmp_path, monkeypatch):
+    async def fake_git(*args, cwd=None, timeout=90.0):
+        return 0, ""
+
+    monkeypatch.setattr(site_ext, "_git", fake_git)
+    hub = _Hub({"enabled": True, "repo": "https://github.com/o/r.git"}, str(tmp_path))
+    assert (await site_ext.provision(hub))["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_vault_ref_is_distinguishable_from_a_git_failure(
+        tmp_path, monkeypatch):
+    """This is the freshly-created-secret race. It must NOT look like a bad
+    token, or the operator revokes a perfectly good PAT."""
+    called = []
+
+    async def fake_git(*args, cwd=None, timeout=90.0):
+        called.append(args)
+        return 0, ""
+
+    monkeypatch.setattr(site_ext, "_git", fake_git)
+    hub = _Hub({"enabled": True, "repo": "https://github.com/o/r.git",
+                "token": "kv:lm-ext-source-token"}, str(tmp_path))
+    res = await site_ext.provision(hub)
+    assert res["reason"] == "token_unavailable"
+    assert "retry shortly" in res["detail"]
+    assert called == [], "must not fetch anonymously with a broken credential"
+
+
+@pytest.mark.asyncio
+async def test_git_failure_detail_is_redacted(tmp_path, monkeypatch):
+    """The detail is returned over the API, so it must carry no credential."""
+    async def fake_git(*args, cwd=None, timeout=90.0):
+        return 128, "fatal: ******github.com/o/r' not found"
+
+    monkeypatch.setattr(site_ext, "_git", fake_git)
+    hub = _Hub({"enabled": True, "repo": "https://github.com/o/r.git",
+                "ref": "main", "token": "ghp_SECRET"}, str(tmp_path))
+    res = await site_ext.provision(hub)
+    assert res["reason"] == "git_failed"
+    assert "ghp_SECRET" not in res["detail"]
+
+
+@pytest.mark.parametrize("output,expect", [
+    ("remote: Support for password authentication was removed. Authentication failed",
+     "check the token is valid"),
+    ("remote: Repository not found.", "unauthorised token looks like"),
+    ("fatal: Remote branch nope not found in upstream origin", "does not exist"),
+    ("fatal: unable to access: Could not resolve host: github.com", "could not reach"),
+])
+def test_git_failures_are_explained(output, expect):
+    assert expect in site_ext._explain_git_failure(output, "nope")
+
+
+def test_unrecognised_git_output_is_passed_through_verbatim():
+    """Never swallow output we can't classify — an unhelpful message still
+    beats no message."""
+    assert site_ext._explain_git_failure("something new", "main") == "something new"

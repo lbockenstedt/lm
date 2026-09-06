@@ -244,7 +244,12 @@ def register(app, hub, ctx):
         if not before["enabled"] or not before["repo"]:
             raise HTTPException(status_code=400,
                                 detail="enable the source and set a repo first")
-        await site_ext.provision(hub)
+        result = await site_ext.provision(hub)
         after = _ext_status(hub)
+        if not result.get("ok"):
+            # Report the actual cause instead of "check the log". The detail is
+            # already redacted by site_ext, so it is safe to return.
+            raise HTTPException(status_code=502, detail=result.get("detail")
+                                or "fetch did not complete")
         return {"status": "ok", "restart_required": after["modules"] != before["modules"]
                 or not before["provisioned"], **after}

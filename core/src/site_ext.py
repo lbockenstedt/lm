@@ -98,12 +98,16 @@ def _redact(text: str, token: Optional[str]) -> str:
     return re.sub(r"(https://)[^/@\s]+@", r"\1***@", out)
 
 
-async def provision(hub) -> None:
+async def provision(hub) -> Dict[str, Any]:
     """Fetch the configured private extension repo into the ext dir. Best-effort:
-    logs and returns on any problem; NEVER raises into startup."""
+    logs and returns on any problem; NEVER raises into startup.
+
+    Returns a ``{"ok", "reason", "detail"}`` result so an interactive caller can
+    tell the operator WHAT went wrong. Startup ignores it, as before."""
     cfg = _cfg(hub)
     if not cfg.get("enabled") or not cfg.get("repo"):
-        return
+        return {"ok": False, "reason": "disabled",
+                "detail": "extension source is disabled or has no repo configured"}
     repo = str(cfg["repo"]).strip()
     ref = str(cfg.get("ref") or "main").strip()
     dest = ext_dir(hub)
@@ -122,7 +126,11 @@ async def provision(hub) -> None:
             # source — just load whatever is already on disk.
             logger.info("site extensions: token unavailable — skipping fetch, "
                         "loading any modules already present")
-            return
+            return {"ok": False, "reason": "token_unavailable",
+                    "detail": f"the vault secret {str(token_ref)[3:]!r} could not be read. "
+                              "A newly saved secret can take a few seconds to become "
+                              "readable — retry shortly. If it persists, check that a "
+                              "cloud vault is enabled and the secret exists."}
 
     url = _repo_url_with_token(repo, token)
     try:
@@ -143,11 +151,33 @@ async def provision(hub) -> None:
             if token:
                 await _git("-C", dest, "remote", "set-url", "origin", repo)
             logger.info("site extensions: provisioned into %s", dest)
-        else:
-            logger.warning("site extensions: fetch failed (rc=%s): %s",
-                           rc, _redact(out, token))
+            return {"ok": True, "reason": "", "detail": ""}
+        safe = _redact(out, token)
+        logger.warning("site extensions: fetch failed (rc=%s): %s", rc, safe)
+        return {"ok": False, "reason": "git_failed",
+                "detail": _explain_git_failure(safe, ref)}
     except Exception as e:  # noqa: BLE001
-        logger.warning("site extensions: provisioning error: %s", _redact(str(e), token))
+        safe = _redact(str(e), token)
+        logger.warning("site extensions: provisioning error: %s", safe)
+        return {"ok": False, "reason": "error", "detail": safe}
+
+
+def _explain_git_failure(output: str, ref: str) -> str:
+    """Turn git's stderr into something an operator can act on. ``output`` is
+    ALREADY redacted — never pass raw git output here."""
+    low = (output or "").lower()
+    if "authentication failed" in low or "could not read username" in low or "403" in low:
+        return ("git rejected the credential — check the token is valid, not expired, "
+                "and grants Contents: Read to this repository. " + output)
+    if "repository not found" in low or "404" in low:
+        return ("repository not found — with a private repo this is also what an "
+                "unauthorised token looks like, so verify both the name and the "
+                "token's repository access. " + output)
+    if "remote branch" in low or "not found in upstream" in low or "couldn't find remote ref" in low:
+        return f"branch/ref {ref!r} does not exist in the repository. {output}"
+    if "could not resolve host" in low or "connection refused" in low or "timed out" in low:
+        return "could not reach github.com — check egress/DNS from this host. " + output
+    return output or "git failed with no output"
 
 
 def load(app, hub, ctx) -> None:

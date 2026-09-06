@@ -142,10 +142,11 @@ async def test_set_secret_creates_when_no_existing_secret_found():
     client, transport = _client_for([
         {"status": 200, "json": []},  # ListSecrets: none found
         {"status": 200, "json": {"id": "ocid1.secret.oc1..new"}},  # CreateSecret
+        {"status": 200, "json": {"lifecycleState": "ACTIVE"}},  # GetSecret: usable
     ])
     secret_id = await oci_vault.set_secret(_cfg(), _vcfg(), "my-secret", "value1", http=client)
     assert secret_id == "ocid1.secret.oc1..new"
-    list_req, create_req = transport.requests
+    list_req, create_req, state_req = transport.requests
     assert list_req.method == "GET"
     assert "vaults." in str(list_req.url)
     assert create_req.method == "POST"
@@ -153,6 +154,9 @@ async def test_set_secret_creates_when_no_existing_secret_found():
     body = create_req.content
     assert b"my-secret" in body
     assert b"keyId" in body
+    # A created secret is CREATING and its VALUE 404s until ACTIVE, so the
+    # create must not return before that transition (see the wait tests below).
+    assert str(state_req.url).endswith("/secrets/ocid1.secret.oc1..new")
 
 
 @pytest.mark.asyncio
@@ -298,3 +302,60 @@ def test_malformed_region_is_rejected_before_any_network_call():
     cfg = oci_vault.OciConfig({"region": "us ashburn 1"})
     with pytest.raises(oci_vault.OciVaultError, match="not a valid OCI region"):
         oci_vault._vaults_base(cfg)
+
+
+# ── waiting for a created secret to become usable ────────────────────────────
+# CreateSecret returns 200 while the secret is still CREATING; the secret
+# BUNDLE (the value) 404s until it reaches ACTIVE — seconds later in practice.
+# A "store the token, then immediately use it" flow therefore races, which is
+# exactly what saving a PAT and clicking "Fetch now" does.
+
+@pytest.mark.asyncio
+async def test_create_waits_for_the_secret_to_become_active(monkeypatch):
+    async def no_sleep(_):
+        return None
+    monkeypatch.setattr(oci_vault.asyncio, "sleep", no_sleep)
+
+    client, transport = _client_for([
+        {"status": 200, "json": []},
+        {"status": 200, "json": {"id": "ocid1.secret.oc1..new"}},
+        {"status": 200, "json": {"lifecycleState": "CREATING"}},
+        {"status": 200, "json": {"lifecycleState": "CREATING"}},
+        {"status": 200, "json": {"lifecycleState": "ACTIVE"}},
+    ])
+    assert await oci_vault.set_secret(_cfg(), _vcfg(), "s", "v",
+                                      http=client) == "ocid1.secret.oc1..new"
+    assert len(transport.requests) == 5, "must poll until ACTIVE, not return on CREATING"
+
+
+@pytest.mark.asyncio
+async def test_create_still_returns_the_id_if_activation_is_slow(monkeypatch, caplog):
+    """Best-effort: the secret IS created, so a slow transition must degrade to
+    the caller's normal error path rather than lose the write."""
+    async def no_sleep(_):
+        return None
+    monkeypatch.setattr(oci_vault.asyncio, "sleep", no_sleep)
+
+    client, _t = _client_for([
+        {"status": 200, "json": []},
+        {"status": 200, "json": {"id": "ocid1.secret.oc1..new"}},
+    ] + [{"status": 200, "json": {"lifecycleState": "CREATING"}}] * 10)
+
+    with caplog.at_level("WARNING"):
+        out = await oci_vault.set_secret(_cfg(), _vcfg(), "s", "v", http=client)
+    assert out == "ocid1.secret.oc1..new"
+    assert "not ACTIVE" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_update_of_an_existing_secret_does_not_wait():
+    """An already-ACTIVE secret's new version is readable immediately; polling
+    would just add latency to every credential rotation."""
+    client, transport = _client_for([
+        {"status": 200, "json": [{"secretName": "s", "id": "ocid1.secret.oc1..old",
+                                  "lifecycleState": "ACTIVE"}]},
+        {"status": 200, "json": {"id": "ocid1.secret.oc1..old"}},
+    ])
+    assert await oci_vault.set_secret(_cfg(), _vcfg(), "s", "v",
+                                      http=client) == "ocid1.secret.oc1..old"
+    assert len(transport.requests) == 2

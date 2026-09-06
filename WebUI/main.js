@@ -4686,12 +4686,13 @@ async function provisionExtSource(ev) {
         const j = await r.json().catch(() => ({}));
         if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
         const n = (j.modules || []).length;
-        showToast(j.provisioned ? `Fetched — ${n} module(s)${j.restart_required ? '; restart required' : ''}`
-                                : 'Fetch did not complete — check the hub log', j.provisioned ? 'success' : 'error');
+        showToast(`Fetched — ${n} module(s)${j.restart_required ? '; restart required' : ''}`, 'success');
         _loadExtSource();
     } catch (e) {
+        // The API returns the actual cause (already redacted server-side), which
+        // can be a sentence or two — show it inline rather than in a toast.
         if (st) st.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`;
-        showToast('Fetch failed: ' + e.message, 'error');
+        showToast('Fetch failed — see the message below the fields', 'error');
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Fetch now'; }
     }

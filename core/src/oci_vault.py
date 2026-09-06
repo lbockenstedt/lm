@@ -40,6 +40,7 @@ the OCI response body so the route/UI can show the real reason.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from typing import Any, Dict, Optional
@@ -282,6 +283,31 @@ async def _find_secret_id(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
     return None
 
 
+async def _wait_secret_active(cfg: OciConfig, vcfg: Dict[str, Any], secret_id: str,
+                              client: httpx.AsyncClient, *,
+                              attempts: int = 10, delay: float = 2.0) -> bool:
+    """Block until a newly created secret reaches ACTIVE, or give up.
+
+    OCI CreateSecret returns 200 with the secret in ``CREATING``; the secret
+    BUNDLE (the actual value) is not retrievable until it goes ``ACTIVE``, which
+    typically takes a few seconds. Without this wait, storing a credential and
+    immediately reading it back — exactly what "save the token, then fetch"
+    does — races and the read 404s.
+
+    Best-effort: returns False on timeout rather than raising, so a slow vault
+    degrades to the caller's existing error path instead of losing the write
+    (the secret IS created either way)."""
+    for i in range(attempts):
+        resp = await _request(cfg, client, "GET", f"{_vaults_base(cfg)}/secrets/{secret_id}")
+        if resp.status_code == 200 and (resp.json() or {}).get("lifecycleState") == "ACTIVE":
+            return True
+        if i < attempts - 1:
+            await asyncio.sleep(delay)
+    logger.warning("OCI vault: secret %s not ACTIVE after %.0fs — reads may 404 briefly",
+                   secret_id, attempts * delay)
+    return False
+
+
 async def set_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str, value: str,
                      http: Optional[httpx.AsyncClient] = None) -> str:
     """Create the secret if it doesn't exist yet, else push a new version.
@@ -312,7 +338,12 @@ async def set_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str, value: str
             })
         if resp.status_code not in (200, 201):
             raise _http_error(cfg, "OCI CreateSecret", resp, vcfg)
-        return resp.json().get("id", "")
+        new_id = resp.json().get("id", "")
+        # A freshly created secret is CREATING; its value can't be read back
+        # until ACTIVE. Wait here so the caller's next read doesn't 404.
+        if new_id:
+            await _wait_secret_active(cfg, vcfg, new_id, client)
+        return new_id
 
 
 # ── delete ───────────────────────────────────────────────────────────────────
