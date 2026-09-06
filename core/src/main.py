@@ -69,6 +69,7 @@ from security.auth_manager import AuthManager, LDAPAuthProvider
 from security.threat_monitor import ThreatMonitor
 from security.probe_signatures import looks_like_probe as _edge_looks_like_probe
 from alert_engine import AlertEngine, run_alert_loop
+from role_listeners import LISTENER_PORT_ROLES, listener_conflict
 from security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
                                    encryption_enabled, is_encrypted, wrap)
 from cryptography.exceptions import InvalidTag
@@ -3784,6 +3785,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         roles = self.agent_assigned_roles(agent_spoke_id)
         if not roles:
             return
+        pushed = []  # roles re-pushed this pass (they now own their port)
         inflight = getattr(self, "_readopt_inflight", None)
         if inflight is None:
             inflight = self._readopt_inflight = set()
@@ -3807,11 +3809,33 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 sub_pk = self._primary_key(f"{agent_spoke_id}-{role}")
                 if sub_pk in self.active_connections:
                     continue  # role sub-spoke already live — nothing to heal
+                # Never re-create a port collision the load-role API refuses to
+                # create. An agent recorded with two :443-binding roles (from
+                # before that guard existed) would otherwise have the loser
+                # re-pushed on EVERY reconnect, silently stealing the port back
+                # from whichever role actually serves traffic. Roles already
+                # live win; otherwise the first in registry order wins.
+                effective = [r for r in roles
+                             if self._primary_key(f"{agent_spoke_id}-{r}")
+                             in self.active_connections] + pushed
+                clash = listener_conflict(effective, role)
+                if clash:
+                    logger.error(
+                        "readopt[%s]: NOT re-pushing LOAD_ROLE %s — role %s is "
+                        "already on this host and both bind port %s. These roles "
+                        "cannot share a VM; unload one of them.",
+                        agent_spoke_id, role, clash,
+                        LISTENER_PORT_ROLES.get(role, 443))
+                    self.record_spoke_event(
+                        agent_spoke_id, "role_readopt_conflict",
+                        f"role={role} conflicts_with={clash}")
+                    continue
                 try:
                     logger.info("readopt[%s]: re-pushing LOAD_ROLE %s "
                                 "(sub-spoke offline)", agent_spoke_id, role)
                     await self.request_response(agent_spoke_id, "LOAD_ROLE",
                                                 {"role": role}, timeout=120.0)
+                    pushed.append(role)
                     self.record_spoke_event(agent_spoke_id, "role_readopt",
                                             f"role={role}")
                 except Exception:  # noqa: BLE001 — one role's failure ≠ stop

@@ -3,6 +3,9 @@ from api import (
     HTTPException, Request, logger,
 )
 from access import valid_display_name, valid_identifier, can_bind_spoke
+from role_listeners import (
+    LISTENER_PORT_ROLES, listener_conflict, listener_conflict_message,
+)
 
 
 def _agent_role_preflight(hub, spoke_id):
@@ -26,45 +29,13 @@ def _agent_role_preflight(hub, spoke_id):
         )
 
 
-# Roles that bind an inbound listener on the SAME port (:443) of the host box.
-# They cannot be stacked: whichever loads first wins the port and the others are
-# left permanently broken.
-#
-#   proxmox     — /ws/agent listener, AGENT_WSS_PORT = 443, always enabled
-#                 (agent_hosting.AgentHostingControlPlane._agent_listener_enabled)
-#   simulation  — the same listener, AGENT_WSS_PORT overridden to 443
-#   proxy       — the edge proxy's browser-facing listener on :443
-#
-# This bit a live box: proxmox bound wss://0.0.0.0:443 two seconds before the
-# proxy role loaded, so the edge proxy could never bind and every request to the
-# UI was answered by the agent listener with a bare "OK". Nothing failed loudly
-# — the proxy just logged EADDRINUSE and retried forever.
-_LISTENER_PORT_ROLES = {
-    "proxmox": 443,
-    "simulation": 443,
-    "proxy": 443,
-}
-
-
-def _listener_conflict(existing_roles, candidate):
-    """The already-present role that would fight *candidate* for a port, or None."""
-    port = _LISTENER_PORT_ROLES.get(candidate)
-    if port is None:
-        return None
-    for other in existing_roles or ():
-        if other != candidate and _LISTENER_PORT_ROLES.get(other) == port:
-            return other
-    return None
-
-
-def _listener_conflict_message(spoke_id, candidate, other, port=443):
-    return (
-        f"Cannot load role '{candidate}' on {spoke_id}: role '{other}' is already "
-        f"loaded there and both bind port {port} on this host. Only one listener "
-        f"can own a port, so whichever starts first wins and the other silently "
-        f"fails to bind — leaving the box answering on the wrong service. Put "
-        f"'{candidate}' on a separate VM, or unload '{other}' first."
-    )
+# The listener/port table and conflict helpers live in ``role_listeners`` so the
+# hub's role RE-ADOPTION path (main._readopt_agent_roles) enforces exactly the
+# same rule as these routes -- a re-push must not be able to recreate a
+# collision the API refuses to create.
+_LISTENER_PORT_ROLES = LISTENER_PORT_ROLES
+_listener_conflict = listener_conflict
+_listener_conflict_message = listener_conflict_message
 
 
 async def _active_role_names(hub, spoke_id):
