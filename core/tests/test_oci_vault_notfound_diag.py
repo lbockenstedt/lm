@@ -139,19 +139,33 @@ def test_404_without_a_provable_fault_explains_the_ambiguity():
     assert "root compartment IS the tenancy" in msg
 
 
+def test_tenancy_ocid_is_a_valid_compartment_ocid():
+    """The root compartment IS the tenancy and shares its OCID — Oracle's own
+    CLI defaults compartmentId to it. Flagging this sent an operator chasing a
+    non-problem, so it must never be reported."""
+    assert oci_auth.diagnose_resource_ocid(
+        "ocid1.tenancy.oc1..aaaaaaaahjfddl7v7owsi", "compartment",
+        "Compartment OCID", "us-ashburn-1") == []
+
+
+def test_tenancy_ocid_is_still_wrong_for_a_vault_field():
+    """The alias is compartment-specific and must not leak to other fields."""
+    problems = oci_auth.diagnose_resource_ocid(
+        "ocid1.tenancy.oc1..aaaa", "vault", "Vault OCID", "us-ashburn-1")
+    assert len(problems) == 1
+
+
 def test_404_does_not_blame_tenancy_equals_compartment():
-    """The root compartment OCID *is* the tenancy OCID — a real config, not a
-    mistake. It must never be reported as the fault."""
+    """A compartment OCID equal to the tenancy OCID is correct config. The
+    assembled 404 must not name it as a fault at all."""
     oci_vault = _vault_mod()
     tenancy = "ocid1.tenancy.oc1..aaaaaaaaroot"
-    err = oci_vault._http_error(
+    err = str(oci_vault._http_error(
         _Cfg(), "OCI GET vault", _Resp(),
-        {"vault_id": "ocid1.vault.oc1.phx.abcd", "compartment_id": tenancy})
-    problems = oci_auth.diagnose_resource_ocid(
-        tenancy, "compartment", "Compartment OCID", "us-phoenix-1")
-    # It *is* flagged as a type mismatch only because it is literally a tenancy
-    # OCID; the assembled message must still carry the reassurance.
-    assert "root compartment IS the tenancy" in str(err) or problems
+        {"vault_id": "ocid1.vault.oc1.phx.abcd", "compartment_id": tenancy}))
+    assert "Compartment OCID is wrong" not in err
+    assert "Detected:" not in err  # nothing is provably wrong here
+    assert "root compartment IS the tenancy" in err
 
 
 def test_401_still_uses_the_auth_diagnosis_not_the_404_one():

@@ -91,7 +91,9 @@ async def test_get_secret_decodes_base64_bundle_content():
     value = await oci_vault.get_secret(_cfg(), _vcfg(), "my-secret", http=client)
     assert value == "s3cr3t-value"
     req = transport.requests[0]
-    assert req.method == "GET"
+    # GetSecretBundleByName is a POST (its arguments ride in the query string);
+    # as a GET this path 404s.
+    assert req.method == "POST"
     assert "secretbundles/actions/getByName" in str(req.url)
     assert "secretName=my-secret" in str(req.url)
     assert f"vaultId={_vcfg()['vault_id']}" in str(req.url)
@@ -234,7 +236,10 @@ async def test_test_connection_returns_vault_summary():
     res = await oci_vault.test_connection(_cfg(), _vcfg(), http=client)
     assert res == {"lifecycle_state": "ACTIVE", "vault_id": "ocid1.vault.oc1..v",
                    "management_endpoint": "https://x"}
-    assert "vaults." in str(transport.requests[0].url)
+    # GetVault belongs to the KMS service, NOT the secrets host — the secrets
+    # host has no /vaults route and answers 404 NotAuthorizedOrNotFound.
+    assert str(transport.requests[0].url).startswith(
+        "https://kms.us-ashburn-1.oraclecloud.com/20180608/vaults/")
 
 
 # ── endpoint hostnames ──────────────────────────────────────────────────────

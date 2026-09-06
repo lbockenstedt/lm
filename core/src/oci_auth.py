@@ -384,6 +384,16 @@ def diagnose_auth(cfg: OciAuthConfig) -> list:
     return problems
 
 
+# Resource types that are legitimately accepted where another type is expected.
+# The root compartment of a tenancy IS the tenancy and shares its OCID, so OCI
+# accepts a tenancy OCID anywhere a compartmentId is required — Oracle's own CLI
+# defaults compartmentId to the tenancy OCID. Flagging that as an error sends
+# operators chasing a non-problem.
+_OCID_TYPE_ALIASES = {
+    "compartment": {"tenancy"},
+}
+
+
 def region_of_ocid(value: str) -> str:
     """The region segment embedded in an OCID, normalised to a region name.
 
@@ -420,7 +430,8 @@ def diagnose_resource_ocid(value: str, expected_type: str, label: str,
         problems.append(f"The {label} doesn't look like an OCID at all (an "
                         f"OCID starts with 'ocid1.'). Got '{value[:40]}…'.")
         return problems
-    if m.group(1) != expected_type:
+    if m.group(1) != expected_type and \
+            m.group(1) not in _OCID_TYPE_ALIASES.get(expected_type, frozenset()):
         problems.append(
             f"The {label} is wrong: you pasted {_describe_ocid(value)}, but "
             f"this field needs an OCID starting with 'ocid1.{expected_type}.'. "
@@ -501,6 +512,23 @@ def signed_headers(cfg: OciAuthConfig, method: str, url: str,
     return out
 
 
+# Methods that carry a body in OCI's signing scheme. For these, OCI requires
+# content-length / content-type / x-content-sha256 to be SIGNED even when the
+# body is empty (some operations, e.g. GetSecretBundleByName, are POSTs whose
+# arguments are query parameters and whose body is empty). Omitting those
+# headers on a bodyless POST is rejected as NotAuthenticated, so an absent body
+# is normalised to b"" rather than None.
+_BODY_METHODS = {"POST", "PUT", "PATCH"}
+
+
+def _body_bytes(method: str, json_body: Optional[dict]) -> Optional[bytes]:
+    """Request body to send AND sign: encoded JSON, b"" for a bodyless
+    POST/PUT/PATCH, or None for methods that take no body at all."""
+    if json_body is not None:
+        return json.dumps(json_body, separators=(",", ":")).encode("utf-8")
+    return b"" if (method or "").upper() in _BODY_METHODS else None
+
+
 async def oci_request(cfg: OciAuthConfig, client: httpx.AsyncClient, method: str, url: str, *,
                       json_body: Optional[dict] = None) -> httpx.Response:
     """Issue ONE signed request on an already-open ASYNC client. Callers own
@@ -511,7 +539,7 @@ async def oci_request(cfg: OciAuthConfig, client: httpx.AsyncClient, method: str
     Transport failures are re-raised as :class:`OciAuthError` naming the host,
     so a DNS miss reads as "could not reach OCI endpoint <host>" instead of a
     context-free ``[Errno -2] Name or service not known``."""
-    body = json.dumps(json_body, separators=(",", ":")).encode("utf-8") if json_body is not None else None
+    body = _body_bytes(method, json_body)
     headers = signed_headers(cfg, method, url, body)
     try:
         return await client.request(method, url, headers=headers, content=body)
@@ -528,7 +556,7 @@ def oci_request_sync(cfg: OciAuthConfig, client: httpx.Client, method: str, url:
     synchronous (called from both sync and async call sites across the hub).
 
     Transport failures are wrapped the same way as :func:`oci_request`."""
-    body = json.dumps(json_body, separators=(",", ":")).encode("utf-8") if json_body is not None else None
+    body = _body_bytes(method, json_body)
     headers = signed_headers(cfg, method, url, body)
     try:
         return client.request(method, url, headers=headers, content=body)

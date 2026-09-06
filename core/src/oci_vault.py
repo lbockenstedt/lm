@@ -43,6 +43,7 @@ from __future__ import annotations
 import base64
 import logging
 from typing import Any, Dict, Optional
+from urllib.parse import quote
 
 import httpx
 
@@ -51,7 +52,20 @@ from oci_auth import OciAuthConfig as OciConfig  # re-exported: same fields/shap
 
 logger = logging.getLogger("OciVault")
 
-_API_VERSION = "20190301"
+# "OCI Vault" is three separate services on three hostnames with two different
+# API versions, and using the wrong combination returns 404
+# NotAuthorizedOrNotFound — indistinguishable from a missing resource or a
+# policy denial. Verified against live endpoints (an unauthenticated request to
+# a real route answers 401 NotAuthenticated; a bad route answers 404):
+#
+#   KMS vault mgmt   kms.<region>.oraclecloud.com                /20180608/vaults…
+#   secret mgmt      vaults.<region>.oci.oraclecloud.com         /20180608/secrets…
+#   secret retrieval secrets.vaults.<region>.oci.oraclecloud.com /20190301/secretbundles…
+#
+# Note the ``.oci.`` label appears on the two secrets hosts but NOT on kms.
+_KMS_API_VERSION = "20180608"      # KMS vault management
+_VAULTS_API_VERSION = "20180608"   # secret management (create/list/update/delete)
+_SECRETS_API_VERSION = "20190301"  # secret retrieval (secret bundles)
 
 
 class OciVaultError(Exception):
@@ -150,6 +164,17 @@ def _vault_region(cfg: OciConfig) -> str:
         raise OciVaultError(str(e)) from e
 
 
+def _kms_base(cfg: OciConfig) -> str:
+    """KMS vault MANAGEMENT — GetVault/ListVaults/CreateVault.
+
+    A different service from the secrets endpoints below, on a host with **no**
+    ``.oci.`` label. ``GET /vaults/{id}`` does not exist on
+    ``vaults.<region>.oci.oraclecloud.com`` at all; sending it there returns
+    404 NotAuthorizedOrNotFound, which reads exactly like a missing vault or a
+    policy problem and sends you hunting for the wrong thing."""
+    return f"https://kms.{_vault_region(cfg)}.oraclecloud.com/{_KMS_API_VERSION}"
+
+
 def _vaults_base(cfg: OciConfig) -> str:
     """Secret MANAGEMENT (control plane) — create/update/list/delete secrets.
 
@@ -157,7 +182,7 @@ def _vaults_base(cfg: OciConfig) -> str:
     ``vaults.<region>.oci.oraclecloud.com``, NOT
     ``vaults.<region>.oraclecloud.com`` (which does not resolve at all). Getting
     this wrong surfaces only as a DNS ``Name or service not known``."""
-    return f"https://vaults.{_vault_region(cfg)}.oci.oraclecloud.com/{_API_VERSION}"
+    return f"https://vaults.{_vault_region(cfg)}.oci.oraclecloud.com/{_VAULTS_API_VERSION}"
 
 
 def _secrets_base(cfg: OciConfig) -> str:
@@ -165,8 +190,9 @@ def _secrets_base(cfg: OciConfig) -> str:
 
     A separate host from the management plane, and note it is
     ``secrets.vaults.<region>.oci.oraclecloud.com`` — the ``vaults.`` label is
-    part of the retrieval host too."""
-    return f"https://secrets.vaults.{_vault_region(cfg)}.oci.oraclecloud.com/{_API_VERSION}"
+    part of the retrieval host too. It is also the one endpoint on a different
+    API version (20190301)."""
+    return f"https://secrets.vaults.{_vault_region(cfg)}.oci.oraclecloud.com/{_SECRETS_API_VERSION}"
 
 
 async def _request(cfg: OciConfig, client: httpx.AsyncClient, method: str, url: str, *,
@@ -193,9 +219,12 @@ async def get_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
     if not name:
         return None
     vault_id = str(vcfg.get("vault_id") or "").strip()
-    url = f"{_secrets_base(cfg)}/secretbundles/actions/getByName?secretName={name}&vaultId={vault_id}"
+    # GetSecretBundleByName is a POST whose arguments are QUERY parameters and
+    # whose body is empty — a GET on this path 404s.
+    url = (f"{_secrets_base(cfg)}/secretbundles/actions/getByName"
+           f"?secretName={quote(name, safe='')}&vaultId={quote(vault_id, safe='')}")
     async with (http or httpx.AsyncClient(timeout=20.0)) as client:
-        resp = await _request(cfg, client, "GET", url)
+        resp = await _request(cfg, client, "POST", url)
     if resp.status_code == 404:
         return None
     if resp.status_code != 200:
@@ -222,9 +251,10 @@ def get_secret_sync(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
     try:
         _require(vcfg)
         vault_id = str(vcfg.get("vault_id") or "").strip()
-        url = f"{_secrets_base(cfg)}/secretbundles/actions/getByName?secretName={name}&vaultId={vault_id}"
+        url = (f"{_secrets_base(cfg)}/secretbundles/actions/getByName"
+               f"?secretName={quote(name, safe='')}&vaultId={quote(vault_id, safe='')}")
         with (http or httpx.Client(timeout=20.0)) as client:
-            resp = _request_sync(cfg, client, "GET", url)
+            resp = _request_sync(cfg, client, "POST", url)
         if resp.status_code == 404:
             return None
         if resp.status_code != 200:
@@ -321,7 +351,7 @@ async def test_connection(cfg: OciConfig, vcfg: Dict[str, Any],
                           http: Optional[httpx.AsyncClient] = None) -> Dict[str, Any]:
     """GET the vault to confirm the signing key + IAM policy + OCID resolve."""
     _require(vcfg)
-    url = f"{_vaults_base(cfg)}/vaults/{vcfg['vault_id']}"
+    url = f"{_kms_base(cfg)}/vaults/{vcfg['vault_id']}"
     async with (http or httpx.AsyncClient(timeout=20.0)) as client:
         resp = await _request(cfg, client, "GET", url)
     if resp.status_code != 200:
