@@ -487,6 +487,58 @@ class SelfUpdateMixin:
     # the update worker — shared by SPOKE_UPDATE (spoke) + AGENT_UPDATE (agent)
     # ------------------------------------------------------------------
 
+    # Core paths that CANNOT affect a running spoke/agent process, so a core
+    # commit touching only these must not bounce the component.
+    #
+    # A spoke restart is not free: the proxy role drops its :443 listener, so a
+    # WebUI-only fix — already live the moment it lands, since the hub serves
+    # WebUI/ off disk per request — was knocking the edge proxy (and every
+    # other role) over across the whole fleet for nothing. The hub side already
+    # avoids this via UpdatePipelineMixin._NO_RESTART_PREFIXES; spokes were
+    # simply never taught the same rule and restarted on ANY core commit.
+    #
+    # Deliberately a DENY-list, mirroring the hub's: anything unrecognised
+    # falls through to "restart", so a new top-level directory is treated as
+    # code until someone says otherwise. Note core/src/routes/ is NOT listed —
+    # spokes don't import hub routes, but proving that for every component is
+    # not worth the risk of skipping a restart that was actually needed.
+    _CORE_NO_RESTART_PREFIXES = (
+        "WebUI/", "docs/", ".github/", "README", "LICENSE", "CHANGELOG",
+        "core/tests/", "tests/",
+    )
+
+    def _core_change_needs_restart(self, core_root: str,
+                                   from_commit: str, to_commit: str) -> bool:
+        """True when the core commits between *from_commit* and *to_commit*
+        touched anything this process could have loaded.
+
+        Fails SAFE: any doubt — unknown commit, git failure, empty diff we
+        can't explain — returns True. Running stale code indefinitely is far
+        worse than one unnecessary restart."""
+        if not (core_root and from_commit and to_commit):
+            return True
+        if from_commit == to_commit:
+            return False
+        try:
+            res = self._run_git(["diff", "--name-only", from_commit, to_commit],
+                                cwd=core_root)
+            if res.returncode != 0:
+                return True
+            paths = [p.strip() for p in (res.stdout or "").splitlines() if p.strip()]
+        except Exception:  # noqa: BLE001
+            return True
+        if not paths:
+            return True
+        inert = self._CORE_NO_RESTART_PREFIXES
+        skipped = [p for p in paths if p.startswith(inert)]
+        if len(skipped) == len(paths):
+            logger.info("update: core advanced %s→%s but only static assets "
+                        "changed (%s) — code is on disk and live; skipping "
+                        "restart.", from_commit[:8], to_commit[:8],
+                        ", ".join(paths[:5]) + ("…" if len(paths) > 5 else ""))
+            return False
+        return True
+
     def _perform_self_update_sync(self, repo_url: str,
                                   core_repo_url: Optional[str] = None,
                                   core_branch: Optional[str] = None,
@@ -518,6 +570,7 @@ class SelfUpdateMixin:
             # component's own repo IS /opt/lm, so the pull below already covers
             # core — avoid a duplicate fetch).
             core_changed = False
+            core_advanced = False
             core_root = None
             core_from_commit = ""
             core_to_commit = ""
@@ -580,7 +633,9 @@ class SelfUpdateMixin:
                                                        core_from_commit], cwd=core_root)
                                         core_to_commit = core_from_commit
                                     else:
-                                        core_changed = (core_to_commit != core_from_commit)
+                                        core_advanced = (core_to_commit != core_from_commit)
+                                        core_changed = self._core_change_needs_restart(
+                                            core_root, core_from_commit, core_to_commit)
                                 else:
                                     logger.warning("update: core fetch failed: %s",
                                                    (fetch_core.stderr or "").strip())
@@ -716,6 +771,15 @@ class SelfUpdateMixin:
                 return {"status": "SUCCESS",
                         "message": f"Updated from {repo_url}; restart skipped"}
             else:
+                if core_advanced:
+                    # The pull DID happen — saying "already up to date" here
+                    # would send an operator hunting for an update that landed.
+                    logger.info("update: core advanced to %s (static assets "
+                                "only); no restart needed.", core_to_commit[:8])
+                    return {"status": "SUCCESS",
+                            "message": (f"Core updated to {core_to_commit[:8]} "
+                                        f"(static assets only); already live, "
+                                        f"no restart needed")}
                 logger.debug("update: already up to date; no restart needed.")
                 return {"status": "SUCCESS", "message": "Already up to date; no restart needed"}
         except subprocess.CalledProcessError as e:
