@@ -71,8 +71,8 @@ def test_hub_self_write_routes_to_agent():
     fake = _FakeHubSelf()
     atomic = []
     d = _Distro(hub_self=fake, atomic=lambda p, c, m: atomic.append((p, c, m)))
-    ok = _run(d._hub_self_write("/opt/lm/tls/fullchain.pem", "DATA", 0o644))
-    assert ok is True
+    ok, err = _run(d._hub_self_write("/opt/lm/tls/fullchain.pem", "DATA", 0o644))
+    assert (ok, err) == (True, "")
     assert fake.write_calls == [{"path": "/opt/lm/tls/fullchain.pem",
                                  "content": "DATA", "mode": 0o644}]
     assert atomic == []          # no fallback when the agent succeeds
@@ -82,25 +82,28 @@ def test_hub_self_write_falls_back_on_agent_error():
     fake = _FakeHubSelf(write_resp={"status": "ERROR", "message": "agent down"})
     atomic = []
     d = _Distro(hub_self=fake, atomic=lambda p, c, m: atomic.append((p, c, m)))
-    ok = _run(d._hub_self_write("/opt/lm/tls/privkey.pem", "KEY", 0o600))
-    assert ok is True
+    ok, err = _run(d._hub_self_write("/opt/lm/tls/privkey.pem", "KEY", 0o600))
+    assert (ok, err) == (True, "")
     assert atomic == [("/opt/lm/tls/privkey.pem", "KEY", 0o600)]
 
 
 def test_hub_self_write_falls_back_when_no_hub_self():
     atomic = []
     d = _Distro(hub_self=None, atomic=lambda p, c, m: atomic.append((p, c, m)))
-    ok = _run(d._hub_self_write("/x/y", "C", 0o600))
-    assert ok is True
+    ok, err = _run(d._hub_self_write("/x/y", "C", 0o600))
+    assert (ok, err) == (True, "")
     assert atomic == [("/x/y", "C", 0o600)]
 
 
 def test_hub_self_write_direct_failure_returns_false():
+    """A failure reports WHY. The operator-facing target status used to say
+    only "see cert log", which is a dead end from the WebUI."""
     def boom(p, c, m):
         raise OSError("disk full")
     d = _Distro(hub_self=None, atomic=boom)
-    ok = _run(d._hub_self_write("/x/y", "C", 0o600))
+    ok, err = _run(d._hub_self_write("/x/y", "C", 0o600))
     assert ok is False
+    assert "disk full" in err and "/x/y" in err
 
 
 # ── _hub_self_restart ────────────────────────────────────────────────────────

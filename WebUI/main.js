@@ -536,6 +536,15 @@ function roleListenerConflictText(candidate, other) {
          + `or unload ${name(other)} first.`;
 }
 
+// Spoke UUID → friendly name, for the many places that render a spoke-keyed
+// map. `spokeHealth` is the same map the header tray uses (/setup/diagnostics
+// lists every approved spoke, including offline ones). Falls back to the raw id
+// when the map isn't loaded yet, so a name never renders as "undefined".
+function spokeDisplayName(spokeId) {
+    const h = (window.spokeHealth || {})[spokeId];
+    return (h && h.name && h.name !== spokeId) ? h.name : spokeId;
+}
+
 const PRODUCT_MAP = {
     'pxmx': 'pxmx',
     'opn': 'opnsense',
@@ -2756,16 +2765,23 @@ function _updateMetrics(statusData) {
             ? Object.entries(obj).sort((a,b)=>b[1]-a[1])
                 .map(([k,v]) => `<span class="inline-block bg-slate-100 rounded px-2 py-0.5 mr-1 mb-1">${esc(k)}: <b>${v}</b></span>`).join('')
             : '<span class="text-slate-400 italic">none</span>';
+        // Same chips, but for maps keyed by SPOKE ID — show the operator the
+        // spoke/agent name instead of a raw UUID, keeping the id on hover so it
+        // is still available for correlating against logs.
+        const kvSpokes = (obj) => Object.keys(obj || {}).length
+            ? Object.entries(obj).sort((a,b)=>b[1]-a[1])
+                .map(([k,v]) => `<span class="inline-block bg-slate-100 rounded px-2 py-0.5 mr-1 mb-1" title="${esc(k)}">${esc(spokeDisplayName(k))}: <b>${v}</b></span>`).join('')
+            : '<span class="text-slate-400 italic">none</span>';
         detEl.innerHTML = `
             <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">Backlog</span>
                  &nbsp;total <b>${bs.total ?? 0}</b> · unacked <b>${bs.pending_ack ?? 0}</b> · queued <b>${bs.queued ?? 0}</b>
                  ${bs.oldest_age_s ? `· oldest <b>${bs.oldest_age_s}s</b>` : ''}</div>
             <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">By type</span><br>${kv(bs.by_type)}</div>
-            <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">By spoke</span><br>${kv(bs.by_spoke)}</div>
+            <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">By spoke</span><br>${kvSpokes(bs.by_spoke)}</div>
             <div class="pt-1 border-t border-slate-100"><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">Rate limit</span>
                  &nbsp;burst <b>${rl.capacity ?? '—'}</b> · <b>${rl.fill_rate ?? '—'}</b>/s
                  &nbsp;·&nbsp;drops total <b>${m.rate_limit_drops_total ?? 0}</b></div>
-            <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">Drops by spoke</span><br>${kv(drops)}</div>
+            <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">Drops by spoke</span><br>${kvSpokes(drops)}</div>
             ${(() => {
                 // Backpressure ladder status: the graceful-degradation control
                 // loop. level 1 = offenders throttled, 2 = fleet-wide slow-down.
@@ -2784,7 +2800,7 @@ function _updateMetrics(statusData) {
                     <br><span class="text-slate-400">telemetry</span> recv <b>${bp.telemetry_received ?? 0}</b>
                     · processed <b>${bp.telemetry_processed ?? 0}</b>
                     · <span title="frames merged latest-wins (not dropped)">coalesced <b>${bp.telemetry_coalesced ?? 0}</b></span>
-                    ${thr.length ? `<br><span class="text-slate-400">throttled:</span> ${kv(bp.spoke_levels || {})}` : ''}</div>`;
+                    ${thr.length ? `<br><span class="text-slate-400">throttled:</span> ${kvSpokes(bp.spoke_levels || {})}` : ''}</div>`;
             })()}`;
     }
     // Populate the rate-limit knobs from live config — but skip a field while
