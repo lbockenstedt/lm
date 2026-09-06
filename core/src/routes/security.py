@@ -340,6 +340,22 @@ def register(app, hub, ctx):
         "client_simulations": "Simulation database",
     }
 
+    # Channels an install needs to make a chosen one work, but which are not a
+    # separate decision for a tenant. Subscribing to the threat database means
+    # running the tripwire, and a tripwire with no decoy routes observes
+    # nothing — so asking an operator to tick a second box would only give them
+    # a way to half-enable the feature.
+    _SUB_IMPLIED = {"threat_monitor": ("decoys",)}
+
+    def _sub_requested(channels) -> list:
+        """Expand the tenant's choices into what enrolment actually asks for."""
+        out = list(channels)
+        for c in channels:
+            for extra in _SUB_IMPLIED.get(c, ()):
+                if extra not in out:
+                    out.append(extra)
+        return out
+
     def _sub_cfg(hub) -> dict:
         gc = hub.state.get_global_config() or {}
         c = gc.get("subscription") or {}
@@ -508,7 +524,7 @@ def register(app, hub, ctx):
         body = await request.json() if await request.body() else {}
         client = await _sub_client(hub, cfg)
         result = await client.enroll(
-            subscriptions=chans,
+            subscriptions=_sub_requested(chans),
             contact_email=str(cfg.get("contact_email") or ""),
             contact_message=str((body or {}).get("message") or ""),
         )

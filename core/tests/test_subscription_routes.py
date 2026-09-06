@@ -307,7 +307,7 @@ async def test_an_unreachable_service_leaves_a_reason_an_operator_can_act_on(mon
 
 
 @pytest.mark.asyncio
-async def test_enrolment_sends_only_the_chosen_channels(monkeypatch):
+async def test_enrolment_does_not_ask_for_databases_the_tenant_declined(monkeypatch):
     import security.tm_client as tm_client
 
     seen = {}
@@ -327,7 +327,8 @@ async def test_enrolment_sends_only_the_chosen_channels(monkeypatch):
          "contact_email": "ops@example.com"}))
     await _h(hub, "/enroll", "POST")(request=_Req({}))
 
-    assert seen["subs"] == ["threat_monitor"]
+    assert "threat_monitor" in seen["subs"]
+    assert "client_simulations" not in seen["subs"]
     assert seen["email"] == "ops@example.com"
     assert seen["url"] == tm_client.SERVICE_URL.rstrip("/")
 
@@ -393,3 +394,68 @@ async def test_a_blank_psk_submit_preserves_the_stored_one():
 
     cleared = await _h(hub, "", "PUT")(request=_Req({"clear_psk": True}))
     assert cleared["psk_set"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_threat_database_pulls_in_the_decoys_it_needs(monkeypatch):
+    """Subscribing to the threat database means running the tripwire, and a
+    tripwire with no decoy routes observes nothing. Making it a second checkbox
+    would only give an operator a way to half-enable the feature."""
+    import security.tm_client as tm_client
+
+    seen = {}
+
+    async def fake_enroll(self, subscriptions=None, contact_email="",
+                          contact_message=""):
+        seen["subs"] = list(subscriptions or ())
+        return {"status": "pending"}
+
+    monkeypatch.setattr(tm_client.TMClient, "enroll", fake_enroll)
+
+    hub = _Hub(_State())
+    await _h(hub, "", "PUT")(request=_Req(
+        {"enabled": True, "channels": ["threat_monitor"]}))
+    await _h(hub, "/enroll", "POST")(request=_Req({}))
+
+    assert "decoys" in seen["subs"]
+    # The tenant's own choice is unchanged: implied channels are an enrolment
+    # detail, not something that silently appears in what they picked.
+    assert _cfg(hub)["channels"] == ["threat_monitor"]
+
+
+@pytest.mark.asyncio
+async def test_the_simulation_database_alone_pulls_in_no_decoys(monkeypatch):
+    """Implied channels follow from a specific need, not from subscribing to
+    anything at all."""
+    import security.tm_client as tm_client
+
+    seen = {}
+
+    async def fake_enroll(self, subscriptions=None, contact_email="",
+                          contact_message=""):
+        seen["subs"] = list(subscriptions or ())
+        return {"status": "pending"}
+
+    monkeypatch.setattr(tm_client.TMClient, "enroll", fake_enroll)
+
+    hub = _Hub(_State())
+    await _h(hub, "", "PUT")(request=_Req(
+        {"enabled": True, "channels": ["client_simulations"]}))
+    await _h(hub, "/enroll", "POST")(request=_Req({}))
+
+    assert seen["subs"] == ["client_simulations"]
+
+
+@pytest.mark.asyncio
+async def test_decoys_is_not_something_a_tenant_can_pick_on_its_own():
+    """It is not a database anyone subscribes to in its own right — it is what
+    makes the threat database work."""
+    from api import HTTPException
+
+    hub = _Hub(_State())
+    out = await _h(hub, "", "GET")(request=_Req())
+    assert "decoys" not in {c["id"] for c in out["available_channels"]}
+
+    with pytest.raises(HTTPException):
+        await _h(hub, "", "PUT")(request=_Req(
+            {"enabled": True, "channels": ["decoys"]}))
