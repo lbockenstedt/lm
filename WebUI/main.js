@@ -4133,7 +4133,7 @@ function _viewTemplate(viewId) {
       ${isAdmin() ? `<button onclick="leRenewAll()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">↻ Renew all</button>
       <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">⚡ Distribute now</button>` : ''}
       <button onclick="showMtlsDebug()" class="bg-slate-600/10 hover:bg-slate-600/20 text-slate-700 border border-slate-400 px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap" title="Debug: which connected spokes/agents are ACTUALLY presenting a verified mTLS client cert vs. connected cert-less, plus the hub's trust bundle + pinned AppBuilder cert check">🔒 mTLS status</button>
-      <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200 whitespace-nowrap" title="Manage this tenant's DNS-01 credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-01 issuance">🔑 DNS Credentials</button>
+      <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200 whitespace-nowrap" title="Manage this tenant's DNS credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-based certificate issuance">🔑 DNS Credentials</button>
     </div>
     <div class="flex items-center gap-4 flex-wrap">
       <label class="flex items-center gap-1 text-xs text-amber-700 cursor-pointer select-none" title="When ON, a wildcard cert (*.domain) is pushed to EVERY connected cert-capable spoke + the hub on each distribution, not just its explicit targets. OFF by default while cert distribution is being tested — flip on once explicit-target distribution is confirmed working.">
@@ -25439,9 +25439,9 @@ async function showDnsCredentialsModal() {
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
     const provOpts = Object.entries(DNS_CRED_PROVIDERS).map(([k, v]) => `<option value="${k}">${escapeHtml(v.label)}</option>`).join('');
     const note = vaultOn
-        ? `<div class="text-xs px-3 py-2 rounded bg-blue-50 text-blue-700 border border-blue-100">🔐 New DNS-01 credentials are managed in the <b>Credential Vault</b> (add a <b>DNS-01</b> secret there, then pick it in the issue-cert form). Creating raw credentials here is disabled; existing ones below still work and can be deleted.</div>
-          <p class="text-xs text-slate-500">Saved DNS-01 credentials for <b>your tenant</b> (stored on the le spoke). A certificate can still pick one of these by name when issuing via DNS-01. Delete any you've migrated to the vault.</p>`
-        : `<p class="text-xs text-slate-500">Saved DNS-01 credentials for <b>your tenant</b>. A certificate picks one by name when issuing via DNS-01. Secrets are stored on the le spoke, <b>encrypted at rest</b>, and are never shown again — leave a secret blank when editing to keep it.</p>
+        ? `<div class="text-xs px-3 py-2 rounded bg-blue-50 text-blue-700 border border-blue-100">🔐 New DNS credentials are managed in the <b>Credential Vault</b> (add a <b>DNS</b> secret there, then pick it in the issue-cert form). Creating raw credentials here is disabled; existing ones below still work and can be deleted.</div>
+          <p class="text-xs text-slate-500">Saved DNS credentials for <b>your tenant</b> (stored on the le spoke). A certificate can still pick one of these by name when issuing. Delete any you've migrated to the vault.</p>`
+        : `<p class="text-xs text-slate-500">Saved DNS credentials for <b>your tenant</b>. A certificate picks one by name when issuing. Secrets are stored on the le spoke, <b>encrypted at rest</b>, and are never shown again — leave a secret blank when editing to keep it.</p>
            <p class="text-[11px] text-slate-400">No Credential Vault is configured, so credentials are kept locally. Configure a vault under Setup → Cloud to manage them centrally instead.</p>`;
     const form = vaultOn ? '' : `
           <div class="border-t border-slate-200 pt-4">
@@ -25461,7 +25461,7 @@ async function showDnsCredentialsModal() {
     modal.innerHTML = `
       <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden max-h-[90vh] flex flex-col">
         <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-          <h3 class="text-lg font-bold text-[#263040]">DNS-01 credentials</h3>
+          <h3 class="text-lg font-bold text-[#263040]">DNS Credentials</h3>
           <button onclick="document.getElementById('dns-creds-modal').remove()" class="text-slate-400 hover:text-slate-600">✕</button>
         </div>
         <div class="p-6 space-y-4 overflow-y-auto">
@@ -25548,7 +25548,7 @@ async function dnsCredReloadList() {
         : '';
     if (!creds.length) {
         const empty = vaultOn
-            ? 'No credentials stored here — add a DNS-01 secret in the Credential Vault.'
+            ? 'No credentials stored here — add a DNS secret in the Credential Vault.'
             : 'No credentials yet — add one below.';
         box.innerHTML = warnBanner + `<p class="text-sm text-slate-400 italic">${empty}</p>`;
         return;

@@ -58,19 +58,66 @@ class OciVaultError(Exception):
     """Raised for any OCI Vault/Secrets API failure; message is safe to surface."""
 
 
-def _http_error(cfg: OciConfig, what: str, resp: httpx.Response) -> OciVaultError:
+def _not_found_help(cfg: OciConfig, vcfg: Optional[Dict[str, Any]]) -> str:
+    """Explain a 404 NotAuthorizedOrNotFound, which OCI makes deliberately
+    ambiguous: it means "doesn't exist, OR is in another region, OR your policy
+    doesn't let you see it" — collapsed into one response so the API can't be
+    used to probe for resources you lack access to. Nothing in the response
+    body narrows it down, so we narrow it locally."""
+    region = getattr(cfg, "region", "") or ""
+    problems = []
+    if vcfg:
+        problems += _oci_auth.diagnose_resource_ocid(
+            str(vcfg.get("vault_id") or ""), "vault", "Vault OCID", region)
+        problems += _oci_auth.diagnose_resource_ocid(
+            str(vcfg.get("compartment_id") or ""), "compartment",
+            "Compartment OCID", region)
+        key_id = str(vcfg.get("key_id") or "")
+        if key_id:
+            problems += _oci_auth.diagnose_resource_ocid(
+                key_id, "key", "Encryption key OCID", region)
+
+    out = ""
+    if problems:
+        out += "\n\nDetected:\n" + "\n".join(f"  • {p}" for p in problems)
+        return out
+
+    # Nothing provably wrong in the OCIDs — point at the two remaining causes.
+    out += ("\n\nOCI returns this same 404 for three different situations and "
+            "will not say which:\n"
+            "  • The resource is in a different region than "
+            f"'{region or '(unset)'}'.\n"
+            "  • The vault was deleted (a deleted vault stays visible in the "
+            "console for a while).\n"
+            "  • Your policy doesn't grant access. The API user needs, in the "
+            "vault's compartment, something like:\n"
+            "      allow group <your-group> to manage secret-family in "
+            "compartment <name>\n"
+            "      allow group <your-group> to read vaults in compartment "
+            "<name>\n"
+            "      allow group <your-group> to use keys in compartment <name>\n"
+            "Note that a compartment OCID equal to the tenancy OCID is normal "
+            "— the root compartment IS the tenancy — so that by itself is not "
+            "the problem.")
+    return out
+
+
+def _http_error(cfg: OciConfig, what: str, resp: httpx.Response,
+                vcfg: Optional[Dict[str, Any]] = None) -> OciVaultError:
     """Build the error for a non-success OCI HTTP response.
 
     OCI answers a bad signing credential with a bare "NotAuthenticated" that
     names no field, so the locally-verifiable diagnosis (OCID shapes, and
     whether the private key actually matches the configured fingerprint) is
-    appended on 401/403."""
+    appended on 401/403. A 404 is equally vague and gets its own diagnosis."""
     msg = f"{what} failed: HTTP {resp.status_code} — {resp.text[:300]}"
-    if resp.status_code in (401, 403):
-        try:
+    try:
+        if resp.status_code in (401, 403):
             msg += _oci_auth.auth_failure_help(cfg)
-        except Exception:  # diagnosis must never mask the original failure
-            pass
+        elif resp.status_code == 404:
+            msg += _not_found_help(cfg, vcfg)
+    except Exception:  # diagnosis must never mask the original failure
+        pass
     return OciVaultError(msg)
 
 
@@ -152,7 +199,7 @@ async def get_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
     if resp.status_code == 404:
         return None
     if resp.status_code != 200:
-        raise _http_error(cfg, "OCI GetSecretBundleByName", resp)
+        raise _http_error(cfg, "OCI GetSecretBundleByName", resp, vcfg)
     body = resp.json()
     content = ((body.get("secretBundleContent") or {}).get("content") or "")
     if not content:
@@ -198,7 +245,7 @@ async def _find_secret_id(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
           f"&vaultId={vcfg['vault_id']}&name={name}")
     resp = await _request(cfg, client, "GET", url)
     if resp.status_code != 200:
-        raise _http_error(cfg, "OCI ListSecrets", resp)
+        raise _http_error(cfg, "OCI ListSecrets", resp, vcfg)
     for item in (resp.json() or []):
         if item.get("secretName") == name and item.get("lifecycleState") not in ("DELETED", "SCHEDULING_DELETION"):
             return item.get("id")
@@ -220,7 +267,7 @@ async def set_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str, value: str
                 cfg, client, "PUT", f"{_vaults_base(cfg)}/secrets/{secret_id}",
                 json_body={"secretContent": {"contentType": "BASE64", "content": content_b64, "stage": "CURRENT"}})
             if resp.status_code not in (200, 202):
-                raise _http_error(cfg, "OCI UpdateSecret", resp)
+                raise _http_error(cfg, "OCI UpdateSecret", resp, vcfg)
             return secret_id
         key_id = str(vcfg.get("key_id") or "").strip()
         if not key_id:
@@ -234,7 +281,7 @@ async def set_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str, value: str
                 "secretContent": {"contentType": "BASE64", "content": content_b64, "stage": "CURRENT"},
             })
         if resp.status_code not in (200, 201):
-            raise _http_error(cfg, "OCI CreateSecret", resp)
+            raise _http_error(cfg, "OCI CreateSecret", resp, vcfg)
         return resp.json().get("id", "")
 
 
@@ -264,7 +311,7 @@ async def delete_secret(cfg: OciConfig, vcfg: Dict[str, Any], name: str,
             cfg, client, "POST", f"{_vaults_base(cfg)}/secrets/{secret_id}/actions/scheduleDeletion",
             json_body={})
         if resp.status_code not in (200, 202, 404):
-            raise _http_error(cfg, "OCI ScheduleSecretDeletion", resp)
+            raise _http_error(cfg, "OCI ScheduleSecretDeletion", resp, vcfg)
     return True
 
 
@@ -278,7 +325,7 @@ async def test_connection(cfg: OciConfig, vcfg: Dict[str, Any],
     async with (http or httpx.AsyncClient(timeout=20.0)) as client:
         resp = await _request(cfg, client, "GET", url)
     if resp.status_code != 200:
-        raise _http_error(cfg, "OCI GET vault", resp)
+        raise _http_error(cfg, "OCI GET vault", resp, vcfg)
     body = resp.json()
     return {"lifecycle_state": body.get("lifecycleState"), "vault_id": body.get("id"),
             "management_endpoint": body.get("managementEndpoint")}

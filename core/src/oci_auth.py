@@ -291,7 +291,35 @@ _OCID_TYPE_NAMES = {
     "policy": "a policy OCID",
     "vcn": "a VCN OCID",
     "networksecuritygroup": "a network security group OCID",
+    "vault": "a Vault OCID",
+    "key": "a KMS key OCID",
+    "secret": "a secret OCID",
+    "bucket": "a bucket OCID",
+    "instance": "a compute instance OCID",
+    "subnet": "a subnet OCID",
 }
+
+# Region identifier → the region KEY that appears inside an OCID. An OCID looks
+# like ocid1.<type>.<realm>.<region>.<unique>, and the region segment is
+# normally the short airport-style key (us-ashburn-1 → "iad"), though some
+# regions carry the full region name there instead. Both forms are accepted.
+_OCID_REGION_KEYS = {
+    "us-ashburn-1": "iad", "us-phoenix-1": "phx", "us-sanjose-1": "sjc",
+    "us-chicago-1": "ord", "ca-toronto-1": "yyz", "ca-montreal-1": "yul",
+    "mx-queretaro-1": "qro", "mx-monterrey-1": "mty", "sa-saopaulo-1": "gru",
+    "sa-vinhedo-1": "vcp", "sa-santiago-1": "scl", "sa-valparaiso-1": "vap",
+    "sa-bogota-1": "bog", "uk-london-1": "lhr", "uk-cardiff-1": "cwl",
+    "eu-frankfurt-1": "fra", "eu-milan-1": "lin", "eu-paris-1": "cdg",
+    "eu-marseille-1": "mrs", "eu-zurich-1": "zrh", "eu-amsterdam-1": "ams",
+    "eu-madrid-1": "mad", "eu-stockholm-1": "arn", "eu-jovanovac-1": "beg",
+    "il-jerusalem-1": "mtz", "me-riyadh-1": "ruh", "me-jeddah-1": "jed",
+    "me-abudhabi-1": "auh", "me-dubai-1": "dxb", "af-johannesburg-1": "jnb",
+    "ap-hyderabad-1": "hyd", "ap-mumbai-1": "bom", "ap-tokyo-1": "nrt",
+    "ap-osaka-1": "kix", "ap-seoul-1": "icn", "ap-chuncheon-1": "yny",
+    "ap-sydney-1": "syd", "ap-melbourne-1": "mel", "ap-singapore-1": "sin",
+    "ap-singapore-2": "xsp", "ap-batam-1": "btm",
+}
+_REGION_KEY_TO_NAME = {v: k for k, v in _OCID_REGION_KEYS.items()}
 
 # Where to get the four signing fields, consistently, in one place.
 _CONFIG_PREVIEW_HINT = (
@@ -353,6 +381,63 @@ def diagnose_auth(cfg: OciAuthConfig) -> list:
                     f"'{cfg.fingerprint}' is configured. Either upload the "
                     f"private key that pairs with that API key, or paste the "
                     f"fingerprint OCI shows for the key you uploaded.")
+    return problems
+
+
+def region_of_ocid(value: str) -> str:
+    """The region segment embedded in an OCID, normalised to a region name.
+
+    ``ocid1.<type>.<realm>.<region>.<unique>``. Returns "" when the OCID has no
+    region segment — which is normal and not an error: tenancy, user, group and
+    compartment OCIDs are global and carry an empty region field
+    (``ocid1.tenancy.oc1..aaaa…``)."""
+    parts = (value or "").split(".")
+    if len(parts) < 5:
+        return ""
+    key = parts[3].strip().lower()
+    if not key:
+        return ""
+    return _REGION_KEY_TO_NAME.get(key, key)
+
+
+def diagnose_resource_ocid(value: str, expected_type: str, label: str,
+                           region: str = "") -> list:
+    """Locally-detectable problems with a *resource* OCID (vault, key, NSG…).
+
+    OCI answers a GET for a resource you can't see with **404
+    NotAuthorizedOrNotFound** whether it doesn't exist, lives in another
+    region, or your policy simply doesn't grant access — it deliberately
+    refuses to distinguish those so it can't be used to probe for resources.
+    That makes the error useless on its own, so anything provable from the
+    OCID's own structure is reported here."""
+    problems = []
+    value = (value or "").strip()
+    if not value:
+        return problems
+
+    m = _OCID_TYPE_RE.match(value)
+    if not m:
+        problems.append(f"The {label} doesn't look like an OCID at all (an "
+                        f"OCID starts with 'ocid1.'). Got '{value[:40]}…'.")
+        return problems
+    if m.group(1) != expected_type:
+        problems.append(
+            f"The {label} is wrong: you pasted {_describe_ocid(value)}, but "
+            f"this field needs an OCID starting with 'ocid1.{expected_type}.'. "
+            f"Got '{value[:40]}…'.")
+        return problems  # type is wrong, so the region check would just add noise
+
+    # A resource in region A is invisible to region B's endpoint, and OCI
+    # reports that as a plain 404 rather than a redirect.
+    ocid_region = region_of_ocid(value)
+    want = (region or "").strip().lower()
+    if ocid_region and want and ocid_region != want:
+        problems.append(
+            f"Region mismatch: the {label} lives in '{ocid_region}', but this "
+            f"config is set to region '{want}'. OCI resources are regional, "
+            f"and querying the wrong region's endpoint returns exactly this "
+            f"404 NotAuthorizedOrNotFound. Set the region to '{ocid_region}', "
+            f"or paste the OCID of the resource in '{want}'.")
     return problems
 
 
