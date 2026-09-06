@@ -49,35 +49,50 @@ _DEFAULT_LOG_MAX_BYTES = 50 * 1024 * 1024
 _DEFAULT_LOG_BACKUPS = 0
 _DEFAULT_LOG_CAP_INTERVAL = 30.0
 
-# Liveness-poll endpoints whose successful (2xx/3xx) uvicorn.access lines are pure
-# noise — the hub/agents health-probe these per second, flooding spoke/hub logs.
-# 4xx/5xx responses still log (real failures), and all other requests log. In
-# debug mode the filter is bypassed so every access line shows. Tunable via env
-# (comma-separated); set LM_QUIET_ACCESS_PATHS="" to disable filtering.
+# Successful (2xx/3xx) uvicorn.access lines are routine request chatter, not
+# operational signal: every WebUI page load, poll and asset fetch emits one
+# (e.g. `GET /setup/diagnostics HTTP/1.1" 200`), burying real events in the hub
+# log. They are therefore DEBUG-only — the filter drops them at INFO and above
+# and is bypassed entirely when uvicorn.access is at DEBUG, so turning on debug
+# logging brings the full access log back.
 #
-# NOTE: the hub's actual public liveness endpoint is the bare ``/status``
-# (see routes/setup.py) plus ``/api/hub/health`` — there never was an
-# ``/api/health`` or ``/api/status`` route, so the original default here never
-# matched anything and every liveness poll (e.g. an external LB hitting
-# ``/status`` once a second) logged unfiltered.
-_DEFAULT_QUIET_ACCESS_PATHS = "/status,/api/hub/health"
+# 4xx/5xx ALWAYS log at INFO regardless of this setting: a 401/404/500 is a real
+# failure signal and is exactly what the log is for.
+#
+# Tunable via env LM_QUIET_ACCESS_PATHS:
+#   unset  → "*" (default): every successful request is debug-only
+#   "*"    → same as unset
+#   ""     → filtering disabled; log every access line (legacy behaviour)
+#   a,b,c  → only these exact paths are quieted (pre-existing path-scoped mode)
+#
+# NOTE: the hub's public liveness endpoints are the bare ``/status`` (see
+# routes/setup.py) and ``/api/hub/health`` — there never was an ``/api/health``
+# or ``/api/status`` route, so an earlier default here never matched anything.
+_QUIET_ACCESS_ALL = "*"
+_DEFAULT_QUIET_ACCESS_PATHS = _QUIET_ACCESS_ALL
 
 # Matches uvicorn's access-log request line: `"<METHOD> <PATH> HTTP/x.y" <code>`.
 _ACCESS_LINE_RE = re.compile(r'"[A-Z]+\s+(?P<path>\S+)\s+HTTP/\d\S*"\s+(?P<status>\d{3})')
 
 
 class _QuietSuccessAccessFilter(logging.Filter):
-    """Drop uvicorn.access lines for noisy liveness endpoints, but only on
-    success (status < 400) — failing probes still log so troubleshooting isn't
-    lost. Bypassed entirely when the uvicorn.access logger is at DEBUG.
+    """Drop successful (status < 400) uvicorn.access lines so routine request
+    chatter stays out of the hub log; failing requests (4xx/5xx) still log so
+    troubleshooting isn't lost. Bypassed entirely when the uvicorn.access logger
+    is at DEBUG, which is what makes successful access lines "debug-only".
 
-    Matches the request path EXACTLY (query string stripped), not a raw
-    substring of the whole log line — a substring match on e.g. ``/status``
-    would also silence unrelated-but-similarly-named routes such as
-    ``/api/le/status`` or ``/setup/repo-sync/status``."""
+    Two modes, chosen by the paths passed in:
+
+    * ``("*",)`` (the default) — quiet EVERY successful request.
+    * an explicit path list — quiet only those paths, matched EXACTLY with the
+      query string stripped, never as a raw substring of the log line. A
+      substring match on e.g. ``/status`` would also silence unrelated routes
+      such as ``/api/le/status`` or ``/setup/repo-sync/status``.
+    """
 
     def __init__(self, quiet_paths: tuple) -> None:
         super().__init__()
+        self._all = _QUIET_ACCESS_ALL in quiet_paths
         self._quiet_paths = set(quiet_paths)
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -91,15 +106,17 @@ class _QuietSuccessAccessFilter(logging.Filter):
         m = _ACCESS_LINE_RE.search(msg)
         if not m:
             return True
-        path = m.group("path").split("?", 1)[0]
-        if path not in self._quiet_paths:
-            return True
+        if not self._all:
+            path = m.group("path").split("?", 1)[0]
+            if path not in self._quiet_paths:
+                return True
         return int(m.group("status")) >= 400
 
 
 def _quiet_access_paths() -> tuple:
-    """Resolve the quiet-access-path list. Unset env → defaults; empty env →
-    filtering disabled; otherwise the comma-separated list."""
+    """Resolve the quiet-access-path list. Unset env → default (``*``: quiet all
+    successful requests); empty env → filtering disabled; otherwise the
+    comma-separated exact-path list."""
     raw = os.getenv("LM_QUIET_ACCESS_PATHS")
     if raw is None:
         raw = _DEFAULT_QUIET_ACCESS_PATHS
@@ -288,9 +305,9 @@ def configure_logging(default_level: int = logging.INFO, *,
             except Exception:
                 pass
 
-    # Suppress noisy successful liveness-poll access lines (per-second
-    # /api/health, /api/status) on the uvicorn.access logger. Bypassed in debug
-    # mode; failing probes (4xx/5xx) still log. Idempotent across re-inits.
+    # Successful (2xx/3xx) access lines are routine request chatter and are
+    # debug-only by default; 4xx/5xx still log. Bypassed in debug mode.
+    # Idempotent across re-inits.
     quiet_paths = _quiet_access_paths()
     if quiet_paths:
         access_logger = logging.getLogger("uvicorn.access")

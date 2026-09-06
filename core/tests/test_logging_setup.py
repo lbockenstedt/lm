@@ -212,13 +212,58 @@ def _access_record(msg, levelno=logging.INFO):
     return logging.LogRecord("uvicorn.access", levelno, __file__, 1, msg, None, None)
 
 
-def test_default_quiet_paths_are_the_real_liveness_routes():
+def test_default_quiets_every_successful_request():
+    """Successful access lines (e.g. `GET /setup/diagnostics 200`) are routine
+    request chatter and are debug-only by default, not just the two liveness
+    routes. The path-scoped mode remains available via the env var."""
     saved = os.environ.pop("LM_QUIET_ACCESS_PATHS", None)
     try:
-        assert logging_setup._quiet_access_paths() == ("/status", "/api/hub/health")
+        assert logging_setup._quiet_access_paths() == ("*",)
     finally:
         if saved is not None:
             os.environ["LM_QUIET_ACCESS_PATHS"] = saved
+
+
+def test_wildcard_drops_any_successful_path():
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    f = logging_setup._QuietSuccessAccessFilter(("*",))
+    for path, code in (
+        ("/setup/diagnostics", 200),
+        ("/api/le/status", 200),
+        ("/", 304),
+        ("/static/main.js", 200),
+    ):
+        rec = _access_record(f'170.9.228.83:55688 - "GET {path} HTTP/1.1" {code}')
+        assert f.filter(rec) is False, path
+
+
+def test_wildcard_still_logs_failures():
+    """4xx/5xx are real signal and must survive the broadened default."""
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    f = logging_setup._QuietSuccessAccessFilter(("*",))
+    for code in (401, 404, 500, 502):
+        rec = _access_record(f'1.2.3.4:1 - "GET /setup/diagnostics HTTP/1.1" {code}')
+        assert f.filter(rec) is True, code
+
+
+def test_wildcard_bypassed_at_debug():
+    saved = logging.getLogger("uvicorn.access").level
+    try:
+        logging.getLogger("uvicorn.access").setLevel(logging.DEBUG)
+        f = logging_setup._QuietSuccessAccessFilter(("*",))
+        rec = _access_record('1.2.3.4:1 - "GET /setup/diagnostics HTTP/1.1" 200')
+        assert f.filter(rec) is True
+    finally:
+        logging.getLogger("uvicorn.access").setLevel(saved)
+
+
+def test_explicit_path_list_does_not_enable_wildcard():
+    """An operator narrowing the list back to specific paths must not get
+    match-all behaviour."""
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    f = logging_setup._QuietSuccessAccessFilter(("/status",))
+    rec = _access_record('1.2.3.4:1 - "GET /setup/diagnostics HTTP/1.1" 200')
+    assert f.filter(rec) is True
 
 
 def test_empty_env_disables_filtering_entirely():
