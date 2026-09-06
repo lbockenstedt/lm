@@ -26,12 +26,115 @@ def _agent_role_preflight(hub, spoke_id):
         )
 
 
+# Roles that bind an inbound listener on the SAME port (:443) of the host box.
+# They cannot be stacked: whichever loads first wins the port and the others are
+# left permanently broken.
+#
+#   proxmox     — /ws/agent listener, AGENT_WSS_PORT = 443, always enabled
+#                 (agent_hosting.AgentHostingControlPlane._agent_listener_enabled)
+#   simulation  — the same listener, AGENT_WSS_PORT overridden to 443
+#   proxy       — the edge proxy's browser-facing listener on :443
+#
+# This bit a live box: proxmox bound wss://0.0.0.0:443 two seconds before the
+# proxy role loaded, so the edge proxy could never bind and every request to the
+# UI was answered by the agent listener with a bare "OK". Nothing failed loudly
+# — the proxy just logged EADDRINUSE and retried forever.
+_LISTENER_PORT_ROLES = {
+    "proxmox": 443,
+    "simulation": 443,
+    "proxy": 443,
+}
+
+
+def _listener_conflict(existing_roles, candidate):
+    """The already-present role that would fight *candidate* for a port, or None."""
+    port = _LISTENER_PORT_ROLES.get(candidate)
+    if port is None:
+        return None
+    for other in existing_roles or ():
+        if other != candidate and _LISTENER_PORT_ROLES.get(other) == port:
+            return other
+    return None
+
+
+def _listener_conflict_message(spoke_id, candidate, other, port=443):
+    return (
+        f"Cannot load role '{candidate}' on {spoke_id}: role '{other}' is already "
+        f"loaded there and both bind port {port} on this host. Only one listener "
+        f"can own a port, so whichever starts first wins and the other silently "
+        f"fails to bind — leaving the box answering on the wrong service. Put "
+        f"'{candidate}' on a separate VM, or unload '{other}' first."
+    )
+
+
+async def _active_role_names(hub, spoke_id):
+    """Role names currently loaded on the agent, or None when it can't be asked.
+
+    None means "unknown", not "none loaded". It deliberately does not block the
+    load: an agent that cannot answer GET_AVAILABLE_ROLES would otherwise become
+    unmanageable, and the spoke-side bind retry still contains the damage."""
+    try:
+        result = await hub.request_response(spoke_id, "GET_AVAILABLE_ROLES", {},
+                                            timeout=15.0)
+    except Exception:  # noqa: BLE001 — best-effort probe
+        logger.warning("listener-conflict check: %s did not answer "
+                       "GET_AVAILABLE_ROLES; proceeding without it", spoke_id)
+        return None
+    payload = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+    if not isinstance(payload, dict):
+        return None
+    active = payload.get("active")
+    if not isinstance(active, list):
+        return None
+    names = set()
+    for entry in active:
+        name = entry.get("role") if isinstance(entry, dict) else entry
+        if name:
+            names.add(str(name))
+    return names
+
+
+async def _guard_listener_conflicts(hub, spoke_id, requested):
+    """Reject a LOAD_ROLE that would put two port-binding roles on one box.
+
+    Checks the requested roles against each other AND against what is already
+    loaded, so neither a batch nor a later single load can create the collision."""
+    candidates = [r for r in requested if r in _LISTENER_PORT_ROLES]
+    if not candidates:
+        return
+
+    seen = []  # within the batch itself
+    for cand in candidates:
+        clash = _listener_conflict(seen, cand)
+        if clash:
+            raise HTTPException(
+                status_code=409,
+                detail=_listener_conflict_message(spoke_id, cand, clash))
+        seen.append(cand)
+
+    active = await _active_role_names(hub, spoke_id)
+    if active is None:
+        return
+    for cand in candidates:
+        clash = _listener_conflict(active, cand)
+        if clash:
+            raise HTTPException(
+                status_code=409,
+                detail=_listener_conflict_message(spoke_id, cand, clash))
+
+
 async def _load_roles_impl(hub, spoke_id, data):
     """Core LOAD_ROLE dispatch shared by the admin + tenant role routes. Accepts
     either a batch (``{"roles": [...]}`` loaded sequentially) or a single
     ``{"role": ..., "config": ...}``. Returns the agent's payload/results. The
     caller MUST run :func:`_agent_role_preflight` first."""
     roles = data.get("roles")
+    _requested = []
+    if isinstance(roles, list) and roles:
+        _requested = [(r.get("role") if isinstance(r, dict) else r) for r in roles]
+    elif data.get("role"):
+        _requested = [data["role"]]
+    await _guard_listener_conflicts(hub, spoke_id, [r for r in _requested if r])
     if isinstance(roles, list) and roles:
         results = []
         for r in roles:

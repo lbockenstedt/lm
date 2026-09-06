@@ -506,6 +506,35 @@ const AGENT_ROLES = {
     'ab':   { name: 'AppBuilder', desc: 'Autonomous GitHub issue bot. Installs as a systemd service on this host and connects to the Hub as its own agent.', deploy: true },
 };
 
+// Roles that bind an inbound listener on the SAME host port. They CANNOT be
+// stacked on one VM: whichever loads first wins the port and the others fail to
+// bind (silently, on a retry loop) — the box then answers on the wrong service.
+// Mirrors _LISTENER_PORT_ROLES in core/src/routes/agents.py, which is the
+// authoritative check; this only keeps the UI from offering the broken combo.
+const ROLE_LISTENER_PORTS = {
+    'proxmox': 443,
+    'simulation': 443,
+    'proxy': 443,
+};
+
+// The role among `roleIds` that would fight `candidate` for a port, else null.
+function roleListenerConflict(roleIds, candidate) {
+    const port = ROLE_LISTENER_PORTS[candidate];
+    if (!port) return null;
+    for (const other of (roleIds || [])) {
+        if (other !== candidate && ROLE_LISTENER_PORTS[other] === port) return other;
+    }
+    return null;
+}
+
+function roleListenerConflictText(candidate, other) {
+    const port = ROLE_LISTENER_PORTS[candidate];
+    const name = id => (AGENT_ROLES[id] || {}).name || id;
+    return `Conflicts with ${name(other)} — both bind port ${port} on this host. `
+         + `Only one can own the port, so put ${name(candidate)} on a separate VM `
+         + `or unload ${name(other)} first.`;
+}
+
 const PRODUCT_MAP = {
     'pxmx': 'pxmx',
     'opn': 'opnsense',
@@ -17093,6 +17122,17 @@ async function showLoadRoleModal(spokeId) {
                 </div>`;
         }
         const deployNote = r.deploy ? ' (background deploy — own service)' : '';
+        const clash = roleListenerConflict([...loadedByRole.keys()], id);
+        if (clash) {
+            return `
+                <label class="flex items-start gap-2 p-2 rounded-md border border-slate-200 bg-slate-50 cursor-not-allowed opacity-70" title="${escapeHtml(roleListenerConflictText(id, clash))}">
+                    <input type="checkbox" value="${id}" disabled class="w-4 h-4 rounded mt-0.5 shrink-0">
+                    <span class="min-w-0">
+                        <span class="text-sm text-slate-500 font-medium">${r.name}</span>
+                        <span class="block text-[11px] text-amber-700 mt-0.5">${escapeHtml(roleListenerConflictText(id, clash))}</span>
+                    </span>
+                </label>`;
+        }
         return `
             <label class="flex items-center gap-2 p-2 rounded-md border border-slate-200 hover:bg-slate-50 transition-colors cursor-pointer" onfocus="updateRoleDesc('${id}')" onmouseover="updateRoleDesc('${id}')">
                 <input type="checkbox" value="${id}" class="role-check w-4 h-4 rounded text-[#01A982] focus:ring-green-500" onchange="updateRoleDesc('${id}')">
@@ -17113,8 +17153,27 @@ function syncNetboxCreds() {
     if (lcfg) lcfg.classList.toggle('hidden', !(lcb && lcb.checked));
 }
 
+// Two roles that bind the same host port can't be selected together either.
+// Once one is checked, grey out its rivals so the combination is unreachable
+// rather than failing later with a 409 from the hub.
+function syncListenerConflicts() {
+    const boxes = Array.from(document.querySelectorAll('.role-check'));
+    const checked = boxes.filter(b => b.checked).map(b => b.value);
+    boxes.forEach(b => {
+        if (b.checked) return;
+        const clash = roleListenerConflict(checked, b.value);
+        b.disabled = !!clash;
+        const label = b.closest('label');
+        if (!label) return;
+        label.classList.toggle('opacity-50', !!clash);
+        label.classList.toggle('cursor-not-allowed', !!clash);
+        label.title = clash ? roleListenerConflictText(b.value, clash) : '';
+    });
+}
+
 function updateRoleDesc(roleId) {
     syncNetboxCreds();
+    syncListenerConflicts();
     const r = AGENT_ROLES[roleId];
     const desc = document.getElementById('role-desc');
     if (desc) desc.textContent = r?.desc || '';
@@ -17131,6 +17190,13 @@ function updateRoleDesc(roleId) {
 async function loadRole(spokeId) {
     const checked = Array.from(document.querySelectorAll('.role-check:checked')).map(el => el.value);
     if (checked.length === 0) { showToast('Select at least one role to load.', 'info'); return; }
+    for (let i = 0; i < checked.length; i++) {
+        const clash = roleListenerConflict(checked.slice(0, i), checked[i]);
+        if (clash) {
+            showToast(roleListenerConflictText(checked[i], clash), 'error');
+            return;
+        }
+    }
 
     const btn = document.querySelector('#load-role-modal button[onclick^="loadRole"]');
     if (btn) { btn.disabled = true; btn.textContent = 'Activating…'; }
