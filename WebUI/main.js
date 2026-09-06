@@ -26444,7 +26444,11 @@ async function showMtlsDebug() {
                 const now = Date.now();
                 const rrows = certs.length ? certs.map(c => {
                     const pk = (c.pk != null ? c.pk : c.spoke_id);
-                    const label = c.spoke_id || c.subject || c.pk || 'unknown';
+                    // Prefer the friendly spoke/agent name — the registry keys
+                    // by spoke id, which for a GUID-keyed spoke is an opaque
+                    // UUID. The raw id stays in the row's title attribute.
+                    const rawId = c.spoke_id || c.pk || '';
+                    const label = (rawId ? spokeDisplayName(rawId) : '') || c.subject || 'unknown';
                     const sanList = Array.isArray(c.san) ? c.san : (Array.isArray(c.sans) ? c.sans : []);
                     const sans = sanList.length ? esc(sanList.join(', ')) : '—';
                     const naStr = c.not_after || '';
