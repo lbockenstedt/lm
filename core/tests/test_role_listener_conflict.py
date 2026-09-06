@@ -170,3 +170,24 @@ async def test_safe_batch_still_loads():
         hub, "box-1", {"roles": [{"role": "le"}, {"role": "proxy"}]})
     assert res["status"] == "SUCCESS"
     assert hub.sent.count("LOAD_ROLE") == 2
+
+
+def test_statuspage_is_covered():
+    """The status page serves its own HTTPS on web_port, default 443
+    (statuspage/src/statuspage_spoke.py) — it collides with the edge proxy just
+    as proxmox does, and was the easiest of these to miss."""
+    assert agents._listener_conflict(["proxy"], "statuspage") == "proxy"
+    assert agents._listener_conflict(["statuspage"], "proxmox") == "statuspage"
+
+
+def test_webui_table_matches_the_backend_table():
+    """WebUI/main.js mirrors LISTENER_PORT_ROLES; a role added to one and not
+    the other means the UI silently offers a combination the hub rejects."""
+    import os
+    import re
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    js = open(os.path.join(root, "WebUI", "main.js")).read()
+    block = re.search(r"const ROLE_LISTENER_PORTS = \{(.*?)\};", js, re.S).group(1)
+    ui = {m.group(1): int(m.group(2))
+          for m in re.finditer(r"'([\w-]+)'\s*:\s*(\d+)", block)}
+    assert ui == agents._LISTENER_PORT_ROLES

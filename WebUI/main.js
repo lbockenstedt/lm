@@ -515,6 +515,7 @@ const ROLE_LISTENER_PORTS = {
     'proxmox': 443,
     'simulation': 443,
     'proxy': 443,
+    'statuspage': 443,
 };
 
 // The role among `roleIds` that would fight `candidate` for a port, else null.

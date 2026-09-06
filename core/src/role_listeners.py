@@ -17,9 +17,16 @@ Who binds what:
   (``agent/src/control_plane.py``) is unconditionally true for proxmox.
 * ``simulation`` — the same listener, with ``AGENT_WSS_PORT`` pointed at 443.
 * ``proxy``      — the edge proxy's browser-facing :443 listener.
+* ``statuspage`` — serves its own public HTTPS status page, ``web_port``
+  defaulting to 443 (``statuspage/src/statuspage_spoke.py``).
 
 Roles absent from this table (dns, dhcp, ldap, netbox, le, cppm, ...) bind
 nothing and stack freely, including alongside one listener role.
+
+Ports here are the DEFAULTS. Some roles can be pointed at another port
+(``LM_STATUS_PORT``, ``AGENT_WSS_PORT``), but the table deliberately reflects
+what a stock install actually does — an operator stacking two of these gets a
+broken box unless they also went out of their way to re-port one of them.
 
 Mirrored in the WebUI as ``ROLE_LISTENER_PORTS`` (``WebUI/main.js``) so the
 broken combination is never offered; the checks here are the authoritative ones.
@@ -29,6 +36,7 @@ LISTENER_PORT_ROLES = {
     "proxmox": 443,
     "simulation": 443,
     "proxy": 443,
+    "statuspage": 443,
 }
 
 
