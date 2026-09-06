@@ -5052,7 +5052,7 @@ function _cvRenderShell() {
     const opts = _cvBuckets.map(b =>
         `<option value="${escapeHtml(b.bucket)}"${b.bucket === _cvCurrentBucket ? ' selected' : ''}>${escapeHtml(_cvBucketLabel(b))}${b.has_psk ? '' : ' (no pass-phrase)'}</option>`).join('');
     const storageHint = _cvVaultAvailable ? '' : `
-      <div class="text-xs px-3 py-2 rounded-md bg-amber-50 text-amber-700 border border-amber-200">No Key Vault is configured — secrets are stored locally (encrypted in hub state). Configure a vault under Setup → Cloud → Azure → Vault or Setup → Cloud → OCI → Vault to store them there instead.</div>`;
+      <div class="text-xs px-3 py-2 rounded-md bg-amber-50 text-amber-700 border border-amber-200">No Key Vault is configured — secrets are stored locally (encrypted in hub state). Configure a vault under Setup → Cloud → Cloud Service Provider → Vault to store them there instead.</div>`;
     host.innerHTML = `
       <div class="hpe-card rounded-lg p-5 shadow-sm space-y-4">
         ${storageHint}
