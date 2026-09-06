@@ -112,6 +112,16 @@ async def provision(hub) -> Dict[str, Any]:
     ref = str(cfg.get("ref") or "main").strip()
     dest = ext_dir(hub)
 
+    # Checked before the token is resolved, so a refused source never causes a
+    # vault read and never puts a credential on a command line for a repo this
+    # install may not fetch in the first place.
+    import repo_policy
+    if repo_policy.is_forbidden(repo):
+        logger.warning("site extensions: refusing configured source %s — %s",
+                       repo, repo_policy.refuse_reason(repo))
+        return {"ok": False, "reason": "forbidden_repo",
+                "detail": repo_policy.refuse_reason(repo)}
+
     token = None
     token_ref = cfg.get("token")
     if token_ref:
