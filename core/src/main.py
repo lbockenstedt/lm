@@ -5010,6 +5010,33 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 if _old_id and _old_id != spoke_id \
                         and self.key_manager.get_valid_key(self._primary_key(_old_id), secret):
                     rename_proven = True
+            # Key↔install binding. A valid secret proves possession of key
+            # material, not that the box presenting it is the install the hub
+            # issued it to. Run this BEFORE _reconcile_spoke_identity: reconcile
+            # repoints install_uuid_index, overwrites the recorded uuid and can
+            # re-arm the guid, so adjudicating afterwards would persist the
+            # claim we are about to refuse — and the REAL spoke would then
+            # mismatch on its next reconnect and be locked out by its own
+            # attacker. Nothing here mutates state.
+            #
+            # Ordered cheapest-first so the normal reconnect pays only a string
+            # compare: no baseline / identical uuid short-circuits, and the key
+            # is verified only once a mismatch actually needs adjudicating.
+            # get_valid_key is a pure constant-time compare — safe to call as a
+            # proof check without consuming or rotating the key.
+            prev_install_uuid = self._recorded_install_uuid(pk)
+            if secret and not rename_proven and prev_install_uuid \
+                    and install_uuid != prev_install_uuid \
+                    and self.key_manager.get_valid_key(pk, secret) \
+                    and not self._verify_install_uuid_binding(
+                        spoke_id, pk, install_uuid, prev_install_uuid, peer_ip):
+                self.record_spoke_event(
+                    spoke_id, "auth_rejected",
+                    "valid secret presented from an install_uuid that does not "
+                    "match the install on record — connection refused")
+                await websocket.close(
+                    1008, "Identity mismatch — re-approval required")
+                return
             self._reconcile_spoke_identity(spoke_id, install_uuid, spoke_hostname,
                                            migrate_if=rename_proven)
             # Re-resolve the primary key: _reconcile_spoke_identity may have
