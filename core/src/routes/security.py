@@ -323,3 +323,232 @@ def register(app, hub, ctx):
                                 or "fetch did not complete")
         return {"status": "ok", "restart_required": after["modules"] != before["modules"]
                 or not before["provisioned"], **after}
+
+    # ── Data subscription (Subscription Service) ─────────────────────────
+    # The tenant-facing counterpart to the extension source above. That tile
+    # fetches CODE from a private repo; this one subscribes to DATA from the
+    # exchange. They are kept apart deliberately: the sensor content is no
+    # longer distributed as source to anyone, so the only supported way to get
+    # threat and simulation intelligence is this subscription.
+    _SUB_SECRET_NAME = "lm-subscription-credential"
+
+    # Channels a tenant may turn on. Kept as an explicit allow-list rather than
+    # passing whatever the UI posts, so a typo or a crafted request cannot
+    # enrol this install in a channel nobody reviewed.
+    _SUB_CHANNELS = {
+        "threat_monitor": "Threat database",
+        "client_simulations": "Simulation database",
+    }
+
+    def _sub_cfg(hub) -> dict:
+        gc = hub.state.get_global_config() or {}
+        c = gc.get("subscription") or {}
+        return dict(c) if isinstance(c, dict) else {}
+
+    async def _sub_store_credential(hub, cred: str) -> str:
+        """Persist the credential, preferring the vault — same pattern as the
+        extension PAT. TMClient owns no storage, so persisting what enrolment
+        returns is the caller's job; losing it means re-enrolling and burning a
+        second credential for the same install."""
+        try:
+            import cloud_vault
+            if cloud_vault.active_provider(hub) is not None:
+                await cloud_vault.set_secret(hub, _SUB_SECRET_NAME, cred)
+                return f"kv:{_SUB_SECRET_NAME}"
+        except Exception as e:  # noqa: BLE001 — vault down must not lose the credential
+            logger.warning(
+                "subscription: vault store failed (%s) — keeping credential in encrypted state", e)
+        return cred
+
+    async def _sub_resolve_credential(hub, cfg: dict) -> str:
+        cred = str(cfg.get("credential") or "")
+        if cred.startswith("kv:"):
+            try:
+                import cloud_vault
+                return str(await cloud_vault.resolve_ref(hub, cred) or "")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("subscription: could not resolve credential: %s", e)
+                return ""
+        return cred
+
+    def _sub_identity(cfg: dict) -> tuple:
+        """Return ``(tenant_id, install_uuid)``, minting either if absent.
+
+        LM has no pre-existing install identity, so one is generated here.
+        Both are opaque: the exchange needs to tell participants apart and to
+        group an org's several installs so they are not miscounted as several
+        independent confirmations, and neither of those needs a real name.
+        """
+        import uuid
+        tid = str(cfg.get("tenant_id") or "").strip() or uuid.uuid4().hex
+        iid = str(cfg.get("install_uuid") or "").strip() or uuid.uuid4().hex
+        return tid, iid
+
+    def _sub_status(hub) -> dict:
+        cfg = _sub_cfg(hub)
+        try:
+            import cloud_vault
+            vault = cloud_vault.active_provider(hub)
+        except Exception:  # noqa: BLE001
+            vault = None
+        chans = [c for c in (cfg.get("channels") or []) if c in _SUB_CHANNELS]
+        cred = str(cfg.get("credential") or "")
+        return {
+            "enabled": bool(cfg.get("enabled")),
+            "status": cfg.get("status") or "not_enrolled",
+            "tenant_id": cfg.get("tenant_id") or "",
+            "install_uuid": cfg.get("install_uuid") or "",
+            "channels": chans,
+            "available_channels": [{"id": k, "label": v}
+                                   for k, v in sorted(_SUB_CHANNELS.items())],
+            "contact_email": cfg.get("contact_email") or "",
+            "enrolled_at": cfg.get("enrolled_at") or 0,
+            "last_error": cfg.get("last_error") or "",
+            # The credential is bearer material: report only that one exists.
+            "credential_set": bool(cred),
+            "credential_storage": ("vault" if cred.startswith("kv:")
+                                   else ("state" if cred else "")),
+            "vault_available": bool(vault),
+            # Surfaced read-only so an operator can see WHERE the data comes
+            # from without being able to point the install somewhere else.
+            "service_url": _sub_service_url(),
+            "psk_set": bool(cfg.get("enrollment_psk")),
+        }
+
+    def _sub_service_url() -> str:
+        try:
+            from security import tm_client
+            return tm_client.SERVICE_URL
+        except Exception:  # noqa: BLE001
+            return ""
+
+    async def _sub_client(hub, cfg: dict):
+        """Build a client from stored config. The service URL is NEVER taken
+        from config — it is a constant in the client module, so a tenant cannot
+        redirect their sensor data somewhere else."""
+        from security.tm_client import TMClient
+        tid, iid = _sub_identity(cfg)
+        return TMClient(
+            tenant_id=tid,
+            install_uuid=iid,
+            credential=await _sub_resolve_credential(hub, cfg),
+            enrollment_psk=str(cfg.get("enrollment_psk") or ""),
+            enabled=bool(cfg.get("enabled")),
+        )
+
+    @app.get("/api/security/subscription")
+    async def subscription_get(request: Request):
+        """Current subscription state. Never returns the credential or PSK."""
+        _guard(request)
+        return _sub_status(hub)
+
+    @app.put("/api/security/subscription")
+    async def subscription_put(request: Request):
+        """Turn the subscription on/off and choose channels.
+
+        Deliberately does NOT accept a service URL. A tenant chooses whether to
+        participate and in what; they do not choose where their sensor data is
+        sent.
+        """
+        _guard(request)
+        body = await request.json()
+        cfg = _sub_cfg(hub)
+        tid, iid = _sub_identity(cfg)
+        cfg["tenant_id"], cfg["install_uuid"] = tid, iid
+
+        if "enabled" in body:
+            cfg["enabled"] = bool(body.get("enabled"))
+        if "channels" in body:
+            want = body.get("channels") or []
+            if not isinstance(want, list):
+                raise HTTPException(status_code=400, detail="channels must be a list")
+            unknown = [c for c in want if c not in _SUB_CHANNELS]
+            if unknown:
+                raise HTTPException(status_code=400,
+                                    detail=f"unknown channel(s): {', '.join(map(str, unknown))}")
+            cfg["channels"] = list(dict.fromkeys(want))
+        if "contact_email" in body:
+            cfg["contact_email"] = str(body.get("contact_email") or "").strip()
+        # An empty PSK preserves what is stored, matching the PAT field above;
+        # clearing is explicit so a blank submit never silently drops it.
+        if body.get("clear_psk"):
+            cfg.pop("enrollment_psk", None)
+        elif str(body.get("enrollment_psk") or "").strip():
+            cfg["enrollment_psk"] = str(body["enrollment_psk"]).strip()
+        # An org that groups its installs supplies a shared id; blank keeps the
+        # minted one rather than wiping identity on an unrelated save.
+        if str(body.get("tenant_id") or "").strip():
+            cfg["tenant_id"] = str(body["tenant_id"]).strip()
+
+        hub.state.update_global_config({"subscription": cfg})
+        await hub.state.save_state_now()
+        return {"status": "ok", **_sub_status(hub)}
+
+    @app.post("/api/security/subscription/enroll")
+    async def subscription_enroll(request: Request):
+        """Register with the exchange and persist whatever it returns.
+
+        Approval may be immediate (with a PSK) or pending a human. Both are
+        normal outcomes and are reported as such — an install waiting for
+        approval is not an error state.
+        """
+        _guard(request)
+        import time
+        cfg = _sub_cfg(hub)
+        if not cfg.get("enabled"):
+            raise HTTPException(status_code=400,
+                                detail="enable the subscription first")
+        chans = [c for c in (cfg.get("channels") or []) if c in _SUB_CHANNELS]
+        if not chans:
+            raise HTTPException(status_code=400,
+                                detail="choose at least one database to subscribe to")
+        tid, iid = _sub_identity(cfg)
+        cfg["tenant_id"], cfg["install_uuid"] = tid, iid
+
+        body = await request.json() if await request.body() else {}
+        client = await _sub_client(hub, cfg)
+        result = await client.enroll(
+            subscriptions=chans,
+            contact_email=str(cfg.get("contact_email") or ""),
+            contact_message=str((body or {}).get("message") or ""),
+        )
+        status = str(result.get("status") or "error").lower()
+        cfg["status"] = status
+        cfg["last_error"] = "" if status in ("approved", "pending") else str(
+            result.get("reason") or "enrolment did not complete")
+        if status == "approved" and client.credential:
+            cfg["credential"] = await _sub_store_credential(hub, client.credential)
+            cfg["enrolled_at"] = time.time()
+        hub.state.update_global_config({"subscription": cfg})
+        await hub.state.save_state_now()
+        return {"status": status, "reason": cfg["last_error"], **_sub_status(hub)}
+
+    @app.post("/api/security/subscription/unsubscribe")
+    async def subscription_unsubscribe(request: Request):
+        """Stop participating and forget the credential.
+
+        Turning the feature off without dropping the credential would leave
+        valid bearer material for the exchange sitting in state for an install
+        that believes it has withdrawn.
+        """
+        _guard(request)
+        cfg = _sub_cfg(hub)
+        cred = str(cfg.get("credential") or "")
+        if cred.startswith("kv:"):
+            try:
+                import cloud_vault
+                await cloud_vault.delete_secret(hub, cred[3:])
+            except Exception:  # noqa: BLE001 — config is authoritative
+                pass
+        # Identity is KEPT: re-subscribing with the same install_uuid is a
+        # rejoin, while a fresh one would look like a new participant and lose
+        # whatever standing this install had built up.
+        for k in ("credential", "enrollment_psk", "enrolled_at", "last_error"):
+            cfg.pop(k, None)
+        cfg["enabled"] = False
+        cfg["channels"] = []
+        cfg["status"] = "not_enrolled"
+        hub.state.update_global_config({"subscription": cfg})
+        await hub.state.save_state_now()
+        logger.warning("subscription: unsubscribed, credential forgotten")
+        return {"status": "ok", **_sub_status(hub)}

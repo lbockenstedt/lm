@@ -4583,6 +4583,10 @@ async function loadSecurityData() {
         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Extension Source</h3>
         <p class="text-sm text-slate-400 italic">Loading…</p></div>`;
 
+    const subCard = `<div class="${card}" id="subscription-card">
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Data Subscription</h3>
+        <p class="text-sm text-slate-400 italic">Loading…</p></div>`;
+
     el.innerHTML = `
       ${stats}
       ${cfg}
@@ -4590,13 +4594,170 @@ async function loadSecurityData() {
       ${blockedTile}
       ${neverTile}
       ${events}
+      ${subCard}
       ${extSrc}`;
     _secPrioLive();
+    _loadSubscription();
     _loadExtSource();
     // Best-effort origin enrichment (country / ISP / reverse-DNS) for every IP
     // shown in the blocked-IP preview and the recent-attempt feed. Lazy + cached
     // server-side, so it never blocks the initial paint.
     _secDecorateGeo([...allBlocks.map(b => b.ip), ...evts.map(e => e.ip)], el);
+}
+
+// ── Data subscription (Security) ─────────────────────────────────────────────
+// The tenant-facing counterpart to the Extension Source tile below. That one
+// fetches CODE from a private repo; this one subscribes to DATA from the
+// exchange. The sensor content is no longer distributed as source, so this is
+// the only supported way to get threat and simulation intelligence.
+//
+// There is deliberately NO service URL field. A tenant chooses whether to take
+// part and in what — they do not choose where their sensor reports are sent.
+async function _loadSubscription() {
+    const el = document.getElementById('subscription-card');
+    if (!el) return;
+    let d = {};
+    try {
+        const r = await setupFetch('/api/security/subscription');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        d = await r.json();
+    } catch (e) {
+        el.innerHTML = `<h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Data Subscription</h3>
+            <p class="text-xs text-red-500">Failed to load: ${escapeHtml(e.message)}</p>`;
+        return;
+    }
+    const inp = 'w-full mt-1 border border-slate-300 rounded px-2 py-1 text-xs';
+    // "pending" is a normal outcome, not a failure: without an enrolment PSK an
+    // install waits for a person to approve it. Colouring it red would push an
+    // operator into re-enrolling something that is already queued.
+    const badge = {
+        approved: '<span class="text-[#01A982]">subscribed</span>',
+        pending: '<span class="text-amber-600">awaiting approval</span>',
+        denied: '<span class="text-red-500">declined</span>',
+        error: '<span class="text-red-500">last attempt failed</span>',
+        not_enrolled: '<span class="text-slate-400">not subscribed</span>',
+    }[d.status] || `<span class="text-slate-400">${escapeHtml(d.status || 'unknown')}</span>`;
+    const store = d.credential_storage === 'vault'
+        ? '<span class="text-[#01A982]">held in the cloud vault</span>'
+        : (d.credential_storage === 'state'
+            ? `<span class="text-slate-600">held encrypted in hub state</span>${d.vault_available ? '' : ' — no vault configured'}`
+            : '<span class="text-slate-400">none yet</span>');
+    const chans = (d.available_channels || []).map(c => `
+        <label class="flex items-center gap-2 text-slate-600">
+          <input type="checkbox" class="sub-chan w-4 h-4 rounded" value="${escapeHtml(c.id)}" ${(d.channels || []).includes(c.id) ? 'checked' : ''}>
+          ${escapeHtml(c.label)}</label>`).join('');
+    el.innerHTML = `
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Data Subscription</h3>
+        <div class="flex gap-2">
+          ${d.credential_set || d.status !== 'not_enrolled'
+            ? '<button onclick="unsubscribeData(event)" class="text-xs bg-slate-100 hover:bg-red-100 text-red-600 px-3 py-1 rounded-md font-medium" title="Stop taking part and forget the stored credential">Unsubscribe</button>'
+            : ''}
+          <button onclick="enrollSubscription(event)" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium" title="Register this install with the exchange">${d.credential_set ? 'Re-enroll' : 'Enroll'}</button>
+          <button onclick="saveSubscription(event)" class="text-xs bg-[#01A982] hover:bg-[#018f6f] text-white px-3 py-1 rounded-md font-medium">Save</button>
+        </div>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+        <label class="flex items-center gap-2 text-slate-600 md:col-span-4"><input type="checkbox" id="sub-enabled" ${d.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Subscribe to the shared threat &amp; simulation databases</label>
+        <div class="md:col-span-2 flex flex-col gap-1.5">
+          <span class="text-slate-500">Databases</span>
+          ${chans || '<span class="text-slate-400 italic">none offered</span>'}
+        </div>
+        <label class="text-slate-500">Contact email<input type="text" id="sub-email" value="${escapeHtml(d.contact_email || '')}" placeholder="who to reach about this install" class="${inp}"></label>
+        <label class="text-slate-500">Enrollment key (optional)<input type="password" id="sub-psk" autocomplete="new-password" placeholder="${d.psk_set ? '•••••• stored — leave blank to keep' : 'none — approval by a human'}" class="${inp}"></label>
+        <label class="text-slate-500 md:col-span-2">Organization ID <span class="text-slate-400 font-normal">— share across your hubs so they count as one participant</span><input type="text" id="sub-tenant" value="${escapeHtml(d.tenant_id || '')}" class="${inp}"></label>
+        <div class="md:col-span-2 text-slate-500 pt-4">Install ID <span class="font-mono text-slate-600">${escapeHtml(d.install_uuid || '—')}</span></div>
+        <div class="md:col-span-4 text-[11px] text-slate-500 bg-slate-50 rounded px-2 py-1.5 leading-relaxed">
+          Status: ${badge}. Credential: ${store}.
+          Source: <code>${escapeHtml(d.service_url || '')}</code> — fixed, so this install's reports can only go to the exchange.
+          Publishing is reciprocal on the threat database: an install that takes the feed also contributes to it.
+          ${d.psk_set ? '<label class="inline-flex items-center gap-1 ml-2 text-red-600"><input type="checkbox" id="sub-clear-psk" class="w-3 h-3 rounded"> clear stored key</label>' : ''}
+          ${d.last_error ? `<span class="ml-2 text-red-500">${escapeHtml(d.last_error)}</span>` : ''}
+          <span id="sub-status" class="ml-2"></span>
+        </div>
+      </div>`;
+}
+
+function _subChannels() {
+    return [...document.querySelectorAll('.sub-chan')].filter(c => c.checked).map(c => c.value);
+}
+
+async function saveSubscription(ev) {
+    const btn = ev && ev.currentTarget;
+    if (btn) btn.disabled = true;
+    const st = document.getElementById('sub-status');
+    try {
+        const body = {
+            enabled: document.getElementById('sub-enabled').checked,
+            channels: _subChannels(),
+            contact_email: document.getElementById('sub-email').value.trim(),
+            enrollment_psk: document.getElementById('sub-psk').value,
+            clear_psk: !!(document.getElementById('sub-clear-psk') || {}).checked,
+            tenant_id: document.getElementById('sub-tenant').value.trim(),
+        };
+        const r = await setupFetch('/api/security/subscription', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+        showToast('Subscription saved', 'success');
+        _loadSubscription();
+    } catch (e) {
+        if (st) st.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`;
+        showToast('Save failed: ' + e.message, 'error');
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function enrollSubscription(ev) {
+    const btn = ev && ev.currentTarget;
+    const label = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Enrolling…'; }
+    const st = document.getElementById('sub-status');
+    try {
+        const r = await setupFetch('/api/security/subscription/enroll', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: '' }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+        if (j.status === 'approved') {
+            showToast('Subscribed — the feed is now available', 'success');
+        } else if (j.status === 'pending') {
+            // Not a failure. Say so plainly so nobody retries a queued request.
+            showToast('Submitted — waiting for approval', 'success');
+        } else {
+            throw new Error(j.reason || 'enrollment did not complete');
+        }
+        _loadSubscription();
+    } catch (e) {
+        if (st) st.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`;
+        showToast('Enrollment failed: ' + e.message, 'error');
+        _loadSubscription();
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = label || 'Enroll'; }
+    }
+}
+
+async function unsubscribeData(ev) {
+    const btn = ev && ev.currentTarget;
+    if (!confirm('Unsubscribe from the shared databases?\n\nThe stored credential is deleted. Your install ID is kept, so re-subscribing later rejoins as the same participant rather than starting over.')) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Working…'; }
+    const st = document.getElementById('sub-status');
+    try {
+        const r = await setupFetch('/api/security/subscription/unsubscribe', { method: 'POST' });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+        showToast('Unsubscribed — credential forgotten', 'success');
+        _loadSubscription();
+    } catch (e) {
+        if (st) st.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`;
+        showToast('Unsubscribe failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Unsubscribe'; }
+    }
 }
 
 // ── Extension source (Security) ──────────────────────────────────────────────
@@ -4630,6 +4791,7 @@ async function _loadExtSource() {
       <div class="flex items-center justify-between mb-3">
         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Extension Source</h3>
         <div class="flex gap-2">
+          <button onclick="purgeExtSource(event)" class="text-xs bg-slate-100 hover:bg-red-100 text-red-600 px-3 py-1 rounded-md font-medium" title="Forget the token and delete the fetched code from disk">Purge</button>
           <button onclick="provisionExtSource(event)" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium" title="Fetch now so a bad token, branch or URL surfaces immediately">Fetch now</button>
           <button onclick="saveExtSource(event)" class="text-xs bg-[#01A982] hover:bg-[#018f6f] text-white px-3 py-1 rounded-md font-medium">Save</button>
         </div>
@@ -4695,6 +4857,38 @@ async function provisionExtSource(ev) {
         showToast('Fetch failed — see the message below the fields', 'error');
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = 'Fetch now'; }
+    }
+}
+
+// Purge is deliberately separate from unticking "Enabled" or clearing the
+// token: those leave the fetched code on disk, where it is imported and
+// registered on every app build. An operator who revoked a credential
+// reasonably believes the code is gone, so removal has to be a thing they
+// asked for in those terms — hence the confirm and the distinct wording.
+async function purgeExtSource(ev) {
+    const btn = ev && ev.currentTarget;
+    if (!confirm('Forget the extension source?\n\nThis deletes the stored token AND removes the fetched code from disk. Modules already loaded keep serving until the hub restarts.')) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Purging…'; }
+    const st = document.getElementById('ext-src-status');
+    try {
+        const r = await setupFetch('/api/security/ext-source/purge', { method: 'POST' });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+        // `detail` is set when the directory could not be removed. That is a
+        // partial purge, not a success: the token is gone but the code is not,
+        // so it must not be reported with a green toast.
+        if (j.detail) {
+            if (st) st.innerHTML = `<span class="text-red-500">${escapeHtml(j.detail)}</span>`;
+            showToast('Partly purged — the code is still on disk', 'error');
+        } else {
+            showToast(`Purged${j.token_removed ? ' — token removed' : ''}${j.dir_removed ? ', files deleted' : ''}; restart the hub`, 'success');
+        }
+        _loadExtSource();
+    } catch (e) {
+        if (st) st.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`;
+        showToast('Purge failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Purge'; }
     }
 }
 
