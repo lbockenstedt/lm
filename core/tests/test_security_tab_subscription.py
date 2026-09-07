@@ -67,7 +67,7 @@ def test_every_button_in_the_tile_has_a_handler(js):
     """onclick names are strings; a renamed function fails silently in the
     browser with nothing but a console error."""
     start = js.index("async function _loadSubscription()")
-    end = js.index("// ── Extension source (Security)", start)
+    end = js.index("// ── IP origin enrichment", start)
     tile = js[start:end]
     for handler in set(re.findall(r'onclick="(\w+)\(', tile)):
         assert re.search(rf"(async )?function {handler}\s*\(", js), \
@@ -78,9 +78,36 @@ def test_the_tile_offers_no_way_to_change_where_data_is_sent(js):
     """A tenant chooses which data, never where from. An input for the service
     URL would be the UI half of a redirect the backend already refuses."""
     start = js.index("async function _loadSubscription()")
-    end = js.index("// ── Extension source (Security)", start)
+    end = js.index("// ── IP origin enrichment", start)
     tile = js[start:end]
     for forbidden in ('id="sub-url"', 'id="sub-service-url"', 'id="sub-base-url"'):
         assert forbidden not in tile
     # It is shown, but as text rather than as an editable field.
     assert "service_url" in tile
+
+
+def test_the_extension_source_tile_is_gone_from_the_security_page(js, security_render):
+    """The operator-facing loader for private modules was removed from the
+    Security page.
+
+    It was the last place in the UI that presented "fetch code from a private
+    repo" as a normal thing to configure, which is exactly the habit the move
+    to a data subscription was meant to end. The backend routes stay so an
+    install that already has a token and a checkout can still be purged, but
+    nothing offers to set one up.
+    """
+    for gone in ("ext-src-card", "extSrc", "_loadExtSource",
+                 "saveExtSource", "provisionExtSource", "purgeExtSource",
+                 "Extension Source"):
+        assert gone not in js, f"{gone} is still present in main.js"
+    assert "ext-source" not in security_render
+
+
+def test_the_security_tab_renders_only_tiles_it_still_defines(security_render):
+    """A ${name} left in the template after its const is deleted renders the
+    literal string "undefined" into the page."""
+    used = set(re.findall(r"\$\{(\w+)\}", security_render.split("el.innerHTML = `")[1]
+                          .split("`;")[0]))
+    for name in used:
+        assert re.search(rf"\bconst {name}\b", security_render), \
+            f"the template uses ${{{name}}} but nothing defines it"
