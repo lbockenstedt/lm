@@ -268,7 +268,7 @@ def test_install_role_le_installs_certbot(tmp_path, monkeypatch):
     agent = _agent_with_tmp_root(tmp_path, monkeypatch)
     res = asyncio.run(agent._install_role("le"))
     assert res["status"] == "SUCCESS"
-    apt_calls = [c for c in calls if c[:2] == ["apt-get", "install"]]
+    apt_calls = [c for c in calls if c and c[0] == "apt-get" and "install" in c]
     assert apt_calls, "expected an apt-get install for le (certbot)"
     flat = " ".join(a for c in apt_calls for a in c)
     assert "certbot" in flat, f"certbot missing from apt install: {apt_calls}"

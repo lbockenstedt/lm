@@ -55,8 +55,12 @@ cat > /etc/logrotate.d/lm <<'LOGROTATE'
 }
 LOGROTATE
 
-# Unbound
-apt-get install -y -qq unbound
+# Unbound. -o DPkg::Lock::Timeout makes apt WAIT for the dpkg lock rather than
+# dying with rc=100 when this deploy collides with another apt user (a sibling
+# role deploy, an LM OS update, unattended-upgrades). Set explicitly as well as
+# via /etc/apt/apt.conf.d/99lm-lock-timeout so the deploy is safe even on a node
+# whose agent has not yet dropped that file.
+apt-get -o DPkg::Lock::Timeout=600 install -y -qq unbound
 grep -q "control-enable: yes" /etc/unbound/unbound.conf 2>/dev/null || cat >> /etc/unbound/unbound.conf <<'UNBOUNDCFG'
 
 remote-control:
