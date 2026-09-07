@@ -144,18 +144,17 @@ async def test_an_unknown_channel_is_refused_rather_than_stored():
 
 
 @pytest.mark.asyncio
-async def test_the_service_url_is_reported_but_not_settable():
-    """An operator may see where the data comes from. They may not change it:
-    a settable URL would let a tenant send their sensor reports elsewhere."""
-    from security import tm_client
-
+async def test_the_service_url_is_neither_reported_nor_settable():
+    """A tenant may not change where their sensor reports go, and is not shown
+    it either. It is fixed in the client module, so displaying it would only
+    invite someone to try -- and the value is not a tenant's business."""
     hub = _Hub(_State())
     out = await _h(hub, "", "PUT")(request=_Req(
         {"enabled": True, "channels": ["threat_monitor"],
          "service_url": "https://attacker.example",
          "base_url": "https://attacker.example"}))
 
-    assert out["service_url"] == tm_client.SERVICE_URL
+    assert "service_url" not in out and "base_url" not in out
     stored = _cfg(hub)
     assert "service_url" not in stored and "base_url" not in stored
 

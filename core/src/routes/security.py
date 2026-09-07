@@ -425,18 +425,8 @@ def register(app, hub, ctx):
             "credential_storage": ("vault" if cred.startswith("kv:")
                                    else ("state" if cred else "")),
             "vault_available": bool(vault),
-            # Surfaced read-only so an operator can see WHERE the data comes
-            # from without being able to point the install somewhere else.
-            "service_url": _sub_service_url(),
             "psk_set": bool(cfg.get("enrollment_psk")),
         }
-
-    def _sub_service_url() -> str:
-        try:
-            from security import tm_client
-            return tm_client.SERVICE_URL
-        except Exception:  # noqa: BLE001
-            return ""
 
     async def _sub_client(hub, cfg: dict):
         """Build a client from stored config. The service URL is NEVER taken

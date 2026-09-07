@@ -4666,7 +4666,7 @@ async function _loadSubscription() {
         <div class="md:col-span-2 text-slate-500 pt-4">Install ID <span class="font-mono text-slate-600">${escapeHtml(d.install_uuid || '—')}</span></div>
         <div class="md:col-span-4 text-[11px] text-slate-500 bg-slate-50 rounded px-2 py-1.5 leading-relaxed">
           Status: ${badge}. Credential: ${store}.
-          Source: <code>${escapeHtml(d.service_url || '')}</code> — fixed, so this install's reports can only go to the exchange.
+          The exchange this install reports to is fixed at build time and not settable from here.
           Publishing is reciprocal on the threat database: an install that takes the feed also contributes to it, and it also receives this install's own decoy routes.
           ${d.psk_set ? '<label class="inline-flex items-center gap-1 ml-2 text-red-600"><input type="checkbox" id="sub-clear-psk" class="w-3 h-3 rounded"> clear stored key</label>' : ''}
           ${d.last_error ? `<span class="ml-2 text-red-500">${escapeHtml(d.last_error)}</span>` : ''}

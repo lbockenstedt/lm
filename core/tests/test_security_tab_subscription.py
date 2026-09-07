@@ -82,8 +82,10 @@ def test_the_tile_offers_no_way_to_change_where_data_is_sent(js):
     tile = js[start:end]
     for forbidden in ('id="sub-url"', 'id="sub-service-url"', 'id="sub-base-url"'):
         assert forbidden not in tile
-    # It is shown, but as text rather than as an editable field.
-    assert "service_url" in tile
+    # Nor is it displayed. The address is not a tenant's business: it is fixed
+    # at build time, so printing it only invites someone to try to change it
+    # and gives a reader of a shared screen one more thing to write down.
+    assert "service_url" not in tile
 
 
 def test_the_extension_source_tile_is_gone_from_the_security_page(js, security_render):
