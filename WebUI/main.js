@@ -16628,21 +16628,11 @@ async function showLoadRoleModal(spokeId) {
     document.body.appendChild(modal);
 
     const active = await fetchLoadedRoles(spokeId);
-    const loadedByRole = new Map((active || []).map(a => [a.role, a]));
+    const loadedRoleIds = new Set((active || []).map(a => a.role));
     const list = document.getElementById('role-list');
-    const rows = Object.entries(AGENT_ROLES).map(([id, r]) => {
-        const loaded = loadedByRole.get(id);
-        if (loaded) {
-            return `
-                <div class="flex items-center justify-between gap-3 p-2 rounded-md bg-green-50 border border-green-200">
-                    <label class="flex items-center gap-2 text-sm text-slate-700 flex-1 min-w-0">
-                        <span class="font-medium truncate">${r.name}</span>
-                        <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-green-600 text-white shrink-0">loaded</span>
-                    </label>
-                    <button onclick="unloadRole('${spokeId}','${id}')"
-                        class="text-xs font-bold text-red-600 hover:text-red-700 transition-colors shrink-0">Unload</button>
-                </div>`;
-        }
+    const availableRoles = Object.entries(AGENT_ROLES)
+        .filter(([id]) => !loadedRoleIds.has(id));
+    const rows = availableRoles.map(([id, r]) => {
         const deployNote = r.deploy ? ' (background deploy — own service)' : '';
         return `
             <label class="flex items-center gap-2 p-2 rounded-md border border-slate-200 hover:bg-slate-50 transition-colors cursor-pointer" onfocus="updateRoleDesc('${id}')" onmouseover="updateRoleDesc('${id}')">
@@ -16650,7 +16640,12 @@ async function showLoadRoleModal(spokeId) {
                 <span class="text-sm text-slate-700 font-medium">${r.name}${deployNote}</span>
             </label>`;
     }).join('');
-    list.innerHTML = rows || '<p class="text-xs text-slate-400 italic col-span-2">No roles available.</p>';
+    list.innerHTML = rows || '<p class="text-xs text-slate-400 italic col-span-3">All available roles are already loaded.</p>';
+    const activateButton = modal.querySelector('button[onclick^="loadRole"]');
+    if (activateButton && availableRoles.length === 0) {
+        activateButton.disabled = true;
+        activateButton.classList.add('opacity-50', 'cursor-not-allowed');
+    }
 }
 
 // Show the NetBox admin-account inputs only while the netbox-server role is
