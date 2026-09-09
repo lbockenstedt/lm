@@ -161,6 +161,36 @@ def test_admin_no_tenant_single_spoke_keeps_legacy_global_behavior():
     assert hub.forwarded[-1][0] == "dhcp-a"
 
 
+def test_dhcp_diagnostics_routes_to_the_tenants_dhcp_spoke():
+    hub = FakeHub(
+        {"dhcp-a", "dhcp-b"},
+        replies={"dhcp-b": {"DHCP_DIAGNOSTICS": {
+            "status": "SUCCESS", "healthy": False,
+            "recommendations": ["Nothing is listening on DHCP server port UDP/67."],
+            "last_errors": ["Sep 09 lease warning for 10.0.0.5"],
+            "interfaces_configured": ["eth0"],
+            "subnets": [{"id": 1, "subnet": "10.0.0.0/24"}],
+            "lease_db": {"path": "/var/lib/kea/leases.csv",
+                         "exists": True, "leases": 2},
+            "listeners": {"dhcp4": ["udp 10.0.0.5:67"],
+                          "control_agent": [], "error": ""},
+        }}},
+        module_metadata={"dhcp-a": {"tenant_id": "tenantA"},
+                         "dhcp-b": {"tenant_id": "tenantB"}},
+    )
+    c = _build(_tenant_user("tenantB"), hub)
+    r = c.get("/api/dhcp/diagnostics")
+    assert r.status_code == 200
+    assert r.json()["healthy"] is False
+    assert r.json()["last_errors"] == []
+    assert r.json()["interfaces_configured"] == []
+    assert r.json()["subnets"] == []
+    assert r.json()["lease_db"]["path"] == ""
+    assert r.json()["lease_db"]["leases"] is None
+    assert r.json()["listeners"]["dhcp4"] == []
+    assert hub.forwarded[-1][:2] == ("dhcp-b", "DHCP_DIAGNOSTICS")
+
+
 def test_reservation_add_routes_to_tenants_own_spoke():
     hub = FakeHub(
         {"dhcp-a", "dhcp-b"},

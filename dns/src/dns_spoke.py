@@ -26,6 +26,7 @@ class DNSSpoke(BaseSpoke):
       DNS_ADD           — add a single record
       DNS_DELETE        — delete a record by name (+ optional type)
       DNS_STATUS        — Unbound process status + record count
+      DNS_DIAGNOSTICS   — service/config/listener/query health evidence
     """
 
     def __init__(self, spoke_id: str, config: Dict[str, Any]):
@@ -82,6 +83,9 @@ class DNSSpoke(BaseSpoke):
         if cmd == "DNS_STATUS":
             s = await asyncio.to_thread(self.mgr.status)
             return {"status": "SUCCESS", **s}
+
+        if cmd == "DNS_DIAGNOSTICS":
+            return await asyncio.to_thread(self.mgr.diagnostics)
 
         if cmd == "DNS_STATS":
             return await asyncio.to_thread(self.mgr.get_stats)

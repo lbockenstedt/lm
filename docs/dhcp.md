@@ -15,7 +15,7 @@ Wraps the Kea Control Agent REST API for subnet/lease/reservation listing and CR
 
 The `dhcp` module manages **Kea DHCP4** subnets, active leases, and static reservations for this node, and shows pool utilization at a glance. It's what hands out (or reserves) IP addresses to devices on a site's DHCP-served subnets — configured by hand, or filled in automatically from NetBox prefixes/IPs.
 
-In the WebUI, open a node's **DHCP** module from the sidebar to reach the **Overview**, **Subnets**, **Leases**, and **Reservations** tabs — see the [WebUI](#webui) section below. This Kea instance is the site's real production DHCP server — it is **not** the same Kea used by the `cs` (Simulations) role's client-simulation feature (see Troubleshooting below).
+In the WebUI, open a node's **DHCP** module from the sidebar to reach the **Overview**, **Diagnostics**, **Subnets**, **Leases**, and **Reservations** tabs — see the [WebUI](#webui) section below. This Kea instance is the site's real production DHCP server — it is **not** the same Kea used by the `cs` (Simulations) role's client-simulation feature (see Troubleshooting below).
 
 ## Entrypoints
 
@@ -37,7 +37,7 @@ None (no installer present).
 
 ## Key commands / handlers (`dhcp_spoke.handle_command`)
 
-`GET_VERSION`, `UPDATE_CONFIG` (rebuild manager), `DHCP_STATUS`, `DHCP_LIST_SUBNETS`, `DHCP_LIST_LEASES` (optional `subnet` CIDR filter — matched against configured subnet `subnet` strings, resolved to a Kea `subnet-id` internally), `DHCP_LIST_RES`, `DHCP_ADD_RES` (`ip`+`mac`+`subnet_id` required), `DHCP_UPDATE_RES` (delete-then-add), `DHCP_DEL_RES` (by `ip` only — scans every subnet and removes the reservation whose `ip-address` matches, across all subnets), `DHCP_SYNC` (`sync(subnets, reservations)` — only-add-missing against existing IPs, best-effort with added/skipped counts), `DHCP_STATS` (`get_stats` via Kea `statistic-get-all` — global + per-subnet pool utilization `{total,assigned,declined,utilization_pct}` and headline packet counters discover/request/offer/ack/nak; relayed by `GET /api/dhcp/stats`).
+`GET_VERSION`, `UPDATE_CONFIG` (rebuild manager), `DHCP_STATUS`, `DHCP_DIAGNOSTICS` (DHCP4/control-agent units, restart counts, config test, interfaces, UDP/67 and CA listeners, CA version/reachability, scopes, lease DB/count, and recent warnings; relayed by `GET /api/dhcp/diagnostics`), `DHCP_LIST_SUBNETS`, `DHCP_LIST_LEASES` (optional `subnet` CIDR filter — matched against configured subnet `subnet` strings, resolved to a Kea `subnet-id` internally), `DHCP_LIST_RES`, `DHCP_ADD_RES` (`ip`+`mac`+`subnet_id` required), `DHCP_UPDATE_RES` (delete-then-add), `DHCP_DEL_RES` (by `ip` only — scans every subnet and removes the reservation whose `ip-address` matches, across all subnets), `DHCP_SYNC` (`sync(subnets, reservations)` — only-add-missing against existing IPs, best-effort with added/skipped counts), `DHCP_STATS` (`get_stats` via Kea `statistic-get-all` — global + per-subnet pool utilization `{total,assigned,declined,utilization_pct}` and headline packet counters discover/request/offer/ack/nak; relayed by `GET /api/dhcp/stats`).
 
 ## NetBox auto-sync (source of truth)
 
@@ -45,7 +45,7 @@ NetBox is the IPAM source of truth. The hub's `DnsDhcpSyncMixin` (`core/src/dns_
 
 ## WebUI
 
-Module view tabs: **Overview** (pool-utilization / assigned-leases / packet-counter stat tiles + per-scope utilization bars + last-auto-sync line), **Subnets**, **Leases**, **Reservations**.
+Module view tabs: **Overview** (pool-utilization / assigned-leases / packet-counter stat tiles + per-scope utilization bars + last-auto-sync line), **Diagnostics** (the same operational evidence used by Sim DHCP health: service/restart state, config validity, interface presence, listeners, control-agent reachability, scopes, leases, and recent warnings), **Subnets**, **Leases**, **Reservations**.
 
 ## Key files
 
