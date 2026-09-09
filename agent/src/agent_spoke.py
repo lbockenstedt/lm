@@ -209,6 +209,39 @@ _DEPLOY_ROLES: Dict[str, Dict[str, Any]] = {
     },
 }
 
+_DEPLOY_ROLE_MARKERS = {
+    "ab": "/etc/systemd/system/ab.service",
+    "netbox-server": "/opt/netbox-app/venv/bin/python3",
+    "ldap-server": "/usr/sbin/slapd",
+    "dns-server": "/usr/sbin/unbound",
+    "dhcp-server": "/usr/sbin/kea-dhcp4",
+}
+
+_DEPLOY_ROLE_UNITS = {
+    "dns-server": ("unbound",),
+    "dhcp-server": ("kea-dhcp4-server", "kea-ctrl-agent"),
+}
+
+
+def _active_deploy_roles(installed_roles: list) -> list:
+    active = []
+    for role, units in _DEPLOY_ROLE_UNITS.items():
+        if role not in installed_roles:
+            continue
+        try:
+            enabled = all(
+                subprocess.run(
+                    ["systemctl", "is-enabled", "--quiet", unit],
+                    capture_output=True, check=False, timeout=10,
+                ).returncode == 0
+                for unit in units
+            )
+        except (OSError, subprocess.SubprocessError):
+            enabled = False
+        if enabled:
+            active.append(role)
+    return active
+
 
 class _RoleAdapter(BaseSpoke):
     """Adapter that lets a non-BaseSpoke spoke (e.g. cppm's CPPMSpoke) be loaded
@@ -1064,9 +1097,18 @@ class GenericAgent(BaseSpoke):
             return await self._apply_netbox_sso(data)
 
         if cmd == "GET_AVAILABLE_ROLES":
+            installed_deploy_roles = [
+                role for role, marker in _DEPLOY_ROLE_MARKERS.items()
+                if os.path.exists(marker)
+            ]
+            active_deploy_roles = await asyncio.to_thread(
+                _active_deploy_roles, installed_deploy_roles)
             return {"status": "SUCCESS",
                     "roles": list(_ROLE_MAP.keys()),
                     "deploy_roles": list(_DEPLOY_ROLES.keys()),
+                    "installed_deploy_roles": installed_deploy_roles,
+                    "active_deploy_roles": active_deploy_roles,
+                    "deploy": self._deploy_status,
                     "active": [{"role": r,
                                 "sub_spoke_id": e["conn"].spoke_id,
                                 "module_type": e["conn"].module_type}
@@ -1161,9 +1203,16 @@ class GenericAgent(BaseSpoke):
             # netbox_installed survives an agent reload (which clears the live
             # _deploy_status), so the WebUI can persistently offer the "reset
             # NetBox admin password" knob on nodes that ran the netbox-server role.
+            installed_deploy_roles = [
+                role for role, marker in _DEPLOY_ROLE_MARKERS.items()
+                if os.path.exists(marker)
+            ]
             return {"status": "SUCCESS", "deploy": self._deploy_status,
                     "active_role": self._deploy_role,
-                    "netbox_installed": os.path.exists("/opt/netbox-app/venv/bin/python3")}
+                    "installed_deploy_roles": installed_deploy_roles,
+                    "active_deploy_roles": await asyncio.to_thread(
+                        _active_deploy_roles, installed_deploy_roles),
+                    "netbox_installed": "netbox-server" in installed_deploy_roles}
 
         if cmd == "NETBOX_RESET_ADMIN_PASSWORD":
             # Reset the admin password on the NetBox app this agent deployed
@@ -1200,6 +1249,45 @@ class GenericAgent(BaseSpoke):
 
         if cmd == "UNLOAD_ROLE":
             role_name = data.get("role")
+            if role_name in _DEPLOY_ROLE_UNITS:
+                module_role = role_name.removesuffix("-server")
+                if module_role in self._roles:
+                    return {
+                        "status": "ERROR",
+                        "message": (
+                            f"Unload the '{module_role}' management role before "
+                            f"stopping '{role_name}'."
+                        ),
+                    }
+                if (self._deploy_task and not self._deploy_task.done()
+                        and self._deploy_role == role_name):
+                    return {
+                        "status": "ERROR",
+                        "message": f"Deployment of '{role_name}' is still running.",
+                    }
+                units = _DEPLOY_ROLE_UNITS[role_name]
+                result = await asyncio.to_thread(
+                    subprocess.run,
+                    ["systemctl", "disable", "--now", *units],
+                    capture_output=True, text=True, check=False, timeout=60,
+                )
+                if result.returncode != 0:
+                    error = (result.stderr or result.stdout or "").strip()
+                    return {
+                        "status": "ERROR",
+                        "message": error or f"Could not stop '{role_name}'.",
+                    }
+                self._deploy_status = {"state": "unloaded", "role": role_name}
+                self._deploy_role = None
+                return {
+                    "status": "SUCCESS",
+                    "role": role_name,
+                    "deploy": True,
+                    "message": (
+                        f"Role '{role_name}' unloaded "
+                        f"({', '.join(units)} stopped and disabled)"
+                    ),
+                }
             # Backward-compat: no role arg + exactly one loaded role → that one.
             if not role_name:
                 if len(self._roles) == 1:

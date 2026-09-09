@@ -16887,9 +16887,8 @@ async function loadApprovedSpokes() {
     }
 }
 
-async function fetchLoadedRoles(spokeId) {
-    // Fetch the roles a generic agent is currently hosting (GET_AVAILABLE_ROLES
-    // via the generic command relay). Returns the `active` list (possibly empty).
+async function fetchAgentRoleState(spokeId) {
+    // Fetch hosted roles plus durable deploy-role installation markers.
     // A tenant-admin (non-Global-Admin) can't reach /api/agent/* — use the
     // tenant-scoped, ownership-checked /tenant/agent/{id}/roles instead.
     try {
@@ -16900,10 +16899,19 @@ async function fetchLoadedRoles(spokeId) {
                 body: JSON.stringify({ command: 'GET_AVAILABLE_ROLES' }),
               })
             : await fetch(`/tenant/agent/${encodeURIComponent(spokeId)}/roles`);
-        if (!res.ok) return [];
+        if (!res.ok) return { active: [], installed_deploy_roles: [] };
         const data = await res.json();
-        return Array.isArray(data.active) ? data.active : [];
-    } catch (e) { return []; }
+        return {
+            ...data,
+            active: Array.isArray(data.active) ? data.active : [],
+            installed_deploy_roles: Array.isArray(data.installed_deploy_roles)
+                ? data.installed_deploy_roles : [],
+        };
+    } catch (e) { return { active: [], installed_deploy_roles: [] }; }
+}
+
+async function fetchLoadedRoles(spokeId) {
+    return (await fetchAgentRoleState(spokeId)).active;
 }
 
 // Deploy-role status for a generic agent (netbox-server, ab). Returns
@@ -16970,6 +16978,7 @@ async function showLoadRoleModal(spokeId) {
                 <div id="role-list" class="grid grid-cols-3 gap-2 max-h-44 overflow-y-auto pr-1">
                     <p class="text-xs text-slate-400 italic col-span-3">Loading roles…</p>
                 </div>
+                <div id="active-server-roles" class="hidden"></div>
                 <div id="netbox-admin-creds" class="hidden p-3 bg-slate-50 border border-slate-200 rounded-md space-y-2">
                     <p class="text-xs font-semibold text-slate-700">NetBox admin account</p>
                     <div class="grid grid-cols-2 gap-2">
@@ -17006,11 +17015,16 @@ async function showLoadRoleModal(spokeId) {
         </div>`;
     document.body.appendChild(modal);
 
-    const active = await fetchLoadedRoles(spokeId);
+    const roleState = await fetchAgentRoleState(spokeId);
+    const active = roleState.active;
     const loadedRoleIds = new Set((active || []).map(a => a.role));
+    const activeDeployRoleIds = new Set(roleState.active_deploy_roles || []);
+    if (roleState.deploy?.state === 'running' && roleState.deploy?.role) {
+        activeDeployRoleIds.add(roleState.deploy.role);
+    }
     const list = document.getElementById('role-list');
     const availableRoles = Object.entries(AGENT_ROLES)
-        .filter(([id]) => !loadedRoleIds.has(id));
+        .filter(([id]) => !loadedRoleIds.has(id) && !activeDeployRoleIds.has(id));
     const rows = availableRoles.map(([id, r]) => {
         const deployNote = r.deploy ? ' (background deploy — own service)' : '';
         return `
@@ -17020,6 +17034,25 @@ async function showLoadRoleModal(spokeId) {
             </label>`;
     }).join('');
     list.innerHTML = rows || '<p class="text-xs text-slate-400 italic col-span-3">All available roles are already loaded.</p>';
+    const activeServers = document.getElementById('active-server-roles');
+    const stoppableServers = [...activeDeployRoleIds]
+        .filter(id => (id === 'dns-server' || id === 'dhcp-server')
+            && !(roleState.deploy?.state === 'running' && roleState.deploy?.role === id));
+    if (activeServers && stoppableServers.length) {
+        activeServers.classList.remove('hidden');
+        activeServers.innerHTML = `
+            <p class="text-xs font-semibold text-slate-600 mb-2">Active server services</p>
+            <div class="flex flex-wrap gap-2">${stoppableServers.map(id => {
+                const moduleLoaded = loadedRoleIds.has(id.replace(/-server$/, ''));
+                return `
+                <div class="flex items-center gap-2 rounded-md border border-green-200 bg-green-50 px-3 py-2">
+                    <span class="text-sm font-medium text-slate-700">${escapeHtml(AGENT_ROLES[id]?.name || id)}</span>
+                    <button onclick="unloadRole('${spokeId}','${id}')"
+                        ${moduleLoaded ? 'disabled title="Unload the management module first"' : ''}
+                        class="text-xs font-bold text-red-600 hover:text-red-700 disabled:text-slate-400 disabled:cursor-not-allowed">Unload</button>
+                </div>`;
+            }).join('')}</div>`;
+    }
     const activateButton = modal.querySelector('button[onclick^="loadRole"]');
     if (activateButton && availableRoles.length === 0) {
         activateButton.disabled = true;
@@ -17139,7 +17172,10 @@ async function loadRole(spokeId) {
 
 async function unloadRole(spokeId, role) {
     const roleLabel = AGENT_ROLES[role]?.name || role;
-    if (!await showConfirmToast(`Unload role "${roleLabel}" from ${spokeId}? Its sub-spoke will disconnect.`)) return;
+    const impact = AGENT_ROLES[role]?.deploy
+        ? 'The server service will be stopped and disabled, but its package and configuration will remain installed.'
+        : 'Its sub-spoke will disconnect.';
+    if (!await showConfirmToast(`Unload role "${roleLabel}" from ${spokeId}? ${impact}`)) return;
     // Only reopen the Load Role modal if the unload was triggered from inside it
     // (not from the per-role Unload action on a Spokes row).
     const modalOpen = !!document.getElementById('load-role-modal');
