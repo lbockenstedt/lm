@@ -1574,8 +1574,8 @@ const VIEW_SUBMENUS = {
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management', 'Assistant'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
-    dns: ['Records', 'Statistics', 'Forwarders', 'External DNS'],
-    dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations'],
+    dns: ['Records', 'Statistics', 'Diagnostics', 'Forwarders', 'External DNS'],
+    dhcp: ['Overview', 'Diagnostics', 'Subnets', 'Leases', 'Reservations'],
     nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'Other', 'Scan'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
 };
@@ -23472,7 +23472,7 @@ async function loadDNSData(subMenu) {
     if (dnsActions) dnsActions.classList.remove('hidden');
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
     const addBtn = document.getElementById('dns-add-btn');
-    // Add-record only applies to the Records tab; Statistics/Forwarders are read-only.
+    // Add-record only applies to the Records tab; analytics/diagnostics are read-only.
     if (addBtn) addBtn.classList.toggle('hidden', !(subMenu === 'Records' || !subMenu));
 
     const th = tableHead, tw = tableWrap;  // shared table helpers
@@ -23512,6 +23512,66 @@ async function loadDNSData(subMenu) {
                     ${typeRows || '<p class="text-slate-400 italic text-sm">No query-type data yet.</p>'}
                 </div>
                 ${syncLine}`;
+            return;
+        }
+
+        // ── Diagnostics: explain installed-but-not-queryable Unbound ──────
+        if (subMenu === 'Diagnostics') {
+            const { ok, data: d, detail } = await _spokeFetch('/api/dns/diagnostics');
+            if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DNS diagnostics unavailable'); return; }
+            const good = !!d.healthy;
+            const svc = d.service || {};
+            const cfg = d.config || {};
+            const sockets = d.sockets || {};
+            const probes = Array.isArray(d.probes) ? d.probes : [];
+            const listeners = Array.isArray(sockets.listeners) ? sockets.listeners : [];
+            const recommendations = Array.isArray(d.recommendations) ? d.recommendations : [];
+            const probeRows = probes.map(p => `<tr class="border-b border-slate-100">
+                <td class="px-4 py-2 font-mono text-xs">${escapeHtml(p.server || '—')}:53</td>
+                <td class="px-4 py-2 font-bold ${p.responded ? 'text-emerald-600' : 'text-red-600'}">${p.responded ? 'Responded' : 'No response'}</td>
+                <td class="px-4 py-2 text-xs">${p.rcode == null ? '—' : escapeHtml(String(p.rcode))}</td>
+                <td class="px-4 py-2 text-xs">${p.latency_ms == null ? '—' : `${escapeHtml(String(p.latency_ms))} ms`}</td>
+                <td class="px-4 py-2 text-xs text-red-600">${escapeHtml(p.error || '')}</td>
+            </tr>`).join('');
+            const check = (label, pass, detailText) => _ddTile(
+                label, pass ? 'PASS' : 'FAIL', detailText || '',
+                pass ? 'text-emerald-600' : 'text-red-600');
+            container.innerHTML = `
+                <div class="flex items-center justify-between gap-3 mb-4">
+                    <div>
+                        <div class="text-sm font-semibold ${good ? 'text-emerald-700' : 'text-red-700'}">${good ? 'DNS listener healthy' : 'DNS listener needs attention'}</div>
+                        <div class="text-xs text-slate-400">Live checks run on the Unbound server.</div>
+                    </div>
+                    <button onclick="loadDNSData('Diagnostics')" title="Run DNS diagnostics again" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Run again</button>
+                </div>
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+                    ${check('Unbound Service', !!svc.ok, svc.output || svc.error || 'inactive')}
+                    ${check('Configuration', !!cfg.ok, cfg.output || cfg.error || 'valid')}
+                    ${check('Port 53', !!sockets.has_port_53_listener, sockets.has_port_53_listener ? `${listeners.length} listener(s)` : (sockets.error || 'not listening'))}
+                    ${check('LAN Listener', !!sockets.has_lan_listener, sockets.has_lan_listener ? 'non-loopback address bound' : 'loopback only or absent')}
+                </div>
+                ${recommendations.length ? `<div class="mb-4 p-4 rounded-lg bg-amber-50 border border-amber-200">
+                    <div class="text-sm font-semibold text-amber-800 mb-2">Recommended checks</div>
+                    <ul class="list-disc pl-5 space-y-1 text-xs text-amber-800">${recommendations.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>
+                </div>` : ''}
+                <div class="grid lg:grid-cols-2 gap-4 mb-4">
+                    <div class="bg-white border border-slate-200 rounded-lg p-4">
+                        <div class="text-sm font-semibold text-slate-700 mb-2">Configured interfaces</div>
+                        <div class="font-mono text-xs text-slate-600">${(d.configured_interfaces || []).map(escapeHtml).join('<br>') || 'none found'}</div>
+                        <div class="text-sm font-semibold text-slate-700 mt-4 mb-2">Detected local IPv4 addresses</div>
+                        <div class="font-mono text-xs text-slate-600">${(d.local_ipv4s || []).map(escapeHtml).join('<br>') || 'none found'}</div>
+                        <div class="text-sm font-semibold text-slate-700 mt-4 mb-2">Access controls</div>
+                        <div class="font-mono text-xs text-slate-600">${(d.access_controls || []).map(escapeHtml).join('<br>') || 'none found'}</div>
+                    </div>
+                    <div class="bg-white border border-slate-200 rounded-lg p-4">
+                        <div class="text-sm font-semibold text-slate-700 mb-2">Port 53 listeners</div>
+                        <pre class="text-[11px] whitespace-pre-wrap break-all text-slate-600">${escapeHtml(listeners.join('\n') || sockets.error || 'none')}</pre>
+                    </div>
+                </div>
+                <div class="bg-white border border-slate-200 rounded-lg overflow-hidden">
+                    <div class="px-4 py-3 text-sm font-semibold text-slate-700 border-b border-slate-200">Local DNS query probes</div>
+                    ${tw(th(['Target', 'Result', 'RCODE', 'Latency', 'Error']) + `<tbody>${probeRows}</tbody>`)}
+                </div>`;
             return;
         }
 
@@ -27123,6 +27183,70 @@ async function loadDHCPData(subMenu) {
                     ${subnetRows || '<p class="text-slate-400 italic text-sm">No subnets configured.</p>'}
                 </div>
                 ${syncLine}`;
+            return;
+        }
+
+        if (subMenu === 'Diagnostics') {
+            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/diagnostics');
+            if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP diagnostics unavailable'); return; }
+            const good = !!d.healthy;
+            const units = d.units || {};
+            const dhcp4 = units['kea-dhcp4-server'] || {};
+            const caUnit = units['kea-ctrl-agent'] || {};
+            const ca = d.ca || {};
+            const cfg = d.config_test || {};
+            const listeners = d.listeners || {};
+            const missing = Array.isArray(d.interface_missing) ? d.interface_missing : [];
+            const subnets = Array.isArray(d.subnets) ? d.subnets : [];
+            const recommendations = Array.isArray(d.recommendations) ? d.recommendations : [];
+            const unitText = u => `${u.ActiveState || '?'} / ${u.SubState || '?'}${u.NRestarts && u.NRestarts !== '0' ? ` · ${u.NRestarts} restart(s)` : ''}`;
+            const check = (label, pass, detailText) => _ddTile(
+                label, pass ? 'PASS' : 'FAIL', detailText || '',
+                pass ? 'text-emerald-600' : 'text-red-600');
+            const subnetRows = subnets.map(s => `<tr class="border-b border-slate-100">
+                <td class="px-4 py-2 text-xs">${escapeHtml(String(s.id == null ? '—' : s.id))}</td>
+                <td class="px-4 py-2 font-mono text-xs">${escapeHtml(s.subnet || '—')}</td>
+                <td class="px-4 py-2 font-mono text-xs">${(s.pools || []).map(escapeHtml).join(', ') || '—'}</td>
+            </tr>`).join('');
+            container.innerHTML = `
+                <div class="flex items-center justify-between gap-3 mb-4">
+                    <div>
+                        <div class="text-sm font-semibold ${good ? 'text-emerald-700' : 'text-red-700'}">${good ? 'Kea DHCP server healthy' : 'Kea DHCP server needs attention'}</div>
+                        <div class="text-xs text-slate-400">Live checks mirror the Sim DHCP (Kea) diagnostics: units, config, interfaces, listeners, control agent, and leases.</div>
+                    </div>
+                    <button onclick="loadDHCPData('Diagnostics')" title="Run DHCP diagnostics again" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Run again</button>
+                </div>
+                <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+                    ${check('DHCP4 Service', dhcp4.ActiveState === 'active', unitText(dhcp4))}
+                    ${check('Control Agent', caUnit.ActiveState === 'active' && !!ca.reachable, ca.error || unitText(caUnit))}
+                    ${check('Configuration', !!cfg.ok, cfg.output || cfg.error || 'valid')}
+                    ${check('UDP/67 Listener', (listeners.dhcp4 || []).length > 0, (listeners.dhcp4 || []).length ? `${listeners.dhcp4.length} listener(s)` : (listeners.error || 'not listening'))}
+                </div>
+                ${recommendations.length ? `<div class="mb-4 p-4 rounded-lg bg-amber-50 border border-amber-200">
+                    <div class="text-sm font-semibold text-amber-800 mb-2">Recommended checks</div>
+                    <ul class="list-disc pl-5 space-y-1 text-xs text-amber-800">${recommendations.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>
+                </div>` : ''}
+                <div class="grid lg:grid-cols-2 gap-4 mb-4">
+                    <div class="bg-white border border-slate-200 rounded-lg p-4">
+                        <div class="text-sm font-semibold text-slate-700 mb-2">Interfaces</div>
+                        <div class="font-mono text-xs text-slate-600">${(d.interfaces_configured || []).map(i => `${escapeHtml(i)}${missing.includes(i) ? ' (missing)' : ''}`).join('<br>') || 'none configured'}</div>
+                        <div class="text-sm font-semibold text-slate-700 mt-4 mb-2">Lease database</div>
+                        <div class="font-mono text-xs text-slate-600">${escapeHtml((d.lease_db || {}).path || 'not reported')}</div>
+                        <div class="text-xs text-slate-500">${(d.lease_db || {}).exists ? 'present' : 'missing'} · ${((d.lease_db || {}).leases == null) ? 'lease count unavailable' : `${d.lease_db.leases} active lease(s)`}</div>
+                    </div>
+                    <div class="bg-white border border-slate-200 rounded-lg p-4">
+                        <div class="text-sm font-semibold text-slate-700 mb-2">Listeners</div>
+                        <pre class="text-[11px] whitespace-pre-wrap break-all text-slate-600">${escapeHtml([...(listeners.dhcp4 || []), ...(listeners.control_agent || [])].join('\n') || listeners.error || 'none')}</pre>
+                    </div>
+                </div>
+                <div class="bg-white border border-slate-200 rounded-lg overflow-hidden mb-4">
+                    <div class="px-4 py-3 text-sm font-semibold text-slate-700 border-b border-slate-200">Configured scopes</div>
+                    ${subnetRows ? tw(th(['ID', 'Subnet', 'Pools']) + `<tbody>${subnetRows}</tbody>`) : '<p class="p-4 text-slate-400 italic text-sm">No subnets reported.</p>'}
+                </div>
+                ${(d.last_errors || []).length ? `<div class="bg-white border border-slate-200 rounded-lg p-4">
+                    <div class="text-sm font-semibold text-slate-700 mb-2">Recent service warnings/errors</div>
+                    <pre class="text-[11px] whitespace-pre-wrap break-all text-slate-600">${escapeHtml(d.last_errors.join('\n'))}</pre>
+                </div>` : ''}`;
             return;
         }
 
