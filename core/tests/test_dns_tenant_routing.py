@@ -161,6 +161,33 @@ def test_admin_no_tenant_single_spoke_keeps_legacy_global_behavior():
     assert hub.forwarded[-1][0] == "dns-a"
 
 
+def test_dns_diagnostics_routes_to_the_tenants_dns_spoke():
+    hub = FakeHub(
+        {"dns-a", "dns-b"},
+        replies={"dns-b": {"DNS_DIAGNOSTICS": {
+            "status": "SUCCESS", "healthy": False,
+            "recommendations": ["Nothing is listening on TCP/UDP port 53."],
+            "local_ipv4s": ["10.0.0.5"],
+            "access_controls": ["10.0.0.0/8 allow"],
+            "sockets": {"has_lan_listener": False,
+                        "listeners": ["udp 10.0.0.5:53"], "error": ""},
+            "probes": [{"server": "10.0.0.5", "responded": False,
+                        "error": "timed out"}],
+        }}},
+        module_metadata={"dns-a": {"tenant_id": "tenantA"},
+                         "dns-b": {"tenant_id": "tenantB"}},
+    )
+    c = _build(_tenant_user("tenantB"), hub)
+    r = c.get("/api/dns/diagnostics")
+    assert r.status_code == 200
+    assert r.json()["healthy"] is False
+    assert r.json()["local_ipv4s"] == []
+    assert r.json()["access_controls"] == []
+    assert r.json()["sockets"]["listeners"] == []
+    assert r.json()["probes"][0]["server"] == "LAN address"
+    assert hub.forwarded[-1][:2] == ("dns-b", "DNS_DIAGNOSTICS")
+
+
 # ── mutations route to the right spoke too ───────────────────────────────────
 
 def test_add_record_routes_to_tenants_own_spoke():

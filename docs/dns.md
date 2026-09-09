@@ -15,7 +15,7 @@ Manages a local **Unbound** resolver via the `unbound-control` CLI. Includes the
 
 The `dns` module manages DNS records on this node's local **Unbound** resolver, and shows query statistics and configured upstream forwarders for troubleshooting. Records are simple name/type/value entries (A/AAAA get an automatic PTR companion; CNAME and PTR are also supported) — add one by hand, or let it fill in automatically from NetBox.
 
-In the WebUI, open a node's **DNS** module from the sidebar to reach the **Records**, **Statistics**, and **Forwarders** tabs — see the [WebUI](#webui) section below for what each tab shows.
+In the WebUI, open a node's **DNS** module from the sidebar to reach the **Records**, **Statistics**, **Diagnostics**, and **Forwarders** tabs — see the [WebUI](#webui) section below for what each tab shows.
 
 ## Entrypoints
 
@@ -37,7 +37,7 @@ None (no installer present).
 
 ## Key commands / handlers (`dns_spoke.handle_command`)
 
-`GET_VERSION`, `UPDATE_CONFIG` (rebuild manager), `DNS_STATUS`, `DNS_LIST` (regex-parses `local-data:`/`local-data-ptr:` directives out of the managed conf.d file — `<name>. <ttl> IN <type> <value>`; memoized on the conf file's mtime — NOT `unbound-control list_local_data`), `DNS_ADD` (append to the parsed record list + full conf rewrite + `unbound-control reload`), `DNS_DELETE` (filter out the matching record + full conf rewrite + reload), `DNS_UPDATE` (delete-then-add, non-atomic), `DNS_SYNC` (`sync_records` — only-add-missing against existing names, added/skipped counts), `DNS_STATS` (`get_stats` via `unbound-control stats_noreset` — total queries, cache hit/miss + ratio, recursion latency, uptime, per-type breakdown; relayed by `GET /api/dns/stats`), `DNS_FORWARDERS` (`list_forwarders` via `unbound-control list_forwards` — per-zone upstream servers; relayed by `GET /api/dns/forwarders`).
+`GET_VERSION`, `UPDATE_CONFIG` (rebuild manager), `DNS_STATUS`, `DNS_DIAGNOSTICS` (service/config/control status, port-53 listeners, configured/local addresses, and loopback/LAN DNS probes; relayed by `GET /api/dns/diagnostics`), `DNS_LIST` (regex-parses `local-data:`/`local-data-ptr:` directives out of the managed conf.d file — `<name>. <ttl> IN <type> <value>`; memoized on the conf file's mtime — NOT `unbound-control list_local_data`), `DNS_ADD` (append to the parsed record list + full conf rewrite + `unbound-control reload`), `DNS_DELETE` (filter out the matching record + full conf rewrite + reload), `DNS_UPDATE` (delete-then-add, non-atomic), `DNS_SYNC` (`sync_records` — only-add-missing against existing names, added/skipped counts), `DNS_STATS` (`get_stats` via `unbound-control stats_noreset` — total queries, cache hit/miss + ratio, recursion latency, uptime, per-type breakdown; relayed by `GET /api/dns/stats`), `DNS_FORWARDERS` (`list_forwarders` via `unbound-control list_forwards` — per-zone upstream servers; relayed by `GET /api/dns/forwarders`).
 
 ## NetBox auto-sync (source of truth)
 
@@ -45,7 +45,7 @@ NetBox is the IPAM source of truth. The hub's `DnsDhcpSyncMixin` (`core/src/dns_
 
 ## WebUI
 
-Module view tabs: **Records**, **Statistics** (total-queries / cache-hit-ratio / recursion / uptime tiles + queries-by-type breakdown, `GET /api/dns/stats`), **Forwarders** (per-zone upstream resolvers, `GET /api/dns/forwarders`), and **External DNS** (internet-facing DNS providers such as HE.NET — appears once an external-DNS spoke is connected; one tile per provider; see [henet.md](henet.md)). The DNS module is "all things DNS": the Unbound tabs plus the External DNS providers subtab.
+Module view tabs: **Records**, **Statistics** (total-queries / cache-hit-ratio / recursion / uptime tiles + queries-by-type breakdown, `GET /api/dns/stats`), **Diagnostics** (live service/config checks, port-53 listener ownership, detected LAN addresses, local query probes, and recommended checks), **Forwarders** (per-zone upstream resolvers, `GET /api/dns/forwarders`), and **External DNS** (internet-facing DNS providers such as HE.NET — appears once an external-DNS spoke is connected; one tile per provider; see [henet.md](henet.md)).
 
 ## Key files
 
