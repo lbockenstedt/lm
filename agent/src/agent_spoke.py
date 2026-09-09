@@ -478,19 +478,45 @@ class GenericAgent(BaseSpoke):
             if role_name == "dns":
                 conf = Path("/etc/unbound/unbound.conf")
                 existing = conf.read_text() if conf.exists() else ""
+                changed = False
                 if "control-enable: yes" not in existing:
                     with conf.open("a") as f:
                         f.write("\n\nremote-control:\n    control-enable: yes\n"
                                 "    control-interface: 127.0.0.1\n"
                                 "    control-port: 8953\n")
+                    changed = True
+                # Listen on all interfaces + allow LAN clients. Unbound defaults
+                # to 127.0.0.1 ONLY and REFUSES non-local queries, so the DNS
+                # role would never answer a query sent to its LAN IP — it looks
+                # like "no response / firewall" even with the firewall off.
+                # Parity with install_dns.sh; idempotent (guarded on interface).
+                if "interface: 0.0.0.0" not in existing:
+                    with conf.open("a") as f:
+                        f.write("\n\nserver:\n"
+                                "    interface: 0.0.0.0\n"
+                                "    access-control: 127.0.0.0/8 allow\n"
+                                "    access-control: 10.0.0.0/8 allow\n"
+                                "    access-control: 172.16.0.0/12 allow\n"
+                                "    access-control: 192.168.0.0/16 allow\n"
+                                "    access-control: 169.254.0.0/16 allow\n")
+                    changed = True
                 Path("/etc/unbound/conf.d").mkdir(parents=True, exist_ok=True)
                 if "conf.d" not in existing:
                     with conf.open("a") as f:
                         f.write('include-toplevel: "/etc/unbound/conf.d/*.conf"\n')
+                    changed = True
                 subprocess.run(["unbound-control-setup"], check=False, timeout=60,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                subprocess.run(["systemctl", "enable", "--now", "unbound"],
-                               check=False, timeout=60)
+                subprocess.run(["systemctl", "enable", "unbound"], check=False,
+                               timeout=60, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+                # apt starts unbound with the stock loopback-only config BEFORE
+                # the block above is appended, and `enable --now` won't restart
+                # an already-running unit — so the new interface/access-control
+                # only takes effect on an explicit restart. Without this the
+                # role loads but DNS keeps refusing LAN queries until a reboot.
+                subprocess.run(["systemctl", "restart" if changed else "start",
+                                "unbound"], check=False, timeout=60)
             elif role_name == "dhcp":
                 Path("/etc/kea").mkdir(parents=True, exist_ok=True)
                 Path("/etc/kea/kea-ctrl-agent.conf").write_text(self._KEA_CTRL_AGENT_CONF)

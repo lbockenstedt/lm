@@ -279,6 +279,73 @@ def test_install_role_le_installs_certbot(tmp_path, monkeypatch):
     assert repo_url and repo_url.endswith("/le.git")
 
 
+def test_role_post_install_dns_opens_lan_listener(tmp_path, monkeypatch):
+    """Loading the dns role must reach parity with install_dns.sh. Unbound
+    defaults to 127.0.0.1 ONLY and REFUSES non-local queries, so without an
+    explicit ``interface: 0.0.0.0`` + access-control block the DNS role installs
+    but never answers a query sent to its LAN IP — the silent "no response /
+    firewall" the standalone installer calls out. Regression for that."""
+    etc = tmp_path / "etc" / "unbound"
+    etc.mkdir(parents=True)
+    conf = etc / "unbound.conf"
+    conf.write_text("# stock debian config\n")
+
+    real_path = agent_spoke.Path
+    def _redir(p="."):
+        s = str(p)
+        if s.startswith("/etc/unbound"):
+            return real_path(str(tmp_path) + s)
+        return real_path(p)
+    monkeypatch.setattr(agent_spoke, "Path", _redir)
+
+    calls = []
+    _fake_subprocess_run(monkeypatch, calls)
+    agent = _agent_with_tmp_root(tmp_path, monkeypatch)
+    agent._role_post_install("dns")
+
+    text = conf.read_text()
+    assert "interface: 0.0.0.0" in text, "unbound never opened a LAN listener"
+    assert "access-control: 10.0.0.0/8 allow" in text
+    assert "access-control: 192.168.0.0/16 allow" in text
+    assert "control-enable: yes" in text
+    # New config → unbound must be RESTARTED: apt starts it loopback-only before
+    # the block is appended, and `enable --now` won't restart a running unit, so
+    # the listener would otherwise never bind until a reboot.
+    assert ["systemctl", "restart", "unbound"] in calls
+    assert ["systemctl", "enable", "unbound"] in calls
+
+
+def test_role_post_install_dns_is_idempotent(tmp_path, monkeypatch):
+    """A second dns role load must not re-append the server block nor bounce a
+    correctly-running Unbound (guarded on the interface line; already-configured
+    → ``start``, not ``restart``)."""
+    etc = tmp_path / "etc" / "unbound"
+    etc.mkdir(parents=True)
+    conf = etc / "unbound.conf"
+    conf.write_text(
+        "server:\n    interface: 0.0.0.0\n"
+        "    access-control: 10.0.0.0/8 allow\n"
+        "remote-control:\n    control-enable: yes\n"
+        'include-toplevel: "/etc/unbound/conf.d/*.conf"\n')
+
+    real_path = agent_spoke.Path
+    def _redir(p="."):
+        s = str(p)
+        if s.startswith("/etc/unbound"):
+            return real_path(str(tmp_path) + s)
+        return real_path(p)
+    monkeypatch.setattr(agent_spoke, "Path", _redir)
+
+    calls = []
+    _fake_subprocess_run(monkeypatch, calls)
+    agent = _agent_with_tmp_root(tmp_path, monkeypatch)
+    agent._role_post_install("dns")
+
+    assert conf.read_text().count("interface: 0.0.0.0") == 1
+    assert ["systemctl", "restart", "unbound"] not in calls
+    assert ["systemctl", "start", "unbound"] in calls
+
+
 # ── 5. multi-role: one agent hosts many role sub-spokes ─────────────────────
 
 class _FakeControlPlane:
