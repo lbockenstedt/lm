@@ -41,9 +41,10 @@ def test_running_deploy_role_is_not_offered_again():
     assert "activeDeployRoleIds.add(roleState.deploy.role)" in body
 
 
-def test_active_server_roles_have_an_unload_action():
+def test_all_loaded_roles_have_an_unload_action():
     body = _show_load_role_modal()
-    assert 'id="active-server-roles"' in body
+    assert 'id="loaded-role-controls"' in body
+    assert "...(active || []).map(item => item.role)" in body
     assert "id === 'dns-server' || id === 'dhcp-server'" in body
     assert "unloadRole('${spokeId}','${id}')" in body
 
