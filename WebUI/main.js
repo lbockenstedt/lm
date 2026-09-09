@@ -16978,7 +16978,7 @@ async function showLoadRoleModal(spokeId) {
                 <div id="role-list" class="grid grid-cols-3 gap-2 max-h-44 overflow-y-auto pr-1">
                     <p class="text-xs text-slate-400 italic col-span-3">Loading roles…</p>
                 </div>
-                <div id="active-server-roles" class="hidden"></div>
+                <div id="loaded-role-controls" class="hidden"></div>
                 <div id="netbox-admin-creds" class="hidden p-3 bg-slate-50 border border-slate-200 rounded-md space-y-2">
                     <p class="text-xs font-semibold text-slate-700">NetBox admin account</p>
                     <div class="grid grid-cols-2 gap-2">
@@ -17034,16 +17034,21 @@ async function showLoadRoleModal(spokeId) {
             </label>`;
     }).join('');
     list.innerHTML = rows || '<p class="text-xs text-slate-400 italic col-span-3">All available roles are already loaded.</p>';
-    const activeServers = document.getElementById('active-server-roles');
+    const loadedControls = document.getElementById('loaded-role-controls');
     const stoppableServers = [...activeDeployRoleIds]
         .filter(id => (id === 'dns-server' || id === 'dhcp-server')
             && !(roleState.deploy?.state === 'running' && roleState.deploy?.role === id));
-    if (activeServers && stoppableServers.length) {
-        activeServers.classList.remove('hidden');
-        activeServers.innerHTML = `
-            <p class="text-xs font-semibold text-slate-600 mb-2">Active server services</p>
-            <div class="flex flex-wrap gap-2">${stoppableServers.map(id => {
-                const moduleLoaded = loadedRoleIds.has(id.replace(/-server$/, ''));
+    const loadedControlIds = [
+        ...(active || []).map(item => item.role),
+        ...stoppableServers,
+    ];
+    if (loadedControls && loadedControlIds.length) {
+        loadedControls.classList.remove('hidden');
+        loadedControls.innerHTML = `
+            <p class="text-xs font-semibold text-slate-600 mb-2">Loaded roles and server services</p>
+            <div class="flex flex-wrap gap-2">${loadedControlIds.map(id => {
+                const isServer = id.endsWith('-server');
+                const moduleLoaded = isServer && loadedRoleIds.has(id.replace(/-server$/, ''));
                 return `
                 <div class="flex items-center gap-2 rounded-md border border-green-200 bg-green-50 px-3 py-2">
                     <span class="text-sm font-medium text-slate-700">${escapeHtml(AGENT_ROLES[id]?.name || id)}</span>
