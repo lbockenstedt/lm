@@ -186,6 +186,45 @@ def register(app, hub, ctx):
         logger.debug("relay GET /api/dns/status")
         return await _relay_spoke(_dns_spoke_for_request(request, tenant), "DNS_STATUS", log_name="dns_status")
 
+    @app.get("/api/dns/diagnostics")
+    async def dns_diagnostics(request: Request, tenant: str = None):
+        """Unbound config, listener, and local query diagnostics."""
+        logger.debug("relay GET /api/dns/diagnostics")
+        data = await _relay_spoke(
+            _dns_spoke_for_request(request, tenant),
+            "DNS_DIAGNOSTICS",
+            log_name="dns_diagnostics",
+        )
+        if not _is_admin(_session_user(request)) and isinstance(data, dict):
+            data = {
+                **data,
+                "service": {k: v for k, v in (data.get("service") or {}).items()
+                            if k in ("ok", "exit_code")},
+                "config": {k: v for k, v in (data.get("config") or {}).items()
+                           if k in ("ok", "exit_code")},
+                "control": {k: v for k, v in (data.get("control") or {}).items()
+                            if k in ("ok", "exit_code")},
+                "sockets": {
+                    **(data.get("sockets") or {}),
+                    "listeners": [],
+                    "error": "",
+                },
+                "configured_interfaces": [],
+                "access_controls": [],
+                "local_ipv4s": [],
+                "probes": [
+                    {
+                        **probe,
+                        "server": ("loopback" if str(probe.get("server", ""))
+                                   .startswith("127.") else "LAN address"),
+                        "error": "",
+                    }
+                    for probe in (data.get("probes") or [])
+                ],
+                "conf_path": "",
+            }
+        return data
+
     @app.get("/api/dns/stats")
     async def dns_stats(request: Request, tenant: str = None):
         """Unbound query statistics (total/cache-hit/recursion + per-type) for
@@ -2470,6 +2509,54 @@ def register(app, hub, ctx):
         """Kea DHCP4 service status / health from the DHCP spoke."""
         logger.debug("relay GET /api/dhcp/status")
         return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_STATUS", log_name="dhcp_status")
+
+    @app.get("/api/dhcp/diagnostics")
+    async def dhcp_diagnostics(request: Request, tenant: str = None):
+        """Kea service, config, interface, listener, CA, and lease diagnostics."""
+        logger.debug("relay GET /api/dhcp/diagnostics")
+        data = await _relay_spoke(
+            _dhcp_spoke_for_request(request, tenant),
+            "DHCP_DIAGNOSTICS",
+            log_name="dhcp_diagnostics",
+        )
+        if not _is_admin(_session_user(request)) and isinstance(data, dict):
+            data = {
+                **data,
+                "units": {
+                    name: {k: v for k, v in unit.items() if k != "error"}
+                    for name, unit in (data.get("units") or {}).items()
+                },
+                "ca": {
+                    **(data.get("ca") or {}),
+                    "url": "",
+                    "error": "",
+                },
+                "config_test": {
+                    k: v for k, v in (data.get("config_test") or {}).items()
+                    if k in ("ok", "exit_code")
+                },
+                "interfaces_configured": [],
+                "interface_missing": [],
+                "subnets": [],
+                "lease_db": {
+                    "path": "",
+                    "exists": (data.get("lease_db") or {}).get("exists", False),
+                    "leases": None,
+                },
+                "listeners": {
+                    "dhcp4": [],
+                    "control_agent": [],
+                    "error": "",
+                },
+                "last_errors": [],
+                "recommendations": [
+                    ("One or more configured DHCP interfaces are missing."
+                     if item.startswith("Configured DHCP interface")
+                     else item)
+                    for item in (data.get("recommendations") or [])
+                ],
+            }
+        return data
 
     @app.get("/api/dhcp/stats")
     async def dhcp_stats(request: Request, tenant: str = None):
