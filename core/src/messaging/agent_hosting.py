@@ -30,6 +30,7 @@ import secrets
 import ssl
 import hmac
 import socket
+import subprocess
 import logging
 import websockets
 from http import HTTPStatus
@@ -44,6 +45,15 @@ except ImportError:  # imported off a stale path (bare modules on sys.path)
     from security.signer import MessageSigner, split_frame  # type: ignore
 
 logger = logging.getLogger("AgentHostingControlPlane")
+
+
+class ListenerRequiresTLS(RuntimeError):
+    """The listener would have to serve plaintext on a public interface.
+
+    Raised (and NOT retried) when ``AGENT_LISTENER_REQUIRE_TLS`` is set and no
+    cert is available: retrying cannot help, and the only safe behavior is to
+    leave the port closed until a cert is provisioned.
+    """
 
 
 class AgentHostingControlPlane(BaseControlPlane):
@@ -79,6 +89,20 @@ class AgentHostingControlPlane(BaseControlPlane):
     AGENT_LOOPBACK_PORT: int = 8443
     AGENT_WSS_PORT: int = 443
     AGENT_FALLBACK_PORT: int = 8766
+    #: Role-specific TLS env overrides. A generic agent can host the dns AND
+    #: dhcp cluster roles at once, and each serves its own port, so they cannot
+    #: share one certificate variable. Set per subclass/instance (e.g.
+    #: ``LM_DNS_TLS_CERT``); the shared ``LM_TLS_CERT`` remains the fallback for
+    #: the single-listener spokes that have always used it.
+    AGENT_TLS_CERT_ENV: str = ""
+    AGENT_TLS_KEY_ENV: str = ""
+
+    #: Refuse to serve the listener in PLAINTEXT on a non-loopback interface.
+    #: Off for pxmx/cs (legacy cert-less deployments depend on the plaintext
+    #: fallback port); ON for the dns/dhcp service-cluster listeners, whose
+    #: workers authenticate by sending a shared PSK in the first frame — a
+    #: plaintext bind there would hand that credential to anyone on the path.
+    AGENT_LISTENER_REQUIRE_TLS: bool = False
 
     def __init__(self, spoke_id: str, secret: str = None, hub_secret: str = None,
                  hub_url: str = None, onboarding_psk: str = None,
@@ -109,6 +133,19 @@ class AgentHostingControlPlane(BaseControlPlane):
             logger.warning("agent_secret not set — zero-touch provisioning only "
                            "(agents will be approved before receiving a secret)")
         self.agent_signer = MessageSigner(self.agent_secret or "")
+
+        # Listener readiness. ``run_agent_server`` sets ``_agent_server_ready``
+        # once the socket is genuinely bound and serving, and records the
+        # failure in ``_agent_server_error`` otherwise, so
+        # ``ensure_cluster_listener`` can report a bind/TLS failure instead of
+        # returning success before an asynchronous crash.
+        self._agent_server_ready: Optional[asyncio.Event] = None
+        self._agent_server_error: str = ""
+        self._agent_server_endpoint: str = ""
+        # Per-INSTANCE listener material. Never written to os.environ: two
+        # co-loaded cluster roles in one process would clobber each other.
+        self._listener_cert: str = ""
+        self._listener_key: str = ""
 
         # Correlated agent command/response futures (corr_id → Future).
         self.pending_responses: Dict[str, asyncio.Future] = {}
@@ -252,6 +289,12 @@ class AgentHostingControlPlane(BaseControlPlane):
         """Return the ``(cert, key)`` paths the ``/ws/agent`` listener should
         present. Resolution order:
 
+        0. This INSTANCE's own provisioned material (``_listener_cert`` /
+           ``_listener_key``), then its role-specific env pair
+           (``AGENT_TLS_CERT_ENV``/``AGENT_TLS_KEY_ENV``, e.g.
+           ``LM_DNS_TLS_CERT``). A generic agent can host the dns AND dhcp
+           cluster roles at once and each serves its own port, so they must not
+           share one certificate variable.
         1. ``LM_TLS_CERT`` / ``LM_TLS_KEY`` env — what the installer / hub
            cert-distribution provisions on cert-capable spokes.
         2. **On-disk LE fallback** — the box's own Let's Encrypt cert, which the
@@ -265,6 +308,21 @@ class AgentHostingControlPlane(BaseControlPlane):
 
         Returns ``('', '')`` when neither is available → ``run_agent_server``
         falls back to plaintext (legacy/cert-less)."""
+        # 0. Per-INSTANCE material (this role's own provisioned cert) wins, so
+        #    co-loaded dns + dhcp listeners never serve each other's certificate.
+        #    getattr: some callers (and older subclasses) bypass __init__.
+        inst_cert = getattr(self, "_listener_cert", "")
+        inst_key = getattr(self, "_listener_key", "")
+        if inst_cert and inst_key:
+            return inst_cert, inst_key
+        # 1a. Role-specific env (LM_DNS_TLS_CERT / LM_DHCP_TLS_CERT), written by
+        #     the installers so each role's listener is independently
+        #     configurable on a shared box.
+        if self.AGENT_TLS_CERT_ENV and self.AGENT_TLS_KEY_ENV:
+            cert = os.environ.get(self.AGENT_TLS_CERT_ENV, "").strip()
+            key = os.environ.get(self.AGENT_TLS_KEY_ENV, "").strip()
+            if cert and key:
+                return cert, key
         cert = os.environ.get("LM_TLS_CERT", "").strip()
         key = os.environ.get("LM_TLS_KEY", "").strip()
         if cert and key:
@@ -413,6 +471,22 @@ class AgentHostingControlPlane(BaseControlPlane):
             port = int(os.environ.get(self.AGENT_PORT_ENV, str(self.AGENT_FALLBACK_PORT)))
             serve_kwargs = {}
             scheme = "ws"
+            if self.AGENT_LISTENER_REQUIRE_TLS:
+                # Service-cluster workers authenticate with a shared PSK sent in
+                # the first handshake frame. Binding plaintext on 0.0.0.0 would
+                # publish that credential to the network, so refuse to bind at
+                # all and say exactly what is missing. The module keeps running
+                # single-host until a cert is provisioned.
+                self._agent_server_error = (
+                    f"no TLS certificate for the {self.MODULE_TYPE} cluster "
+                    f"listener on 0.0.0.0:{port} — refusing to serve worker "
+                    f"secrets in plaintext (set LM_TLS_CERT/LM_TLS_KEY)")
+                self._signal_listener_failure()
+                raise ListenerRequiresTLS(
+                    f"refusing to serve {self.MODULE_TYPE} cluster workers in "
+                    f"plaintext on 0.0.0.0:{port} — no TLS cert found "
+                    f"(set LM_TLS_CERT/LM_TLS_KEY, or deploy an LE cert). "
+                    f"Worker secrets must never cross the network unencrypted.")
         for attempt in range(10):
             try:
                 # Websocket keepalive on the /ws/agent server: use the same
@@ -432,18 +506,28 @@ class AgentHostingControlPlane(BaseControlPlane):
                     self._ws_dispatch, host, port, **serve_kwargs,
                 ):
                     logger.info(f"Agent listener on {scheme}://{host}:{port}")
+                    # Bound and serving: only NOW is the listener usable.
+                    self._agent_server_error = ""
+                    self._agent_server_endpoint = f"{scheme}://{host}:{port}"
+                    if self._agent_server_ready is not None:
+                        self._agent_server_ready.set()
                     await asyncio.Future()
                 return
             except OSError as e:
                 # errno 98 = address in use (Linux), errno 48 = macOS equivalent
                 if e.errno in (98, 48) and attempt < 9:
                     logger.warning(f"Port {port} in use, retrying in 3s (attempt {attempt + 1}/10)…")
+                    self._agent_server_error = f"port {port} in use, retrying"
                     await asyncio.sleep(3)
                 else:
                     logger.error(f"Agent server failed to bind to port {port}: {e}")
+                    self._agent_server_error = f"could not bind {host}:{port}: {e}"
+                    self._signal_listener_failure()
                     raise
             except Exception as e:
                 logger.error(f"Agent server unexpected error: {e}", exc_info=True)
+                self._agent_server_error = str(e)
+                self._signal_listener_failure()
                 raise
 
     def _start_agent_server_task(self) -> None:
@@ -461,6 +545,11 @@ class AgentHostingControlPlane(BaseControlPlane):
                     await self.run_agent_server()
                 except asyncio.CancelledError:
                     raise
+                except ListenerRequiresTLS as e:
+                    # Not retryable: no amount of restarting produces a cert.
+                    # Leave the port closed and say so once.
+                    logger.error("%s", e)
+                    return
                 except Exception as e:
                     logger.error(f"Agent server exited: {e} — restarting in 5s", exc_info=True)
                     await asyncio.sleep(5)
@@ -475,6 +564,7 @@ class AgentHostingControlPlane(BaseControlPlane):
         restarts. Connected agents drop and reconnect — the spoke re-onboards
         them on reconnect (agent_id is stable), so this is safe during a cert
         renew. No-op when the listener isn't running or isn't enabled."""
+        self._agent_server_endpoint = ""
         old = self._agent_server_task
         if old is not None and not old.done():
             old.cancel()
@@ -534,6 +624,169 @@ class AgentHostingControlPlane(BaseControlPlane):
                 "persist it to %s (%s); it will not survive a spoke restart, so "
                 "re-run the installer's agent-secret step for a stable secret",
                 path, e)
+
+    def snapshot_agent_secret(self) -> str:
+        """The PSK currently in force, for a caller that may need to undo."""
+        return str(getattr(self, "agent_secret", "") or "")
+
+    def restore_agent_secret(self, previous: str) -> bool:
+        """Put a PREVIOUS PSK back after a failed topology change.
+
+        A topology edit that rolls back must also roll back the credential:
+        having already overwritten the PSK, every worker provisioned with the
+        old value would silently stop authenticating even though the operator's
+        change was rejected. ``previous == ""`` means there was none, so the
+        stored secret is removed rather than left as a half-applied new one."""
+        if previous:
+            return self.set_agent_secret(previous)
+        self.agent_secret = None
+        self.agent_signer = MessageSigner("")
+        cfg = self.config if isinstance(getattr(self, "config", None), dict) else {}
+        cfg.pop("agent_secret", None)
+        self.config = cfg
+        path = self.AGENT_CONFIG_PATH
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(cfg, f, indent=2)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+            return True
+        except Exception as e:  # noqa: BLE001
+            logger.error("Could not clear the listener secret at %s: %s", path, e)
+            return False
+
+    def set_agent_secret(self, secret: str) -> bool:
+        """Replace + persist the listener PSK (write-only, never echoed).
+
+        Used by the clustered dns/dhcp modules: the operator sets the SAME
+        secret on the coordinator and on each service worker, so the workers
+        authenticate on their first dial rather than sitting in the
+        pending-approval loop that exists for hub-approved node agents. Rotating
+        it disconnects any worker still holding the old value — expected, they
+        reconnect once re-provisioned. Returns True when persisted to disk."""
+        secret = str(secret or "").strip()
+        if not secret:
+            return False
+        self.agent_secret = secret
+        self.agent_signer = MessageSigner(secret)
+        cfg = self.config if isinstance(getattr(self, "config", None), dict) else {}
+        cfg["agent_secret"] = secret
+        self.config = cfg
+        path = self.AGENT_CONFIG_PATH
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(cfg, f, indent=2)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, path)
+            return True
+        except Exception as e:  # noqa: BLE001 — in-memory secret still works now
+            logger.error("Could not persist the listener secret to %s: %s — it "
+                         "will not survive a restart", path, e)
+            return False
+
+    def _cluster_listener_required(self) -> bool:
+        """True when a hosted module has declared a multi-host service cluster.
+
+        A clustered dns/dhcp module owns 2+ service workers that dial THIS
+        spoke's ``/ws/agent``; a single-host module owns none and must not open
+        a port. Asked of the module (which holds the member list) rather than an
+        env flag so enabling a cluster at runtime is enough."""
+        for module in (getattr(self, "modules", None) or {}).values():
+            hook = getattr(module, "cluster_listener_required", None)
+            try:
+                if callable(hook) and hook():
+                    return True
+            except Exception:  # noqa: BLE001 — a broken module must not bind a port
+                continue
+        return False
+
+    def _signal_listener_failure(self) -> None:
+        """Unblock ``ensure_cluster_listener`` on a terminal listener failure."""
+        if self._agent_server_ready is not None:
+            self._agent_server_ready.set()
+
+    def _provision_listener_cert(self) -> None:
+        """Self-sign a listener certificate for a hosted cluster role.
+
+        The standalone installers provision one; an agent-HOSTED dns/dhcp role
+        has no installer of its own, and the listener refuses to serve plaintext
+        — so without this a generic-agent cluster could never come up. Written
+        under ``AGENT_CONFIG_PATH``'s directory (0600 key) and exported via
+        LM_TLS_CERT/LM_TLS_KEY for ``_agent_listener_tls_paths``. Idempotent and
+        best-effort: an existing cert (installer- or LE-provided) wins."""
+        if not self.AGENT_LISTENER_REQUIRE_TLS:
+            return
+        cert, key = self._agent_listener_tls_paths()
+        if cert and key and os.path.isfile(cert) and os.path.isfile(key):
+            return
+        # Under this role's OWN config dir (/etc/lm-dns/tls, /etc/lm-dhcp/tls),
+        # so a box hosting both cluster roles has two distinct certificates.
+        base = os.path.join(os.path.dirname(self.AGENT_CONFIG_PATH), "tls")
+        cert = os.path.join(base, "coordinator.crt")
+        key = os.path.join(base, "coordinator.key")
+        if not (os.path.isfile(cert) and os.path.isfile(key)):
+            try:
+                os.makedirs(base, mode=0o750, exist_ok=True)
+                fqdn = socket.getfqdn() or socket.gethostname()
+                subprocess.run(
+                    ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                     "-days", "3650", "-keyout", key, "-out", cert,
+                     "-subj", f"/CN=lm-{self.MODULE_TYPE or 'service'}-coordinator",
+                     "-addext", f"subjectAltName=DNS:{fqdn}"],
+                    check=True, capture_output=True, timeout=120)
+                os.chmod(cert, 0o644)
+                os.chmod(key, 0o600)
+                logger.info("Minted a self-signed %s cluster-listener cert at %s "
+                            "— distribute it to each %s worker as --ca-cert",
+                            self.MODULE_TYPE, cert, self.MODULE_TYPE)
+            except Exception as e:  # noqa: BLE001 — surfaced by the readiness check
+                logger.error("Could not mint a cluster-listener certificate: %s", e)
+                return
+        # Bind to THIS instance only. Writing os.environ here (the previous
+        # behaviour) made the first cluster role to start supply the certificate
+        # for every other one in the process, so a dns worker pinning the dns
+        # cert could be handed the dhcp listener's cert and refuse to connect.
+        self._listener_cert = cert
+        self._listener_key = key
+
+    async def ensure_cluster_listener(self, timeout: float = 20.0) -> Dict[str, Any]:
+        """Mint the PSK + cert if needed, (re)bind, and WAIT for the result.
+
+        Returns ``{"ok": bool, "serving": bool, "endpoint": str, "error": str}``.
+        The previous version returned as soon as the server task existed, so a
+        bind collision or a missing certificate surfaced asynchronously — after
+        the API had already told the operator the cluster was configured. It now
+        blocks until the socket is genuinely serving or the attempt has failed,
+        and the caller reports ERROR on failure."""
+        wanted = self._agent_listener_enabled()
+        if not wanted:
+            await self._rebind_agent_server()
+            return {"ok": True, "serving": False, "endpoint": "", "error": ""}
+
+        self._ensure_agent_secret()
+        self._provision_listener_cert()
+        self._agent_server_error = ""
+        self._agent_server_endpoint = ""
+        self._agent_server_ready = asyncio.Event()
+        await self._rebind_agent_server()
+        try:
+            await asyncio.wait_for(self._agent_server_ready.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return {"ok": False, "serving": False, "endpoint": "",
+                    "error": (f"the {self.MODULE_TYPE} cluster listener did not "
+                              f"start within {timeout:.0f}s"
+                              + (f": {self._agent_server_error}"
+                                 if self._agent_server_error else ""))}
+        if self._agent_server_error or not self._agent_server_endpoint:
+            return {"ok": False, "serving": False, "endpoint": "",
+                    "error": (self._agent_server_error
+                              or "the cluster listener failed to start")}
+        return {"ok": True, "serving": True,
+                "endpoint": self._agent_server_endpoint, "error": ""}
 
     async def approve_pending_agent(self, agent_id: str):
         """Called when the LM hub approves a pending agent. Sends the

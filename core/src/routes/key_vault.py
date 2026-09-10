@@ -98,6 +98,11 @@ def register(app, hub, ctx):
             if k in incoming:
                 cur[k] = incoming[k]
         cur["enabled"] = bool(cur.get("enabled", False))
+        if cur["enabled"]:
+            import cloud_vault
+            if cloud_vault.other_provider_enabled(hub, "azure"):
+                raise HTTPException(status_code=400,
+                                    detail="OCI Vault is currently enabled — disable it before enabling Azure Key Vault")
         for k in ("retain", "rotate_days"):
             try:
                 cur[k] = max(1, int(cur[k]))
