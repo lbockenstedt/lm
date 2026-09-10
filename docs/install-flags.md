@@ -91,7 +91,15 @@ Roles persist in `.env` `LOADED_ROLES` (durable across self-update restarts); on
 
 ## dhcp / dns
 
-**No install scripts** in these repos (minimal/stub-style). Deployed via the agent-spoke role loader or a manual unit.
+**No install scripts** in these repos (minimal/stub-style). Deployed via the agent-spoke role loader or a manual unit. Host prep + cluster-worker deployment live in the `lm` repo's `dns/install_dns.sh` / `dhcp/install_dhcp.sh`.
+
+### `lm/dns/install_dns.sh`
+`--hub`, `--id`, `--secret`, `--infra-only` (Unbound server only, no `lm-dns` spoke unit — the `dns` role manages it), and the cluster-worker trio `--member-id` / `--coordinator` / `--worker-secret` (all three required together; imply `--infra-only`). The worker trio also lays down the `lm-dns-worker` unit that dials the managing DNS module's `/ws/agent` listener (default port 8769) so this resolver is driven as one member of a cluster. `--coordinator` accepts a bare host (`10.0.1.9` → `wss://10.0.1.9:8769/ws/agent`); a remote `ws://` URL is **refused** because the worker PSK is sent in the handshake. `--ca-cert <coordinator cert>` is **required** on a worker — verification is mandatory on this leg. The coordinator install creates `/etc/lm-dns` + `/var/lib/lm-dns` + `/etc/lm-dns/tls` owned by `svc_lm` and mints a self-signed listener certificate (`--tls-cert`/`--tls-key`/`--tls-san` override it).
+
+### `lm/dhcp/install_dhcp.sh`
+`--hub`, `--id`, `--secret`, `--infra-only` (Kea server only), the HA-worker trio `--member-id` / `--coordinator` / `--worker-secret` (all three required together; imply `--infra-only`), plus `--ca-cert` (**required**), `--ha-user` / `--ha-password` / `--ha-ca` / `--ha-cert` / `--ha-key` (all **required** for an HA member) / `--ha-port` (default 8002) / `--ha-peer <ip>` (repeatable), and `--stand-down` to leave a pair.
+
+The node-local `kea-ctrl-agent` stays **loopback-only on 8001** — it is unauthenticated, so exposing it would publish `config-set` to the network. HA peer traffic gets a **separate** `kea-ha-agent` unit on `--ha-port` speaking **HTTPS with mutual certificate verification**; the basic-auth credentials ride inside that session, and the port is firewalled to the `--ha-peer` addresses with **persistent** nft/iptables rules. The hook libraries come from **kea-common** and the multiarch hook dir is resolved on the node. The `lm-dhcp-worker` unit dials the DHCP module's listener (default port 8770, `wss://` only). The coordinator install creates `/etc/lm-dhcp` + `/var/lib/lm-dhcp` + `/etc/lm-dhcp/tls` owned by `svc_lm`. Unloading the `dhcp-server` deploy role also stops `lm-dhcp-worker` and `kea-ha-agent`.
 
 ## ab
 

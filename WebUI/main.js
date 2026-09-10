@@ -6195,9 +6195,11 @@ function _renderSettingsSection(subMenu) {
                         <button onclick="loadModuleDiagnostics()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
                     </div>
                 </div>
+                <div id="service-cluster-summary"></div>
                 <div id="module-diag-body"><p class="text-slate-400 italic text-xs">Loading…</p></div>
             </div>`;
         loadModuleDiagnostics();
+        loadServiceClusterSummary();
         return;
     }
 
@@ -23099,6 +23101,371 @@ function _ddUptime(sec) {
     return (d ? `${d}d ` : '') + (h || d ? `${h}h ` : '') + `${m}m`;
 }
 
+// ─── Clustered DNS / HA DHCP panels ────────────────────────────────────────
+// Rendered inside the existing DNS + DHCP Diagnostics tabs whenever the module
+// reports a multi-host deployment. A single-host module sends no `cluster`
+// block (or `enabled: false`), so these return '' and the page is unchanged.
+
+function _ddClusterBadge(state) {
+    const map = {
+        converged: ['text-emerald-700', 'bg-emerald-50 border-emerald-200'],
+        healthy:   ['text-emerald-700', 'bg-emerald-50 border-emerald-200'],
+        partial:   ['text-amber-700', 'bg-amber-50 border-amber-200'],
+        degraded:  ['text-amber-700', 'bg-amber-50 border-amber-200'],
+        diverged:  ['text-red-700', 'bg-red-50 border-red-200'],
+        down:      ['text-red-700', 'bg-red-50 border-red-200'],
+        invalid:   ['text-red-700', 'bg-red-50 border-red-200'],
+    };
+    const [text, box] = map[state] || ['text-slate-600', 'bg-slate-50 border-slate-200'];
+    return `<span class="px-2 py-0.5 rounded-full border text-xs font-bold ${text} ${box}">${escapeHtml(String(state || 'unknown'))}</span>`;
+}
+
+const _DD_MEMBER_TONE = {
+    converged: 'text-emerald-600', healthy: 'text-emerald-600',
+    drifted: 'text-amber-600', degraded: 'text-amber-600',
+    unknown: 'text-amber-600',
+    unreachable: 'text-red-600',
+};
+
+// Two Unbound resolvers behind one DNS module: per-member applied version +
+// digest against the coordinator's desired set, so drift is visible rather than
+// inferred.
+function _dnsClusterPanel(c) {
+    if (!c || c.enabled === false) return '';
+    const desired = c.desired || {};
+    const members = Array.isArray(c.members) ? c.members : [];
+    const commit = c.last_commit || {};
+    const rows = members.map(m => {
+        const tone = _DD_MEMBER_TONE[m.convergence] || 'text-slate-600';
+        const ver = m.applied_version == null ? '—' : `v${m.applied_version}`;
+        const dig = m.applied_digest ? String(m.applied_digest).slice(0, 12) + '…' : '—';
+        const seen = m.seconds_since_seen == null ? '—' : `${m.seconds_since_seen}s ago`;
+        return `<tr class="border-b border-slate-100">
+            <td class="px-4 py-2 font-mono font-medium">${escapeHtml(m.id || '—')}</td>
+            <td class="px-4 py-2 font-mono text-xs">${escapeHtml(m.host || '—')}</td>
+            <td class="px-4 py-2 text-xs font-bold ${tone}">${escapeHtml(m.convergence || 'unknown')}</td>
+            <td class="px-4 py-2 text-xs">${escapeHtml(ver)}</td>
+            <td class="px-4 py-2 font-mono text-[11px] text-slate-500">${escapeHtml(dig)}</td>
+            <td class="px-4 py-2 text-xs">${m.unbound_running === false ? '<span class="text-red-600 font-bold">stopped</span>' : (m.unbound_running ? 'running' : '—')}</td>
+            <td class="px-4 py-2 text-xs text-slate-500">${escapeHtml(seen)}</td>
+        </tr>`;
+    }).join('');
+    const partial = commit.status && commit.status !== 'SUCCESS';
+    return `
+        <div class="bg-white border border-slate-200 rounded-lg overflow-hidden mb-4">
+            <div class="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-3">
+                <div class="text-sm font-semibold text-slate-700">Resolver cluster ${_ddClusterBadge(c.state)}</div>
+                <div class="text-xs text-slate-400">${c.converged_count || 0}/${c.member_count || 0} converged on desired set v${desired.version == null ? '?' : desired.version} (${desired.record_count || 0} records)</div>
+            </div>
+            ${tableWrap(tableHead(['Member', 'Host', 'Convergence', 'Applied', 'Digest', 'Unbound', 'Last seen']) + `<tbody>${rows}</tbody>`)}
+            ${partial ? `<div class="px-4 py-3 border-t border-slate-200 text-xs text-amber-700 bg-amber-50">
+                Last commit v${escapeHtml(String(commit.version))} reported <b>${escapeHtml(commit.status)}</b> — applied on ${escapeHtml((commit.applied || []).join(', ') || 'no member')}; not applied on ${escapeHtml((commit.failed || []).join(', ') || 'none')}.
+                ${Object.entries(commit.errors || {}).map(([k, v]) => `<div class="mt-1 font-mono">${escapeHtml(k)}: ${escapeHtml(String(v))}</div>`).join('')}
+            </div>` : ''}
+            <div class="px-4 py-3 border-t border-slate-200">
+                <button onclick="reconcileDnsCluster()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Reconcile now</button>
+                <span class="text-xs text-slate-400 ml-2">Re-pushes the desired record set to any resolver that has drifted.</span>
+            </div>
+        </div>`;
+}
+
+// A real Kea HA pair behind one DHCP module: per-node HA state + lease sync +
+// shared-config drift.
+function _dhcpHaPanel(c) {
+    if (!c || c.enabled === false) return '';
+    const members = Array.isArray(c.members) ? c.members : [];
+    const apply = c.last_apply || {};
+    const rows = members.map(m => {
+        const tone = _DD_MEMBER_TONE[m.health] || 'text-slate-600';
+        const scopes = (m.scopes || []).join(', ') || '—';
+        return `<tr class="border-b border-slate-100">
+            <td class="px-4 py-2 font-mono font-medium">${escapeHtml(m.id || '—')}</td>
+            <td class="px-4 py-2 text-xs">${escapeHtml(m.ha_role || '—')}</td>
+            <td class="px-4 py-2 text-xs font-bold ${tone}">${escapeHtml(m.health || 'unknown')}</td>
+            <td class="px-4 py-2 text-xs">${escapeHtml(m.ha_enabled ? (m.ha_state || 'unknown') : 'HA hook not loaded')}</td>
+            <td class="px-4 py-2 text-xs">${escapeHtml(m.remote_state || '—')}${m.communication_interrupted ? ' <span class="text-red-600 font-bold">(interrupted)</span>' : ''}</td>
+            <td class="px-4 py-2 font-mono text-[11px] text-slate-500">${escapeHtml(scopes)}</td>
+            <td class="px-4 py-2 font-mono text-[11px] text-slate-500">${escapeHtml(m.config_digest ? String(m.config_digest).slice(0, 12) + '…' : '—')}</td>
+        </tr>`;
+    }).join('');
+    const partial = apply.status && apply.status !== 'SUCCESS';
+    return `
+        <div class="bg-white border border-slate-200 rounded-lg overflow-hidden mb-4">
+            <div class="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-3">
+                <div class="text-sm font-semibold text-slate-700">Kea HA pair ${_ddClusterBadge(c.state)}</div>
+                <div class="text-xs text-slate-400">${escapeHtml(c.mode || 'hot-standby')} · ${c.healthy_count || 0}/${c.member_count || 0} in sync · configuration ${c.config_converged ? 'matched' : ((c.config_digests_missing || []).length ? `<b class="text-amber-600">UNKNOWN</b> (no report from ${escapeHtml((c.config_digests_missing || []).join(', '))})` : '<b class="text-red-600">MISMATCHED</b>')}</div>
+            </div>
+            ${tableWrap(tableHead(['Node', 'Role', 'Health', 'HA state', 'Partner', 'Scopes', 'Config digest']) + `<tbody>${rows}</tbody>`)}
+            ${partial ? `<div class="px-4 py-3 border-t border-slate-200 text-xs text-amber-700 bg-amber-50">
+                Last apply reported <b>${escapeHtml(apply.status)}</b> at stage <b>${escapeHtml(apply.stage || '?')}</b> — applied on ${escapeHtml((apply.applied || []).join(', ') || 'no node')}${(apply.rolled_back || []).length ? `, rolled back ${escapeHtml(apply.rolled_back.join(', '))}` : ''}.
+                ${Object.entries(apply.errors || {}).map(([k, v]) => `<div class="mt-1 font-mono">${escapeHtml(k)}: ${escapeHtml(String(v))}</div>`).join('')}
+            </div>` : ''}
+            <div class="px-4 py-3 border-t border-slate-200">
+                <button onclick="applyDhcpHaConfig()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Re-apply configuration to both nodes</button>
+                <span class="text-xs text-slate-400 ml-2">Validates both nodes, then applies standby first and primary last.</span>
+            </div>
+        </div>`;
+}
+
+// Per-member evidence blocks (each worker's own diagnostics recommendations).
+function _ddMemberEvidence(members) {
+    const entries = Object.entries(members || {});
+    if (!entries.length) return '';
+    const cards = entries.map(([id, diag]) => {
+        const okBadge = diag && diag.status === 'SUCCESS'
+            ? (diag.healthy ? '<span class="text-emerald-600 font-bold">healthy</span>'
+                            : '<span class="text-amber-600 font-bold">needs attention</span>')
+            : '<span class="text-red-600 font-bold">unavailable</span>';
+        const recs = (diag && diag.recommendations) || [];
+        return `<div class="bg-white border border-slate-200 rounded-lg p-4">
+            <div class="text-sm font-semibold text-slate-700 mb-1">${escapeHtml(id)} — ${okBadge}</div>
+            ${diag && diag.status !== 'SUCCESS' ? `<div class="text-xs text-red-600">${escapeHtml(diag.message || 'no response')}</div>` : ''}
+            ${recs.length ? `<ul class="list-disc pl-5 space-y-1 text-xs text-slate-600 mt-1">${recs.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>`
+                          : '<div class="text-xs text-slate-400">No findings reported.</div>'}
+        </div>`;
+    }).join('');
+    return `<div class="grid lg:grid-cols-2 gap-4 mb-4">${cards}</div>`;
+}
+
+// Query-string suffix carrying the tenant picker's current selection. EVERY
+// cluster/HA/diagnostic call must pass it: these endpoints resolve which spoke
+// answers via the caller's effective tenant, so an unscoped request silently
+// lands on whichever module spoke connected first — a different tenant's.
+function _tenantQS(prefix = '?') {
+    const t = (typeof currentTenant === 'string' && currentTenant) ? currentTenant : '';
+    return t ? `${prefix}tenant=${encodeURIComponent(t)}` : '';
+}
+
+// Compact multi-host service summary for Settings -> Diagnostics: one line per
+// clustered service module. Renders NOTHING when both modules are single-host or
+// unreachable, so a normal deployment sees no new noise.
+async function loadServiceClusterSummary() {
+    const el = document.getElementById('service-cluster-summary');
+    if (!el) return;
+    const grab = async (url) => {
+        try {
+            const res = await fetch(url);
+            if (!res.ok) return null;
+            const data = await res.json();
+            return (data && data.enabled !== false) ? data : null;
+        } catch (_e) { return null; }
+    };
+    const [dns, dhcp] = await Promise.all([
+        grab('/api/dns/cluster' + _tenantQS()),
+        grab('/api/dhcp/ha' + _tenantQS())]);
+    const rows = [];
+    if (dns) {
+        rows.push(`<tr class="border-b border-slate-100">
+            <td class="px-4 py-2 font-medium">DNS resolvers</td>
+            <td class="px-4 py-2">${_ddClusterBadge(dns.state)}</td>
+            <td class="px-4 py-2 text-xs">${dns.converged_count || 0}/${dns.member_count || 0} converged · desired v${(dns.desired || {}).version == null ? '?' : dns.desired.version}</td>
+            <td class="px-4 py-2 text-xs text-slate-500">${escapeHtml(((dns.recommendations || [])[0]) || 'No findings.')}</td>
+        </tr>`);
+    }
+    if (dhcp) {
+        rows.push(`<tr class="border-b border-slate-100">
+            <td class="px-4 py-2 font-medium">Kea HA pair</td>
+            <td class="px-4 py-2">${_ddClusterBadge(dhcp.state)}</td>
+            <td class="px-4 py-2 text-xs">${escapeHtml(dhcp.mode || 'hot-standby')} · ${dhcp.healthy_count || 0}/${dhcp.member_count || 0} in sync · config ${dhcp.config_converged ? 'matched' : 'MISMATCHED'}</td>
+            <td class="px-4 py-2 text-xs text-slate-500">${escapeHtml(((dhcp.recommendations || [])[0]) || 'No findings.')}</td>
+        </tr>`);
+    }
+    if (!rows.length) { el.innerHTML = ''; return; }
+    el.innerHTML = `<div class="bg-white border border-slate-200 rounded-lg overflow-hidden">
+        <div class="px-4 py-3 text-sm font-semibold text-slate-700 border-b border-slate-200">Clustered service modules</div>
+        ${tableWrap(tableHead(['Service', 'State', 'Members', 'Top finding']) + `<tbody>${rows.join('')}</tbody>`)}
+    </div>`;
+}
+
+// ─── Cluster / HA topology editor ──────────────────────────────────────────
+// Admin-only. Defines the two worker members (and, for DHCP, the HA mode) that
+// a single dns/dhcp module drives. The shared worker secret is write-only: it
+// is stored as the module's listener PSK and never read back, so the same value
+// must be given to each worker's installer (--worker-secret).
+
+// The canonical HA TLS layout install_dhcp.sh writes on every node. The spoke
+// defaults to exactly these paths, so a pair configured from this form is a
+// valid mutually-verified HA pair without the operator typing anything.
+const SVC_HA_TLS_DIR = '/etc/kea/ha-tls';
+
+function openServiceClusterModal(kind, current) {
+    const isDns = kind === 'dns';
+    const members = (current && Array.isArray(current.members) ? current.members : []);
+    const m = i => members[i] || {};
+    // "Already enabled" = the module reports 2+ members, i.e. a worker secret is
+    // already stored. Only then may the secret field be left blank.
+    const alreadyEnabled = members.length >= 2;
+    const body = `
+        <h3 class="text-lg font-bold text-[#263040]">${isDns ? 'DNS resolver cluster' : 'Kea HA pair'}</h3>
+        <p class="text-sm text-slate-500">${isDns
+            ? 'Two Unbound hosts managed by this DNS module. The module owns the record set and keeps both resolvers identical.'
+            : 'Two Kea hosts run as one HA pair. Both nodes get the same scopes and reservations; only their HA identity differs.'}</p>
+        ${[0, 1].map(i => `
+        <div class="grid grid-cols-2 gap-2">
+            <div>
+                <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">Member ${i + 1} id</label>
+                <input id="svc-cl-id-${i}" value="${escapeHtml(m(i).id || '')}" placeholder="${isDns ? 'dns-a' : 'kea-a'}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
+            </div>
+            <div>
+                <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">Member ${i + 1} host</label>
+                <input id="svc-cl-host-${i}" value="${escapeHtml(m(i).host || '')}" placeholder="10.0.1.${i + 10}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
+            </div>
+        </div>`).join('')}
+        ${isDns ? '' : `
+        <div>
+            <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">HA mode</label>
+            <select id="svc-cl-mode" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm" disabled>
+                <option value="hot-standby" selected>hot-standby</option>
+            </select>
+            <p class="text-[11px] text-slate-400 mt-1">Load-balancing is not offered: it requires each subnet's pool to be split between the two servers by client class, which this module does not yet generate. Both nodes would allocate from the same range.</p>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+            <div>
+                <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">HA control user</label>
+                <input id="svc-cl-hauser" value="${escapeHtml(m(0).ha_user || 'kea-ha')}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
+            </div>
+            <div>
+                <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">HA control password${m(0).ha_password_set ? '' : ' <span class="text-red-600">(required)</span>'}</label>
+                <input id="svc-cl-hapass" type="password" placeholder="${m(0).ha_password_set ? 'unchanged' : 'required to enable the pair'}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
+            </div>
+        </div>
+        <p class="text-[11px] text-slate-400">Write-only, and carried over when left blank. Must match <code>--ha-user</code>/<code>--ha-password</code> on both nodes. Peer traffic is HTTPS with mutual cert verification; these credentials travel inside that TLS session.</p>
+        <div>
+            <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">HA peer addresses (firewall scope)</label>
+            <input id="svc-cl-hapeers" value="${escapeHtml((current && (current.ha_peers || []).join(', ')) || '')}" placeholder="10.0.1.10, 10.0.1.11" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
+            <p class="text-[11px] text-slate-400 mt-1">Passed to each node's installer as <code>--ha-peer</code>; the HA port accepts only these sources.</p>
+        </div>
+        <div>
+            <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">HA TLS directory (on each node)</label>
+            <input id="svc-cl-hatls" value="${escapeHtml((m(0).ha_trust_anchor || '').replace(/\/ha-ca\.pem$/, '') || SVC_HA_TLS_DIR)}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
+            <p class="text-[11px] text-slate-400 mt-1">Where <code>install_dhcp.sh --ha-ca/--ha-cert/--ha-key</code> placed the material: <code>${escapeHtml(SVC_HA_TLS_DIR)}/ha-ca.pem</code>, <code>node.crt</code>, <code>node.key</code>. Leave as-is unless you installed them elsewhere.</p>
+        </div>`}
+        <div>
+            <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">Worker secret${alreadyEnabled ? '' : ' <span class="text-red-600">(required)</span>'}</label>
+            <input id="svc-cl-secret" type="password" placeholder="${alreadyEnabled ? 'leave blank to keep the current secret' : 'required to enable the cluster'}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
+            <p class="text-[11px] text-slate-400 mt-1">Write-only. Choose it here and give the SAME value to each host's installer:
+                <code>--worker-secret &lt;value&gt;</code>. Nothing generates it for you — a secret you cannot read could never be handed to the workers — and it is never displayed again.</p>
+        </div>
+        <div id="svc-cl-error" class="hidden text-xs text-red-600"></div>
+        <div class="flex justify-end gap-2 pt-2">
+            <button onclick="document.getElementById('svc-cluster-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+            <button onclick="saveServiceCluster('${escapeHtml(kind)}', ${alreadyEnabled}, ${!!m(0).ha_password_set})" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Save</button>
+        </div>`;
+    openModal('svc-cluster-modal', body, { backdropClose: true });
+}
+
+async function saveServiceCluster(kind, alreadyEnabled, haCredsStored) {
+    const err = document.getElementById('svc-cl-error');
+    const fail = (msg) => {
+        if (err) { err.textContent = msg; err.classList.remove('hidden'); }
+        showToast(msg, 'error');
+    };
+    const haUser = (document.getElementById('svc-cl-hauser')?.value || '').trim();
+    const haPass = (document.getElementById('svc-cl-hapass')?.value || '').trim();
+    const haTlsDir = ((document.getElementById('svc-cl-hatls')?.value || '').trim()
+                      || SVC_HA_TLS_DIR).replace(/\/+$/, '');
+    const members = [0, 1].map(i => {
+        const member = {
+            id: (document.getElementById(`svc-cl-id-${i}`)?.value || '').trim(),
+            host: (document.getElementById(`svc-cl-host-${i}`)?.value || '').trim(),
+        };
+        // Write-only HA credentials: send them only when the operator typed a
+        // value. The spoke carries the stored one forward for a blank field, so
+        // re-saving the form can never erase the pair's credential.
+        if (kind === 'dhcp') {
+            if (haUser) member.ha_user = haUser;
+            if (haPass) member.ha_password = haPass;
+            // Always send the TLS material explicitly: the payload this form
+            // produces must be a complete, build_peers-valid pair on its own,
+            // not one that only works because the spoke happened to default it.
+            member.ha_trust_anchor = `${haTlsDir}/ha-ca.pem`;
+            member.ha_cert = `${haTlsDir}/node.crt`;
+            member.ha_key = `${haTlsDir}/node.key`;
+        }
+        return member;
+    }).filter(x => x.id);
+
+    const secret = (document.getElementById('svc-cl-secret')?.value || '').trim();
+    if (members.length >= 2 && !secret && !alreadyEnabled) {
+        fail('A worker secret is required to enable the cluster. Choose one here and pass the same value to each host installer with --worker-secret.');
+        return;
+    }
+    // The Kea HA control agent rejects an unauthenticated peer, so a pair
+    // configured without credentials could never heartbeat. Blank is allowed
+    // only when the spoke already holds them (it carries them forward).
+    if (kind === 'dhcp' && members.length >= 2 && !haCredsStored
+            && (!haUser || !haPass)) {
+        fail('HA control credentials are required to enable the pair. Enter the same ha-user/ha-password you passed to each node installer (--ha-user/--ha-password); the Kea HA control agent rejects an unauthenticated peer.');
+        return;
+    }
+    const payload = { members };
+    if (secret) payload.worker_secret = secret;
+    if (kind === 'dhcp') {
+        payload.mode = 'hot-standby';
+        const peers = (document.getElementById('svc-cl-hapeers')?.value || '')
+            .split(',').map(x => x.trim()).filter(Boolean);
+        if (peers.length) payload.ha_peers = peers;
+    }
+    try {
+        const url = (kind === 'dns' ? '/api/dns/cluster' : '/api/dhcp/ha') + _tenantQS();
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { fail(data.detail || 'Save failed'); return; }
+        if (data.status && data.status === 'ERROR') { fail(data.message || 'Save failed'); return; }
+        if (data.status === 'PARTIAL') {
+            showToast(data.message || 'Saved with incomplete cleanup', 'error');
+        } else {
+            showToast(members.length >= 2
+                ? `${kind.toUpperCase()} cluster configured (${members.map(x => x.id).join(', ')})`
+                : `${kind.toUpperCase()} cluster cleared — the module is single-host again`, 'success');
+        }
+        document.getElementById('svc-cluster-modal')?.remove();
+    } catch (e) { fail(e.message); }
+    if (kind === 'dns') loadDNSData('Diagnostics'); else loadDHCPData('Diagnostics');
+}
+
+// Header button shown on the DNS/DHCP Diagnostics tabs (admin only) so an
+// operator can define the pair even before any worker exists.
+function serviceClusterButton(kind, cluster) {
+    if (typeof isAdmin === 'function' && !isAdmin()) return '';
+    const label = cluster ? 'Edit cluster' : (kind === 'dns' ? 'Configure resolver cluster' : 'Configure HA pair');
+    window._svcClusterState = window._svcClusterState || {};
+    window._svcClusterState[kind] = cluster || null;
+    return `<button onclick="openServiceClusterModal('${kind}', (window._svcClusterState||{})['${kind}'])" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">${label}</button>`;
+}
+
+async function reconcileDnsCluster() {
+    try {
+        const res = await fetch('/api/dns/cluster/reconcile' + _tenantQS(),
+                                { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(data.detail || 'Reconcile failed', 'error'); return; }
+        const done = (data.reconciled || []).length;
+        showToast(done ? `Re-pushed the desired record set to ${done} resolver(s)`
+                       : 'All resolvers already converged',
+                  data.status === 'SUCCESS' ? 'success' : 'error');
+    } catch (e) { showToast(e.message, 'error'); }
+    loadDNSData('Diagnostics');
+}
+
+async function applyDhcpHaConfig() {
+    try {
+        const res = await fetch('/api/dhcp/ha/apply' + _tenantQS(),
+                                { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(data.detail || 'HA apply failed', 'error'); return; }
+        showToast(data.status === 'SUCCESS'
+            ? `Configuration applied to ${(data.applied || []).join(' and ')}`
+            : (data.message || `HA apply reported ${data.status}`),
+            data.status === 'SUCCESS' ? 'success' : 'error');
+    } catch (e) { showToast(e.message, 'error'); }
+    loadDHCPData('Diagnostics');
+}
+
 // Best-effort "last NetBox → Unbound/Kea auto-sync" line for the analytics
 // panels; silent when the status endpoint is unreachable.
 async function _ddSyncStatusLine(side) {
@@ -23144,7 +23511,7 @@ async function loadDNSData(subMenu) {
     try {
         // ── Statistics: Unbound query telemetry (OPNsense-grade) ──────────
         if (subMenu === 'Statistics') {
-            const { ok, data: d, detail } = await _spokeFetch('/api/dns/stats');
+            const { ok, data: d, detail } = await _spokeFetch('/api/dns/stats' + _tenantQS());
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DNS spoke not connected'); return; }
             if (d.status && d.status !== 'SUCCESS') {
                 container.innerHTML = _spokeErrorBanner(d.message, 'unbound-control stats unavailable'); return;
@@ -23179,7 +23546,7 @@ async function loadDNSData(subMenu) {
 
         // ── Diagnostics: explain installed-but-not-queryable Unbound ──────
         if (subMenu === 'Diagnostics') {
-            const { ok, data: d, detail } = await _spokeFetch('/api/dns/diagnostics');
+            const { ok, data: d, detail } = await _spokeFetch('/api/dns/diagnostics' + _tenantQS());
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DNS diagnostics unavailable'); return; }
             const good = !!d.healthy;
             const svc = d.service || {};
@@ -23198,14 +23565,25 @@ async function loadDNSData(subMenu) {
             const check = (label, pass, detailText) => _ddTile(
                 label, pass ? 'PASS' : 'FAIL', detailText || '',
                 pass ? 'text-emerald-600' : 'text-red-600');
+            // Clustered DNS: the module drives 2+ resolvers. The evidence tiles
+            // below are ONE named member's (diagnostics_source); the cluster
+            // panel carries convergence/drift for the whole set.
+            const cluster = d.cluster && d.cluster.enabled !== false ? d.cluster : null;
+            const clusterPanel = _dnsClusterPanel(cluster);
+            const memberEvidence = cluster ? _ddMemberEvidence(d.members) : '';
             container.innerHTML = `
                 <div class="flex items-center justify-between gap-3 mb-4">
                     <div>
-                        <div class="text-sm font-semibold ${good ? 'text-emerald-700' : 'text-red-700'}">${good ? 'DNS listener healthy' : 'DNS listener needs attention'}</div>
-                        <div class="text-xs text-slate-400">Live checks run on the Unbound server.</div>
+                        <div class="text-sm font-semibold ${good ? 'text-emerald-700' : 'text-red-700'}">${good ? (cluster ? 'DNS cluster healthy' : 'DNS listener healthy') : (cluster ? 'DNS cluster needs attention' : 'DNS listener needs attention')}</div>
+                        <div class="text-xs text-slate-400">${cluster ? `Cluster of ${cluster.member_count || 0} resolver(s); evidence below is from ${escapeHtml(d.diagnostics_source || 'no reachable member')}.` : 'Live checks run on the Unbound server.'}</div>
                     </div>
-                    <button onclick="loadDNSData('Diagnostics')" title="Run DNS diagnostics again" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Run again</button>
+                    <div class="flex items-center gap-2">
+                        ${serviceClusterButton('dns', cluster)}
+                        <button onclick="loadDNSData('Diagnostics')" title="Run DNS diagnostics again" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Run again</button>
+                    </div>
                 </div>
+                ${clusterPanel}
+                ${memberEvidence}
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
                     ${check('Unbound Service', !!svc.ok, svc.output || svc.error || 'inactive')}
                     ${check('Configuration', !!cfg.ok, cfg.output || cfg.error || 'valid')}
@@ -23239,7 +23617,7 @@ async function loadDNSData(subMenu) {
 
         // ── Forwarders: configured upstream resolvers ─────────────────────
         if (subMenu === 'Forwarders') {
-            const { ok, data: d, detail } = await _spokeFetch('/api/dns/forwarders');
+            const { ok, data: d, detail } = await _spokeFetch('/api/dns/forwarders' + _tenantQS());
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DNS spoke not connected'); return; }
             if (d.status && d.status !== 'SUCCESS') {
                 container.innerHTML = _spokeErrorBanner(d.message, 'unbound-control forwarders unavailable'); return;
@@ -26807,7 +27185,7 @@ async function loadDHCPData(subMenu) {
     try {
         // ── Overview: Kea pool utilization + packet counters (OPNsense-grade) ─
         if (subMenu === 'Overview') {
-            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/stats');
+            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/stats' + _tenantQS());
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); return; }
             if (d.status && d.status !== 'SUCCESS') {
                 container.innerHTML = _spokeErrorBanner(d.message, 'Kea statistics unavailable'); return;
@@ -26849,7 +27227,7 @@ async function loadDHCPData(subMenu) {
         }
 
         if (subMenu === 'Diagnostics') {
-            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/diagnostics');
+            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/diagnostics' + _tenantQS());
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP diagnostics unavailable'); return; }
             const good = !!d.healthy;
             const units = d.units || {};
@@ -26870,14 +27248,25 @@ async function loadDHCPData(subMenu) {
                 <td class="px-4 py-2 font-mono text-xs">${escapeHtml(s.subnet || '—')}</td>
                 <td class="px-4 py-2 font-mono text-xs">${(s.pools || []).map(escapeHtml).join(', ') || '—'}</td>
             </tr>`).join('');
+            // HA pair: the module drives two Kea nodes. The evidence tiles below
+            // are ONE named node's (diagnostics_source); the HA panel carries
+            // pair state, lease sync and config drift.
+            const haCluster = d.cluster && d.cluster.enabled !== false ? d.cluster : null;
+            const haPanel = _dhcpHaPanel(haCluster);
+            const nodeEvidence = haCluster ? _ddMemberEvidence(d.members) : '';
             container.innerHTML = `
                 <div class="flex items-center justify-between gap-3 mb-4">
                     <div>
-                        <div class="text-sm font-semibold ${good ? 'text-emerald-700' : 'text-red-700'}">${good ? 'Kea DHCP server healthy' : 'Kea DHCP server needs attention'}</div>
-                        <div class="text-xs text-slate-400">Live checks mirror the Sim DHCP (Kea) diagnostics: units, config, interfaces, listeners, control agent, and leases.</div>
+                        <div class="text-sm font-semibold ${good ? 'text-emerald-700' : 'text-red-700'}">${good ? (haCluster ? 'Kea HA pair healthy' : 'Kea DHCP server healthy') : (haCluster ? 'Kea HA pair needs attention' : 'Kea DHCP server needs attention')}</div>
+                        <div class="text-xs text-slate-400">${haCluster ? `HA pair (${escapeHtml(haCluster.mode || 'hot-standby')}); evidence below is from ${escapeHtml(d.diagnostics_source || 'no reachable node')}.` : 'Live checks mirror the Sim DHCP (Kea) diagnostics: units, config, interfaces, listeners, control agent, and leases.'}</div>
                     </div>
-                    <button onclick="loadDHCPData('Diagnostics')" title="Run DHCP diagnostics again" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Run again</button>
+                    <div class="flex items-center gap-2">
+                        ${serviceClusterButton('dhcp', haCluster)}
+                        <button onclick="loadDHCPData('Diagnostics')" title="Run DHCP diagnostics again" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Run again</button>
+                    </div>
                 </div>
+                ${haPanel}
+                ${nodeEvidence}
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
                     ${check('DHCP4 Service', dhcp4.ActiveState === 'active', unitText(dhcp4))}
                     ${check('Control Agent', caUnit.ActiveState === 'active' && !!ca.reachable, ca.error || unitText(caUnit))}
