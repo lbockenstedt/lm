@@ -214,7 +214,7 @@ const ROUTES = {
     // ── DNS / DHCP ──
     loadDNSData:            { m: 'GET',  p: '/api/dns/records',           api: 'dns_list_records' },
     showDnsRecordModal:     { m: 'POST', p: '/api/dns/record',            api: 'dns_add_record/dns_update_record', via: 'saveDnsRecord' }, // (modal)
-    showDnsForwarderModal:  { m: 'POST', p: '/api/dns/forwarders' + _tenantQS(), api: 'dns_add_forwarder', via: 'saveDnsForwarder' }, // (modal)
+    showDnsForwarderModal:  { m: 'POST', p: '/api/dns/forwarders' /* + _tenantQS() */, api: 'dns_add_forwarder', via: 'saveDnsForwarder' }, // (modal)
     loadDHCPData:           { m: 'GET',  p: '/api/dhcp/{subnets|leases|reservations}', api: 'dhcp_list_subnets/dhcp_list_leases/dhcp_list_reservations' },
     showDhcpReservationModal:{ m: 'GET', p: '/api/dhcp/subnets',          api: 'dhcp_list_subnets', via: '_loadDhcpSubnetOptions' }, // (modal)
 
@@ -1341,14 +1341,15 @@ async function submitBugReport() {
 // index.html error boundary). Dedup'd per unique message per session so a
 // spammy handler doesn't open a GitHub issue on every throw. ``onStatus``
 // updates the banner's "Filing Bug with AppBuilder" status line.
-const _autoFiledBugs = new Set();
 async function fileBugAuto(message, where, onStatus) {
+    const filedBugs = window.__lmAutoFiledBugs
+        || (window.__lmAutoFiledBugs = new Set());
     const sig = String(message || '').slice(0, 200);
-    if (_autoFiledBugs.has(sig)) {
+    if (filedBugs.has(sig)) {
         if (typeof onStatus === 'function') onStatus('Already filed for this error');
         return;
     }
-    _autoFiledBugs.add(sig);
+    filedBugs.add(sig);
     if (typeof onStatus === 'function') onStatus('Filing Bug with AppBuilder…');
     const whereStr = where ? ` (${where})` : '';
     const viewCtx = [currentView, currentSubView].filter(Boolean).join(' / ');
