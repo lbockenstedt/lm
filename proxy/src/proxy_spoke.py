@@ -21,9 +21,12 @@ Commands (hub → spoke):
 Phase 2 (console shortcut) is NOT here yet — console still relays through the hub.
 """
 import asyncio
+import datetime
 import errno
+import ipaddress
 import logging
 import os
+import socket
 import ssl
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -90,6 +93,13 @@ class ProxySpoke(BaseSpoke):
         self.web_port = int(cfg.get("web_port") or os.environ.get("LM_PROXY_PORT", "443"))
         self.tls_cert = cfg.get("tls_cert") or os.environ.get("LM_PROXY_TLS_CERT") or ""
         self.tls_key = cfg.get("tls_key") or os.environ.get("LM_PROXY_TLS_KEY") or ""
+        # Name to put in the bootstrap self-signed cert. web_host is a bind
+        # address (0.0.0.0), so it is useless as a CN.
+        self.public_host = (cfg.get("public_host")
+                            or os.environ.get("LM_PROXY_PUBLIC_HOST") or "").strip()
+        # True while the listener is using the generated self-signed cert, so
+        # status reporting can flag it and INSTALL_CERT knows it may replace it.
+        self._using_bootstrap_cert = False
 
         # Upstream = the hub's HTTPS base. Explicit config wins; else derive from
         # the hub URL the control plane already dials (HUB_URL / --hub).
@@ -165,12 +175,86 @@ class ProxySpoke(BaseSpoke):
         self._bind = None  # (host, port, cert, key) the running site used
 
     # ── SSL contexts ─────────────────────────────────────────────────────────
+    def _ensure_bootstrap_cert(self) -> bool:
+        """Generate a self-signed cert under ``<data_dir>/tls/selfsigned.*`` and
+        adopt it, returning True when a usable cert is in place.
+
+        Port 443 is the HTTPS port, so serving plaintext there is never the
+        right answer: a browser sent to ``https://<spoke>/`` gets a TLS
+        protocol error / handshake reset, which reads as "the proxy is broken"
+        rather than "no certificate yet". That is the state a fresh install
+        sits in until the ``le`` role finishes issuing — which may be never if
+        DNS-01 can't complete.
+
+        A self-signed cert gives a working HTTPS listener immediately. The
+        browser shows an untrusted-certificate warning (expected, and
+        click-through), but the transport is correct from the first boot. Any
+        real cert delivered later via INSTALL_CERT takes precedence: this only
+        ever fills the gap, and is never written over fullchain/privkey."""
+        tls_dir = Path(self._data_dir) / "tls"
+        crt, key = tls_dir / "selfsigned.pem", tls_dir / "selfsigned.key"
+        if crt.exists() and key.exists():
+            self.tls_cert, self.tls_key = str(crt), str(key)
+            self._using_bootstrap_cert = True
+            return True
+        try:
+            from cryptography import x509
+            from cryptography.x509.oid import NameOID
+            from cryptography.hazmat.primitives import hashes, serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa
+
+            cn = (self.public_host or socket.getfqdn() or "lm-proxy").strip()
+            pkey = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+            name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, cn)])
+            now = datetime.datetime.utcnow()
+            alt = [x509.DNSName(cn)]
+            try:  # let the IP form work too, when the CN is literally an IP
+                alt.append(x509.IPAddress(ipaddress.ip_address(cn)))
+            except ValueError:
+                pass
+            cert = (x509.CertificateBuilder()
+                    .subject_name(name).issuer_name(name)
+                    .public_key(pkey.public_key())
+                    .serial_number(x509.random_serial_number())
+                    .not_valid_before(now - datetime.timedelta(minutes=5))
+                    .not_valid_after(now + datetime.timedelta(days=825))
+                    .add_extension(x509.SubjectAlternativeName(alt), critical=False)
+                    .add_extension(x509.BasicConstraints(ca=False, path_length=None),
+                                   critical=True)
+                    .sign(pkey, hashes.SHA256()))
+
+            tls_dir.mkdir(parents=True, exist_ok=True)
+            # Key first, at 0600, before the cert exists — so the pair is never
+            # momentarily readable or half-present to a concurrent reader.
+            fd = os.open(str(key), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(pkey.private_bytes(
+                    serialization.Encoding.PEM,
+                    serialization.PrivateFormat.TraditionalOpenSSL,
+                    serialization.NoEncryption()))
+            crt.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+            os.chmod(str(crt), 0o644)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not generate bootstrap self-signed cert (%s) — "
+                           "falling back to plaintext HTTP on :%d", e, self.web_port)
+            return False
+        self.tls_cert, self.tls_key = str(crt), str(key)
+        self._using_bootstrap_cert = True
+        logger.warning("No CA-issued cert yet — serving HTTPS on :%d with a "
+                       "SELF-SIGNED certificate for %r (browsers will warn). "
+                       "It is replaced automatically when the le role delivers "
+                       "a real cert via INSTALL_CERT.", self.web_port, cn)
+        return True
+
     def _listener_ssl(self) -> Optional[ssl.SSLContext]:
         """Browser-facing context: server cert ONLY, no client-cert request
         (CERT_NONE) → no TLS CertificateRequest → no macOS Keychain prompt."""
         if not (self.tls_cert and self.tls_key
                 and os.path.exists(self.tls_cert) and os.path.exists(self.tls_key)):
-            return None  # no cert yet → plain HTTP (dev / pre-cert)
+            # No CA-issued cert. Bootstrap a self-signed one rather than
+            # silently downgrading :443 to plaintext.
+            if not self._ensure_bootstrap_cert():
+                return None
         ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)  # verify_mode=CERT_NONE
         ctx.load_cert_chain(self.tls_cert, self.tls_key)
         return ctx
@@ -293,6 +377,7 @@ class ProxySpoke(BaseSpoke):
             kp.write_text(key_pem)
             os.chmod(kp, 0o600)
             self.tls_cert, self.tls_key = str(cp), str(kp)
+            self._using_bootstrap_cert = False
             await self._ensure_web_server()  # re-bind HTTPS
             return {"status": "SUCCESS"}
         except Exception as e:  # noqa: BLE001
@@ -307,6 +392,10 @@ class ProxySpoke(BaseSpoke):
             "host": self.web_host,
             "port": self.web_port,
             "tls": bool(self.tls_cert and self.tls_key),
+            # True → HTTPS is up but on the generated self-signed cert, so
+            # browsers warn. Distinguishes "no cert at all" from "not yet
+            # issued by the le role".
+            "tls_self_signed": bool(self._using_bootstrap_cert),
             "upstream": self.upstream_url or None,
             "upstream_verify": self.upstream_verify,
             "upstream_mtls": bool(self.upstream_cert and self.upstream_key),

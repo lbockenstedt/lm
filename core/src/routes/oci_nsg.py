@@ -50,6 +50,21 @@ def register(app, hub, ctx):
         hub.state.system_state["global_config"] = gc
         hub.state._mark_dirty()
 
+    @app.get("/setup/oci-regions")
+    async def get_oci_regions():
+        """The OCI region catalog for the Region dropdown (shared by the OCI NSG
+        and OCI Vault tiles).
+
+        There is no unauthenticated OCI API to list regions — ``ListRegions``
+        itself needs a working signing key AND a bootstrap region host, which is
+        exactly what an operator hasn't configured yet. So this serves the
+        curated catalog in ``oci_auth.OCI_REGIONS``, the same approach the
+        official OCI SDK and Terraform provider take.
+
+        A dropdown (rather than a free-text box) is the point: a typo'd region
+        is otherwise only discoverable as a DNS failure once a call is made."""
+        return {"regions": oci_auth.list_regions()}
+
     @app.get("/setup/oci-nsg")
     async def get_oci_nsg():
         cfg = _cfg()
@@ -58,17 +73,26 @@ def register(app, hub, ctx):
         # don't track yet into the local DB (empty description). Persist
         # when something new was found.
         live = None
+        unmanaged = None
         warning = ""
         if cfg.get("nsg_id") and cfg.get("region"):
             try:
-                live = await _nsg.get_allowlist(_nsg.get_oci_config(hub), cfg)
-                merged, added = _nsg.merge_live_prefixes(cfg["entries"], live)
-                if added:
-                    cfg["entries"] = merged
-                    _save(cfg)
+                split = await _nsg.get_live_prefixes(_nsg.get_oci_config(hub), cfg)
+                if split is not None:
+                    live = split["managed"]
+                    unmanaged = split["unmanaged"]
+                    # Only OUR rules are folded into the local list. An
+                    # unmanaged rule is shown but never adopted — importing it
+                    # would make the next apply create a duplicate, tagged rule
+                    # for the same CIDR alongside the operator's own.
+                    merged, added = _nsg.merge_live_prefixes(cfg["entries"], live)
+                    if added:
+                        cfg["entries"] = merged
+                        _save(cfg)
             except Exception as e:  # noqa: BLE001
                 warning = str(e)
-        return {"config": cfg, "live_prefixes": live, "warning": warning}
+        return {"config": cfg, "live_prefixes": live,
+                "unmanaged_prefixes": unmanaged, "warning": warning}
 
     @app.post("/setup/oci-nsg")
     async def set_oci_nsg(request: Request):
@@ -97,6 +121,17 @@ def register(app, hub, ctx):
         _save(clean)
         applied = None
         warning = ""
+        # Pre-flight the credentials BEFORE attempting any OCI call. A wrong
+        # OCID shape or a private key that doesn't match the fingerprint is
+        # detectable locally, and saying so at save time is far better than
+        # letting it surface as an opaque 401 from the apply below (or worse,
+        # staying silent because the apply was skipped for another reason).
+        try:
+            _problems = oci_auth.diagnose_auth(_nsg.get_oci_config(hub))
+        except Exception:  # noqa: BLE001 — diagnosis must never block a save
+            _problems = []
+        if _problems:
+            warning = " ".join(_problems)
         if clean["enabled"] and clean.get("nsg_id") and clean.get("region"):
             try:
                 applied = await _nsg.reconcile_allowlist(

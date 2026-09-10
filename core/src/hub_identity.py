@@ -31,6 +31,32 @@ _CLONE_REIMAGE_THRESHOLD = 3
 # intact, and hold the new id pending until it presents a unique identity.
 _UUID_COLLISION_LIVE_WINDOW_S = 90
 
+# Key-binding check: a session secret alone used to be sufficient proof of
+# identity — the install_uuid was consulted only to EXCUSE a *failed* auth
+# (``_is_approved_install_reconnect``) or to prove a rename, never to contradict
+# a *successful* one. That left key theft without image theft silent: an
+# attacker who obtained only the secret (leaked backup/log/config export, not a
+# wholesale copy of the state directory) could authenticate from anywhere, and
+# because a valid key arriving under a DIFFERENT uuid matches the "new UUID
+# reusing a known id" case, the hub classified it as a benign ``reimaged``
+# lifecycle event. Binding the secret to the install_uuid the hub already
+# recorded closes that: the uuid is now corroborating evidence on success as
+# well as on failure.
+#
+# Enforcement is deliberately split by whether the recorded owner is still LIVE,
+# mirroring ``_is_uuid_collision``:
+#   * owner live  → unambiguous (the real box is connected right now). The
+#     newcomer is DENIED, matching the established duplicate-connection policy
+#     of keeping the live spoke and rejecting the challenger.
+#   * owner idle  → indistinguishable from a legitimate re-image that preserved
+#     the secret, so it is OBSERVE-ONLY by default (record + alert, allow the
+#     connection) and only denied when the operator opts in to strict mode.
+# Like ``_note_uuid_collision`` this never drives an auto-block: the usual cause
+# of a surprising identity claim in this fleet is a clone-template/imaging
+# mistake, and NSG-blocking a site's egress IP over one would be a self-inflicted
+# outage. It records + alerts and lets the operator act.
+_UUID_BINDING_LIVE_WINDOW_S = _UUID_COLLISION_LIVE_WINDOW_S
+
 
 class HubIdentityMixin:
     """Correlate spokes/agents by stable install_uuid so a cloned+renamed box is
@@ -162,6 +188,160 @@ class HubIdentityMixin:
                 new_id, "install_uuid_collision",
                 f"shares install_uuid with live spoke {old_id} — left pending; "
                 f"regenerate this box's machine uuid")
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _recorded_install_uuid(self, pk: str) -> str:
+        """The install_uuid the hub currently has on record for ``pk``.
+
+        Must be sampled BEFORE ``_reconcile_spoke_identity`` runs: reconcile
+        persists the presented uuid (and may repoint the index), so afterwards
+        the recorded value has already been overwritten with whatever the caller
+        claimed and no comparison is possible."""
+        try:
+            mm = self.state.system_state.get("module_metadata", {}) or {}
+            return ((mm.get(pk, {}) or {}).get("install_uuid") or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _uuid_binding_owner_live(self, pk: str) -> bool:
+        """True when the install recorded under ``pk`` is connected now (or was
+        within the concurrency window) — i.e. the legitimate owner is present, so
+        a second box authenticating as it cannot be that same box returning.
+
+        Fails CLOSED (treat as live): if liveness cannot be established we prefer
+        to deny the challenger over admitting a possible key thief; the real
+        spoke reconnects on its next retry."""
+        try:
+            if self.active_connections.get(pk) is not None:
+                return True
+            # No inner try: a state fault must reach the outer handler and fail
+            # CLOSED. Swallowing it here would silently downgrade "unknown" to
+            # "not live" — the exact opposite of the documented posture.
+            last = (self.state.get_spoke_last_seen() or {}).get(pk)
+            return bool(last and (time.time() - float(last)) < _UUID_BINDING_LIVE_WINDOW_S)
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _verify_install_uuid_binding(self, spoke_id: str, pk: str,
+                                     presented_uuid: str, prev_uuid: str,
+                                     peer_ip: Optional[str] = None) -> bool:
+        """Validate a SUCCESSFUL key auth against the install_uuid on record.
+
+        Returns True to allow the connection, False to deny it. Call only after
+        the secret has verified — this exists to catch a valid key presented by
+        the wrong install, not to add another way for a bad secret to fail.
+
+        ORDERING CONTRACT: call this BEFORE anything that persists the presented
+        identity (on the spoke path, before ``_reconcile_spoke_identity``).
+        Reconcile repoints ``install_uuid_index``, overwrites the recorded uuid
+        and can re-arm the guid; adjudicating after it would bake in the very
+        claim being refused, and the legitimate install would then mismatch on
+        its next reconnect — letting an attacker lock out the real box with a
+        single refused connection. This method itself mutates nothing, so it is
+        safe to call at any point once the key is known good.
+
+        Allowed unconditionally (no baseline / no claim to check):
+          * no recorded uuid — a legacy or first-connect spoke; there is nothing
+            to bind to yet and refusing would lock out the existing fleet.
+          * no presented uuid — the agent documents returning '' when the guid
+            file cannot be read or written, so an absent uuid is an expected
+            degraded state, not a signal. Recorded as an anomaly (a spoke that
+            previously had a guid should normally still send it) but allowed,
+            because failing closed here would take out any spoke with a
+            read-only or full state directory.
+          * presented == recorded — the normal path, silent.
+
+        A MISMATCH is the interesting case: a valid secret under a different
+        install than the one the hub bound it to. Denied when the recorded owner
+        is live, observe-only otherwise (see ``_UUID_BINDING_LIVE_WINDOW_S``).
+
+        Known gap: the baseline is read through ``_primary_key``, which resolves
+        name→guid via the in-memory ``spoke_id_alias``. Immediately after a hub
+        restart that alias is empty, so an armed spoke reconnecting BY NAME has
+        no recoverable baseline until reconcile re-arms it — the first connect
+        after a restart is therefore unbound. Steady state (the alias armed by
+        the legitimate spoke's own reconnect) is covered."""
+        try:
+            presented = (presented_uuid or "").strip()
+            recorded = (prev_uuid or "").strip()
+            if not recorded:
+                return True
+            if not presented:
+                self._note_uuid_binding_event(
+                    spoke_id, pk, presented, recorded, peer_ip, denied=False,
+                    detail="authenticated without an install_uuid although one is "
+                           "on record (agent guid file unreadable, or a client "
+                           "replaying only the session key)")
+                return True
+            if presented == recorded:
+                return True
+
+            owner_live = self._uuid_binding_owner_live(pk)
+            strict = self._uuid_binding_strict()
+            denied = owner_live or strict
+            self._note_uuid_binding_event(
+                spoke_id, pk, presented, recorded, peer_ip, denied=denied,
+                detail=("the recorded install is still live — a returning box "
+                        "cannot also be connected as itself"
+                        if owner_live else
+                        ("no live owner to corroborate; strict binding enforced"
+                         if strict else
+                         "no live owner — indistinguishable from a re-image that "
+                         "kept its secret, so the connection is allowed and only "
+                         "reported (set security.uuid_binding_strict to deny)")))
+            return not denied
+        except Exception:  # noqa: BLE001 — a bookkeeping fault must never strand
+            # a legitimate spoke; the secret already verified.
+            logger.debug("[identity] install_uuid binding check skipped", exc_info=True)
+            return True
+
+    def _uuid_binding_strict(self) -> bool:
+        """Operator opt-in to deny a uuid mismatch even when no live owner
+        corroborates it. Default False: observe first, enforce once the fleet is
+        known to report guids cleanly (same staged posture as ``auto_block``)."""
+        try:
+            cfg = (self.state.get_global_config() or {}).get("security", {}) or {}
+            return bool(cfg.get("uuid_binding_strict"))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _note_uuid_binding_event(self, spoke_id: str, pk: str, presented: str,
+                                 recorded: str, peer_ip: Optional[str],
+                                 denied: bool, detail: str) -> None:
+        """Record + alert an install_uuid binding anomaly on a successful auth.
+
+        Deliberately does NOT auto-block the IP (severity stays below the
+        ``critical`` threshold that drives an NSG block in ``note_anomaly``):
+        the most common real-world cause of a surprising identity claim in this
+        fleet is a cloning/imaging mistake, and cutting off the site's egress
+        would turn a misconfiguration into an outage. Never raises."""
+        try:
+            short_p = (presented or "-")[:8]
+            short_r = (recorded or "-")[:8]
+            verb = "DENIED" if denied else "ALLOWED (observe-only)"
+            logger.warning(
+                "[identity] INSTALL_UUID BINDING MISMATCH: %s presented a VALID "
+                "session key with install_uuid %s… but the hub has %s… on record "
+                "— %s. %s. This is the signature of a session key used from an "
+                "install the hub did not issue it to (key theft without image "
+                "theft) — or of a re-image/restore that preserved the secret. "
+                "Verify the box before re-approving; rotate the spoke's key if "
+                "you cannot account for it.",
+                spoke_id, short_p, short_r, verb, detail)
+            self.record_spoke_event(
+                pk, "install_uuid_binding_mismatch",
+                f"valid key presented with install_uuid {short_p}… but "
+                f"{short_r}… is on record — {verb}; {detail}")
+            tm = getattr(self, "threat_monitor", None)
+            if tm:
+                tm.note_anomaly(
+                    "install_uuid_binding_mismatch",
+                    detail=(f"spoke {spoke_id} authenticated with a valid key under "
+                            f"install_uuid {short_p}… (recorded {short_r}…) — {verb}"),
+                    ip=peer_ip, severity="warning",
+                    meta={"spoke_id": spoke_id, "presented_uuid": short_p,
+                          "recorded_uuid": short_r, "denied": denied})
         except Exception:  # noqa: BLE001
             pass
 

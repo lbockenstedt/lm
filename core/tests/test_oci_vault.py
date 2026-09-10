@@ -91,7 +91,9 @@ async def test_get_secret_decodes_base64_bundle_content():
     value = await oci_vault.get_secret(_cfg(), _vcfg(), "my-secret", http=client)
     assert value == "s3cr3t-value"
     req = transport.requests[0]
-    assert req.method == "GET"
+    # GetSecretBundleByName is a POST (its arguments ride in the query string);
+    # as a GET this path 404s.
+    assert req.method == "POST"
     assert "secretbundles/actions/getByName" in str(req.url)
     assert "secretName=my-secret" in str(req.url)
     assert f"vaultId={_vcfg()['vault_id']}" in str(req.url)
@@ -140,10 +142,11 @@ async def test_set_secret_creates_when_no_existing_secret_found():
     client, transport = _client_for([
         {"status": 200, "json": []},  # ListSecrets: none found
         {"status": 200, "json": {"id": "ocid1.secret.oc1..new"}},  # CreateSecret
+        {"status": 200, "json": {"lifecycleState": "ACTIVE"}},  # GetSecret: usable
     ])
     secret_id = await oci_vault.set_secret(_cfg(), _vcfg(), "my-secret", "value1", http=client)
     assert secret_id == "ocid1.secret.oc1..new"
-    list_req, create_req = transport.requests
+    list_req, create_req, state_req = transport.requests
     assert list_req.method == "GET"
     assert "vaults." in str(list_req.url)
     assert create_req.method == "POST"
@@ -151,6 +154,9 @@ async def test_set_secret_creates_when_no_existing_secret_found():
     body = create_req.content
     assert b"my-secret" in body
     assert b"keyId" in body
+    # A created secret is CREATING and its VALUE 404s until ACTIVE, so the
+    # create must not return before that transition (see the wait tests below).
+    assert str(state_req.url).endswith("/secrets/ocid1.secret.oc1..new")
 
 
 @pytest.mark.asyncio
@@ -234,4 +240,122 @@ async def test_test_connection_returns_vault_summary():
     res = await oci_vault.test_connection(_cfg(), _vcfg(), http=client)
     assert res == {"lifecycle_state": "ACTIVE", "vault_id": "ocid1.vault.oc1..v",
                    "management_endpoint": "https://x"}
-    assert "vaults." in str(transport.requests[0].url)
+    # GetVault belongs to the KMS service, NOT the secrets host — the secrets
+    # host has no /vaults route and answers 404 NotAuthorizedOrNotFound.
+    assert str(transport.requests[0].url).startswith(
+        "https://kms.us-ashburn-1.oraclecloud.com/20180608/vaults/")
+
+
+# ── endpoint hostnames ──────────────────────────────────────────────────────
+#
+# Pins a real user-reported bug: "Saved, but OCI apply failed: [Errno -2] Name
+# or service not known". The Vault base URLs were built as
+# ``vaults.<region>.oraclecloud.com`` / ``secrets.<region>.oraclecloud.com``,
+# but the OCI Vault service lives under an ``.oci.`` label and the retrieval
+# plane keeps the ``vaults.`` label too:
+#     management: vaults.<region>.oci.oraclecloud.com
+#     retrieval : secrets.vaults.<region>.oci.oraclecloud.com
+# The old hostnames do not resolve AT ALL, so every Vault call died in the
+# resolver before a request was ever signed or sent.
+
+def test_vaults_base_uses_the_oci_label():
+    url = oci_vault._vaults_base(_cfg())
+    assert url.startswith("https://vaults.us-ashburn-1.oci.oraclecloud.com/")
+
+
+def test_secrets_base_uses_the_secrets_vaults_oci_host():
+    url = oci_vault._secrets_base(_cfg())
+    assert url.startswith("https://secrets.vaults.us-ashburn-1.oci.oraclecloud.com/")
+
+
+def test_vault_hosts_are_not_the_old_unresolvable_form():
+    """Regression guard: the pre-fix hostnames must never come back."""
+    vaults = oci_vault._vaults_base(_cfg())
+    secrets = oci_vault._secrets_base(_cfg())
+    assert "vaults.us-ashburn-1.oraclecloud.com" not in vaults
+    assert "secrets.us-ashburn-1.oraclecloud.com" not in secrets
+    # Both Vault planes are distinctly NOT the Core/iaas host.
+    assert "iaas." not in vaults and "iaas." not in secrets
+
+
+def test_management_and_retrieval_are_different_hosts():
+    assert oci_vault._vaults_base(_cfg()) != oci_vault._secrets_base(_cfg())
+
+
+def test_region_is_interpolated_into_both_planes():
+    cfg = oci_vault.OciConfig({"region": "eu-frankfurt-1"})
+    assert "eu-frankfurt-1" in oci_vault._vaults_base(cfg)
+    assert "eu-frankfurt-1" in oci_vault._secrets_base(cfg)
+
+
+def test_missing_region_is_a_config_error_not_a_dns_failure():
+    cfg = oci_vault.OciConfig({"region": ""})
+    with pytest.raises(oci_vault.OciVaultError, match="region"):
+        oci_vault._vaults_base(cfg)
+    with pytest.raises(oci_vault.OciVaultError, match="region"):
+        oci_vault._secrets_base(cfg)
+
+
+def test_malformed_region_is_rejected_before_any_network_call():
+    """A typo'd region must fail as a clear config error rather than being
+    interpolated into a hostname that then fails DNS with no context."""
+    cfg = oci_vault.OciConfig({"region": "us ashburn 1"})
+    with pytest.raises(oci_vault.OciVaultError, match="not a valid OCI region"):
+        oci_vault._vaults_base(cfg)
+
+
+# ── waiting for a created secret to become usable ────────────────────────────
+# CreateSecret returns 200 while the secret is still CREATING; the secret
+# BUNDLE (the value) 404s until it reaches ACTIVE — seconds later in practice.
+# A "store the token, then immediately use it" flow therefore races, which is
+# exactly what saving a PAT and clicking "Fetch now" does.
+
+@pytest.mark.asyncio
+async def test_create_waits_for_the_secret_to_become_active(monkeypatch):
+    async def no_sleep(_):
+        return None
+    monkeypatch.setattr(oci_vault.asyncio, "sleep", no_sleep)
+
+    client, transport = _client_for([
+        {"status": 200, "json": []},
+        {"status": 200, "json": {"id": "ocid1.secret.oc1..new"}},
+        {"status": 200, "json": {"lifecycleState": "CREATING"}},
+        {"status": 200, "json": {"lifecycleState": "CREATING"}},
+        {"status": 200, "json": {"lifecycleState": "ACTIVE"}},
+    ])
+    assert await oci_vault.set_secret(_cfg(), _vcfg(), "s", "v",
+                                      http=client) == "ocid1.secret.oc1..new"
+    assert len(transport.requests) == 5, "must poll until ACTIVE, not return on CREATING"
+
+
+@pytest.mark.asyncio
+async def test_create_still_returns_the_id_if_activation_is_slow(monkeypatch, caplog):
+    """Best-effort: the secret IS created, so a slow transition must degrade to
+    the caller's normal error path rather than lose the write."""
+    async def no_sleep(_):
+        return None
+    monkeypatch.setattr(oci_vault.asyncio, "sleep", no_sleep)
+
+    client, _t = _client_for([
+        {"status": 200, "json": []},
+        {"status": 200, "json": {"id": "ocid1.secret.oc1..new"}},
+    ] + [{"status": 200, "json": {"lifecycleState": "CREATING"}}] * 10)
+
+    with caplog.at_level("WARNING"):
+        out = await oci_vault.set_secret(_cfg(), _vcfg(), "s", "v", http=client)
+    assert out == "ocid1.secret.oc1..new"
+    assert "not ACTIVE" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_update_of_an_existing_secret_does_not_wait():
+    """An already-ACTIVE secret's new version is readable immediately; polling
+    would just add latency to every credential rotation."""
+    client, transport = _client_for([
+        {"status": 200, "json": [{"secretName": "s", "id": "ocid1.secret.oc1..old",
+                                  "lifecycleState": "ACTIVE"}]},
+        {"status": 200, "json": {"id": "ocid1.secret.oc1..old"}},
+    ])
+    assert await oci_vault.set_secret(_cfg(), _vcfg(), "s", "v",
+                                      http=client) == "ocid1.secret.oc1..old"
+    assert len(transport.requests) == 2

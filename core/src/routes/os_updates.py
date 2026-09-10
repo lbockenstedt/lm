@@ -15,6 +15,12 @@ spoke trusts them exactly like SPOKE_UPDATE.
 Behaviour is fixed by design, not exposed as knobs: dist-upgrade (everything —
 security, regular, dependency transitions), NEVER auto-reboot, rolling one node
 at a time, hub last. See hub_os_updates.py for why.
+
+Checking IS on a configurable schedule though: the panel auto-checks the fleet
+every ``interval_hours`` (default 6, ``/api/os-updates/auto-check``) so its
+status stays fresh without an operator remembering to click "Check for
+updates" — see ``run_os_updates_check_loop`` in ``hub_os_updates.py``. This is
+read-only, same as the manual button; applying is never scheduled.
 """
 from api import HTTPException, Request, logger
 
@@ -49,6 +55,31 @@ def register(app, hub, ctx):
             body = {}
         refresh = bool((body or {}).get("refresh", True))
         return await hub.osu_check_fleet(refresh=refresh)
+
+    @app.get("/api/os-updates/auto-check")
+    async def os_updates_autocheck_get(request: Request):
+        """Current auto-check schedule: ``{enabled, interval_hours}``. Runs the
+        scheduled twin of the "Check for updates" button — see
+        ``run_os_updates_check_loop`` in ``hub_os_updates.py``."""
+        _require_admin(request)
+        return hub.osu_autocheck_config()
+
+    @app.post("/api/os-updates/auto-check")
+    async def os_updates_autocheck_set(request: Request):
+        """Update the auto-check schedule. ``interval_hours`` is clamped >= 1
+        (server-side) so a fat-fingered '0' can't hot-loop probing the whole
+        fleet. Takes effect on the loop's NEXT cycle — no restart needed."""
+        sess = _require_admin(request)
+        try:
+            body = await request.json()
+        except Exception:  # noqa: BLE001
+            body = {}
+        enabled = bool((body or {}).get("enabled", True))
+        interval_hours = (body or {}).get("interval_hours", 6)
+        cfg = hub.osu_set_autocheck_config(enabled, interval_hours)
+        logger.info("[os-updates] auto-check config updated by %s: enabled=%s "
+                   "interval_hours=%g", _who(sess), cfg["enabled"], cfg["interval_hours"])
+        return cfg
 
     @app.post("/api/os-updates/apply")
     async def os_updates_apply(request: Request):

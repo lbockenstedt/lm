@@ -3,6 +3,9 @@ from api import (
     HTTPException, Request, logger,
 )
 from access import valid_display_name, valid_identifier, can_bind_spoke
+from role_listeners import (
+    LISTENER_PORT_ROLES, listener_conflict, listener_conflict_message,
+)
 
 
 def _agent_role_preflight(hub, spoke_id):
@@ -26,12 +29,83 @@ def _agent_role_preflight(hub, spoke_id):
         )
 
 
+# The listener/port table and conflict helpers live in ``role_listeners`` so the
+# hub's role RE-ADOPTION path (main._readopt_agent_roles) enforces exactly the
+# same rule as these routes -- a re-push must not be able to recreate a
+# collision the API refuses to create.
+_LISTENER_PORT_ROLES = LISTENER_PORT_ROLES
+_listener_conflict = listener_conflict
+_listener_conflict_message = listener_conflict_message
+
+
+async def _active_role_names(hub, spoke_id):
+    """Role names currently loaded on the agent, or None when it can't be asked.
+
+    None means "unknown", not "none loaded". It deliberately does not block the
+    load: an agent that cannot answer GET_AVAILABLE_ROLES would otherwise become
+    unmanageable, and the spoke-side bind retry still contains the damage."""
+    try:
+        result = await hub.request_response(spoke_id, "GET_AVAILABLE_ROLES", {},
+                                            timeout=15.0)
+    except Exception:  # noqa: BLE001 — best-effort probe
+        logger.warning("listener-conflict check: %s did not answer "
+                       "GET_AVAILABLE_ROLES; proceeding without it", spoke_id)
+        return None
+    payload = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+    if not isinstance(payload, dict):
+        return None
+    active = payload.get("active")
+    if not isinstance(active, list):
+        return None
+    names = set()
+    for entry in active:
+        name = entry.get("role") if isinstance(entry, dict) else entry
+        if name:
+            names.add(str(name))
+    return names
+
+
+async def _guard_listener_conflicts(hub, spoke_id, requested):
+    """Reject a LOAD_ROLE that would put two port-binding roles on one box.
+
+    Checks the requested roles against each other AND against what is already
+    loaded, so neither a batch nor a later single load can create the collision."""
+    candidates = [r for r in requested if r in _LISTENER_PORT_ROLES]
+    if not candidates:
+        return
+
+    seen = []  # within the batch itself
+    for cand in candidates:
+        clash = _listener_conflict(seen, cand)
+        if clash:
+            raise HTTPException(
+                status_code=409,
+                detail=_listener_conflict_message(spoke_id, cand, clash))
+        seen.append(cand)
+
+    active = await _active_role_names(hub, spoke_id)
+    if active is None:
+        return
+    for cand in candidates:
+        clash = _listener_conflict(active, cand)
+        if clash:
+            raise HTTPException(
+                status_code=409,
+                detail=_listener_conflict_message(spoke_id, cand, clash))
+
+
 async def _load_roles_impl(hub, spoke_id, data):
     """Core LOAD_ROLE dispatch shared by the admin + tenant role routes. Accepts
     either a batch (``{"roles": [...]}`` loaded sequentially) or a single
     ``{"role": ..., "config": ...}``. Returns the agent's payload/results. The
     caller MUST run :func:`_agent_role_preflight` first."""
     roles = data.get("roles")
+    _requested = []
+    if isinstance(roles, list) and roles:
+        _requested = [(r.get("role") if isinstance(r, dict) else r) for r in roles]
+    elif data.get("role"):
+        _requested = [data["role"]]
+    await _guard_listener_conflicts(hub, spoke_id, [r for r in _requested if r])
     if isinstance(roles, list) and roles:
         results = []
         for r in roles:

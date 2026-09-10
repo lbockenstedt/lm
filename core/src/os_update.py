@@ -52,6 +52,17 @@ _APT_CONF = [
 CHECK_TIMEOUT_S = 180
 APPLY_TIMEOUT_S = 3600      # a PVE dist-upgrade on a slow mirror genuinely takes this long
 
+# Wait for the dpkg lock rather than dying with rc=100 when another apt user
+# (a role deploy, unattended-upgrades) is mid-run. Each wait MUST stay under the
+# subprocess timeout above, or we would kill apt for waiting as instructed and
+# report a timeout instead of the queue it was politely sitting in.
+_CHECK_LOCK_TIMEOUT_S = 120
+_APPLY_LOCK_TIMEOUT_S = 600
+
+
+def _lock_flags(timeout_s: int) -> List[str]:
+    return ["-o", f"DPkg::Lock::Timeout={timeout_s}"]
+
 
 def _run(argv: List[str], timeout: int) -> subprocess.CompletedProcess:
     return subprocess.run(argv, capture_output=True, text=True,
@@ -124,7 +135,8 @@ def check_updates(refresh: bool = True) -> Dict[str, Any]:
     warnings: List[str] = []
     if refresh:
         try:
-            r = _run(["apt-get", "update", "-qq"], CHECK_TIMEOUT_S)
+            r = _run(["apt-get", "update", "-qq", *_lock_flags(_CHECK_LOCK_TIMEOUT_S)],
+                     CHECK_TIMEOUT_S)
             if r.returncode != 0:
                 # A failing metadata refresh is reported, not fatal: the cached
                 # list is still useful, and a dead mirror shouldn't blank the panel.
@@ -164,7 +176,8 @@ def apply_updates() -> Dict[str, Any]:
                 "message": f"refusing to apply updates: {cap['reason']}"}
     before = check_updates(refresh=True)
     try:
-        r = _run(["apt-get", "dist-upgrade", "-y", *_APT_CONF], APPLY_TIMEOUT_S)
+        r = _run(["apt-get", "dist-upgrade", "-y", *_APT_CONF,
+                  *_lock_flags(_APPLY_LOCK_TIMEOUT_S)], APPLY_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         return {"status": "ERROR", "eligible": True,
                 "message": f"dist-upgrade exceeded {APPLY_TIMEOUT_S}s — the host may be "
