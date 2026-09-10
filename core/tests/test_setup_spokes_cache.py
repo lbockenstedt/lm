@@ -162,3 +162,25 @@ def test_aggregate_payload_shape():
     assert by["pxmx-1"]["tenant_shared"] is False
     # An unassigned (None-tenant) spoke is never shared.
     assert by["opn-1"]["tenant_shared"] is False
+
+
+def test_aggregate_keeps_direct_agent_that_collides_with_relay_inventory():
+    sid = "dns-worker-agent"
+    hub = _FakeHub(
+        known=(),
+        names={sid: "MIPBE-SVCS2"},
+        meta={sid: {
+            "hostname": "mipbe-svcs2",
+            "install_uuid": sid,
+            "module_type": "agent",
+        }},
+        tenants={sid: "shared"},
+        approved={sid: True},
+        module_types={sid: "agent"},
+    )
+    hub._relayed_agent_ids = lambda: {sid}
+
+    result = asyncio.run(setup._aggregate_spokes(hub))
+
+    assert [spoke["spoke_id"] for spoke in result["spokes"]] == [sid]
+    assert result["spokes"][0]["display_name"] == "MIPBE-SVCS2"
