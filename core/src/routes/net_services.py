@@ -306,7 +306,25 @@ def register(app, hub, ctx):
                 {"role": "dns-server", "config": bootstrap},
                 timeout=120.0)
             deployed = result.get("payload", {}).get("data", result)
-            deployed = _spoke_payload_or_raise(deployed)
+            if (deployed.get("status") == "ERROR"
+                    and "deployment is already running" in str(
+                        deployed.get("message") or "").lower()):
+                progress = await hub.request_response(
+                    sid, "GET_DEPLOY_STATUS", {}, timeout=15.0)
+                progress = progress.get("payload", {}).get("data", progress)
+                progress = _spoke_payload_or_raise(progress)
+                active = progress.get("active_role")
+                state = (progress.get("deploy") or {}).get("state")
+                if active == "dns-server" and state == "running":
+                    deployed = {
+                        "status": "SUCCESS",
+                        "deploy": True,
+                        "message": "DNS Server deployment already in progress",
+                    }
+                else:
+                    deployed = _spoke_payload_or_raise(deployed)
+            else:
+                deployed = _spoke_payload_or_raise(deployed)
             worker_status = "configuring"
             if deployed.get("deploy"):
                 for _attempt in range(60):
@@ -509,7 +527,11 @@ def register(app, hub, ctx):
         """Automatically enroll DNS Server roles assigned to this DNS tenant."""
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
-        return await _discover_dns_workers(request, tenant)
+        try:
+            return await _discover_dns_workers(request, tenant)
+        except HTTPException as exc:
+            logger.warning("DNS worker discovery failed: %s", exc.detail)
+            raise
 
     @app.post("/api/dns/cluster/reconcile")
     async def dns_cluster_reconcile(request: Request, tenant: str = None):
