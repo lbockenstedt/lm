@@ -487,9 +487,9 @@ function updateContextActions() {
 const AGENT_ROLES = {
     'dns':        { name: 'DNS Management',  desc: 'Coordinator-only management spoke. Does not install or run Unbound locally; deploy "DNS Server" on each resolver worker, then configure those members here.', deploy: false },
     'henet':      { name: 'HE.NET (Hurricane Electric public DNS)', desc: 'Manages public DNS records at dns.he.net over HE\'s dynamic-DNS update API. No server to deploy — the account login credential (shared with certificates, DNS → "Hurricane Electric (account login)") powers Import/Sync (reading the zone); pushing a record\'s IP needs THAT record\'s own per-record DDNS key, entered when you add or edit it.', deploy: false },
-    'dns-server': { name: 'DNS Server (Unbound)', desc: 'Deploys Unbound itself (server + remote-control + conf.d include). Runs as its own service on this host; does NOT create a spoke. Load the "DNS (Unbound module)" role to manage it.', deploy: true },
-    'dhcp':       { name: 'DHCP (Kea module)',     desc: 'Manages a running Kea DHCP4. Syncs subnets and reservations from NetBox. Needs a Kea server — deploy the "DHCP Server" role (or install standalone).', deploy: false },
-    'dhcp-server':{ name: 'DHCP Server (Kea)', desc: 'Deploys Kea itself (kea-dhcp4-server + kea-ctrl-agent on :8001). Runs as its own service on this host; does NOT create a spoke. Load the "DHCP (Kea module)" role to manage it.', deploy: true },
+    'dns-server': { name: 'DNS Server (Unbound)', desc: 'Deploys Unbound itself (server + remote-control + conf.d include). Runs as its own service on this host; does NOT create a spoke. Load "DNS Management" to manage it.', deploy: true },
+    'dhcp':       { name: 'DHCP Management', desc: 'Coordinator-only management spoke. Does not install or run Kea locally; deploy "DHCP Server" on each Kea worker, then configure the HA pair here.', deploy: false },
+    'dhcp-server':{ name: 'DHCP Server (Kea)', desc: 'Deploys Kea itself (kea-dhcp4-server + kea-ctrl-agent on :8001). Runs as its own service on this host; does NOT create a spoke. Load "DHCP Management" to manage it.', deploy: true },
     'network':    { name: 'Network Devices (nw)',  desc: 'Polls fleet switches for ARP/MAC topology and syncs device/MAC/ARP data into NetBox.', deploy: false },
     'netbox':     { name: 'IPAM/DCIM (NetBox)',    desc: 'Source-of-truth for sites, racks, devices, prefixes, IPs, VMs, tenants. Sinks every discovery sync and runs the NetBox→Kea DHCP scope sync. This is the API MODULE — it needs a running NetBox server (deploy the "NetBox Server" role, then point this module\'s connection settings at it).', deploy: false },
     'netbox-server': { name: 'NetBox Server', desc: 'Deploys the NetBox application itself — PostgreSQL, Redis, gunicorn, and nginx serving the WebUI on port 80. Runs as its own service on this host; does NOT create a spoke. Load the "IPAM/DCIM (NetBox)" module role to talk to it.', deploy: true },
@@ -1341,14 +1341,15 @@ async function submitBugReport() {
 // index.html error boundary). Dedup'd per unique message per session so a
 // spammy handler doesn't open a GitHub issue on every throw. ``onStatus``
 // updates the banner's "Filing Bug with AppBuilder" status line.
-const _autoFiledBugs = new Set();
 async function fileBugAuto(message, where, onStatus) {
+    const filedBugs = window.__lmAutoFiledBugs
+        || (window.__lmAutoFiledBugs = new Set());
     const sig = String(message || '').slice(0, 200);
-    if (_autoFiledBugs.has(sig)) {
+    if (filedBugs.has(sig)) {
         if (typeof onStatus === 'function') onStatus('Already filed for this error');
         return;
     }
-    _autoFiledBugs.add(sig);
+    filedBugs.add(sig);
     if (typeof onStatus === 'function') onStatus('Filing Bug with AppBuilder…');
     const whereStr = where ? ` (${where})` : '';
     const viewCtx = [currentView, currentSubView].filter(Boolean).join(' / ');
@@ -17176,9 +17177,8 @@ async function loadApprovedSpokes() {
     }
 }
 
-async function fetchLoadedRoles(spokeId) {
-    // Fetch the roles a generic agent is currently hosting (GET_AVAILABLE_ROLES
-    // via the generic command relay). Returns the `active` list (possibly empty).
+async function fetchAgentRoleState(spokeId) {
+    // Fetch hosted roles plus durable deploy-role installation markers.
     // A tenant-admin (non-Global-Admin) can't reach /api/agent/* — use the
     // tenant-scoped, ownership-checked /tenant/agent/{id}/roles instead.
     try {
@@ -17189,10 +17189,19 @@ async function fetchLoadedRoles(spokeId) {
                 body: JSON.stringify({ command: 'GET_AVAILABLE_ROLES' }),
               })
             : await fetch(`/tenant/agent/${encodeURIComponent(spokeId)}/roles`);
-        if (!res.ok) return [];
+        if (!res.ok) return { active: [], installed_deploy_roles: [] };
         const data = await res.json();
-        return Array.isArray(data.active) ? data.active : [];
-    } catch (e) { return []; }
+        return {
+            ...data,
+            active: Array.isArray(data.active) ? data.active : [],
+            installed_deploy_roles: Array.isArray(data.installed_deploy_roles)
+                ? data.installed_deploy_roles : [],
+        };
+    } catch (e) { return { active: [], installed_deploy_roles: [] }; }
+}
+
+async function fetchLoadedRoles(spokeId) {
+    return (await fetchAgentRoleState(spokeId)).active;
 }
 
 // Deploy-role status for a generic agent (netbox-server, ab). Returns
@@ -17259,6 +17268,7 @@ async function showLoadRoleModal(spokeId) {
                 <div id="role-list" class="grid grid-cols-3 gap-2 max-h-44 overflow-y-auto pr-1">
                     <p class="text-xs text-slate-400 italic col-span-3">Loading roles…</p>
                 </div>
+                <div id="loaded-role-controls" class="hidden"></div>
                 <div id="netbox-admin-creds" class="hidden p-3 bg-slate-50 border border-slate-200 rounded-md space-y-2">
                     <p class="text-xs font-semibold text-slate-700">NetBox admin account</p>
                     <div class="grid grid-cols-2 gap-2">
@@ -17295,24 +17305,19 @@ async function showLoadRoleModal(spokeId) {
         </div>`;
     document.body.appendChild(modal);
 
-    const active = await fetchLoadedRoles(spokeId);
-    const loadedByRole = new Map((active || []).map(a => [a.role, a]));
+    const roleState = await fetchAgentRoleState(spokeId);
+    const active = roleState.active;
+    const loadedRoleIds = new Set((active || []).map(a => a.role));
+    const activeDeployRoleIds = new Set(roleState.active_deploy_roles || []);
+    if (roleState.deploy?.state === 'running' && roleState.deploy?.role) {
+        activeDeployRoleIds.add(roleState.deploy.role);
+    }
     const list = document.getElementById('role-list');
-    const rows = Object.entries(AGENT_ROLES).map(([id, r]) => {
-        const loaded = loadedByRole.get(id);
-        if (loaded) {
-            return `
-                <div class="flex items-center justify-between gap-3 p-2 rounded-md bg-green-50 border border-green-200">
-                    <label class="flex items-center gap-2 text-sm text-slate-700 flex-1 min-w-0">
-                        <span class="font-medium truncate">${r.name}</span>
-                        <span class="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-green-600 text-white shrink-0">loaded</span>
-                    </label>
-                    <button onclick="unloadRole('${spokeId}','${id}')"
-                        class="text-xs font-bold text-red-600 hover:text-red-700 transition-colors shrink-0">Unload</button>
-                </div>`;
-        }
+    const availableRoles = Object.entries(AGENT_ROLES)
+        .filter(([id]) => !loadedRoleIds.has(id) && !activeDeployRoleIds.has(id));
+    const rows = availableRoles.map(([id, r]) => {
         const deployNote = r.deploy ? ' (background deploy — own service)' : '';
-        const clash = roleListenerConflict([...loadedByRole.keys()], id);
+        const clash = roleListenerConflict([...loadedRoleIds], id);
         if (clash) {
             return `
                 <label class="flex items-start gap-2 p-2 rounded-md border border-slate-200 bg-slate-50 cursor-not-allowed opacity-70" title="${escapeHtml(roleListenerConflictText(id, clash))}">
@@ -17329,7 +17334,36 @@ async function showLoadRoleModal(spokeId) {
                 <span class="text-sm text-slate-700 font-medium">${r.name}${deployNote}</span>
             </label>`;
     }).join('');
-    list.innerHTML = rows || '<p class="text-xs text-slate-400 italic col-span-2">No roles available.</p>';
+    list.innerHTML = rows || '<p class="text-xs text-slate-400 italic col-span-3">All available roles are already loaded.</p>';
+    const loadedControls = document.getElementById('loaded-role-controls');
+    const stoppableServers = [...activeDeployRoleIds]
+        .filter(id => (id === 'dns-server' || id === 'dhcp-server')
+            && !(roleState.deploy?.state === 'running' && roleState.deploy?.role === id));
+    const loadedControlIds = [
+        ...(active || []).map(item => item.role),
+        ...stoppableServers,
+    ];
+    if (loadedControls && loadedControlIds.length) {
+        loadedControls.classList.remove('hidden');
+        loadedControls.innerHTML = `
+            <p class="text-xs font-semibold text-slate-600 mb-2">Loaded roles and server services</p>
+            <div class="flex flex-wrap gap-2">${loadedControlIds.map(id => {
+                const isServer = id.endsWith('-server');
+                const moduleLoaded = isServer && loadedRoleIds.has(id.replace(/-server$/, ''));
+                return `
+                <div class="flex items-center gap-2 rounded-md border border-green-200 bg-green-50 px-3 py-2">
+                    <span class="text-sm font-medium text-slate-700">${escapeHtml(AGENT_ROLES[id]?.name || id)}</span>
+                    <button onclick="unloadRole('${spokeId}','${id}')"
+                        ${moduleLoaded ? 'disabled title="Unload the management module first"' : ''}
+                        class="text-xs font-bold text-red-600 hover:text-red-700 disabled:text-slate-400 disabled:cursor-not-allowed">Unload</button>
+                </div>`;
+            }).join('')}</div>`;
+    }
+    const activateButton = modal.querySelector('button[onclick^="loadRole"]');
+    if (activateButton && availableRoles.length === 0) {
+        activateButton.disabled = true;
+        activateButton.classList.add('opacity-50', 'cursor-not-allowed');
+    }
 }
 
 // Show the NetBox admin-account inputs only while the netbox-server role is
@@ -17470,7 +17504,10 @@ async function loadRole(spokeId) {
 
 async function unloadRole(spokeId, role) {
     const roleLabel = AGENT_ROLES[role]?.name || role;
-    if (!await showConfirmToast(`Unload role "${roleLabel}" from ${spokeId}? Its sub-spoke will disconnect.`)) return;
+    const impact = AGENT_ROLES[role]?.deploy
+        ? 'The server service will be stopped and disabled, but its package and configuration will remain installed.'
+        : 'Its sub-spoke will disconnect.';
+    if (!await showConfirmToast(`Unload role "${roleLabel}" from ${spokeId}? ${impact}`)) return;
     // Only reopen the Load Role modal if the unload was triggered from inside it
     // (not from the per-role Unload action on a Spokes row).
     const modalOpen = !!document.getElementById('load-role-modal');
@@ -24168,7 +24205,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
     if (dnsActions) dnsActions.classList.remove('hidden');
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
     const addBtn = document.getElementById('dns-add-btn');
-    // Add-record only applies to the Records tab; Statistics/Forwarders are read-only.
+    // Add-record only applies to the Records tab; analytics/diagnostics are read-only.
     if (addBtn) addBtn.classList.toggle('hidden', !(subMenu === 'Records' || !subMenu));
     const addForwarderBtn = document.getElementById('dns-forwarder-add-btn');
     if (addForwarderBtn) addForwarderBtn.classList.toggle('hidden', subMenu !== 'Forwarders');
@@ -28025,7 +28062,7 @@ async function syncHenet() {
 
 // ─── DHCP (Kea) ──────────────────────────────────────────────────────────────
 
-async function loadDHCPData(subMenu) {
+async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
     const container = document.getElementById('dhcp-content');
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
@@ -28037,6 +28074,35 @@ async function loadDHCPData(subMenu) {
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
 
     try {
+        if (!skipWorkerDiscovery && (typeof isAdmin === 'function') && isAdmin()) {
+            window._dhcpWorkerDiscovery = window._dhcpWorkerDiscovery || fetch(
+                '/api/dhcp/ha/discover' + _tenantQS(), { method: 'POST' })
+                .then(async res => {
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok) throw new Error(data.detail || 'DHCP worker discovery failed');
+                    const configuring = (data.workers || [])
+                        .filter(w => w.status === 'configuring').length;
+                    const configured = (data.workers || [])
+                        .filter(w => w.status === 'configured').length;
+                    if (configuring) {
+                        showToast(`Discovered ${configuring} DHCP Server worker(s); configuring the HA pair now.`, 'success');
+                    } else if (configured) {
+                        showToast('Discovered and configured the two-server DHCP HA pair.', 'success');
+                    }
+                    if (configuring || configured) {
+                        loadDHCPData(subMenu, true);
+                    }
+                    return data;
+                })
+                .catch(err => {
+                    console.warn('DHCP worker auto-discovery:', err);
+                    showToast(err.message || 'DHCP worker discovery failed', 'error');
+                    return null;
+                })
+                .finally(() => {
+                    window._dhcpWorkerDiscovery = null;
+                });
+        }
         // ── Overview: Kea pool utilization + packet counters (OPNsense-grade) ─
         if (subMenu === 'Overview') {
             const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/stats' + _tenantQS());

@@ -381,7 +381,6 @@ def _active_deploy_roles(installed_roles: list) -> list:
         if enabled:
             active.append(role)
     return active
-
 class _RoleAdapter(BaseSpoke):
     """Adapter that lets a non-BaseSpoke spoke (e.g. cppm's CPPMSpoke) be loaded
     as a role. Delegates handle_command/get_version to the inner instance and
@@ -570,12 +569,10 @@ class GenericAgent(BaseSpoke):
             else:
                 logger.debug("Role repo already present at %s; skipping clone.", clone_dir)
 
-        # 2. System packages. Management-only roles such as dns do not install
-        # the service they coordinate; that belongs to the separate dns-server
-        # deploy role. le needs certbot + common DNS-01 plugins.
+        # 2. System packages. Management-only roles such as dns/dhcp do not
+        # install the services they coordinate; those belong to the separate
+        # dns-server/dhcp-server deploy roles.
         install_cmds = {
-            "dhcp": ["apt-get", *_APT_LOCK_FLAGS, "install", "-y", "-qq",
-                     "kea-dhcp4-server", "kea-ctrl-agent"],
             "le":   ["apt-get", *_APT_LOCK_FLAGS, "install", "-y", "-qq", "certbot",
                      "python3-certbot-dns-cloudflare", "python3-certbot-dns-route53",
                      "openssl"],
@@ -596,9 +593,8 @@ class GenericAgent(BaseSpoke):
             except subprocess.CalledProcessError as e:
                 return {"status": "ERROR", "message": f"Package install failed: {e}"}
 
-        # 2b. Module-specific OS bootstrapping the DEDICATED installers used to
-        #     do where the hosted role still owns local infrastructure (dhcp
-        #     needs a non-interactive kea-ctrl-agent config + daemons started).
+        # 2b. Module-specific OS bootstrapping for hosted roles that still own
+        #     local infrastructure.
         #     Idempotent + best-effort; a config hiccup must not fail the load.
         #     Offloaded whole: it shells out (up to 600s for --infra-only).
         await asyncio.to_thread(self._role_post_install, role_name)
@@ -620,43 +616,20 @@ class GenericAgent(BaseSpoke):
 
         return {"status": "SUCCESS"}
 
-    # kea-ctrl-agent config mirrored from dhcp/install_dhcp.sh — loopback-only,
-    # port 8001, no auth (the default Debian package config may prompt for HTTP
-    # auth; this replaces it so the role load is fully non-interactive).
-    _KEA_CTRL_AGENT_CONF = (
-        '{\n'
-        '    "Control-agent": {\n'
-        '        "http-host": "127.0.0.1",\n'
-        '        "http-port": 8001,\n'
-        '        "control-sockets": {\n'
-        '            "dhcp4": {\n'
-        '                "socket-type": "unix",\n'
-        '                "socket-name": "/run/kea/kea4-ctrl-socket"\n'
-        '            }\n'
-        '        },\n'
-        '        "loggers": [{\n'
-        '            "name": "kea-ctrl-agent",\n'
-        '            "output_options": [{"output": "syslog"}],\n'
-        '            "severity": "WARN"\n'
-        '        }]\n'
-        '    }\n'
-        '}\n'
-    )
-
     def _role_post_install(self, role_name: str) -> None:
         """Module-specific OS config the dedicated installers did, so a loaded
         role reaches parity. Idempotent + best-effort (never fails the load).
-        Pure management/API roles (dns/opnsense/netbox/cppm/ldap/le/nw/pxmx)
-        need nothing here.
+        Pure management/API roles (dns/dhcp/opnsense/netbox/cppm/ldap/le/nw/
+        pxmx) need nothing here.
         Runs as root (the lm-agent unit is User=root)."""
         try:
-            if role_name == "dns":
-                tls_dir = Path("/etc/lm-dns/tls")
+            if role_name in ("dns", "dhcp"):
+                tls_dir = Path(f"/etc/lm-{role_name}/tls")
                 cert = tls_dir / "coordinator.crt"
                 key = tls_dir / "coordinator.key"
                 tls_dir.mkdir(parents=True, exist_ok=True)
                 if not (cert.is_file() and key.is_file()):
-                    hostname = socket.getfqdn() or socket.gethostname() or "lm-dns"
+                    hostname = socket.getfqdn() or socket.gethostname() or f"lm-{role_name}"
                     subprocess.run(
                         [
                             "openssl", "req", "-x509", "-newkey", "rsa:2048",
@@ -669,12 +642,6 @@ class GenericAgent(BaseSpoke):
                     )
                 os.chmod(cert, 0o644)
                 os.chmod(key, 0o600)
-            elif role_name == "dhcp":
-                Path("/etc/kea").mkdir(parents=True, exist_ok=True)
-                Path("/etc/kea/kea-ctrl-agent.conf").write_text(self._KEA_CTRL_AGENT_CONF)
-                subprocess.run(["systemctl", "enable", "--now",
-                                "kea-ctrl-agent", "kea-dhcp4-server"],
-                               check=False, timeout=60)
             elif role_name in ("simulation", "proxmox"):
                 # Heavy roles carry OS infra the dedicated installers set up (cs:
                 # sim-client Kea/NIC + agent-listener cert; pxmx: agent-host prep).
@@ -771,6 +738,33 @@ class GenericAgent(BaseSpoke):
         # Kea HA channel: credentials + peer scope + mutual-TLS material. These
         # are per-node install-time inputs; without forwarding them the deploy
         # role produced a node that could never join its pair.
+        if role_name == "dhcp-server":
+            ha_tls_dir = Path(str(
+                config.get("ha_tls_dir") or "/etc/kea/ha-tls"))
+            pem_specs = (
+                ("ha_ca_pem", "CERTIFICATE", ha_tls_dir / "ha-ca.pem", 0o644),
+                ("ha_cert_pem", "CERTIFICATE", ha_tls_dir / "node.crt", 0o644),
+                ("ha_key_pem", "PRIVATE KEY", ha_tls_dir / "node.key", 0o640),
+            )
+            for key, marker, path, mode in pem_specs:
+                pem = str(config.get(key) or "").strip()
+                if not pem:
+                    continue
+                if (f"-----BEGIN {marker}-----" not in pem
+                        or f"-----END {marker}-----" not in pem
+                        or len(pem) > 65536):
+                    raise ValueError(f"{key} is not valid PEM")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                tmp.write_text(pem + "\n", encoding="utf-8")
+                os.chmod(tmp, mode)
+                os.replace(tmp, path)
+            if config.get("ha_ca_pem"):
+                config["ha_ca"] = str(ha_tls_dir / "ha-ca.pem")
+            if config.get("ha_cert_pem"):
+                config["ha_cert"] = str(ha_tls_dir / "node.crt")
+            if config.get("ha_key_pem"):
+                config["ha_key"] = str(ha_tls_dir / "node.key")
         for flag, key in (("ha-user", "ha_user"), ("ha-password", "ha_password"),
                           ("ha-port", "ha_port"), ("ha-ca", "ha_ca"),
                           ("ha-cert", "ha_cert"), ("ha-key", "ha_key")):
