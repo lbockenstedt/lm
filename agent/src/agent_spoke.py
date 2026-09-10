@@ -439,13 +439,10 @@ class GenericAgent(BaseSpoke):
             else:
                 logger.debug("Role repo already present at %s; skipping clone.", clone_dir)
 
-        # 2. System packages. dns/dhcp need their daemons; le needs certbot +
-        # the common DNS-01 plugins (the spoke itself creates /etc/lm-le and the
-        # ledger dir on demand, and runs as root so it can bind :80 / write
-        # /etc/letsencrypt — the generic-agent service is User=root). Other
-        # siblings are pip-only (curl/requests-based).
+        # 2. System packages. Management-only roles such as dns do not install
+        # the service they coordinate; that belongs to the separate dns-server
+        # deploy role. le needs certbot + common DNS-01 plugins.
         install_cmds = {
-            "dns":  ["apt-get", "install", "-y", "-qq", "unbound"],
             "dhcp": ["apt-get", "install", "-y", "-qq", "kea-dhcp4-server", "kea-ctrl-agent"],
             "le":   ["apt-get", "install", "-y", "-qq", "certbot",
                      "python3-certbot-dns-cloudflare", "python3-certbot-dns-route53",
@@ -466,9 +463,8 @@ class GenericAgent(BaseSpoke):
                 return {"status": "ERROR", "message": f"Package install failed: {e}"}
 
         # 2b. Module-specific OS bootstrapping the DEDICATED installers used to
-        #     do, so a freshly-loaded role reaches parity with install_<mod>.sh
-        #     (dns needs unbound remote-control enabled+started; dhcp needs a
-        #     non-interactive kea-ctrl-agent config + the kea daemons started).
+        #     do where the hosted role still owns local infrastructure (dhcp
+        #     needs a non-interactive kea-ctrl-agent config + daemons started).
         #     Idempotent + best-effort; a config hiccup must not fail the load.
         #     Offloaded whole: it shells out (up to 600s for --infra-only).
         await asyncio.to_thread(self._role_post_install, role_name)
@@ -516,52 +512,11 @@ class GenericAgent(BaseSpoke):
     def _role_post_install(self, role_name: str) -> None:
         """Module-specific OS config the dedicated installers did, so a loaded
         role reaches parity. Idempotent + best-effort (never fails the load).
-        Pure-API roles (opnsense/netbox/cppm/ldap/le/nw/pxmx) need nothing here.
+        Pure management/API roles (dns/opnsense/netbox/cppm/ldap/le/nw/pxmx)
+        need nothing here.
         Runs as root (the lm-agent unit is User=root)."""
         try:
-            if role_name == "dns":
-                conf = Path("/etc/unbound/unbound.conf")
-                existing = conf.read_text() if conf.exists() else ""
-                changed = False
-                if "control-enable: yes" not in existing:
-                    with conf.open("a") as f:
-                        f.write("\n\nremote-control:\n    control-enable: yes\n"
-                                "    control-interface: 127.0.0.1\n"
-                                "    control-port: 8953\n")
-                    changed = True
-                # Listen on all interfaces + allow LAN clients. Unbound defaults
-                # to 127.0.0.1 ONLY and REFUSES non-local queries, so the DNS
-                # role would never answer a query sent to its LAN IP — it looks
-                # like "no response / firewall" even with the firewall off.
-                # Parity with install_dns.sh; idempotent (guarded on interface).
-                if "interface: 0.0.0.0" not in existing:
-                    with conf.open("a") as f:
-                        f.write("\n\nserver:\n"
-                                "    interface: 0.0.0.0\n"
-                                "    access-control: 127.0.0.0/8 allow\n"
-                                "    access-control: 10.0.0.0/8 allow\n"
-                                "    access-control: 172.16.0.0/12 allow\n"
-                                "    access-control: 192.168.0.0/16 allow\n"
-                                "    access-control: 169.254.0.0/16 allow\n")
-                    changed = True
-                Path("/etc/unbound/conf.d").mkdir(parents=True, exist_ok=True)
-                if "conf.d" not in existing:
-                    with conf.open("a") as f:
-                        f.write('include-toplevel: "/etc/unbound/conf.d/*.conf"\n')
-                    changed = True
-                subprocess.run(["unbound-control-setup"], check=False, timeout=60,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                subprocess.run(["systemctl", "enable", "unbound"], check=False,
-                               timeout=60, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL)
-                # apt starts unbound with the stock loopback-only config BEFORE
-                # the block above is appended, and `enable --now` won't restart
-                # an already-running unit — so the new interface/access-control
-                # only takes effect on an explicit restart. Without this the
-                # role loads but DNS keeps refusing LAN queries until a reboot.
-                subprocess.run(["systemctl", "restart" if changed else "start",
-                                "unbound"], check=False, timeout=60)
-            elif role_name == "dhcp":
+            if role_name == "dhcp":
                 Path("/etc/kea").mkdir(parents=True, exist_ok=True)
                 Path("/etc/kea/kea-ctrl-agent.conf").write_text(self._KEA_CTRL_AGENT_CONF)
                 subprocess.run(["systemctl", "enable", "--now",

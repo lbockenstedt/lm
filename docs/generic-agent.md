@@ -101,7 +101,7 @@ role's live status.
   sibling repo if the role isn't in-repo yet (`dns`/`dhcp`/`console` ship inside the `lm`
   clone; `network`, `netbox`, `opnsense`, `ldap`, `simulation`, `cppm`, `proxmox`, `le`,
   `truenas` are separate GitHub repos cloned into `/opt/lm/<dir>`), (2) installs any system
-  packages the role needs (e.g. `unbound` for dns, `kea-dhcp4-server` for dhcp,
+  packages the role needs (e.g. `kea-dhcp4-server` for dhcp,
   `certbot` for le) and pip-installs the role's `requirements.txt` into the agent's
   shared venv, (3) instantiates the real spoke class and — for a role whose class isn't
   a `BaseSpoke` subclass (currently `cppm`) — wraps it in `_RoleAdapter` so command
