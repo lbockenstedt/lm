@@ -23844,8 +23844,19 @@ function _dnsClusterPanel(c) {
         const ver = m.applied_version == null ? '—' : `v${m.applied_version}`;
         const dig = m.applied_digest ? String(m.applied_digest).slice(0, 12) + '…' : '—';
         const seen = m.seconds_since_seen == null ? '—' : `${m.seconds_since_seen}s ago`;
+        // Human-friendly name is the primary label (see display_name in
+        // core/src/routes/net_services.py); the raw id (UUID/agent-id) is
+        // kept right below it, and in a title tooltip, so identity stays
+        // traceable even when a friendly name is shown. A member with no
+        // known name falls back to the id as the label and shows no
+        // secondary line — unchanged from before this field existed.
+        const memberName = m.display_name || m.id || '—';
+        const showId = m.id && m.display_name && m.display_name !== m.id;
         return `<tr class="border-b border-slate-100">
-            <td class="px-4 py-2 font-mono font-medium">${escapeHtml(m.id || '—')}</td>
+            <td class="px-4 py-2 font-medium" title="${escapeHtml(m.id || '')}">
+                ${escapeHtml(memberName)}
+                ${showId ? `<div class="font-mono text-[11px] text-slate-400">${escapeHtml(m.id)}</div>` : ''}
+            </td>
             <td class="px-4 py-2 font-mono text-xs">${escapeHtml(m.host || '—')}</td>
             <td class="px-4 py-2 text-xs font-bold ${tone}">${escapeHtml(m.convergence || 'unknown')}</td>
             <td class="px-4 py-2 text-xs">${escapeHtml(ver)}</td>

@@ -104,6 +104,61 @@ def register(app, hub, ctx):
         merged = [r for recs in await asyncio.gather(*[_one(s) for s in spokes]) for r in recs]
         return {list_key: merged, "total": len(merged)}
 
+    def _dns_member_display_name(member_id):
+        """Best-effort human-friendly name for a DNS cluster member ``id``
+        (normally a raw agent/spoke id, e.g. a UUID-ish worker id — not
+        something an operator would recognize at a glance). Never invents a
+        name: falls through, in order, to whatever the hub already knows
+        about that id, and finally to the id itself so an install with none
+        of this data behaves exactly as before.
+
+        1. The DNS managed-device inventory (``dns_instances``, in
+           ``global_config`` — populated by ``/api/dns/cluster/discover``,
+           itself already named from module_names/module_metadata; see
+           ``_upsert_dns_instance`` above). Matched on ``member_id`` (the
+           field discovery persists it under) or ``source_agent_id``.
+        2. ``module_names`` / ``module_metadata[...].display_name`` directly
+           — covers a member added by hand via ``DNS_CLUSTER_CONFIG`` that
+           never went through discovery, but whose id happens to be a known
+           agent/spoke id.
+        3. The raw id, unchanged — the pre-existing behavior."""
+        if not member_id:
+            return member_id
+        instances = (hub.state.system_state.get("global_config", {}) or {}).get("dns_instances", []) or []
+        inst = next((i for i in instances
+                     if isinstance(i, dict) and i.get("name")
+                     and (i.get("member_id") == member_id
+                          or i.get("source_agent_id") == member_id)), None)
+        if inst:
+            return inst["name"]
+        module_names = hub.state.system_state.get("module_names", {}) or {}
+        if module_names.get(member_id):
+            return module_names[member_id]
+        metadata = hub.state.system_state.get("module_metadata", {}) or {}
+        meta_name = (metadata.get(member_id) or {}).get("display_name")
+        return meta_name or member_id
+
+    def _annotate_dns_cluster_members(cluster):
+        """Add a ``display_name`` to each member of a DNS cluster report,
+        non-destructively (the raw ``id`` — the traceable UUID/spoke-id — is
+        left exactly where it was; ``display_name`` is additive so any
+        existing caller that only knows ``id`` is unaffected). No-op for
+        anything that isn't a dict with a member list, e.g. a single-host
+        module's ``{"enabled": false}``."""
+        if not isinstance(cluster, dict):
+            return cluster
+        members = cluster.get("members")
+        if not isinstance(members, list):
+            return cluster
+        return {
+            **cluster,
+            "members": [
+                {**m, "display_name": _dns_member_display_name(m.get("id"))}
+                if isinstance(m, dict) else m
+                for m in members
+            ],
+        }
+
     def _redact_dns_cluster(cluster):
         """Non-admin view of a DNS resolver-cluster report.
 
@@ -113,7 +168,9 @@ def register(app, hub, ctx):
         and the per-member error text of the last commit. Used by BOTH
         /api/dns/diagnostics and /api/dns/cluster — a status endpoint that
         skipped it would hand a tenant everything the diagnostics endpoint
-        deliberately withholds."""
+        deliberately withholds. ``display_name`` is kept alongside ``id`` — a
+        friendly name is not sensitive, unlike the hostname/address it is
+        derived independently of."""
         if not isinstance(cluster, dict):
             return cluster
         keep = ("enabled", "state", "converged", "member_count",
@@ -121,7 +178,7 @@ def register(app, hub, ctx):
         out = {k: v for k, v in cluster.items() if k in keep}
         out["members"] = [
             {k: v for k, v in m.items()
-             if k in ("id", "connected", "convergence", "role")}
+             if k in ("id", "display_name", "connected", "convergence", "role")}
             for m in (cluster.get("members") or []) if isinstance(m, dict)
         ]
         out["desired"] = {k: v for k, v in (cluster.get("desired") or {}).items()
@@ -471,6 +528,8 @@ def register(app, hub, ctx):
             "DNS_DIAGNOSTICS",
             log_name="dns_diagnostics",
         )
+        if isinstance(data, dict) and isinstance(data.get("cluster"), dict):
+            data = {**data, "cluster": _annotate_dns_cluster_members(data["cluster"])}
         if not _is_admin(_session_user(request)) and isinstance(data, dict):
             data = {
                 **data,
@@ -509,10 +568,15 @@ def register(app, hub, ctx):
         """Resolver-cluster membership, convergence, drift and recommendations.
 
         A single-host DNS module answers ``enabled: false`` — the WebUI hides
-        the cluster panel in that case rather than inventing one."""
+        the cluster panel in that case rather than inventing one. Each member
+        additionally carries a best-effort ``display_name`` (see
+        ``_dns_member_display_name``) alongside its raw ``id`` — the UUID/
+        agent-id stays for traceability, the name is what the WebUI shows as
+        the primary label."""
         logger.debug("relay GET /api/dns/cluster")
         data = await _relay_spoke(_dns_spoke_for_request(request, tenant),
                                   "DNS_CLUSTER_STATUS", log_name="dns_cluster_status")
+        data = _annotate_dns_cluster_members(data)
         # The cluster report IS the diagnostics cluster block; a non-admin must
         # not get through this door what the diagnostics door withholds.
         if not _is_admin(_session_user(request)) and isinstance(data, dict):
