@@ -17,9 +17,9 @@ The **agent-spoke** — a spoke of the hub that, on `LOAD_ROLE`, clones a siblin
 
 The agent is what you install on every managed node — one systemd unit per box
 (`lm-agent`, spoke id `agent-<hostname>`). By itself it does nothing but phone the hub;
-it becomes a DNS server, a DHCP server, a NetBox sync spoke, a firewall spoke, a
-hypervisor spoke, a console server, etc. only when the hub tells it to **load a role**.
-A single agent can host several roles at once (e.g. `dns` + `dhcp` on the same box).
+it becomes a management spoke or server only when the hub tells it to **load a role**.
+DNS and DHCP management roles are separate from their server roles; load both
+when management and the resolver/Kea service intentionally share one box.
 You manage agents and their roles from the WebUI under **Setup → Agents**: that page
 lists every connected agent, lets you Load Role / Unload Role, and shows each hosted
 role's live status.
@@ -101,8 +101,8 @@ role's live status.
   sibling repo if the role isn't in-repo yet (`dns`/`dhcp`/`console` ship inside the `lm`
   clone; `network`, `netbox`, `opnsense`, `ldap`, `simulation`, `cppm`, `proxmox`, `le`,
   `truenas` are separate GitHub repos cloned into `/opt/lm/<dir>`), (2) installs any system
-  packages the role needs (e.g. `kea-dhcp4-server` for dhcp,
-  `certbot` for le) and pip-installs the role's `requirements.txt` into the agent's
+  packages the role needs (for example `certbot` for le) and pip-installs the role's
+  `requirements.txt` into the agent's
   shared venv, (3) instantiates the real spoke class and — for a role whose class isn't
   a `BaseSpoke` subclass (currently `cppm`) — wraps it in `_RoleAdapter` so command
   dispatch and status reporting stay uniform, and (4) spawns the `RoleConnection` and
