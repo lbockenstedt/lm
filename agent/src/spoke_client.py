@@ -191,8 +191,10 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
             with open(self.secret_path, "w") as f:
                 f.write(secret)
             os.chmod(self.secret_path, 0o600)
+            return True
         except Exception as e:  # noqa: BLE001
             logger.warning("could not persist provisioned secret: %s", e)
+            return False
 
     def _ensure_install_uuid(self) -> str:
         """Stable per-install guid for a device-mode node agent — minted on
@@ -372,6 +374,16 @@ class SpokeClient(CodeDriftWatchdogMixin, SelfUpdateMixin):
         """Generic primitives ONLY — the spoke holds all product logic."""
         if cmd in ("HUB_PING", "HEARTBEAT_ACK"):
             return {"status": "SUCCESS"}
+        if cmd == "SPOKE_UPDATE_SESSION_KEY":
+            new_secret = str(data.get("secret") or "").strip()
+            if not new_secret:
+                return {"status": "ERROR", "message": "session key is required"}
+            if not self._save_secret(new_secret):
+                return {"status": "ERROR",
+                        "message": "session key could not be persisted"}
+            self.secret = new_secret
+            self.signer = MessageSigner(new_secret)
+            return {"status": "SUCCESS", "message": "session key updated"}
         if cmd == "RUN_COMMAND":
             from command_runner import run_local_command
             res = await asyncio.to_thread(
