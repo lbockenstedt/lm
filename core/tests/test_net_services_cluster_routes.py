@@ -525,6 +525,116 @@ def test_dhcp_ha_apply_relays_the_apply_command():
     assert hub.forwarded[-1][:2] == ("dhcp-1", "DHCP_HA_APPLY")
 
 
+def test_dhcp_worker_discovery_configures_exactly_two_server_roles():
+    hub = FakeHub()
+    hub.spoke_module_types = {
+        "dhcp-a-agent": "agent",
+        "dhcp-b-agent": "agent",
+    }
+    hub.active_connections.update(hub.spoke_module_types)
+    cert = "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----"
+    key = "-----BEGIN PRIVATE KEY-----\nprivate\n-----END PRIVATE KEY-----"
+    calls = 0
+
+    async def request_response(sid, cmd, payload=None, timeout=None):
+        nonlocal calls
+        hub.forwarded.append((sid, cmd, payload))
+        if cmd == "GET_AVAILABLE_ROLES":
+            data = {
+                "status": "SUCCESS",
+                "installed_deploy_roles": ["dhcp-server"],
+                "active_deploy_roles": ["dhcp-server"],
+                "configured_worker_roles": [],
+                "configured_workers": [],
+                "service_addresses": [
+                    "10.0.1.10" if sid == "dhcp-a-agent" else "10.0.1.11"],
+            }
+        elif cmd == "DHCP_HA_STATUS":
+            calls += 1
+            data = {
+                "status": "SUCCESS",
+                "enabled": calls > 1,
+                "members": [] if calls == 1 else [
+                    {"id": "dhcp-a-agent", "host": "10.0.1.10",
+                     "connected": True},
+                    {"id": "dhcp-b-agent", "host": "10.0.1.11",
+                     "connected": True},
+                ],
+            }
+        elif cmd == "DHCP_HA_ENROLL_WORKERS":
+            data = {
+                "status": "SUCCESS",
+                "workers": {
+                    member["id"]: {
+                        "member_id": member["id"],
+                        "coordinator": "dhcp-management.example",
+                        "worker_secret": "worker-secret",
+                        "coordinator_ca_pem": cert,
+                        "ha_user": "kea-ha",
+                        "ha_password": "ha-secret",
+                        "ha_ca_pem": cert,
+                        "ha_cert_pem": cert,
+                        "ha_key_pem": key,
+                        "ha_peers": [
+                            other["host"] for other in payload["members"]
+                            if other["id"] != member["id"]],
+                    }
+                    for member in payload["members"]
+                },
+            }
+        elif cmd == "DHCP_HA_COMMIT_ENROLLMENT":
+            data = {"status": "SUCCESS"}
+        elif cmd == "LOAD_ROLE":
+            data = {"status": "SUCCESS", "deploy": False}
+        else:
+            raise AssertionError(cmd)
+        return {"payload": {"data": data}}
+
+    hub.request_response = request_response
+    response = _client(ADMIN, hub).post("/api/dhcp/ha/discover")
+
+    assert response.status_code == 200
+    assert response.json()["cluster_ready"] is True
+    assert [worker["status"] for worker in response.json()["workers"]] == [
+        "configured", "configured"]
+    enrollment = next(call for call in hub.forwarded
+                      if call[:2] == ("dhcp-1", "DHCP_HA_ENROLL_WORKERS"))
+    assert [member["host"] for member in enrollment[2]["members"]] == [
+        "10.0.1.10", "10.0.1.11"]
+    loads = [call for call in hub.forwarded if call[1] == "LOAD_ROLE"]
+    assert len(loads) == 2
+    assert loads[0][2]["config"]["ha_key_pem"] == key
+    assert hub.state.system_state["global_config"]["dhcp_instances"][0][
+        "discovered"] is True
+
+
+def test_dhcp_worker_discovery_waits_until_two_servers_exist():
+    hub = FakeHub({
+        "dhcp-1": {"DHCP_HA_STATUS": {
+            "status": "SUCCESS", "enabled": False, "members": []}},
+        "dns-worker-agent": {"GET_AVAILABLE_ROLES": {
+            "status": "SUCCESS",
+            "installed_deploy_roles": ["dhcp-server"],
+            "active_deploy_roles": ["dhcp-server"],
+            "service_addresses": ["10.0.1.10"],
+        }},
+    })
+    hub.active_connections.add("dns-worker-agent")
+
+    response = _client(ADMIN, hub).post("/api/dhcp/ha/discover")
+
+    assert response.status_code == 200
+    assert response.json()["cluster_ready"] is False
+    assert response.json()["workers"][0]["status"] == "waiting"
+    assert not any(cmd == "DHCP_HA_ENROLL_WORKERS"
+                   for _sid, cmd, _payload in hub.forwarded)
+
+
+def test_dhcp_worker_discovery_is_global_admin_only():
+    response = _client(TENANT, FakeHub()).post("/api/dhcp/ha/discover")
+    assert response.status_code == 403
+
+
 # ── Non-admin redaction of the cluster block ────────────────────────────────
 
 _DNS_DIAG = {

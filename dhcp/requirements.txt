@@ -1,2 +1,3 @@
 requests
 websockets
+cryptography>=42,<50

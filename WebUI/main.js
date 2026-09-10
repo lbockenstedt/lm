@@ -28062,7 +28062,7 @@ async function syncHenet() {
 
 // ─── DHCP (Kea) ──────────────────────────────────────────────────────────────
 
-async function loadDHCPData(subMenu) {
+async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
     const container = document.getElementById('dhcp-content');
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
@@ -28074,6 +28074,35 @@ async function loadDHCPData(subMenu) {
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
 
     try {
+        if (!skipWorkerDiscovery && (typeof isAdmin === 'function') && isAdmin()) {
+            window._dhcpWorkerDiscovery = window._dhcpWorkerDiscovery || fetch(
+                '/api/dhcp/ha/discover' + _tenantQS(), { method: 'POST' })
+                .then(async res => {
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok) throw new Error(data.detail || 'DHCP worker discovery failed');
+                    const configuring = (data.workers || [])
+                        .filter(w => w.status === 'configuring').length;
+                    const configured = (data.workers || [])
+                        .filter(w => w.status === 'configured').length;
+                    if (configuring) {
+                        showToast(`Discovered ${configuring} DHCP Server worker(s); configuring the HA pair now.`, 'success');
+                    } else if (configured) {
+                        showToast('Discovered and configured the two-server DHCP HA pair.', 'success');
+                    }
+                    if (configuring || configured) {
+                        loadDHCPData(subMenu, true);
+                    }
+                    return data;
+                })
+                .catch(err => {
+                    console.warn('DHCP worker auto-discovery:', err);
+                    showToast(err.message || 'DHCP worker discovery failed', 'error');
+                    return null;
+                })
+                .finally(() => {
+                    window._dhcpWorkerDiscovery = null;
+                });
+        }
         // ── Overview: Kea pool utilization + packet counters (OPNsense-grade) ─
         if (subMenu === 'Overview') {
             const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/stats' + _tenantQS());
