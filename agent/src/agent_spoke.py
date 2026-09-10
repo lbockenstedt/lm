@@ -1,5 +1,7 @@
 import asyncio
 import importlib.util
+import ipaddress
+import json
 import logging
 import os
 import shlex
@@ -321,6 +323,44 @@ def _configured_service_workers() -> list:
             "coordinator": values.get(f"{prefix}_COORDINATOR", ""),
         })
     return out
+
+
+def _local_service_addresses() -> list:
+    """Private IPv4 addresses this agent can advertise to managed services."""
+    candidates = []
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            # UDP connect selects the primary routed interface without sending.
+            probe.connect(("192.0.2.1", 9))
+            candidates.append(probe.getsockname()[0])
+        finally:
+            probe.close()
+    except OSError:
+        pass
+    try:
+        result = subprocess.run(
+            ["ip", "-j", "-4", "address", "show", "up"],
+            capture_output=True, text=True, check=False, timeout=10)
+        if result.returncode == 0:
+            for interface in json.loads(getattr(result, "stdout", "") or "[]"):
+                for info in interface.get("addr_info") or []:
+                    if info.get("family") == "inet" \
+                            and info.get("scope") == "global":
+                        candidates.append(str(info.get("local") or ""))
+    except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+        pass
+
+    addresses = []
+    for value in candidates:
+        try:
+            addr = ipaddress.ip_address(value)
+        except ValueError:
+            continue
+        if addr.version == 4 and addr.is_private and not addr.is_loopback \
+                and not addr.is_link_local and value not in addresses:
+            addresses.append(value)
+    return addresses
 
 
 def _active_deploy_roles(installed_roles: list) -> list:
@@ -1252,6 +1292,7 @@ class GenericAgent(BaseSpoke):
                     "configured_worker_roles": [
                         item["role"] for item in configured_workers],
                     "configured_workers": configured_workers,
+                    "service_addresses": _local_service_addresses(),
                     "deploy": self._deploy_status,
                     "active": [{"role": r,
                                 "sub_spoke_id": e["conn"].spoke_id,
