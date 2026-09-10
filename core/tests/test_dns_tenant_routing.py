@@ -26,7 +26,8 @@ class FakeState:
 
 class FakeHub:
     def __init__(self, spokes, replies=None, dns_instances=None,
-                module_metadata=None, global_dns=None, approved=None):
+                module_metadata=None, global_dns=None, shared_dns=None,
+                approved=None):
         self.active_connections = set(spokes)
         self.approved_modules = approved or {sid: True for sid in spokes}
         self.state = FakeState(dns_instances, module_metadata)
@@ -34,6 +35,7 @@ class FakeHub:
         self.forwarded = []
         self._dns_spokes = set(spokes)
         self._global_dns = global_dns
+        self._shared_dns = shared_dns
 
     def _primary_key(self, sid):
         return sid
@@ -53,7 +55,7 @@ class FakeHub:
         return None
 
     def get_dns_spoke_for_shared(self):
-        return None
+        return self._shared_dns
 
     async def request_response(self, sid, cmd, payload=None, timeout=None):
         self.forwarded.append((sid, cmd, payload))
@@ -131,6 +133,22 @@ def test_tenant_with_no_bound_spoke_gets_503():
     r = c.get("/api/dns/status")
     assert r.status_code == 503
     assert hub.forwarded == []
+
+
+def test_tenant_with_no_bound_spoke_uses_shared_tenant_spoke():
+    hub = FakeHub(
+        {"dns-shared"},
+        replies={"dns-shared": {
+            "DNS_STATUS": {"status": "SUCCESS", "server": "shared"},
+        }},
+        module_metadata={"dns-shared": {"tenant_id": "shared"}},
+        shared_dns="dns-shared",
+    )
+    c = _build(_tenant_user("tenantC"), hub)
+    r = c.get("/api/dns/status")
+    assert r.status_code == 200
+    assert r.json()["server"] == "shared"
+    assert hub.forwarded[-1][0] == "dns-shared"
 
 
 def test_dns_instance_record_spoke_wins_over_module_type_fallback():
