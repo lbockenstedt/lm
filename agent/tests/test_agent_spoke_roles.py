@@ -466,6 +466,29 @@ def test_available_roles_reports_installed_deploy_roles(monkeypatch):
     assert result["deploy"] == {"state": "idle"}
 
 
+def test_configured_worker_report_never_exposes_secret(monkeypatch):
+    dns_env = (
+        "LM_DNS_MEMBER_ID=dns-a\n"
+        "LM_DNS_COORDINATOR=wss://dns-management:8769/ws/agent\n"
+        "LM_DNS_WORKER_SECRET=must-not-leave-agent\n"
+    )
+    monkeypatch.setattr(
+        agent_spoke.os.path, "exists",
+        lambda path: path == "/etc/lm-dns-worker/worker.env")
+    monkeypatch.setattr(
+        agent_spoke.Path, "read_text",
+        lambda self, **kwargs: dns_env)
+
+    workers = agent_spoke._configured_service_workers()
+
+    assert workers == [{
+        "role": "dns-server",
+        "member_id": "dns-a",
+        "coordinator": "wss://dns-management:8769/ws/agent",
+    }]
+    assert "must-not-leave-agent" not in repr(workers)
+
+
 def test_unload_dns_server_stops_and_disables_unbound(monkeypatch):
     agent = GenericAgent("agent-1", {})
     calls = []
