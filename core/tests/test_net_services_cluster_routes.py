@@ -349,6 +349,74 @@ def test_dns_worker_discovery_uses_dns_parent_private_address_as_coordinator():
     assert load[2]["config"]["coordinator"] == "172.17.1.10"
 
 
+def test_dns_worker_discovery_waits_for_existing_dns_deployment(monkeypatch):
+    hub = FakeHub()
+    hub.active_connections.add("dns-worker-agent")
+    deployment_checks = 0
+
+    async def no_sleep(_seconds):
+        pass
+
+    async def request_response(sid, cmd, payload=None, timeout=None):
+        nonlocal deployment_checks
+        hub.forwarded.append((sid, cmd, payload))
+        if cmd == "GET_AVAILABLE_ROLES":
+            data = {
+                "status": "SUCCESS",
+                "installed_deploy_roles": ["dns-server"],
+                "active_deploy_roles": ["dns-server"],
+                "configured_worker_roles": [],
+                "configured_workers": [],
+                "service_addresses": ["172.17.1.11"],
+            }
+        elif cmd == "DNS_CLUSTER_ENROLL_WORKER":
+            data = {
+                "status": "SUCCESS",
+                "coordinator": "172.17.1.10",
+                "worker_secret": "generated-secret",
+                "coordinator_ca_pem": (
+                    "-----BEGIN CERTIFICATE-----\npublic\n"
+                    "-----END CERTIFICATE-----"),
+            }
+        elif cmd == "LOAD_ROLE":
+            data = {
+                "status": "ERROR",
+                "message": "A deployment is already running",
+            }
+        elif cmd == "GET_DEPLOY_STATUS":
+            deployment_checks += 1
+            data = {
+                "status": "SUCCESS",
+                "active_role": "dns-server",
+                "deploy": {
+                    "state": "running" if deployment_checks == 1 else "completed",
+                },
+            }
+        elif cmd == "DNS_CLUSTER_STATUS":
+            data = {
+                "status": "SUCCESS",
+                "enabled": True,
+                "members": [{
+                    "id": "dns-worker-agent",
+                    "host": "172.17.1.11",
+                    "connected": deployment_checks > 1,
+                }],
+                "desired": {"version": 1},
+            }
+        else:
+            raise AssertionError(cmd)
+        return {"payload": {"data": data}}
+
+    monkeypatch.setattr("routes.net_services.asyncio.sleep", no_sleep)
+    hub.request_response = request_response
+
+    r = _client(ADMIN, hub).post("/api/dns/cluster/discover")
+
+    assert r.status_code == 200
+    assert r.json()["workers"][0]["status"] == "configured"
+    assert deployment_checks == 2
+
+
 def test_a_spoke_error_becomes_a_502_not_a_200():
     hub = FakeHub({"dns-1": {"DNS_CLUSTER_RECONCILE": {
         "status": "ERROR", "message": "DNS cluster is not enabled"}}})
