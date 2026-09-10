@@ -214,7 +214,7 @@ const ROUTES = {
     // ── DNS / DHCP ──
     loadDNSData:            { m: 'GET',  p: '/api/dns/records',           api: 'dns_list_records' },
     showDnsRecordModal:     { m: 'POST', p: '/api/dns/record',            api: 'dns_add_record/dns_update_record', via: 'saveDnsRecord' }, // (modal)
-    showDnsForwarderModal:  { m: 'POST', p: '/api/dns/forwarders',        api: 'dns_add_forwarder', via: 'saveDnsForwarder' }, // (modal)
+    showDnsForwarderModal:  { m: 'POST', p: '/api/dns/forwarders' + _tenantQS(), api: 'dns_add_forwarder', via: 'saveDnsForwarder' }, // (modal)
     loadDHCPData:           { m: 'GET',  p: '/api/dhcp/{subnets|leases|reservations}', api: 'dhcp_list_subnets/dhcp_list_leases/dhcp_list_reservations' },
     showDhcpReservationModal:{ m: 'GET', p: '/api/dhcp/subnets',          api: 'dhcp_list_subnets', via: '_loadDhcpSubnetOptions' }, // (modal)
 
