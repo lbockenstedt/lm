@@ -22,7 +22,10 @@ class FakeState:
         self.system_state = {"global_config": {}}
 
     def get_spoke_tenant(self, sid):
-        return ""
+        return "shared"
+
+    def _mark_dirty(self):
+        pass
 
 
 class FakeHub:
@@ -32,6 +35,10 @@ class FakeHub:
         self.state = FakeState()
         self.replies = replies or {}
         self.forwarded = []
+        self.spoke_module_types = {"dns-worker-agent": "agent"}
+        self.spoke_telemetry = {
+            "dns-worker-agent": {"remote_ip": "10.0.0.11"},
+        }
 
     def _primary_key(self, sid):
         return sid
@@ -112,6 +119,107 @@ def test_dns_cluster_reconcile_relays_the_reconcile_command():
     r = _client(ADMIN, hub).post("/api/dns/cluster/reconcile")
     assert r.json()["reconciled"] == ["dns-b"]
     assert hub.forwarded[-1][:2] == ("dns-1", "DNS_CLUSTER_RECONCILE")
+
+
+def test_dns_worker_discovery_enrolls_installed_server_role_without_user_secret():
+    cert = "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----"
+    hub = FakeHub({
+        "dns-1": {
+            "DNS_CLUSTER_STATUS": {
+                "status": "SUCCESS", "enabled": False, "members": []},
+            "DNS_CLUSTER_ENROLL_WORKER": {
+                "status": "SUCCESS",
+                "coordinator": "dns-management.example",
+                "worker_secret": "generated-inside-dns-management",
+                "coordinator_ca_pem": cert,
+            },
+        },
+        "dns-worker-agent": {
+            "GET_AVAILABLE_ROLES": {
+                "status": "SUCCESS",
+                "installed_deploy_roles": ["dns-server"],
+                "active_deploy_roles": ["dns-server"],
+                "configured_worker_roles": [],
+                "configured_workers": [],
+            },
+            "LOAD_ROLE": {
+                "status": "SUCCESS",
+                "message": "Deployment of 'dns-server' started in background",
+            },
+        },
+    })
+    hub.active_connections.add("dns-worker-agent")
+
+    r = _client(ADMIN, hub).post("/api/dns/cluster/discover")
+
+    assert r.status_code == 200
+    assert r.json()["workers"][0]["status"] == "configuring"
+    load = next(call for call in hub.forwarded
+                if call[:2] == ("dns-worker-agent", "LOAD_ROLE"))
+    config = load[2]["config"]
+    assert config["member_id"] == "dns-worker-agent"
+    assert config["worker_secret"] == "generated-inside-dns-management"
+    assert config["coordinator_ca_pem"] == cert
+    saved = hub.state.system_state["global_config"]["dns_instances"][0]
+    assert saved["discovered"] is True
+    assert "worker_secret" not in saved
+
+
+def test_dns_worker_discovery_finalizes_once_after_all_workers_are_connected():
+    hub = FakeHub()
+    hub.spoke_module_types = {"dns-a-agent": "agent", "dns-b-agent": "agent"}
+    hub.active_connections.update(hub.spoke_module_types)
+    hub.spoke_telemetry = {
+        "dns-a-agent": {"remote_ip": "10.0.0.11"},
+        "dns-b-agent": {"remote_ip": "10.0.0.12"},
+    }
+    members = []
+
+    async def request_response(sid, cmd, payload=None, timeout=None):
+        hub.forwarded.append((sid, cmd, payload))
+        if cmd == "GET_AVAILABLE_ROLES":
+            data = {
+                "status": "SUCCESS",
+                "installed_deploy_roles": ["dns-server"],
+                "active_deploy_roles": ["dns-server"],
+                "configured_worker_roles": [],
+                "configured_workers": [],
+            }
+        elif cmd == "DNS_CLUSTER_ENROLL_WORKER":
+            members.append({"id": payload["member"]["id"], "connected": True})
+            data = {
+                "status": "SUCCESS",
+                "coordinator": "dns-management.example",
+                "worker_secret": "generated-secret",
+                "coordinator_ca_pem": (
+                    "-----BEGIN CERTIFICATE-----\npublic\n"
+                    "-----END CERTIFICATE-----"),
+            }
+        elif cmd == "DNS_CLUSTER_STATUS":
+            data = {
+                "status": "SUCCESS",
+                "enabled": bool(members),
+                "members": list(members),
+                "desired": {"version": 0},
+            }
+        elif cmd == "DNS_CLUSTER_FINALIZE_ENROLLMENT":
+            data = {"status": "SUCCESS", "version": 1}
+        elif cmd == "LOAD_ROLE":
+            data = {"status": "SUCCESS", "deploy": False}
+        else:
+            raise AssertionError(cmd)
+        return {"payload": {"data": data}}
+
+    hub.request_response = request_response
+    r = _client(ADMIN, hub).post("/api/dns/cluster/discover")
+
+    assert r.status_code == 200
+    commands = [(sid, cmd) for sid, cmd, _payload in hub.forwarded]
+    finalize_index = commands.index(("dns-1", "DNS_CLUSTER_FINALIZE_ENROLLMENT"))
+    assert finalize_index > commands.index(("dns-a-agent", "LOAD_ROLE"))
+    assert finalize_index > commands.index(("dns-b-agent", "LOAD_ROLE"))
+    assert len([cmd for _sid, cmd in commands
+                if cmd == "DNS_CLUSTER_FINALIZE_ENROLLMENT"]) == 1
 
 
 def test_a_spoke_error_becomes_a_502_not_a_200():
