@@ -191,6 +191,11 @@ def register(app, hub, ctx):
             str(m.get("id") or "") for m in (current.get("members") or [])
             if isinstance(m, dict)
         }
+        current_hosts = {
+            str(m.get("id") or ""): str(m.get("host") or "")
+            for m in (current.get("members") or [])
+            if isinstance(m, dict)
+        }
         connected_ids = {
             str(m.get("id") or "") for m in (current.get("members") or [])
             if isinstance(m, dict) and m.get("connected")
@@ -234,12 +239,24 @@ def register(app, hub, ctx):
             configured = bool(worker_info) or "dns-server" in (
                 report.get("configured_worker_roles") or [])
             member_id = str(worker_info.get("member_id") or sid)
-            if member_id in current_ids and member_id in connected_ids and configured:
+
+            service_addresses = [
+                str(addr).strip() for addr in (
+                    report.get("service_addresses") or [])
+                if str(addr).strip()
+            ]
+            if not service_addresses:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"DNS Server agent {sid} did not report a private local "
+                        "service address; refusing to use its public/NAT "
+                        "WebSocket source address."))
+            host = service_addresses[0]
+            if (member_id in current_ids and member_id in connected_ids
+                    and configured and current_hosts.get(member_id) == host):
                 discovered.append({"spoke_id": sid, "status": "already-configured"})
                 continue
-
-            telemetry = (hub.spoke_telemetry.get(hub._primary_key(sid), {}) or {})
-            host = str(telemetry.get("remote_ip") or sid)
             enrollment = await _relay_spoke(
                 dns_spoke, "DNS_CLUSTER_ENROLL_WORKER",
                 {"member": {"id": member_id, "host": host, "role": "resolver"}},

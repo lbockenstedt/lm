@@ -141,6 +141,7 @@ def test_dns_worker_discovery_enrolls_installed_server_role_without_user_secret(
                 "active_deploy_roles": ["dns-server"],
                 "configured_worker_roles": [],
                 "configured_workers": [],
+                "service_addresses": ["10.0.0.11"],
             },
             "LOAD_ROLE": {
                 "status": "SUCCESS",
@@ -184,6 +185,8 @@ def test_dns_worker_discovery_finalizes_once_after_all_workers_are_connected():
                 "active_deploy_roles": ["dns-server"],
                 "configured_worker_roles": [],
                 "configured_workers": [],
+                "service_addresses": [
+                    "10.0.0.11" if sid == "dns-a-agent" else "10.0.0.12"],
             }
         elif cmd == "DNS_CLUSTER_ENROLL_WORKER":
             members.append({"id": payload["member"]["id"], "connected": True})
@@ -220,6 +223,83 @@ def test_dns_worker_discovery_finalizes_once_after_all_workers_are_connected():
     assert finalize_index > commands.index(("dns-b-agent", "LOAD_ROLE"))
     assert len([cmd for _sid, cmd in commands
                 if cmd == "DNS_CLUSTER_FINALIZE_ENROLLMENT"]) == 1
+
+
+def test_dns_worker_discovery_never_uses_public_websocket_source_address():
+    hub = FakeHub({
+        "dns-1": {
+            "DNS_CLUSTER_STATUS": {
+                "status": "SUCCESS", "enabled": False, "members": []},
+        },
+        "dns-worker-agent": {
+            "GET_AVAILABLE_ROLES": {
+                "status": "SUCCESS",
+                "installed_deploy_roles": ["dns-server"],
+                "active_deploy_roles": ["dns-server"],
+                "configured_worker_roles": [],
+                "configured_workers": [],
+                "service_addresses": [],
+            },
+        },
+    })
+    hub.active_connections.add("dns-worker-agent")
+    hub.spoke_telemetry["dns-worker-agent"] = {
+        "remote_ip": "104.36.251.61"}
+
+    r = _client(ADMIN, hub).post("/api/dns/cluster/discover")
+
+    assert r.status_code == 502
+    assert "refusing to use its public/NAT" in r.json()["detail"]
+    assert not any(cmd == "DNS_CLUSTER_ENROLL_WORKER"
+                   for _sid, cmd, _payload in hub.forwarded)
+
+
+def test_dns_worker_discovery_repairs_connected_member_with_stale_public_host():
+    hub = FakeHub({
+        "dns-1": {
+            "DNS_CLUSTER_STATUS": {
+                "status": "SUCCESS",
+                "enabled": True,
+                "members": [{
+                    "id": "dns-worker-agent",
+                    "host": "104.36.251.61",
+                    "connected": True,
+                }],
+                "desired": {"version": 1},
+            },
+            "DNS_CLUSTER_ENROLL_WORKER": {
+                "status": "SUCCESS",
+                "coordinator": "dns-management.example",
+                "worker_secret": "generated-secret",
+                "coordinator_ca_pem": (
+                    "-----BEGIN CERTIFICATE-----\npublic\n"
+                    "-----END CERTIFICATE-----"),
+            },
+        },
+        "dns-worker-agent": {
+            "GET_AVAILABLE_ROLES": {
+                "status": "SUCCESS",
+                "installed_deploy_roles": ["dns-server"],
+                "active_deploy_roles": ["dns-server"],
+                "configured_worker_roles": ["dns-server"],
+                "configured_workers": [{
+                    "role": "dns-server",
+                    "member_id": "dns-worker-agent",
+                }],
+                "service_addresses": ["10.0.0.11"],
+            },
+            "LOAD_ROLE": {"status": "SUCCESS", "deploy": False},
+        },
+    })
+    hub.active_connections.add("dns-worker-agent")
+
+    r = _client(ADMIN, hub).post("/api/dns/cluster/discover")
+
+    assert r.status_code == 200
+    enrollment = next(
+        call for call in hub.forwarded
+        if call[:2] == ("dns-1", "DNS_CLUSTER_ENROLL_WORKER"))
+    assert enrollment[2]["member"]["host"] == "10.0.0.11"
 
 
 def test_a_spoke_error_becomes_a_502_not_a_200():
