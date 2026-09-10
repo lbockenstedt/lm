@@ -36,6 +36,7 @@ class FakeHub:
         self.replies = replies or {}
         self.forwarded = []
         self.spoke_module_types = {"dns-worker-agent": "agent"}
+        self.spoke_parent_map = {}
         self.spoke_telemetry = {
             "dns-worker-agent": {"remote_ip": "10.0.0.11"},
         }
@@ -300,6 +301,52 @@ def test_dns_worker_discovery_repairs_connected_member_with_stale_public_host():
         call for call in hub.forwarded
         if call[:2] == ("dns-1", "DNS_CLUSTER_ENROLL_WORKER"))
     assert enrollment[2]["member"]["host"] == "10.0.0.11"
+
+
+def test_dns_worker_discovery_uses_dns_parent_private_address_as_coordinator():
+    cert = "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----"
+    hub = FakeHub({
+        "dns-1": {
+            "DNS_CLUSTER_STATUS": {
+                "status": "SUCCESS", "enabled": False, "members": []},
+            "DNS_CLUSTER_ENROLL_WORKER": {
+                "status": "SUCCESS",
+                "coordinator": "unresolvable-hostname",
+                "worker_secret": "generated-secret",
+                "coordinator_ca_pem": cert,
+            },
+        },
+        "dns-manager-agent": {
+            "GET_AVAILABLE_ROLES": {
+                "status": "SUCCESS",
+                "installed_deploy_roles": [],
+                "active_deploy_roles": [],
+                "service_addresses": ["172.17.1.10"],
+            },
+        },
+        "dns-worker-agent": {
+            "GET_AVAILABLE_ROLES": {
+                "status": "SUCCESS",
+                "installed_deploy_roles": ["dns-server"],
+                "active_deploy_roles": ["dns-server"],
+                "configured_worker_roles": [],
+                "configured_workers": [],
+                "service_addresses": ["172.17.1.11"],
+            },
+            "LOAD_ROLE": {"status": "SUCCESS", "deploy": False},
+        },
+    })
+    hub.spoke_module_types["dns-manager-agent"] = "agent"
+    hub.active_connections.add("dns-manager-agent")
+    hub.active_connections.add("dns-worker-agent")
+    hub.spoke_parent_map["dns-1"] = "dns-manager-agent"
+
+    r = _client(ADMIN, hub).post("/api/dns/cluster/discover")
+
+    assert r.status_code == 200
+    load = next(call for call in hub.forwarded
+                if call[:2] == ("dns-worker-agent", "LOAD_ROLE"))
+    assert load[2]["config"]["coordinator"] == "172.17.1.10"
 
 
 def test_a_spoke_error_becomes_a_502_not_a_200():
