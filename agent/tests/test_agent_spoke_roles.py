@@ -475,6 +475,36 @@ def test_configured_worker_report_never_exposes_secret(monkeypatch):
     assert "must-not-leave-agent" not in repr(workers)
 
 
+def test_local_service_addresses_prefers_primary_private_interface(monkeypatch):
+    class _Socket:
+        def connect(self, target):
+            assert target == ("192.0.2.1", 9)
+
+        def getsockname(self):
+            return ("10.42.7.15", 49152)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(agent_spoke.socket, "socket", lambda *args: _Socket())
+    monkeypatch.setattr(
+        agent_spoke.subprocess, "run",
+        lambda *args, **kwargs: types.SimpleNamespace(
+            returncode=0,
+            stdout=(
+                '[{"ifname":"lo","addr_info":['
+                '{"family":"inet","local":"127.0.0.1","scope":"host"}]},'
+                '{"ifname":"eth0","addr_info":['
+                '{"family":"inet","local":"10.42.7.15","scope":"global"},'
+                '{"family":"inet","local":"104.36.251.61","scope":"global"}]},'
+                '{"ifname":"eth1","addr_info":['
+                '{"family":"inet","local":"192.168.50.4","scope":"global"}]}]'
+            )))
+
+    assert agent_spoke._local_service_addresses() == [
+        "10.42.7.15", "192.168.50.4"]
+
+
 def test_unload_dns_server_stops_and_disables_unbound(monkeypatch):
     agent = GenericAgent("agent-1", {})
     calls = []
