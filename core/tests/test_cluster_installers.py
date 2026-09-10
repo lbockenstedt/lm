@@ -124,6 +124,12 @@ def test_both_installers_reject_remote_plaintext_coordinators():
         assert "ws://localhost*|ws://127.*|ws://[::1]*" in src, path
 
 
+def test_dns_installer_enables_query_type_statistics():
+    src = _read(DNS_SH)
+    assert "extended-statistics: yes" in src
+    assert "unbound-control reload" in src
+
+
 # ── Review #4: coordinator state/config dirs exist and are writable ────────
 
 def test_dns_installer_creates_and_chowns_the_coordinator_dirs():
