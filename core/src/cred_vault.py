@@ -1,18 +1,20 @@
-"""Per-tenant + admin-slot credential vault (hub-side, Azure Key Vault-backed).
+"""Per-tenant + admin-slot credential vault (hub-side, Key Vault-backed).
 
 A general-purpose secret locker that lets a **tenant-admin** store/retrieve their
 OWN tenant's named credentials, plus a special non-tenant **admin slot**
 (``__admin__``) for infrastructure credentials (e.g. the Hurricane Electric DNS
-account) that belong to no tenant. Built on the existing pure-REST Key Vault
-broker (:mod:`key_vault`) — the same SSO-app-certificate auth as the DR kit — so
-no new Azure config is required beyond the vault URL already set under
-``global_config["key_vault"]``.
+account) that belong to no tenant. Built on :mod:`cloud_vault`, the generic
+Azure/OCI Vault dispatcher — so no code here ever knows or cares WHICH cloud
+vault backend is active; it just calls ``cloud_vault.get_secret`` /
+``set_secret`` / ``delete_secret`` and whichever provider is currently
+``enabled`` (Azure Key Vault or OCI Vault) handles the request.
 
-Storage backend is transparent: when a Key Vault URL is configured the encrypted
-ciphertext is stored in the vault; on a standalone/vault-less deployment (the hub
-running as a plain local VM) it falls back to an encrypted-blob map in hub state.
-The ciphertext is Fernet-encrypted either way, so the vault is *used when
-available* but never *required*.
+Storage backend is transparent: when a cloud vault is configured/enabled the
+encrypted ciphertext is stored there; on a standalone/vault-less deployment
+(the hub running as a plain local VM, or one with neither vault enabled) it
+falls back to an encrypted-blob map in hub state. The ciphertext is
+Fernet-encrypted either way, so the vault is *used when available* but never
+*required*.
 
 Security model (decided with the operator)
 ------------------------------------------
@@ -25,8 +27,9 @@ Security model (decided with the operator)
   two modes:
 
   - ``psk`` (default, strongest): the value is encrypted with a key *derived
-    from the bucket PSK* (scrypt). Neither the hub nor Azure can read it without
-    the PSK — a human must supply it for every reveal. No unattended access.
+    from the bucket PSK* (scrypt). Neither the hub nor the cloud vault backend
+    can read it without the PSK — a human must supply it for every reveal. No
+    unattended access.
   - ``hub`` (automation-readable): the value is encrypted with the hub's
     at-rest Fernet key (:data:`security.encryption.hub_encryption`). The hub can
     decrypt it unattended, so tooling (e.g. a cert-renewal run pulling the HE
@@ -34,10 +37,11 @@ Security model (decided with the operator)
     loop. Interactive reveal STILL requires the PSK; only :func:`automation_get`
     bypasses it, and only for ``hub``-mode secrets.
 
-At rest the ciphertext lives in Key Vault (Azure's own encryption + RBAC) under
-an opaque ``cred-<uuid>`` name; the hub keeps only non-secret **metadata**
-(names, mode, type, description, timestamps, per-secret salt, PSK verifier) in
-the Fernet-encrypted hub state — never a plaintext value.
+At rest the ciphertext lives in whichever cloud vault is currently enabled
+(Azure Key Vault or OCI Vault — each provider's own encryption + RBAC/IAM)
+under an opaque ``cred-<uuid>`` name; the hub keeps only non-secret
+**metadata** (names, mode, type, description, timestamps, per-secret salt,
+PSK verifier) in the Fernet-encrypted hub state — never a plaintext value.
 """
 from __future__ import annotations
 
@@ -53,15 +57,14 @@ from typing import Any, Dict, List, Optional
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
-import key_vault as _kv
+import cloud_vault as _cv
 from security.encryption import hub_encryption
 from security import sentinel
-from security.oidc import get_oidc_config
 
 logger = logging.getLogger("CredVault")
 
 ADMIN_BUCKET = "__admin__"          # the non-tenant "Global Admin slot"
-_KV_PREFIX = "cred-"                # opaque Key Vault secret-name prefix
+_KV_PREFIX = "cred-"                # opaque cloud-vault secret-name prefix
 # Canary / honeytoken secret name (§5J-J1). A decoy secret provisioned under this
 # name is NEVER read by any legitimate code path, so ANY read of it — via any
 # vault entry point — is malicious by definition and trips the sentinel canary.
@@ -70,7 +73,7 @@ sentinel.register_canary("vault.canary")
 _MODE_PSK = "psk"
 _MODE_HUB = "hub"
 _MODES = (_MODE_PSK, _MODE_HUB)
-_STORE_KV = "kv"                    # ciphertext lives in Azure Key Vault
+_STORE_KV = "kv"                    # ciphertext lives in the active cloud vault
 _STORE_LOCAL = "local"             # ciphertext lives in hub state (no-KV deploy)
 
 # scrypt work factors (N,r,p) — ~16 MiB memory, interactive-fast.
@@ -122,11 +125,11 @@ def _meta(hub) -> Dict[str, Any]:
 
     Shape: ``{"buckets": {bucket: {"psk": {salt,hash}, "created_at": ...}},
     "secrets": {bucket: {name: {mode,type,description,kv_name,salt,store,...}}},
-    "blobs": {kv_name: ciphertext}}``. Plaintext is NEVER stored here. When
-    Azure Key Vault is configured the ciphertext lives in the vault; on a
-    vault-less deployment it falls back to the encrypted ``blobs`` map (the
-    ciphertext is already Fernet-encrypted, exactly like the other at-rest
-    encrypted blobs in hub state)."""
+    "blobs": {kv_name: ciphertext}}``. Plaintext is NEVER stored here. When a
+    cloud vault (Azure Key Vault or OCI Vault) is enabled the ciphertext lives
+    there; on a vault-less deployment it falls back to the encrypted ``blobs``
+    map (the ciphertext is already Fernet-encrypted, exactly like the other
+    at-rest encrypted blobs in hub state)."""
     gc = hub.state.system_state.setdefault("global_config", {})
     cv = gc.setdefault("cred_vault", {})
     cv.setdefault("buckets", {})
@@ -139,28 +142,18 @@ def _save(hub) -> None:
     hub.state._mark_dirty()
 
 
-def _oidc(hub):
-    return get_oidc_config(hub)
-
-
 def _vault_available(hub) -> bool:
-    """True when Azure Key Vault is configured (a vault URL is set). Standalone
-    hubs deployed as a plain VM without a vault return False and transparently
-    use the local encrypted-blob store instead."""
+    """True when a cloud vault (Azure Key Vault or OCI Vault) is enabled.
+    Standalone hubs deployed as a plain VM without a vault — or with neither
+    provider enabled — return False and transparently use the local
+    encrypted-blob store instead."""
     try:
-        return bool(str((_kv.get_config(hub) or {}).get("vault_url") or "").strip())
+        return _cv.active_provider(hub) is not None
     except Exception:  # noqa: BLE001
         return False
 
 
-def _vault_url(hub) -> str:
-    url = str((_kv.get_config(hub) or {}).get("vault_url") or "").strip()
-    if not url:
-        raise CredVaultError("Azure Key Vault is not configured (set the vault URL in Setup → Azure → Key Vault)")
-    return url
-
-
-# ── storage backend (Key Vault when configured, else local hub state) ────────
+# ── storage backend (cloud vault when configured, else local hub state) ─────
 def _secret_store(sm: Dict[str, Any]) -> str:
     """Which backend a stored secret lives in (``kv`` for pre-existing records
     without an explicit marker — they were vault-only before this fallback)."""
@@ -171,23 +164,23 @@ async def _store_put(hub, kv_name: str, token: str, store: str) -> None:
     if store == _STORE_LOCAL:
         _meta(hub)["blobs"][kv_name] = token
     else:
-        await _kv.set_secret(_oidc(hub), _vault_url(hub), kv_name, token)
+        await _cv.set_secret(hub, kv_name, token)
 
 
 async def _store_get(hub, kv_name: str, store: str) -> Optional[str]:
     if store == _STORE_LOCAL:
         return _meta(hub)["blobs"].get(kv_name)
-    return await _kv.get_secret(_oidc(hub), _vault_url(hub), kv_name)
+    return await _cv.get_secret(hub, kv_name)
 
 
 async def _store_del(hub, kv_name: str, store: str) -> None:
     if store == _STORE_LOCAL:
         _meta(hub)["blobs"].pop(kv_name, None)
         return
-    try:
-        await _kv.delete_secret(_oidc(hub), _vault_url(hub), kv_name)
-    except _kv.KeyVaultError:
-        pass  # metadata removal proceeds even if the vault delete 404s/soft-deletes
+    # Best-effort: metadata removal proceeds even if the vault delete
+    # 404s/soft-deletes/fails — cloud_vault.delete_secret already swallows
+    # backend-specific errors and returns False rather than raising.
+    await _cv.delete_secret(hub, kv_name)
 
 
 # ── bucket / PSK management ─────────────────────────────────────────────────

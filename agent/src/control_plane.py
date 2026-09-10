@@ -95,6 +95,42 @@ def _lm_root_for(path: str) -> Path:
 # hub sends (see AgentControlPlane.handle_system_command).
 _LM_REPO_URL = "https://github.com/lbockenstedt/lm.git"
 
+# Per-role ``/ws/agent`` listener knobs for the roles that host SERVICE workers
+# (a clustered dns module driving two Unbound resolvers; a dhcp module driving a
+# two-node Kea HA pair). Distinct ports so both roles can be co-loaded on one
+# agent, and a distinct config path so the worker PSK is never the pxmx/cs
+# node-agent secret. Kept in lockstep with the standalone spokes' own class
+# attrs (``dns/src/main.py``, ``dhcp/src/main.py``) — the workers dial the same
+# port either way.
+_CLUSTER_ROLE_LISTENERS = {
+    "dns": {
+        # Workers send the shared PSK in their first frame: never plaintext on a
+        # public interface.
+        "AGENT_LISTENER_REQUIRE_TLS": True,
+        "AGENT_TLS_CERT_ENV": "LM_DNS_TLS_CERT",
+        "AGENT_TLS_KEY_ENV": "LM_DNS_TLS_KEY",
+        "AGENT_PORT_ENV": "LM_DNS_AGENT_PORT",
+        "AGENT_LOOPBACK_ENV": "LM_DNS_AGENT_LOOPBACK",
+        "AGENT_LISTENER_ENV": "LM_DNS_AGENT_LISTENER",
+        "AGENT_CONFIG_PATH": "/etc/lm-dns/agent.json",
+        "AGENT_LOOPBACK_PORT": 8769,
+        "AGENT_WSS_PORT": 8769,
+        "AGENT_FALLBACK_PORT": 8769,
+    },
+    "dhcp": {
+        "AGENT_LISTENER_REQUIRE_TLS": True,
+        "AGENT_TLS_CERT_ENV": "LM_DHCP_TLS_CERT",
+        "AGENT_TLS_KEY_ENV": "LM_DHCP_TLS_KEY",
+        "AGENT_PORT_ENV": "LM_DHCP_AGENT_PORT",
+        "AGENT_LOOPBACK_ENV": "LM_DHCP_AGENT_LOOPBACK",
+        "AGENT_LISTENER_ENV": "LM_DHCP_AGENT_LISTENER",
+        "AGENT_CONFIG_PATH": "/etc/lm-dhcp/agent.json",
+        "AGENT_LOOPBACK_PORT": 8770,
+        "AGENT_WSS_PORT": 8770,
+        "AGENT_FALLBACK_PORT": 8770,
+    },
+}
+
 
 class RoleConnection(AgentHostingControlPlane):
     """One independent hub connection per loaded role (multi-role agent).
@@ -170,6 +206,14 @@ class RoleConnection(AgentHostingControlPlane):
             self.AGENT_LISTENER_ENV = "LM_CS_AGENT_LISTENER"
             self.AGENT_WSS_PORT = 443
             self.AGENT_FALLBACK_PORT = 8767
+        # The dns/dhcp roles host SERVICE workers (two Unbound resolvers, a
+        # two-node Kea HA pair) on the same inherited listener. Each gets its OWN
+        # port + config path so both roles can be co-loaded on one agent without
+        # a bind collision and without sharing the pxmx/cs node-agent PSK:
+        # 8765 hub, 8766 pxmx, 8767 cs, 8768 hub-self, 8769 dns, 8770 dhcp.
+        elif role_name in _CLUSTER_ROLE_LISTENERS:
+            for attr, value in _CLUSTER_ROLE_LISTENERS[role_name].items():
+                setattr(self, attr, value)
         super().__init__(sub_id, secret, hub_secret="", hub_url=hub_url)
         self.role_name = role_name
         self.base_id = base_id
@@ -294,8 +338,14 @@ class RoleConnection(AgentHostingControlPlane):
         * **console** — opt-in via ``LM_CONSOLE_RELAY_LISTENER=1`` ONLY to serve
           the edge-proxy ``/ws/console-relay`` endpoint (Phase 2 serial shortcut)
           on the same listener.
+        * **dns / dhcp** — on ONLY when the hosted module has declared a
+          multi-host service cluster (2+ Unbound resolvers / a two-node Kea HA
+          pair). Those workers dial this box on the role's own port. A
+          single-host dns/dhcp role declares no members and binds nothing, so
+          existing deployments are unaffected. ``LM_DNS_AGENT_LISTENER`` /
+          ``LM_DHCP_AGENT_LISTENER`` force it on.
 
-        Every other role (dns/dhcp/ldap/…) never binds a port.
+        Every other role (ldap/…) never binds a port.
         """
         if self.role_name == "proxmox":
             return True
@@ -306,6 +356,13 @@ class RoleConnection(AgentHostingControlPlane):
             if val in ("0", "false", "no", "off"):
                 return False
             return not self._is_colocated_with_hub()   # default: standalone → on
+        if self.role_name in _CLUSTER_ROLE_LISTENERS:
+            val = str(os.environ.get(self.AGENT_LISTENER_ENV, "")).strip().lower()
+            if val in ("1", "true", "yes", "on"):
+                return True
+            if val in ("0", "false", "no", "off"):
+                return False
+            return self._cluster_listener_required()
         if self.role_name == "console" and str(
                 os.environ.get("LM_CONSOLE_RELAY_LISTENER", "")).strip() in ("1", "true", "yes", "on"):
             return True
@@ -318,12 +375,55 @@ class RoleConnection(AgentHostingControlPlane):
         node-agents can dial this box (``--spoke-ip <box>``). Mirrors
         PxmxControlPlane.run (pxmx/src/control_plane.py)."""
         if self._agent_listener_enabled():
+            # A dns/dhcp cluster role only becomes listener-enabled once its
+            # module is registered (which happens at the END of __init__), so
+            # the constructor's mint step could not have run for it yet.
+            self._ensure_agent_secret()
             self._start_agent_server_task()
         self._start_role_local_services()
         try:
             await super().run()
         finally:
             self._stop_role_local_services()
+
+    async def shutdown(self) -> None:
+        """Tear down everything this role owns OUTSIDE its hub connection.
+
+        Unloading a role cancels only its ``run()`` task. The ``/ws/agent``
+        cluster listener and the module's background loops are SEPARATE tasks,
+        so without this an unloaded dns/dhcp role kept its cluster port bound —
+        re-loading the role (or loading the other one) then failed to bind — and
+        the orphaned reconcile loop kept pushing to workers a torn-down
+        coordinator no longer owns.
+
+        Called by ``GenericAgent._stop_role`` AFTER the run task is awaited, so
+        it runs in an un-cancelled context and can actually await the socket
+        closing before the unload reports success."""
+        self._stop_role_local_services()
+        pending = []
+        mod = self.modules.get(self.role_name)
+        stop_loops = getattr(mod, "stop_background_loops", None) if mod else None
+        if callable(stop_loops):
+            try:
+                task = stop_loops()
+                if task is not None:
+                    pending.append(task)
+            except Exception as e:  # noqa: BLE001 — best-effort teardown
+                logger.debug("role '%s' stop_background_loops failed: %s",
+                             self.role_name, e)
+        server = getattr(self, "_agent_server_task", None)
+        if server is not None:
+            self._agent_server_task = None
+            if not server.done():
+                server.cancel()
+            pending.append(server)
+        for task in pending:
+            if task is None or task.done():
+                continue
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
 
     def _start_role_local_services(self) -> None:
         """Invoke the hosted role module's PROCESS-scoped startup hooks once.

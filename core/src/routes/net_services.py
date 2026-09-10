@@ -103,6 +103,49 @@ def register(app, hub, ctx):
         merged = [r for recs in await asyncio.gather(*[_one(s) for s in spokes]) for r in recs]
         return {list_key: merged, "total": len(merged)}
 
+    def _redact_dns_cluster(cluster):
+        """Non-admin view of a DNS resolver-cluster report.
+
+        Keeps the VERDICT a tenant user needs (state, convergence counts,
+        per-member convergence) and drops the operational detail the rest of the
+        diagnostics redaction already strips: member hostnames, record digests,
+        and the per-member error text of the last commit. Used by BOTH
+        /api/dns/diagnostics and /api/dns/cluster — a status endpoint that
+        skipped it would hand a tenant everything the diagnostics endpoint
+        deliberately withholds."""
+        if not isinstance(cluster, dict):
+            return cluster
+        keep = ("enabled", "state", "converged", "member_count",
+                "converged_count", "recommendations", "reason")
+        out = {k: v for k, v in cluster.items() if k in keep}
+        out["members"] = [
+            {k: v for k, v in m.items()
+             if k in ("id", "connected", "convergence", "role")}
+            for m in (cluster.get("members") or []) if isinstance(m, dict)
+        ]
+        out["desired"] = {k: v for k, v in (cluster.get("desired") or {}).items()
+                          if k in ("version", "record_count")}
+        out["last_commit"] = {}
+        return out
+
+    def _redact_dhcp_cluster(cluster):
+        """Non-admin view of a Kea HA report — same posture as the DNS one."""
+        if not isinstance(cluster, dict):
+            return cluster
+        keep = ("enabled", "mode", "state", "healthy", "config_converged",
+                "config_digests_missing", "member_count", "healthy_count",
+                "recommendations", "supported_modes", "reason")
+        out = {k: v for k, v in cluster.items() if k in keep}
+        out["members"] = [
+            {k: v for k, v in m.items()
+             if k in ("id", "connected", "health", "ha_role", "ha_state",
+                      "ha_enabled")}
+            for m in (cluster.get("members") or []) if isinstance(m, dict)
+        ]
+        out["peers"] = []
+        out["last_apply"] = {}
+        return out
+
     def _get_le_spoke(hub):
         return get_spoke_or_503(hub, "certificates", "Certificate")
 
@@ -223,7 +266,46 @@ def register(app, hub, ctx):
                 ],
                 "conf_path": "",
             }
+            if isinstance(data.get("cluster"), dict):
+                data["cluster"] = _redact_dns_cluster(data["cluster"])
+                data["members"] = {}
         return data
+
+    @app.get("/api/dns/cluster")
+    async def dns_cluster_status(request: Request, tenant: str = None):
+        """Resolver-cluster membership, convergence, drift and recommendations.
+
+        A single-host DNS module answers ``enabled: false`` — the WebUI hides
+        the cluster panel in that case rather than inventing one."""
+        logger.debug("relay GET /api/dns/cluster")
+        data = await _relay_spoke(_dns_spoke_for_request(request, tenant),
+                                  "DNS_CLUSTER_STATUS", log_name="dns_cluster_status")
+        # The cluster report IS the diagnostics cluster block; a non-admin must
+        # not get through this door what the diagnostics door withholds.
+        if not _is_admin(_session_user(request)) and isinstance(data, dict):
+            data = {"status": data.get("status", "SUCCESS"),
+                    **_redact_dns_cluster(data)}
+        return data
+
+    @app.post("/api/dns/cluster")
+    async def dns_cluster_config(request: Request, tenant: str = None):
+        """Declare the resolver hosts this DNS module owns (Global-Admin only —
+        ``_ADMIN_INFRA_WRITE_PREFIXES`` covers ``/api/dns/``).
+
+        Body: ``{"members": [{"id", "host"}...], "worker_secret": "…"}``. The
+        secret is passed straight through to the spoke, which stores it as the
+        listener PSK and never returns it."""
+        body = await request.json()
+        return await _relay_spoke(_dns_spoke_for_request(request, tenant),
+                                  "DNS_CLUSTER_CONFIG", body,
+                                  log_name="dns_cluster_config", timeout=30)
+
+    @app.post("/api/dns/cluster/reconcile")
+    async def dns_cluster_reconcile(request: Request, tenant: str = None):
+        """Force an immediate reconcile pass (normally runs on a timer)."""
+        return await _relay_spoke(_dns_spoke_for_request(request, tenant),
+                                  "DNS_CLUSTER_RECONCILE", {},
+                                  log_name="dns_cluster_reconcile", timeout=60)
 
     @app.get("/api/dns/stats")
     async def dns_stats(request: Request, tenant: str = None):
@@ -2556,7 +2638,45 @@ def register(app, hub, ctx):
                     for item in (data.get("recommendations") or [])
                 ],
             }
+            if isinstance(data.get("cluster"), dict):
+                data["cluster"] = _redact_dhcp_cluster(data["cluster"])
+                data["members"] = {}
         return data
+
+    @app.get("/api/dhcp/ha")
+    async def dhcp_ha_status(request: Request, tenant: str = None):
+        """Kea HA pair state: per-node HA state, lease sync, config drift and
+        recommendations. A single-host DHCP module answers ``enabled: false``."""
+        logger.debug("relay GET /api/dhcp/ha")
+        data = await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
+                                  "DHCP_HA_STATUS", log_name="dhcp_ha_status",
+                                  timeout=30)
+        if not _is_admin(_session_user(request)) and isinstance(data, dict):
+            data = {"status": data.get("status", "SUCCESS"),
+                    **_redact_dhcp_cluster(data)}
+        return data
+
+    @app.post("/api/dhcp/ha")
+    async def dhcp_ha_config(request: Request, tenant: str = None):
+        """Declare the Kea HA pair + mode (Global-Admin only —
+        ``_ADMIN_INFRA_WRITE_PREFIXES`` covers ``/api/dhcp/``).
+
+        Body: ``{"members": [{"id","host"}, …], "mode": "hot-standby"|
+        "load-balancing", "worker_secret": "…"}``. ``mode`` defaults to
+        hot-standby; the secret is stored as the listener PSK and never
+        returned."""
+        body = await request.json()
+        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
+                                  "DHCP_HA_CONFIG", body,
+                                  log_name="dhcp_ha_config", timeout=30)
+
+    @app.post("/api/dhcp/ha/apply")
+    async def dhcp_ha_apply(request: Request, tenant: str = None):
+        """Re-apply the current desired DHCP configuration to BOTH nodes
+        (validate both → standby first → primary)."""
+        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
+                                  "DHCP_HA_APPLY", {},
+                                  log_name="dhcp_ha_apply", timeout=120)
 
     @app.get("/api/dhcp/stats")
     async def dhcp_stats(request: Request, tenant: str = None):

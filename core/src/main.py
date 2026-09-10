@@ -951,11 +951,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # Simulations module: tenant-scoped browser broadcast + slim cs-config store.
         self.simulations_broadcaster = SimulationsBroadcaster()
         self.simulations_store = SimulationsStore(self.state.data_dir)
-        # Resolve a tenant github_token stored as a Key Vault reference
-        # (``kv:<name>``) at read time, so the token can live in the vault instead
-        # of on disk. No-op for inline tokens / no vault (self-hosted).
+        # Resolve a tenant github_token stored as a cloud vault reference
+        # (``kv:<name>``) at read time, so the token can live in whichever
+        # vault (Azure Key Vault or OCI Vault) is enabled instead of on disk.
+        # No-op for inline tokens / no vault (self-hosted).
         try:
-            import key_vault as _kv
+            import cloud_vault as _kv
 
             async def _gh_token_resolver(ref):
                 return await _kv.resolve_ref(self, ref)

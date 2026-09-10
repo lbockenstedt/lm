@@ -18,21 +18,21 @@ def hub(monkeypatch):
 
     store: dict[str, str] = {}
 
-    async def _set(cfg, url, name, value, http=None):
+    async def _set(hub, name, value, http=None):
         store[name] = value
         return f"id/{name}"
 
-    async def _get(cfg, url, name, http=None):
+    async def _get(hub, name, http=None):
         return store.get(name)
 
-    async def _del(cfg, url, name, http=None):
+    async def _del(hub, name, http=None):
         store.pop(name, None)
         return True
 
-    monkeypatch.setattr(cv._kv, "set_secret", _set)
-    monkeypatch.setattr(cv._kv, "get_secret", _get)
-    monkeypatch.setattr(cv._kv, "delete_secret", _del)
-    monkeypatch.setattr(cv, "get_oidc_config", lambda _h: object())
+    monkeypatch.setattr(cv._cv, "active_provider", lambda _h: "azure")
+    monkeypatch.setattr(cv._cv, "set_secret", _set)
+    monkeypatch.setattr(cv._cv, "get_secret", _get)
+    monkeypatch.setattr(cv._cv, "delete_secret", _del)
     h._kv_store = store
     return h
 
@@ -159,8 +159,7 @@ def test_no_vault_falls_back_to_local_store(monkeypatch):
     roundtrips — the vault is used when available, never required."""
     state = FakeState(system_state={"global_config": {}})
     h = FakeHub(state=state)
-    monkeypatch.setattr(cv, "get_oidc_config", lambda _h: object())
-    # No Key Vault URL configured.
+    # No cloud vault provider enabled.
     assert cv._vault_available(h) is False
 
     run(cv.set_bucket_psk(h, "t1", "hunter2pass"))
@@ -184,7 +183,6 @@ def test_no_vault_hub_mode_automation_readable(monkeypatch):
     """hub-mode secrets stored locally are still unattended-readable."""
     state = FakeState(system_state={"global_config": {}})
     h = FakeHub(state=state)
-    monkeypatch.setattr(cv, "get_oidc_config", lambda _h: object())
     run(cv.set_bucket_psk(h, cv.ADMIN_BUCKET, "adminpass1"))
     run(cv.put_secret(h, cv.ADMIN_BUCKET, "console-auto-credentials",
                       {"credentials": [{"username": "a", "password": "b"}]},
