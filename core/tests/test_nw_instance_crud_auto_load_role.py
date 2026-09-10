@@ -33,6 +33,7 @@ class _Hub:
         self.sent = []
         self.load_role_calls = []
         self.unload_role_calls = []
+        self.dns_cluster_calls = []
 
     def _primary_key(self, sid):
         return sid
@@ -55,6 +56,9 @@ class _Hub:
                 "status": "SUCCESS", "sub_spoke_id": sub_id, "module_type": module_type}}}
         if cmd == "UNLOAD_ROLE":
             self.unload_role_calls.append((spoke_id, payload))
+            return {"payload": {"data": {"status": "SUCCESS"}}}
+        if cmd == "DNS_CLUSTER_CONFIG":
+            self.dns_cluster_calls.append((spoke_id, payload))
             return {"payload": {"data": {"status": "SUCCESS"}}}
         raise AssertionError(f"unexpected command {cmd}")
 
@@ -122,3 +126,59 @@ def test_admin_reassign_ipam_instance_loads_new_and_unloads_old():
     assert r.status_code == 200
     assert hub.load_role_calls[-1] == ("spokeB", {"role": "netbox", "config": {}})
     assert hub.unload_role_calls == [("spokeA", {"role": "netbox"})]
+
+
+def test_admin_dns_instances_push_the_complete_worker_topology():
+    c, hub = _build()
+    hub.active_connections["dns-management"] = object()
+    hub.spoke_module_types["dns-management"] = "dns"
+
+    first = c.post("/setup/dns-instances", json={"instance": {
+        "name": "Primary DNS",
+        "member_id": "dns-a",
+        "host": "10.0.0.11",
+        "spoke_id": "dns-management",
+        "worker_secret": "write-only-secret",
+    }})
+    assert first.status_code == 200
+    assert hub.dns_cluster_calls[-1] == ("dns-management", {
+        "members": [{"id": "dns-a", "host": "10.0.0.11"}],
+        "worker_secret": "write-only-secret",
+    })
+
+    second = c.post("/setup/dns-instances", json={"instance": {
+        "name": "Secondary DNS",
+        "member_id": "dns-b",
+        "host": "10.0.0.12",
+        "spoke_id": "dns-management",
+    }})
+    assert second.status_code == 200
+    assert hub.dns_cluster_calls[-1] == ("dns-management", {
+        "members": [
+            {"id": "dns-a", "host": "10.0.0.11"},
+            {"id": "dns-b", "host": "10.0.0.12"},
+        ],
+    })
+    stored = hub.state.system_state["global_config"]["dns_instances"]
+    assert all("worker_secret" not in item for item in stored)
+
+
+def test_admin_delete_dns_instance_pushes_reduced_topology():
+    c, hub = _build()
+    hub.active_connections["dns-management"] = object()
+    hub.spoke_module_types["dns-management"] = "dns"
+    for member_id in ("dns-a", "dns-b"):
+        c.post("/setup/dns-instances", json={"instance": {
+            "name": member_id,
+            "member_id": member_id,
+            "host": f"{member_id}.example",
+            "spoke_id": "dns-management",
+            "worker_secret": "secret",
+        }})
+    rid = c.get("/setup/dns-instances").json()["instances"][0]["id"]
+
+    deleted = c.delete(f"/setup/dns-instances/{rid}")
+    assert deleted.status_code == 200
+    assert hub.dns_cluster_calls[-1][1]["members"] == [
+        {"id": "dns-b", "host": "dns-b.example"},
+    ]
