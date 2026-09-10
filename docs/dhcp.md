@@ -1,27 +1,27 @@
 ---
-summary: "Thin Kea DHCP4 management spoke. Repo: dhcp. moduletype = 'dhcp'. See architecture-topology.md."
+summary: "Kea DHCP4 HA management spoke. Repo: dhcp. moduletype = 'dhcp'. See architecture-topology.md."
 keywords: [auto, backends, behaviors, custom_fields, dhcp, dhcp_stats, dhcp_status, dhcp_update_res, kea_url, lm]
 ---
 
 # dhcp — DHCP (Kea)
 
-Thin Kea DHCP4 management spoke. Repo: `dhcp`. `module_type = "dhcp"`. See [architecture-topology.md](architecture-topology.md).
+Kea DHCP4 HA management spoke. Repo: `dhcp`. `module_type = "dhcp"`. See [architecture-topology.md](architecture-topology.md).
 
 ## Role & module_type
 
-Wraps the Kea Control Agent REST API for subnet/lease/reservation listing and CRUD, plus a NetBox→Kea reservation sync. Includes the role code plus `install_dhcp.sh` for Kea host prep/direct role deployment; no API_SPEC or standalone README.
+The hosted `dhcp` role is management-only and does not install or start Kea. Kea workers are deployed separately with the `dhcp-server` role. A direct standalone install can still manage a local Kea server.
 
 ## What it does
 
-The `dhcp` module manages **Kea DHCP4** subnets, active leases, and static reservations for this node, and shows pool utilization at a glance. It's what hands out (or reserves) IP addresses to devices on a site's DHCP-served subnets — configured by hand, or filled in automatically from NetBox prefixes/IPs.
+The `dhcp` module coordinates **Kea DHCP4** subnets, active leases, and static reservations across the configured HA pair and shows pool utilization at a glance.
 
 In the WebUI, open a node's **DHCP** module from the sidebar to reach the **Overview**, **Diagnostics**, **Subnets**, **Leases**, and **Reservations** tabs — see the [WebUI](#webui) section below. This Kea instance is the site's real production DHCP server — it is **not** the same Kea used by the `cs` (Simulations) role's client-simulation feature (see Troubleshooting below).
 
 ## Entrypoints
 
-`python3 -m src.main` (`DHCPControlPlane`); spoke `DHCPSpoke(BaseSpoke)`. `install_dhcp.sh` performs Kea host prep and can install the direct `lm-dhcp` unit when needed; the agent role loader uses the same deployment path when loading the `dhcp` role.
+`python3 -m src.main` (`DHCPControlPlane`); spoke `DHCPSpoke(BaseSpoke)`. `install_dhcp.sh` performs Kea host prep for direct installs and `dhcp-server`; the agent `dhcp` role loader installs only management dependencies.
 
-> **Primarily a role now.** DHCP runs mainly as the **`dhcp`** role hosted by the agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-dhcp` (module_type `dhcp`, parent-auto-approved) and loads it in-process via `agent/src/agent_spoke.py::_install_role` (this repo is bundled in-tree; the role loader also does the Kea host prep). `install_dhcp.sh` can create a direct `lm-dhcp` deployment when needed, but the agent role remains the standard path. Config (`KEA_URL`) comes from the hub push (WebUI), not a per-module `.env`. (This module's Kea is the ctrl-agent :8001 instance — distinct from the cs `simulation` role's cs-owned `kea-dhcp4-sim` at :8002.)
+> **Primarily a role now.** DHCP runs mainly as the **`dhcp`** role hosted by the agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a management-only sub-spoke `{agent}-dhcp` (module_type `dhcp`, parent-auto-approved). Load `dhcp-server` separately on each Kea worker; load both roles when the coordinator and Kea server intentionally share one host. `install_dhcp.sh` can create a direct local deployment when needed. Config comes from the hub push (WebUI), not a per-module `.env`.
 
 ## Ports / backends
 
@@ -79,7 +79,7 @@ A worker distinguishes the two apply failures that matter: `config-set` rejected
 sudo bash install_dhcp.sh --member-id kea-a --coordinator <coordinator-host> --worker-secret <secret>
 ```
 
-Add `--ca-cert <coordinator cert>` (required), `--ha-user`/`--ha-password` (required), `--ha-ca`/`--ha-cert`/`--ha-key` (required — the HA channel is mutually-verified HTTPS) and `--ha-peer <partner-ip>`. `--stand-down` reverses it and runs **before** the `--hub` check, so a node being removed from a pair does not have to name a hub it no longer belongs to. That installs Kea + the hook libraries from `kea-common`, stands up the HTTPS HA control agent on :8002 with persistent firewall rules scoped to the partner (the node-local :8001 agent stays loopback-only), and lays down the `lm-dhcp-worker` unit. It implies `--infra-only`. `--stand-down` reverses it: the worker and HA agent are stopped and the firewall rules removed. The coordinator install creates `/etc/lm-dhcp`, `/var/lib/lm-dhcp` and `/etc/lm-dhcp/tls` owned by `svc_lm` and mints a coordinator certificate. Unloading the `dhcp-server` deploy role also stops `lm-dhcp-worker` and `kea-ha-agent`. Without an HA pair configured the module behaves exactly as a single-host install: no listener is bound and every operation goes to the local `KeaManager`.
+Add `--ca-cert <coordinator cert>` (required), `--ha-user`/`--ha-password` (required), `--ha-ca`/`--ha-cert`/`--ha-key` (required — the HA channel is mutually-verified HTTPS) and `--ha-peer <partner-ip>`. `--stand-down` reverses it and runs **before** the `--hub` check, so a node being removed from a pair does not have to name a hub it no longer belongs to. That installs Kea + the hook libraries from `kea-common`, stands up the HTTPS HA control agent on :8002 with persistent firewall rules scoped to the partner (the node-local :8001 agent stays loopback-only), and lays down the `lm-dhcp-worker` unit. It implies `--infra-only`. `--stand-down` reverses it: the worker and HA agent are stopped and the firewall rules removed. The coordinator install creates `/etc/lm-dhcp`, `/var/lib/lm-dhcp` and `/etc/lm-dhcp/tls` owned by `svc_lm` and mints a coordinator certificate. Unloading the `dhcp-server` deploy role also stops `lm-dhcp-worker` and `kea-ha-agent`. The hosted management role requires exactly two configured members. Direct standalone installs retain local single-server behavior.
 
 **See it.** DHCP → **Diagnostics** grows a *Kea HA pair* panel (per-node role, health, HA state, partner state, scopes, config digest) plus each node's own diagnostics findings, and a *Re-apply configuration to both nodes* action. `GET /api/dhcp/ha` returns the same report; Settings → Diagnostics carries a one-line summary. A non-admin sees the verdict but not node addressing or error text.
 

@@ -99,6 +99,52 @@ rollback_if_bad(){
   fi
 }
 
+# ── 0. Cert directory writability ───────────────────────────────────────────
+# The hub writes its cert dir at runtime: the renewed LE server cert, the mTLS
+# CA bundle, and the Hub-Local client CA. Every one of those writes is ATOMIC —
+# a temp file is created IN THIS DIRECTORY and renamed over the target — so it
+# needs write permission on the DIRECTORY, not just on the cert files.
+#
+# A root-owned cert dir (install_all.sh used to `mkdir -p` it as root and chown
+# only the two files, and operators create it by hand) silently breaks ALL cert
+# material: the hub's own cert, the mTLS CA bundle, and every spoke's mTLS
+# client cert, each failing with "Permission denied: .../tmpXXXX.tmp". It took a
+# production hub down for hours and never self-healed, because the hub runs as
+# svc_lm and CANNOT chown its way out — only root can, which is us.
+#
+# Probe with a real write as svc_lm rather than comparing ownership: that is the
+# exact operation that fails, so it also catches odd modes, ACLs and group
+# setups that an ownership check would call fine.
+repair_cert_dir(){
+  local dir probe
+  dir=$(grep -s '^LM_TLS_CERT=' /opt/lm/.env 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '\042\047')
+  [ -n "$dir" ] && dir=$(dirname "$dir") || dir=/opt/lm/certs
+  id -u svc_lm >/dev/null 2>&1 || return 0
+  if [ ! -d "$dir" ]; then
+    mkdir -p "$dir" 2>/dev/null || return 0
+    chown svc_lm:svc_lm "$dir" 2>/dev/null || true
+    chmod 755 "$dir" 2>/dev/null || true
+    log "REPAIR: created missing cert dir $dir (svc_lm:svc_lm 755)"
+    return 0
+  fi
+  probe="$dir/.wd-write-probe.$$"
+  if runuser -u svc_lm -- touch "$probe" 2>/dev/null; then
+    rm -f "$probe" 2>/dev/null || true
+    return 0
+  fi
+  # chown -R so a root-owned hub.key/hub.crt left by an older installer is fixed
+  # too; modes are deliberately NOT touched (hub.key must stay 0600).
+  chown -R svc_lm:svc_lm "$dir" 2>/dev/null || true
+  chmod 755 "$dir" 2>/dev/null || true
+  if runuser -u svc_lm -- touch "$probe" 2>/dev/null; then
+    rm -f "$probe" 2>/dev/null || true
+    log "REPAIR: cert dir $dir was not writable by svc_lm — chowned (cert installs were failing)"
+  else
+    log "WARN: cert dir $dir still not writable by svc_lm after chown — cert installs will keep failing"
+  fi
+}
+repair_cert_dir
+
 # ── 1. Hub liveness ─────────────────────────────────────────────────────────
 if systemctl is-enabled --quiet lm.service 2>/dev/null; then
   state=$(systemctl is-active lm.service 2>/dev/null || echo unknown)

@@ -651,6 +651,52 @@ def register(app, hub, ctx):
             hub._console_creds_seeded = s
         s.add(sid)
 
+    async def _console_write_credentials_no_vault(hub, body, sess):
+        """Full create/update/delete of the hub-local console credential list —
+        the supported path when NO Credential Vault is configured.
+
+        Without a vault there is nowhere else for console logins to live, so
+        blocking this would leave the operator unable to use auto-identify at
+        all. The list is still never stored in the clear: it round-trips through
+        :func:`_console_save_credentials`, which Fernet-encrypts it into
+        ``console_credentials_enc``.
+
+        A blank password KEEPS the currently-stored one for that username — the
+        GET masks passwords, so the WebUI submits blanks for untouched rows and
+        a naive replace would wipe them. Key-Vault-backed lists are read-only
+        here and rejected, same as before."""
+        # Vault-backed lists are managed in Key Vault (least-privilege: the hub
+        # only reads them) — editing here would be silently lost, so reject it.
+        if _console_creds_keyvault_backed(hub):
+            raise HTTPException(
+                status_code=409,
+                detail="console credentials are managed in Key Vault (read-only here)")
+        stored = {c.get("username"): c.get("password")
+                  for c in _console_load_local_credentials(hub)}
+        creds = []
+        for c in (body.get("credentials") or []):
+            if not isinstance(c, dict):
+                continue
+            u = str(c.get("username", "")).strip()
+            if not u:
+                continue
+            p = str(c.get("password", ""))
+            if not p and u in stored:
+                p = stored[u]  # sentinel-merge: blank means "keep the stored one"
+            creds.append({"username": u, "password": p})
+        _console_save_credentials(hub, creds)
+        hub._console_creds_seeded = set()  # force re-seed with the new list
+        for sid in (hub.get_all_spokes_by_type("console") or []):
+            try:
+                await hub.send_to_spoke_command(sid, "CONSOLE_SET_CREDENTIALS",
+                                                {"credentials": creds})
+                _console_mark_seeded(hub, sid)
+            except Exception:  # noqa: BLE001
+                pass
+        logger.info("console: %d local credential(s) saved by %s (no vault configured)",
+                    len(creds), (sess.get("user", {}) or {}).get("username", "?"))
+        return {"status": "ok", "count": len(creds)}
+
     async def _console_seed_credentials(hub, spokes):
         """Push the credential list to any console spoke not yet seeded this
         process (so a spoke that connects after credentials were set still gets
@@ -1358,11 +1404,16 @@ def register(app, hub, ctx):
                        "still exist on the hub. Migrate them into the Credential Vault "
                        "(Global Admin slot → 'console-auto-credentials') manually; they "
                        "are otherwise ignored and won't be updatable here.")
+        # With NO vault configured there is nowhere else to keep console logins,
+        # so the hub-local (Fernet-encrypted) store is the supported path and the
+        # editor stays open. Key-Vault-backed lists remain read-only regardless.
+        kv_backed = _console_creds_keyvault_backed(hub)
+        editable = (not vault_on) and (not kv_backed)
         return {"credentials": [{"username": c.get("username", ""),
                                  "has_password": bool(c.get("password"))} for c in creds],
                 "source": ("cred_vault" if vault_backed
-                           else "keyvault" if _console_creds_keyvault_backed(hub) else "hub"),
-                "read_only": True, "creation_disabled": True,
+                           else "keyvault" if kv_backed else "hub"),
+                "read_only": not editable, "creation_disabled": not editable,
                 "vault_enabled": vault_on, "local_passwords_present": local_present,
                 "migrate_warning": warning,
                 "local_credentials": [{"username": c.get("username", ""),
@@ -1372,16 +1423,27 @@ def register(app, hub, ctx):
 
     @app.post("/api/console/credentials")
     async def console_post_credentials(request: Request):
-        """Delete-only. CREATING or CHANGING console passwords here is disabled —
-        store console logins in the Credential Vault (Global Admin slot
-        ``__admin__`` → secret ``console-auto-credentials``, automation-readable)
-        and the seed loop pulls them unattended. But an operator MAY still REMOVE
-        legacy LOCAL passwords to clean them up once the vault is in use (the
-        agreed "delete but not add" rule): the submitted ``credentials`` list must
-        be a subset of the existing local usernames with NO passwords supplied;
-        any new username or supplied password is rejected 409. Submitting an empty
-        list clears all local passwords. Never touches Key-Vault-backed creds
-        (those are read-only / managed in the vault). Admin only."""
+        """Manage the global auto-identify console credential list. Admin only.
+
+        Behaviour depends on whether a Credential Vault is configured:
+
+        * **Vault ON** — delete-only. Console logins belong in the vault (Global
+          Admin slot ``__admin__`` → secret ``console-auto-credentials``,
+          automation-readable) and the seed loop pulls them unattended, so
+          CREATING or CHANGING a password here is rejected 409. An operator MAY
+          still REMOVE legacy LOCAL passwords to clean them up (the agreed
+          "delete but not add" rule): the submitted ``credentials`` list must be
+          a subset of the existing local usernames with NO passwords supplied.
+          Submitting an empty list clears all local passwords.
+        * **Vault OFF** — full create/update/delete. With no vault configured
+          there is nowhere else to store console logins, so the hub-local store
+          is the supported path. It is Fernet-encrypted at rest
+          (``console_credentials_enc``), never plaintext. A blank password keeps
+          the currently-stored one for that username (the GET never returns
+          passwords, so the UI submits blanks to keep them).
+
+        Either way, Key-Vault-backed lists are read-only here (managed in the
+        vault) and are never touched."""
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
@@ -1390,6 +1452,8 @@ def register(app, hub, ctx):
             body = await request.json()
         except Exception:
             body = {}
+        if not _vault_enabled(hub):
+            return await _console_write_credentials_no_vault(hub, body, sess)
         existing = _console_load_local_credentials(hub)
         existing_users = {c.get("username") for c in existing}
         keep_users = set()

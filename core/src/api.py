@@ -2508,9 +2508,20 @@ def _uvicorn_log_config():
     ``client_addr`` / ``request_line`` / ``status_code`` in ``record.args``, so
     ``record.getMessage()`` (the canonical ``%(message)s``) renders the full
     access line — no need for uvicorn's ``AccessFormatter``.
+
+    The uvicorn logger levels track the root level (i.e. ``LOG_LEVEL``) rather
+    than a hardcoded INFO. Successful access lines are DEBUG-only (see
+    ``_QuietSuccessAccessFilter``), and that filter's escape hatch is putting
+    ``uvicorn.access`` at DEBUG — hardcoding INFO here would pin the filter on
+    and make booting with ``LOG_LEVEL=DEBUG`` unable to restore the access log.
+    The live WebUI debug toggle already levels every logger, so this only
+    closes the boot-time path.
     """
     fmt = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     datefmt = '%Y-%m-%d %H:%M:%S'
+    level = logging.getLevelName(logging.getLogger().getEffectiveLevel())
+    if not isinstance(level, str) or not level.isalpha():
+        level = "INFO"
     return {
         "version": 1,
         "disable_existing_loggers": False,
@@ -2520,9 +2531,9 @@ def _uvicorn_log_config():
                          "formatter": "default", "stream": "ext://sys.stderr"},
         },
         "loggers": {
-            "uvicorn": {"handlers": ["default"], "level": "INFO", "propagate": False},
-            "uvicorn.error": {"handlers": ["default"], "level": "INFO", "propagate": False},
-            "uvicorn.access": {"handlers": ["default"], "level": "INFO", "propagate": False},
+            "uvicorn": {"handlers": ["default"], "level": level, "propagate": False},
+            "uvicorn.error": {"handlers": ["default"], "level": level, "propagate": False},
+            "uvicorn.access": {"handlers": ["default"], "level": level, "propagate": False},
         },
     }
 

@@ -38,6 +38,7 @@ import glob
 import importlib.util
 import logging
 import os
+import re
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger("Hub")
@@ -87,15 +88,39 @@ async def _git(*args: str, cwd: Optional[str] = None, timeout: float = 90.0) -> 
     return proc.returncode or 0, (out or b"").decode(errors="replace")[-500:]
 
 
-async def provision(hub) -> None:
+def _redact(text: str, token: Optional[str]) -> str:
+    """Strip a credential out of git output before it is logged. Git echoes the
+    remote URL in most failure messages, and the hub log is surfaced in the
+    WebUI error feed — so an unredacted failure would publish the PAT."""
+    out = text or ""
+    if token:
+        out = out.replace(token, "***")
+    return re.sub(r"(https://)[^/@\s]+@", r"\1***@", out)
+
+
+async def provision(hub) -> Dict[str, Any]:
     """Fetch the configured private extension repo into the ext dir. Best-effort:
-    logs and returns on any problem; NEVER raises into startup."""
+    logs and returns on any problem; NEVER raises into startup.
+
+    Returns a ``{"ok", "reason", "detail"}`` result so an interactive caller can
+    tell the operator WHAT went wrong. Startup ignores it, as before."""
     cfg = _cfg(hub)
     if not cfg.get("enabled") or not cfg.get("repo"):
-        return
+        return {"ok": False, "reason": "disabled",
+                "detail": "extension source is disabled or has no repo configured"}
     repo = str(cfg["repo"]).strip()
     ref = str(cfg.get("ref") or "main").strip()
     dest = ext_dir(hub)
+
+    # Checked before the token is resolved, so a refused source never causes a
+    # vault read and never puts a credential on a command line for a repo this
+    # install may not fetch in the first place.
+    import repo_policy
+    if repo_policy.is_forbidden(repo):
+        logger.warning("site extensions: refusing configured source %s — %s",
+                       repo, repo_policy.refuse_reason(repo))
+        return {"ok": False, "reason": "forbidden_repo",
+                "detail": repo_policy.refuse_reason(repo)}
 
     token = None
     token_ref = cfg.get("token")
@@ -111,24 +136,58 @@ async def provision(hub) -> None:
             # source — just load whatever is already on disk.
             logger.info("site extensions: token unavailable — skipping fetch, "
                         "loading any modules already present")
-            return
+            return {"ok": False, "reason": "token_unavailable",
+                    "detail": f"the vault secret {str(token_ref)[3:]!r} could not be read. "
+                              "A newly saved secret can take a few seconds to become "
+                              "readable — retry shortly. If it persists, check that a "
+                              "cloud vault is enabled and the secret exists."}
 
     url = _repo_url_with_token(repo, token)
     try:
         if os.path.isdir(os.path.join(dest, ".git")):
-            rc, out = await _git("-C", dest, "remote", "set-url", "origin", url)
-            rc, out = await _git("-C", dest, "fetch", "--depth", "1", "origin", ref)
+            # Pass the credentialed URL as a ONE-SHOT argument and reset to
+            # FETCH_HEAD; never `remote set-url` it, so the token is not written
+            # into .git/config.
+            rc, out = await _git("-C", dest, "fetch", "--depth", "1", url, ref)
             if rc == 0:
-                rc, out = await _git("-C", dest, "reset", "--hard", f"origin/{ref}")
+                rc, out = await _git("-C", dest, "reset", "--hard", "FETCH_HEAD")
         else:
             os.makedirs(os.path.dirname(dest) or ".", exist_ok=True)
             rc, out = await _git("clone", "--depth", "1", "--branch", ref, url, dest)
         if rc == 0:
+            # git clone persists the credentialed URL in .git/config — rewrite it
+            # to the bare form immediately so the PAT is not left in plaintext on
+            # disk. (The fetch path above never wrote it.)
+            if token:
+                await _git("-C", dest, "remote", "set-url", "origin", repo)
             logger.info("site extensions: provisioned into %s", dest)
-        else:
-            logger.warning("site extensions: fetch failed (rc=%s): %s", rc, out)
+            return {"ok": True, "reason": "", "detail": ""}
+        safe = _redact(out, token)
+        logger.warning("site extensions: fetch failed (rc=%s): %s", rc, safe)
+        return {"ok": False, "reason": "git_failed",
+                "detail": _explain_git_failure(safe, ref)}
     except Exception as e:  # noqa: BLE001
-        logger.warning("site extensions: provisioning error: %s", e)
+        safe = _redact(str(e), token)
+        logger.warning("site extensions: provisioning error: %s", safe)
+        return {"ok": False, "reason": "error", "detail": safe}
+
+
+def _explain_git_failure(output: str, ref: str) -> str:
+    """Turn git's stderr into something an operator can act on. ``output`` is
+    ALREADY redacted — never pass raw git output here."""
+    low = (output or "").lower()
+    if "authentication failed" in low or "could not read username" in low or "403" in low:
+        return ("git rejected the credential — check the token is valid, not expired, "
+                "and grants Contents: Read to this repository. " + output)
+    if "repository not found" in low or "404" in low:
+        return ("repository not found — with a private repo this is also what an "
+                "unauthorised token looks like, so verify both the name and the "
+                "token's repository access. " + output)
+    if "remote branch" in low or "not found in upstream" in low or "couldn't find remote ref" in low:
+        return f"branch/ref {ref!r} does not exist in the repository. {output}"
+    if "could not resolve host" in low or "connection refused" in low or "timed out" in low:
+        return "could not reach github.com — check egress/DNS from this host. " + output
+    return output or "git failed with no output"
 
 
 def load(app, hub, ctx) -> None:

@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import pwd
 import ssl
 import subprocess
 import tempfile
 import time
+from typing import Tuple
 
 from sync_loop import run_sync_loop  # sibling leaf
 
@@ -301,20 +303,25 @@ class HubCertDistributionMixin:
         except Exception as e:  # never block distribution on a state-save
             cert_log.debug("wildcard push-state save failed: %s", e)
 
-    async def _hub_self_write(self, path: str, content: str, mode: int = 0o600) -> bool:
+    async def _hub_self_write(self, path: str, content: str, mode: int = 0o600) -> Tuple[bool, str]:
         """Write a file ON THE HUB via the loopback hub-self agent's ``WRITE_FILE``
         primitive — the SAME primitive a spoke-side cert deploy uses — so the
         hub's own cert-install path is uniform with spoke deploys (agent-rework
         #5 / Phase 4). Falls back to a direct inline atomic write (identical to
         what the agent would have run) when the hub-self agent isn't connected:
         feature off (``LM_HUB_SELF_AGENT=0``), not booted yet, or the loopback
-        listener died. Returns True iff the file landed."""
+        listener died.
+
+        Returns ``(ok, error)``. The error string is propagated into the
+        operator-facing target status: a failure here is almost always a
+        filesystem permission problem on the cert directory, and "see cert log"
+        gave the operator nothing to act on."""
         hub_self = getattr(self, "_hub_self", None)
         if hub_self is not None:
             try:
                 resp = await hub_self.write_file(path, content, mode=mode)
                 if resp.get("status") == "SUCCESS" and (resp.get("result") or {}).get("ok"):
-                    return True
+                    return True, ""
                 cert_log.debug("[cert] hub-self WRITE_FILE %s non-success → direct fallback (resp=%s)",
                                path, resp)
             except Exception as e:  # noqa: BLE001
@@ -322,10 +329,36 @@ class HubCertDistributionMixin:
         # Direct fallback — the identical atomic write the in-process agent runs.
         try:
             self._atomic_write(path, content, mode)
-            return True
+            return True, ""
         except Exception as e:  # noqa: BLE001
             cert_log.warning("[cert] direct write to %s failed: %s", path, e)
-            return False
+            return False, self._write_error_hint(path, e)
+
+    @staticmethod
+    def _write_error_hint(path: str, exc: Exception) -> str:
+        """Turn a raw write failure into something an operator can act on.
+
+        The atomic write creates its temp file IN THE TARGET DIRECTORY (required
+        so os.replace stays on one filesystem), so it needs write permission on
+        the DIRECTORY — not merely on the file. A cert dir owned by root while
+        the hub runs as an unprivileged service user therefore fails even though
+        the existing cert files look writable, which is exactly how this
+        presented in the field."""
+        d = os.path.dirname(os.path.abspath(path)) or "."
+        if isinstance(exc, PermissionError):
+            try:
+                owner = pwd.getpwuid(os.stat(d).st_uid).pw_name
+            except Exception:  # noqa: BLE001
+                owner = "another user"
+            try:
+                me = pwd.getpwuid(os.geteuid()).pw_name
+            except Exception:  # noqa: BLE001
+                me = f"uid {os.geteuid()}"
+            return (f"{exc} — the hub runs as '{me}' but {d} is owned by "
+                    f"'{owner}'. An atomic write needs write permission on the "
+                    f"DIRECTORY (the temp file is created there), not just on "
+                    f"the cert file. Fix with: chown -R {me} {d}")
+        return f"{exc} (writing {path})"
 
     async def _hub_self_restart(self) -> str:
         """Schedule ``lm-self-restart`` via the loopback hub-self agent's
@@ -436,9 +469,12 @@ class HubCertDistributionMixin:
             # uniformity with spoke-side cert deploys — with a direct inline
             # atomic-write fallback. The runtime CA registration below is hub-
             # state (not a file-on-disk op), so it stays inline.
-            if not await self._hub_self_write(ca_path, chain, 0o644):
-                cert_log.warning("[mtls] %s → hub: CA bundle write to %s failed", domain, ca_path)
-                return {"status": "ERROR", "message": f"CA bundle write to {ca_path} failed"}
+            ok_ca, ca_err = await self._hub_self_write(ca_path, chain, 0o644)
+            if not ok_ca:
+                cert_log.warning("[mtls] %s → hub: CA bundle write to %s failed: %s",
+                                 domain, ca_path, ca_err)
+                return {"status": "ERROR",
+                        "message": f"CA bundle write to {ca_path} failed: {ca_err}"}
             try:
                 self._register_hub_mtls_ca(ca_path)
             except Exception as e:  # noqa: BLE001
@@ -487,13 +523,14 @@ class HubCertDistributionMixin:
         # primitive a spoke-side cert deploy uses (agent-rework #5 / Phase 4) —
         # with a direct inline atomic-write fallback when the hub-self agent
         # isn't connected. Cert 0644, key 0600 (temp + os.replace either way).
-        ok_cert = await self._hub_self_write(cert_path, fullchain, 0o644)
-        ok_key = await self._hub_self_write(key_path, privkey, 0o600)
+        ok_cert, cert_err = await self._hub_self_write(cert_path, fullchain, 0o644)
+        ok_key, key_err = await self._hub_self_write(key_path, privkey, 0o600)
         if not ok_cert or not ok_key:
-            cert_log.warning("[cert] %s → hub: FAILED — write to %s/%s failed "
-                              "(see cert log for detail)", domain, cert_path, key_path)
+            why = cert_err or key_err
+            cert_log.warning("[cert] %s → hub: FAILED — write to %s/%s failed: %s",
+                             domain, cert_path, key_path, why)
             return {"status": "ERROR",
-                    "message": f"write to {cert_path}/{key_path} failed (see cert log)"}
+                    "message": f"write to {cert_path}/{key_path} failed: {why}"}
 
         # Also write the LE chain → the mTLS CA bundle (LM_MTLS_CA) so the hub
         # can verify spoke client certs once mTLS is enabled. The hub is the
@@ -507,7 +544,8 @@ class HubCertDistributionMixin:
         if chain and "BEGIN CERTIFICATE" in chain:
             ca_path = os.path.join(os.path.dirname(os.path.abspath(cert_path)),
                                    "mtls-ca.pem")
-            if await self._hub_self_write(ca_path, chain, 0o644):
+            _ok_ca, _ca_err = await self._hub_self_write(ca_path, chain, 0o644)
+            if _ok_ca:
                 try:
                     self._register_hub_mtls_ca(ca_path)
                 except Exception as e:  # noqa: BLE001
@@ -565,8 +603,13 @@ class HubCertDistributionMixin:
     def _atomic_write(path: str, content: str, mode: int) -> None:
         """Write content to path atomically (temp in the same dir + os.replace)
         at the given mode. Same-dir temp is required for os.replace to stay on
-        one filesystem (rename across filesystems raises EXDEV)."""
+        one filesystem (rename across filesystems raises EXDEV).
+
+        Creates the parent directory when missing: a cert target whose cert dir
+        has never been provisioned (nothing in the installers creates it) would
+        otherwise fail every sweep forever with a bare FileNotFoundError."""
         d = os.path.dirname(os.path.abspath(path)) or "."
+        os.makedirs(d, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
         try:
             with os.fdopen(fd, "w") as f:
