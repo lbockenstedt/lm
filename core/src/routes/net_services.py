@@ -1,5 +1,6 @@
 """DNS/LE/DHCP spoke-relay routes and shared spoke helpers."""
 import asyncio
+import ipaddress
 import time
 from api import (
     HTTPException, Request, _spoke_payload_or_raise, access, get_spoke_or_503,
@@ -225,8 +226,34 @@ def register(app, hub, ctx):
                                sid, exc)
                 return sid, {}
 
+        def _private_service_addresses(report):
+            addresses = []
+            for raw in report.get("service_addresses") or []:
+                try:
+                    address = ipaddress.ip_address(str(raw).strip())
+                except ValueError:
+                    continue
+                if (address.version == 4 and address.is_private
+                        and not address.is_loopback
+                        and not address.is_link_local
+                        and not address.is_unspecified
+                        and not address.is_multicast
+                        and not address.is_reserved):
+                    addresses.append(str(address))
+            return addresses
+
         discovered = []
         role_reports = await asyncio.gather(*[_roles(sid) for sid in candidates])
+        parent_id = (getattr(hub, "spoke_parent_map", {}).get(
+            hub._primary_key(dns_spoke)) or "")
+        parent_report = next((
+            report for sid, report in role_reports
+            if hub._primary_key(sid) == hub._primary_key(parent_id)
+        ), {})
+        coordinator_addresses = _private_service_addresses(
+            parent_report)
+        coordinator_host = (
+            coordinator_addresses[0] if coordinator_addresses else "")
         for sid, report in role_reports:
             if "dns-server" not in (report.get("installed_deploy_roles") or []):
                 continue
@@ -240,11 +267,7 @@ def register(app, hub, ctx):
                 report.get("configured_worker_roles") or [])
             member_id = str(worker_info.get("member_id") or sid)
 
-            service_addresses = [
-                str(addr).strip() for addr in (
-                    report.get("service_addresses") or [])
-                if str(addr).strip()
-            ]
+            service_addresses = _private_service_addresses(report)
             if not service_addresses:
                 raise HTTPException(
                     status_code=502,
@@ -257,13 +280,20 @@ def register(app, hub, ctx):
                     and configured and current_hosts.get(member_id) == host):
                 discovered.append({"spoke_id": sid, "status": "already-configured"})
                 continue
+            if parent_id and not coordinator_host:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"DNS Management host agent {parent_id} did not report "
+                        "a private local service address; worker coordinator "
+                        "configuration cannot be completed safely."))
             enrollment = await _relay_spoke(
                 dns_spoke, "DNS_CLUSTER_ENROLL_WORKER",
                 {"member": {"id": member_id, "host": host, "role": "resolver"}},
                 log_name="dns_cluster_enroll_worker", timeout=30)
             bootstrap = {
                 "member_id": member_id,
-                "coordinator": enrollment.get("coordinator"),
+                "coordinator": coordinator_host or enrollment.get("coordinator"),
                 "worker_secret": enrollment.get("worker_secret"),
                 "coordinator_ca_pem": enrollment.get("coordinator_ca_pem"),
             }
