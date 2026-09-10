@@ -24229,6 +24229,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 })
                 .catch(err => {
                     console.warn('DNS worker auto-discovery:', err);
+                    showToast(err.message || 'DNS worker discovery failed', 'error');
                     return null;
                 })
                 .finally(() => {
