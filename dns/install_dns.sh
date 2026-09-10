@@ -168,6 +168,14 @@ server:
     access-control: 192.168.0.0/16 allow
     access-control: 169.254.0.0/16 allow
 UNBOUNDSRV
+# Per-query-type counters (num.query.type.A, AAAA, PTR, ...) are omitted from
+# stats_noreset unless extended statistics are enabled. Keep this independent
+# of the listener block above so an existing install self-heals on re-run.
+grep -qE '^[[:space:]]*extended-statistics:[[:space:]]*yes' /etc/unbound/unbound.conf 2>/dev/null || cat >> /etc/unbound/unbound.conf <<'UNBOUNDSTATS'
+
+server:
+    extended-statistics: yes
+UNBOUNDSTATS
 mkdir -p /etc/unbound/conf.d
 grep -q "conf\.d" /etc/unbound/unbound.conf 2>/dev/null \
     || echo 'include-toplevel: "/etc/unbound/conf.d/*.conf"' >> /etc/unbound/unbound.conf
@@ -176,6 +184,9 @@ unbound-control-setup 2>/dev/null || true
 # version), still install/start the lm-dns spoke below instead of aborting the
 # whole install under `set -e` — the spoke must reach --hub regardless.
 systemctl enable --now unbound || echo "⚠️  unbound failed to start — DNS spoke will still install; check 'unbound-checkconf'"
+if systemctl is-active --quiet unbound; then
+    unbound-control reload >/dev/null 2>&1 || systemctl restart unbound
+fi
 
 # Cluster worker: this resolver is one member of a DNS cluster. Lay down the
 # lm-dns-worker unit that dials the coordinator's /ws/agent listener. The worker

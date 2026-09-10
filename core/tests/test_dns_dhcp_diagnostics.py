@@ -2,6 +2,7 @@
 
 import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -64,6 +65,22 @@ def test_dns_diagnostics_reports_healthy_lan_probe(monkeypatch, tmp_path):
         "answers": 1, "latency_ms": 1, "error": "",
     })
     assert mgr.diagnostics()["healthy"] is True
+
+
+def test_dns_stats_sum_threaded_query_type_counters(monkeypatch, tmp_path):
+    mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
+    output = "\n".join([
+        "total.num.queries=9",
+        "thread0.num.query.type.A=4",
+        "thread1.num.query.type.A=2",
+        "thread1.num.query.type.AAAA=3",
+    ])
+    monkeypatch.setattr(
+        dns_manager.subprocess, "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=0, stdout=output, stderr=""))
+
+    assert mgr.get_stats()["query_types"] == {"A": 6, "AAAA": 3}
 
 
 def test_dns_add_forwarder_persists_config_and_reloads(monkeypatch, tmp_path):
