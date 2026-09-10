@@ -13,8 +13,7 @@ from unbound_manager import UnboundManager
 from dns_cluster import (
     DEFAULT_CLUSTER_CONFIG, DEFAULT_DESIRED_STATE, DNS_WORKER_OPS,
     DnsClusterCoordinator, DnsDesiredState, DnsRecordError,
-    DnsStateUnavailable, derive_managed_records, load_cluster_config,
-    save_cluster_config,
+    DnsStateUnavailable, load_cluster_config, save_cluster_config,
 )
 
 logger = logging.getLogger("DNSSpoke")
@@ -57,14 +56,12 @@ class DNSSpoke(BaseSpoke):
 
     Two deployment shapes, one command surface:
 
-    * **Local (default, unchanged).** The spoke manages the Unbound instance on
-      its own host. Records are written to /etc/unbound/conf.d/lm-netbox.conf
-      and Unbound is reloaded after every write.
-    * **Cluster.** Two or more resolver hosts run ``lm-dns-worker`` and dial
+    * **Management only.** This spoke never manages a local Unbound service.
+      With no configured workers it reports that DNS Server is not configured.
+    * **Server workers.** One or more resolver hosts run ``lm-dns-worker`` and dial
       this spoke's ``/ws/agent`` listener. The spoke becomes the authoritative
       owner of a versioned record set and fans every change out to all members —
-      see ``dns_cluster.py``. Enabled only when 2+ members are configured, so an
-      existing single-host install behaves exactly as before.
+      see ``dns_cluster.py``. Two or more workers provide resolver redundancy.
 
     Commands:
       DNS_SYNC          — replace all managed records (list of record dicts)
@@ -121,8 +118,7 @@ class DNSSpoke(BaseSpoke):
     def cluster_listener_required(self) -> bool:
         """Tells the control plane whether to bind the DNS ``/ws/agent`` port.
 
-        Only a real (2+ member) cluster binds a port — a single-host DNS role
-        must never open a listener it has no use for.
+        One or more DNS Server workers require the management listener.
         """
         return bool(self.cluster.enabled)
 
@@ -202,7 +198,7 @@ class DNSSpoke(BaseSpoke):
 
         cp = getattr(self, "control_plane", None)
         secret = str(data.get("worker_secret") or "").strip()
-        enabling = len(members) >= 2
+        enabling = bool(members)
         have_secret = bool(getattr(cp, "agent_secret", "") or "")
         if enabling and not secret and not have_secret:
             self._transport.set_members(previous_members)
@@ -311,16 +307,10 @@ class DNSSpoke(BaseSpoke):
         return result
 
     async def _seed_desired_state(self) -> Dict[str, Any]:
-        """Adopt the records already being served as the cluster's v1."""
-        try:
-            local = await asyncio.to_thread(self.mgr.list_records)
-        except Exception as e:  # noqa: BLE001 — an agent-hosted module may have
-            # no local Unbound at all; the members are then asked instead.
-            logger.info("No local managed records to adopt (%s)", e)
-            local = []
+        """Adopt records already served by the configured DNS Server workers."""
         # Already inside the coordinator transaction (see
         # _apply_cluster_config_locked), so do not re-take the lock.
-        return await self.cluster.seed(derive_managed_records(local), locked=True)
+        return await self.cluster.seed([], locked=True)
 
     async def _standdown_removed(self, removed):
         """Ask removed resolvers to drop their cluster marker; report failures."""
@@ -470,7 +460,7 @@ class DNSSpoke(BaseSpoke):
             if not self.cluster.enabled:
                 return {"status": "SUCCESS", "enabled": False, "members": [],
                         "member_count": 0,
-                        "reason": "fewer than two resolver members configured"}
+                        "reason": "no DNS Server workers configured"}
             return await self._cluster_status()
 
         if cmd == "DNS_CLUSTER_RECONCILE":
@@ -512,64 +502,19 @@ class DNSSpoke(BaseSpoke):
             if cmd == "DNS_FORWARDERS":
                 return await self._cluster_forwarders()
 
-        # UnboundManager does sync subprocess.run (unbound-control reload/status/
-        # stats_noreset/list_forwards, 5-10s timeouts) + sync conf writes. This
-        # role runs on the lm-svcs agent's ONE shared event loop alongside the
-        # dhcp + base role sub-spokes; a hung unbound-control reload blocks the
-        # whole loop and the hub's 5s request_response fires for every in-flight
-        # request across all three sub-spokes at once. Offload each mgr call to a
-        # worker thread so the loop keeps servicing the other roles + the hub link.
-        if cmd == "DNS_SYNC":
-            records = data.get("records", [])
-            return await asyncio.to_thread(self.mgr.sync, records)
-
-        if cmd == "DNS_LIST":
-            records = await asyncio.to_thread(self.mgr.list_records)
-            return {"status": "SUCCESS", "records": records}
-
-        if cmd == "DNS_ADD":
-            name  = data.get("name")
-            rtype = data.get("type", "A")
-            value = data.get("value")
-            ttl   = int(data.get("ttl", 300))
-            if not name or not value:
-                return {"status": "ERROR", "message": "name and value are required"}
-            return await asyncio.to_thread(self.mgr.add_record, name, rtype, value, ttl)
-
-        if cmd == "DNS_UPDATE":
-            name  = data.get("name")
-            rtype = data.get("type", "A")
-            value = data.get("value")
-            ttl   = int(data.get("ttl", 300))
-            if not name or not value:
-                return {"status": "ERROR", "message": "name and value are required"}
-            return await asyncio.to_thread(self.mgr.update_record, name, rtype, value, ttl)
-
-        if cmd == "DNS_DELETE":
-            name  = data.get("name")
-            rtype = data.get("type")
-            if not name:
-                return {"status": "ERROR", "message": "name is required"}
-            return await asyncio.to_thread(self.mgr.delete_record, name, rtype)
-
-        if cmd == "DNS_STATUS":
-            s = await asyncio.to_thread(self.mgr.status)
-            return {"status": "SUCCESS", **s}
-
-        if cmd == "DNS_DIAGNOSTICS":
-            return await asyncio.to_thread(self.mgr.diagnostics)
-
-        if cmd == "DNS_STATS":
-            return await asyncio.to_thread(self.mgr.get_stats)
-
-        if cmd == "DNS_FORWARDERS":
-            return await asyncio.to_thread(self.mgr.list_forwarders)
+        if cmd in {
+            "DNS_SYNC", "DNS_LIST", "DNS_ADD", "DNS_UPDATE", "DNS_DELETE",
+            "DNS_STATUS", "DNS_DIAGNOSTICS", "DNS_STATS", "DNS_FORWARDERS",
+        }:
+            return {
+                "status": "ERROR",
+                "message": ("No DNS Server workers configured. Install the DNS "
+                            "Server role and add it to DNS Management."),
+            }
 
         return {"status": "ERROR", "error": f"Unknown command: {command_type}"}
 
     async def get_status(self) -> Dict[str, Any]:
-        # Polled by the hub for telemetry — offload the sync unbound-control
-        # status subprocess off the shared loop (same reason as handle_command).
         if self.cluster.enabled:
             report = self.cluster.cluster_report()
             reachable = report["member_count"] - len(report["unreachable"])
@@ -591,13 +536,13 @@ class DNSSpoke(BaseSpoke):
                            if report["converged"] and reachable == report["member_count"]
                            else "DEGRADED"),
             }
-        s = await asyncio.to_thread(self.mgr.status)
         return {
             "spoke_id":     self.spoke_id,
             "module":       "dns",
-            "unbound":      "running" if s["running"] else "stopped",
-            "record_count": s["record_count"],
-            "status":       "HEALTHY" if s["running"] else "DEGRADED",
+            "unbound":      "not-configured",
+            "record_count": self.desired.snapshot()["record_count"],
+            "status":       "DEGRADED",
+            "message":      "No DNS Server workers configured",
         }
 
     def get_version(self) -> str:

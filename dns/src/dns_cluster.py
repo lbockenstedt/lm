@@ -440,7 +440,10 @@ class DnsClusterCoordinator:
 
     @property
     def enabled(self) -> bool:
-        return bool(getattr(self.transport, "enabled", False))
+        # DNS Management is coordinator-only. One configured DNS Server worker
+        # is therefore enough to enable remote mode; two or more additionally
+        # provide resolver redundancy and convergence checks.
+        return bool(self.transport.member_ids())
 
     @property
     def state_error(self) -> str:
