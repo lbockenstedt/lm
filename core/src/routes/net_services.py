@@ -206,6 +206,35 @@ def register(app, hub, ctx):
         if dns_spoke == shared_spoke:
             dns_tenant = access.shared_tenant_id() or dns_tenant
 
+        def _upsert_dns_instance(sid, member_id, host):
+            global_config = hub.state.system_state.setdefault("global_config", {})
+            instances = global_config.setdefault("dns_instances", [])
+            existing = next((i for i in instances if isinstance(i, dict)
+                             and (i.get("source_agent_id") == sid
+                                  or i.get("member_id") == member_id)), None)
+            module_names = hub.state.system_state.get("module_names", {}) or {}
+            metadata = hub.state.system_state.get("module_metadata", {}) or {}
+            display_name = (
+                module_names.get(sid)
+                or (metadata.get(sid) or {}).get("display_name")
+                or sid
+            )
+            record = {
+                "id": (existing or {}).get("id") or f"discovered-{sid}",
+                "name": (existing or {}).get("name") or display_name,
+                "member_id": member_id,
+                "host": host,
+                "spoke_id": dns_spoke,
+                "tenant_id": dns_tenant,
+                "source_agent_id": sid,
+                "discovered": True,
+            }
+            if existing is not None:
+                existing.update(record)
+            else:
+                instances.append(record)
+            hub.state._mark_dirty()
+
         candidates = []
         for sid, module_type in list(hub.spoke_module_types.items()):
             if module_type != "agent" or hub._primary_key(sid) not in hub.active_connections:
@@ -278,6 +307,7 @@ def register(app, hub, ctx):
             host = service_addresses[0]
             if (member_id in current_ids and member_id in connected_ids
                     and configured and current_hosts.get(member_id) == host):
+                _upsert_dns_instance(sid, member_id, host)
                 discovered.append({"spoke_id": sid, "status": "already-configured"})
                 continue
             if parent_id and not coordinator_host:
@@ -359,26 +389,7 @@ def register(app, hub, ctx):
             discovered.append({"spoke_id": sid, "status": worker_status,
                                "deploy": deployed.get("message", "")})
 
-            global_config = hub.state.system_state.setdefault("global_config", {})
-            instances = global_config.setdefault("dns_instances", [])
-            existing = next((i for i in instances if isinstance(i, dict)
-                             and (i.get("source_agent_id") == sid
-                                  or i.get("member_id") == member_id)), None)
-            record = {
-                "id": (existing or {}).get("id") or f"discovered-{sid}",
-                "name": (existing or {}).get("name") or sid,
-                "member_id": member_id,
-                "host": host,
-                "spoke_id": dns_spoke,
-                "tenant_id": dns_tenant,
-                "source_agent_id": sid,
-                "discovered": True,
-            }
-            if existing is not None:
-                existing.update(record)
-            else:
-                instances.append(record)
-            hub.state._mark_dirty()
+            _upsert_dns_instance(sid, member_id, host)
 
         final_status = await _relay_spoke(
             dns_spoke, "DNS_CLUSTER_STATUS",

@@ -167,6 +167,59 @@ def test_dns_worker_discovery_enrolls_installed_server_role_without_user_secret(
     assert "worker_secret" not in saved
 
 
+def test_dns_worker_discovery_restores_inventory_for_healthy_existing_worker():
+    hub = FakeHub({
+        "dns-1": {
+            "DNS_CLUSTER_STATUS": {
+                "status": "SUCCESS",
+                "enabled": True,
+                "members": [{
+                    "id": "dns-worker-agent",
+                    "host": "10.0.0.11",
+                    "connected": True,
+                }],
+                "desired": {"version": 1},
+            },
+        },
+        "dns-worker-agent": {
+            "GET_AVAILABLE_ROLES": {
+                "status": "SUCCESS",
+                "installed_deploy_roles": ["dns-server"],
+                "active_deploy_roles": ["dns-server"],
+                "configured_worker_roles": ["dns-server"],
+                "configured_workers": [{
+                    "role": "dns-server",
+                    "member_id": "dns-worker-agent",
+                }],
+                "service_addresses": ["10.0.0.11"],
+            },
+        },
+    })
+    hub.active_connections.add("dns-worker-agent")
+    hub.state.system_state["module_names"] = {
+        "dns-worker-agent": "MIPBE-SVCS2",
+    }
+
+    r = _client(ADMIN, hub).post("/api/dns/cluster/discover")
+
+    assert r.status_code == 200
+    assert r.json()["workers"] == [{
+        "spoke_id": "dns-worker-agent",
+        "status": "already-configured",
+    }]
+    assert not any(cmd == "LOAD_ROLE" for _sid, cmd, _payload in hub.forwarded)
+    assert hub.state.system_state["global_config"]["dns_instances"] == [{
+        "id": "discovered-dns-worker-agent",
+        "name": "MIPBE-SVCS2",
+        "member_id": "dns-worker-agent",
+        "host": "10.0.0.11",
+        "spoke_id": "dns-1",
+        "tenant_id": "shared",
+        "source_agent_id": "dns-worker-agent",
+        "discovered": True,
+    }]
+
+
 def test_dns_worker_discovery_finalizes_once_after_all_workers_are_connected():
     hub = FakeHub()
     hub.spoke_module_types = {"dns-a-agent": "agent", "dns-b-agent": "agent"}
