@@ -232,13 +232,19 @@ def test_install_role_skips_clone_when_repo_present(tmp_path, monkeypatch):
 
 
 def test_install_role_no_clone_for_inrepo_role(tmp_path, monkeypatch):
-    """dns ships inside the lm repo → repo_url None → never clones (apt only)."""
+    """dns ships in LM and is management-only: no clone or local Unbound."""
     (tmp_path / "dns").mkdir()
     calls = []
     _fake_subprocess_run(monkeypatch, calls)
     agent = _agent_with_tmp_root(tmp_path, monkeypatch)
     asyncio.run(agent._install_role("dns"))
     assert not [c for c in calls if c[:2] == ["git", "clone"]], "dns must not clone"
+    assert not [c for c in calls if c[:2] == ["apt-get", "install"]], \
+        "the dns management role must not install Unbound"
+    assert not [c for c in calls if c and (
+        c[0] == "unbound-control-setup" or
+        c[:4] == ["systemctl", "enable", "--now", "unbound"]
+    )], "the dns management role must not configure or start local Unbound"
 
 
 def test_install_role_requirements_path_for_simulation_subdir(tmp_path, monkeypatch):
@@ -278,6 +284,30 @@ def test_install_role_le_installs_certbot(tmp_path, monkeypatch):
     # because the dir was pre-created; the role map URL is checked separately).
     _, _, _, repo_url = _ROLE_MAP["le"]
     assert repo_url and repo_url.endswith("/le.git")
+
+
+def test_role_post_install_dns_does_not_touch_local_unbound(tmp_path, monkeypatch):
+    """The management role must leave any local resolver untouched."""
+    etc = tmp_path / "etc" / "unbound"
+    etc.mkdir(parents=True)
+    conf = etc / "unbound.conf"
+    conf.write_text("# stock debian config\n")
+
+    real_path = agent_spoke.Path
+    def _redir(p="."):
+        s = str(p)
+        if s.startswith("/etc/unbound"):
+            return real_path(str(tmp_path) + s)
+        return real_path(p)
+    monkeypatch.setattr(agent_spoke, "Path", _redir)
+
+    calls = []
+    _fake_subprocess_run(monkeypatch, calls)
+    agent = _agent_with_tmp_root(tmp_path, monkeypatch)
+    agent._role_post_install("dns")
+
+    assert conf.read_text() == "# stock debian config\n"
+    assert not calls
 
 
 # ── 5. multi-role: one agent hosts many role sub-spokes ─────────────────────
