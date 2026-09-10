@@ -66,6 +66,57 @@ def test_dns_diagnostics_reports_healthy_lan_probe(monkeypatch, tmp_path):
     assert mgr.diagnostics()["healthy"] is True
 
 
+def test_dns_add_forwarder_persists_config_and_reloads(monkeypatch, tmp_path):
+    mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
+    monkeypatch.setattr(mgr, "list_forwarders",
+                        lambda: {"status": "SUCCESS", "forwarders": []})
+    monkeypatch.setattr(mgr, "_reload",
+                        lambda: {"ok": True, "error": ""})
+
+    result = mgr.add_forwarder(".", ["1.1.1.1", "2606:4700:4700::1111"])
+
+    assert result["status"] == "SUCCESS"
+    text = (tmp_path / "lm-forwarders.conf").read_text()
+    assert 'name: "."' in text
+    assert "forward-addr: 1.1.1.1" in text
+    assert "forward-addr: 2606:4700:4700::1111" in text
+
+
+def test_dns_add_forwarder_rejects_invalid_or_duplicate_values(monkeypatch, tmp_path):
+    mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
+
+    assert mgr.add_forwarder("bad zone", ["1.1.1.1"])["status"] == "ERROR"
+    assert mgr.add_forwarder(".", ["not-an-ip"])["status"] == "ERROR"
+
+    monkeypatch.setattr(mgr, "list_forwarders", lambda: {
+        "status": "SUCCESS",
+        "forwarders": [{"zone": ".", "upstreams": ["8.8.8.8"]}],
+    })
+    duplicate = mgr.add_forwarder(".", ["1.1.1.1"])
+    assert duplicate["status"] == "ERROR"
+    assert "already exists" in duplicate["message"]
+
+
+def test_dns_add_forwarder_restores_previous_file_when_reload_fails(
+        monkeypatch, tmp_path):
+    mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
+    mgr.forwarders_path = str(tmp_path / "lm-forwarders.conf")
+    original = '# existing\nforward-zone:\n    name: "old.example."\n'
+    (tmp_path / "lm-forwarders.conf").write_text(original)
+    monkeypatch.setattr(mgr, "list_forwarders",
+                        lambda: {"status": "SUCCESS", "forwarders": []})
+    reloads = iter([
+        {"ok": False, "error": "invalid configuration"},
+        {"ok": True, "error": ""},
+    ])
+    monkeypatch.setattr(mgr, "_reload", lambda: next(reloads))
+
+    result = mgr.add_forwarder(".", ["1.1.1.1"])
+
+    assert result["status"] == "ERROR"
+    assert (tmp_path / "lm-forwarders.conf").read_text() == original
+
+
 def test_dhcp_diagnostics_matches_kea_health_contract(monkeypatch):
     mgr = dhcp_manager.KeaManager()
     monkeypatch.setattr(mgr, "_unit_status", lambda unit: {
