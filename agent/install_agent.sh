@@ -255,7 +255,7 @@ for _mod in dns dhcp; do
         for _ip in $(hostname -I 2>/dev/null || true); do _alt="${_alt},IP:${_ip}"; done
         openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
             -keyout "$_tls/coordinator.key" -out "$_tls/coordinator.crt" \
-            -subj "/CN=${_san}" -addext "subjectAltName=${_alt}" >/dev/null 2>&1 \
+            -subj "/CN=lm-${_mod}-coordinator" -addext "subjectAltName=${_alt}" >/dev/null 2>&1 \
             && chmod 0644 "$_tls/coordinator.crt" && chmod 0600 "$_tls/coordinator.key" \
             && echo "Minted the hosted ${_mod} cluster-listener cert at $_tls/coordinator.crt" \
             || echo "⚠️  could not mint a ${_mod} cluster-listener cert; the module will retry at runtime"

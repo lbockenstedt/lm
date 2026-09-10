@@ -656,6 +656,10 @@ def test_co_loaded_roles_provision_distinct_listener_certificates(tmp_path,
                 "LM_DHCP_TLS_CERT", "LM_DHCP_TLS_KEY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("LM_LE_LIVE_DIR", "/nonexistent-le-dir")
+    monkeypatch.setattr(
+        "messaging.agent_hosting.socket.getfqdn",
+        lambda: "runner." + ("a" * 60) + ".internal.example",
+    )
 
     dns = _role_host(_DnsRoleHost, tmp_path, "dns")
     dhcp = _role_host(_DhcpRoleHost, tmp_path, "dhcp")

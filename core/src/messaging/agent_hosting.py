@@ -735,7 +735,7 @@ class AgentHostingControlPlane(BaseControlPlane):
                 subprocess.run(
                     ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
                      "-days", "3650", "-keyout", key, "-out", cert,
-                     "-subj", f"/CN={fqdn}",
+                     "-subj", f"/CN=lm-{self.MODULE_TYPE or 'service'}-coordinator",
                      "-addext", f"subjectAltName=DNS:{fqdn}"],
                     check=True, capture_output=True, timeout=120)
                 os.chmod(cert, 0o644)
