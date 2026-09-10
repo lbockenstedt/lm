@@ -236,6 +236,46 @@ def correlate_nw_records(devices, device_cache, ip=None, mac=None):
     return hits
 
 
+def dns_members_from_instances(instances, spoke_id):
+    """Project Setup DNS records for one management spoke into worker members."""
+    members = []
+    seen = set()
+    for inst in instances or []:
+        if not isinstance(inst, dict) or inst.get("spoke_id") != spoke_id:
+            continue
+        member_id = str(inst.get("member_id") or inst.get("name") or "").strip()
+        host = str(inst.get("host") or "").strip()
+        if not member_id or not host:
+            raise HTTPException(
+                status_code=400,
+                detail="Each DNS server requires a Worker ID and host/IP.")
+        if member_id in seen:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Duplicate DNS Worker ID: {member_id}")
+        seen.add(member_id)
+        members.append({"id": member_id, "host": host})
+    return members
+
+
+async def sync_dns_instance_topology(hub, instances, spoke_id,
+                                     worker_secret=""):
+    """Push Setup's DNS server list to its connected DNS Management spoke."""
+    if not spoke_id or hub._primary_key(spoke_id) not in hub.active_connections:
+        return False
+    payload = {"members": dns_members_from_instances(instances, spoke_id)}
+    if worker_secret:
+        payload["worker_secret"] = worker_secret
+    result = await hub.request_response(
+        spoke_id, "DNS_CLUSTER_CONFIG", payload, timeout=30.0)
+    data = _unwrap_spoke(result)
+    if data.get("status") not in ("SUCCESS", "PARTIAL"):
+        raise HTTPException(
+            status_code=502,
+            detail=data.get("message", "DNS worker configuration failed"))
+    return True
+
+
 def register(app, hub, ctx):
     """Register nw routes on the Hub app."""
     _session_user = ctx._session_user
@@ -1571,7 +1611,8 @@ def register(app, hub, ctx):
         return True
 
     def _instance_crud(route_prefix: str, storage_key: str, payload_fn=None,
-                       legacy_key: str = None, legacy_to_instance=None):
+                       legacy_key: str = None, legacy_to_instance=None,
+                       topology_sync=None):
         """Register GET/POST/PUT/DELETE /setup/<route_prefix>[/id] for one
         multi-instance product, mirroring the firewalls CRUD. Each instance is
         a dict with an `id` and `spoke_id`; on add/update the config is pushed
@@ -1624,9 +1665,10 @@ def register(app, hub, ctx):
             """Add an instance and push its config to the bound spoke (partial_success + pushed=False when the spoke is down)."""
             try:
                 data = await request.json()
-                new_inst = data.get("instance", {})
+                new_inst = dict(data.get("instance", {}))
                 if not new_inst.get("name"):
                     raise HTTPException(status_code=400, detail="Missing instance name")
+                worker_secret = str(new_inst.pop("worker_secret", "") or "")
                 _enforce_tenant_bind(request, new_inst, route_prefix.split("-")[0])
                 if new_inst.get("spoke_id") and route_prefix in PRODUCT_ROLE:
                     # Auto-load the matching coordinator role if the operator
@@ -1645,12 +1687,17 @@ def register(app, hub, ctx):
                 if "id" not in new_inst:
                     new_inst["id"] = str(uuid.uuid4())
                 global_config = hub.state.system_state.get("global_config", {})
-                instances = global_config.get(storage_key, [])
+                instances = list(global_config.get(storage_key, []))
+                candidate = [*instances, new_inst]
+                pushed = (await topology_sync(
+                    hub, candidate, new_inst.get("spoke_id"), worker_secret)
+                    if topology_sync else
+                    await _push_instance_config(
+                        hub, new_inst, payload_fn, storage_key))
                 instances.append(new_inst)
                 global_config[storage_key] = instances
                 hub.state.system_state["global_config"] = global_config
                 hub.state._mark_dirty()
-                pushed = await _push_instance_config(hub, new_inst, payload_fn, storage_key)
                 status = "ok" if pushed else "partial_success"
                 msg = "Instance added and pushed to spoke." if pushed else "Instance added; spoke not connected."
                 return {"status": status, "message": msg, "pushed": pushed, "instance": new_inst}
@@ -1665,9 +1712,10 @@ def register(app, hub, ctx):
             """Update an instance and push to its spoke (partial_success + pushed=False when the spoke is down)."""
             try:
                 data = await request.json()
-                update_data = data.get("config", {})
+                update_data = dict(data.get("config", {}))
+                worker_secret = str(update_data.pop("worker_secret", "") or "")
                 global_config = hub.state.system_state.get("global_config", {})
-                instances = global_config.get(storage_key, [])
+                instances = list(global_config.get(storage_key, []))
                 idx = next((i for i, x in enumerate(instances) if x.get("id") == instance_id), None)
                 if idx is None:
                     raise HTTPException(status_code=404, detail="Instance not found")
@@ -1676,16 +1724,28 @@ def register(app, hub, ctx):
                 if new_spoke and new_spoke != old_spoke and route_prefix in PRODUCT_ROLE:
                     role, module_type = PRODUCT_ROLE[route_prefix]
                     update_data["spoke_id"] = await ensure_role_loaded(hub, new_spoke, role, module_type)
-                instances[idx].update(update_data)
+                updated = dict(instances[idx])
+                updated.update(update_data)
                 # Validate/strip a Credential Vault reference on the merged record.
                 await instance_vault.validate_ref(
-                    hub, instances[idx], _session_user(request),
+                    hub, updated, _session_user(request),
                     is_admin=_is_admin(_session_user(request)), storage_key=storage_key)
-                instance_vault.strip_inline_secrets(instances[idx], storage_key)
+                instance_vault.strip_inline_secrets(updated, storage_key)
+                instances[idx] = updated
+                if topology_sync:
+                    pushed = await topology_sync(
+                        hub, instances, updated.get("spoke_id"), worker_secret)
+                    if old_spoke and old_spoke != updated.get("spoke_id"):
+                        old_pushed = await topology_sync(
+                            hub, instances, old_spoke, "")
+                        pushed = pushed and old_pushed
+                else:
+                    pushed = await _push_instance_config(
+                        hub, updated, payload_fn, storage_key)
+                global_config[storage_key] = instances
                 hub.state.system_state["global_config"] = global_config
                 hub.state._mark_dirty()
-                pushed = await _push_instance_config(hub, instances[idx], payload_fn, storage_key)
-                if route_prefix in PRODUCT_ROLE and old_spoke and old_spoke != instances[idx].get("spoke_id"):
+                if route_prefix in PRODUCT_ROLE and old_spoke and old_spoke != updated.get("spoke_id"):
                     role, _mt = PRODUCT_ROLE[route_prefix]
                     await maybe_unload_orphaned_role(hub, old_spoke, role, instances)
                 if pushed:
@@ -1701,19 +1761,24 @@ def register(app, hub, ctx):
         async def delete_instance(instance_id: str):
             """Delete an instance; the spoke keeps its last config until re-pushed."""
             global_config = hub.state.system_state.get("global_config", {})
-            instances = global_config.get(storage_key, [])
+            instances = list(global_config.get(storage_key, []))
             deleted = next((x for x in instances if x.get("id") == instance_id), None)
-            before = len(instances)
-            instances[:] = [x for x in instances if x.get("id") != instance_id]
-            if len(instances) == before:
+            if deleted is None:
                 raise HTTPException(status_code=404, detail="Instance not found")
+            candidate = [x for x in instances if x.get("id") != instance_id]
+            pushed = (await topology_sync(
+                hub, candidate, deleted.get("spoke_id"), "")
+                if topology_sync else False)
+            instances = candidate
+            global_config[storage_key] = instances
             hub.state.system_state["global_config"] = global_config
             hub.state._mark_dirty()
             spoke_id = (deleted or {}).get("spoke_id")
             if route_prefix in PRODUCT_ROLE and spoke_id:
                 role, _mt = PRODUCT_ROLE[route_prefix]
                 await maybe_unload_orphaned_role(hub, spoke_id, role, instances)
-            return {"status": "ok", "message": f"Instance {instance_id} deleted."}
+            return {"status": "ok", "message": f"Instance {instance_id} deleted.",
+                    "pushed": pushed}
 
     _instance_crud(
         "nac-instances", "nac_instances",
@@ -1802,5 +1867,7 @@ def register(app, hub, ctx):
             "LDAP_ADMIN_PW": inst.get("admin_pw"),
         },
     )
-    _instance_crud("dns-instances", "dns_instances", None)
+    _instance_crud(
+        "dns-instances", "dns_instances", None,
+        topology_sync=sync_dns_instance_topology)
     _instance_crud("dhcp-instances", "dhcp_instances", None)
