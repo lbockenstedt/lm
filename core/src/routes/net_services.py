@@ -69,9 +69,9 @@ def register(app, hub, ctx):
         spoke_id = (inst or {}).get("spoke_id") or ""
         if spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
             return spoke_id
-        resolved = (hub.get_dns_spoke_for_shared()
-                   if access.tenant_is_shared(tid)
-                   else hub.get_dns_spoke_for_tenant(tid))
+        resolved = hub.get_dns_spoke_for_tenant(tid)
+        if not resolved:
+            resolved = hub.get_dns_spoke_for_shared()
         return spoke_or_503(resolved, "DNS")
 
     async def _dns_merge_fanout(cmd: str, payload: dict, list_key: str):
@@ -2500,9 +2500,9 @@ def register(app, hub, ctx):
         spoke_id = (inst or {}).get("spoke_id") or ""
         if spoke_id and hub._primary_key(spoke_id) in hub.active_connections:
             return spoke_id
-        resolved = (hub.get_dhcp_spoke_for_shared()
-                   if access.tenant_is_shared(tid)
-                   else hub.get_dhcp_spoke_for_tenant(tid))
+        resolved = hub.get_dhcp_spoke_for_tenant(tid)
+        if not resolved:
+            resolved = hub.get_dhcp_spoke_for_shared()
         return spoke_or_503(resolved, "DHCP")
 
     async def _dhcp_merge_fanout(cmd: str, payload: dict, list_key: str):
