@@ -122,6 +122,23 @@ def test_dns_cluster_reconcile_relays_the_reconcile_command():
     assert hub.forwarded[-1][:2] == ("dns-1", "DNS_CLUSTER_RECONCILE")
 
 
+def test_dns_forwarder_post_relays_zone_and_upstreams():
+    hub = FakeHub({"dns-1": {"DNS_FORWARDER_ADD": {
+        "status": "SUCCESS", "zone": ".", "upstreams": ["1.1.1.1"]}}})
+
+    response = _client(ADMIN, hub).post(
+        "/api/dns/forwarders",
+        json={"zone": ".", "upstreams": ["1.1.1.1"]},
+    )
+
+    assert response.status_code == 200
+    assert hub.forwarded[-1] == (
+        "dns-1",
+        "DNS_FORWARDER_ADD",
+        {"zone": ".", "upstreams": ["1.1.1.1"]},
+    )
+
+
 def test_dns_worker_discovery_enrolls_installed_server_role_without_user_secret():
     cert = "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----"
     hub = FakeHub({
