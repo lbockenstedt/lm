@@ -101,8 +101,8 @@ async def provision(hub) -> None:
     token_ref = cfg.get("token")
     if token_ref:
         try:
-            import key_vault
-            token = await key_vault.resolve_ref(hub, str(token_ref))
+            import cloud_vault
+            token = await cloud_vault.resolve_ref(hub, str(token_ref))
         except Exception as e:  # noqa: BLE001
             logger.debug("site extensions: token resolve failed: %s", e)
         if str(token_ref).startswith("kv:") and not token:

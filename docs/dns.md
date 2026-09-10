@@ -5,11 +5,11 @@ keywords: [auto, backends, behaviors, dns, dns_delete, dns_forwarders, dns_updat
 
 # dns — DNS (Unbound)
 
-DNS spoke managing a local Unbound resolver. Repo: `dns`. `module_type = "dns"`. See [architecture-topology.md](architecture-topology.md).
+DNS management spoke coordinating Unbound resolvers. Repo: `dns`. `module_type = "dns"`. See [architecture-topology.md](architecture-topology.md).
 
 ## Role & module_type
 
-Manages a local **Unbound** resolver via the `unbound-control` CLI. Includes the role code plus `install_dns.sh` for Unbound host prep/direct role deployment; no API_SPEC or standalone README.
+The hosted `dns` role is management-only and does not install or start Unbound. Resolver workers are deployed separately with the `dns-server` role. A direct standalone install can still manage a local **Unbound** resolver via `unbound-control`.
 
 ## What it does
 
@@ -19,9 +19,9 @@ In the WebUI, open a node's **DNS** module from the sidebar to reach the **Recor
 
 ## Entrypoints
 
-`python3 -m src.main` (`DNSControlPlane`); spoke `DNSSpoke(BaseSpoke)`. `install_dns.sh` performs Unbound host prep for direct installs; the agent role loader uses the same deployment path when loading the `dns` role.
+`python3 -m src.main` (`DNSControlPlane`); spoke `DNSSpoke(BaseSpoke)`. `install_dns.sh` performs Unbound host prep for direct installs and `dns-server`; the agent `dns` role loader installs only management dependencies.
 
-> **Primarily a role now.** DNS runs mainly as the **`dns`** role hosted by the agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-dns` (module_type `dns`, parent-auto-approved) and loads it in-process via `agent/src/agent_spoke.py::_install_role` (this repo is bundled in-tree; the role loader also does the Unbound host prep). `install_dns.sh` can create a direct role deployment when needed, but the agent role remains the standard path. Config (`UNBOUND_CONTROL` etc.) comes from the hub push (WebUI), not a per-module `.env`.
+> **Primarily a role now.** DNS runs mainly as the **`dns`** role hosted by the agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a management-only sub-spoke `{agent}-dns` (module_type `dns`, parent-auto-approved). Load `dns-server` separately on each resolver worker; load both roles when the coordinator and resolver intentionally share one host. `install_dns.sh` can create a direct local deployment when needed. Config comes from the hub push (WebUI), not a per-module `.env`.
 
 ## Ports / backends
 
@@ -38,6 +38,43 @@ None (no installer present).
 ## Key commands / handlers (`dns_spoke.handle_command`)
 
 `GET_VERSION`, `UPDATE_CONFIG` (rebuild manager), `DNS_STATUS`, `DNS_DIAGNOSTICS` (service/config/control status, port-53 listeners, configured/local addresses, and loopback/LAN DNS probes; relayed by `GET /api/dns/diagnostics`), `DNS_LIST` (regex-parses `local-data:`/`local-data-ptr:` directives out of the managed conf.d file — `<name>. <ttl> IN <type> <value>`; memoized on the conf file's mtime — NOT `unbound-control list_local_data`), `DNS_ADD` (append to the parsed record list + full conf rewrite + `unbound-control reload`), `DNS_DELETE` (filter out the matching record + full conf rewrite + reload), `DNS_UPDATE` (delete-then-add, non-atomic), `DNS_SYNC` (`sync_records` — only-add-missing against existing names, added/skipped counts), `DNS_STATS` (`get_stats` via `unbound-control stats_noreset` — total queries, cache hit/miss + ratio, recursion latency, uptime, per-type breakdown; relayed by `GET /api/dns/stats`), `DNS_FORWARDERS` (`list_forwarders` via `unbound-control list_forwards` — per-zone upstream servers; relayed by `GET /api/dns/forwarders`).
+
+## Multi-resolver cluster (two Unbound hosts, one DNS module)
+
+A DNS module can drive **two or more Unbound hosts** instead of the one on its own box. It becomes the authoritative owner of the record set and keeps every resolver identical.
+
+**Shape.** One `dns` spoke is the **coordinator**; each resolver host runs an `lm-dns-worker` unit that dials the coordinator's `/ws/agent` listener on **8769** (pxmx 8766 / cs 8767 / hub-self 8768 are taken, so the dns and dhcp roles can be co-loaded on one agent). Workers authenticate with a shared PSK and every frame is HMAC-signed — the same machinery pxmx node-agents use (`core/src/messaging/agent_hosting.py` + `core/src/messaging/service_cluster.py`). Workers are **not** spokes: they never appear in the hub registry and tenant routing stays "one tenant → one coordinator".
+
+**The hop is always encrypted AND verified.** The PSK rides in the first handshake frame, so the coordinator URL defaults to `wss://`, a `ws://` URL to a **remote** host is rejected outright, and — unlike the hub leg — there is **no unverified mode at all**. The installer mints (or accepts) a coordinator certificate at `/etc/lm-dns/tls/`, wires it into the unit as `LM_TLS_CERT`/`LM_TLS_KEY`, and each worker install requires `--ca-cert` (that certificate, pinned as `LM_CLUSTER_CA_CERT`). A configured CA path that does not exist fails closed. `LM_CLUSTER_TLS_CHECK_HOSTNAME=0` relaxes only the SAN match for a self-signed-by-IP coordinator; the trust anchor is still enforced. The listener **refuses to bind** plaintext on `0.0.0.0` (`AGENT_LISTENER_REQUIRE_TLS`): with no cert it leaves the port closed and logs why.
+
+**The worker is not a generic agent.** Its op table is fixed at import: `DNSW_APPLY`, `DNSW_STATE`, `DNSW_STATUS`, `DNSW_DIAGNOSTICS`, `DNSW_STATS`, `DNSW_FORWARDERS`, `DNSW_STANDDOWN`. There is no `RUN_COMMAND`, no `WRITE_FILE`, no caller-supplied path or URL. The conf path is fixed at start from local config. Forwarders are per-resolver, so the **Forwarders** tab in cluster mode aggregates `DNSW_FORWARDERS` from every member (tagged with the member it came from) instead of reading the coordinator box's own Unbound, which may not exist.
+
+**Desired state — persisted first, fail closed.** Every write (`DNS_SYNC` / `DNS_ADD` / `DNS_UPDATE` / `DNS_DELETE`) lands in the coordinator's versioned, digested desired state (`/var/lib/lm-dns/desired.json`), which is written to disk **before** anything is fanned out: if the write fails, no worker is touched and the coordinator stays exactly where it was. A desired-state file that exists but cannot be read (or whose digest does not match its own records) **blocks every mutation and the reconcile loop** with an actionable error — starting clean there would silently republish an empty record set to both resolvers. Mutations and reconcile passes are serialized under one lock, so two concurrent changes can never interleave their fan-outs. Once persisted the set is fanned out to every member. Records are **validated before they are versioned** — a name or value containing a quote, newline, whitespace or config punctuation is rejected outright, because Unbound's `local-data: "…"` is quote-delimited and line-oriented and would otherwise accept injected directives. An identical re-sync does not bump the version, so the periodic NetBox loop doesn't make every worker look momentarily stale.
+
+**Convergence needs three facts to agree.** `DNSW_STATE` reports the digest of the managed records on disk (parsed from the conf, with the auto-generated PTR companions folded back out), the digest the worker **confirmed applying** (written only after a successful `unbound-control reload`), and the applied version. A member counts as converged only when all three match the desired set. That distinction matters: a conf write whose reload failed already has the right digest ON DISK while the resolver is still ANSWERING the previous set — the member is reported `pending-reload`, stays degraded, and reconcile re-issues `DNSW_APPLY` until the reload is confirmed. An out-of-band edit shows as `drifted`.
+
+**Partial application is reported as partial.** A commit is `SUCCESS` only when every member confirmed the exact desired digest. A worker records the applied version only after Unbound **confirmed the reload** — `unbound-control reload` failures are propagated (they used to be swallowed with a warning), so a conf file the resolver never picked up shows as drift and is reconciled rather than counted as applied. A member that is offline, errored, *or that answers SUCCESS with a different digest* counts as failed → `PARTIAL` (some applied) or `ERROR` (none did). The module telemetry is `DEGRADED` until the cluster is converged and fully reachable.
+
+**Reconcile.** A 30s loop asks each member what it actually has on disk (`DNSW_STATE`) and re-pushes only to members that drifted. That is also the reconnect path: a resolver that reboots reports a stale/absent version and is brought back automatically. `POST /api/dns/cluster/reconcile` forces a pass.
+
+**Configure it.** DNS → **Diagnostics** → *Configure resolver cluster* (Global Admin), or `POST /api/dns/cluster` with `{"members": [{"id","host"}, …], "worker_secret": "…"}`. The secret is write-only — it becomes the listener PSK and is never returned — and it is **required on first enablement**: nothing generates one, because a value the operator cannot read could never be given to the workers. Re-saving with the field blank keeps the stored secret.
+
+**Enabling adopts what is already live — and never guesses.** On the single-host → cluster transition the coordinator seeds its desired state (as v1) from the records already being served. Every populated source (its own conf and each reachable member) must agree **exactly**; two shapes are explicitly safe — all populated sources identical, or exactly one populated and the rest empty. Anything else **aborts** with a per-source record count and digest, and the module stays single-host until an operator reconciles the resolvers by hand. Adopting the largest set would silently erase every record unique to the smaller one. Until something is committed the reconcile pass **skips** rather than fanning an empty default out over resolvers that are already answering.
+
+**Enabling is one transaction.** Validate → persist topology → bind the listener → seed → stand down removed members all run under the same lock every record apply takes, and the listener is **awaited**: if it does not actually come up (no cert, port in use) the call returns `ERROR` with the reason and the topology is rolled back, rather than reporting success before an asynchronous failure. A rolled-back change also **restores the previous worker PSK** — overwriting it and then reverting the topology would leave every already-provisioned resolver unable to authenticate against a coordinator whose config no longer reflects the change.
+
+**Each cluster role serves its own certificate.** A generic agent hosting both the dns and dhcp cluster roles gives each listener its own material (`/etc/lm-dns/tls`, `/etc/lm-dhcp/tls`, overridable via `LM_DNS_TLS_CERT`/`LM_DHCP_TLS_CERT`). Provisioning binds it to that role instance and never writes the process environment, so the role that starts first cannot supply the certificate for the other — a worker pinning its own role's cert would then fail to verify.
+
+**Removing a member deconfigures it.** A removed resolver is sent `DNSW_STANDDOWN` (drops its cluster marker; its records are left in place so it keeps answering). A removal that cannot be reached is reported as `PARTIAL` with the node named — never as a clean success. On the resolver itself, `install_dns.sh --stand-down` stops `lm-dns-worker` and clears its marker; it runs **before** the `--hub` check, because a node that no longer belongs to any coordinator has no hub to name. Unloading the `dns-server` deploy role stops the worker too. Then install each resolver host with the same value:
+
+```
+sudo bash install_dns.sh --member-id dns-a --coordinator <coordinator-host> --worker-secret <secret>
+```
+
+…plus `--ca-cert <coordinator cert>`, which is **required** — the worker verifies the coordinator before sending its secret. That installs Unbound **and** the `lm-dns-worker` unit; it implies `--infra-only` (the module lives on the coordinator, not here). The coordinator install creates `/etc/lm-dns`, `/var/lib/lm-dns` and `/etc/lm-dns/tls` owned by `svc_lm`, and mints a self-signed coordinator certificate (override with `--tls-cert`/`--tls-key`/`--tls-san`). Copy `/etc/lm-dns/tls/coordinator.crt` to each resolver and pass it as `--ca-cert`. The hosted management role requires at least two configured members to enable cluster fan-out. Direct standalone installs retain local single-resolver behavior.
+
+**See it.** DNS → **Diagnostics** grows a *Resolver cluster* panel (per-member convergence, applied version + digest, Unbound up/down, last-seen, and the last commit's per-member errors) plus each member's own diagnostics findings. `GET /api/dns/cluster` returns the same report; Settings → Diagnostics carries a one-line summary. A non-admin sees the verdict but not member hostnames, digests or error text.
+
 
 ## NetBox auto-sync (source of truth)
 
@@ -88,7 +125,7 @@ Module view tabs: **Records**, **Statistics** (total-queries / cache-hit-ratio /
 ## Troubleshooting / common questions
 
 - **"I added a record in NetBox but never touched the DNS module — why is it already in Unbound?"** The NetBox → Unbound auto-sync loop (default every 300s) picked it up: any IP with a `dns_name` set gets added automatically — see the NetBox auto-sync section above. Check `GET /api/dns-dhcp/sync-status` for the last run's timing and result, or just press **Sync now** instead of waiting.
-- **"I added/edited a record but the Records tab (or `DNS_LIST`) shows nothing at all."** Check that Unbound is actually running on the node hosting the `dns` role, and that `unbound-control` has permission to talk to it. `list_records` swallows any read failure of the managed conf file (missing file, permission denied, Unbound not started) and just returns an empty list — there's no visible error, the symptom is simply "records list is empty." Run `unbound-control status` directly on the box and confirm the account running the `dns` role can read/write the managed conf path (default `/etc/unbound/conf.d/lm-netbox.conf`, or your `UNBOUND_CONF` override).
+- **"I added/edited a record but the Records tab (or `DNS_LIST`) shows nothing at all."** For a hosted management role, confirm both resolver members are configured and connected in DNS → Cluster. For a direct standalone install, check that local Unbound is running and that `unbound-control` can access it.
 - **"The DNS module shows offline/red in the WebUI."** The `{agent}-dns` sub-spoke isn't connected to the hub. Check the node's `lm-agent` unit first — the `dns` role rides on it and is loaded in-process, so an agent-wide outage takes DNS down with it. A `dns`-only failure independent of the agent is unusual unless this node uses the rare standalone `lm-dhcp`-style hand-rolled `lm-dns` unit.
 - **"Records I added by hand disappeared after a sync."** Sync (both the loop and the button) is only-add-missing — it never deletes. If a manually-added record vanished, check whether someone ran an explicit `DNS_UPDATE`/`DNS_DELETE` on it (those are the only paths that touch existing entries), and remember the managed conf.d file is fully regenerated on every write — anything edited directly on the box outside the DNS module (bypassing Lab Manager entirely) will get clobbered on the next write.
 - **"Is this dnsmasq or Unbound?"** Unbound — confirmed by the `unbound-control` CLI dependency and the `status`/`stats_noreset`/`list_forwards`/`reload` verbs it actually issues. There is no dnsmasq involved in this module.

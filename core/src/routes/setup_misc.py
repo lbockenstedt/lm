@@ -232,10 +232,40 @@ def register(app, hub, ctx):
             _validate_update_config(config)
 
             gc = hub.state.system_state.setdefault("global_config", {})
+            # Snapshot the hub-tree-affecting fields BEFORE the merge so we can
+            # tell whether THIS save actually changed which repo/branch the hub
+            # deploys from (see resync trigger below).
+            old_hub_repo = (gc.get("update_sources") or {}).get("hub")
+            old_branch = gc.get("global_branch")
+
             gc.update(config)
             hub.state._mark_dirty()
 
-            return {"status": "ok", "message": "Global configuration updated."}
+            # Repo/branch changes must take effect immediately, not silently wait
+            # for the next 15-min repo-sync tick (or worse, for the next tick
+            # AFTER whatever gates a hub restart) — an admin who just repointed
+            # the hub at a different repo/branch reasonably expects the checkout
+            # to switch right away, the same as clicking "Update now". Fire the
+            # SAME resync path as the manual button (run_repo_sync_all, which
+            # calls perform_update() -> _git_update()) in the background so the
+            # save itself stays fast; best-effort, never fails the save.
+            new_hub_repo = (gc.get("update_sources") or {}).get("hub")
+            new_branch = gc.get("global_branch")
+            resync_triggered = False
+            if new_hub_repo != old_hub_repo or new_branch != old_branch:
+                logger.info(
+                    "API: /setup/config changed the hub repo/branch (repo %r -> %r, "
+                    "branch %r -> %r) — triggering an immediate resync",
+                    old_hub_repo, new_hub_repo, old_branch, new_branch,
+                )
+                try:
+                    asyncio.create_task(hub.run_repo_sync_all(force_spokes=False, force=True))
+                    resync_triggered = True
+                except Exception as e:  # noqa: BLE001 — the config save must still succeed
+                    logger.warning("Failed to schedule post-config-save resync: %s", e)
+
+            return {"status": "ok", "message": "Global configuration updated.",
+                    "resync_triggered": resync_triggered}
         except HTTPException:
             raise
         except _ConfigValidationError as e:
