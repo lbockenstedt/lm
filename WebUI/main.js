@@ -24181,6 +24181,21 @@ async function applyDhcpHaConfig() {
     loadDHCPData('Diagnostics');
 }
 
+// Renders the "Queries by Destination" rows — e.g. "A record for
+// www.dwx.com — 42 queries" — from the /api/dns/stats `query_names` list
+// (already sorted/filtered server-side; this just formats it).
+function _ddQueryNameRows(names) {
+    if (!names.length) {
+        return '<p class="text-slate-400 italic text-sm">No per-name query data yet (Unbound query logging may take a moment to start collecting after first enabled).</p>';
+    }
+    return `<div class="max-h-80 overflow-y-auto divide-y divide-slate-100">${names.map(q => `
+        <div class="flex items-center justify-between gap-3 py-1.5 text-xs">
+            <span><span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium mr-2">${escapeHtml(q.type)}</span>
+                  <span class="font-mono text-slate-700">${escapeHtml(q.name)}</span></span>
+            <span class="font-mono text-slate-500 whitespace-nowrap">${(q.count || 0).toLocaleString()} queries</span>
+        </div>`).join('')}</div>`;
+}
+
 // Best-effort "last NetBox → Unbound/Kea auto-sync" line for the analytics
 // panels; silent when the status endpoint is unreachable.
 async function _ddSyncStatusLine(side) {
@@ -24301,11 +24316,35 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 </div>`).join('');
             container.innerHTML = `
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">${tiles}</div>
-                <div class="bg-white border border-slate-200 rounded-lg p-4">
+                <div class="bg-white border border-slate-200 rounded-lg p-4 mb-4">
                     <div class="text-sm font-semibold text-slate-700 mb-2">Queries by Type</div>
                     ${typeRows || '<p class="text-slate-400 italic text-sm">No query-type data yet.</p>'}
                 </div>
+                <div class="bg-white border border-slate-200 rounded-lg p-4">
+                    <div class="flex items-center justify-between mb-2 gap-3">
+                        <div class="text-sm font-semibold text-slate-700">Queries by Destination</div>
+                        <input id="dns-query-name-search" type="search" placeholder="Search name (e.g. www.dwx.com)"
+                               class="text-xs border border-slate-300 rounded-md px-2 py-1 w-64 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                    </div>
+                    <div id="dns-query-name-list">${_ddQueryNameRows(d.query_names || [])}</div>
+                </div>
                 ${syncLine}`;
+            const searchInput = document.getElementById('dns-query-name-search');
+            if (searchInput) {
+                let debounce;
+                searchInput.addEventListener('input', () => {
+                    clearTimeout(debounce);
+                    const q = searchInput.value;
+                    debounce = setTimeout(async () => {
+                        const list = document.getElementById('dns-query-name-list');
+                        if (!list) return;
+                        const tq = _tenantQS();
+                        const searchParam = q ? (tq ? '&' : '?') + 'search=' + encodeURIComponent(q) : '';
+                        const { ok: ok2, data: d2 } = await _spokeFetch('/api/dns/stats' + tq + searchParam);
+                        if (ok2 && d2) list.innerHTML = _ddQueryNameRows(d2.query_names || []);
+                    }, 250);
+                });
+            }
             return;
         }
 
