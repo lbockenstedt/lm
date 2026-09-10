@@ -151,8 +151,15 @@ class SpokeAlertMixin:
             relay_ids = self._relayed_agent_ids()
         if not relay_ids:
             return set()
+        metadata = self.state.system_state.get("module_metadata", {}) or {}
+        direct_module_ids = {
+            sid for sid, meta in metadata.items()
+            if isinstance(meta, dict)
+            and meta.get("install_uuid")
+            and not meta.get("parent_name")
+        }
         leaked = {s for s, ap in self.approved_modules.items()
-                  if ap and s in relay_ids}
+                  if ap and s in relay_ids and s not in direct_module_ids}
         if not leaked:
             return set()
         for sid in leaked:
