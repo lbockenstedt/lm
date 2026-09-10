@@ -297,6 +297,32 @@ _DEPLOY_ROLE_EXTRA_UNITS = {
 }
 
 
+def _configured_service_workers() -> list:
+    """Non-secret identity for configured DNS/DHCP worker sidecars."""
+    out = []
+    for role, path, prefix in (
+        ("dns-server", "/etc/lm-dns-worker/worker.env", "LM_DNS"),
+        ("dhcp-server", "/etc/lm-dhcp-worker/worker.env", "LM_DHCP"),
+    ):
+        if not os.path.exists(path):
+            continue
+        values = {}
+        try:
+            for line in Path(path).read_text(encoding="utf-8").splitlines():
+                key, sep, value = line.partition("=")
+                if sep and key in (f"{prefix}_MEMBER_ID",
+                                   f"{prefix}_COORDINATOR"):
+                    values[key] = value.strip()
+        except OSError:
+            pass
+        out.append({
+            "role": role,
+            "member_id": values.get(f"{prefix}_MEMBER_ID", ""),
+            "coordinator": values.get(f"{prefix}_COORDINATOR", ""),
+        })
+    return out
+
+
 def _active_deploy_roles(installed_roles: list) -> list:
     active = []
     for role, units in _DEPLOY_ROLE_UNITS.items():
@@ -656,13 +682,13 @@ class GenericAgent(BaseSpoke):
             if extra and cmd and cmd[-1].rstrip().endswith("--infra-only"):
                 cmd[-1] = cmd[-1] + extra
         elif role_name in ("dns-server", "dhcp-server"):
-            extra = self._service_worker_install_args(config or {})
+            extra = self._service_worker_install_args(role_name, config or {})
             if extra and cmd and cmd[-1].rstrip().endswith("--infra-only"):
                 cmd[-1] = cmd[-1] + extra
         return cmd
 
     @staticmethod
-    def _service_worker_install_args(config: dict) -> str:
+    def _service_worker_install_args(role_name, config: dict = None) -> str:
         """Project a dns-server/dhcp-server LOAD_ROLE ``config`` into the
         cluster-worker installer flags appended after ``--infra-only``.
 
@@ -671,6 +697,9 @@ class GenericAgent(BaseSpoke):
         listener, which is what turns two independently-deployed service hosts
         into one managed cluster. Absent (the pre-existing single-host flow) →
         nothing is appended and the deploy is byte-identical to before."""
+        if config is None:
+            config = role_name
+            role_name = "dns-server"
         member_id = config.get("member_id") or config.get("id")
         coordinator = config.get("coordinator") or config.get("coordinator_url")
         secret = config.get("worker_secret") or config.get("secret")
@@ -683,6 +712,20 @@ class GenericAgent(BaseSpoke):
         # Coordinator trust anchor: the worker VERIFIES the coordinator's cert
         # before sending its secret, so the installer refuses to run without one.
         ca = config.get("ca_cert") or config.get("coordinator_ca")
+        ca_pem = str(config.get("coordinator_ca_pem") or "").strip()
+        if ca_pem:
+            if ("-----BEGIN CERTIFICATE-----" not in ca_pem
+                    or "-----END CERTIFICATE-----" not in ca_pem
+                    or len(ca_pem) > 65536):
+                raise ValueError("coordinator_ca_pem is not a valid PEM certificate")
+            service = role_name.removesuffix("-server")
+            ca_path = Path(f"/etc/lm-{service}-worker/coordinator-ca.pem")
+            ca_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = ca_path.with_suffix(".tmp")
+            tmp.write_text(ca_pem + "\n", encoding="utf-8")
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, ca_path)
+            ca = str(ca_path)
         if ca:
             parts.append(" --ca-cert " + shlex.quote(str(ca)))
         # Kea HA channel: credentials + peer scope + mutual-TLS material. These
@@ -1200,11 +1243,15 @@ class GenericAgent(BaseSpoke):
             ]
             active_deploy_roles = await asyncio.to_thread(
                 _active_deploy_roles, installed_deploy_roles)
+            configured_workers = _configured_service_workers()
             return {"status": "SUCCESS",
                     "roles": list(_ROLE_MAP.keys()),
                     "deploy_roles": list(_DEPLOY_ROLES.keys()),
                     "installed_deploy_roles": installed_deploy_roles,
                     "active_deploy_roles": active_deploy_roles,
+                    "configured_worker_roles": [
+                        item["role"] for item in configured_workers],
+                    "configured_workers": configured_workers,
                     "deploy": self._deploy_status,
                     "active": [{"role": r,
                                 "sub_spoke_id": e["conn"].spoke_id,
