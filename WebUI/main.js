@@ -24338,9 +24338,8 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                     debounce = setTimeout(async () => {
                         const list = document.getElementById('dns-query-name-list');
                         if (!list) return;
-                        const tq = _tenantQS();
-                        const searchParam = q ? (tq ? '&' : '?') + 'search=' + encodeURIComponent(q) : '';
-                        const { ok: ok2, data: d2 } = await _spokeFetch('/api/dns/stats' + tq + searchParam);
+                        const searchParam = q ? (_tenantQS() ? '&' : '?') + 'search=' + encodeURIComponent(q) : '';
+                        const { ok: ok2, data: d2 } = await _spokeFetch('/api/dns/stats' + _tenantQS() + searchParam);
                         if (ok2 && d2) list.innerHTML = _ddQueryNameRows(d2.query_names || []);
                     }, 250);
                 });
