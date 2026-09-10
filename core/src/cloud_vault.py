@@ -26,6 +26,7 @@ credentials" abstraction.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, Optional
 
@@ -107,11 +108,26 @@ async def get_secret(hub, name: str, http: Optional[httpx.AsyncClient] = None) -
     return await oci_vault.get_secret(oci_vault.get_oci_config(hub), vcfg, name, http=http)
 
 
-async def set_secret(hub, name: str, value: str, http: Optional[httpx.AsyncClient] = None) -> Any:
+async def set_secret(hub, name: str, value: str, http: Optional[httpx.AsyncClient] = None,
+                     *, confirm: bool = True, attempts: int = 8,
+                     delay: float = 2.0) -> Any:
     """Store a named secret in whichever cloud vault is currently enabled.
     Raises if no vault is enabled (unlike the read-side helpers, a caller
     that explicitly asked to STORE a credential needs to know it didn't
-    happen) or if the backend call itself fails."""
+    happen) or if the backend call itself fails.
+
+    ``confirm`` (default on) re-reads the secret until it comes back, so the
+    write is only reported successful once the value is actually READABLE.
+    Cloud vaults are not read-your-writes: OCI returns CreateSecret 200 with
+    the secret in ``CREATING`` and 404s the bundle until it goes ``ACTIVE``,
+    and Azure can briefly 404 a freshly created (or soft-delete-recovered)
+    secret while it propagates. Without this, "save a credential then use it"
+    races — which is exactly what saving a token and immediately fetching
+    does. Provider-agnostic on purpose: any backend added later inherits it.
+
+    Best-effort: a confirmation timeout logs and returns the write result
+    rather than raising, because the secret IS stored — only its visibility
+    lagged, and failing the save would be more destructive than a slow read."""
     provider = active_provider(hub)
     if provider is None:
         raise RuntimeError("no cloud vault provider is enabled — cannot store credential")
@@ -122,10 +138,31 @@ async def set_secret(hub, name: str, value: str, http: Optional[httpx.AsyncClien
         vault_url = (gc.get("key_vault", {}) or {}).get("vault_url")
         if not vault_url:
             raise RuntimeError("Azure Key Vault enabled but 'vault_url' is not configured")
-        return await key_vault.set_secret(get_oidc_config(hub), vault_url, name, value, http=http)
-    import oci_vault
-    vcfg = dict(gc.get("oci_vault", {}) or {})
-    return await oci_vault.set_secret(oci_vault.get_oci_config(hub), vcfg, name, value, http=http)
+        result = await key_vault.set_secret(get_oidc_config(hub), vault_url, name, value, http=http)
+    else:
+        import oci_vault
+        vcfg = dict(gc.get("oci_vault", {}) or {})
+        result = await oci_vault.set_secret(oci_vault.get_oci_config(hub), vcfg, name, value,
+                                            http=http)
+    if confirm:
+        await _confirm_readable(hub, name, attempts=attempts, delay=delay)
+    return result
+
+
+async def _confirm_readable(hub, name: str, *, attempts: int = 8,
+                            delay: float = 2.0) -> bool:
+    """Poll ``get_secret`` until the named secret reads back, or give up."""
+    for i in range(attempts):
+        try:
+            if await get_secret(hub, name) is not None:
+                return True
+        except Exception:  # noqa: BLE001 — a transient backend error is a retry
+            pass
+        if i < attempts - 1:
+            await asyncio.sleep(delay)
+    logger.warning("cloud vault: secret %r stored but not readable after %.0fs — "
+                   "an immediate read may fail until it propagates", name, attempts * delay)
+    return False
 
 
 async def delete_secret(hub, name: str, http: Optional[httpx.AsyncClient] = None) -> bool:

@@ -162,3 +162,53 @@ def test_readopt_single_flight_per_agent():
 
     asyncio.run(_drive())
     assert hub.load_role_calls == [("agent-r11", "console")]
+
+
+# ── re-adoption must not recreate a port collision ──────────────────────────
+#
+# The load-role API refuses to put two :443-binding roles on one box, but this
+# re-push path bypasses those routes entirely. An agent recorded with both
+# (from before that guard existed) would otherwise have the loser re-pushed on
+# EVERY reconnect, stealing the port back from whichever role serves traffic.
+# That is the "proxmox stole :443 from the edge proxy and answered every request
+# with OK" outage, recreated automatically forever.
+
+def test_readopt_skips_role_conflicting_with_a_live_listener_role():
+    hub = _ReadoptHub()
+    hub._record_agent_role("agent-r11", "proxy")
+    hub._record_agent_role("agent-r11", "proxmox")
+    hub._record_agent_role("agent-r11", "dns")
+    # The edge proxy is live and owns :443; proxmox must NOT be re-pushed.
+    hub.active_connections["agent-r11-proxy"] = object()
+    asyncio.run(hub._readopt_agent_roles("agent-r11"))
+    assert hub.load_role_calls == [("agent-r11", "dns")]
+    details = [e["detail"] for e in hub.spoke_events.get("agent-r11", [])]
+    assert "role=proxmox conflicts_with=proxy" in details
+
+
+def test_readopt_pushes_only_one_of_two_offline_conflicting_roles():
+    """Neither is live, so exactly one wins — never both."""
+    hub = _ReadoptHub()
+    hub._record_agent_role("agent-r11", "proxy")
+    hub._record_agent_role("agent-r11", "proxmox")
+    asyncio.run(hub._readopt_agent_roles("agent-r11"))
+    pushed = [r for _sid, r in hub.load_role_calls]
+    assert len(pushed) == 1 and pushed[0] in {"proxy", "proxmox"}
+
+
+def test_readopt_unaffected_for_non_listener_roles():
+    """dns/dhcp/le bind nothing — a listener role on the box must not block them."""
+    hub = _ReadoptHub()
+    for r in ("proxmox", "dns", "dhcp", "le"):
+        hub._record_agent_role("agent-r11", r)
+    hub.active_connections["agent-r11-proxmox"] = object()
+    asyncio.run(hub._readopt_agent_roles("agent-r11"))
+    assert sorted(r for _s, r in hub.load_role_calls) == ["dhcp", "dns", "le"]
+
+
+def test_readopt_still_heals_a_lone_listener_role():
+    """The guard must not break the normal single-listener self-heal."""
+    hub = _ReadoptHub()
+    hub._record_agent_role("agent-r11", "proxy")
+    asyncio.run(hub._readopt_agent_roles("agent-r11"))
+    assert hub.load_role_calls == [("agent-r11", "proxy")]

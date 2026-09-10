@@ -195,3 +195,133 @@ def test_cap_oversized_logs_disabled_and_missing_dir_are_safe(tmp_path):
     assert logging_setup.cap_oversized_logs(str(tmp_path), max_bytes=0) == []
     assert f.stat().st_size == 4096
     assert logging_setup.cap_oversized_logs(str(tmp_path / "nope"), max_bytes=10) == []
+
+
+# ── _QuietSuccessAccessFilter / _quiet_access_paths ─────────────────────────
+#
+# Pins two related fixes: (1) the default quiet-access paths used to be
+# "/api/health,/api/status" — neither route exists ANYWHERE in the codebase,
+# so liveness-poll suppression had silently never worked; the real routes are
+# the bare "/status" (routes/setup.py) and "/api/hub/health"
+# (routes/net_services.py). (2) the filter now does an EXACT path match (via
+# _ACCESS_LINE_RE) instead of a raw substring test, so quieting "/status"
+# doesn't also swallow unrelated routes that merely contain that substring,
+# e.g. "/api/le/status" or "/setup/repo-sync/status".
+
+def _access_record(msg, levelno=logging.INFO):
+    return logging.LogRecord("uvicorn.access", levelno, __file__, 1, msg, None, None)
+
+
+def test_default_quiets_every_successful_request():
+    """Successful access lines (e.g. `GET /setup/diagnostics 200`) are routine
+    request chatter and are debug-only by default, not just the two liveness
+    routes. The path-scoped mode remains available via the env var."""
+    saved = os.environ.pop("LM_QUIET_ACCESS_PATHS", None)
+    try:
+        assert logging_setup._quiet_access_paths() == ("*",)
+    finally:
+        if saved is not None:
+            os.environ["LM_QUIET_ACCESS_PATHS"] = saved
+
+
+def test_wildcard_drops_any_successful_path():
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    f = logging_setup._QuietSuccessAccessFilter(("*",))
+    for path, code in (
+        ("/setup/diagnostics", 200),
+        ("/api/le/status", 200),
+        ("/", 304),
+        ("/static/main.js", 200),
+    ):
+        rec = _access_record(f'170.9.228.83:55688 - "GET {path} HTTP/1.1" {code}')
+        assert f.filter(rec) is False, path
+
+
+def test_wildcard_still_logs_failures():
+    """4xx/5xx are real signal and must survive the broadened default."""
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    f = logging_setup._QuietSuccessAccessFilter(("*",))
+    for code in (401, 404, 500, 502):
+        rec = _access_record(f'1.2.3.4:1 - "GET /setup/diagnostics HTTP/1.1" {code}')
+        assert f.filter(rec) is True, code
+
+
+def test_wildcard_bypassed_at_debug():
+    saved = logging.getLogger("uvicorn.access").level
+    try:
+        logging.getLogger("uvicorn.access").setLevel(logging.DEBUG)
+        f = logging_setup._QuietSuccessAccessFilter(("*",))
+        rec = _access_record('1.2.3.4:1 - "GET /setup/diagnostics HTTP/1.1" 200')
+        assert f.filter(rec) is True
+    finally:
+        logging.getLogger("uvicorn.access").setLevel(saved)
+
+
+def test_explicit_path_list_does_not_enable_wildcard():
+    """An operator narrowing the list back to specific paths must not get
+    match-all behaviour."""
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    f = logging_setup._QuietSuccessAccessFilter(("/status",))
+    rec = _access_record('1.2.3.4:1 - "GET /setup/diagnostics HTTP/1.1" 200')
+    assert f.filter(rec) is True
+
+
+def test_empty_env_disables_filtering_entirely():
+    with mock.patch.dict(os.environ, {"LM_QUIET_ACCESS_PATHS": ""}):
+        assert logging_setup._quiet_access_paths() == ()
+
+
+def test_env_override_is_comma_split_and_trimmed():
+    with mock.patch.dict(os.environ, {"LM_QUIET_ACCESS_PATHS": " /foo , /bar/baz "}):
+        assert logging_setup._quiet_access_paths() == ("/foo", "/bar/baz")
+
+
+def test_successful_liveness_poll_is_dropped():
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    f = logging_setup._QuietSuccessAccessFilter(("/status",))
+    rec = _access_record('127.0.0.1:0 - "GET /status HTTP/1.1" 200')
+    assert f.filter(rec) is False
+
+
+def test_failing_liveness_poll_still_logs():
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    f = logging_setup._QuietSuccessAccessFilter(("/status",))
+    rec = _access_record('127.0.0.1:0 - "GET /status HTTP/1.1" 503')
+    assert f.filter(rec) is True
+
+
+def test_query_string_is_stripped_before_matching():
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    f = logging_setup._QuietSuccessAccessFilter(("/status",))
+    rec = _access_record('127.0.0.1:0 - "GET /status?foo=bar HTTP/1.1" 200')
+    assert f.filter(rec) is False
+
+
+def test_substring_lookalike_route_is_not_swallowed():
+    """The bug this pins: a raw substring match on '/status' used to also
+    silence '/api/le/status' and similar routes that merely CONTAIN the
+    quieted path, even though they're a different, real endpoint."""
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    f = logging_setup._QuietSuccessAccessFilter(("/status",))
+    rec = _access_record('127.0.0.1:0 - "GET /api/le/status HTTP/1.1" 200')
+    assert f.filter(rec) is True
+    rec2 = _access_record('127.0.0.1:0 - "GET /setup/repo-sync/status HTTP/1.1" 200')
+    assert f.filter(rec2) is True
+
+
+def test_debug_level_bypasses_filter_entirely():
+    saved = logging.getLogger("uvicorn.access").level
+    try:
+        logging.getLogger("uvicorn.access").setLevel(logging.DEBUG)
+        f = logging_setup._QuietSuccessAccessFilter(("/status",))
+        rec = _access_record('127.0.0.1:0 - "GET /status HTTP/1.1" 200')
+        assert f.filter(rec) is True
+    finally:
+        logging.getLogger("uvicorn.access").setLevel(saved)
+
+
+def test_non_access_log_line_is_never_dropped():
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    f = logging_setup._QuietSuccessAccessFilter(("/status",))
+    rec = _access_record("some unrelated log message with no request line")
+    assert f.filter(rec) is True
