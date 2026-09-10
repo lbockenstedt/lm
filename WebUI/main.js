@@ -30055,13 +30055,15 @@ const INSTANCE_PRODUCTS = {
         ],
     },
     dns: {
-        title: 'DNS / Unbound Instance',
+        title: 'DNS Server Worker',
         endpoint: '/setup/dns-instances',
         listId: 'dns-instances-list',
         moduleType: 'dns',
-        rowSummary: inst => `${inst.host || '—'}`,
+        rowSummary: inst => `${inst.member_id || inst.name || '—'} · ${inst.host || '—'}`,
         fields: [
+            { id: 'member_id', label: 'Worker ID (must match --member-id)', placeholder: 'dns-a' },
             { id: 'host', label: 'DNS Server Host / IP', placeholder: '10.0.0.1' },
+            { id: 'worker_secret', label: 'Worker Secret (write-only; required on first server)', type: 'password', placeholder: 'Same value used by lm-dns-worker' },
         ],
     },
     dhcp: {
