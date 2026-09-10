@@ -334,6 +334,29 @@ async def test_relayed_agent_skip_is_change_gated(monkeypatch):
     assert "pxmx-agent" not in h.approved_modules
 
 
+def test_relayed_id_collision_preserves_real_direct_module():
+    h = _AlertHub(approved={"dns-agent": True},
+                  last_seen={"pxmx:dns-agent": 100.0})
+    h.state.system_state["agent_config"] = {
+        "dns-agent": {"install_uuid": "agent-install-uuid"}}
+    h.state.system_state["module_metadata"] = {
+        "dns-agent": {
+            "display_name": "DNS agent",
+            "install_uuid": "direct-module-install-uuid",
+        },
+    }
+    h.state.system_state["known_modules"] = ["dns-agent"]
+    h.known_modules = ["dns-agent"]
+    h.agent_info = {
+        "dns-agent": {"spoke_id": "pxmx", "last_seen": 100.0}}
+
+    removed = h._selfheal_leaked_agents()
+
+    assert removed == set()
+    assert h.approved_modules["dns-agent"] is True
+    assert h.state.system_state["known_modules"] == ["dns-agent"]
+
+
 # ── get_active_spoke_alerts ──────────────────────────────────────────────────
 
 def test_active_alerts_severity_ordering():
