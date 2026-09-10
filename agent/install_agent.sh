@@ -250,11 +250,34 @@ retire_legacy_agent() {
         purged=1
     fi
     if [ "$purged" = 1 ]; then
-        systemctl daemon-reload 2>/dev/null || true
         echo "    The role-capable ${SERVICE_NAME} now owns this box's spoke connection."
     fi
 }
 retire_legacy_agent
+
+# ── Hosted cluster-role listener certificates ──────────────────────────────
+# The dns/dhcp roles can host service workers on their own /ws/agent port, and
+# that listener REFUSES to serve plaintext (the worker PSK rides in the
+# handshake). A hosted role has no installer of its own, so mint the listener
+# certificate here; the module also self-provisions at runtime, this just makes
+# it available before the first role load. Idempotent.
+for _mod in dns dhcp; do
+    _tls="/etc/lm-${_mod}/tls"
+    if [[ ! -s "$_tls/coordinator.crt" || ! -s "$_tls/coordinator.key" ]]; then
+        install -d -m 0750 "$_tls"
+        _san="$(hostname -f 2>/dev/null || hostname -s)"
+        _alt="DNS:${_san}"
+        for _ip in $(hostname -I 2>/dev/null || true); do _alt="${_alt},IP:${_ip}"; done
+        openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+            -keyout "$_tls/coordinator.key" -out "$_tls/coordinator.crt" \
+            -subj "/CN=${_san}" -addext "subjectAltName=${_alt}" >/dev/null 2>&1 \
+            && chmod 0644 "$_tls/coordinator.crt" && chmod 0600 "$_tls/coordinator.key" \
+            && echo "Minted the hosted ${_mod} cluster-listener cert at $_tls/coordinator.crt" \
+            || echo "⚠️  could not mint a ${_mod} cluster-listener cert; the module will retry at runtime"
+    fi
+done
+
+systemctl daemon-reload 2>/dev/null || true
 
 # Clone or update the LM repo (contains agent + all roles).
 # A real prior install is a git checkout at $INSTALL_DIR (has .git + agent/).
