@@ -501,7 +501,10 @@ def test_unload_dns_server_stops_and_disables_unbound(monkeypatch):
 
     assert result["status"] == "SUCCESS"
     assert result["deploy"] is True
-    assert calls == [["systemctl", "disable", "--now", "unbound"]]
+    # The cluster worker is torn down FIRST (a removed node must stop dialling
+    # its old coordinator), then the server itself.
+    assert calls == [["systemctl", "disable", "--now", "lm-dns-worker"],
+                     ["systemctl", "disable", "--now", "unbound"]]
 
 
 def test_unload_dns_server_refuses_while_dns_module_is_loaded():

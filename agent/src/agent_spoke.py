@@ -222,6 +222,17 @@ _DEPLOY_ROLE_UNITS = {
     "dhcp-server": ("kea-dhcp4-server", "kea-ctrl-agent"),
 }
 
+# Units a cluster deploy ALSO leaves behind. They are stopped on unload but are
+# deliberately NOT part of _DEPLOY_ROLE_UNITS: a single-host node never has them,
+# and requiring them for the "is this role active" probe would report every
+# non-clustered dns/dhcp server as inactive. Without stopping these, unloading a
+# server role left the cluster worker (and the Kea HA control agent) running and
+# still talking to a coordinator that no longer manages this node.
+_DEPLOY_ROLE_EXTRA_UNITS = {
+    "dns-server": ("lm-dns-worker",),
+    "dhcp-server": ("lm-dhcp-worker", "kea-ha-agent"),
+}
+
 
 def _active_deploy_roles(installed_roles: list) -> list:
     active = []
@@ -602,7 +613,51 @@ class GenericAgent(BaseSpoke):
             extra = self._ldap_server_install_args(config or {})
             if extra and cmd and cmd[-1].rstrip().endswith("--infra-only"):
                 cmd[-1] = cmd[-1] + extra
+        elif role_name in ("dns-server", "dhcp-server"):
+            extra = self._service_worker_install_args(config or {})
+            if extra and cmd and cmd[-1].rstrip().endswith("--infra-only"):
+                cmd[-1] = cmd[-1] + extra
         return cmd
+
+    @staticmethod
+    def _service_worker_install_args(config: dict) -> str:
+        """Project a dns-server/dhcp-server LOAD_ROLE ``config`` into the
+        cluster-worker installer flags appended after ``--infra-only``.
+
+        Present → the installer also lays down the ``lm-dns-worker`` /
+        ``lm-dhcp-worker`` unit that dials the managing module's coordinator
+        listener, which is what turns two independently-deployed service hosts
+        into one managed cluster. Absent (the pre-existing single-host flow) →
+        nothing is appended and the deploy is byte-identical to before."""
+        member_id = config.get("member_id") or config.get("id")
+        coordinator = config.get("coordinator") or config.get("coordinator_url")
+        secret = config.get("worker_secret") or config.get("secret")
+        if not (member_id and coordinator and secret):
+            return ""
+        parts = ["", *(" --" + flag + " " + shlex.quote(str(value))
+                       for flag, value in (("member-id", member_id),
+                                           ("coordinator", coordinator),
+                                           ("worker-secret", secret)))]
+        # Coordinator trust anchor: the worker VERIFIES the coordinator's cert
+        # before sending its secret, so the installer refuses to run without one.
+        ca = config.get("ca_cert") or config.get("coordinator_ca")
+        if ca:
+            parts.append(" --ca-cert " + shlex.quote(str(ca)))
+        # Kea HA channel: credentials + peer scope + mutual-TLS material. These
+        # are per-node install-time inputs; without forwarding them the deploy
+        # role produced a node that could never join its pair.
+        for flag, key in (("ha-user", "ha_user"), ("ha-password", "ha_password"),
+                          ("ha-port", "ha_port"), ("ha-ca", "ha_ca"),
+                          ("ha-cert", "ha_cert"), ("ha-key", "ha_key")):
+            value = config.get(key)
+            if value:
+                parts.append(" --" + flag + " " + shlex.quote(str(value)))
+        peers = config.get("ha_peers") or config.get("ha_peer") or []
+        if isinstance(peers, str):
+            peers = [p.strip() for p in peers.split(",") if p.strip()]
+        for peer in peers:
+            parts.append(" --ha-peer " + shlex.quote(str(peer)))
+        return "".join(parts)
 
     @staticmethod
     def _ldap_server_install_args(config: dict) -> str:
@@ -1266,6 +1321,17 @@ class GenericAgent(BaseSpoke):
                         "message": f"Deployment of '{role_name}' is still running.",
                     }
                 units = _DEPLOY_ROLE_UNITS[role_name]
+                # Stop the cluster sidecars first (best-effort: a single-host
+                # node has none). Leaving lm-*-worker running would keep a
+                # removed node dialling its old coordinator, and kea-ha-agent
+                # would keep the authenticated HA port open.
+                extra = _DEPLOY_ROLE_EXTRA_UNITS.get(role_name, ())
+                if extra:
+                    await asyncio.to_thread(
+                        subprocess.run,
+                        ["systemctl", "disable", "--now", *extra],
+                        capture_output=True, text=True, check=False, timeout=60,
+                    )
                 result = await asyncio.to_thread(
                     subprocess.run,
                     ["systemctl", "disable", "--now", *units],
@@ -1338,6 +1404,16 @@ class GenericAgent(BaseSpoke):
             await task
         except (asyncio.CancelledError, Exception):
             pass
+        # The run task owns only the hub connection. A cluster-hosting role
+        # (dns/dhcp) also holds a /ws/agent listener + module background loops
+        # on separate tasks; without this the port stays bound and the role
+        # cannot be re-loaded. Awaited here, outside the cancelled context.
+        shutdown = getattr(conn, "shutdown", None)
+        if callable(shutdown):
+            try:
+                await shutdown()
+            except Exception as e:  # noqa: BLE001 — teardown is best-effort
+                logger.warning("shutdown of role '%s' raised: %s", role_name, e)
         logger.info("Role unloaded: %s (sub-spoke %s)", role_name, conn.spoke_id)
         self._persist_loaded_roles(remove={role_name})
 
