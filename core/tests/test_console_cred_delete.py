@@ -158,3 +158,104 @@ def test_reject_when_nothing_to_delete():
     r = c.post("/api/console/credentials", json={"credentials": [{"username": "admin"}]})
     assert r.status_code == 409
     assert "No local credentials to delete" in r.json()["detail"]
+
+
+# ── no vault configured: full create/update is the supported path ───────────
+#
+# Pins the counterpart of the LE DNS-01 bug: the module unconditionally refused
+# to create console passwords and steered the operator to the Credential Vault
+# — even when NO vault was configured, leaving nowhere at all to put them.
+# With no vault, the hub-local store (Fernet-encrypted `console_credentials_enc`)
+# is the supported path and the editor must stay open.
+
+def _set_vault(enabled):
+    sys.modules["cred_vault"]._vault_available = lambda hub: enabled
+
+
+def test_get_reports_editable_when_no_vault_configured():
+    _set_vault(False)
+    c, _ = _client([{"username": "admin", "password": "x"}])
+    body = c.get("/api/console/credentials").json()
+    assert body["creation_disabled"] is False
+    assert body["read_only"] is False
+    assert body["vault_enabled"] is False
+    assert body["migrate_warning"] == ""  # nothing to migrate to
+
+
+def test_create_new_credential_allowed_when_no_vault():
+    _set_vault(False)
+    c, hub = _client([])
+    r = c.post("/api/console/credentials",
+               json={"credentials": [{"username": "admin", "password": "s3cret"}]})
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok", "count": 1}
+    assert _local(hub) == [{"username": "admin", "password": "s3cret"}]
+    # Pushed to connected console spokes so it takes effect immediately.
+    assert hub.pushed and hub.pushed[0][1] == "CONSOLE_SET_CREDENTIALS"
+
+
+def test_blank_password_keeps_the_stored_one_when_no_vault():
+    """The GET masks passwords, so the WebUI submits blanks for untouched rows;
+    a naive replace would silently wipe them."""
+    _set_vault(False)
+    c, hub = _client([{"username": "admin", "password": "keepme"}])
+    r = c.post("/api/console/credentials",
+               json={"credentials": [{"username": "admin", "password": ""},
+                                     {"username": "root", "password": "new"}]})
+    assert r.status_code == 200
+    got = {x["username"]: x["password"] for x in _local(hub)}
+    assert got == {"admin": "keepme", "root": "new"}
+
+
+def test_password_change_allowed_when_no_vault():
+    _set_vault(False)
+    c, hub = _client([{"username": "admin", "password": "old"}])
+    c.post("/api/console/credentials",
+           json={"credentials": [{"username": "admin", "password": "rotated"}]})
+    assert _local(hub) == [{"username": "admin", "password": "rotated"}]
+
+
+def test_credentials_are_never_stored_in_plaintext_state_key():
+    """The list must round-trip through hub_encryption into
+    ``console_credentials_enc`` — never a bare plaintext state key."""
+    _set_vault(False)
+    c, hub = _client([])
+    c.post("/api/console/credentials",
+           json={"credentials": [{"username": "admin", "password": "s3cret"}]})
+    assert "console_credentials" not in hub.state.system_state
+    assert "console_credentials_enc" in hub.state.system_state
+
+
+def test_delete_still_works_when_no_vault():
+    _set_vault(False)
+    c, hub = _client([{"username": "admin", "password": "x"},
+                      {"username": "root", "password": "y"}])
+    r = c.post("/api/console/credentials", json={"credentials": [{"username": "root"}]})
+    assert r.status_code == 200
+    assert [x["username"] for x in _local(hub)] == ["root"]
+
+
+def test_empty_list_clears_all_when_no_vault():
+    _set_vault(False)
+    c, hub = _client([{"username": "admin", "password": "x"}])
+    r = c.post("/api/console/credentials", json={"credentials": []})
+    assert r.status_code == 200
+    assert _local(hub) == []
+
+
+def test_non_admin_still_rejected_when_no_vault():
+    _set_vault(False)
+    app = FastAPI()
+    hub = _Hub([])
+    app.state.hub = hub
+    ctx = SimpleNamespace(
+        _session_user=lambda req: {"user": {"is_admin": False, "username": "bob"}},
+        _is_admin=lambda s: False,
+        _has_console_write_access=lambda s: True,
+        _has_console_access=lambda s: True,
+        _resolve_tenant=lambda req, explicit=None: "default",
+    )
+    console_routes.register(app, hub, ctx)
+    r = TestClient(app).post("/api/console/credentials",
+                             json={"credentials": [{"username": "x", "password": "y"}]})
+    assert r.status_code == 403

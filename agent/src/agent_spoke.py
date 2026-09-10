@@ -32,6 +32,68 @@ _NETBOX_VENV_PIP = "/opt/netbox-app/venv/bin/pip"
 _NB_SSO_BEGIN = "# --- BEGIN LM SSO (Entra ID / OIDC) managed by install.sh --netbox-sso-* ---"
 _NB_SSO_END = "# --- END LM SSO ---"
 
+# ── apt lock contention ───────────────────────────────────────────────────────
+# By default apt takes /var/lib/dpkg/lock-frontend or dies instantly with
+# rc=100 ("Could not get lock ... It is held by process N"). On a managed node
+# there are several legitimate apt users — role deploys (install_dns.sh,
+# install_dhcp.sh, ...), LM's own OS-update feature (core/src/os_update.py runs
+# apt-get dist-upgrade), and the distro's unattended-upgrades timer — so a
+# deploy that merely lands while another apt is mid-run FAILS, and the operator
+# sees a package error for what is only a scheduling collision.
+#
+# DPkg::Lock::Timeout (apt >= 1.9.11, i.e. Debian 11 / Ubuntu 20.04 and newer)
+# makes apt WAIT for the lock instead. Unknown -o keys are ignored by older
+# apt, so setting it is safe on anything we might be running on.
+_APT_LOCK_TIMEOUT_S = 600
+# Written node-wide so EVERY apt invocation inherits the wait — the module
+# install scripts and os_update shell out on their own and are not all reachable
+# from here, and future ones would otherwise have to remember the flag.
+_APT_CONF_DROPIN = "/etc/apt/apt.conf.d/99lm-lock-timeout"
+_APT_LOCK_FLAGS = ["-o", f"DPkg::Lock::Timeout={_APT_LOCK_TIMEOUT_S}"]
+# Must exceed the lock wait, or we would kill apt for doing exactly what we
+# just asked it to do: wait. Lock wait + a slow mirror's install time.
+_APT_INSTALL_TIMEOUT_S = _APT_LOCK_TIMEOUT_S + 600
+
+
+def ensure_apt_lock_timeout(path: str = _APT_CONF_DROPIN,
+                            timeout_s: int = _APT_LOCK_TIMEOUT_S) -> bool:
+    """Drop a node-wide apt config making apt wait for the dpkg lock.
+
+    Best-effort and idempotent. Applied at agent startup rather than only at
+    install time so nodes provisioned before this existed self-heal as soon as
+    the agent restarts, which it does on every SPOKE_UPDATE.
+    """
+    desired = (
+        "// Managed by LM GenericAgent — do not edit.\n"
+        "// Wait for the dpkg/apt lock instead of failing with rc=100 when a\n"
+        "// role deploy collides with unattended-upgrades or an LM OS update.\n"
+        f'DPkg::Lock::Timeout "{timeout_s}";\n'
+    )
+    try:
+        p = Path(path)
+        if p.read_text() == desired:
+            return True
+    except (OSError, UnicodeDecodeError):
+        pass
+    try:
+        p = Path(path)
+        if not p.parent.is_dir():
+            # Not a Debian-family host (no apt at all) — nothing to configure.
+            return False
+        p.write_text(desired)
+        logger.info("Configured apt to wait up to %ss for the dpkg lock (%s).",
+                    timeout_s, path)
+        return True
+    except PermissionError:
+        # The agent normally runs as root; if it does not, the explicit -o
+        # flags on the calls below still cover the deploys we run ourselves.
+        logger.warning("Cannot write %s (not root); apt lock waits will only "
+                       "apply to package installs this agent runs directly.", path)
+        return False
+    except OSError as exc:
+        logger.warning("Could not configure the apt lock timeout at %s: %s", path, exc)
+        return False
+
 try:
     from base_spoke import BaseSpoke
 except ImportError:
@@ -252,8 +314,6 @@ def _active_deploy_roles(installed_roles: list) -> list:
         if enabled:
             active.append(role)
     return active
-
-
 class _RoleAdapter(BaseSpoke):
     """Adapter that lets a non-BaseSpoke spoke (e.g. cppm's CPPMSpoke) be loaded
     as a role. Delegates handle_command/get_version to the inner instance and
@@ -335,6 +395,9 @@ class GenericAgent(BaseSpoke):
         # to threads, so a second LOAD_ROLE for the same role could otherwise
         # start a concurrent apt/pip run mid-install → double-spawn).
         self._role_installs_inflight: set = set()
+        # Make apt wait for the dpkg lock rather than failing a deploy that
+        # merely collided with another apt run. Cheap, idempotent, best-effort.
+        ensure_apt_lock_timeout()
 
     # ── Role loading ──────────────────────────────────────────────────────────
 
@@ -439,12 +502,11 @@ class GenericAgent(BaseSpoke):
             else:
                 logger.debug("Role repo already present at %s; skipping clone.", clone_dir)
 
-        # 2. System packages. Management-only roles such as dns do not install
-        # the service they coordinate; that belongs to the separate dns-server
-        # deploy role. le needs certbot + common DNS-01 plugins.
+        # 2. System packages. Management-only roles such as dns/dhcp do not
+        # install the services they coordinate; those belong to the separate
+        # dns-server/dhcp-server deploy roles.
         install_cmds = {
-            "dhcp": ["apt-get", "install", "-y", "-qq", "kea-dhcp4-server", "kea-ctrl-agent"],
-            "le":   ["apt-get", "install", "-y", "-qq", "certbot",
+            "le":   ["apt-get", *_APT_LOCK_FLAGS, "install", "-y", "-qq", "certbot",
                      "python3-certbot-dns-cloudflare", "python3-certbot-dns-route53",
                      "openssl"],
             # ldap: BUILD deps for python-ldap (the pip wheel compiles against
@@ -452,19 +514,20 @@ class GenericAgent(BaseSpoke):
             # crashes on load with "No module named 'ldap.filter'" — the role
             # never loads. Must run BEFORE the pip step below. The slapd SERVER
             # (interactive debconf) is set up in _role_post_install, not here.
-            "ldap": ["apt-get", "install", "-y", "-qq", "libldap2-dev", "libsasl2-dev"],
+            "ldap": ["apt-get", *_APT_LOCK_FLAGS, "install", "-y", "-qq",
+                     "libldap2-dev", "libsasl2-dev"],
         }
         cmds = install_cmds.get(role_name)
         if cmds:
             logger.info("Installing system packages for role '%s'…", role_name)
             try:
-                await asyncio.to_thread(subprocess.run, cmds, check=True, timeout=180)
+                await asyncio.to_thread(subprocess.run, cmds, check=True,
+                                        timeout=_APT_INSTALL_TIMEOUT_S)
             except subprocess.CalledProcessError as e:
                 return {"status": "ERROR", "message": f"Package install failed: {e}"}
 
-        # 2b. Module-specific OS bootstrapping the DEDICATED installers used to
-        #     do where the hosted role still owns local infrastructure (dhcp
-        #     needs a non-interactive kea-ctrl-agent config + daemons started).
+        # 2b. Module-specific OS bootstrapping for hosted roles that still own
+        #     local infrastructure.
         #     Idempotent + best-effort; a config hiccup must not fail the load.
         #     Offloaded whole: it shells out (up to 600s for --infra-only).
         await asyncio.to_thread(self._role_post_install, role_name)
@@ -486,43 +549,14 @@ class GenericAgent(BaseSpoke):
 
         return {"status": "SUCCESS"}
 
-    # kea-ctrl-agent config mirrored from dhcp/install_dhcp.sh — loopback-only,
-    # port 8001, no auth (the default Debian package config may prompt for HTTP
-    # auth; this replaces it so the role load is fully non-interactive).
-    _KEA_CTRL_AGENT_CONF = (
-        '{\n'
-        '    "Control-agent": {\n'
-        '        "http-host": "127.0.0.1",\n'
-        '        "http-port": 8001,\n'
-        '        "control-sockets": {\n'
-        '            "dhcp4": {\n'
-        '                "socket-type": "unix",\n'
-        '                "socket-name": "/run/kea/kea4-ctrl-socket"\n'
-        '            }\n'
-        '        },\n'
-        '        "loggers": [{\n'
-        '            "name": "kea-ctrl-agent",\n'
-        '            "output_options": [{"output": "syslog"}],\n'
-        '            "severity": "WARN"\n'
-        '        }]\n'
-        '    }\n'
-        '}\n'
-    )
-
     def _role_post_install(self, role_name: str) -> None:
         """Module-specific OS config the dedicated installers did, so a loaded
         role reaches parity. Idempotent + best-effort (never fails the load).
-        Pure management/API roles (dns/opnsense/netbox/cppm/ldap/le/nw/pxmx)
-        need nothing here.
+        Pure management/API roles (dns/dhcp/opnsense/netbox/cppm/ldap/le/nw/
+        pxmx) need nothing here.
         Runs as root (the lm-agent unit is User=root)."""
         try:
-            if role_name == "dhcp":
-                Path("/etc/kea").mkdir(parents=True, exist_ok=True)
-                Path("/etc/kea/kea-ctrl-agent.conf").write_text(self._KEA_CTRL_AGENT_CONF)
-                subprocess.run(["systemctl", "enable", "--now",
-                                "kea-ctrl-agent", "kea-dhcp4-server"],
-                               check=False, timeout=60)
-            elif role_name in ("simulation", "proxmox"):
+            if role_name in ("simulation", "proxmox"):
                 # Heavy roles carry OS infra the dedicated installers set up (cs:
                 # sim-client Kea/NIC + agent-listener cert; pxmx: agent-host prep).
                 # Each installer exposes an idempotent, non-interactive --infra-only

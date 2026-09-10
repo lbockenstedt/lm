@@ -86,6 +86,24 @@ class RepoSyncMixin:
             logger.debug("repo_sync rev-parse %s failed: %s", repo_dir, e)
         return ""
 
+    async def _git_remote_url(self, repo_dir: str) -> str:
+        """Best-effort upstream URL for a repo dir; '' on any failure.
+
+        Reads the remote the checkout would actually contact rather than
+        assuming ``origin``: provisioning_repos are cloned by several different
+        install scripts and do not all use the same remote name.
+        """
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "-C", repo_dir, "remote", "get-url", "origin",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=15.0)
+            if proc.returncode == 0:
+                return out.decode("utf-8", "replace").strip()
+        except Exception as e:  # noqa: BLE001 — best-effort, never fatal
+            logger.debug("repo_sync remote get-url %s failed: %s", repo_dir, e)
+        return ""
+
     async def _git_pull_repo(self, repo_dir: str) -> Dict[str, Any]:
         """Best-effort ``git pull --ff-only`` on one repo dir.
 
@@ -97,6 +115,23 @@ class RepoSyncMixin:
         """
         name = os.path.basename(repo_dir.rstrip("/"))
         before = await self._git_head(repo_dir)
+        # A checkout under provisioning_repos keeps itself updated forever, so
+        # a repo that must not be distributed as source would go on refreshing
+        # long after the config path that could fetch it was closed. Check the
+        # checkout's own upstream, since that -- not the directory name -- is
+        # what a pull actually contacts.
+        try:
+            import repo_policy
+            origin = await self._git_remote_url(repo_dir)
+            if origin and repo_policy.is_forbidden(origin):
+                logger.warning("repo_sync: refusing to pull %s (%s) — %s",
+                               name, origin, repo_policy.refuse_reason(origin))
+                return {"name": name, "status": "refused",
+                        "message": repo_policy.refuse_reason(origin),
+                        "commit_before": before, "commit_after": before,
+                        "changed": False}
+        except Exception as e:  # noqa: BLE001 — a policy read must not break sync
+            logger.debug("repo_sync policy check failed for %s: %s", name, e)
         try:
             proc = await asyncio.create_subprocess_exec(
                 "git", "-C", repo_dir, "pull", "--ff-only",

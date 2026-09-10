@@ -1271,6 +1271,23 @@ TLS_CERT_DIR="$BASE_DIR/certs"
 TLS_CERT="$TLS_CERT_DIR/hub.crt"
 TLS_KEY="$TLS_CERT_DIR/hub.key"
 mkdir -p "$TLS_CERT_DIR"
+# The DIRECTORY must belong to the service user, not just the cert files.
+# The hub writes this dir at runtime — its renewed LE server cert, the mTLS CA
+# bundle (mtls-ca.pem) and the Hub-Local client CA (mtls-client-ca.{pem,key}) —
+# and every one of those writes is ATOMIC: a temp file is created in this
+# directory and renamed over the target (required so os.replace stays on one
+# filesystem). That needs write permission on the DIRECTORY. Because this
+# installer runs as root, `mkdir -p` leaves it root-owned, and chowning only
+# the two files below is not enough: the files look writable while every write
+# still dies with "Permission denied: .../tmpXXXX.tmp".
+#
+# That is not theoretical — it took a production hub down for hours, blocking
+# its own cert install, the mTLS CA bundle, and mTLS client certs for the whole
+# fleet. Unconditional (not inside the openssl branch) so it also REPAIRS an
+# existing install on a re-run, and so the dir is still correct when openssl is
+# missing and no cert is generated at all.
+chown "$SvcUser:$SvcUser" "$TLS_CERT_DIR" 2>/dev/null || true
+chmod 755 "$TLS_CERT_DIR" 2>/dev/null || true
 if ! command -v openssl >/dev/null 2>&1; then
     echo "⚠️  openssl not found — skipping hub TLS cert generation (hub stays plaintext)."
 elif [ -f "$TLS_CERT" ] && [ -f "$TLS_KEY" ]; then

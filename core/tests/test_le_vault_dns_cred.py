@@ -129,30 +129,99 @@ def test_missing_provider_is_400(monkeypatch):
     assert ei.value.status_code == 400
 
 
-def _load_post_route(name="le_set_dns_cred"):
-    """Lift a disabled POST route (raw credential creation) with the
-    ``@app.post`` decorator stripped and exec it in a minimal namespace."""
+def _load_post_route(name="le_set_dns_cred", *, vault_enabled=True, relay=None,
+                     tenant="t-acme"):
+    """Lift a vault-gated POST route with the ``@app.post`` decorator stripped
+    and exec it in a minimal namespace.
+
+    The route's closure over ``_le_vault_enabled`` / ``_le_tenant`` /
+    ``_le_request`` is supplied here, so a single helper can drive BOTH the
+    vault-ON (raw creation refused) and vault-OFF (spoke-local store is the
+    supported path) branches."""
+    calls = []
+
+    async def _relay(command, body=None, **kw):
+        calls.append((command, body))
+        return (object(), "le-1", (relay if relay is not None else {"status": "ok"}))
+
     src = open(_NS).read()
     tree = ast.parse(src)
-    ns = {"Request": object, "HTTPException": _HTTPError}
+    ns = {
+        "Request": object,
+        "HTTPException": _HTTPError,
+        "_le_vault_enabled": lambda: vault_enabled,
+        "_le_tenant": lambda _req: tenant,
+        "_le_request": _relay,
+    }
     for node in ast.walk(tree):
         if isinstance(node, ast.AsyncFunctionDef) and node.name == name:
             node.decorator_list = []
             exec(compile(ast.Module(body=[node], type_ignores=[]), _NS, "exec"), ns)
-    return ns[name]
+    return ns[name], calls
 
 
-def test_set_dns_cred_post_disabled():
-    fn = _load_post_route()
+class _Req:
+    """Minimal Request stand-in exposing the awaited ``.json()`` the routes use."""
+
+    def __init__(self, body):
+        self._body = body
+
+    async def json(self):
+        return self._body
+
+
+# ── vault ON: raw credential creation is refused, steer to the vault ────────
+
+def test_set_dns_cred_post_disabled_when_vault_enabled():
+    fn, _ = _load_post_route(vault_enabled=True)
     with pytest.raises(_HTTPError) as ei:
-        _run(fn(object()))
+        _run(fn(_Req({"name": "cf", "dns_provider": "cloudflare"})))
     assert ei.value.status_code == 409
     assert "Credential Vault" in ei.value.detail
 
 
-def test_set_he_login_post_disabled():
-    fn = _load_post_route("le_set_he_login")
+def test_set_he_login_post_disabled_when_vault_enabled():
+    fn, _ = _load_post_route("le_set_he_login", vault_enabled=True)
     with pytest.raises(_HTTPError) as ei:
-        _run(fn(object()))
+        _run(fn(_Req({"username": "u@e", "password": "pw"})))
     assert ei.value.status_code == 409
     assert "Credential Vault" in ei.value.detail
+
+
+# ── vault OFF: the spoke-local store is the supported path and stays open ───
+#
+# Pins the user-reported bug: with NO vault configured the DNS-01 modal said
+# "New DNS-01 credentials are now managed in the Credential Vault ... Creating
+# raw credentials here is disabled", leaving nowhere at all to store a DNS-01
+# credential. Creation must work when there is no vault to steer to.
+
+def test_set_dns_cred_post_allowed_when_no_vault():
+    fn, calls = _load_post_route(vault_enabled=False)
+    out = _run(fn(_Req({"name": "cf", "dns_provider": "cloudflare",
+                        "dns_creds": "dns_cloudflare_api_token = x"})))
+    assert out == {"status": "ok"}
+    assert len(calls) == 1
+    command, body = calls[0]
+    assert command == "LE_SET_DNS_CRED"
+    assert body["name"] == "cf" and body["dns_provider"] == "cloudflare"
+
+
+def test_set_dns_cred_tenant_is_server_derived_not_client_supplied():
+    """A client must not be able to write into another tenant's cred store."""
+    fn, calls = _load_post_route(vault_enabled=False, tenant="t-mine")
+    _run(fn(_Req({"name": "cf", "tenant_id": "t-someone-else"})))
+    assert calls[0][1]["tenant_id"] == "t-mine"
+
+
+def test_set_dns_cred_non_dict_body_does_not_explode():
+    fn, calls = _load_post_route(vault_enabled=False)
+    _run(fn(_Req(["not", "a", "dict"])))
+    assert calls[0][1] == {"tenant_id": "t-acme"}
+
+
+def test_set_he_login_post_allowed_when_no_vault():
+    fn, calls = _load_post_route("le_set_he_login", vault_enabled=False)
+    out = _run(fn(_Req({"username": "u@e", "password": "pw"})))
+    assert out == {"status": "ok"}
+    assert calls[0][0] == "LE_SET_HE_LOGIN"
+    assert calls[0][1]["username"] == "u@e"

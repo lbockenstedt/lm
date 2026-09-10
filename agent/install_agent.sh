@@ -168,6 +168,21 @@ mapfile -t _ROLE_LIST < <(printf '%s\n' ${STARTUP_ROLES//,/ } $STARTUP_ROLE | aw
 STARTUP_ROLES_CSV="$(IFS=,; printf '%s' "${_ROLE_LIST[*]}")"
 
 # System deps
+# Configure apt to WAIT for the dpkg lock before we (or any later role deploy)
+# touch it. Without this a package install that merely lands while
+# unattended-upgrades or an LM OS update is running dies with rc=100
+# ("Could not get lock /var/lib/dpkg/lock-frontend"). The GenericAgent rewrites
+# this file at startup too, so pre-existing nodes self-heal; doing it here means
+# a fresh node is covered before its first install.
+if [[ -d /etc/apt/apt.conf.d ]]; then
+    cat > /etc/apt/apt.conf.d/99lm-lock-timeout <<'APTLOCK'
+// Managed by LM GenericAgent — do not edit.
+// Wait for the dpkg/apt lock instead of failing with rc=100 when a
+// role deploy collides with unattended-upgrades or an LM OS update.
+DPkg::Lock::Timeout "600";
+APTLOCK
+fi
+
 apt-get update -qq
 apt-get install -y -qq python3 python3-venv python3-pip git curl
 

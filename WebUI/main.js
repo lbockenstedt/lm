@@ -486,9 +486,9 @@ function updateContextActions() {
 const AGENT_ROLES = {
     'dns':        { name: 'DNS Management',  desc: 'Coordinator-only management spoke. Does not install or run Unbound locally; deploy "DNS Server" on each resolver worker, then configure those members here.', deploy: false },
     'henet':      { name: 'HE.NET (Hurricane Electric public DNS)', desc: 'Manages public DNS records at dns.he.net over HE\'s dynamic-DNS update API. No server to deploy — the account login credential (shared with certificates, DNS → "Hurricane Electric (account login)") powers Import/Sync (reading the zone); pushing a record\'s IP needs THAT record\'s own per-record DDNS key, entered when you add or edit it.', deploy: false },
-    'dns-server': { name: 'DNS Server (Unbound)', desc: 'Deploys Unbound itself (server + remote-control + conf.d include). Runs as its own service on this host; does NOT create a spoke. Load the "DNS (Unbound module)" role to manage it.', deploy: true },
-    'dhcp':       { name: 'DHCP (Kea module)',     desc: 'Manages a running Kea DHCP4. Syncs subnets and reservations from NetBox. Needs a Kea server — deploy the "DHCP Server" role (or install standalone).', deploy: false },
-    'dhcp-server':{ name: 'DHCP Server (Kea)', desc: 'Deploys Kea itself (kea-dhcp4-server + kea-ctrl-agent on :8001). Runs as its own service on this host; does NOT create a spoke. Load the "DHCP (Kea module)" role to manage it.', deploy: true },
+    'dns-server': { name: 'DNS Server (Unbound)', desc: 'Deploys Unbound itself (server + remote-control + conf.d include). Runs as its own service on this host; does NOT create a spoke. Load "DNS Management" to manage it.', deploy: true },
+    'dhcp':       { name: 'DHCP Management', desc: 'Coordinator-only management spoke. Does not install or run Kea locally; deploy "DHCP Server" on each Kea worker, then configure the HA pair here.', deploy: false },
+    'dhcp-server':{ name: 'DHCP Server (Kea)', desc: 'Deploys Kea itself (kea-dhcp4-server + kea-ctrl-agent on :8001). Runs as its own service on this host; does NOT create a spoke. Load "DHCP Management" to manage it.', deploy: true },
     'network':    { name: 'Network Devices (nw)',  desc: 'Polls fleet switches for ARP/MAC topology and syncs device/MAC/ARP data into NetBox.', deploy: false },
     'netbox':     { name: 'IPAM/DCIM (NetBox)',    desc: 'Source-of-truth for sites, racks, devices, prefixes, IPs, VMs, tenants. Sinks every discovery sync and runs the NetBox→Kea DHCP scope sync. This is the API MODULE — it needs a running NetBox server (deploy the "NetBox Server" role, then point this module\'s connection settings at it).', deploy: false },
     'netbox-server': { name: 'NetBox Server', desc: 'Deploys the NetBox application itself — PostgreSQL, Redis, gunicorn, and nginx serving the WebUI on port 80. Runs as its own service on this host; does NOT create a spoke. Load the "IPAM/DCIM (NetBox)" module role to talk to it.', deploy: true },
@@ -505,6 +505,45 @@ const AGENT_ROLES = {
     'proxy':      { name: 'Edge Proxy (per-tenant front door)', desc: 'Serves a local :443 WebUI front door with an LE server cert (no client-cert prompt) and reverse-proxies every request to the hub over mTLS. A dumb forwarding edge — all logic stays on the hub. Also load the "Certificate Management (Let\'s Encrypt)" role on this host so it can obtain/serve its HTTPS cert (proxy is a cert-distribution target).', deploy: false },
     'ab':   { name: 'AppBuilder', desc: 'Autonomous GitHub issue bot. Installs as a systemd service on this host and connects to the Hub as its own agent.', deploy: true },
 };
+
+// Roles that bind an inbound listener on the SAME host port. They CANNOT be
+// stacked on one VM: whichever loads first wins the port and the others fail to
+// bind (silently, on a retry loop) — the box then answers on the wrong service.
+// Mirrors _LISTENER_PORT_ROLES in core/src/routes/agents.py, which is the
+// authoritative check; this only keeps the UI from offering the broken combo.
+const ROLE_LISTENER_PORTS = {
+    'proxmox': 443,
+    'simulation': 443,
+    'proxy': 443,
+    'statuspage': 443,
+};
+
+// The role among `roleIds` that would fight `candidate` for a port, else null.
+function roleListenerConflict(roleIds, candidate) {
+    const port = ROLE_LISTENER_PORTS[candidate];
+    if (!port) return null;
+    for (const other of (roleIds || [])) {
+        if (other !== candidate && ROLE_LISTENER_PORTS[other] === port) return other;
+    }
+    return null;
+}
+
+function roleListenerConflictText(candidate, other) {
+    const port = ROLE_LISTENER_PORTS[candidate];
+    const name = id => (AGENT_ROLES[id] || {}).name || id;
+    return `Conflicts with ${name(other)} — both bind port ${port} on this host. `
+         + `Only one can own the port, so put ${name(candidate)} on a separate VM `
+         + `or unload ${name(other)} first.`;
+}
+
+// Spoke UUID → friendly name, for the many places that render a spoke-keyed
+// map. `spokeHealth` is the same map the header tray uses (/setup/diagnostics
+// lists every approved spoke, including offline ones). Falls back to the raw id
+// when the map isn't loaded yet, so a name never renders as "undefined".
+function spokeDisplayName(spokeId) {
+    const h = (window.spokeHealth || {})[spokeId];
+    return (h && h.name && h.name !== spokeId) ? h.name : spokeId;
+}
 
 const PRODUCT_MAP = {
     'pxmx': 'pxmx',
@@ -2726,16 +2765,23 @@ function _updateMetrics(statusData) {
             ? Object.entries(obj).sort((a,b)=>b[1]-a[1])
                 .map(([k,v]) => `<span class="inline-block bg-slate-100 rounded px-2 py-0.5 mr-1 mb-1">${esc(k)}: <b>${v}</b></span>`).join('')
             : '<span class="text-slate-400 italic">none</span>';
+        // Same chips, but for maps keyed by SPOKE ID — show the operator the
+        // spoke/agent name instead of a raw UUID, keeping the id on hover so it
+        // is still available for correlating against logs.
+        const kvSpokes = (obj) => Object.keys(obj || {}).length
+            ? Object.entries(obj).sort((a,b)=>b[1]-a[1])
+                .map(([k,v]) => `<span class="inline-block bg-slate-100 rounded px-2 py-0.5 mr-1 mb-1" title="${esc(k)}">${esc(spokeDisplayName(k))}: <b>${v}</b></span>`).join('')
+            : '<span class="text-slate-400 italic">none</span>';
         detEl.innerHTML = `
             <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">Backlog</span>
                  &nbsp;total <b>${bs.total ?? 0}</b> · unacked <b>${bs.pending_ack ?? 0}</b> · queued <b>${bs.queued ?? 0}</b>
                  ${bs.oldest_age_s ? `· oldest <b>${bs.oldest_age_s}s</b>` : ''}</div>
             <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">By type</span><br>${kv(bs.by_type)}</div>
-            <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">By spoke</span><br>${kv(bs.by_spoke)}</div>
+            <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">By spoke</span><br>${kvSpokes(bs.by_spoke)}</div>
             <div class="pt-1 border-t border-slate-100"><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">Rate limit</span>
                  &nbsp;burst <b>${rl.capacity ?? '—'}</b> · <b>${rl.fill_rate ?? '—'}</b>/s
                  &nbsp;·&nbsp;drops total <b>${m.rate_limit_drops_total ?? 0}</b></div>
-            <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">Drops by spoke</span><br>${kv(drops)}</div>
+            <div><span class="text-slate-400 uppercase text-[10px] font-bold tracking-widest">Drops by spoke</span><br>${kvSpokes(drops)}</div>
             ${(() => {
                 // Backpressure ladder status: the graceful-degradation control
                 // loop. level 1 = offenders throttled, 2 = fleet-wide slow-down.
@@ -2754,7 +2800,7 @@ function _updateMetrics(statusData) {
                     <br><span class="text-slate-400">telemetry</span> recv <b>${bp.telemetry_received ?? 0}</b>
                     · processed <b>${bp.telemetry_processed ?? 0}</b>
                     · <span title="frames merged latest-wins (not dropped)">coalesced <b>${bp.telemetry_coalesced ?? 0}</b></span>
-                    ${thr.length ? `<br><span class="text-slate-400">throttled:</span> ${kv(bp.spoke_levels || {})}` : ''}</div>`;
+                    ${thr.length ? `<br><span class="text-slate-400">throttled:</span> ${kvSpokes(bp.spoke_levels || {})}` : ''}</div>`;
             })()}`;
     }
     // Populate the rate-limit knobs from live config — but skip a field while
@@ -4135,7 +4181,7 @@ function _viewTemplate(viewId) {
       ${isAdmin() ? `<button onclick="leRenewAll()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">↻ Renew all</button>
       <button onclick="leDistributeNow()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap">⚡ Distribute now</button>` : ''}
       <button onclick="showMtlsDebug()" class="bg-slate-600/10 hover:bg-slate-600/20 text-slate-700 border border-slate-400 px-3 py-1 rounded-md text-xs font-medium transition-all whitespace-nowrap" title="Debug: which connected spokes/agents are ACTUALLY presenting a verified mTLS client cert vs. connected cert-less, plus the hub's trust bundle + pinned AppBuilder cert check">🔒 mTLS status</button>
-      <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200 whitespace-nowrap" title="Manage this tenant's DNS-01 credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-01 issuance">🔑 DNS Credentials</button>
+      <button onclick="showDnsCredentialsModal()" class="ml-auto bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md text-xs font-medium transition-all border border-slate-200 whitespace-nowrap" title="Manage this tenant's DNS credentials (Hurricane Electric, Cloudflare, rfc2136, Route53), used for DNS-based certificate issuance">🔑 DNS Credentials</button>
     </div>
     <div class="flex items-center gap-4 flex-wrap">
       <label class="flex items-center gap-1 text-xs text-amber-700 cursor-pointer select-none" title="When ON, a wildcard cert (*.domain) is pushed to EVERY connected cert-capable spoke + the hub on each distribution, not just its explicit targets. OFF by default while cert distribution is being tested — flip on once explicit-target distribution is confirmed working.">
@@ -4167,7 +4213,7 @@ function _viewTemplate(viewId) {
             return `<div class="space-y-4">
   <div>
     <h2 class="text-xl font-bold text-slate-800">Security — Threat Monitor</h2>
-    <p class="text-sm text-slate-500">Detects brute-force / faked-credential attacks on the API, logs invalid attempts, and (opt-in) auto-blocks the source IP via a NSG deny rule.</p>
+    <p class="text-sm text-slate-500">Detects brute-force / faked-credential attacks on the API, logs invalid attempts, and (opt-in) auto-blocks the source IP via a NSG deny rule. Optionally subscribes to the shared threat database, so addresses other participants have already seen are known here before they arrive.</p>
   </div>
   <div id="security-content"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
 </div>`;
@@ -4422,7 +4468,7 @@ async function loadSecurityData() {
       <div class="${card}">
         <div class="flex items-center justify-between mb-3">
           <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Policy</h3>
-          <button onclick="securityReconcile()" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium" title="Push the current blocked-IP set onto the Azure NSG deny rule now">Sync NSG now</button>
+          <button onclick="securityReconcile()" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium" title="Push the trusted allow-list and the blocked-IP set onto the active cloud NSG (Azure or OCI) now">Sync NSG now</button>
         </div>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
           <label class="flex items-center gap-2 text-slate-600 col-span-2"><input type="checkbox" id="sec-enabled" ${c.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Detection enabled (log invalid attempts)</label>
@@ -4535,18 +4581,182 @@ async function loadSecurityData() {
         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Recent invalid attempts <span class="text-slate-400 font-normal">(${evts.length})</span> <span class="text-[11px] text-slate-400 normal-case font-normal">— click a row to drill in</span></h3>
         <div class="overflow-x-auto max-h-72 overflow-y-auto"><table class="w-full text-xs"><thead class="text-slate-400 text-[10px] uppercase"><tr><th class="px-2 py-1 text-left">When</th><th class="px-2 py-1 text-left">Source IP</th><th class="px-2 py-1 text-left">Kind</th><th class="px-2 py-1 text-left">User</th><th class="px-2 py-1 text-left">Detail</th></tr></thead><tbody>${evtRows || '<tr><td colspan="5" class="px-2 py-3 text-slate-400 italic">no events yet</td></tr>'}</tbody></table></div></div>`;
 
+    const subCard = `<div class="${card}" id="subscription-card">
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Threat Monitor Subscription</h3>
+        <p class="text-sm text-slate-400 italic">Loading…</p></div>`;
+
+    // The subscription sits directly under the Threat Monitor config it
+    // extends, not at the foot of the tab: it is a configuration decision, and
+    // below the 60-row event table nobody scrolls to it.
     el.innerHTML = `
       ${stats}
       ${cfg}
+      ${subCard}
       ${manualBlock}
       ${blockedTile}
       ${neverTile}
       ${events}`;
     _secPrioLive();
+    _loadSubscription();
     // Best-effort origin enrichment (country / ISP / reverse-DNS) for every IP
     // shown in the blocked-IP preview and the recent-attempt feed. Lazy + cached
     // server-side, so it never blocks the initial paint.
     _secDecorateGeo([...allBlocks.map(b => b.ip), ...evts.map(e => e.ip)], el);
+}
+
+// ── Threat Monitor subscription (Security) ───────────────────────────────────
+// How a tenant gets threat and simulation intelligence. The sensor content is
+// not distributed as source to anyone, so a subscription to the exchange is
+// the only supported route — the operator-facing extension-source tile that
+// used to sit alongside this one has been removed from the Security page.
+//
+// There is deliberately NO service URL field. A tenant chooses whether to take
+// part and in what — they do not choose where their sensor reports are sent.
+async function _loadSubscription() {
+    const el = document.getElementById('subscription-card');
+    if (!el) return;
+    let d = {};
+    try {
+        const r = await setupFetch('/api/security/subscription');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        d = await r.json();
+    } catch (e) {
+        el.innerHTML = `<h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Threat Monitor Subscription</h3>
+            <p class="text-xs text-red-500">Failed to load: ${escapeHtml(e.message)}</p>`;
+        return;
+    }
+    const inp = 'w-full mt-1 border border-slate-300 rounded px-2 py-1 text-xs';
+    // "pending" is a normal outcome, not a failure: without an enrolment PSK an
+    // install waits for a person to approve it. Colouring it red would push an
+    // operator into re-enrolling something that is already queued.
+    const badge = {
+        approved: '<span class="text-[#01A982]">subscribed</span>',
+        pending: '<span class="text-amber-600">awaiting approval</span>',
+        denied: '<span class="text-red-500">declined</span>',
+        error: '<span class="text-red-500">last attempt failed</span>',
+        not_enrolled: '<span class="text-slate-400">not subscribed</span>',
+    }[d.status] || `<span class="text-slate-400">${escapeHtml(d.status || 'unknown')}</span>`;
+    const store = d.credential_storage === 'vault'
+        ? '<span class="text-[#01A982]">held in the cloud vault</span>'
+        : (d.credential_storage === 'state'
+            ? `<span class="text-slate-600">held encrypted in hub state</span>${d.vault_available ? '' : ' — no vault configured'}`
+            : '<span class="text-slate-400">none yet</span>');
+    const chans = (d.available_channels || []).map(c => `
+        <label class="flex items-center gap-2 text-slate-600">
+          <input type="checkbox" class="sub-chan w-4 h-4 rounded" value="${escapeHtml(c.id)}" ${(d.channels || []).includes(c.id) ? 'checked' : ''}>
+          ${escapeHtml(c.label)}</label>`).join('');
+    el.innerHTML = `
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Threat Monitor Subscription</h3>
+        <div class="flex gap-2">
+          ${d.credential_set || d.status !== 'not_enrolled'
+            ? '<button onclick="unsubscribeData(event)" class="text-xs bg-slate-100 hover:bg-red-100 text-red-600 px-3 py-1 rounded-md font-medium" title="Stop taking part and forget the stored credential">Unsubscribe</button>'
+            : ''}
+          <button onclick="enrollSubscription(event)" class="text-xs bg-slate-100 hover:bg-slate-200 text-slate-700 px-3 py-1 rounded-md font-medium" title="Register this install with the exchange">${d.credential_set ? 'Re-enroll' : 'Enroll'}</button>
+          <button onclick="saveSubscription(event)" class="text-xs bg-[#01A982] hover:bg-[#018f6f] text-white px-3 py-1 rounded-md font-medium">Save</button>
+        </div>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+        <label class="flex items-center gap-2 text-slate-600 md:col-span-4"><input type="checkbox" id="sub-enabled" ${d.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Subscribe to the shared threat &amp; simulation databases</label>
+        <div class="md:col-span-2 flex flex-col gap-1.5">
+          <span class="text-slate-500">Databases</span>
+          ${chans || '<span class="text-slate-400 italic">none offered</span>'}
+        </div>
+        <label class="text-slate-500">Contact email<input type="text" id="sub-email" value="${escapeHtml(d.contact_email || '')}" placeholder="who to reach about this install" class="${inp}"></label>
+        <label class="text-slate-500">Enrollment key (optional)<input type="password" id="sub-psk" autocomplete="new-password" placeholder="${d.psk_set ? '•••••• stored — leave blank to keep' : 'none — approval by a human'}" class="${inp}"></label>
+        <label class="text-slate-500 md:col-span-2">Organization ID <span class="text-slate-400 font-normal">— share across your hubs so they count as one participant</span><input type="text" id="sub-tenant" value="${escapeHtml(d.tenant_id || '')}" class="${inp}"></label>
+        <div class="md:col-span-2 text-slate-500 pt-4">Install ID <span class="font-mono text-slate-600">${escapeHtml(d.install_uuid || '—')}</span></div>
+        <div class="md:col-span-4 text-[11px] text-slate-500 bg-slate-50 rounded px-2 py-1.5 leading-relaxed">
+          Status: ${badge}. Credential: ${store}.
+          The exchange this install reports to is fixed at build time and not settable from here.
+          Publishing is reciprocal on the threat database: an install that takes the feed also contributes to it, and it also receives this install's own decoy routes.
+          ${d.psk_set ? '<label class="inline-flex items-center gap-1 ml-2 text-red-600"><input type="checkbox" id="sub-clear-psk" class="w-3 h-3 rounded"> clear stored key</label>' : ''}
+          ${d.last_error ? `<span class="ml-2 text-red-500">${escapeHtml(d.last_error)}</span>` : ''}
+          <span id="sub-status" class="ml-2"></span>
+        </div>
+      </div>`;
+}
+
+function _subChannels() {
+    return [...document.querySelectorAll('.sub-chan')].filter(c => c.checked).map(c => c.value);
+}
+
+async function saveSubscription(ev) {
+    const btn = ev && ev.currentTarget;
+    if (btn) btn.disabled = true;
+    const st = document.getElementById('sub-status');
+    try {
+        const body = {
+            enabled: document.getElementById('sub-enabled').checked,
+            channels: _subChannels(),
+            contact_email: document.getElementById('sub-email').value.trim(),
+            enrollment_psk: document.getElementById('sub-psk').value,
+            clear_psk: !!(document.getElementById('sub-clear-psk') || {}).checked,
+            tenant_id: document.getElementById('sub-tenant').value.trim(),
+        };
+        const r = await setupFetch('/api/security/subscription', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+        showToast('Subscription saved', 'success');
+        _loadSubscription();
+    } catch (e) {
+        if (st) st.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`;
+        showToast('Save failed: ' + e.message, 'error');
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function enrollSubscription(ev) {
+    const btn = ev && ev.currentTarget;
+    const label = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Enrolling…'; }
+    const st = document.getElementById('sub-status');
+    try {
+        const r = await setupFetch('/api/security/subscription/enroll', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: '' }),
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+        if (j.status === 'approved') {
+            showToast('Subscribed — the feed is now available', 'success');
+        } else if (j.status === 'pending') {
+            // Not a failure. Say so plainly so nobody retries a queued request.
+            showToast('Submitted — waiting for approval', 'success');
+        } else {
+            throw new Error(j.reason || 'enrollment did not complete');
+        }
+        _loadSubscription();
+    } catch (e) {
+        if (st) st.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`;
+        showToast('Enrollment failed: ' + e.message, 'error');
+        _loadSubscription();
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = label || 'Enroll'; }
+    }
+}
+
+async function unsubscribeData(ev) {
+    const btn = ev && ev.currentTarget;
+    if (!confirm('Unsubscribe from the shared databases?\n\nThe stored credential is deleted. Your install ID is kept, so re-subscribing later rejoins as the same participant rather than starting over.')) return;
+    if (btn) { btn.disabled = true; btn.textContent = 'Working…'; }
+    const st = document.getElementById('sub-status');
+    try {
+        const r = await setupFetch('/api/security/subscription/unsubscribe', { method: 'POST' });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(j.detail || ('HTTP ' + r.status));
+        showToast('Unsubscribed — credential forgotten', 'success');
+        _loadSubscription();
+    } catch (e) {
+        if (st) st.innerHTML = `<span class="text-red-500">${escapeHtml(e.message)}</span>`;
+        showToast('Unsubscribe failed: ' + e.message, 'error');
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Unsubscribe'; }
+    }
 }
 
 // ── IP origin enrichment (reverse DNS + geolocation) ─────────────────────────
@@ -5054,7 +5264,7 @@ function _cvRenderShell() {
     const opts = _cvBuckets.map(b =>
         `<option value="${escapeHtml(b.bucket)}"${b.bucket === _cvCurrentBucket ? ' selected' : ''}>${escapeHtml(_cvBucketLabel(b))}${b.has_psk ? '' : ' (no pass-phrase)'}</option>`).join('');
     const storageHint = _cvVaultAvailable ? '' : `
-      <div class="text-xs px-3 py-2 rounded-md bg-amber-50 text-amber-700 border border-amber-200">No Key Vault is configured — secrets are stored locally (encrypted in hub state). Configure a vault under Setup → Cloud → Azure → Vault or Setup → Cloud → OCI → Vault to store them there instead.</div>`;
+      <div class="text-xs px-3 py-2 rounded-md bg-amber-50 text-amber-700 border border-amber-200">No Key Vault is configured — secrets are stored locally (encrypted in hub state). Configure a vault under Setup → Cloud → Cloud Service Provider → Vault to store them there instead.</div>`;
     host.innerHTML = `
       <div class="hpe-card rounded-lg p-5 shadow-sm space-y-4">
         ${storageHint}
@@ -6797,7 +7007,7 @@ function _onSaTenantFilterChange() {
 let _osuPoll = null;
 
 function _renderSetupOsUpdatesTile(content) {
-    const { card, btnCls, btnSecCls } = _SETUP_CLS;
+    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
     content.innerHTML = `
         <div class="${card} space-y-4">
             <div class="flex items-center justify-between">
@@ -6811,6 +7021,18 @@ function _renderSetupOsUpdatesTile(content) {
                 Nodes are updated <b>one at a time</b>, and the <b>hub goes last</b> (updating it restarts this page).
                 This is separate from LM code updates.
             </div>
+            <div class="flex flex-wrap items-end gap-3 border border-slate-200 rounded-md px-3 py-2 bg-slate-50">
+                <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer"><input type="checkbox" id="osu-autocheck-enabled" class="w-4 h-4 text-green-600 rounded">Auto-check the fleet</label>
+                <div class="space-y-1">
+                    <label class="${labelCls}">Every</label>
+                    <div class="flex items-center gap-1">
+                        <input type="number" id="osu-autocheck-hours" min="1" step="1" value="6" class="${inputCls} w-20">
+                        <span class="text-xs text-slate-500">hour(s)</span>
+                    </div>
+                </div>
+                <button onclick="osuSaveAutoCheck()" class="${btnSecCls}">Save</button>
+                <span id="osu-autocheck-status" class="text-xs text-slate-400"></span>
+            </div>
             <div class="flex flex-wrap items-center gap-2">
                 <button onclick="osuCheck()" class="${btnSecCls}">↻ Check for updates</button>
                 <button id="osu-apply" onclick="osuApply()" class="${btnCls}">Approve &amp; deploy all</button>
@@ -6819,7 +7041,32 @@ function _renderSetupOsUpdatesTile(content) {
             <div id="osu-body"><p class="text-xs text-slate-400 italic">Loading…</p></div>
         </div>`;
     osuLoad();
+    osuLoadAutoCheck();
 }
+
+async function osuLoadAutoCheck() {
+    try {
+        const cfg = await apiJson('/api/os-updates/auto-check');
+        const chk = document.getElementById('osu-autocheck-enabled');
+        const hrs = document.getElementById('osu-autocheck-hours');
+        if (chk) chk.checked = cfg.enabled !== false;
+        if (hrs) hrs.value = cfg.interval_hours ?? 6;
+    } catch (e) { /* best-effort — the manual Check button still works */ }
+}
+
+window.osuSaveAutoCheck = async function () {
+    const enabled = !!document.getElementById('osu-autocheck-enabled')?.checked;
+    const hours = Math.max(1, parseInt(document.getElementById('osu-autocheck-hours')?.value, 10) || 6);
+    const st = document.getElementById('osu-autocheck-status');
+    try {
+        const cfg = await apiJson('/api/os-updates/auto-check', {
+            method: 'POST', body: JSON.stringify({ enabled, interval_hours: hours }),
+        });
+        document.getElementById('osu-autocheck-hours').value = cfg.interval_hours;
+        showToast(cfg.enabled ? `Auto-check enabled — every ${cfg.interval_hours}h.` : 'Auto-check disabled.', 'success');
+        if (st) { st.textContent = 'saved'; setTimeout(() => { if (st) st.textContent = ''; }, 2000); }
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+};
 
 async function osuLoad() {
     try { _osuRender(await apiJson('/api/os-updates')); }
@@ -11410,7 +11657,7 @@ function _renderSettingsOciNsgTile(content) {
                     </div>
                     <p class="text-[11px] text-slate-400">Upload the unencrypted PEM private key generated for this OCI API user (Profile → API Keys → Add API Key). It's written to a 0600 file on this hub and the path above is filled in automatically — the key content itself is never shown or sent back to the browser.</p>
                 </div>
-                <div class="space-y-1"><label class="${labelCls}">Region</label><input id="oci-nsg-region" type="text" placeholder="us-ashburn-1" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Region</label><select id="oci-nsg-region" class="${inputCls}"><option value="">Loading regions…</option></select></div>
                 <div class="space-y-1"><label class="${labelCls}">NSG OCID</label><input id="oci-nsg-id" type="text" placeholder="ocid1.networksecuritygroup.oc1..…" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">Destination port</label><input id="oci-nsg-dport" type="text" placeholder="443" class="${inputCls}"></div>
             </div>
@@ -11475,6 +11722,30 @@ window.removeOciNsgEntry = function (i) {
     renderOciNsgEntries();
 };
 
+// Populate an OCI Region <select> from the hub's curated catalog. Shared by the
+// OCI NSG and OCI Vault tiles. A dropdown (not free text) is deliberate: a
+// typo'd region only ever surfaces as a DNS failure at call time.
+// `current` is the stored value — kept as an extra option if it isn't in the
+// catalog, so a newer//custom region already configured isn't silently lost.
+async function _ociPopulateRegions(selectId, current) {
+    const el = document.getElementById(selectId);
+    if (!el) return;
+    let regions = [];
+    try {
+        const r = await setupFetch('/setup/oci-regions');
+        const d = await r.json().catch(() => ({}));
+        regions = d.regions || [];
+    } catch (e) { console.error('load OCI regions failed', e); }
+    const cur = (current || '').trim();
+    const opts = ['<option value="">— Select a region —</option>'];
+    if (cur && !regions.some(x => x.id === cur)) {
+        opts.push(`<option value="${escapeHtml(cur)}">${escapeHtml(cur)} (configured)</option>`);
+    }
+    regions.forEach(x => opts.push(`<option value="${escapeHtml(x.id)}">${escapeHtml(x.label)}</option>`));
+    el.innerHTML = opts.join('');
+    el.value = cur;
+}
+
 function _ociNsgFormConfig() {
     const v = id => (document.getElementById(id)?.value || '').trim();
     _syncOciNsgEntriesFromDom();
@@ -11499,6 +11770,7 @@ async function loadOciNsg() {
         set('oci-nsg-tenancy', c.tenancy_ocid); set('oci-nsg-user', c.user_ocid);
         set('oci-nsg-fp', c.fingerprint); set('oci-nsg-key', c.key_path);
         set('oci-nsg-region', c.region); set('oci-nsg-id', c.nsg_id);
+        await _ociPopulateRegions('oci-nsg-region', c.region);
         set('oci-nsg-dport', c.dest_port || '443');
         window._ociNsgEntries = (c.entries || []).map(e => ({ ip: e.ip, description: e.description || '' }));
         renderOciNsgEntries();
@@ -11510,7 +11782,14 @@ async function loadOciNsg() {
             else if (Array.isArray(d.live_prefixes)) {
                 const localIps = (c.entries || []).map(e => e.ip);
                 const same = JSON.stringify(d.live_prefixes.slice().sort()) === JSON.stringify(localIps.slice().sort());
-                drift.textContent = `Live in OCI: ${d.live_prefixes.length} IP(s)` + (same ? ' — in sync' : ' — differs from local (Save & Apply to sync)');
+                let txt = `Live in OCI: ${d.live_prefixes.length} IP(s) managed by LM` + (same ? ' — in sync' : ' — differs from local (Save & Apply to sync)');
+                // Rules the operator created by hand carry no LM marker. They
+                // are shown so the screen reflects what is actually on the NSG
+                // (it previously reported 0 and looked like a failed read), but
+                // LM never edits or adopts them.
+                const un = Array.isArray(d.unmanaged_prefixes) ? d.unmanaged_prefixes : [];
+                if (un.length) txt += ` · plus ${un.length} pre-existing rule(s) not managed by LM (${un.slice(0, 4).join(', ')}${un.length > 4 ? '…' : ''}) — left untouched`;
+                drift.textContent = txt;
             } else drift.textContent = 'NSG not found yet — check the NSG OCID, or Save & Apply once it exists.';
         }
     } catch (e) { console.error('loadOciNsg failed', e); }
@@ -11594,7 +11873,7 @@ function _renderSettingsOciVaultTile(content) {
                     </div>
                     <p class="text-[11px] text-slate-400">Upload the unencrypted PEM private key generated for this OCI API user (Profile → API Keys → Add API Key). It's written to a 0600 file on this hub and the path above is filled in automatically — the key content itself is never shown or sent back to the browser.</p>
                 </div>
-                <div class="space-y-1"><label class="${labelCls}">Region</label><input id="oci-vault-region" type="text" placeholder="us-ashburn-1" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Region</label><select id="oci-vault-region" class="${inputCls}"><option value="">Loading regions…</option></select></div>
                 <div class="space-y-1"><label class="${labelCls}">Compartment OCID</label><input id="oci-vault-compartment" type="text" placeholder="ocid1.compartment.oc1..…" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">Vault OCID</label><input id="oci-vault-vault" type="text" placeholder="ocid1.vault.oc1..…" class="${inputCls} font-mono text-xs"></div>
                 <div class="space-y-1"><label class="${labelCls}">Master encryption key OCID</label><input id="oci-vault-keyid" type="text" placeholder="ocid1.key.oc1..…" class="${inputCls} font-mono text-xs"></div>
@@ -11632,6 +11911,7 @@ async function loadOciVault() {
         set('oci-vault-tenancy', c.tenancy_ocid); set('oci-vault-user', c.user_ocid);
         set('oci-vault-fp', c.fingerprint); set('oci-vault-key', c.key_path);
         set('oci-vault-region', c.region); set('oci-vault-compartment', c.compartment_id);
+        await _ociPopulateRegions('oci-vault-region', c.region);
         set('oci-vault-vault', c.vault_id); set('oci-vault-keyid', c.key_id);
         const pill = document.getElementById('oci-vault-state-pill');
         if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
@@ -17031,6 +17311,17 @@ async function showLoadRoleModal(spokeId) {
         .filter(([id]) => !loadedRoleIds.has(id) && !activeDeployRoleIds.has(id));
     const rows = availableRoles.map(([id, r]) => {
         const deployNote = r.deploy ? ' (background deploy — own service)' : '';
+        const clash = roleListenerConflict([...loadedRoleIds], id);
+        if (clash) {
+            return `
+                <label class="flex items-start gap-2 p-2 rounded-md border border-slate-200 bg-slate-50 cursor-not-allowed opacity-70" title="${escapeHtml(roleListenerConflictText(id, clash))}">
+                    <input type="checkbox" value="${id}" disabled class="w-4 h-4 rounded mt-0.5 shrink-0">
+                    <span class="min-w-0">
+                        <span class="text-sm text-slate-500 font-medium">${r.name}</span>
+                        <span class="block text-[11px] text-amber-700 mt-0.5">${escapeHtml(roleListenerConflictText(id, clash))}</span>
+                    </span>
+                </label>`;
+        }
         return `
             <label class="flex items-center gap-2 p-2 rounded-md border border-slate-200 hover:bg-slate-50 transition-colors cursor-pointer" onfocus="updateRoleDesc('${id}')" onmouseover="updateRoleDesc('${id}')">
                 <input type="checkbox" value="${id}" class="role-check w-4 h-4 rounded text-[#01A982] focus:ring-green-500" onchange="updateRoleDesc('${id}')">
@@ -17080,8 +17371,27 @@ function syncNetboxCreds() {
     if (lcfg) lcfg.classList.toggle('hidden', !(lcb && lcb.checked));
 }
 
+// Two roles that bind the same host port can't be selected together either.
+// Once one is checked, grey out its rivals so the combination is unreachable
+// rather than failing later with a 409 from the hub.
+function syncListenerConflicts() {
+    const boxes = Array.from(document.querySelectorAll('.role-check'));
+    const checked = boxes.filter(b => b.checked).map(b => b.value);
+    boxes.forEach(b => {
+        if (b.checked) return;
+        const clash = roleListenerConflict(checked, b.value);
+        b.disabled = !!clash;
+        const label = b.closest('label');
+        if (!label) return;
+        label.classList.toggle('opacity-50', !!clash);
+        label.classList.toggle('cursor-not-allowed', !!clash);
+        label.title = clash ? roleListenerConflictText(b.value, clash) : '';
+    });
+}
+
 function updateRoleDesc(roleId) {
     syncNetboxCreds();
+    syncListenerConflicts();
     const r = AGENT_ROLES[roleId];
     const desc = document.getElementById('role-desc');
     if (desc) desc.textContent = r?.desc || '';
@@ -17098,6 +17408,13 @@ function updateRoleDesc(roleId) {
 async function loadRole(spokeId) {
     const checked = Array.from(document.querySelectorAll('.role-check:checked')).map(el => el.value);
     if (checked.length === 0) { showToast('Select at least one role to load.', 'info'); return; }
+    for (let i = 0; i < checked.length; i++) {
+        const clash = roleListenerConflict(checked.slice(0, i), checked[i]);
+        if (clash) {
+            showToast(roleListenerConflictText(checked[i], clash), 'error');
+            return;
+        }
+    }
 
     const btn = document.querySelector('#load-role-modal button[onclick^="loadRole"]');
     if (btn) { btn.disabled = true; btn.textContent = 'Activating…'; }
@@ -25828,28 +26145,119 @@ const DNS_CRED_PROVIDERS = {
 };
 
 async function showDnsCredentialsModal() {
+    // Whether a Credential Vault is configured decides which mode this modal
+    // runs in. With a vault, DNS-01 secrets belong there and this is a
+    // read-only list + cleanup view. With NO vault there is nowhere else to put
+    // them, so the spoke-local store (encrypted at rest) is the supported path
+    // and the add/edit form is shown. The backend enforces the same rule.
+    let vaultOn = false;
+    try {
+        const r = await _spokeFetch('/api/le/dns-credentials', { method: 'GET' });
+        const d = (r.data && r.data.data) ? r.data.data : (r.data || {});
+        vaultOn = !!(d.vault_enabled ?? (r.data && r.data.vault_enabled));
+    } catch (e) { /* fall back to showing the editor; the API is the real gate */ }
+
     const modal = document.createElement('div');
     modal.id = 'dns-creds-modal';
     modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 backdrop-blur-sm';
+    const provOpts = Object.entries(DNS_CRED_PROVIDERS).map(([k, v]) => `<option value="${k}">${escapeHtml(v.label)}</option>`).join('');
+    const note = vaultOn
+        ? `<div class="text-xs px-3 py-2 rounded bg-blue-50 text-blue-700 border border-blue-100">🔐 New DNS credentials are managed in the <b>Credential Vault</b> (add a <b>DNS</b> secret there, then pick it in the issue-cert form). Creating raw credentials here is disabled; existing ones below still work and can be deleted.</div>
+          <p class="text-xs text-slate-500">Saved DNS credentials for <b>your tenant</b> (stored on the le spoke). A certificate can still pick one of these by name when issuing. Delete any you've migrated to the vault.</p>`
+        : `<p class="text-xs text-slate-500">Saved DNS credentials for <b>your tenant</b>. A certificate picks one by name when issuing. Secrets are stored on the le spoke, <b>encrypted at rest</b>, and are never shown again — leave a secret blank when editing to keep it.</p>
+           <p class="text-[11px] text-slate-400">No Credential Vault is configured, so credentials are kept locally. Configure a vault under Setup → Cloud to manage them centrally instead.</p>`;
+    const form = vaultOn ? '' : `
+          <div class="border-t border-slate-200 pt-4">
+            <h4 id="dns-cred-form-title" class="text-sm font-bold text-slate-600 mb-2">Add a credential</h4>
+            <div class="grid grid-cols-2 gap-3">
+              <div class="flex flex-col"><label class="text-[11px] text-slate-500 mb-0.5">Name</label>
+                <input id="dns-cred-name" type="text" placeholder="e.g. HE - lrbtech" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
+              <div class="flex flex-col"><label class="text-[11px] text-slate-500 mb-0.5">Provider</label>
+                <select id="dns-cred-provider" onchange="dnsCredRenderFields()" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">${provOpts}</select></div>
+            </div>
+            <div id="dns-cred-fields" class="grid grid-cols-2 gap-3 mt-3"></div>
+            <div class="flex justify-end gap-2 mt-3">
+              <button onclick="dnsCredResetForm()" class="px-3 py-1.5 text-sm text-slate-600 hover:text-slate-800">Clear</button>
+              <button onclick="saveDnsCredential()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold">Save credential</button>
+            </div>
+          </div>`;
     modal.innerHTML = `
       <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden max-h-[90vh] flex flex-col">
         <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
-          <h3 class="text-lg font-bold text-[#263040]">DNS-01 credentials</h3>
+          <h3 class="text-lg font-bold text-[#263040]">DNS Credentials</h3>
           <button onclick="document.getElementById('dns-creds-modal').remove()" class="text-slate-400 hover:text-slate-600">✕</button>
         </div>
         <div class="p-6 space-y-4 overflow-y-auto">
-          <div class="text-xs px-3 py-2 rounded bg-blue-50 text-blue-700 border border-blue-100">🔐 New DNS-01 credentials are now managed in the <b>Credential Vault</b> (add a <b>DNS-01</b> secret there, then pick it in the issue-cert form). Creating raw credentials here is disabled; existing ones below still work and can be deleted.</div>
-          <p class="text-xs text-slate-500">Saved DNS-01 credentials for <b>your tenant</b> (stored on the le spoke). A certificate can still pick one of these by name when issuing via DNS-01. Delete any you've migrated to the vault.</p>
+          ${note}
           <div id="dns-creds-list" class="space-y-2"><p class="text-sm text-slate-400 italic">Loading…</p></div>
+          ${form}
         </div>
       </div>`;
     document.body.appendChild(modal);
+    modal.dataset.vaultOn = vaultOn ? '1' : '';
+    if (!vaultOn) dnsCredRenderFields();
     await dnsCredReloadList();
+}
+
+function dnsCredRenderFields(values) {
+    const p = document.getElementById('dns-cred-provider')?.value;
+    const def = DNS_CRED_PROVIDERS[p];
+    const box = document.getElementById('dns-cred-fields');
+    if (!def || !box) return;
+    values = values || {};
+    const secretsSet = values.__secrets__ || {};
+    box.innerHTML = def.fields.map(f => `
+      <div class="flex flex-col">
+        <label class="text-[11px] text-slate-500 mb-0.5">${escapeHtml(f.label)}</label>
+        <input id="dns-cred-f-${f.k}" type="${f.type}" value="${f.secret ? '' : escapeHtml(values[f.k] || '')}"
+               placeholder="${f.secret && secretsSet[f.k] ? '(keep stored)' : (f.placeholder ? escapeHtml(f.placeholder) : '')}"
+               autocomplete="off" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+      </div>`).join('');
+}
+
+function dnsCredEdit(c) {
+    const nameEl = document.getElementById('dns-cred-name');
+    const provEl = document.getElementById('dns-cred-provider');
+    if (nameEl) nameEl.value = c.name || '';
+    if (provEl) provEl.value = c.provider || 'he-login';
+    const title = document.getElementById('dns-cred-form-title');
+    if (title) title.textContent = 'Edit "' + (c.name || '') + '"';
+    dnsCredRenderFields({ ...(c.fields || {}), __secrets__: c.secrets_set || {} });
+}
+
+function dnsCredResetForm() {
+    const nameEl = document.getElementById('dns-cred-name'); if (nameEl) nameEl.value = '';
+    const title = document.getElementById('dns-cred-form-title'); if (title) title.textContent = 'Add a credential';
+    dnsCredRenderFields();
+}
+
+async function saveDnsCredential() {
+    const name = document.getElementById('dns-cred-name')?.value?.trim() || '';
+    const provider = document.getElementById('dns-cred-provider')?.value || '';
+    if (!name) { showToast('Credential name is required.', 'error'); return; }
+    const def = DNS_CRED_PROVIDERS[provider];
+    const fields = {};
+    def.fields.forEach(f => {
+        const v = document.getElementById('dns-cred-f-' + f.k)?.value ?? '';
+        if (v !== '' || !f.secret) fields[f.k] = v;  // empty secret → omit (keep stored)
+    });
+    try {
+        const r = await _spokeFetch('/api/le/dns-credentials', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, provider, fields }),
+        });
+        const d = (r.data && r.data.data) ? r.data.data : (r.data || {});
+        if (!r.ok || d.status === 'ERROR') { showToast('Save failed: ' + (d.message || r.detail || ''), 'error'); return; }
+        showToast('DNS credential saved', 'success');
+        dnsCredResetForm();
+        await dnsCredReloadList();
+    } catch (e) { showToast('Save failed: ' + e.message, 'error'); }
 }
 
 async function dnsCredReloadList() {
     const box = document.getElementById('dns-creds-list');
     if (!box) return;
+    const vaultOn = !!document.getElementById('dns-creds-modal')?.dataset.vaultOn;
     let creds = [];
     let warn = '';
     try {
@@ -25861,13 +26269,22 @@ async function dnsCredReloadList() {
     const warnBanner = warn
         ? `<div class="text-xs px-3 py-2 mb-2 rounded bg-amber-50 text-amber-800 border border-amber-200">⚠ ${escapeHtml(warn)}</div>`
         : '';
-    if (!creds.length) { box.innerHTML = warnBanner + '<p class="text-sm text-slate-400 italic">No credentials yet — add one below.</p>'; return; }
+    if (!creds.length) {
+        const empty = vaultOn
+            ? 'No credentials stored here — add a DNS secret in the Credential Vault.'
+            : 'No credentials yet — add one below.';
+        box.innerHTML = warnBanner + `<p class="text-sm text-slate-400 italic">${empty}</p>`;
+        return;
+    }
     box.innerHTML = warnBanner + creds.map(c => {
         const label = (DNS_CRED_PROVIDERS[c.provider] || {}).label || c.provider;
+        const editBtn = vaultOn ? '' :
+            `<button onclick='dnsCredEdit(${escapeHtml(JSON.stringify(c))})' class="text-xs text-slate-600 hover:text-slate-800 border border-slate-200 rounded px-2 py-1">Edit</button>`;
         return `<div class="flex items-center justify-between border border-slate-200 rounded-md px-3 py-2">
           <div><span class="text-sm font-medium text-slate-700">${escapeHtml(c.name)}</span>
             <span class="text-[11px] text-slate-400 ml-2">${escapeHtml(label)}</span></div>
           <div class="flex gap-2">
+            ${editBtn}
             <button onclick="deleteDnsCredential(${escapeHtml(JSON.stringify(c.name))})" class="text-xs text-red-500 hover:text-red-700 border border-red-200 rounded px-2 py-1" title="Delete this stored DNS provider credential">Delete</button>
           </div></div>`;
     }).join('');
@@ -26667,7 +27084,11 @@ async function showMtlsDebug() {
                 const now = Date.now();
                 const rrows = certs.length ? certs.map(c => {
                     const pk = (c.pk != null ? c.pk : c.spoke_id);
-                    const label = c.spoke_id || c.subject || c.pk || 'unknown';
+                    // Prefer the friendly spoke/agent name — the registry keys
+                    // by spoke id, which for a GUID-keyed spoke is an opaque
+                    // UUID. The raw id stays in the row's title attribute.
+                    const rawId = c.spoke_id || c.pk || '';
+                    const label = (rawId ? spokeDisplayName(rawId) : '') || c.subject || 'unknown';
                     const sanList = Array.isArray(c.san) ? c.san : (Array.isArray(c.sans) ? c.sans : []);
                     const sans = sanList.length ? esc(sanList.join(', ')) : '—';
                     const naStr = c.not_after || '';
