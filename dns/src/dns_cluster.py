@@ -453,7 +453,8 @@ class DnsClusterCoordinator:
     # ── Seeding ─────────────────────────────────────────────────────────────
 
     async def seed(self, local_records: Iterable[Dict[str, Any]],
-                   locked: bool = False) -> Dict[str, Any]:
+                   locked: bool = False,
+                   require_all_members: bool = False) -> Dict[str, Any]:
         """Adopt the records already being served as v1.
 
         Called once, when a single-host module is first turned into a cluster.
@@ -479,11 +480,12 @@ class DnsClusterCoordinator:
         ``locked=True`` when the caller already holds the transaction lock.
         """
         if locked:
-            return await self._seed_locked(local_records)
+            return await self._seed_locked(local_records, require_all_members)
         async with self._get_lock():
-            return await self._seed_locked(local_records)
+            return await self._seed_locked(local_records, require_all_members)
 
-    async def _seed_locked(self, local_records) -> Dict[str, Any]:
+    async def _seed_locked(self, local_records,
+                           require_all_members=False) -> Dict[str, Any]:
         if self.desired.version:
             return {"status": "SUCCESS", "seeded": False,
                     "reason": "a record set is already committed",
@@ -493,7 +495,20 @@ class DnsClusterCoordinator:
         local = [r for r in (local_records or []) if isinstance(r, dict)]
         if local:
             sources["coordinator"] = local
-        sources.update(await self._member_record_sets())
+        member_sources, failed = await self._member_record_sets()
+        if require_all_members and failed:
+            return {
+                "status": "ERROR",
+                "seeded": False,
+                "failed_members": failed,
+                "version": 0,
+                "message": (
+                    "Could not read the existing DNS records from every enrolled "
+                    "worker; enrollment remains blocked to prevent an incomplete "
+                    "or empty record set from overwriting a resolver. Failed: "
+                    + ", ".join(failed)),
+            }
+        sources.update(member_sources)
 
         if not sources:
             return {"status": "SUCCESS", "seeded": False,
@@ -532,7 +547,7 @@ class DnsClusterCoordinator:
                 "sources_in_agreement": sorted(sources),
                 "version": version, "record_count": len(self.desired.records)}
 
-    async def _member_record_sets(self) -> Dict[str, List[Dict[str, Any]]]:
+    async def _member_record_sets(self):
         """Each reachable member's NON-EMPTY live record set.
 
         An empty member contributes nothing: "one populated, the rest empty" is
@@ -541,15 +556,20 @@ class DnsClusterCoordinator:
             fan = await self.transport.fanout("DNSW_STATE", {}, timeout=15.0)
         except Exception as e:  # noqa: BLE001
             logger.warning("DNS seed: could not read member state: %s", e)
-            return {}
+            return {}, list(self.transport.member_ids())
         out = {}
+        failed = []
         for member_id, reply in (fan.get("results") or {}).items():
             if not isinstance(reply, dict) or reply.get("status") != "SUCCESS":
+                failed.append(member_id)
                 continue
             records = reply.get("records")
             if isinstance(records, list) and records:
                 out[member_id] = records
-        return out
+        missing = set(self.transport.member_ids()) - set(
+            (fan.get("results") or {}).keys())
+        failed.extend(sorted(missing))
+        return out, sorted(set(failed))
 
     # ── Commit ──────────────────────────────────────────────────────────────
 

@@ -181,6 +181,163 @@ def register(app, hub, ctx):
             logger.exception("%s relay failed", log_name or command)
             raise HTTPException(status_code=500, detail=str(e))
 
+    async def _discover_dns_workers(request: Request, tenant: str = None):
+        """Enroll connected agents that already have the DNS Server role."""
+        dns_spoke = _dns_spoke_for_request(request, tenant)
+        current = await _relay_spoke(
+            dns_spoke, "DNS_CLUSTER_STATUS",
+            log_name="dns_cluster_discovery_status")
+        current_ids = {
+            str(m.get("id") or "") for m in (current.get("members") or [])
+            if isinstance(m, dict)
+        }
+        connected_ids = {
+            str(m.get("id") or "") for m in (current.get("members") or [])
+            if isinstance(m, dict) and m.get("connected")
+        }
+        dns_tenant = hub.state.get_spoke_tenant(dns_spoke) or ""
+        shared_spoke = hub.get_dns_spoke_for_shared()
+        if dns_spoke == shared_spoke:
+            dns_tenant = access.shared_tenant_id() or dns_tenant
+
+        candidates = []
+        for sid, module_type in list(hub.spoke_module_types.items()):
+            if module_type != "agent" or hub._primary_key(sid) not in hub.active_connections:
+                continue
+            agent_tenant = hub.state.get_spoke_tenant(sid) or ""
+            if agent_tenant != dns_tenant:
+                continue
+            candidates.append(sid)
+
+        async def _roles(sid):
+            try:
+                result = await hub.request_response(
+                    sid, "GET_AVAILABLE_ROLES", {}, timeout=15.0)
+                data = result.get("payload", {}).get("data", result)
+                return sid, data if isinstance(data, dict) else {}
+            except Exception as exc:  # noqa: BLE001 - one offline agent is isolated
+                logger.warning("DNS worker discovery could not inspect %s: %s",
+                               sid, exc)
+                return sid, {}
+
+        discovered = []
+        role_reports = await asyncio.gather(*[_roles(sid) for sid in candidates])
+        for sid, report in role_reports:
+            if "dns-server" not in (report.get("installed_deploy_roles") or []):
+                continue
+            if "dns-server" not in (report.get("active_deploy_roles") or []):
+                continue
+            worker_info = next((
+                item for item in (report.get("configured_workers") or [])
+                if isinstance(item, dict) and item.get("role") == "dns-server"
+            ), {})
+            configured = bool(worker_info) or "dns-server" in (
+                report.get("configured_worker_roles") or [])
+            member_id = str(worker_info.get("member_id") or sid)
+            if member_id in current_ids and member_id in connected_ids and configured:
+                discovered.append({"spoke_id": sid, "status": "already-configured"})
+                continue
+
+            telemetry = (hub.spoke_telemetry.get(hub._primary_key(sid), {}) or {})
+            host = str(telemetry.get("remote_ip") or sid)
+            enrollment = await _relay_spoke(
+                dns_spoke, "DNS_CLUSTER_ENROLL_WORKER",
+                {"member": {"id": member_id, "host": host, "role": "resolver"}},
+                log_name="dns_cluster_enroll_worker", timeout=30)
+            bootstrap = {
+                "member_id": member_id,
+                "coordinator": enrollment.get("coordinator"),
+                "worker_secret": enrollment.get("worker_secret"),
+                "coordinator_ca_pem": enrollment.get("coordinator_ca_pem"),
+            }
+            if not all(bootstrap.values()):
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"DNS Management returned incomplete enrollment for {sid}")
+            result = await hub.request_response(
+                sid, "LOAD_ROLE",
+                {"role": "dns-server", "config": bootstrap},
+                timeout=120.0)
+            deployed = result.get("payload", {}).get("data", result)
+            deployed = _spoke_payload_or_raise(deployed)
+            worker_status = "configuring"
+            if deployed.get("deploy"):
+                for _attempt in range(60):
+                    await asyncio.sleep(2)
+                    progress = await hub.request_response(
+                        sid, "GET_DEPLOY_STATUS", {}, timeout=15.0)
+                    progress = progress.get("payload", {}).get("data", progress)
+                    progress = _spoke_payload_or_raise(progress)
+                    state = (progress.get("deploy") or {}).get("state")
+                    if state == "completed":
+                        break
+                    if state in ("failed", "error"):
+                        detail = ((progress.get("deploy") or {}).get("tail")
+                                  or (progress.get("deploy") or {}).get("error")
+                                  or state)
+                        raise HTTPException(
+                            status_code=502,
+                            detail=f"DNS worker configuration failed on {sid}: {detail}")
+                for _attempt in range(30):
+                    await asyncio.sleep(2)
+                    status = await _relay_spoke(
+                        dns_spoke, "DNS_CLUSTER_STATUS",
+                        log_name="dns_cluster_worker_connect", timeout=30)
+                    live = next((
+                        m for m in (status.get("members") or [])
+                        if isinstance(m, dict)
+                        and str(m.get("id") or "") == member_id
+                    ), {})
+                    if live.get("connected"):
+                        worker_status = "connected"
+                        break
+            discovered.append({"spoke_id": sid, "status": worker_status,
+                               "deploy": deployed.get("message", "")})
+
+            global_config = hub.state.system_state.setdefault("global_config", {})
+            instances = global_config.setdefault("dns_instances", [])
+            existing = next((i for i in instances if isinstance(i, dict)
+                             and (i.get("source_agent_id") == sid
+                                  or i.get("member_id") == member_id)), None)
+            record = {
+                "id": (existing or {}).get("id") or f"discovered-{sid}",
+                "name": (existing or {}).get("name") or sid,
+                "member_id": member_id,
+                "host": host,
+                "spoke_id": dns_spoke,
+                "tenant_id": dns_tenant,
+                "source_agent_id": sid,
+                "discovered": True,
+            }
+            if existing is not None:
+                existing.update(record)
+            else:
+                instances.append(record)
+            hub.state._mark_dirty()
+
+        final_status = await _relay_spoke(
+            dns_spoke, "DNS_CLUSTER_STATUS",
+            log_name="dns_cluster_discovery_final_status")
+        final_members = [
+            m for m in (final_status.get("members") or [])
+            if isinstance(m, dict) and m.get("id")
+        ]
+        all_connected = bool(final_members) and all(
+            bool(m.get("connected")) for m in final_members)
+        desired_version = int(
+            (final_status.get("desired") or {}).get("version") or 0)
+        if all_connected and desired_version == 0:
+            await _relay_spoke(
+                dns_spoke, "DNS_CLUSTER_FINALIZE_ENROLLMENT",
+                log_name="dns_cluster_finalize_enrollment", timeout=30)
+            desired_version = 1
+        if desired_version > 0:
+            for item in discovered:
+                if item.get("status") == "connected":
+                    item["status"] = "configured"
+        return {"status": "SUCCESS", "workers": discovered,
+                "discovered_count": len(discovered)}
+
     @app.get("/api/dns/records")
     async def dns_list_records(request: Request, tenant: str = None):
         """List DNS records from the Unbound spoke, subnet-filtered per the
@@ -299,6 +456,13 @@ def register(app, hub, ctx):
         return await _relay_spoke(_dns_spoke_for_request(request, tenant),
                                   "DNS_CLUSTER_CONFIG", body,
                                   log_name="dns_cluster_config", timeout=30)
+
+    @app.post("/api/dns/cluster/discover")
+    async def dns_cluster_discover(request: Request, tenant: str = None):
+        """Automatically enroll DNS Server roles assigned to this DNS tenant."""
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        return await _discover_dns_workers(request, tenant)
 
     @app.post("/api/dns/cluster/reconcile")
     async def dns_cluster_reconcile(request: Request, tenant: str = None):
