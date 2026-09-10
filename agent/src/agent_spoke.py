@@ -3,6 +3,7 @@ import importlib.util
 import logging
 import os
 import shlex
+import socket
 import ssl
 import subprocess
 import sys
@@ -556,7 +557,26 @@ class GenericAgent(BaseSpoke):
         pxmx) need nothing here.
         Runs as root (the lm-agent unit is User=root)."""
         try:
-            if role_name in ("simulation", "proxmox"):
+            if role_name in ("dns", "dhcp"):
+                tls_dir = Path(f"/etc/lm-{role_name}/tls")
+                cert = tls_dir / "coordinator.crt"
+                key = tls_dir / "coordinator.key"
+                tls_dir.mkdir(parents=True, exist_ok=True)
+                if not (cert.is_file() and key.is_file()):
+                    hostname = socket.getfqdn() or socket.gethostname() or f"lm-{role_name}"
+                    subprocess.run(
+                        [
+                            "openssl", "req", "-x509", "-newkey", "rsa:2048",
+                            "-nodes", "-days", "3650",
+                            "-keyout", str(key), "-out", str(cert),
+                            "-subj", f"/CN={hostname}",
+                            "-addext", f"subjectAltName=DNS:{hostname}",
+                        ],
+                        check=True, capture_output=True, timeout=30,
+                    )
+                os.chmod(cert, 0o644)
+                os.chmod(key, 0o600)
+            elif role_name in ("simulation", "proxmox"):
                 # Heavy roles carry OS infra the dedicated installers set up (cs:
                 # sim-client Kea/NIC + agent-listener cert; pxmx: agent-host prep).
                 # Each installer exposes an idempotent, non-interactive --infra-only
