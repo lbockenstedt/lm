@@ -5,11 +5,11 @@ keywords: [auto, backends, behaviors, dns, dns_delete, dns_forwarders, dns_updat
 
 # dns — DNS (Unbound)
 
-DNS spoke managing a local Unbound resolver. Repo: `dns`. `module_type = "dns"`. See [architecture-topology.md](architecture-topology.md).
+DNS management spoke coordinating Unbound resolvers. Repo: `dns`. `module_type = "dns"`. See [architecture-topology.md](architecture-topology.md).
 
 ## Role & module_type
 
-Manages a local **Unbound** resolver via the `unbound-control` CLI. Includes the role code plus `install_dns.sh` for Unbound host prep/direct role deployment; no API_SPEC or standalone README.
+The hosted `dns` role is management-only and does not install or start Unbound. Resolver workers are deployed separately with the `dns-server` role. A direct standalone install can still manage a local **Unbound** resolver via `unbound-control`.
 
 ## What it does
 
@@ -19,9 +19,9 @@ In the WebUI, open a node's **DNS** module from the sidebar to reach the **Recor
 
 ## Entrypoints
 
-`python3 -m src.main` (`DNSControlPlane`); spoke `DNSSpoke(BaseSpoke)`. `install_dns.sh` performs Unbound host prep for direct installs; the agent role loader uses the same deployment path when loading the `dns` role.
+`python3 -m src.main` (`DNSControlPlane`); spoke `DNSSpoke(BaseSpoke)`. `install_dns.sh` performs Unbound host prep for direct installs and `dns-server`; the agent `dns` role loader installs only management dependencies.
 
-> **Primarily a role now.** DNS runs mainly as the **`dns`** role hosted by the agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a sub-spoke `{agent}-dns` (module_type `dns`, parent-auto-approved) and loads it in-process via `agent/src/agent_spoke.py::_install_role` (this repo is bundled in-tree; the role loader also does the Unbound host prep). `install_dns.sh` can create a direct role deployment when needed, but the agent role remains the standard path. Config (`UNBOUND_CONTROL` etc.) comes from the hub push (WebUI), not a per-module `.env`.
+> **Primarily a role now.** DNS runs mainly as the **`dns`** role hosted by the agent (`agent-<hostname>`, unit `lm-agent`): the agent opens a management-only sub-spoke `{agent}-dns` (module_type `dns`, parent-auto-approved). Load `dns-server` separately on each resolver worker; load both roles when the coordinator and resolver intentionally share one host. `install_dns.sh` can create a direct local deployment when needed. Config comes from the hub push (WebUI), not a per-module `.env`.
 
 ## Ports / backends
 
@@ -71,7 +71,7 @@ A DNS module can drive **two or more Unbound hosts** instead of the one on its o
 sudo bash install_dns.sh --member-id dns-a --coordinator <coordinator-host> --worker-secret <secret>
 ```
 
-…plus `--ca-cert <coordinator cert>`, which is **required** — the worker verifies the coordinator before sending its secret. That installs Unbound **and** the `lm-dns-worker` unit; it implies `--infra-only` (the module lives on the coordinator, not here). The coordinator install creates `/etc/lm-dns`, `/var/lib/lm-dns` and `/etc/lm-dns/tls` owned by `svc_lm`, and mints a self-signed coordinator certificate (override with `--tls-cert`/`--tls-key`/`--tls-san`). Copy `/etc/lm-dns/tls/coordinator.crt` to each resolver and pass it as `--ca-cert`. Fewer than two members = cluster off, and the module behaves exactly as a single-host install: no listener is bound, and every write goes to the local `UnboundManager`.
+…plus `--ca-cert <coordinator cert>`, which is **required** — the worker verifies the coordinator before sending its secret. That installs Unbound **and** the `lm-dns-worker` unit; it implies `--infra-only` (the module lives on the coordinator, not here). The coordinator install creates `/etc/lm-dns`, `/var/lib/lm-dns` and `/etc/lm-dns/tls` owned by `svc_lm`, and mints a self-signed coordinator certificate (override with `--tls-cert`/`--tls-key`/`--tls-san`). Copy `/etc/lm-dns/tls/coordinator.crt` to each resolver and pass it as `--ca-cert`. The hosted management role requires at least two configured members to enable cluster fan-out. Direct standalone installs retain local single-resolver behavior.
 
 **See it.** DNS → **Diagnostics** grows a *Resolver cluster* panel (per-member convergence, applied version + digest, Unbound up/down, last-seen, and the last commit's per-member errors) plus each member's own diagnostics findings. `GET /api/dns/cluster` returns the same report; Settings → Diagnostics carries a one-line summary. A non-admin sees the verdict but not member hostnames, digests or error text.
 
@@ -125,7 +125,7 @@ Module view tabs: **Records**, **Statistics** (total-queries / cache-hit-ratio /
 ## Troubleshooting / common questions
 
 - **"I added a record in NetBox but never touched the DNS module — why is it already in Unbound?"** The NetBox → Unbound auto-sync loop (default every 300s) picked it up: any IP with a `dns_name` set gets added automatically — see the NetBox auto-sync section above. Check `GET /api/dns-dhcp/sync-status` for the last run's timing and result, or just press **Sync now** instead of waiting.
-- **"I added/edited a record but the Records tab (or `DNS_LIST`) shows nothing at all."** Check that Unbound is actually running on the node hosting the `dns` role, and that `unbound-control` has permission to talk to it. `list_records` swallows any read failure of the managed conf file (missing file, permission denied, Unbound not started) and just returns an empty list — there's no visible error, the symptom is simply "records list is empty." Run `unbound-control status` directly on the box and confirm the account running the `dns` role can read/write the managed conf path (default `/etc/unbound/conf.d/lm-netbox.conf`, or your `UNBOUND_CONF` override).
+- **"I added/edited a record but the Records tab (or `DNS_LIST`) shows nothing at all."** For a hosted management role, confirm both resolver members are configured and connected in DNS → Cluster. For a direct standalone install, check that local Unbound is running and that `unbound-control` can access it.
 - **"The DNS module shows offline/red in the WebUI."** The `{agent}-dns` sub-spoke isn't connected to the hub. Check the node's `lm-agent` unit first — the `dns` role rides on it and is loaded in-process, so an agent-wide outage takes DNS down with it. A `dns`-only failure independent of the agent is unusual unless this node uses the rare standalone `lm-dhcp`-style hand-rolled `lm-dns` unit.
 - **"Records I added by hand disappeared after a sync."** Sync (both the loop and the button) is only-add-missing — it never deletes. If a manually-added record vanished, check whether someone ran an explicit `DNS_UPDATE`/`DNS_DELETE` on it (those are the only paths that touch existing entries), and remember the managed conf.d file is fully regenerated on every write — anything edited directly on the box outside the DNS module (bypassing Lab Manager entirely) will get clobbered on the next write.
 - **"Is this dnsmasq or Unbound?"** Unbound — confirmed by the `unbound-control` CLI dependency and the `status`/`stats_noreset`/`list_forwards`/`reload` verbs it actually issues. There is no dnsmasq involved in this module.
