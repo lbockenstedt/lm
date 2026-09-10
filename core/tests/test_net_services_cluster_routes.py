@@ -850,3 +850,127 @@ def test_a_disabled_cluster_status_survives_redaction():
     body = _client(TENANT, hub).get("/api/dns/cluster").json()
     assert body["enabled"] is False
     assert body["reason"] == "fewer than two resolver members configured"
+
+
+# ── DNS cluster member display_name ─────────────────────────────────────────
+# The MEMBER column's primary label should be a human-friendly name, not the
+# raw member id (typically a UUID/agent-id) — see docs/dns.md's "See it"
+# paragraph and WebUI/main.js's _dnsClusterPanel. The id itself must never be
+# dropped: it stays on the response (and, in the WebUI, as a secondary line +
+# tooltip) so identity remains traceable.
+
+def _report_with_two_live_members():
+    return {
+        "status": "SUCCESS", "enabled": True, "state": "converged",
+        "converged": True, "member_count": 2, "converged_count": 2,
+        "desired": {"version": 1, "record_count": 2},
+        "members": [
+            {"id": "dns-worker-agent-1", "host": "10.0.1.1", "connected": True,
+             "convergence": "converged"},
+            {"id": "dns-worker-agent-2", "host": "10.0.1.2", "connected": True,
+             "convergence": "converged"},
+        ],
+        "last_commit": {"status": "SUCCESS"},
+        "recommendations": [],
+    }
+
+
+def test_dns_cluster_status_names_members_from_the_managed_device_inventory():
+    """Primary source: dns_instances (the DNS managed-device inventory
+    discovery already populates), matched by member_id."""
+    hub = FakeHub({"dns-1": {"DNS_CLUSTER_STATUS": _report_with_two_live_members()}})
+    hub.state.system_state["global_config"]["dns_instances"] = [
+        {"member_id": "dns-worker-agent-1", "name": "MIPBE-SVCS1"},
+        {"member_id": "dns-worker-agent-2", "name": "MIPBE-SVCS2"},
+    ]
+    body = _client(ADMIN, hub).get("/api/dns/cluster").json()
+    names = {m["id"]: m["display_name"] for m in body["members"]}
+    assert names == {
+        "dns-worker-agent-1": "MIPBE-SVCS1",
+        "dns-worker-agent-2": "MIPBE-SVCS2",
+    }
+    # the raw id must survive alongside the name — traceability is preserved
+    assert {m["id"] for m in body["members"]} == {
+        "dns-worker-agent-1", "dns-worker-agent-2"}
+
+
+def test_dns_cluster_status_falls_back_to_module_names_without_inventory():
+    """A member added by hand via DNS_CLUSTER_CONFIG (never discovered, so no
+    dns_instances entry) still gets named if the hub knows it as a spoke."""
+    hub = FakeHub({"dns-1": {"DNS_CLUSTER_STATUS": _report_with_two_live_members()}})
+    hub.state.system_state["module_names"] = {
+        "dns-worker-agent-1": "MIPBE-SVCS1",
+        "dns-worker-agent-2": "MIPBE-SVCS2",
+    }
+    body = _client(ADMIN, hub).get("/api/dns/cluster").json()
+    names = {m["id"]: m["display_name"] for m in body["members"]}
+    assert names == {
+        "dns-worker-agent-1": "MIPBE-SVCS1",
+        "dns-worker-agent-2": "MIPBE-SVCS2",
+    }
+
+
+def test_dns_cluster_status_falls_back_to_module_metadata_display_name():
+    hub = FakeHub({"dns-1": {"DNS_CLUSTER_STATUS": _report_with_two_live_members()}})
+    hub.state.system_state["module_metadata"] = {
+        "dns-worker-agent-1": {"display_name": "MIPBE-SVCS1"},
+    }
+    body = _client(ADMIN, hub).get("/api/dns/cluster").json()
+    names = {m["id"]: m["display_name"] for m in body["members"]}
+    assert names["dns-worker-agent-1"] == "MIPBE-SVCS1"
+    # no name known anywhere for member 2 -> falls back to its own id, exactly
+    # the pre-existing behavior for an install with no naming data.
+    assert names["dns-worker-agent-2"] == "dns-worker-agent-2"
+
+
+def test_dns_cluster_status_display_name_defaults_to_id_with_no_naming_data():
+    """Backward compatibility: an install with no module_names/metadata/
+    inventory entries at all gets display_name == id, so an old UI that
+    already only reads id sees nothing different, and a new UI has a safe
+    field to read either way."""
+    hub = FakeHub({"dns-1": {"DNS_CLUSTER_STATUS": _report_with_two_live_members()}})
+    body = _client(ADMIN, hub).get("/api/dns/cluster").json()
+    for m in body["members"]:
+        assert m["display_name"] == m["id"]
+
+
+def test_non_admin_dns_cluster_status_keeps_display_name_but_not_host():
+    hub = FakeHub({"dns-1": {"DNS_CLUSTER_STATUS": _report_with_two_live_members()}})
+    hub.state.system_state["global_config"]["dns_instances"] = [
+        {"member_id": "dns-worker-agent-1", "name": "MIPBE-SVCS1"},
+    ]
+    body = _client(TENANT, hub).get("/api/dns/cluster").json()
+    member = next(m for m in body["members"] if m["id"] == "dns-worker-agent-1")
+    assert member["display_name"] == "MIPBE-SVCS1"
+    assert "host" not in member
+
+
+def test_dns_diagnostics_cluster_block_carries_display_name_for_admin():
+    hub = FakeHub({"dns-1": {"DNS_DIAGNOSTICS": {
+        "status": "SUCCESS", "healthy": True,
+        "cluster": _report_with_two_live_members(),
+        "members": {},
+    }}})
+    hub.state.system_state["module_names"] = {"dns-worker-agent-1": "MIPBE-SVCS1"}
+    body = _client(ADMIN, hub).get("/api/dns/diagnostics").json()
+    member = next(m for m in body["cluster"]["members"]
+                  if m["id"] == "dns-worker-agent-1")
+    assert member["display_name"] == "MIPBE-SVCS1"
+    # unrelated diagnostics fields untouched for admin
+    assert body["healthy"] is True
+
+
+def test_dns_diagnostics_cluster_block_carries_display_name_for_non_admin():
+    hub = FakeHub({"dns-1": {"DNS_DIAGNOSTICS": {
+        "status": "SUCCESS", "healthy": True,
+        "cluster": _report_with_two_live_members(),
+        "members": {"dns-worker-agent-1": {"status": "SUCCESS"}},
+    }}})
+    hub.state.system_state["module_names"] = {"dns-worker-agent-1": "MIPBE-SVCS1"}
+    body = _client(TENANT, hub).get("/api/dns/diagnostics").json()
+    member = next(m for m in body["cluster"]["members"]
+                  if m["id"] == "dns-worker-agent-1")
+    assert member["display_name"] == "MIPBE-SVCS1"
+    assert "host" not in member
+    # non-admin redaction of the outer diagnostics body is unaffected
+    assert body["members"] == {}
