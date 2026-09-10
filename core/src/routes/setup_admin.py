@@ -176,11 +176,21 @@ async def _aggregate_diagnostics(hub):
         _raw = (_info or {}).get("agent_id")
         if _raw:
             relay_ids.add(_raw)
+    metadata = hub.state.system_state.get("module_metadata", {}) or {}
+    direct_module_ids = {
+        sid for sid, meta in metadata.items()
+        if isinstance(meta, dict)
+        and meta.get("install_uuid")
+        and not meta.get("parent_name")
+    }
     if relay_ids:
         known = list(hub.state.system_state.get("known_modules", []))
-        leaked = [m for m in known if m in relay_ids]
+        leaked = [
+            m for m in known
+            if m in relay_ids and m not in direct_module_ids
+        ]
         if leaked:
-            cleaned = [m for m in known if m not in relay_ids]
+            cleaned = [m for m in known if m not in leaked]
             hub.state.system_state["known_modules"] = cleaned
             hub.known_modules = cleaned
             for aid in leaked:
@@ -190,7 +200,7 @@ async def _aggregate_diagnostics(hub):
                         "known_modules/approved_modules: %s", leaked)
 
     for sid in known_spokes:
-        if sid in relay_ids:
+        if sid in relay_ids and sid not in direct_module_ids:
             continue  # relayed node agent — surfaced via /api/pxmx/agents, not here
         ws = hub.active_connections.get(hub._primary_key(sid))
         telemetry = hub.spoke_telemetry.get(hub._primary_key(sid), {})

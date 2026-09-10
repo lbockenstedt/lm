@@ -63,7 +63,8 @@ def _install_fakes(monkeypatch, fail_times):
 def _bare_spoke():
     sp = proxy_spoke.ProxySpoke.__new__(proxy_spoke.ProxySpoke)
     sp.web_host, sp.web_port = "0.0.0.0", 443
-    sp.tls_cert = sp.tls_key = None  # → plain HTTP, no real cert needed
+    sp.tls_cert = sp.tls_key = None
+    sp._listener_ssl = lambda: None  # bind retry is independent of TLS setup
     sp.upstream_url = "wss://hub:443/ws/spoke"
     sp._proxy_app = sp._runner = sp._site = sp._bind = None
     return sp

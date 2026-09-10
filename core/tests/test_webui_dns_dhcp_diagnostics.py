@@ -21,3 +21,10 @@ def test_diagnostics_views_call_the_read_only_endpoints():
     assert "_spokeFetch('/api/dhcp/diagnostics' + _tenantQS())" in src
     assert "Port 53 listeners" in src
     assert "Recent service warnings/errors" in src
+
+
+def test_global_admin_dhcp_view_auto_discovers_the_ha_pair():
+    src = MAIN_JS.read_text(encoding="utf-8")
+    assert "isAdmin()) {" in src
+    assert "'/api/dhcp/ha/discover' + _tenantQS()" in src
+    assert "loadDHCPData(subMenu, true)" in src

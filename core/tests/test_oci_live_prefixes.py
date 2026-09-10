@@ -23,6 +23,14 @@ import oci_nsg  # noqa: E402
 OCCFG = {"nsg_id": "ocid1.nsg.oc1..aaa", "region": "us-ashburn-1", "dest_port": "443"}
 
 
+@pytest.fixture(autouse=True)
+def bypass_request_signing(monkeypatch):
+    async def request(_cfg, client, method, url, *, json_body=None):
+        return await client.request(method, url, json=json_body)
+
+    monkeypatch.setattr(oci_nsg._oci_auth, "oci_request", request)
+
+
 def _cfg():
     return oci_nsg.OciConfig({
         "tenancy_ocid": "ocid1.tenancy.oc1..a", "user_ocid": "ocid1.user.oc1..b",

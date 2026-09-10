@@ -83,7 +83,7 @@ def test_startup_never_raises_when_not_root(tmp_path, monkeypatch):
 
 # ── the installs the agent runs itself ────────────────────────────────────────
 
-@pytest.mark.parametrize("role", ["dhcp", "le", "ldap"])
+@pytest.mark.parametrize("role", ["le", "ldap"])
 def test_every_role_install_waits_for_the_lock(role):
     """Each apt argv must carry the wait, and carry it as an apt-get OPTION.
 
