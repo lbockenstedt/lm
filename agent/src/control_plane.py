@@ -215,6 +215,13 @@ class RoleConnection(AgentHostingControlPlane):
             for attr, value in _CLUSTER_ROLE_LISTENERS[role_name].items():
                 setattr(self, attr, value)
         super().__init__(sub_id, secret, hub_secret="", hub_url=hub_url)
+        if role_name in _CLUSTER_ROLE_LISTENERS:
+            tls_dir = Path(f"/etc/lm-{role_name}/tls")
+            cert = tls_dir / "coordinator.crt"
+            key = tls_dir / "coordinator.key"
+            if cert.is_file() and key.is_file():
+                self._listener_cert = str(cert)
+                self._listener_key = str(key)
         self.role_name = role_name
         self.base_id = base_id
         self.module_type = mtype
