@@ -103,8 +103,15 @@ async def _aggregate_spokes(hub):
         _relay_ids = hub._relayed_agent_ids()
     except Exception:
         _relay_ids = set()
+    _direct_ids = {
+        sid for sid, meta in module_metadata.items()
+        if isinstance(meta, dict)
+        and meta.get("install_uuid")
+        and not meta.get("parent_name")
+    }
     for pk, ap in (hub.approved_modules or {}).items():
-        if ap and pk not in _covered and pk not in _relay_ids:
+        if (ap and pk not in _covered
+                and (pk not in _relay_ids or pk in _direct_ids)):
             known_spokes.append(pk)
 
     spokes_status = []
