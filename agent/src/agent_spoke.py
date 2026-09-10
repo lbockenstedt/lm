@@ -3,6 +3,7 @@ import importlib.util
 import logging
 import os
 import shlex
+import socket
 import ssl
 import subprocess
 import sys
@@ -583,7 +584,26 @@ class GenericAgent(BaseSpoke):
         need nothing here.
         Runs as root (the lm-agent unit is User=root)."""
         try:
-            if role_name == "dhcp":
+            if role_name == "dns":
+                tls_dir = Path("/etc/lm-dns/tls")
+                cert = tls_dir / "coordinator.crt"
+                key = tls_dir / "coordinator.key"
+                tls_dir.mkdir(parents=True, exist_ok=True)
+                if not (cert.is_file() and key.is_file()):
+                    hostname = socket.getfqdn() or socket.gethostname() or "lm-dns"
+                    subprocess.run(
+                        [
+                            "openssl", "req", "-x509", "-newkey", "rsa:2048",
+                            "-nodes", "-days", "3650",
+                            "-keyout", str(key), "-out", str(cert),
+                            "-subj", f"/CN={hostname}",
+                            "-addext", f"subjectAltName=DNS:{hostname}",
+                        ],
+                        check=True, capture_output=True, timeout=30,
+                    )
+                os.chmod(cert, 0o644)
+                os.chmod(key, 0o600)
+            elif role_name == "dhcp":
                 Path("/etc/kea").mkdir(parents=True, exist_ok=True)
                 Path("/etc/kea/kea-ctrl-agent.conf").write_text(self._KEA_CTRL_AGENT_CONF)
                 subprocess.run(["systemctl", "enable", "--now",
