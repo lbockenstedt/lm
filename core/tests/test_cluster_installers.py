@@ -223,6 +223,7 @@ def test_both_installers_require_a_worker_trust_anchor():
                      (DHCP_SH, "/etc/lm-dhcp-worker/coordinator-ca.pem")):
         src = _read(path)
         assert f'WORKER_CA_PATH="{ca}"' in src, path
+        assert '"$(readlink -f "$WORKER_CA")" != "$(readlink -f "$WORKER_CA_PATH")"' in src, path
         assert "--ca-cert is required" in src, path
         assert "LM_CLUSTER_CA_CERT=$WORKER_CA_PATH" in src, path
         assert "--ca-cert)" in src, path
