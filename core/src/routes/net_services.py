@@ -616,11 +616,15 @@ def register(app, hub, ctx):
                                   log_name="dns_cluster_reconcile", timeout=60)
 
     @app.get("/api/dns/stats")
-    async def dns_stats(request: Request, tenant: str = None):
-        """Unbound query statistics (total/cache-hit/recursion + per-type) for
-        the DNS analytics panel."""
+    async def dns_stats(request: Request, tenant: str = None, search: str = None):
+        """Unbound query statistics (total/cache-hit/recursion + per-type,
+        plus a per-destination-name breakdown) for the DNS analytics panel.
+        ``search`` filters the per-name breakdown by substring match."""
         logger.debug("relay GET /api/dns/stats")
-        return await _relay_spoke(_dns_spoke_for_request(request, tenant), "DNS_STATS", log_name="dns_stats")
+        return await _relay_spoke(
+            _dns_spoke_for_request(request, tenant), "DNS_STATS",
+            {"search": search} if search else {}, log_name="dns_stats",
+        )
 
     @app.get("/api/dns/forwarders")
     async def dns_forwarders(request: Request, tenant: str = None):
