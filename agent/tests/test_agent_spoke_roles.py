@@ -15,6 +15,7 @@ Covers the blockers fixed when extending ``_ROLE_MAP`` from 2 → 10 roles:
 import asyncio
 import importlib
 import sys
+import types
 from pathlib import Path
 
 import agent_spoke
@@ -402,6 +403,52 @@ def test_load_multiple_roles_hosts_all_concurrently(monkeypatch):
                               "module_type": "dhcp"}
     # LOADED_ROLES persisted as a sorted comma-list of both roles.
     assert cp.env.get("LOADED_ROLES") == "dhcp,dns"
+
+
+def test_available_roles_reports_installed_deploy_roles(monkeypatch):
+    agent = GenericAgent("agent-1", {})
+    installed = {"/usr/sbin/unbound", "/usr/sbin/kea-dhcp4"}
+    monkeypatch.setattr(
+        agent_spoke.os.path, "exists", lambda path: path in installed)
+    monkeypatch.setattr(agent_spoke.subprocess, "run", lambda *args, **kwargs:
+                        types.SimpleNamespace(returncode=0))
+
+    result = asyncio.run(agent.handle_command("GET_AVAILABLE_ROLES", {}))
+
+    assert result["installed_deploy_roles"] == ["dns-server", "dhcp-server"]
+    assert result["active_deploy_roles"] == ["dns-server", "dhcp-server"]
+    assert result["deploy"] == {"state": "idle"}
+
+
+def test_unload_dns_server_stops_and_disables_unbound(monkeypatch):
+    agent = GenericAgent("agent-1", {})
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(agent_spoke.subprocess, "run", run)
+    result = asyncio.run(
+        agent.handle_command("UNLOAD_ROLE", {"role": "dns-server"}))
+
+    assert result["status"] == "SUCCESS"
+    assert result["deploy"] is True
+    # The cluster worker is torn down FIRST (a removed node must stop dialling
+    # its old coordinator), then the server itself.
+    assert calls == [["systemctl", "disable", "--now", "lm-dns-worker"],
+                     ["systemctl", "disable", "--now", "unbound"]]
+
+
+def test_unload_dns_server_refuses_while_dns_module_is_loaded():
+    agent = GenericAgent("agent-1", {})
+    agent._roles["dns"] = {}
+
+    result = asyncio.run(
+        agent.handle_command("UNLOAD_ROLE", {"role": "dns-server"}))
+
+    assert result["status"] == "ERROR"
+    assert "management role" in result["message"]
 
 
 def test_load_role_is_idempotent(monkeypatch):

@@ -2,8 +2,87 @@ import logging
 import re
 import requests
 import ipaddress
+import os
+import subprocess
 
 logger = logging.getLogger("KeaManager")
+
+
+def build_subnet4(subnets: list, reservations: list) -> tuple:
+    """Translate LM/NetBox intent into Kea's ``subnet4`` list.
+
+    Returns ``(kea_subnets, applied_reservations, skipped_reservations)``.
+    Extracted from :meth:`KeaManager.sync` so an HA pair can be handed the
+    IDENTICAL scope + reservation block for both nodes — two nodes computing
+    their own subnet list independently is how a "HA pair" ends up handing out
+    overlapping addresses.
+    """
+    kea_subnets = []
+    applied = [False] * len(reservations)
+    for idx, s in enumerate(subnets, start=1):
+        subnet_str = s.get("subnet", "")
+        try:
+            net = ipaddress.ip_network(subnet_str, strict=False)
+        except ValueError:
+            logger.warning("Invalid subnet %s — skipping", subnet_str)
+            continue
+
+        pools = [
+            {"pool": f"{p['start']} - {p['end']}"}
+            for p in s.get("pools", [])
+            if p.get("start") and p.get("end")
+        ]
+        if not pools:
+            # Default pool: .10 → .254
+            first = int(net.network_address) + 10
+            last  = int(net.broadcast_address) - 1
+            pools = [{"pool": f"{ipaddress.ip_address(first)} - {ipaddress.ip_address(last)}"}]
+
+        kea_subnet = {
+            "id":     idx,
+            "subnet": str(net),
+            "pools":  pools,
+            "option-data": [],
+        }
+        if s.get("gateway"):
+            kea_subnet["option-data"].append(
+                {"name": "routers", "data": s["gateway"]}
+            )
+        dns = s.get("dns_servers", [])
+        if dns:
+            kea_subnet["option-data"].append(
+                {"name": "domain-name-servers", "data": ", ".join(dns)}
+            )
+
+        # Attach reservations that belong to this subnet. Guard ip/mac with
+        # .get and wrap ip_network in try — one malformed reservation (missing
+        # or invalid ip) must be skipped, not KeyError/ValueError out of the
+        # whole sync (which would then config-set the subnet with NO reservations).
+        subnet_res = []
+        for res_idx, r in enumerate(reservations):
+            ip, mac = r.get("ip"), r.get("mac")
+            if not ip or not mac:
+                continue
+            try:
+                in_subnet = (r.get("subnet") == subnet_str
+                             or net.overlaps(ipaddress.ip_network(f"{ip}/32")))
+            except ValueError:
+                continue  # malformed reservation IP
+            if in_subnet:
+                subnet_res.append({
+                    "ip-address": ip,
+                    "hw-address": mac.lower().replace("-", ":"),
+                    "hostname": r.get("hostname", ""),
+                })
+                applied[res_idx] = True
+        if subnet_res:
+            kea_subnet["reservations"] = subnet_res
+
+        kea_subnets.append(kea_subnet)
+
+    applied_count = sum(1 for flag in applied if flag)
+    return kea_subnets, applied_count, len(reservations) - applied_count
+
 
 
 class KeaManager:
@@ -56,6 +135,26 @@ class KeaManager:
         self._rpc("dhcp4", "config-set", {"Dhcp4": dhcp4_config})
         self._rpc("dhcp4", "config-write", {})
 
+    def apply_config(self, dhcp4_config: dict) -> dict:
+        """``config-set`` then ``config-write`` as two OBSERVABLE steps.
+
+        ``_set_config`` collapses both into one exception, which loses the one
+        distinction that matters for rollback: a ``config-write`` failure means
+        the new config is ALREADY RUNNING (config-set succeeded) but is not
+        persisted — the node is mutated and must be restored, whereas a
+        ``config-set`` failure left it untouched. Returns
+        ``{"set": bool, "written": bool, "error": str}``.
+        """
+        try:
+            self._rpc("dhcp4", "config-set", {"Dhcp4": dhcp4_config})
+        except Exception as e:  # noqa: BLE001 — a rejected config is the answer
+            return {"set": False, "written": False, "error": str(e)}
+        try:
+            self._rpc("dhcp4", "config-write", {})
+        except Exception as e:  # noqa: BLE001
+            return {"set": True, "written": False, "error": str(e)}
+        return {"set": True, "written": True, "error": ""}
+
     def sync(self, subnets: list, reservations: list) -> dict:
         """
         Full sync: replace all subnets and reservations.
@@ -68,66 +167,7 @@ class KeaManager:
         except Exception as e:
             return {"status": "ERROR", "message": f"Cannot read Kea config: {e}"}
 
-        kea_subnets = []
-        for idx, s in enumerate(subnets, start=1):
-            subnet_str = s.get("subnet", "")
-            try:
-                net = ipaddress.ip_network(subnet_str, strict=False)
-            except ValueError:
-                logger.warning("Invalid subnet %s — skipping", subnet_str)
-                continue
-
-            pools = [
-                {"pool": f"{p['start']} - {p['end']}"}
-                for p in s.get("pools", [])
-                if p.get("start") and p.get("end")
-            ]
-            if not pools:
-                # Default pool: .10 → .254
-                first = int(net.network_address) + 10
-                last  = int(net.broadcast_address) - 1
-                pools = [{"pool": f"{ipaddress.ip_address(first)} - {ipaddress.ip_address(last)}"}]
-
-            kea_subnet = {
-                "id":     idx,
-                "subnet": str(net),
-                "pools":  pools,
-                "option-data": [],
-            }
-            if s.get("gateway"):
-                kea_subnet["option-data"].append(
-                    {"name": "routers", "data": s["gateway"]}
-                )
-            dns = s.get("dns_servers", [])
-            if dns:
-                kea_subnet["option-data"].append(
-                    {"name": "domain-name-servers", "data": ", ".join(dns)}
-                )
-
-            # Attach reservations that belong to this subnet. Guard ip/mac with
-            # .get and wrap ip_network in try — one malformed reservation (missing
-            # or invalid ip) must be skipped, not KeyError/ValueError out of the
-            # whole sync (which would then config-set the subnet with NO reservations).
-            subnet_res = []
-            for r in reservations:
-                ip, mac = r.get("ip"), r.get("mac")
-                if not ip or not mac:
-                    continue
-                try:
-                    in_subnet = (r.get("subnet") == subnet_str
-                                 or net.overlaps(ipaddress.ip_network(f"{ip}/32")))
-                except ValueError:
-                    continue  # malformed reservation IP
-                if in_subnet:
-                    subnet_res.append({
-                        "ip-address": ip,
-                        "hw-address": mac.lower().replace("-", ":"),
-                        "hostname": r.get("hostname", ""),
-                    })
-            if subnet_res:
-                kea_subnet["reservations"] = subnet_res
-
-            kea_subnets.append(kea_subnet)
+        kea_subnets, _applied, _skipped = build_subnet4(subnets, reservations)
 
         cfg["subnet4"] = kea_subnets
         try:
@@ -193,23 +233,39 @@ class KeaManager:
 
     def update_reservation(self, old_ip: str, subnet_id: int, ip: str,
                            mac: str, hostname: str = "") -> dict:
-        """Update a reservation by IP. Implemented as delete-then-add since Kea
-        reservations live in the subnet config block and may move between
-        subnets when the IP changes."""
+        """Update a reservation by IP in ONE config write.
+
+        Previously this deleted the old entry in one ``config-set`` and added
+        the replacement in a second: a failure (or a crash) between the two left
+        the reservation DELETED and never re-created, so the host silently
+        dropped to a dynamic lease. The removal and the insertion are now a
+        single atomic write — either the replacement lands or nothing changes.
+        Reservations still move freely between subnets, because the whole
+        ``subnet4`` block is rewritten in that one write."""
         if not all([subnet_id, ip, mac]):
             return {"status": "ERROR", "message": "subnet_id, ip, and mac are required"}
-        # Remove the old reservation (by old IP) from any subnet.
         cfg = self.get_config()
+        target = None
         for sub in cfg.get("subnet4", []):
+            if sub["id"] == int(subnet_id):
+                target = sub
             sub["reservations"] = [
                 r for r in sub.get("reservations", [])
                 if r.get("ip-address") != old_ip
             ]
+        if target is None:
+            return {"status": "ERROR", "message": f"Subnet {subnet_id} not found"}
+        target.setdefault("reservations", [])
+        target["reservations"].append({
+            "ip-address": ip,
+            "hw-address": mac.lower().replace("-", ":"),
+            "hostname":   hostname,
+        })
         try:
             self._set_config(cfg)
         except Exception as e:
             return {"status": "ERROR", "message": str(e)}
-        return self.add_reservation(int(subnet_id), ip, mac, hostname)
+        return {"status": "SUCCESS"}
 
     def delete_reservation(self, ip: str) -> dict:
         cfg = self.get_config()
@@ -307,3 +363,162 @@ class KeaManager:
             "subnet_count": len(self.list_subnets()) if running else 0,
             "ca_url":       self.ca_url,
         }
+
+    def diagnostics(self) -> dict:
+        """Return Kea service, config, interface, listener, CA, and lease checks."""
+        units = {
+            name: self._unit_status(name)
+            for name in ("kea-dhcp4-server", "kea-ctrl-agent")
+        }
+        config_test = self._run_diag(
+            ["kea-dhcp4", "-t", "/etc/kea/kea-dhcp4.conf"], timeout=10)
+        sockets = self._run_diag(["ss", "-H", "-lntup"])
+        if not sockets["ok"]:
+            sockets = self._run_diag(["ss", "-H", "-lntu"])
+        listener_lines = [
+            line.strip() for line in sockets["output"].splitlines()
+            if re.search(r"(?:\]:|:)(?:67|8001)(?:\s|$)", line)
+        ]
+        dhcp_listeners = [line for line in listener_lines
+                          if re.search(r"(?:\]:|:)67(?:\s|$)", line)]
+        ca_listeners = [line for line in listener_lines
+                        if re.search(r"(?:\]:|:)8001(?:\s|$)", line)]
+
+        ca = {"reachable": False, "config_loaded": False,
+              "url": self.ca_url, "version": "", "error": ""}
+        config = {}
+        leases = None
+        try:
+            version = self._rpc("dhcp4", "version-get")
+            ca["reachable"] = True
+            ca["version"] = str(
+                version.get("extended") or version.get("version") or "")
+        except Exception as e:
+            ca["error"] = str(e)
+        if ca["reachable"]:
+            try:
+                config = self.get_config()
+                ca["config_loaded"] = True
+            except Exception as e:
+                ca["error"] = str(e)
+            try:
+                lease_data = self._rpc(
+                    "dhcp4", "lease4-get-all", {"subnet-id": 0})
+                leases = lease_data.get("leases", [])
+            except Exception as e:
+                if not ca["error"]:
+                    ca["error"] = str(e)
+
+        interfaces = [
+            str(value).split("/", 1)[0].strip()
+            for value in ((config.get("interfaces-config", {}) or {})
+                          .get("interfaces", []) or [])
+            if str(value).strip()
+        ]
+        missing_interfaces = [
+            iface for iface in interfaces
+            if iface != "*" and not os.path.exists(f"/sys/class/net/{iface}")
+        ]
+        subnets = config.get("subnet4", []) or []
+        lease_file = ((config.get("lease-database", {}) or {}).get("name") or "")
+        lease_db = {
+            "path": lease_file,
+            "exists": bool(lease_file and os.path.exists(lease_file)),
+            "leases": len(leases) if leases is not None else None,
+        }
+        recent = self._run_diag([
+            "journalctl", "-u", "kea-dhcp4-server", "-u", "kea-ctrl-agent",
+            "-p", "warning", "-n", "20", "--no-pager",
+        ])
+        recent_errors = [
+            line for line in recent["output"].splitlines()
+            if line.strip() and "-- No entries --" not in line
+        ][-20:]
+
+        recommendations = []
+        if units["kea-dhcp4-server"].get("ActiveState") != "active":
+            recommendations.append(
+                "Kea DHCP4 is not active; inspect its service status and recent log.")
+        if units["kea-ctrl-agent"].get("ActiveState") != "active":
+            recommendations.append(
+                "Kea Control Agent is not active; the LM DHCP module cannot manage Kea.")
+        if not config_test["ok"]:
+            recommendations.append(
+                "Kea configuration validation failed; fix the reported config error.")
+        if not ca["reachable"]:
+            recommendations.append(
+                f"Kea Control Agent did not answer at {self.ca_url}.")
+        elif not ca["config_loaded"]:
+            recommendations.append(
+                "Kea Control Agent answered, but DHCP4 configuration retrieval failed.")
+        if leases is None:
+            recommendations.append(
+                "Kea lease retrieval failed; the active lease count is unavailable.")
+        if missing_interfaces:
+            recommendations.append(
+                "Configured DHCP interface(s) are missing: "
+                + ", ".join(missing_interfaces) + ".")
+        if not dhcp_listeners:
+            recommendations.append(
+                "Nothing is listening on DHCP server port UDP/67.")
+
+        healthy = (
+            units["kea-dhcp4-server"].get("ActiveState") == "active"
+            and units["kea-ctrl-agent"].get("ActiveState") == "active"
+            and config_test["ok"]
+            and ca["reachable"]
+            and ca["config_loaded"]
+            and leases is not None
+            and not missing_interfaces
+            and bool(dhcp_listeners)
+        )
+        return {
+            "status": "SUCCESS",
+            "healthy": healthy,
+            "units": units,
+            "ca": ca,
+            "config_test": config_test,
+            "interfaces_configured": interfaces,
+            "interface_missing": missing_interfaces,
+            "subnets": [
+                {"id": s.get("id"), "subnet": s.get("subnet", ""),
+                 "pools": [p.get("pool", "") for p in (s.get("pools", []) or [])]}
+                for s in subnets
+            ],
+            "lease_db": lease_db,
+            "listeners": {
+                "dhcp4": dhcp_listeners,
+                "control_agent": ca_listeners,
+                "error": sockets["error"],
+            },
+            "last_errors": recent_errors,
+            "recommendations": recommendations,
+        }
+
+    @staticmethod
+    def _run_diag(cmd, timeout=5):
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout)
+            output = (result.stdout or result.stderr or "").strip()[:4000]
+            return {
+                "ok": result.returncode == 0,
+                "exit_code": result.returncode,
+                "output": output,
+                "error": "" if result.returncode == 0 else (output or "command failed"),
+            }
+        except Exception as e:
+            return {"ok": False, "exit_code": None, "output": "", "error": str(e)}
+
+    def _unit_status(self, unit):
+        result = self._run_diag([
+            "systemctl", "show", unit,
+            "--property=LoadState,ActiveState,SubState,NRestarts,ExecMainStatus",
+        ])
+        values = {}
+        for line in result["output"].splitlines():
+            key, sep, value = line.partition("=")
+            if sep:
+                values[key] = value
+        values["error"] = result["error"]
+        return values
