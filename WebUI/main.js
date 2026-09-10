@@ -214,6 +214,7 @@ const ROUTES = {
     // ── DNS / DHCP ──
     loadDNSData:            { m: 'GET',  p: '/api/dns/records',           api: 'dns_list_records' },
     showDnsRecordModal:     { m: 'POST', p: '/api/dns/record',            api: 'dns_add_record/dns_update_record', via: 'saveDnsRecord' }, // (modal)
+    showDnsForwarderModal:  { m: 'POST', p: '/api/dns/forwarders' + _tenantQS(), api: 'dns_add_forwarder', via: 'saveDnsForwarder' }, // (modal)
     loadDHCPData:           { m: 'GET',  p: '/api/dhcp/{subnets|leases|reservations}', api: 'dhcp_list_subnets/dhcp_list_leases/dhcp_list_reservations' },
     showDhcpReservationModal:{ m: 'GET', p: '/api/dhcp/subnets',          api: 'dhcp_list_subnets', via: '_loadDhcpSubnetOptions' }, // (modal)
 
@@ -4162,6 +4163,7 @@ function _viewTemplate(viewId) {
   <div id="dns-actions" class="flex justify-end gap-2">
     ${addServerButtonHtml('dns', 'DNS')}
     ${(isAdmin() || isTenantAdmin()) ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" class="${btn}">+ Add Record</button>` : ''}
+    ${isAdmin() ? `<button id="dns-forwarder-add-btn" onclick="showDnsForwarderModal()" class="${btn} hidden">+ Add Forwarder</button>` : ''}
   </div>
   <div id="dns-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;
@@ -24168,6 +24170,8 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
     const addBtn = document.getElementById('dns-add-btn');
     // Add-record only applies to the Records tab; Statistics/Forwarders are read-only.
     if (addBtn) addBtn.classList.toggle('hidden', !(subMenu === 'Records' || !subMenu));
+    const addForwarderBtn = document.getElementById('dns-forwarder-add-btn');
+    if (addForwarderBtn) addForwarderBtn.classList.toggle('hidden', subMenu !== 'Forwarders');
 
     const th = tableHead, tw = tableWrap;  // shared table helpers
     const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
@@ -24317,8 +24321,10 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 container.innerHTML = _spokeErrorBanner(d.message, 'unbound-control forwarders unavailable'); return;
             }
             const fwds = d.forwarders || [];
-            const cols = ['Zone', 'Class', 'Upstream Servers'];
+            const showMember = fwds.some(f => f.member_id);
+            const cols = (showMember ? ['Member'] : []).concat(['Zone', 'Class', 'Upstream Servers']);
             const rows = fwds.map(f => `<tr class="border-b border-slate-100 hover:bg-slate-50">
+                ${showMember ? `<td class="px-4 py-2 font-mono text-xs">${escapeHtml(f.member_id || '—')}</td>` : ''}
                 <td class="px-4 py-2 font-mono font-medium">${escapeHtml(f.zone || '.')}</td>
                 <td class="px-4 py-2 text-xs">${escapeHtml(f.class || 'IN')}</td>
                 <td class="px-4 py-2 font-mono text-xs">${(f.upstreams || []).map(u => escapeHtml(u)).join(', ') || '—'}</td>
@@ -27219,6 +27225,56 @@ async function saveDnsRecord() {
         if (ok && d.status === 'SUCCESS') { modal.remove(); loadDNSData('Records'); }
         else showToast('Error: ' + (detail || d?.message || 'Operation failed'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+function showDnsForwarderModal() {
+    const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
+    openModal('dns-forwarder-modal', `
+        <h3 class="text-lg font-bold text-[#263040]">Add DNS Forwarder</h3>
+        <div class="space-y-3">
+            <div class="space-y-1">
+                <label class="text-xs text-slate-500 font-bold uppercase">Zone</label>
+                <input id="dns-fwd-zone" value="." class="${inputCls}" placeholder=". or example.com">
+                <p class="text-xs text-slate-400">Use <span class="font-mono">.</span> to forward all non-authoritative queries.</p>
+            </div>
+            <div class="space-y-1">
+                <label class="text-xs text-slate-500 font-bold uppercase">Upstream servers</label>
+                <input id="dns-fwd-upstreams" class="${inputCls}" placeholder="1.1.1.1, 1.0.0.1">
+                <p class="text-xs text-slate-400">Enter one or more IPv4 or IPv6 addresses separated by commas or spaces.</p>
+            </div>
+        </div>
+        <div class="flex justify-end gap-2 pt-2">
+            <button onclick="saveDnsForwarder()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Add Forwarder</button>
+            <button onclick="document.getElementById('dns-forwarder-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+}
+
+async function saveDnsForwarder() {
+    const modal = document.getElementById('dns-forwarder-modal');
+    const zone = document.getElementById('dns-fwd-zone')?.value?.trim() || '.';
+    const upstreams = (document.getElementById('dns-fwd-upstreams')?.value || '')
+        .split(/[\s,]+/).filter(Boolean);
+    if (!upstreams.length) {
+        showToast('At least one upstream server is required', 'error');
+        return;
+    }
+    try {
+        const { ok, data: d, detail } = await _spokeFetch(
+            '/api/dns/forwarders' + _tenantQS(), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ zone, upstreams }),
+            });
+        if (ok && d.status === 'SUCCESS') {
+            modal.remove();
+            showToast(`Forwarder ${zone} added to all DNS servers.`, 'success');
+            loadDNSData('Forwarders');
+        } else {
+            showToast('Error: ' + (detail || d?.message || 'Forwarder add failed'), 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
 }
 
 async function deleteDnsRecord(name, rtype) {
