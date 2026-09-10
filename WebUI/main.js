@@ -484,7 +484,7 @@ function updateContextActions() {
 
 // Roles available to load on a generic agent (matches lm/agent/src/agent_spoke.py _ROLE_MAP)
 const AGENT_ROLES = {
-    'dns':        { name: 'DNS (Unbound module)',  desc: 'Manages a running Unbound. Syncs records from NetBox. Needs an Unbound server — deploy the "DNS Server" role (or install standalone).', deploy: false },
+    'dns':        { name: 'DNS Management',  desc: 'Coordinator-only management spoke. Does not install or run Unbound locally; deploy "DNS Server" on each resolver worker, then configure those members here.', deploy: false },
     'henet':      { name: 'HE.NET (Hurricane Electric public DNS)', desc: 'Manages public DNS records at dns.he.net over HE\'s dynamic-DNS update API. No server to deploy — the account login credential (shared with certificates, DNS → "Hurricane Electric (account login)") powers Import/Sync (reading the zone); pushing a record\'s IP needs THAT record\'s own per-record DDNS key, entered when you add or edit it.', deploy: false },
     'dns-server': { name: 'DNS Server (Unbound)', desc: 'Deploys Unbound itself (server + remote-control + conf.d include). Runs as its own service on this host; does NOT create a spoke. Load the "DNS (Unbound module)" role to manage it.', deploy: true },
     'dhcp':       { name: 'DHCP (Kea module)',     desc: 'Manages a running Kea DHCP4. Syncs subnets and reservations from NetBox. Needs a Kea server — deploy the "DHCP Server" role (or install standalone).', deploy: false },
@@ -608,6 +608,10 @@ let currentSubView = 'General';
 // within the current primary (e.g. 'VMs' under 'VM Server'). '' when the
 // current primary has no children.
 let currentSubChild = '';
+// For a three-tier nav (Settings → Cloud → Azure/OCI → SSO/NSG/…), the active
+// grandchild tab within the current child. '' when the current child has no
+// grandchildren (see VIEW_GRANDCHILDREN).
+let currentSubGrandchild = '';
 // Configured firewalls (Setup → Firewalls). The Firewalls page no longer has a
 // single-firewall selector — it aggregates every firewall's rules/NAT/etc. into
 // one table, so each item carries its source firewall id (_fwId) + name.
@@ -1561,7 +1565,7 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'Azure', 'Tenant Config', 'Sync', 'Hub Status', 'Diagnostics', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons'],
+    settings: ['General', 'User Access', 'Cloud', 'Tenant Config', 'Sync', 'Hub Status', 'Diagnostics', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-console', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs', 'logs-features'],
     setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'OS Updates'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
@@ -1598,11 +1602,32 @@ const VIEW_CHILDREN = {
         'Setup':       ['General', 'Central API', 'Central On-Prem API', 'Mist API', 'Proxmox', 'GitHub', 'Security', 'Notifications', 'Diagnostics'],
     },
     settings: {
-        // Azure gets a second-tier strip (SSO / NSG / Cloud NAC / Key Vault /
-        // NetBox SSO) — they share the one Entra app registration + cert.
-        'Azure': ['SSO', 'NSG', 'Cloud NAC', 'Key Vault', 'NetBox SSO'],
+        // Cloud gets a second-tier strip — one tab per cloud provider (Azure,
+        // OCI); each provider's own integrations are a THIRD tier (see
+        // VIEW_GRANDCHILDREN below) so e.g. Azure's SSO/NSG/Cloud NAC/Key Vault/
+        // NetBox SSO tiles nest under 'Azure', not flattened alongside OCI's.
+        'Cloud': ['Azure', 'OCI'],
     },
 };
+
+// Third-tier grandchild tabs (#top-nav-tertiary), nested under a VIEW_CHILDREN
+// child. Only Settings → Cloud uses this today: each provider's own set of
+// integrations (Azure shares its SSO app registration + cert across every
+// item below; OCI uses its own API signing key).
+const VIEW_GRANDCHILDREN = {
+    settings: {
+        Cloud: {
+            'Azure': ['SSO', 'NSG', 'Cloud NAC', 'Vault', 'NetBox SSO'],
+            'OCI': ['NSG', 'Vault'],
+        },
+    },
+};
+
+// First grandchild of a child, or '' if the child has no grandchildren.
+function _csDefaultGrandchild(viewId, primary, child) {
+    const gkids = ((VIEW_GRANDCHILDREN[viewId] || {})[primary] || {})[child];
+    return (gkids && gkids.length) ? gkids[0] : '';
+}
 
 // First child of a primary, or '' if the primary/module has no children.
 function _csDefaultChild(viewId, primary) {
@@ -3190,6 +3215,8 @@ function _rebuildMainNav(allSpokes, connections) {
             icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.25" stroke-width="2"></circle><circle cx="18" cy="6" r="2.25" stroke-width="2"></circle><circle cx="12" cy="18" r="2.25" stroke-width="2"></circle><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.25 6h7.5M7.2 7.9l3.6 8.2M16.8 7.9l-3.6 8.2"></path></svg>';
         } else if (className === 'Certificates') {
             icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m-6-8h6M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M14.5 19.5l1.5 1.5 2.5-2.5"></path></svg>';
+        } else if (className === 'Storage') {
+            icon = '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008V8.25zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008V8.25z"></path></svg>';
         } else if (firstProduct && window.VIEWS && window.VIEWS[firstProduct]) {
             icon = window.VIEWS[firstProduct].icon || '';
         }
@@ -3607,6 +3634,7 @@ async function setView(viewId) {
 
     currentSubView = (VIEW_SUBMENUS[currentView] || ['General'])[0];
     currentSubChild = _csDefaultChild(currentView, currentSubView);
+    currentSubGrandchild = _csDefaultGrandchild(currentView, currentSubView, currentSubChild);
 
     document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
     const navItem = document.getElementById(`nav-${isClass ? viewId : currentView}`);
@@ -3683,10 +3711,12 @@ async function setSubView(subMenu) {
     // ticker so it doesn't keep fetching /api/le/inflight in the background.
     // (loadLEData restarts them when the tab is re-entered.)
     if (currentView !== 'le') clearLeInflightPollers();
-    // Reset the child for the newly-selected primary (two-tier nav). For
-    // non-cs modules _csDefaultChild returns '' and the secondary strip is
-    // hidden by renderSecondaryNav.
+    // Reset the child (and grandchild, three-tier nav) for the newly-selected
+    // primary. For non-cs/non-Cloud modules _csDefaultChild returns '' and the
+    // secondary strip is hidden by renderSecondaryNav (same for the tertiary
+    // strip when the child has no grandchildren).
     currentSubChild = _csDefaultChild(currentView, subMenu);
+    currentSubGrandchild = _csDefaultGrandchild(currentView, subMenu, currentSubChild);
 
     // Update active state in top-nav
     document.querySelectorAll('#top-nav .sub-nav-item').forEach(el => {
@@ -3754,9 +3784,12 @@ function renderTopNav(viewId) {
 }
 
 // Render the second-tier child strip (#top-nav-secondary) for the active
-// primary of a two-tier module (cs). Populates it with the primary's children
-// and highlights currentSubChild; hides the strip entirely for primaries/modules
-// without children so non-cs modules and childless cs primaries are unaffected.
+// primary of a two-tier module (cs) — or the middle tier of a three-tier one
+// (settings/Cloud). Populates it with the primary's children and highlights
+// currentSubChild; hides the strip entirely for primaries/modules without
+// children so non-cs modules and childless cs primaries are unaffected. Also
+// keeps the tertiary (grandchild) strip in sync, since it depends on the
+// active child.
 function renderSecondaryNav(viewId) {
     const sec = document.getElementById('top-nav-secondary');
     if (!sec) return;
@@ -3764,6 +3797,7 @@ function renderSecondaryNav(viewId) {
     if (!kids || !kids.length) {
         sec.classList.add('hidden');
         sec.innerHTML = '';
+        renderTertiaryNav(viewId);
         return;
     }
     const activeChild = currentSubChild || kids[0];
@@ -3780,25 +3814,64 @@ function renderSecondaryNav(viewId) {
     if (ksSlot && typeof window.csKillSwitchMountChip === 'function') {
         window.csKillSwitchMountChip('cs-ks-chip');
     }
+    renderTertiaryNav(viewId);
 }
 
-// Select a child tab within the current cs primary (two-tier nav). Sets
-// currentSubChild, updates the secondary strip's active state, and dispatches
-// the child renderer via loadCSData.
+// Render the third-tier grandchild strip (#top-nav-tertiary), nested under the
+// active child (e.g. Settings → Cloud → Azure → SSO/NSG/…). Hides the strip
+// when the active child has no grandchildren (VIEW_GRANDCHILDREN) — every
+// module except Settings → Cloud today.
+function renderTertiaryNav(viewId) {
+    const ter = document.getElementById('top-nav-tertiary');
+    if (!ter) return;
+    const gkids = ((VIEW_GRANDCHILDREN[viewId] || {})[currentSubView] || {})[currentSubChild] || null;
+    if (!gkids || !gkids.length) {
+        ter.classList.add('hidden');
+        ter.innerHTML = '';
+        return;
+    }
+    const activeGrandchild = currentSubGrandchild || gkids[0];
+    ter.innerHTML = gkids.map((gchild) =>
+        `<div class="sub-nav-item ${gchild === activeGrandchild ? 'active' : ''} px-2 py-1 cursor-pointer select-none" data-subgrandchild="${gchild}" onclick="setSubGrandchild('${gchild.replace(/'/g, "\\'")}')">${gchild}</div>`
+    ).join('');
+    ter.classList.remove('hidden');
+}
+
+// Select a child tab within the current primary (two-tier nav, e.g. cs) — or
+// the middle tier of a three-tier nav (settings/Cloud, e.g. 'Azure'/'OCI').
+// Sets currentSubChild, resets currentSubGrandchild to the new child's first
+// grandchild, updates the secondary strip's active state + the tertiary strip,
+// and dispatches the child renderer.
 async function setSubChild(child) {
     currentSubChild = child;
+    currentSubGrandchild = _csDefaultGrandchild(currentView, currentSubView, child);
     document.querySelectorAll('#top-nav-secondary .sub-nav-item').forEach(el => {
         el.classList.toggle('active', el.dataset.subchild === child);
     });
+    renderTertiaryNav(currentView);
     if (currentView === 'cs') {
         await loadCSData(currentSubView, child);
     } else if (currentView === 'settings') {
-        // Re-render the current settings primary (e.g. Azure) — it reads
-        // currentSubChild to pick the right tile.
+        // Re-render the current settings primary (e.g. Cloud) — it reads
+        // currentSubChild/currentSubGrandchild to pick the right provider + tile.
         _renderSettingsSection(currentSubView);
     }
 }
 window.setSubChild = setSubChild;
+
+// Select a grandchild tab within the current child (three-tier nav, e.g.
+// Settings → Cloud → Azure → 'NSG'). Sets currentSubGrandchild, updates the
+// tertiary strip's active state, and re-renders the settings tile.
+function setSubGrandchild(gchild) {
+    currentSubGrandchild = gchild;
+    document.querySelectorAll('#top-nav-tertiary .sub-nav-item').forEach(el => {
+        el.classList.toggle('active', el.dataset.subgrandchild === gchild);
+    });
+    if (currentView === 'settings') {
+        _renderSettingsSection(currentSubView);
+    }
+}
+window.setSubGrandchild = setSubGrandchild;
 
 function renderView(viewId) {
     const vp = document.getElementById('viewport');
@@ -4094,7 +4167,7 @@ function _viewTemplate(viewId) {
             return `<div class="space-y-4">
   <div>
     <h2 class="text-xl font-bold text-slate-800">Security — Threat Monitor</h2>
-    <p class="text-sm text-slate-500">Detects brute-force / faked-credential attacks on the API, logs invalid attempts, and (opt-in) auto-blocks the source IP via an Azure NSG deny rule.</p>
+    <p class="text-sm text-slate-500">Detects brute-force / faked-credential attacks on the API, logs invalid attempts, and (opt-in) auto-blocks the source IP via a NSG deny rule.</p>
   </div>
   <div id="security-content"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
 </div>`;
@@ -4103,7 +4176,7 @@ function _viewTemplate(viewId) {
             return `<div class="space-y-4">
   <div>
     <h2 class="text-xl font-bold text-slate-800">Credential Vault</h2>
-    <p class="text-sm text-slate-500">Per-tenant secret locker backed by Azure Key Vault. Each bucket is unlocked with its own pass-phrase — your role decides which buckets you can reach, the pass-phrase decrypts the values. Revealed secrets are shown once and never cached.</p>
+    <p class="text-sm text-slate-500">Per-tenant secret locker backed by Key Vault. Each bucket is unlocked with its own pass-phrase — your role decides which buckets you can reach, the pass-phrase decrypts the values. Revealed secrets are shown once and never cached.</p>
   </div>
   <div id="credvault-content"><p class="text-sm text-slate-400 italic p-4">Loading…</p></div>
 </div>`;
@@ -4353,7 +4426,7 @@ async function loadSecurityData() {
         </div>
         <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
           <label class="flex items-center gap-2 text-slate-600 col-span-2"><input type="checkbox" id="sec-enabled" ${c.enabled ? 'checked' : ''} class="w-4 h-4 rounded"> Detection enabled (log invalid attempts)</label>
-          <label class="flex items-center gap-2 text-amber-700 font-bold col-span-2"><input type="checkbox" id="sec-autoblock" ${c.auto_block ? 'checked' : ''} class="w-4 h-4 rounded"> Auto-block via Azure NSG (off = log-only)</label>
+          <label class="flex items-center gap-2 text-amber-700 font-bold col-span-2"><input type="checkbox" id="sec-autoblock" ${c.auto_block ? 'checked' : ''} class="w-4 h-4 rounded"> Auto-block via NSG (off = log-only)</label>
           <label class="text-slate-500">Block after &gt; N fails<input type="number" id="sec-threshold" min="1" value="${c.threshold != null ? c.threshold : 5}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
           <label class="text-slate-500">Window (min)<input type="number" id="sec-window" min="1" value="${Math.round((c.window_s || 600) / 60)}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
           <label class="text-slate-500">TTL (hours)<input type="number" id="sec-ttl" min="1" value="${Math.round((c.ttl_s || 86400) / 3600)}" class="w-full mt-1 border border-slate-300 rounded px-2 py-1"></label>
@@ -4364,7 +4437,7 @@ async function loadSecurityData() {
           ${(() => {
             const ar = d.allow_rule || {};
             return `<div class="col-span-2 md:col-span-4 text-[11px] text-slate-500 bg-slate-50 rounded px-2 py-1.5 leading-relaxed">
-              <b>Allow must be a lower number than Deny; both below 1000 (Azure's default allow on 443).</b> The <b>allow rule</b> (name <b>${escapeHtml(ar.name || 'lm-allowlist')}</b>) is also editable under <b>Settings → Azure → NSG</b> — saving here updates <b>both</b> priorities (allow → Azure NSG, deny → threat monitor).
+              <b>Allow must be a lower number than Deny; both below 1000 (NSG's default allow on 443).</b> The <b>allow rule</b> (name <b>${escapeHtml(ar.name || 'lm-allowlist')}</b>) is also editable under <b>Settings → Cloud → Azure → NSG</b> — saving here updates <b>both</b> priorities (allow → NSG, deny → threat monitor).
               <span id="sec-prio-check"></span>
             </div>`;
           })()}
@@ -4405,7 +4478,7 @@ async function loadSecurityData() {
         <button onclick="securityNeverRemove('${escapeHtml(e.ip)}')" class="text-[11px] text-slate-500 hover:text-red-600 font-medium shrink-0">Remove</button></div>`;
     const neverTile = `<div class="${card}">
         <h3 class="text-sm font-bold text-green-600 mb-1">Trusted IPs — never auto-blocked <span class="text-slate-500">AND allowed through the Azure NSG</span> <span class="text-slate-400 font-normal">(${trusted.length})</span></h3>
-        <p class="text-[11px] text-slate-400 mb-2">Shared list — the same one edited under <b>Settings → Azure → NSG</b>. Adding an entry here also opens an <b>allow rule</b> hole in the NSG when NSG management is enabled${allowOn ? '' : ' (currently disabled — entries still exempt from auto-block)'}.</p>
+        <p class="text-[11px] text-slate-400 mb-2">Shared list — the same one edited under <b>Settings → Cloud → Azure → NSG</b>. Adding an entry here also opens an <b>allow rule</b> hole in the NSG when NSG management is enabled${allowOn ? '' : ' (currently disabled — entries still exempt from auto-block)'}.</p>
         <div class="flex gap-2 mb-2">
           <input id="sec-never-ip" placeholder="IP or CIDR" class="flex-1 border border-slate-300 rounded px-2 py-1 text-xs font-mono">
           <input id="sec-never-desc" placeholder="description (optional)" class="flex-1 border border-slate-300 rounded px-2 py-1 text-xs">
@@ -4685,8 +4758,8 @@ function _nsgPriorityCheck(allow, deny) {
     if (isNaN(a) || isNaN(d)) return { ok: false, msg: 'Enter numeric allow and deny priorities.' };
     const problems = [];
     if (!(a < d)) problems.push(`Allow (${a}) must be a LOWER number than Deny (${d}).`);
-    if (!(d < 1000)) problems.push(`Deny (${d}) must be below 1000 (Azure's default allow on 443).`);
-    if (!(a < 1000)) problems.push(`Allow (${a}) must be below 1000 (Azure's default allow on 443).`);
+    if (!(d < 1000)) problems.push(`Deny (${d}) must be below 1000 (NSG's default allow on 443).`);
+    if (!(a < 1000)) problems.push(`Allow (${a}) must be below 1000 (NSG's default allow on 443).`);
     return problems.length ? { ok: false, msg: problems.join(' ') } : { ok: true, msg: 'ordering OK' };
 }
 function _prioCheckHtml(allow, deny) {
@@ -4981,7 +5054,7 @@ function _cvRenderShell() {
     const opts = _cvBuckets.map(b =>
         `<option value="${escapeHtml(b.bucket)}"${b.bucket === _cvCurrentBucket ? ' selected' : ''}>${escapeHtml(_cvBucketLabel(b))}${b.has_psk ? '' : ' (no pass-phrase)'}</option>`).join('');
     const storageHint = _cvVaultAvailable ? '' : `
-      <div class="text-xs px-3 py-2 rounded-md bg-amber-50 text-amber-700 border border-amber-200">Azure Key Vault is not configured — secrets are stored locally (encrypted in hub state). Configure a vault under Setup → Azure → Key Vault to store them there instead.</div>`;
+      <div class="text-xs px-3 py-2 rounded-md bg-amber-50 text-amber-700 border border-amber-200">No Key Vault is configured — secrets are stored locally (encrypted in hub state). Configure a vault under Setup → Cloud → Azure → Vault or Setup → Cloud → OCI → Vault to store them there instead.</div>`;
     host.innerHTML = `
       <div class="hpe-card rounded-lg p-5 shadow-sm space-y-4">
         ${storageHint}
@@ -6143,16 +6216,24 @@ function _renderSettingsSection(subMenu) {
         return;
     }
 
-    // Azure — one primary tab; the second-tier strip (VIEW_CHILDREN.settings.Azure)
-    // provides SSO / NSG / Cloud NAC, which share the SSO app registration + cert.
-    // Render the active child's tile (currentSubChild) into the settings content.
-    if (subMenu === 'Azure') {
-        const child = ['SSO', 'NSG', 'Cloud NAC', 'Key Vault', 'NetBox SSO'].includes(currentSubChild) ? currentSubChild : 'SSO';
-        if (child === 'NSG') _renderSettingsAzureNsgTile(content);
-        else if (child === 'Cloud NAC') _renderSettingsCloudNacTile(content);
-        else if (child === 'Key Vault') _renderSettingsKeyVaultTile(content);
-        else if (child === 'NetBox SSO') _renderSettingsNetboxSsoTile(content);
-        else _renderSettingsSsoTile(content);
+    // Cloud — one primary tab; the second-tier strip (VIEW_CHILDREN.settings.Cloud)
+    // is one tab per cloud provider (Azure, OCI), each with its own THIRD tier
+    // of integrations (VIEW_GRANDCHILDREN.settings.Cloud) — currentSubChild is
+    // the provider, currentSubGrandchild is the specific tile.
+    if (subMenu === 'Cloud') {
+        const provider = ['Azure', 'OCI'].includes(currentSubChild) ? currentSubChild : 'Azure';
+        const gkids = (VIEW_GRANDCHILDREN.settings.Cloud[provider] || []);
+        const tile = gkids.includes(currentSubGrandchild) ? currentSubGrandchild : gkids[0];
+        if (provider === 'Azure') {
+            if (tile === 'NSG') _renderSettingsAzureNsgTile(content);
+            else if (tile === 'Cloud NAC') _renderSettingsCloudNacTile(content);
+            else if (tile === 'Vault') _renderSettingsKeyVaultTile(content);
+            else if (tile === 'NetBox SSO') _renderSettingsNetboxSsoTile(content);
+            else _renderSettingsSsoTile(content);
+        } else {  // OCI
+            if (tile === 'Vault') _renderSettingsOciVaultTile(content);
+            else _renderSettingsOciNsgTile(content);
+        }
         return;
     }
 
@@ -6195,9 +6276,11 @@ function _renderSettingsSection(subMenu) {
                         <button onclick="loadModuleDiagnostics()" class="text-xs px-3 py-1 rounded-md border border-slate-300 text-slate-600 hover:bg-slate-50">↻ Refresh</button>
                     </div>
                 </div>
+                <div id="service-cluster-summary"></div>
                 <div id="module-diag-body"><p class="text-slate-400 italic text-xs">Loading…</p></div>
             </div>`;
         loadModuleDiagnostics();
+        loadServiceClusterSummary();
         return;
     }
 
@@ -6802,6 +6885,7 @@ function _osuRender(d) {
         ${chip('need reboot', t.reboot_required || 0, (t.reboot_required ? 'bg-amber-50 border-amber-200' : 'bg-white border-slate-200'))}
         ${chip('unmanaged', t.unmanaged || 0)}
         ${chip('unreachable', t.unreachable || 0, (t.unreachable ? 'bg-red-50 border-red-200' : 'bg-white border-slate-200'))}
+        ${chip('not checked yet', t.not_checked || 0, (t.not_checked ? 'bg-slate-100 border-slate-300' : 'bg-white border-slate-200'))}
       </div>`;
     const rows = (d.nodes || []).map(n => {
         const key = `${n.kind}:${n.id}`;
@@ -6812,6 +6896,7 @@ function _osuRender(d) {
         else if (item && item.status === 'done') state = '<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">updated</span>';
         else if (n.unreachable) state = `<span class="text-[10px] font-bold text-red-700 bg-red-50 border border-red-200 rounded-full px-2 py-0.5">unreachable</span>`;
         else if (n.unmanaged) state = '<span class="text-[10px] font-bold text-slate-500 bg-slate-100 border border-slate-200 rounded-full px-2 py-0.5">unmanaged</span>';
+        else if (n.checked === false) state = '<span class="text-[10px] font-bold text-slate-500 bg-slate-100 border border-slate-300 rounded-full px-2 py-0.5">not checked yet</span>';
         else if (!n.count) state = '<span class="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2 py-0.5">up to date</span>';
         else state = `<span class="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5">${n.count} pending</span>`;
         const reboot = n.reboot_required ? '<span class="text-[10px] font-bold text-amber-800 bg-amber-50 border border-amber-200 rounded-full px-2 py-0.5" title="A kernel/PVE update needs a reboot. Nothing reboots automatically — do it deliberately.">reboot required</span>' : '';
@@ -10904,12 +10989,12 @@ const LM_NAV_ICONS = [
     { id: 17, name: 'Setup',        key: 'setup',      svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26"></path></svg>' },
     { id: 18, name: 'System',       key: 'settings',   svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.24-.438.613-.431.992a6.759 6.759 0 010 .255c-.007.378.138.75.43.99l1.005.828c.424.35.534.954.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.57 6.57 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.28c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.992a6.932 6.932 0 010-.255c.007-.378-.138-.75-.43-.99l-1.004-.828a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.087.22-.128.332-.183.582-.495.644-.869l.214-1.281z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>' },
     { id: 19, name: 'Logs',         key: 'logs',       svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8.25 6.75h12M8.25 12h12M8.25 17.25h12M3.75 6.75h.007v.008H3.75V6.75zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zM3.75 12h.007v.008H3.75V12zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm-.375 5.25h.007v.008H3.75v-.008zm.375 0a.375.375 0 11-.75 0 .375.375 0 01.75 0z"></path></svg>' },
+    { id: 101, name: 'Storage',      key: 'truenas',    svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008V8.25zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008V8.25z"></path></svg>' },
 ];
 
 // Extra icons available to assign to a module/nav item (not currently in use).
 // Same outline style + 24×24 viewBox as LM_NAV_ICONS; IDs continue the series.
 const LM_ICON_LIBRARY = [
-    { id: 101, name: 'Server Stack', svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M5.25 14.25h13.5m-13.5 0a3 3 0 01-3-3m3 3a3 3 0 100 6h13.5a3 3 0 100-6m-16.5-3a3 3 0 013-3h13.5a3 3 0 013 3m-19.5 0a4.5 4.5 0 01.9-2.7L5.737 5.1a3.375 3.375 0 012.7-1.35h7.126c1.062 0 2.062.5 2.7 1.35l2.587 3.45a4.5 4.5 0 01.9 2.7m0 0a3 3 0 01-3 3m0 3h.008v.008h-.008v-.008zm0-6h.008v.008h-.008V8.25zm-3 6h.008v.008h-.008v-.008zm0-6h.008v.008h-.008V8.25z"></path></svg>' },
     { id: 102, name: 'Database',     svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375m16.5 0v3.75m-16.5-3.75v3.75m16.5 0v3.75C20.25 16.153 16.556 18 12 18s-8.25-1.847-8.25-4.125v-3.75m16.5 0c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125"></path></svg>' },
     { id: 103, name: 'Cloud',        svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z"></path></svg>' },
     { id: 104, name: 'Lock',         svg: '<svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.6" d="M16.5 10.5V6.75a4.5 4.5 0 10-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 002.25-2.25v-6.75a2.25 2.25 0 00-2.25-2.25H6.75a2.25 2.25 0 00-2.25 2.25v6.75a2.25 2.25 0 002.25 2.25z"></path></svg>' },
@@ -11082,7 +11167,7 @@ async function loadNetboxSso() {
         const pill = document.getElementById('nbsso-state-pill');
         if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
         const ow = document.getElementById('nbsso-oidc-warn');
-        if (ow) { if (!oidc.configured) { ow.textContent = 'Hub Entra SSO is not configured yet — set it up in Settings → Azure → SSO first (NetBox reuses its tenant + client ID).'; ow.classList.remove('hidden'); } else ow.classList.add('hidden'); }
+        if (ow) { if (!oidc.configured) { ow.textContent = 'Hub Entra SSO is not configured yet — set it up in Settings → Cloud → Azure → SSO first (NetBox reuses its tenant + client ID).'; ow.classList.remove('hidden'); } else ow.classList.add('hidden'); }
         const tw = document.getElementById('nbsso-target-warn');
         if (tw) { if (!(d.netbox_server_agents || []).length) { tw.textContent = 'No connected netbox-server host found. The agent that deployed the "NetBox Server" role must be online to receive the SSO config (it will be queued until then).'; tw.classList.remove('hidden'); } else tw.classList.add('hidden'); }
     } catch (e) { console.error('loadNetboxSso failed', e); }
@@ -11295,6 +11380,304 @@ async function testAzureNsg() {
         else { showToast('Test failed: ' + (d.message || 'error'), 'error'); if (msg) msg.textContent = d.message || 'failed'; }
     } catch (e) { showToast('Test failed: ' + (e.message || e), 'error'); if (msg) msg.textContent = String(e.message || e); }
 }
+
+// ── Settings → Cloud → OCI → NSG (allow-list) ─────────────────────────────────
+// OCI parity for Azure NSG above: manages a SET of allow rules (one per CIDR —
+// OCI security rules carry a single source, unlike Azure's prefix-list rule) on
+// an OCI Network Security Group. Auth is a plain OCI API signing key (tenancy +
+// user OCID + fingerprint + private key), not the Entra app cert. NOTE: OCI NSGs
+// support ALLOW rules only — there is no deny/priority to reconcile, so this tile
+// has no counterpart to the Azure tile's Allow/Deny priority fields.
+function _renderSettingsOciNsgTile(content) {
+    const { card, inputCls, labelCls, btnCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card}">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">OCI NSG — IP allow-list</h3>
+                <span id="oci-nsg-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+            </div>
+            <p class="text-xs text-slate-400 mb-3">Manages a set of <b>allow rules</b> (one per IP/CIDR, tagged so a reconcile only touches rules it created) on an Oracle Cloud Infrastructure <b>Network Security Group</b>. Auth is a dedicated <b>OCI API signing key</b> — create one for a user with an IAM policy granting <code>manage security-lists</code> (or <code>use network-security-groups</code>) in the NSG's compartment, then paste its details below. <b>OCI NSGs allow-only</b> — traffic not matched by a rule is denied by default, so there is no deny/priority to configure here (unlike Azure NSG).</p>
+            <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="oci-nsg-enabled" class="w-4 h-4 text-green-600 rounded">Enable NSG management (Save applies the IP list to OCI)</label>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="space-y-1"><label class="${labelCls}">Tenancy OCID</label><input id="oci-nsg-tenancy" type="text" placeholder="ocid1.tenancy.oc1..…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">User OCID</label><input id="oci-nsg-user" type="text" placeholder="ocid1.user.oc1..…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Key fingerprint</label><input id="oci-nsg-fp" type="text" placeholder="aa:bb:cc:…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Private key path <span class="text-slate-400 normal-case font-normal">(or kv:&lt;name&gt;)</span></label>
+                    <div class="flex gap-2">
+                        <input id="oci-nsg-key" type="text" placeholder="/etc/lm/oci/api-key.pem or kv:oci-api-key" class="${inputCls} font-mono text-xs flex-1">
+                        <button type="button" onclick="document.getElementById('oci-nsg-key-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">Upload…</button>
+                        <input type="file" id="oci-nsg-key-file" accept=".pem,.key,text/plain,application/x-pem-file" class="hidden" onchange="uploadOciNsgKey(this)">
+                    </div>
+                    <p class="text-[11px] text-slate-400">Upload the unencrypted PEM private key generated for this OCI API user (Profile → API Keys → Add API Key). It's written to a 0600 file on this hub and the path above is filled in automatically — the key content itself is never shown or sent back to the browser.</p>
+                </div>
+                <div class="space-y-1"><label class="${labelCls}">Region</label><input id="oci-nsg-region" type="text" placeholder="us-ashburn-1" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">NSG OCID</label><input id="oci-nsg-id" type="text" placeholder="ocid1.networksecuritygroup.oc1..…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Destination port</label><input id="oci-nsg-dport" type="text" placeholder="443" class="${inputCls}"></div>
+            </div>
+            <div class="mt-3 space-y-1">
+                <div class="flex items-center justify-between">
+                    <label class="${labelCls}">Allow-list — IP / CIDR + description <span class="text-slate-400 normal-case font-normal">(descriptions are kept in LM only — OCI has no per-IP note)</span></label>
+                    <span id="oci-nsg-drift" class="text-[11px] text-slate-400"></span>
+                </div>
+                <div class="flex gap-2 mb-2">
+                    <input id="oci-nsg-add-ip" type="text" placeholder="1.2.3.4 or 10.0.0.0/24" class="${inputCls} font-mono text-xs flex-1">
+                    <input id="oci-nsg-add-desc" type="text" placeholder="description (optional)" class="${inputCls} text-xs flex-1">
+                    <button type="button" onclick="addOciNsgEntry()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">+ Add</button>
+                </div>
+                <div id="oci-nsg-entries" class="border border-slate-200 rounded-md divide-y divide-slate-100 max-h-72 overflow-y-auto"></div>
+            </div>
+            <div class="mt-4 flex items-center justify-between gap-3">
+                <span id="oci-nsg-msg" class="text-xs text-slate-400"></span>
+                <div class="flex items-center gap-3">
+                    <button onclick="testOciNsg()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Test connection</button>
+                    <button onclick="saveOciNsg()" id="oci-nsg-save-btn" class="${btnCls}">Save &amp; Apply</button>
+                </div>
+            </div>
+        </div>`;
+    loadOciNsg();
+}
+
+// Local allow-list DB: [{ip, description}]. IPs go to OCI; descriptions stay in
+// LM. This is a SEPARATE list from Azure's (Settings → Cloud → Azure → NSG /
+// Security → Trusted IPs) — OCI has no deny/threat-monitor tie-in, so unlike
+// the Azure list it is not the never-block source.
+function renderOciNsgEntries() {
+    const box = document.getElementById('oci-nsg-entries');
+    if (!box) return;
+    const es = window._ociNsgEntries || [];
+    box.innerHTML = es.length ? es.map((e, i) => `
+      <div class="flex items-center gap-2 px-2 py-1">
+        <span class="font-mono text-xs text-slate-700 w-44 shrink-0 truncate" title="${escapeHtml(e.ip)}">${escapeHtml(e.ip)}</span>
+        <input data-oci-nsg-desc="${i}" value="${escapeHtml(e.description || '')}" placeholder="description" class="flex-1 bg-white border border-slate-200 rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-green-400">
+        <button type="button" onclick="removeOciNsgEntry(${i})" title="Remove" class="text-red-500 hover:text-red-700 text-xs font-bold px-1">✕</button>
+      </div>`).join('')
+      : '<div class="text-xs text-slate-400 italic px-2 py-2">No IPs yet. Add one above, or hit Test/Save to import what\'s already on the NSG.</div>';
+}
+function _syncOciNsgEntriesFromDom() {
+    (window._ociNsgEntries || []).forEach((e, i) => {
+        const el = document.querySelector(`[data-oci-nsg-desc="${i}"]`);
+        if (el) e.description = el.value;
+    });
+}
+window.addOciNsgEntry = function () {
+    _syncOciNsgEntriesFromDom();
+    const ipEl = document.getElementById('oci-nsg-add-ip'), dEl = document.getElementById('oci-nsg-add-desc');
+    const ip = (ipEl?.value || '').trim();
+    if (!ip) { if (typeof showToast === 'function') showToast('Enter an IP or CIDR', 'info'); return; }
+    window._ociNsgEntries = window._ociNsgEntries || [];
+    window._ociNsgEntries.push({ ip, description: (dEl?.value || '').trim() });
+    if (ipEl) ipEl.value = ''; if (dEl) dEl.value = '';
+    renderOciNsgEntries();
+};
+window.removeOciNsgEntry = function (i) {
+    _syncOciNsgEntriesFromDom();
+    (window._ociNsgEntries || []).splice(i, 1);
+    renderOciNsgEntries();
+};
+
+function _ociNsgFormConfig() {
+    const v = id => (document.getElementById(id)?.value || '').trim();
+    _syncOciNsgEntriesFromDom();
+    return {
+        enabled: !!document.getElementById('oci-nsg-enabled')?.checked,
+        tenancy_ocid: v('oci-nsg-tenancy'), user_ocid: v('oci-nsg-user'),
+        fingerprint: v('oci-nsg-fp'), key_path: v('oci-nsg-key'),
+        region: v('oci-nsg-region'), nsg_id: v('oci-nsg-id'),
+        dest_port: v('oci-nsg-dport') || '443',
+        entries: (window._ociNsgEntries || []).map(e => ({ ip: e.ip, description: e.description || '' })),
+    };
+}
+
+async function loadOciNsg() {
+    try {
+        const r = await setupFetch('/setup/oci-nsg');
+        const d = await r.json().catch(() => ({}));
+        const c = d.config || {};
+        const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val == null ? '' : val; };
+        const chk = (id, val) => { const el = document.getElementById(id); if (el) el.checked = !!val; };
+        chk('oci-nsg-enabled', c.enabled);
+        set('oci-nsg-tenancy', c.tenancy_ocid); set('oci-nsg-user', c.user_ocid);
+        set('oci-nsg-fp', c.fingerprint); set('oci-nsg-key', c.key_path);
+        set('oci-nsg-region', c.region); set('oci-nsg-id', c.nsg_id);
+        set('oci-nsg-dport', c.dest_port || '443');
+        window._ociNsgEntries = (c.entries || []).map(e => ({ ip: e.ip, description: e.description || '' }));
+        renderOciNsgEntries();
+        const pill = document.getElementById('oci-nsg-state-pill');
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+        const drift = document.getElementById('oci-nsg-drift');
+        if (drift) {
+            if (d.warning) drift.textContent = 'Live read failed: ' + d.warning;
+            else if (Array.isArray(d.live_prefixes)) {
+                const localIps = (c.entries || []).map(e => e.ip);
+                const same = JSON.stringify(d.live_prefixes.slice().sort()) === JSON.stringify(localIps.slice().sort());
+                drift.textContent = `Live in OCI: ${d.live_prefixes.length} IP(s)` + (same ? ' — in sync' : ' — differs from local (Save & Apply to sync)');
+            } else drift.textContent = 'NSG not found yet — check the NSG OCID, or Save & Apply once it exists.';
+        }
+    } catch (e) { console.error('loadOciNsg failed', e); }
+}
+
+async function saveOciNsg() {
+    const btn = document.getElementById('oci-nsg-save-btn'); const msg = document.getElementById('oci-nsg-msg');
+    const cfg = _ociNsgFormConfig();
+    if (btn) { btn.disabled = true; btn.textContent = 'Applying…'; }
+    try {
+        const d = await apiJson('/setup/oci-nsg', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: cfg }) });
+        if (d && d.warning) { showToast('Saved, but OCI apply failed: ' + d.warning, 'error'); if (msg) msg.textContent = d.warning; }
+        else if (d) {
+            const a = d.applied;
+            const detail = a ? `${(a.prefixes || []).length} IP(s) applied (+${a.added || 0}/-${a.removed || 0})` : 'saved (not applied)';
+            showToast('OCI NSG: ' + detail, 'success'); if (msg) msg.textContent = detail;
+        } else { showToast('Saved', 'success'); }
+        loadOciNsg();
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Save & Apply'; } }
+}
+
+async function testOciNsg() {
+    const msg = document.getElementById('oci-nsg-msg');
+    if (msg) msg.textContent = 'Testing…';
+    try {
+        const r = await setupFetch('/setup/oci-nsg/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _ociNsgFormConfig() }) });
+        const d = await r.json().catch(() => ({}));
+        if (d.status === 'ok') { showToast(`Connected — NSG is ${d.lifecycle_state || 'reachable'}.`, 'success'); if (msg) msg.textContent = `OK: ${d.lifecycle_state || ''}`; }
+        else { showToast('Test failed: ' + (d.message || 'error'), 'error'); if (msg) msg.textContent = d.message || 'failed'; }
+    } catch (e) { showToast('Test failed: ' + (e.message || e), 'error'); if (msg) msg.textContent = String(e.message || e); }
+}
+
+// Upload the OCI API signing private key (PEM) instead of hand-typing/scp-ing
+// a path onto the hub. The server validates it parses as an unencrypted PEM
+// key, writes it to a fixed 0600 path, and persists that path into
+// oci_nsg.key_path immediately (independent of the rest of this form / the
+// Save & Apply button) -- so a partially-filled form in progress can't lose
+// the just-uploaded key.
+async function uploadOciNsgKey(input) {
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    const msg = document.getElementById('oci-nsg-msg');
+    try {
+        const fd = new FormData();
+        fd.append('file', file, file.name);
+        const d = await apiJson('/setup/oci-nsg/upload-key', { method: 'POST', body: fd });
+        const el = document.getElementById('oci-nsg-key');
+        if (el) el.value = d.key_path || '';
+        showToast('Private key uploaded and saved.', 'success');
+        if (msg) msg.textContent = 'Key uploaded — click Save & Apply to reconcile with the new key.';
+    } catch (e) { showToast('Key upload failed: ' + (e.message || e), 'error'); }
+    finally { input.value = ''; }
+}
+window.uploadOciNsgKey = uploadOciNsgKey;
+
+// OCI Vault — connection config for the OCI parity backend of Credential
+// Vault (cloud_vault.py dispatches here when oci_vault.enabled). Auth is a
+// SEPARATE OCI API signing key from oci_nsg's (a customer may reasonably
+// want a narrower-scoped user/key per integration) — see routes/oci_vault.py
+// module docstring. Mirrors _renderSettingsOciNsgTile's layout/upload pattern.
+function _renderSettingsOciVaultTile(content) {
+    const { card, inputCls, labelCls, btnCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card}">
+            <div class="flex items-center justify-between mb-2">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">OCI Vault — Key Vault backend</h3>
+                <span id="oci-vault-state-pill" class="text-[11px] px-2 py-0.5 rounded-full font-bold bg-slate-100 text-slate-500">—</span>
+            </div>
+            <p class="text-xs text-slate-400 mb-3">Connects the hub's <b>Credential Vault</b> (secret storage abstraction) to an Oracle Cloud Infrastructure <b>Vault</b>. Auth is a dedicated <b>OCI API signing key</b> — create one for a user with an IAM policy granting <code>manage secret-family</code> (create/update secrets) and <code>manage vaults</code> (read-only use is enough for Test connection) in the vault's compartment, then paste its details below. This is a <b>separate</b> OCI user/key from OCI NSG's — a narrower-scoped key per integration is fine.</p>
+            <label class="flex items-center gap-2 text-sm text-slate-600 mb-3 cursor-pointer"><input type="checkbox" id="oci-vault-enabled" class="w-4 h-4 text-green-600 rounded">Enable OCI Vault (this hub's Key Vault backend)</label>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="space-y-1"><label class="${labelCls}">Tenancy OCID</label><input id="oci-vault-tenancy" type="text" placeholder="ocid1.tenancy.oc1..…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">User OCID</label><input id="oci-vault-user" type="text" placeholder="ocid1.user.oc1..…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Key fingerprint</label><input id="oci-vault-fp" type="text" placeholder="aa:bb:cc:…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Private key path <span class="text-slate-400 normal-case font-normal">(or kv:&lt;name&gt;)</span></label>
+                    <div class="flex gap-2">
+                        <input id="oci-vault-key" type="text" placeholder="/etc/lm/oci/api-key.pem or kv:oci-vault-key" class="${inputCls} font-mono text-xs flex-1">
+                        <button type="button" onclick="document.getElementById('oci-vault-key-file').click()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-300 px-3 rounded-md text-xs font-bold whitespace-nowrap">Upload…</button>
+                        <input type="file" id="oci-vault-key-file" accept=".pem,.key,text/plain,application/x-pem-file" class="hidden" onchange="uploadOciVaultKey(this)">
+                    </div>
+                    <p class="text-[11px] text-slate-400">Upload the unencrypted PEM private key generated for this OCI API user (Profile → API Keys → Add API Key). It's written to a 0600 file on this hub and the path above is filled in automatically — the key content itself is never shown or sent back to the browser.</p>
+                </div>
+                <div class="space-y-1"><label class="${labelCls}">Region</label><input id="oci-vault-region" type="text" placeholder="us-ashburn-1" class="${inputCls}"></div>
+                <div class="space-y-1"><label class="${labelCls}">Compartment OCID</label><input id="oci-vault-compartment" type="text" placeholder="ocid1.compartment.oc1..…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Vault OCID</label><input id="oci-vault-vault" type="text" placeholder="ocid1.vault.oc1..…" class="${inputCls} font-mono text-xs"></div>
+                <div class="space-y-1"><label class="${labelCls}">Master encryption key OCID</label><input id="oci-vault-keyid" type="text" placeholder="ocid1.key.oc1..…" class="${inputCls} font-mono text-xs"></div>
+            </div>
+            <div class="mt-4 flex items-center justify-between gap-3">
+                <span id="oci-vault-msg" class="text-xs text-slate-400"></span>
+                <div class="flex items-center gap-3">
+                    <button onclick="testOciVault()" class="bg-slate-100 hover:bg-slate-200 text-slate-600 px-4 py-2 rounded-md text-sm font-bold">Test connection</button>
+                    <button onclick="saveOciVault()" id="oci-vault-save-btn" class="${btnCls}">Save</button>
+                </div>
+            </div>
+        </div>`;
+    loadOciVault();
+}
+
+function _ociVaultFormConfig() {
+    const v = id => (document.getElementById(id)?.value || '').trim();
+    return {
+        enabled: !!document.getElementById('oci-vault-enabled')?.checked,
+        tenancy_ocid: v('oci-vault-tenancy'), user_ocid: v('oci-vault-user'),
+        fingerprint: v('oci-vault-fp'), key_path: v('oci-vault-key'),
+        region: v('oci-vault-region'), compartment_id: v('oci-vault-compartment'),
+        vault_id: v('oci-vault-vault'), key_id: v('oci-vault-keyid'),
+    };
+}
+
+async function loadOciVault() {
+    try {
+        const r = await setupFetch('/setup/oci-vault');
+        const d = await r.json().catch(() => ({}));
+        const c = d.config || {};
+        const set = (id, val) => { const el = document.getElementById(id); if (el) el.value = val == null ? '' : val; };
+        const chk = (id, val) => { const el = document.getElementById(id); if (el) el.checked = !!val; };
+        chk('oci-vault-enabled', c.enabled);
+        set('oci-vault-tenancy', c.tenancy_ocid); set('oci-vault-user', c.user_ocid);
+        set('oci-vault-fp', c.fingerprint); set('oci-vault-key', c.key_path);
+        set('oci-vault-region', c.region); set('oci-vault-compartment', c.compartment_id);
+        set('oci-vault-vault', c.vault_id); set('oci-vault-keyid', c.key_id);
+        const pill = document.getElementById('oci-vault-state-pill');
+        if (pill) { pill.textContent = c.enabled ? 'ENABLED' : 'DISABLED'; pill.className = 'text-[11px] px-2 py-0.5 rounded-full font-bold ' + (c.enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'); }
+    } catch (e) { console.error('loadOciVault failed', e); }
+}
+
+async function saveOciVault() {
+    const btn = document.getElementById('oci-vault-save-btn'); const msg = document.getElementById('oci-vault-msg');
+    const cfg = _ociVaultFormConfig();
+    if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+    try {
+        await apiJson('/setup/oci-vault', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: cfg }) });
+        showToast('OCI Vault config saved.', 'success'); if (msg) msg.textContent = 'saved';
+        loadOciVault();
+    } catch (e) { showToast('Save failed: ' + (e.message || e), 'error'); }
+    finally { if (btn) { btn.disabled = false; btn.textContent = 'Save'; } }
+}
+
+async function testOciVault() {
+    const msg = document.getElementById('oci-vault-msg');
+    if (msg) msg.textContent = 'Testing…';
+    try {
+        const r = await setupFetch('/setup/oci-vault/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ config: _ociVaultFormConfig() }) });
+        const d = await r.json().catch(() => ({}));
+        if (d.status === 'ok') { showToast('Connected to OCI Vault.', 'success'); if (msg) msg.textContent = 'OK'; }
+        else { showToast('Test failed: ' + (d.message || 'error'), 'error'); if (msg) msg.textContent = d.message || 'failed'; }
+    } catch (e) { showToast('Test failed: ' + (e.message || e), 'error'); if (msg) msg.textContent = String(e.message || e); }
+}
+
+// Same upload pattern as uploadOciNsgKey, targeting the OCI Vault key path.
+async function uploadOciVaultKey(input) {
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    const msg = document.getElementById('oci-vault-msg');
+    try {
+        const fd = new FormData();
+        fd.append('file', file, file.name);
+        const d = await apiJson('/setup/oci-vault/upload-key', { method: 'POST', body: fd });
+        const el = document.getElementById('oci-vault-key');
+        if (el) el.value = d.key_path || '';
+        showToast('Private key uploaded and saved.', 'success');
+        if (msg) msg.textContent = 'Key uploaded — click Save to confirm the rest of the config.';
+    } catch (e) { showToast('Key upload failed: ' + (e.message || e), 'error'); }
+    finally { input.value = ''; }
+}
+window.testOciVault = testOciVault; window.saveOciVault = saveOciVault; window.uploadOciVaultKey = uploadOciVaultKey;
 
 function _renderSettingsSsoTile(content) {
     const { card, inputCls, labelCls, btnCls } = _SETUP_CLS;
@@ -19806,7 +20189,7 @@ async function openConsoleCredentialsModal() {
         const srcLabel = tenantScope
             ? `the <b>Credential Vault</b> (tenant <b>${escapeHtml(tenantScope)}</b> bucket + shared global slot)`
             : source === 'cred_vault' ? 'the <b>Credential Vault</b> (Global Admin slot)'
-            : source === 'keyvault' ? 'a legacy <b>Azure Key Vault</b> reference'
+            : source === 'keyvault' ? 'a legacy <b>Key Vault</b> reference'
             : 'the <b>hub</b> (legacy local store)';
         const warnBanner = migrateWarning
             ? `<div class="text-xs px-3 py-2 rounded bg-amber-50 text-amber-800 border border-amber-200">⚠ ${escapeHtml(migrateWarning)}</div>`
@@ -23099,6 +23482,371 @@ function _ddUptime(sec) {
     return (d ? `${d}d ` : '') + (h || d ? `${h}h ` : '') + `${m}m`;
 }
 
+// ─── Clustered DNS / HA DHCP panels ────────────────────────────────────────
+// Rendered inside the existing DNS + DHCP Diagnostics tabs whenever the module
+// reports a multi-host deployment. A single-host module sends no `cluster`
+// block (or `enabled: false`), so these return '' and the page is unchanged.
+
+function _ddClusterBadge(state) {
+    const map = {
+        converged: ['text-emerald-700', 'bg-emerald-50 border-emerald-200'],
+        healthy:   ['text-emerald-700', 'bg-emerald-50 border-emerald-200'],
+        partial:   ['text-amber-700', 'bg-amber-50 border-amber-200'],
+        degraded:  ['text-amber-700', 'bg-amber-50 border-amber-200'],
+        diverged:  ['text-red-700', 'bg-red-50 border-red-200'],
+        down:      ['text-red-700', 'bg-red-50 border-red-200'],
+        invalid:   ['text-red-700', 'bg-red-50 border-red-200'],
+    };
+    const [text, box] = map[state] || ['text-slate-600', 'bg-slate-50 border-slate-200'];
+    return `<span class="px-2 py-0.5 rounded-full border text-xs font-bold ${text} ${box}">${escapeHtml(String(state || 'unknown'))}</span>`;
+}
+
+const _DD_MEMBER_TONE = {
+    converged: 'text-emerald-600', healthy: 'text-emerald-600',
+    drifted: 'text-amber-600', degraded: 'text-amber-600',
+    unknown: 'text-amber-600',
+    unreachable: 'text-red-600',
+};
+
+// Two Unbound resolvers behind one DNS module: per-member applied version +
+// digest against the coordinator's desired set, so drift is visible rather than
+// inferred.
+function _dnsClusterPanel(c) {
+    if (!c || c.enabled === false) return '';
+    const desired = c.desired || {};
+    const members = Array.isArray(c.members) ? c.members : [];
+    const commit = c.last_commit || {};
+    const rows = members.map(m => {
+        const tone = _DD_MEMBER_TONE[m.convergence] || 'text-slate-600';
+        const ver = m.applied_version == null ? '—' : `v${m.applied_version}`;
+        const dig = m.applied_digest ? String(m.applied_digest).slice(0, 12) + '…' : '—';
+        const seen = m.seconds_since_seen == null ? '—' : `${m.seconds_since_seen}s ago`;
+        return `<tr class="border-b border-slate-100">
+            <td class="px-4 py-2 font-mono font-medium">${escapeHtml(m.id || '—')}</td>
+            <td class="px-4 py-2 font-mono text-xs">${escapeHtml(m.host || '—')}</td>
+            <td class="px-4 py-2 text-xs font-bold ${tone}">${escapeHtml(m.convergence || 'unknown')}</td>
+            <td class="px-4 py-2 text-xs">${escapeHtml(ver)}</td>
+            <td class="px-4 py-2 font-mono text-[11px] text-slate-500">${escapeHtml(dig)}</td>
+            <td class="px-4 py-2 text-xs">${m.unbound_running === false ? '<span class="text-red-600 font-bold">stopped</span>' : (m.unbound_running ? 'running' : '—')}</td>
+            <td class="px-4 py-2 text-xs text-slate-500">${escapeHtml(seen)}</td>
+        </tr>`;
+    }).join('');
+    const partial = commit.status && commit.status !== 'SUCCESS';
+    return `
+        <div class="bg-white border border-slate-200 rounded-lg overflow-hidden mb-4">
+            <div class="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-3">
+                <div class="text-sm font-semibold text-slate-700">Resolver cluster ${_ddClusterBadge(c.state)}</div>
+                <div class="text-xs text-slate-400">${c.converged_count || 0}/${c.member_count || 0} converged on desired set v${desired.version == null ? '?' : desired.version} (${desired.record_count || 0} records)</div>
+            </div>
+            ${tableWrap(tableHead(['Member', 'Host', 'Convergence', 'Applied', 'Digest', 'Unbound', 'Last seen']) + `<tbody>${rows}</tbody>`)}
+            ${partial ? `<div class="px-4 py-3 border-t border-slate-200 text-xs text-amber-700 bg-amber-50">
+                Last commit v${escapeHtml(String(commit.version))} reported <b>${escapeHtml(commit.status)}</b> — applied on ${escapeHtml((commit.applied || []).join(', ') || 'no member')}; not applied on ${escapeHtml((commit.failed || []).join(', ') || 'none')}.
+                ${Object.entries(commit.errors || {}).map(([k, v]) => `<div class="mt-1 font-mono">${escapeHtml(k)}: ${escapeHtml(String(v))}</div>`).join('')}
+            </div>` : ''}
+            <div class="px-4 py-3 border-t border-slate-200">
+                <button onclick="reconcileDnsCluster()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Reconcile now</button>
+                <span class="text-xs text-slate-400 ml-2">Re-pushes the desired record set to any resolver that has drifted.</span>
+            </div>
+        </div>`;
+}
+
+// A real Kea HA pair behind one DHCP module: per-node HA state + lease sync +
+// shared-config drift.
+function _dhcpHaPanel(c) {
+    if (!c || c.enabled === false) return '';
+    const members = Array.isArray(c.members) ? c.members : [];
+    const apply = c.last_apply || {};
+    const rows = members.map(m => {
+        const tone = _DD_MEMBER_TONE[m.health] || 'text-slate-600';
+        const scopes = (m.scopes || []).join(', ') || '—';
+        return `<tr class="border-b border-slate-100">
+            <td class="px-4 py-2 font-mono font-medium">${escapeHtml(m.id || '—')}</td>
+            <td class="px-4 py-2 text-xs">${escapeHtml(m.ha_role || '—')}</td>
+            <td class="px-4 py-2 text-xs font-bold ${tone}">${escapeHtml(m.health || 'unknown')}</td>
+            <td class="px-4 py-2 text-xs">${escapeHtml(m.ha_enabled ? (m.ha_state || 'unknown') : 'HA hook not loaded')}</td>
+            <td class="px-4 py-2 text-xs">${escapeHtml(m.remote_state || '—')}${m.communication_interrupted ? ' <span class="text-red-600 font-bold">(interrupted)</span>' : ''}</td>
+            <td class="px-4 py-2 font-mono text-[11px] text-slate-500">${escapeHtml(scopes)}</td>
+            <td class="px-4 py-2 font-mono text-[11px] text-slate-500">${escapeHtml(m.config_digest ? String(m.config_digest).slice(0, 12) + '…' : '—')}</td>
+        </tr>`;
+    }).join('');
+    const partial = apply.status && apply.status !== 'SUCCESS';
+    return `
+        <div class="bg-white border border-slate-200 rounded-lg overflow-hidden mb-4">
+            <div class="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-3">
+                <div class="text-sm font-semibold text-slate-700">Kea HA pair ${_ddClusterBadge(c.state)}</div>
+                <div class="text-xs text-slate-400">${escapeHtml(c.mode || 'hot-standby')} · ${c.healthy_count || 0}/${c.member_count || 0} in sync · configuration ${c.config_converged ? 'matched' : ((c.config_digests_missing || []).length ? `<b class="text-amber-600">UNKNOWN</b> (no report from ${escapeHtml((c.config_digests_missing || []).join(', '))})` : '<b class="text-red-600">MISMATCHED</b>')}</div>
+            </div>
+            ${tableWrap(tableHead(['Node', 'Role', 'Health', 'HA state', 'Partner', 'Scopes', 'Config digest']) + `<tbody>${rows}</tbody>`)}
+            ${partial ? `<div class="px-4 py-3 border-t border-slate-200 text-xs text-amber-700 bg-amber-50">
+                Last apply reported <b>${escapeHtml(apply.status)}</b> at stage <b>${escapeHtml(apply.stage || '?')}</b> — applied on ${escapeHtml((apply.applied || []).join(', ') || 'no node')}${(apply.rolled_back || []).length ? `, rolled back ${escapeHtml(apply.rolled_back.join(', '))}` : ''}.
+                ${Object.entries(apply.errors || {}).map(([k, v]) => `<div class="mt-1 font-mono">${escapeHtml(k)}: ${escapeHtml(String(v))}</div>`).join('')}
+            </div>` : ''}
+            <div class="px-4 py-3 border-t border-slate-200">
+                <button onclick="applyDhcpHaConfig()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Re-apply configuration to both nodes</button>
+                <span class="text-xs text-slate-400 ml-2">Validates both nodes, then applies standby first and primary last.</span>
+            </div>
+        </div>`;
+}
+
+// Per-member evidence blocks (each worker's own diagnostics recommendations).
+function _ddMemberEvidence(members) {
+    const entries = Object.entries(members || {});
+    if (!entries.length) return '';
+    const cards = entries.map(([id, diag]) => {
+        const okBadge = diag && diag.status === 'SUCCESS'
+            ? (diag.healthy ? '<span class="text-emerald-600 font-bold">healthy</span>'
+                            : '<span class="text-amber-600 font-bold">needs attention</span>')
+            : '<span class="text-red-600 font-bold">unavailable</span>';
+        const recs = (diag && diag.recommendations) || [];
+        return `<div class="bg-white border border-slate-200 rounded-lg p-4">
+            <div class="text-sm font-semibold text-slate-700 mb-1">${escapeHtml(id)} — ${okBadge}</div>
+            ${diag && diag.status !== 'SUCCESS' ? `<div class="text-xs text-red-600">${escapeHtml(diag.message || 'no response')}</div>` : ''}
+            ${recs.length ? `<ul class="list-disc pl-5 space-y-1 text-xs text-slate-600 mt-1">${recs.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>`
+                          : '<div class="text-xs text-slate-400">No findings reported.</div>'}
+        </div>`;
+    }).join('');
+    return `<div class="grid lg:grid-cols-2 gap-4 mb-4">${cards}</div>`;
+}
+
+// Query-string suffix carrying the tenant picker's current selection. EVERY
+// cluster/HA/diagnostic call must pass it: these endpoints resolve which spoke
+// answers via the caller's effective tenant, so an unscoped request silently
+// lands on whichever module spoke connected first — a different tenant's.
+function _tenantQS(prefix = '?') {
+    const t = (typeof currentTenant === 'string' && currentTenant) ? currentTenant : '';
+    return t ? `${prefix}tenant=${encodeURIComponent(t)}` : '';
+}
+
+// Compact multi-host service summary for Settings -> Diagnostics: one line per
+// clustered service module. Renders NOTHING when both modules are single-host or
+// unreachable, so a normal deployment sees no new noise.
+async function loadServiceClusterSummary() {
+    const el = document.getElementById('service-cluster-summary');
+    if (!el) return;
+    const grab = async (url) => {
+        try {
+            const res = await fetch(url);
+            if (!res.ok) return null;
+            const data = await res.json();
+            return (data && data.enabled !== false) ? data : null;
+        } catch (_e) { return null; }
+    };
+    const [dns, dhcp] = await Promise.all([
+        grab('/api/dns/cluster' + _tenantQS()),
+        grab('/api/dhcp/ha' + _tenantQS())]);
+    const rows = [];
+    if (dns) {
+        rows.push(`<tr class="border-b border-slate-100">
+            <td class="px-4 py-2 font-medium">DNS resolvers</td>
+            <td class="px-4 py-2">${_ddClusterBadge(dns.state)}</td>
+            <td class="px-4 py-2 text-xs">${dns.converged_count || 0}/${dns.member_count || 0} converged · desired v${(dns.desired || {}).version == null ? '?' : dns.desired.version}</td>
+            <td class="px-4 py-2 text-xs text-slate-500">${escapeHtml(((dns.recommendations || [])[0]) || 'No findings.')}</td>
+        </tr>`);
+    }
+    if (dhcp) {
+        rows.push(`<tr class="border-b border-slate-100">
+            <td class="px-4 py-2 font-medium">Kea HA pair</td>
+            <td class="px-4 py-2">${_ddClusterBadge(dhcp.state)}</td>
+            <td class="px-4 py-2 text-xs">${escapeHtml(dhcp.mode || 'hot-standby')} · ${dhcp.healthy_count || 0}/${dhcp.member_count || 0} in sync · config ${dhcp.config_converged ? 'matched' : 'MISMATCHED'}</td>
+            <td class="px-4 py-2 text-xs text-slate-500">${escapeHtml(((dhcp.recommendations || [])[0]) || 'No findings.')}</td>
+        </tr>`);
+    }
+    if (!rows.length) { el.innerHTML = ''; return; }
+    el.innerHTML = `<div class="bg-white border border-slate-200 rounded-lg overflow-hidden">
+        <div class="px-4 py-3 text-sm font-semibold text-slate-700 border-b border-slate-200">Clustered service modules</div>
+        ${tableWrap(tableHead(['Service', 'State', 'Members', 'Top finding']) + `<tbody>${rows.join('')}</tbody>`)}
+    </div>`;
+}
+
+// ─── Cluster / HA topology editor ──────────────────────────────────────────
+// Admin-only. Defines the two worker members (and, for DHCP, the HA mode) that
+// a single dns/dhcp module drives. The shared worker secret is write-only: it
+// is stored as the module's listener PSK and never read back, so the same value
+// must be given to each worker's installer (--worker-secret).
+
+// The canonical HA TLS layout install_dhcp.sh writes on every node. The spoke
+// defaults to exactly these paths, so a pair configured from this form is a
+// valid mutually-verified HA pair without the operator typing anything.
+const SVC_HA_TLS_DIR = '/etc/kea/ha-tls';
+
+function openServiceClusterModal(kind, current) {
+    const isDns = kind === 'dns';
+    const members = (current && Array.isArray(current.members) ? current.members : []);
+    const m = i => members[i] || {};
+    // "Already enabled" = the module reports 2+ members, i.e. a worker secret is
+    // already stored. Only then may the secret field be left blank.
+    const alreadyEnabled = members.length >= 2;
+    const body = `
+        <h3 class="text-lg font-bold text-[#263040]">${isDns ? 'DNS resolver cluster' : 'Kea HA pair'}</h3>
+        <p class="text-sm text-slate-500">${isDns
+            ? 'Two Unbound hosts managed by this DNS module. The module owns the record set and keeps both resolvers identical.'
+            : 'Two Kea hosts run as one HA pair. Both nodes get the same scopes and reservations; only their HA identity differs.'}</p>
+        ${[0, 1].map(i => `
+        <div class="grid grid-cols-2 gap-2">
+            <div>
+                <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">Member ${i + 1} id</label>
+                <input id="svc-cl-id-${i}" value="${escapeHtml(m(i).id || '')}" placeholder="${isDns ? 'dns-a' : 'kea-a'}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
+            </div>
+            <div>
+                <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">Member ${i + 1} host</label>
+                <input id="svc-cl-host-${i}" value="${escapeHtml(m(i).host || '')}" placeholder="10.0.1.${i + 10}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
+            </div>
+        </div>`).join('')}
+        ${isDns ? '' : `
+        <div>
+            <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">HA mode</label>
+            <select id="svc-cl-mode" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm" disabled>
+                <option value="hot-standby" selected>hot-standby</option>
+            </select>
+            <p class="text-[11px] text-slate-400 mt-1">Load-balancing is not offered: it requires each subnet's pool to be split between the two servers by client class, which this module does not yet generate. Both nodes would allocate from the same range.</p>
+        </div>
+        <div class="grid grid-cols-2 gap-2">
+            <div>
+                <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">HA control user</label>
+                <input id="svc-cl-hauser" value="${escapeHtml(m(0).ha_user || 'kea-ha')}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
+            </div>
+            <div>
+                <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">HA control password${m(0).ha_password_set ? '' : ' <span class="text-red-600">(required)</span>'}</label>
+                <input id="svc-cl-hapass" type="password" placeholder="${m(0).ha_password_set ? 'unchanged' : 'required to enable the pair'}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
+            </div>
+        </div>
+        <p class="text-[11px] text-slate-400">Write-only, and carried over when left blank. Must match <code>--ha-user</code>/<code>--ha-password</code> on both nodes. Peer traffic is HTTPS with mutual cert verification; these credentials travel inside that TLS session.</p>
+        <div>
+            <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">HA peer addresses (firewall scope)</label>
+            <input id="svc-cl-hapeers" value="${escapeHtml((current && (current.ha_peers || []).join(', ')) || '')}" placeholder="10.0.1.10, 10.0.1.11" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
+            <p class="text-[11px] text-slate-400 mt-1">Passed to each node's installer as <code>--ha-peer</code>; the HA port accepts only these sources.</p>
+        </div>
+        <div>
+            <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">HA TLS directory (on each node)</label>
+            <input id="svc-cl-hatls" value="${escapeHtml((m(0).ha_trust_anchor || '').replace(/\/ha-ca\.pem$/, '') || SVC_HA_TLS_DIR)}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
+            <p class="text-[11px] text-slate-400 mt-1">Where <code>install_dhcp.sh --ha-ca/--ha-cert/--ha-key</code> placed the material: <code>${escapeHtml(SVC_HA_TLS_DIR)}/ha-ca.pem</code>, <code>node.crt</code>, <code>node.key</code>. Leave as-is unless you installed them elsewhere.</p>
+        </div>`}
+        <div>
+            <label class="block text-[11px] uppercase tracking-wide text-slate-400 font-semibold">Worker secret${alreadyEnabled ? '' : ' <span class="text-red-600">(required)</span>'}</label>
+            <input id="svc-cl-secret" type="password" placeholder="${alreadyEnabled ? 'leave blank to keep the current secret' : 'required to enable the cluster'}" class="w-full border border-slate-300 rounded-md px-2 py-1 text-sm">
+            <p class="text-[11px] text-slate-400 mt-1">Write-only. Choose it here and give the SAME value to each host's installer:
+                <code>--worker-secret &lt;value&gt;</code>. Nothing generates it for you — a secret you cannot read could never be handed to the workers — and it is never displayed again.</p>
+        </div>
+        <div id="svc-cl-error" class="hidden text-xs text-red-600"></div>
+        <div class="flex justify-end gap-2 pt-2">
+            <button onclick="document.getElementById('svc-cluster-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+            <button onclick="saveServiceCluster('${escapeHtml(kind)}', ${alreadyEnabled}, ${!!m(0).ha_password_set})" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Save</button>
+        </div>`;
+    openModal('svc-cluster-modal', body, { backdropClose: true });
+}
+
+async function saveServiceCluster(kind, alreadyEnabled, haCredsStored) {
+    const err = document.getElementById('svc-cl-error');
+    const fail = (msg) => {
+        if (err) { err.textContent = msg; err.classList.remove('hidden'); }
+        showToast(msg, 'error');
+    };
+    const haUser = (document.getElementById('svc-cl-hauser')?.value || '').trim();
+    const haPass = (document.getElementById('svc-cl-hapass')?.value || '').trim();
+    const haTlsDir = ((document.getElementById('svc-cl-hatls')?.value || '').trim()
+                      || SVC_HA_TLS_DIR).replace(/\/+$/, '');
+    const members = [0, 1].map(i => {
+        const member = {
+            id: (document.getElementById(`svc-cl-id-${i}`)?.value || '').trim(),
+            host: (document.getElementById(`svc-cl-host-${i}`)?.value || '').trim(),
+        };
+        // Write-only HA credentials: send them only when the operator typed a
+        // value. The spoke carries the stored one forward for a blank field, so
+        // re-saving the form can never erase the pair's credential.
+        if (kind === 'dhcp') {
+            if (haUser) member.ha_user = haUser;
+            if (haPass) member.ha_password = haPass;
+            // Always send the TLS material explicitly: the payload this form
+            // produces must be a complete, build_peers-valid pair on its own,
+            // not one that only works because the spoke happened to default it.
+            member.ha_trust_anchor = `${haTlsDir}/ha-ca.pem`;
+            member.ha_cert = `${haTlsDir}/node.crt`;
+            member.ha_key = `${haTlsDir}/node.key`;
+        }
+        return member;
+    }).filter(x => x.id);
+
+    const secret = (document.getElementById('svc-cl-secret')?.value || '').trim();
+    if (members.length >= 2 && !secret && !alreadyEnabled) {
+        fail('A worker secret is required to enable the cluster. Choose one here and pass the same value to each host installer with --worker-secret.');
+        return;
+    }
+    // The Kea HA control agent rejects an unauthenticated peer, so a pair
+    // configured without credentials could never heartbeat. Blank is allowed
+    // only when the spoke already holds them (it carries them forward).
+    if (kind === 'dhcp' && members.length >= 2 && !haCredsStored
+            && (!haUser || !haPass)) {
+        fail('HA control credentials are required to enable the pair. Enter the same ha-user/ha-password you passed to each node installer (--ha-user/--ha-password); the Kea HA control agent rejects an unauthenticated peer.');
+        return;
+    }
+    const payload = { members };
+    if (secret) payload.worker_secret = secret;
+    if (kind === 'dhcp') {
+        payload.mode = 'hot-standby';
+        const peers = (document.getElementById('svc-cl-hapeers')?.value || '')
+            .split(',').map(x => x.trim()).filter(Boolean);
+        if (peers.length) payload.ha_peers = peers;
+    }
+    try {
+        const url = (kind === 'dns' ? '/api/dns/cluster' : '/api/dhcp/ha') + _tenantQS();
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { fail(data.detail || 'Save failed'); return; }
+        if (data.status && data.status === 'ERROR') { fail(data.message || 'Save failed'); return; }
+        if (data.status === 'PARTIAL') {
+            showToast(data.message || 'Saved with incomplete cleanup', 'error');
+        } else {
+            showToast(members.length >= 2
+                ? `${kind.toUpperCase()} cluster configured (${members.map(x => x.id).join(', ')})`
+                : `${kind.toUpperCase()} cluster cleared — the module is single-host again`, 'success');
+        }
+        document.getElementById('svc-cluster-modal')?.remove();
+    } catch (e) { fail(e.message); }
+    if (kind === 'dns') loadDNSData('Diagnostics'); else loadDHCPData('Diagnostics');
+}
+
+// Header button shown on the DNS/DHCP Diagnostics tabs (admin only) so an
+// operator can define the pair even before any worker exists.
+function serviceClusterButton(kind, cluster) {
+    if (typeof isAdmin === 'function' && !isAdmin()) return '';
+    const label = cluster ? 'Edit cluster' : (kind === 'dns' ? 'Configure resolver cluster' : 'Configure HA pair');
+    window._svcClusterState = window._svcClusterState || {};
+    window._svcClusterState[kind] = cluster || null;
+    return `<button onclick="openServiceClusterModal('${kind}', (window._svcClusterState||{})['${kind}'])" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">${label}</button>`;
+}
+
+async function reconcileDnsCluster() {
+    try {
+        const res = await fetch('/api/dns/cluster/reconcile' + _tenantQS(),
+                                { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(data.detail || 'Reconcile failed', 'error'); return; }
+        const done = (data.reconciled || []).length;
+        showToast(done ? `Re-pushed the desired record set to ${done} resolver(s)`
+                       : 'All resolvers already converged',
+                  data.status === 'SUCCESS' ? 'success' : 'error');
+    } catch (e) { showToast(e.message, 'error'); }
+    loadDNSData('Diagnostics');
+}
+
+async function applyDhcpHaConfig() {
+    try {
+        const res = await fetch('/api/dhcp/ha/apply' + _tenantQS(),
+                                { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(data.detail || 'HA apply failed', 'error'); return; }
+        showToast(data.status === 'SUCCESS'
+            ? `Configuration applied to ${(data.applied || []).join(' and ')}`
+            : (data.message || `HA apply reported ${data.status}`),
+            data.status === 'SUCCESS' ? 'success' : 'error');
+    } catch (e) { showToast(e.message, 'error'); }
+    loadDHCPData('Diagnostics');
+}
+
 // Best-effort "last NetBox → Unbound/Kea auto-sync" line for the analytics
 // panels; silent when the status endpoint is unreachable.
 async function _ddSyncStatusLine(side) {
@@ -23144,7 +23892,7 @@ async function loadDNSData(subMenu) {
     try {
         // ── Statistics: Unbound query telemetry (OPNsense-grade) ──────────
         if (subMenu === 'Statistics') {
-            const { ok, data: d, detail } = await _spokeFetch('/api/dns/stats');
+            const { ok, data: d, detail } = await _spokeFetch('/api/dns/stats' + _tenantQS());
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DNS spoke not connected'); return; }
             if (d.status && d.status !== 'SUCCESS') {
                 container.innerHTML = _spokeErrorBanner(d.message, 'unbound-control stats unavailable'); return;
@@ -23179,7 +23927,7 @@ async function loadDNSData(subMenu) {
 
         // ── Diagnostics: explain installed-but-not-queryable Unbound ──────
         if (subMenu === 'Diagnostics') {
-            const { ok, data: d, detail } = await _spokeFetch('/api/dns/diagnostics');
+            const { ok, data: d, detail } = await _spokeFetch('/api/dns/diagnostics' + _tenantQS());
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DNS diagnostics unavailable'); return; }
             const good = !!d.healthy;
             const svc = d.service || {};
@@ -23198,14 +23946,25 @@ async function loadDNSData(subMenu) {
             const check = (label, pass, detailText) => _ddTile(
                 label, pass ? 'PASS' : 'FAIL', detailText || '',
                 pass ? 'text-emerald-600' : 'text-red-600');
+            // Clustered DNS: the module drives 2+ resolvers. The evidence tiles
+            // below are ONE named member's (diagnostics_source); the cluster
+            // panel carries convergence/drift for the whole set.
+            const cluster = d.cluster && d.cluster.enabled !== false ? d.cluster : null;
+            const clusterPanel = _dnsClusterPanel(cluster);
+            const memberEvidence = cluster ? _ddMemberEvidence(d.members) : '';
             container.innerHTML = `
                 <div class="flex items-center justify-between gap-3 mb-4">
                     <div>
-                        <div class="text-sm font-semibold ${good ? 'text-emerald-700' : 'text-red-700'}">${good ? 'DNS listener healthy' : 'DNS listener needs attention'}</div>
-                        <div class="text-xs text-slate-400">Live checks run on the Unbound server.</div>
+                        <div class="text-sm font-semibold ${good ? 'text-emerald-700' : 'text-red-700'}">${good ? (cluster ? 'DNS cluster healthy' : 'DNS listener healthy') : (cluster ? 'DNS cluster needs attention' : 'DNS listener needs attention')}</div>
+                        <div class="text-xs text-slate-400">${cluster ? `Cluster of ${cluster.member_count || 0} resolver(s); evidence below is from ${escapeHtml(d.diagnostics_source || 'no reachable member')}.` : 'Live checks run on the Unbound server.'}</div>
                     </div>
-                    <button onclick="loadDNSData('Diagnostics')" title="Run DNS diagnostics again" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Run again</button>
+                    <div class="flex items-center gap-2">
+                        ${serviceClusterButton('dns', cluster)}
+                        <button onclick="loadDNSData('Diagnostics')" title="Run DNS diagnostics again" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Run again</button>
+                    </div>
                 </div>
+                ${clusterPanel}
+                ${memberEvidence}
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
                     ${check('Unbound Service', !!svc.ok, svc.output || svc.error || 'inactive')}
                     ${check('Configuration', !!cfg.ok, cfg.output || cfg.error || 'valid')}
@@ -23239,7 +23998,7 @@ async function loadDNSData(subMenu) {
 
         // ── Forwarders: configured upstream resolvers ─────────────────────
         if (subMenu === 'Forwarders') {
-            const { ok, data: d, detail } = await _spokeFetch('/api/dns/forwarders');
+            const { ok, data: d, detail } = await _spokeFetch('/api/dns/forwarders' + _tenantQS());
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DNS spoke not connected'); return; }
             if (d.status && d.status !== 'SUCCESS') {
                 container.innerHTML = _spokeErrorBanner(d.message, 'unbound-control forwarders unavailable'); return;
@@ -26807,7 +27566,7 @@ async function loadDHCPData(subMenu) {
     try {
         // ── Overview: Kea pool utilization + packet counters (OPNsense-grade) ─
         if (subMenu === 'Overview') {
-            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/stats');
+            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/stats' + _tenantQS());
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); return; }
             if (d.status && d.status !== 'SUCCESS') {
                 container.innerHTML = _spokeErrorBanner(d.message, 'Kea statistics unavailable'); return;
@@ -26849,7 +27608,7 @@ async function loadDHCPData(subMenu) {
         }
 
         if (subMenu === 'Diagnostics') {
-            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/diagnostics');
+            const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/diagnostics' + _tenantQS());
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP diagnostics unavailable'); return; }
             const good = !!d.healthy;
             const units = d.units || {};
@@ -26870,14 +27629,25 @@ async function loadDHCPData(subMenu) {
                 <td class="px-4 py-2 font-mono text-xs">${escapeHtml(s.subnet || '—')}</td>
                 <td class="px-4 py-2 font-mono text-xs">${(s.pools || []).map(escapeHtml).join(', ') || '—'}</td>
             </tr>`).join('');
+            // HA pair: the module drives two Kea nodes. The evidence tiles below
+            // are ONE named node's (diagnostics_source); the HA panel carries
+            // pair state, lease sync and config drift.
+            const haCluster = d.cluster && d.cluster.enabled !== false ? d.cluster : null;
+            const haPanel = _dhcpHaPanel(haCluster);
+            const nodeEvidence = haCluster ? _ddMemberEvidence(d.members) : '';
             container.innerHTML = `
                 <div class="flex items-center justify-between gap-3 mb-4">
                     <div>
-                        <div class="text-sm font-semibold ${good ? 'text-emerald-700' : 'text-red-700'}">${good ? 'Kea DHCP server healthy' : 'Kea DHCP server needs attention'}</div>
-                        <div class="text-xs text-slate-400">Live checks mirror the Sim DHCP (Kea) diagnostics: units, config, interfaces, listeners, control agent, and leases.</div>
+                        <div class="text-sm font-semibold ${good ? 'text-emerald-700' : 'text-red-700'}">${good ? (haCluster ? 'Kea HA pair healthy' : 'Kea DHCP server healthy') : (haCluster ? 'Kea HA pair needs attention' : 'Kea DHCP server needs attention')}</div>
+                        <div class="text-xs text-slate-400">${haCluster ? `HA pair (${escapeHtml(haCluster.mode || 'hot-standby')}); evidence below is from ${escapeHtml(d.diagnostics_source || 'no reachable node')}.` : 'Live checks mirror the Sim DHCP (Kea) diagnostics: units, config, interfaces, listeners, control agent, and leases.'}</div>
                     </div>
-                    <button onclick="loadDHCPData('Diagnostics')" title="Run DHCP diagnostics again" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Run again</button>
+                    <div class="flex items-center gap-2">
+                        ${serviceClusterButton('dhcp', haCluster)}
+                        <button onclick="loadDHCPData('Diagnostics')" title="Run DHCP diagnostics again" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Run again</button>
+                    </div>
                 </div>
+                ${haPanel}
+                ${nodeEvidence}
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
                     ${check('DHCP4 Service', dhcp4.ActiveState === 'active', unitText(dhcp4))}
                     ${check('Control Agent', caUnit.ActiveState === 'active' && !!ca.reachable, ca.error || unitText(caUnit))}

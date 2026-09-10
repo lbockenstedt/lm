@@ -222,6 +222,17 @@ _DEPLOY_ROLE_UNITS = {
     "dhcp-server": ("kea-dhcp4-server", "kea-ctrl-agent"),
 }
 
+# Units a cluster deploy ALSO leaves behind. They are stopped on unload but are
+# deliberately NOT part of _DEPLOY_ROLE_UNITS: a single-host node never has them,
+# and requiring them for the "is this role active" probe would report every
+# non-clustered dns/dhcp server as inactive. Without stopping these, unloading a
+# server role left the cluster worker (and the Kea HA control agent) running and
+# still talking to a coordinator that no longer manages this node.
+_DEPLOY_ROLE_EXTRA_UNITS = {
+    "dns-server": ("lm-dns-worker",),
+    "dhcp-server": ("lm-dhcp-worker", "kea-ha-agent"),
+}
+
 
 def _active_deploy_roles(installed_roles: list) -> list:
     active = []
@@ -428,13 +439,10 @@ class GenericAgent(BaseSpoke):
             else:
                 logger.debug("Role repo already present at %s; skipping clone.", clone_dir)
 
-        # 2. System packages. dns/dhcp need their daemons; le needs certbot +
-        # the common DNS-01 plugins (the spoke itself creates /etc/lm-le and the
-        # ledger dir on demand, and runs as root so it can bind :80 / write
-        # /etc/letsencrypt — the generic-agent service is User=root). Other
-        # siblings are pip-only (curl/requests-based).
+        # 2. System packages. Management-only roles such as dns do not install
+        # the service they coordinate; that belongs to the separate dns-server
+        # deploy role. le needs certbot + common DNS-01 plugins.
         install_cmds = {
-            "dns":  ["apt-get", "install", "-y", "-qq", "unbound"],
             "dhcp": ["apt-get", "install", "-y", "-qq", "kea-dhcp4-server", "kea-ctrl-agent"],
             "le":   ["apt-get", "install", "-y", "-qq", "certbot",
                      "python3-certbot-dns-cloudflare", "python3-certbot-dns-route53",
@@ -455,9 +463,8 @@ class GenericAgent(BaseSpoke):
                 return {"status": "ERROR", "message": f"Package install failed: {e}"}
 
         # 2b. Module-specific OS bootstrapping the DEDICATED installers used to
-        #     do, so a freshly-loaded role reaches parity with install_<mod>.sh
-        #     (dns needs unbound remote-control enabled+started; dhcp needs a
-        #     non-interactive kea-ctrl-agent config + the kea daemons started).
+        #     do where the hosted role still owns local infrastructure (dhcp
+        #     needs a non-interactive kea-ctrl-agent config + daemons started).
         #     Idempotent + best-effort; a config hiccup must not fail the load.
         #     Offloaded whole: it shells out (up to 600s for --infra-only).
         await asyncio.to_thread(self._role_post_install, role_name)
@@ -505,52 +512,11 @@ class GenericAgent(BaseSpoke):
     def _role_post_install(self, role_name: str) -> None:
         """Module-specific OS config the dedicated installers did, so a loaded
         role reaches parity. Idempotent + best-effort (never fails the load).
-        Pure-API roles (opnsense/netbox/cppm/ldap/le/nw/pxmx) need nothing here.
+        Pure management/API roles (dns/opnsense/netbox/cppm/ldap/le/nw/pxmx)
+        need nothing here.
         Runs as root (the lm-agent unit is User=root)."""
         try:
-            if role_name == "dns":
-                conf = Path("/etc/unbound/unbound.conf")
-                existing = conf.read_text() if conf.exists() else ""
-                changed = False
-                if "control-enable: yes" not in existing:
-                    with conf.open("a") as f:
-                        f.write("\n\nremote-control:\n    control-enable: yes\n"
-                                "    control-interface: 127.0.0.1\n"
-                                "    control-port: 8953\n")
-                    changed = True
-                # Listen on all interfaces + allow LAN clients. Unbound defaults
-                # to 127.0.0.1 ONLY and REFUSES non-local queries, so the DNS
-                # role would never answer a query sent to its LAN IP — it looks
-                # like "no response / firewall" even with the firewall off.
-                # Parity with install_dns.sh; idempotent (guarded on interface).
-                if "interface: 0.0.0.0" not in existing:
-                    with conf.open("a") as f:
-                        f.write("\n\nserver:\n"
-                                "    interface: 0.0.0.0\n"
-                                "    access-control: 127.0.0.0/8 allow\n"
-                                "    access-control: 10.0.0.0/8 allow\n"
-                                "    access-control: 172.16.0.0/12 allow\n"
-                                "    access-control: 192.168.0.0/16 allow\n"
-                                "    access-control: 169.254.0.0/16 allow\n")
-                    changed = True
-                Path("/etc/unbound/conf.d").mkdir(parents=True, exist_ok=True)
-                if "conf.d" not in existing:
-                    with conf.open("a") as f:
-                        f.write('include-toplevel: "/etc/unbound/conf.d/*.conf"\n')
-                    changed = True
-                subprocess.run(["unbound-control-setup"], check=False, timeout=60,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                subprocess.run(["systemctl", "enable", "unbound"], check=False,
-                               timeout=60, stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL)
-                # apt starts unbound with the stock loopback-only config BEFORE
-                # the block above is appended, and `enable --now` won't restart
-                # an already-running unit — so the new interface/access-control
-                # only takes effect on an explicit restart. Without this the
-                # role loads but DNS keeps refusing LAN queries until a reboot.
-                subprocess.run(["systemctl", "restart" if changed else "start",
-                                "unbound"], check=False, timeout=60)
-            elif role_name == "dhcp":
+            if role_name == "dhcp":
                 Path("/etc/kea").mkdir(parents=True, exist_ok=True)
                 Path("/etc/kea/kea-ctrl-agent.conf").write_text(self._KEA_CTRL_AGENT_CONF)
                 subprocess.run(["systemctl", "enable", "--now",
@@ -602,7 +568,51 @@ class GenericAgent(BaseSpoke):
             extra = self._ldap_server_install_args(config or {})
             if extra and cmd and cmd[-1].rstrip().endswith("--infra-only"):
                 cmd[-1] = cmd[-1] + extra
+        elif role_name in ("dns-server", "dhcp-server"):
+            extra = self._service_worker_install_args(config or {})
+            if extra and cmd and cmd[-1].rstrip().endswith("--infra-only"):
+                cmd[-1] = cmd[-1] + extra
         return cmd
+
+    @staticmethod
+    def _service_worker_install_args(config: dict) -> str:
+        """Project a dns-server/dhcp-server LOAD_ROLE ``config`` into the
+        cluster-worker installer flags appended after ``--infra-only``.
+
+        Present → the installer also lays down the ``lm-dns-worker`` /
+        ``lm-dhcp-worker`` unit that dials the managing module's coordinator
+        listener, which is what turns two independently-deployed service hosts
+        into one managed cluster. Absent (the pre-existing single-host flow) →
+        nothing is appended and the deploy is byte-identical to before."""
+        member_id = config.get("member_id") or config.get("id")
+        coordinator = config.get("coordinator") or config.get("coordinator_url")
+        secret = config.get("worker_secret") or config.get("secret")
+        if not (member_id and coordinator and secret):
+            return ""
+        parts = ["", *(" --" + flag + " " + shlex.quote(str(value))
+                       for flag, value in (("member-id", member_id),
+                                           ("coordinator", coordinator),
+                                           ("worker-secret", secret)))]
+        # Coordinator trust anchor: the worker VERIFIES the coordinator's cert
+        # before sending its secret, so the installer refuses to run without one.
+        ca = config.get("ca_cert") or config.get("coordinator_ca")
+        if ca:
+            parts.append(" --ca-cert " + shlex.quote(str(ca)))
+        # Kea HA channel: credentials + peer scope + mutual-TLS material. These
+        # are per-node install-time inputs; without forwarding them the deploy
+        # role produced a node that could never join its pair.
+        for flag, key in (("ha-user", "ha_user"), ("ha-password", "ha_password"),
+                          ("ha-port", "ha_port"), ("ha-ca", "ha_ca"),
+                          ("ha-cert", "ha_cert"), ("ha-key", "ha_key")):
+            value = config.get(key)
+            if value:
+                parts.append(" --" + flag + " " + shlex.quote(str(value)))
+        peers = config.get("ha_peers") or config.get("ha_peer") or []
+        if isinstance(peers, str):
+            peers = [p.strip() for p in peers.split(",") if p.strip()]
+        for peer in peers:
+            parts.append(" --ha-peer " + shlex.quote(str(peer)))
+        return "".join(parts)
 
     @staticmethod
     def _ldap_server_install_args(config: dict) -> str:
@@ -1266,6 +1276,17 @@ class GenericAgent(BaseSpoke):
                         "message": f"Deployment of '{role_name}' is still running.",
                     }
                 units = _DEPLOY_ROLE_UNITS[role_name]
+                # Stop the cluster sidecars first (best-effort: a single-host
+                # node has none). Leaving lm-*-worker running would keep a
+                # removed node dialling its old coordinator, and kea-ha-agent
+                # would keep the authenticated HA port open.
+                extra = _DEPLOY_ROLE_EXTRA_UNITS.get(role_name, ())
+                if extra:
+                    await asyncio.to_thread(
+                        subprocess.run,
+                        ["systemctl", "disable", "--now", *extra],
+                        capture_output=True, text=True, check=False, timeout=60,
+                    )
                 result = await asyncio.to_thread(
                     subprocess.run,
                     ["systemctl", "disable", "--now", *units],
@@ -1338,6 +1359,16 @@ class GenericAgent(BaseSpoke):
             await task
         except (asyncio.CancelledError, Exception):
             pass
+        # The run task owns only the hub connection. A cluster-hosting role
+        # (dns/dhcp) also holds a /ws/agent listener + module background loops
+        # on separate tasks; without this the port stays bound and the role
+        # cannot be re-loaded. Awaited here, outside the cancelled context.
+        shutdown = getattr(conn, "shutdown", None)
+        if callable(shutdown):
+            try:
+                await shutdown()
+            except Exception as e:  # noqa: BLE001 — teardown is best-effort
+                logger.warning("shutdown of role '%s' raised: %s", role_name, e)
         logger.info("Role unloaded: %s (sub-spoke %s)", role_name, conn.spoke_id)
         self._persist_loaded_roles(remove={role_name})
 

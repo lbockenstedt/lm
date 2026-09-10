@@ -17,19 +17,33 @@ Policy (all configurable via ``global_config["threat_monitor"]``):
     ``permanent_after`` times becomes a PERMANENT block (never expires).
   * ``auto_block`` toggles whether a block reaches Azure (log-only when off).
 
+CLOUD NSG BACKENDS — the ALLOW (never-block) side of this module can push to
+EITHER (or both) of two cloud NSG integrations, each independently enabled:
+  * Azure NSG (``azure_nsg.py`` / ``global_config["azure_nsg"]``) — also owns
+    the DENY (auto-block) side (an explicit Deny rule above a lower-priority
+    Allow — see ``validate_nsg_priorities``).
+  * OCI NSG (``oci_nsg.py`` / ``global_config["oci_nsg"]``) — ALLOW-list only.
+    An OCI Network Security Group supports ALLOW rules exclusively (traffic
+    matching no rule is denied by default) — there is no explicit DENY rule to
+    reconcile onto, so auto-block stays LOG-ONLY when OCI is the active/only
+    configured provider. See ``oci_nsg.py``'s module docstring.
+
 Self-lockout safeguards — an IP is NEVER auto-blocked when it is:
   * on the shared trusted / allow-list (``global_config["azure_nsg"]["entries"]``),
   * a recent successful-login IP (within ``success_grace_s``).
 
-SHARED TRUSTED LIST — the "never auto-block" list and the Azure NSG allow-list
+SHARED TRUSTED LIST — the "never auto-block" list and the cloud NSG allow-lists
 are ONE list, canonically ``global_config["azure_nsg"]["entries"]`` (shape
-``[{ip, description}]``). An entry is BOTH never-auto-blocked AND allowed through
-the NSG. The list itself is never gated on ``azure_nsg.enabled`` (never-block
-works even when Azure is unused); the allow-rule reconcile only reaches ARM when
-azure_nsg is enabled + configured. The legacy private ``_never`` list is merged
-into this shared list once on load (see ``_migrate_never_to_entries``) and then
-left empty. Both the Azure NSG tile and the Security never-block tile edit this
-same list.
+``[{ip, description}]`` — the key name is historical: this list is
+provider-agnostic and feeds BOTH the Azure NSG allow rule AND the OCI NSG
+allow rules when each is enabled). An entry is BOTH never-auto-blocked AND
+allowed through every enabled cloud NSG. The list itself is never gated on
+either provider's ``enabled`` flag (never-block works even when no cloud NSG
+is configured); the allow-rule reconcile only reaches the cloud API for a
+provider that is enabled + configured. The legacy private ``_never`` list is
+merged into this shared list once on load (see ``_migrate_never_to_entries``) and
+left empty. The Azure NSG tile, the OCI NSG tile, and the Security never-block
+tile all edit this same list.
 
 NSG shape: blocks are reconciled — one prefix per IP — onto a dedicated DENY
 rule (``block_rule_name``). Priority ordering invariant (Azure evaluates LOWER
@@ -581,19 +595,32 @@ class ThreatMonitor:
             pass  # no loop (e.g. under sync test)
 
     async def reconcile_allow(self) -> Dict[str, Any]:
+        """Push the shared trusted list onto the ONE currently-ENABLED cloud
+        NSG allow rule (Azure NSG XOR OCI NSG — see ``cloud_nsg.py``, the
+        generic dispatcher this delegates to, and this module's docstring).
+        The trusted list itself is never gated on the provider's ``enabled``
+        (so never-block always works); only the reach-to-the-cloud-API step
+        is. Azure/OCI can never both be active — ``cloud_nsg.active_provider``
+        is the single source of truth for which one is — so the result is
+        always a single flat shape, never a per-provider breakdown."""
+        import cloud_nsg
+        provider = cloud_nsg.active_provider(self.hub)
+        if provider is None:
+            return {"status": "SKIPPED", "message": "no cloud NSG provider enabled — list saved, not applied"}
+        gc = self.hub.state.system_state.get("global_config", {}) or {}
+        if provider == "azure":
+            return await self._reconcile_allow_azure(dict(gc.get("azure_nsg", {}) or {}))
+        return await self._reconcile_allow_oci(dict(gc.get("oci_nsg", {}) or {}))
+
+    async def _reconcile_allow_azure(self, azcfg: Dict[str, Any]) -> Dict[str, Any]:
         """Push the shared trusted list onto the Azure NSG ALLOW rule (the same
-        rule the Azure NSG tile manages). No-op unless azure_nsg is enabled +
-        configured — the trusted list itself is never gated on ``enabled`` (so
-        never-block always works), only the reach-to-ARM step is."""
+        rule the Azure NSG tile manages). No-op unless azure_nsg is configured
+        (``enabled`` is already checked by the caller)."""
         try:
             import azure_nsg as _nsg
             from security.oidc import get_oidc_config
         except Exception as e:  # noqa: BLE001
             return {"status": "ERROR", "message": f"nsg import: {e}"}
-        gc = self.hub.state.system_state.get("global_config", {}) or {}
-        azcfg = dict(gc.get("azure_nsg", {}) or {})
-        if not azcfg.get("enabled"):
-            return {"status": "SKIPPED", "message": "Azure NSG disabled — list saved, not applied"}
         if not all(azcfg.get(k) for k in ("subscription_id", "resource_group", "nsg_name")):
             return {"status": "SKIPPED", "message": "Azure NSG not configured"}
         ips = _nsg.entries_to_ips(azcfg.get("entries") or [])
@@ -604,13 +631,42 @@ class ThreatMonitor:
                          azcfg.get("rule_name") or "lm-allowlist")
             return {"status": "SUCCESS", "count": len(ips), **res}
         except Exception as e:  # noqa: BLE001
-            logger.warning("threat allow-rule reconcile failed: %s", e)
+            logger.warning("threat allow-rule reconcile (Azure) failed: %s", e)
+            return {"status": "ERROR", "message": str(e)}
+
+    async def _reconcile_allow_oci(self, occfg: Dict[str, Any]) -> Dict[str, Any]:
+        """Push the shared trusted list onto the OCI NSG's managed ALLOW rules
+        (the same rules the OCI NSG tile manages). No-op unless oci_nsg is
+        configured (``enabled`` is already checked by the caller). OCI has no
+        deny/block equivalent — see the module docstring — so this is the
+        ENTIRE OCI integration; there is no OCI counterpart to reconcile_nsg."""
+        try:
+            import oci_nsg as _nsg
+        except Exception as e:  # noqa: BLE001
+            return {"status": "ERROR", "message": f"nsg import: {e}"}
+        if not all(occfg.get(k) for k in ("nsg_id", "region")):
+            return {"status": "SKIPPED", "message": "OCI NSG not configured"}
+        # Uses the SAME shared trusted list as Azure (canonically stored under
+        # azure_nsg.entries — see the module docstring) — entries are not
+        # duplicated per-provider.
+        ips = _nsg.entries_to_ips(self._shared_entries())
+        try:
+            res = await _nsg.reconcile_allowlist(_nsg.get_oci_config(self.hub), occfg, ips)
+            sec_log.info("THREAT NSG allow-rule reconciled: %d IP(s) on OCI NSG %s",
+                         len(ips), occfg.get("nsg_id"))
+            return {"status": "SUCCESS", "count": len(ips), **res}
+        except Exception as e:  # noqa: BLE001
+            logger.warning("threat allow-rule reconcile (OCI) failed: %s", e)
             return {"status": "ERROR", "message": str(e)}
 
     async def reconcile_nsg(self) -> Dict[str, Any]:
         """Push the current blocked-IP set onto the Azure NSG deny rule (one
         prefix per IP). No-op unless auto_block is ON and azure_nsg is configured.
         Empty set → the deny rule is deleted (reconcile_allowlist semantics).
+
+        There is no OCI equivalent: an OCI Network Security Group supports
+        ALLOW rules only (default-deny), so auto-block stays log-only when OCI
+        is the active provider — see the module docstring and ``oci_nsg.py``.
 
         If ``block_rule_name`` changed since the last successful reconcile,
         the OLD-named rule is deleted FIRST. Azure NSG rules are keyed by
@@ -689,22 +745,28 @@ class ThreatMonitor:
         trusted = self._shared_entries()  # shared list [{ip, description}]
         gc = self.hub.state.system_state.get("global_config", {}) or {}
         az = gc.get("azure_nsg", {}) or {}
+        oc = gc.get("oci_nsg", {}) or {}
         allow_rule = {
             "name": az.get("rule_name") or "lm-allowlist",
             "priority": self.allow_priority(),
             "enabled": bool(az.get("enabled")),
         }
+        # OCI has no priority/rule-name equivalent (allow-only, one rule per
+        # CIDR — see oci_nsg.py) so this is deliberately a smaller shape than
+        # allow_rule above; additive key, doesn't change any existing field.
+        oci_allow = {"enabled": bool(oc.get("enabled")), "nsg_id": oc.get("nsg_id") or ""}
         return {
             "config": self.config(),
             "permanent": [b for b in blocks if b.get("permanent")],
             "temporary": [b for b in blocks if not b.get("permanent")],
             "manual": [b for b in blocks if str(b.get("source", "")).startswith("manual")],
             # Shared trusted list: full entries (with descriptions) + a bare-IP
-            # list for back-compat. Both editors (Azure NSG tile / Security tile)
-            # read/write the SAME underlying azure_nsg.entries.
+            # list for back-compat. Every editor (Azure NSG tile / OCI NSG tile /
+            # Security tile) reads/writes the SAME underlying azure_nsg.entries.
             "trusted": trusted,
             "never_block": [e["ip"] for e in trusted],
             "allow_rule": allow_rule,
+            "oci_allow_rule": oci_allow,
             "events": list(self._events)[:200],
             "counts": {"blocked": len(blocks), "permanent": sum(1 for b in blocks if b.get("permanent")),
                        "never": len(trusted), "events": len(self._events)},

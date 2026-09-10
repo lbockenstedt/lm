@@ -59,13 +59,27 @@ class UnboundManager:
             f.writelines(lines)
 
         count = len(records)
-        self._reload()
+        # A write that Unbound never reloaded has NOT taken effect: the file on
+        # disk says one thing and the running resolver answers another. Report
+        # the reload failure instead of a SUCCESS the caller cannot act on —
+        # the clustered coordinator relies on this to avoid recording a version
+        # a resolver is not actually serving.
+        reload_result = self._reload()
         # We just rewrote the conf — drop the parsed-list memo so the next
         # list_records re-reads the new contents rather than returning stale.
         self._records_cache = None
         self._records_cache_mtime = None
+        if not reload_result["ok"]:
+            logger.error("Wrote %d DNS records but unbound-control reload failed: %s",
+                         count, reload_result["error"])
+            return {"status": "ERROR", "records_written": count,
+                    "reloaded": False, "error": reload_result["error"],
+                    "message": (f"{count} record(s) written to {self.conf_path} but "
+                                f"unbound-control reload failed: "
+                                f"{reload_result['error']} — the running resolver "
+                                f"is still serving the previous set")}
         logger.info("Synced %d DNS records to Unbound", count)
-        return {"status": "SUCCESS", "records_written": count}
+        return {"status": "SUCCESS", "records_written": count, "reloaded": True}
 
     def list_records(self) -> list:
         """Parse the managed conf file and return records.
@@ -405,12 +419,19 @@ class UnboundManager:
         finally:
             sock.close()
 
-    def _reload(self):
+    def _reload(self) -> dict:
+        """Reload Unbound. Returns ``{"ok": bool, "error": str}``.
+
+        Previously swallowed the failure with a WARNING, so a conf write whose
+        reload never happened still reported SUCCESS upstream. Callers need the
+        distinction: the file changed but the resolver did not."""
         try:
             subprocess.run(["unbound-control", "reload"], check=True, timeout=10)
             logger.info("Unbound reloaded")
+            return {"ok": True, "error": ""}
         except Exception as e:
             logger.warning("unbound-control reload failed: %s", e)
+            return {"ok": False, "error": str(e)}
 
     def _ptr_name(self, ip: str) -> str:
         try:
