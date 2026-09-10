@@ -564,6 +564,18 @@ def register(app, hub, ctx):
         logger.debug("relay GET /api/dns/forwarders")
         return await _relay_spoke(_dns_spoke_for_request(request, tenant), "DNS_FORWARDERS", log_name="dns_forwarders")
 
+    @app.post("/api/dns/forwarders")
+    async def dns_add_forwarder(request: Request, tenant: str = None):
+        """Add a persistent forwarding zone to every resolver worker."""
+        body = await request.json()
+        return await _relay_spoke(
+            _dns_spoke_for_request(request, tenant),
+            "DNS_FORWARDER_ADD",
+            {"zone": body.get("zone", "."), "upstreams": body.get("upstreams", [])},
+            log_name="dns_add_forwarder",
+            timeout=30,
+        )
+
     @app.post("/api/dns/sync")
     async def dns_sync_from_netbox():
         """
