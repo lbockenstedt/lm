@@ -301,7 +301,7 @@ def test_install_role_le_installs_certbot(tmp_path, monkeypatch):
 
 
 def test_role_post_install_dns_does_not_touch_local_unbound(tmp_path, monkeypatch):
-    """The management role must leave any local resolver untouched."""
+    """The management role provisions listener TLS without touching Unbound."""
     etc = tmp_path / "etc" / "unbound"
     etc.mkdir(parents=True)
     conf = etc / "unbound.conf"
@@ -310,7 +310,7 @@ def test_role_post_install_dns_does_not_touch_local_unbound(tmp_path, monkeypatc
     real_path = agent_spoke.Path
     def _redir(p="."):
         s = str(p)
-        if s.startswith("/etc/unbound"):
+        if s.startswith("/etc/unbound") or s.startswith("/etc/lm-dns"):
             return real_path(str(tmp_path) + s)
         return real_path(p)
     monkeypatch.setattr(agent_spoke, "Path", _redir)
@@ -321,7 +321,9 @@ def test_role_post_install_dns_does_not_touch_local_unbound(tmp_path, monkeypatc
     agent._role_post_install("dns")
 
     assert conf.read_text() == "# stock debian config\n"
-    assert not calls
+    assert len(calls) == 1
+    assert calls[0][:4] == ["openssl", "req", "-x509", "-newkey"]
+    assert "unbound" not in " ".join(calls[0])
 
 
 # ── 5. multi-role: one agent hosts many role sub-spokes ─────────────────────
