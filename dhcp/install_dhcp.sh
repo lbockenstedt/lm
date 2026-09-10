@@ -397,7 +397,11 @@ EOF
     mkdir -p "$(dirname "$WORKER_ENV")"
     WORKER_CA_PATH="/etc/lm-dhcp-worker/coordinator-ca.pem"
     if [[ -n "$WORKER_CA" ]]; then
-        install -m 0644 "$WORKER_CA" "$WORKER_CA_PATH"
+        if [[ "$(readlink -f "$WORKER_CA")" != "$(readlink -f "$WORKER_CA_PATH")" ]]; then
+            install -m 0644 "$WORKER_CA" "$WORKER_CA_PATH"
+        else
+            chmod 0644 "$WORKER_CA_PATH"
+        fi
     elif [[ ! -s "$WORKER_CA_PATH" ]]; then
         echo "--ca-cert is required: the worker verifies the coordinator's"
         echo "certificate before sending its secret. Copy the coordinator's"
