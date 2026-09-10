@@ -293,6 +293,31 @@ def test_ha_peers_accept_a_comma_separated_string():
     assert out.count(" --ha-peer ") == 2
 
 
+def test_service_worker_install_args_write_generated_ha_material(tmp_path):
+    from agent_spoke import GenericAgent
+    cert = "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----"
+    key = "-----BEGIN PRIVATE KEY-----\nprivate\n-----END PRIVATE KEY-----"
+    config = {
+        "member_id": "kea-a",
+        "coordinator": "10.0.1.9",
+        "worker_secret": "secret",
+        "ha_tls_dir": str(tmp_path),
+        "ha_ca_pem": cert,
+        "ha_cert_pem": cert,
+        "ha_key_pem": key,
+    }
+
+    out = GenericAgent._service_worker_install_args("dhcp-server", config)
+
+    assert (tmp_path / "ha-ca.pem").read_text().strip() == cert
+    assert (tmp_path / "node.crt").read_text().strip() == cert
+    assert (tmp_path / "node.key").read_text().strip() == key
+    assert (tmp_path / "node.key").stat().st_mode & 0o777 == 0o640
+    assert f" --ha-ca {tmp_path}/ha-ca.pem" in out
+    assert f" --ha-cert {tmp_path}/node.crt" in out
+    assert f" --ha-key {tmp_path}/node.key" in out
+
+
 def test_no_cluster_config_still_produces_the_legacy_command():
     from agent_spoke import GenericAgent
     assert GenericAgent._service_worker_install_args({}) == ""

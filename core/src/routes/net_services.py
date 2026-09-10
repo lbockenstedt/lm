@@ -2761,6 +2761,253 @@ def register(app, hub, ctx):
             resolved = hub.get_dhcp_spoke_for_shared()
         return spoke_or_503(resolved, "DHCP")
 
+    async def _discover_dhcp_workers(request: Request, tenant: str = None):
+        """Build the tenant's Kea HA pair from active DHCP Server roles."""
+        dhcp_spoke = _dhcp_spoke_for_request(request, tenant)
+        current = await _relay_spoke(
+            dhcp_spoke, "DHCP_HA_STATUS",
+            log_name="dhcp_worker_discovery_status", timeout=30)
+        current_members = [
+            m for m in (current.get("members") or [])
+            if isinstance(m, dict) and m.get("id")
+        ]
+        current_by_id = {
+            str(m["id"]): m for m in current_members
+        }
+        dhcp_tenant = hub.state.get_spoke_tenant(dhcp_spoke) or ""
+        shared_spoke = hub.get_dhcp_spoke_for_shared()
+        if dhcp_spoke == shared_spoke:
+            dhcp_tenant = access.shared_tenant_id() or dhcp_tenant
+
+        def _private_addresses(report):
+            addresses = []
+            for raw in report.get("service_addresses") or []:
+                try:
+                    address = ipaddress.ip_address(str(raw).strip())
+                except ValueError:
+                    continue
+                if (address.version == 4 and address.is_private
+                        and not address.is_loopback
+                        and not address.is_link_local
+                        and not address.is_unspecified
+                        and not address.is_multicast
+                        and not address.is_reserved):
+                    addresses.append(str(address))
+            return addresses
+
+        def _upsert_instance(sid, member_id, host):
+            global_config = hub.state.system_state.setdefault("global_config", {})
+            instances = global_config.setdefault("dhcp_instances", [])
+            existing = next((
+                item for item in instances if isinstance(item, dict)
+                and (item.get("source_agent_id") == sid
+                     or item.get("member_id") == member_id)
+            ), None)
+            module_names = hub.state.system_state.get("module_names", {}) or {}
+            metadata = hub.state.system_state.get("module_metadata", {}) or {}
+            display_name = (
+                module_names.get(sid)
+                or (metadata.get(sid) or {}).get("display_name")
+                or sid
+            )
+            record = {
+                "id": (existing or {}).get("id") or f"discovered-{sid}",
+                "name": (existing or {}).get("name") or display_name,
+                "member_id": member_id,
+                "host": host,
+                "spoke_id": dhcp_spoke,
+                "tenant_id": dhcp_tenant,
+                "source_agent_id": sid,
+                "discovered": True,
+            }
+            if existing is not None:
+                existing.update(record)
+            else:
+                instances.append(record)
+            hub.state._mark_dirty()
+
+        candidates = []
+        for sid, module_type in list(hub.spoke_module_types.items()):
+            if module_type != "agent" or hub._primary_key(sid) not in hub.active_connections:
+                continue
+            if (hub.state.get_spoke_tenant(sid) or "") != dhcp_tenant:
+                continue
+            candidates.append(sid)
+
+        async def _roles(sid):
+            try:
+                result = await hub.request_response(
+                    sid, "GET_AVAILABLE_ROLES", {}, timeout=15.0)
+                data = result.get("payload", {}).get("data", result)
+                return sid, data if isinstance(data, dict) else {}
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("DHCP worker discovery could not inspect %s: %s",
+                               sid, exc)
+                return sid, {}
+
+        reports = await asyncio.gather(*[_roles(sid) for sid in candidates])
+        parent_id = (getattr(hub, "spoke_parent_map", {}).get(
+            hub._primary_key(dhcp_spoke)) or "")
+        parent_report = next((
+            report for sid, report in reports
+            if hub._primary_key(sid) == hub._primary_key(parent_id)
+        ), {})
+        coordinator_addresses = _private_addresses(parent_report)
+        coordinator_host = (
+            coordinator_addresses[0] if coordinator_addresses else "")
+
+        workers = []
+        for sid, report in reports:
+            if "dhcp-server" not in (report.get("installed_deploy_roles") or []):
+                continue
+            if "dhcp-server" not in (report.get("active_deploy_roles") or []):
+                continue
+            worker_info = next((
+                item for item in (report.get("configured_workers") or [])
+                if isinstance(item, dict) and item.get("role") == "dhcp-server"
+            ), {})
+            addresses = _private_addresses(report)
+            if not addresses:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"DHCP Server agent {sid} did not report a private local "
+                        "service address; refusing to use its public/NAT "
+                        "WebSocket source address."))
+            workers.append({
+                "spoke_id": sid,
+                "id": str(worker_info.get("member_id") or sid),
+                "host": addresses[0],
+                "configured": bool(worker_info) or "dhcp-server" in (
+                    report.get("configured_worker_roles") or []),
+            })
+
+        workers.sort(key=lambda item: item["id"])
+        for item in workers:
+            _upsert_instance(item["spoke_id"], item["id"], item["host"])
+        if len(workers) < 2:
+            return {
+                "status": "SUCCESS",
+                "workers": [{"spoke_id": item["spoke_id"], "status": "waiting"}
+                            for item in workers],
+                "discovered_count": len(workers),
+                "cluster_ready": False,
+                "message": "Two active DHCP Server roles are required for Kea HA.",
+            }
+        if len(workers) > 2:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Found {len(workers)} active DHCP Server roles for tenant "
+                    f"{dhcp_tenant or 'unassigned'}; Kea HA requires exactly two."))
+
+        already_configured = all(
+            item["configured"]
+            and item["id"] in current_by_id
+            and current_by_id[item["id"]].get("connected")
+            and str(current_by_id[item["id"]].get("host") or "") == item["host"]
+            for item in workers
+        )
+        if already_configured:
+            return {
+                "status": "SUCCESS",
+                "workers": [{"spoke_id": item["spoke_id"],
+                             "status": "already-configured"} for item in workers],
+                "discovered_count": 2,
+                "cluster_ready": True,
+            }
+        if parent_id and not coordinator_host:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"DHCP Management host agent {parent_id} did not report a "
+                    "private local service address; worker coordinator "
+                    "configuration cannot be completed safely."))
+
+        enrollment = await _relay_spoke(
+            dhcp_spoke, "DHCP_HA_ENROLL_WORKERS",
+            {"members": [
+                {"id": item["id"], "host": item["host"],
+                 "role": "primary" if index == 0 else "standby"}
+                for index, item in enumerate(workers)
+            ]},
+            log_name="dhcp_ha_enroll_workers", timeout=60)
+        bootstraps = enrollment.get("workers") or {}
+
+        async def _deploy(item):
+            bootstrap = dict(bootstraps.get(item["id"]) or {})
+            if coordinator_host:
+                bootstrap["coordinator"] = coordinator_host
+            required = (
+                "member_id", "coordinator", "worker_secret",
+                "coordinator_ca_pem", "ha_user", "ha_password",
+                "ha_ca_pem", "ha_cert_pem", "ha_key_pem",
+            )
+            if not all(bootstrap.get(key) for key in required):
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"DHCP Management returned incomplete enrollment for "
+                           f"{item['spoke_id']}")
+            result = await hub.request_response(
+                item["spoke_id"], "LOAD_ROLE",
+                {"role": "dhcp-server", "config": bootstrap},
+                timeout=120.0)
+            deployed = result.get("payload", {}).get("data", result)
+            if (deployed.get("status") == "ERROR"
+                    and "deployment is already running" in str(
+                        deployed.get("message") or "").lower()):
+                progress = await hub.request_response(
+                    item["spoke_id"], "GET_DEPLOY_STATUS", {}, timeout=15.0)
+                progress = progress.get("payload", {}).get("data", progress)
+                progress = _spoke_payload_or_raise(progress)
+                active = progress.get("active_role")
+                state = (progress.get("deploy") or {}).get("state")
+                if active == "dhcp-server" and state == "running":
+                    deployed = {"status": "SUCCESS", "deploy": True}
+                else:
+                    deployed = _spoke_payload_or_raise(deployed)
+            else:
+                deployed = _spoke_payload_or_raise(deployed)
+            if deployed.get("deploy"):
+                for _attempt in range(60):
+                    await asyncio.sleep(2)
+                    progress = await hub.request_response(
+                        item["spoke_id"], "GET_DEPLOY_STATUS", {}, timeout=15.0)
+                    progress = progress.get("payload", {}).get("data", progress)
+                    progress = _spoke_payload_or_raise(progress)
+                    state = (progress.get("deploy") or {}).get("state")
+                    if state == "completed":
+                        break
+                    if state in ("failed", "error"):
+                        detail = ((progress.get("deploy") or {}).get("tail")
+                                  or (progress.get("deploy") or {}).get("error")
+                                  or state)
+                        raise HTTPException(
+                            status_code=502,
+                            detail=f"DHCP worker configuration failed on "
+                                   f"{item['spoke_id']}: {detail}")
+            return {"spoke_id": item["spoke_id"], "status": "configuring"}
+
+        deployed = list(await asyncio.gather(*[_deploy(item) for item in workers]))
+        for _attempt in range(30):
+            result = await hub.request_response(
+                dhcp_spoke, "DHCP_HA_COMMIT_ENROLLMENT", {}, timeout=30)
+            committed = result.get("payload", {}).get("data", result)
+            if committed.get("status") in ("SUCCESS", "PARTIAL"):
+                for item in deployed:
+                    item["status"] = "configured"
+                break
+            if not committed.get("waiting"):
+                _spoke_payload_or_raise(committed)
+            await asyncio.sleep(2)
+        return {
+            "status": "SUCCESS",
+            "workers": deployed,
+            "discovered_count": 2,
+            "cluster_ready": all(
+                item["status"] == "configured" for item in deployed),
+        }
+
     async def _dhcp_merge_fanout(cmd: str, payload: dict, list_key: str):
         """Admin, no tenant selected, 2+ dhcp spokes connected: fan ``cmd``
         out to EVERY connected, approved dhcp spoke, tag each returned record
@@ -2941,6 +3188,23 @@ def register(app, hub, ctx):
         return await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
                                   "DHCP_HA_CONFIG", body,
                                   log_name="dhcp_ha_config", timeout=30)
+
+    @app.post("/api/dhcp/ha/discover")
+    async def dhcp_ha_discover(request: Request, tenant: str = None):
+        """Automatically enroll the tenant's two active DHCP Server roles."""
+        if not _is_admin(_session_user(request)):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        spoke_id = _dhcp_spoke_for_request(request, tenant)
+        locks = getattr(app.state, "_dhcp_discovery_locks", None)
+        if locks is None:
+            locks = app.state._dhcp_discovery_locks = {}
+        lock = locks.setdefault(hub._primary_key(spoke_id), asyncio.Lock())
+        try:
+            async with lock:
+                return await _discover_dhcp_workers(request, tenant)
+        except HTTPException as exc:
+            logger.warning("DHCP worker discovery failed: %s", exc.detail)
+            raise
 
     @app.post("/api/dhcp/ha/apply")
     async def dhcp_ha_apply(request: Request, tenant: str = None):

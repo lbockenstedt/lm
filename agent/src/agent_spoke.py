@@ -738,6 +738,33 @@ class GenericAgent(BaseSpoke):
         # Kea HA channel: credentials + peer scope + mutual-TLS material. These
         # are per-node install-time inputs; without forwarding them the deploy
         # role produced a node that could never join its pair.
+        if role_name == "dhcp-server":
+            ha_tls_dir = Path(str(
+                config.get("ha_tls_dir") or "/etc/kea/ha-tls"))
+            pem_specs = (
+                ("ha_ca_pem", "CERTIFICATE", ha_tls_dir / "ha-ca.pem", 0o644),
+                ("ha_cert_pem", "CERTIFICATE", ha_tls_dir / "node.crt", 0o644),
+                ("ha_key_pem", "PRIVATE KEY", ha_tls_dir / "node.key", 0o640),
+            )
+            for key, marker, path, mode in pem_specs:
+                pem = str(config.get(key) or "").strip()
+                if not pem:
+                    continue
+                if (f"-----BEGIN {marker}-----" not in pem
+                        or f"-----END {marker}-----" not in pem
+                        or len(pem) > 65536):
+                    raise ValueError(f"{key} is not valid PEM")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                tmp = path.with_suffix(path.suffix + ".tmp")
+                tmp.write_text(pem + "\n", encoding="utf-8")
+                os.chmod(tmp, mode)
+                os.replace(tmp, path)
+            if config.get("ha_ca_pem"):
+                config["ha_ca"] = str(ha_tls_dir / "ha-ca.pem")
+            if config.get("ha_cert_pem"):
+                config["ha_cert"] = str(ha_tls_dir / "node.crt")
+            if config.get("ha_key_pem"):
+                config["ha_key"] = str(ha_tls_dir / "node.key")
         for flag, key in (("ha-user", "ha_user"), ("ha-password", "ha_password"),
                           ("ha-port", "ha_port"), ("ha-ca", "ha_ca"),
                           ("ha-cert", "ha_cert"), ("ha-key", "ha_key")):

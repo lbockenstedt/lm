@@ -1,4 +1,5 @@
 """NetBox (IPAM) config + sites/racks/devices/prefixes/IPs routes."""
+import asyncio
 import os
 import secrets
 from api import (
@@ -15,6 +16,15 @@ def register(app, hub, ctx):
     _resolve_tenant = ctx._resolve_tenant
     _filter_session = ctx._filter_session
     _trigger_endpoint_sync_after_ipam_edit = ctx._trigger_endpoint_sync_after_ipam_edit
+
+    def _trigger_dhcp_sync_after_prefix_edit():
+        """Apply a successful NetBox prefix change to Kea immediately."""
+        async def _sync():
+            try:
+                await hub.sync_dhcp_from_netbox()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("DHCP sync after NetBox prefix edit failed: %s", exc)
+        asyncio.create_task(_sync())
 
     async def _verify_owns(request, module_key, obj_id, id_field="id"):
         """Cross-tenant guard for NetBox path-ID mutation routes (DELETE/PUT).
@@ -91,7 +101,8 @@ def register(app, hub, ctx):
 
     async def _netbox_write(request, cmd, refresh_keys, *, log_name,
                             id_field=None, obj_id=None, verify_key=None,
-                            tenant_mode="always", sync_body=None, timeout=None):
+                            tenant_mode="always", sync_body=None, timeout=None,
+                            sync_dhcp=False):
         """Shared body of the 12 NetBox write (POST/PUT/DELETE) handlers:
         spoke-check → ownership verify → body/id build → tenant-enforce →
         relay → cache-refresh → optional endpoint-sync trigger → unwrap
@@ -123,13 +134,16 @@ def register(app, hub, ctx):
                     data["tenant"] = _enforce_body_tenant(request, data)
             kw = {"timeout": timeout} if timeout else {}
             result = await hub.request_response(spoke_id, cmd, data, **kw)
+            response = _unwrap_netbox(result)
             for key in refresh_keys:
                 _refresh_module_all_tenants(hub, key)
             if sync_body == "data":
                 _trigger_endpoint_sync_after_ipam_edit(hub, request, data)
             elif sync_body == "null":
                 _trigger_endpoint_sync_after_ipam_edit(hub, request, None)
-            return _unwrap_netbox(result)
+            if sync_dhcp:
+                _trigger_dhcp_sync_after_prefix_edit()
+            return response
         except HTTPException:
             raise
         except Exception as e:
@@ -705,7 +719,8 @@ def register(app, hub, ctx):
         """Allocate a NetBox prefix; invalidates the prefix + IP caches (30s timeout)."""
         return await _netbox_write(request, "NETBOX_ALLOCATE_PREFIX",
                                    ["netbox_prefixes", "netbox_ips"],
-                                   log_name="netbox_allocate_prefix", timeout=30.0)
+                                   log_name="netbox_allocate_prefix", timeout=30.0,
+                                   sync_dhcp=True)
 
     @app.put("/api/netbox/prefixes/{prefix_id}")
     async def netbox_update_prefix(prefix_id: int, request: Request):
@@ -714,7 +729,7 @@ def register(app, hub, ctx):
                                    log_name="netbox_update_prefix",
                                    id_field="prefix_id", obj_id=prefix_id,
                                    verify_key="netbox_prefixes",
-                                   tenant_mode="if_present")
+                                   tenant_mode="if_present", sync_dhcp=True)
 
     @app.delete("/api/netbox/prefixes/{prefix_id}")
     async def netbox_delete_prefix(prefix_id: int, request: Request):
@@ -723,7 +738,8 @@ def register(app, hub, ctx):
                                    ["netbox_prefixes", "netbox_ips"],
                                    log_name="netbox_delete_prefix",
                                    id_field="prefix_id", obj_id=prefix_id,
-                                   verify_key="netbox_prefixes", tenant_mode=None)
+                                   verify_key="netbox_prefixes", tenant_mode=None,
+                                   sync_dhcp=True)
 
     @app.get("/api/netbox/available-subnets")
     async def netbox_find_available_subnets(request: Request, near: str = None,

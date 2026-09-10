@@ -197,3 +197,51 @@ def test_self_heal_removes_leaked_relay_agent_id():
     assert "leaked-agent" not in hub.approved_modules
     # And it does not appear as a spoke row in the payload.
     assert [s["spoke_id"] for s in r["spokes"]] == ["s1"]
+
+
+def test_self_heal_preserves_direct_agent_with_relay_id_collision():
+    _reset_diag_cache()
+    hub = _FakeHub(known=["s1", "shared-agent-id"])
+    hub.heartbeat.last_seen["s1:shared-agent-id"] = time.time() - 5
+    hub.state.system_state["agent_config"]["shared-agent-id"] = {}
+    hub.state.system_state["module_metadata"] = {
+        "shared-agent-id": {
+            "install_uuid": "direct-install",
+            "display_name": "MIPBE-SVCS1",
+        },
+    }
+    hub.approved_modules["shared-agent-id"] = True
+
+    result = asyncio.run(setup_admin._aggregate_diagnostics(hub))
+
+    assert "shared-agent-id" in hub.state.system_state["known_modules"]
+    assert hub.approved_modules["shared-agent-id"] is True
+    assert "shared-agent-id" in [row["spoke_id"] for row in result["spokes"]]
+
+
+def test_self_heal_mixed_cleanup_preserves_direct_agent_collision():
+    _reset_diag_cache()
+    hub = _FakeHub(known=["s1", "shared-agent-id", "leaked-agent"])
+    hub.heartbeat.last_seen["s1:shared-agent-id"] = time.time() - 5
+    hub.heartbeat.last_seen["s1:leaked-agent"] = time.time() - 5
+    hub.state.system_state["agent_config"].update({
+        "shared-agent-id": {},
+        "leaked-agent": {},
+    })
+    hub.state.system_state["module_metadata"] = {
+        "shared-agent-id": {
+            "install_uuid": "direct-install",
+            "display_name": "MIPBE-SVCS1",
+        },
+    }
+    hub.approved_modules.update({
+        "shared-agent-id": True,
+        "leaked-agent": True,
+    })
+
+    asyncio.run(setup_admin._aggregate_diagnostics(hub))
+
+    assert "shared-agent-id" in hub.state.system_state["known_modules"]
+    assert "shared-agent-id" in hub.approved_modules
+    assert "leaked-agent" not in hub.state.system_state["known_modules"]
+    assert "leaked-agent" not in hub.approved_modules
