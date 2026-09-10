@@ -24241,8 +24241,27 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                     } else if (configured) {
                         showToast(`Discovered and configured ${configured} DNS Server worker(s).`, 'success');
                     }
-                    if ((data.workers || []).length) {
-                        loadDNSData(subMenu, true);
+                    // Re-render the tab that is ACTUALLY on screen when this
+                    // resolves, not the ``subMenu`` this particular call was
+                    // kicked off for. Discovery runs in the background (this
+                    // fetch is intentionally un-awaited above) and a steady-
+                    // state cluster reports its already-configured workers on
+                    // every call, so ``data.workers.length`` is truthy on
+                    // nearly every load — if the operator switched tabs (e.g.
+                    // Records -> Forwarders, added a forwarder, and it
+                    // rendered correctly) before an EARLIER tab's discovery
+                    // call finished, this callback used to blindly re-run
+                    // ``loadDNSData`` for that earlier, now-stale tab and
+                    // silently overwrite the currently-visible one with it —
+                    // no error, the data just "disappeared" underneath the
+                    // forwarder the operator just added. Reading the live
+                    // ``currentView``/``currentSubView`` globals instead (the
+                    // same ones ``setSubView`` maintains for nav highlighting)
+                    // means a still-in-flight discovery from a different tab,
+                    // or one from before the operator navigated to a
+                    // different top-level view entirely, is a no-op here.
+                    if ((data.workers || []).length && currentView === 'dns') {
+                        loadDNSData(currentSubView, true);
                     }
                     return data;
                 })
@@ -24377,9 +24396,26 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 <td class="px-4 py-2 text-xs">${escapeHtml(f.class || 'IN')}</td>
                 <td class="px-4 py-2 font-mono text-xs">${(f.upstreams || []).map(u => escapeHtml(u)).join(', ') || '—'}</td>
             </tr>`).join('');
-            container.innerHTML = fwds.length === 0
+            // The cluster fanout (dns_spoke.py's _cluster_forwarders) reports a
+            // SUCCESS status + whatever it *could* collect even when one or
+            // more members failed to answer — a member drop mid-fanout would
+            // otherwise silently shrink this list with nothing on screen to
+            // explain it. Surface member_errors (already computed server-side)
+            // as a warning instead of a blank/incomplete-looking table.
+            const memberErrors = (d.member_errors && typeof d.member_errors === 'object')
+                ? Object.entries(d.member_errors) : [];
+            const errorBanner = memberErrors.length
+                ? `<div class="mb-3 p-3 rounded-md bg-amber-50 border border-amber-200 text-xs text-amber-800">
+                    <span class="font-semibold">${memberErrors.length} resolver(s) did not report their forwarders</span>
+                    — the list below may be incomplete:
+                    <ul class="list-disc pl-5 mt-1">
+                        ${memberErrors.map(([mid, msg]) => `<li><span class="font-mono">${escapeHtml(mid)}</span>: ${escapeHtml(String(msg))}</li>`).join('')}
+                    </ul>
+                </div>`
+                : '';
+            container.innerHTML = errorBanner + (fwds.length === 0
                 ? '<p class="p-4 text-slate-400 italic text-sm">No upstream forwarders configured (Unbound is resolving recursively from root).</p>'
-                : tw(th(cols) + `<tbody>${rows}</tbody>`);
+                : tw(th(cols) + `<tbody>${rows}</tbody>`));
             return;
         }
 
