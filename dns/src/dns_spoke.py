@@ -1,6 +1,9 @@
 import asyncio
 import logging
 import os
+from pathlib import Path
+import secrets
+import socket
 from typing import Any, Dict, List, Optional
 
 try:
@@ -186,7 +189,79 @@ class DNSSpoke(BaseSpoke):
         async with self.cluster.transaction():
             return await self._apply_cluster_config_locked(raw, data)
 
-    async def _apply_cluster_config_locked(self, raw, data) -> Dict[str, Any]:
+    async def _enroll_worker(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Add one LM-discovered DNS Server and return its ephemeral bootstrap."""
+        raw = data.get("member")
+        if not isinstance(raw, dict):
+            return {"status": "ERROR", "message": "member is required"}
+        member_id = str(raw.get("id") or raw.get("member_id") or "").strip()
+        if not member_id:
+            return {"status": "ERROR", "message": "member.id is required"}
+
+        cp = getattr(self, "control_plane", None)
+        secret = (cp.snapshot_agent_secret()
+                  if cp is not None and hasattr(cp, "snapshot_agent_secret")
+                  else "")
+        secret = str(secret or "").strip() or secrets.token_urlsafe(32)
+        async with self.cluster.transaction():
+            members = [dict(m) for m in self._transport.members
+                       if str(m.get("id") or "") != member_id]
+            members.append({
+                "id": member_id,
+                "host": str(raw.get("host") or "").strip(),
+                "role": str(raw.get("role") or "").strip(),
+            })
+            result = await self._apply_cluster_config_locked(
+                members, {"worker_secret": secret}, defer_seed=True)
+        if result.get("status") not in ("SUCCESS", "PARTIAL"):
+            return result
+
+        cert_path = Path(
+            str(getattr(cp, "_listener_cert", "") or
+                "/etc/lm-dns/tls/coordinator.crt"))
+        try:
+            ca_pem = cert_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            return {"status": "ERROR",
+                    "message": f"could not read DNS coordinator certificate: {exc}"}
+        if "-----BEGIN CERTIFICATE-----" not in ca_pem:
+            return {"status": "ERROR",
+                    "message": "DNS coordinator certificate is invalid"}
+
+        coordinator = socket.getfqdn() or socket.gethostname()
+        return {
+            "status": result.get("status", "SUCCESS"),
+            "member": member_id,
+            "coordinator": coordinator,
+            "worker_secret": secret,
+            "coordinator_ca_pem": ca_pem,
+        }
+
+    async def _finalize_worker_enrollment(self) -> Dict[str, Any]:
+        """Adopt live worker records before allowing the first DNS mutation."""
+        async with self.cluster.transaction():
+            connected = self._transport.connected_ids()
+            if not connected:
+                return {"status": "ERROR",
+                        "message": "No enrolled DNS Server worker is connected yet"}
+            seeded = await self.cluster.seed(
+                [], locked=True, require_all_members=True)
+            if seeded.get("status") == "ERROR":
+                return seeded
+            if self.desired.version == 0:
+                version, _changed = self.desired.set_records([])
+                seeded = {
+                    "status": "SUCCESS",
+                    "seeded": True,
+                    "source": "connected-empty-workers",
+                    "version": version,
+                    "record_count": 0,
+                }
+            return {"status": "SUCCESS", "connected": connected,
+                    "seed": seeded, "version": self.desired.version}
+
+    async def _apply_cluster_config_locked(
+            self, raw, data, *, defer_seed=False) -> Dict[str, Any]:
         previous_members = [dict(m) for m in self._transport.members]
         was_enabled = self.cluster.enabled
 
@@ -257,7 +332,7 @@ class DNSSpoke(BaseSpoke):
                                 f"{listener.get('error') or 'unknown error'}")}
 
         seeded = {}
-        if enabling and not was_enabled:
+        if enabling and not was_enabled and not defer_seed:
             try:
                 seeded = await self._seed_desired_state()
             except DnsStateUnavailable as e:
@@ -452,6 +527,12 @@ class DNSSpoke(BaseSpoke):
         if cmd == "DNS_CLUSTER_CONFIG":
             return await self._apply_cluster_config(data)
 
+        if cmd == "DNS_CLUSTER_ENROLL_WORKER":
+            return await self._enroll_worker(data)
+
+        if cmd == "DNS_CLUSTER_FINALIZE_ENROLLMENT":
+            return await self._finalize_worker_enrollment()
+
         if cmd == "DNS_CLUSTER_STATUS":
             if self.cluster.state_error:
                 return {"status": "ERROR", "enabled": True,
@@ -471,6 +552,16 @@ class DNSSpoke(BaseSpoke):
         # ── Clustered path: the coordinator owns the record set ──────────────
         if self.cluster.enabled:
             try:
+                if cmd in ("DNS_SYNC", "DNS_DELETE", "DNS_ADD", "DNS_UPDATE") \
+                        and self.desired.version == 0:
+                    return {
+                        "status": "ERROR",
+                        "initializing": True,
+                        "message": (
+                            "DNS Server enrollment is still initializing. "
+                            "Wait for a worker to connect so its existing records "
+                            "can be adopted safely."),
+                    }
                 if cmd == "DNS_SYNC":
                     return await self.cluster.apply_records(data.get("records", []))
                 if cmd == "DNS_DELETE":
