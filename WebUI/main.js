@@ -24148,7 +24148,7 @@ async function _ddSyncStatusLine(side) {
     } catch (_e) { return ''; }
 }
 
-async function loadDNSData(subMenu) {
+async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
     const container = document.getElementById('dns-content');
     if (!container) return;
     // External DNS subtab: "all things DNS" also covers internet-facing DNS
@@ -24171,6 +24171,34 @@ async function loadDNSData(subMenu) {
     const delIcon  = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>`;
 
     try {
+        if (!skipWorkerDiscovery && (typeof isAdmin === 'function') && isAdmin()) {
+            window._dnsWorkerDiscovery = window._dnsWorkerDiscovery || fetch(
+                '/api/dns/cluster/discover' + _tenantQS(), { method: 'POST' })
+                .then(async res => {
+                    const data = await res.json().catch(() => ({}));
+                    if (!res.ok) throw new Error(data.detail || 'DNS worker discovery failed');
+                    const configuring = (data.workers || [])
+                        .filter(w => w.status === 'configuring').length;
+                    const configured = (data.workers || [])
+                        .filter(w => w.status === 'configured').length;
+                    if (configuring) {
+                        showToast(`Discovered ${configuring} DNS Server worker(s); configuring them now.`, 'success');
+                    } else if (configured) {
+                        showToast(`Discovered and configured ${configured} DNS Server worker(s).`, 'success');
+                    }
+                    if ((data.workers || []).length) {
+                        loadDNSData(subMenu, true);
+                    }
+                    return data;
+                })
+                .catch(err => {
+                    console.warn('DNS worker auto-discovery:', err);
+                    return null;
+                })
+                .finally(() => {
+                    window._dnsWorkerDiscovery = null;
+                });
+        }
         // ── Statistics: Unbound query telemetry (OPNsense-grade) ──────────
         if (subMenu === 'Statistics') {
             const { ok, data: d, detail } = await _spokeFetch('/api/dns/stats' + _tenantQS());
@@ -30019,15 +30047,15 @@ const INSTANCE_PRODUCTS = {
         ],
     },
     dns: {
-        title: 'DNS Server Worker',
+        title: 'DNS Server Worker (external/manual)',
         endpoint: '/setup/dns-instances',
         listId: 'dns-instances-list',
         moduleType: 'dns',
         rowSummary: inst => `${inst.member_id || inst.name || '—'} · ${inst.host || '—'}`,
         fields: [
-            { id: 'member_id', label: 'Worker ID (must match --member-id)', placeholder: 'dns-a' },
+            { id: 'member_id', label: 'Worker ID (advanced)', placeholder: 'dns-a' },
             { id: 'host', label: 'DNS Server Host / IP', placeholder: '10.0.0.1' },
-            { id: 'worker_secret', label: 'Worker Secret (write-only; required on first server)', type: 'password', placeholder: 'Same value used by lm-dns-worker' },
+            { id: 'worker_secret', label: 'Worker Secret (external workers only)', type: 'password', placeholder: 'Not needed for DNS Server roles installed by LM' },
         ],
     },
     dhcp: {
