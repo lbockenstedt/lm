@@ -39,6 +39,32 @@ def _dispatch(c, data):
     return asyncio.run(c._dispatch("AGENT_UPDATE", data))
 
 
+def test_session_key_update_persists_and_rearms_signer(tmp_path):
+    c = _client(tmp_path)
+
+    result = asyncio.run(c._dispatch(
+        "SPOKE_UPDATE_SESSION_KEY", {"secret": "rotated-secret"}))
+
+    assert result["status"] == "SUCCESS"
+    assert c.secret == "rotated-secret"
+    assert (tmp_path / "secret").read_text() == "rotated-secret"
+    assert c.signer.secret == "rotated-secret"
+
+
+def test_session_key_update_keeps_old_signer_on_persist_failure(
+        tmp_path, monkeypatch):
+    c = _client(tmp_path)
+    old_signer = c.signer
+    monkeypatch.setattr(c, "_save_secret", lambda _secret: False)
+
+    result = asyncio.run(c._dispatch(
+        "SPOKE_UPDATE_SESSION_KEY", {"secret": "rotated-secret"}))
+
+    assert result["status"] == "ERROR"
+    assert c.secret == "s"
+    assert c.signer is old_signer
+
+
 def test_missing_repo_url_returns_error(tmp_path):
     c = _client(tmp_path)
     res = _dispatch(c, {})
