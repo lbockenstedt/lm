@@ -1604,7 +1604,7 @@ async function refreshModuleCache(moduleKey) {
 
 const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
-    settings: ['General', 'User Access', 'Cloud', 'Tenant Config', 'Sync', 'Hub Status', 'Diagnostics', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons'],
+    settings: ['General', 'User Access', 'Cloud', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons', 'Diagnostics'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-console', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs', 'logs-features'],
     setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'OS Updates'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
@@ -3509,7 +3509,8 @@ function renderSpokeIndicators() {
     // The dot is the entry point to the diagnostics view — it merges four
     // producers, so "what is red?" is only answerable there. Bound once.
     const _mdWrap = document.getElementById('module-status-container');
-    if (_mdWrap && !_mdWrap._diagBound) {
+    if (_mdWrap) _mdWrap.classList.toggle('cursor-pointer', isAdmin());
+    if (_mdWrap && isAdmin() && !_mdWrap._diagBound) {
         _mdWrap._diagBound = true;
         _mdWrap.title = 'Open Module Diagnostics — every producer behind this dot';
         _mdWrap.addEventListener('click', () => {
@@ -3752,6 +3753,7 @@ const VIEW_LOADERS = {
 };
 
 async function setSubView(subMenu) {
+    if (subMenu === 'Diagnostics' && !isAdmin()) return;
     currentSubView = subMenu;
     // Leaving the Certificates tab: stop the in-flight distribution poller/
     // ticker so it doesn't keep fetching /api/le/inflight in the background.
@@ -3788,6 +3790,7 @@ function renderTopNav(viewId) {
     // (see logsSubmenu). Every other view uses its fixed VIEW_SUBMENUS list.
     const rawSubmenus = (viewId === 'logs') ? logsSubmenu() : (VIEW_SUBMENUS[viewId] || []);
     const subMenus = rawSubmenus.filter(m => {
+        if (m === 'Diagnostics' && !isAdmin()) return false;
         if (m === 'Simulations' && !isAdmin()) return false;
         // The NW "Scan" tab lets a tenant configure + run discovery scans on
         // their own NW spoke(s) and set a recurring scan schedule + poll
