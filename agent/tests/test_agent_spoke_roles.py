@@ -247,6 +247,20 @@ def test_install_role_no_clone_for_inrepo_role(tmp_path, monkeypatch):
     )], "the dns management role must not configure or start local Unbound"
 
 
+def test_install_dhcp_role_does_not_touch_local_kea(tmp_path, monkeypatch):
+    """The DHCP management role must not install or start a local Kea server."""
+    (tmp_path / "dhcp").mkdir()
+    calls = []
+    _fake_subprocess_run(monkeypatch, calls)
+    agent = _agent_with_tmp_root(tmp_path, monkeypatch)
+
+    result = asyncio.run(agent._install_role("dhcp"))
+
+    assert result["status"] == "SUCCESS"
+    assert not [c for c in calls if c and c[0] == "apt-get"]
+    assert not [c for c in calls if "kea-dhcp4-server" in c or "kea-ctrl-agent" in c]
+
+
 def test_install_role_requirements_path_for_simulation_subdir(tmp_path, monkeypatch):
     """simulation's requirements live at cs/lm-spoke/ (role_file.parent.parent),
     not the cs/ repo root — confirm the pip install targets that exact path."""
@@ -275,7 +289,7 @@ def test_install_role_le_installs_certbot(tmp_path, monkeypatch):
     agent = _agent_with_tmp_root(tmp_path, monkeypatch)
     res = asyncio.run(agent._install_role("le"))
     assert res["status"] == "SUCCESS"
-    apt_calls = [c for c in calls if c[:2] == ["apt-get", "install"]]
+    apt_calls = [c for c in calls if c and c[0] == "apt-get" and "install" in c]
     assert apt_calls, "expected an apt-get install for le (certbot)"
     flat = " ".join(a for c in apt_calls for a in c)
     assert "certbot" in flat, f"certbot missing from apt install: {apt_calls}"

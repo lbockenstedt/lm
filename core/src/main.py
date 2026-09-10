@@ -69,6 +69,7 @@ from security.auth_manager import AuthManager, LDAPAuthProvider
 from security.threat_monitor import ThreatMonitor
 from security.probe_signatures import looks_like_probe as _edge_looks_like_probe
 from alert_engine import AlertEngine, run_alert_loop
+from role_listeners import LISTENER_PORT_ROLES, listener_conflict
 from security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
                                    encryption_enabled, is_encrypted, wrap)
 from cryptography.exceptions import InvalidTag
@@ -3784,6 +3785,7 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         roles = self.agent_assigned_roles(agent_spoke_id)
         if not roles:
             return
+        pushed = []  # roles re-pushed this pass (they now own their port)
         inflight = getattr(self, "_readopt_inflight", None)
         if inflight is None:
             inflight = self._readopt_inflight = set()
@@ -3807,11 +3809,33 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 sub_pk = self._primary_key(f"{agent_spoke_id}-{role}")
                 if sub_pk in self.active_connections:
                     continue  # role sub-spoke already live — nothing to heal
+                # Never re-create a port collision the load-role API refuses to
+                # create. An agent recorded with two :443-binding roles (from
+                # before that guard existed) would otherwise have the loser
+                # re-pushed on EVERY reconnect, silently stealing the port back
+                # from whichever role actually serves traffic. Roles already
+                # live win; otherwise the first in registry order wins.
+                effective = [r for r in roles
+                             if self._primary_key(f"{agent_spoke_id}-{r}")
+                             in self.active_connections] + pushed
+                clash = listener_conflict(effective, role)
+                if clash:
+                    logger.error(
+                        "readopt[%s]: NOT re-pushing LOAD_ROLE %s — role %s is "
+                        "already on this host and both bind port %s. These roles "
+                        "cannot share a VM; unload one of them.",
+                        agent_spoke_id, role, clash,
+                        LISTENER_PORT_ROLES.get(role, 443))
+                    self.record_spoke_event(
+                        agent_spoke_id, "role_readopt_conflict",
+                        f"role={role} conflicts_with={clash}")
+                    continue
                 try:
                     logger.info("readopt[%s]: re-pushing LOAD_ROLE %s "
                                 "(sub-spoke offline)", agent_spoke_id, role)
                     await self.request_response(agent_spoke_id, "LOAD_ROLE",
                                                 {"role": role}, timeout=120.0)
+                    pushed.append(role)
                     self.record_spoke_event(agent_spoke_id, "role_readopt",
                                             f"role={role}")
                 except Exception:  # noqa: BLE001 — one role's failure ≠ stop
@@ -4986,6 +5010,33 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                 if _old_id and _old_id != spoke_id \
                         and self.key_manager.get_valid_key(self._primary_key(_old_id), secret):
                     rename_proven = True
+            # Key↔install binding. A valid secret proves possession of key
+            # material, not that the box presenting it is the install the hub
+            # issued it to. Run this BEFORE _reconcile_spoke_identity: reconcile
+            # repoints install_uuid_index, overwrites the recorded uuid and can
+            # re-arm the guid, so adjudicating afterwards would persist the
+            # claim we are about to refuse — and the REAL spoke would then
+            # mismatch on its next reconnect and be locked out by its own
+            # attacker. Nothing here mutates state.
+            #
+            # Ordered cheapest-first so the normal reconnect pays only a string
+            # compare: no baseline / identical uuid short-circuits, and the key
+            # is verified only once a mismatch actually needs adjudicating.
+            # get_valid_key is a pure constant-time compare — safe to call as a
+            # proof check without consuming or rotating the key.
+            prev_install_uuid = self._recorded_install_uuid(pk)
+            if secret and not rename_proven and prev_install_uuid \
+                    and install_uuid != prev_install_uuid \
+                    and self.key_manager.get_valid_key(pk, secret) \
+                    and not self._verify_install_uuid_binding(
+                        spoke_id, pk, install_uuid, prev_install_uuid, peer_ip):
+                self.record_spoke_event(
+                    spoke_id, "auth_rejected",
+                    "valid secret presented from an install_uuid that does not "
+                    "match the install on record — connection refused")
+                await websocket.close(
+                    1008, "Identity mismatch — re-approval required")
+                return
             self._reconcile_spoke_identity(spoke_id, install_uuid, spoke_hostname,
                                            migrate_if=rename_proven)
             # Re-resolve the primary key: _reconcile_spoke_identity may have
@@ -9726,6 +9777,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # runs on a never-configured hub (the loop otherwise defaults disabled).
         self.seed_staleness_sweep_defaults()
         staleness_sweep_task = asyncio.create_task(self.run_staleness_sweep_loop())
+        # Fleet OS-updates auto-check (HubOsUpdatesMixin): every interval_hours
+        # (default 6, WebUI-configurable in Setup → OS Updates) re-probes every
+        # spoke/agent/hub for pending apt updates — the scheduled twin of the
+        # "Check for updates" button, so the panel's status stays fresh without
+        # an operator remembering to click it. Never applies anything itself.
+        # Seed enabled=True defaults once so a never-configured hub still gets
+        # the auto-check out of the box. See run_os_updates_check_loop.
+        self.seed_os_updates_check_defaults()
+        os_updates_check_task = asyncio.create_task(self.run_os_updates_check_loop())
         # Hub self-backup (SelfBackupMixin): on a schedule (backup_interval_hours)
         # takes a rotated, optionally Fernet-encrypted tarball of hub state +
         # the key/secret stores under <state_dir>/self-backup/, and optionally

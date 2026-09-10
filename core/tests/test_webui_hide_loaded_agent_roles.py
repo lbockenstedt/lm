@@ -31,7 +31,7 @@ def test_loaded_roles_are_filtered_before_rendering():
         r"Object\.entries\(AGENT_ROLES\)\s*"
         r"\.filter\(\(\[id\]\) => !loadedRoleIds\.has\(id\) "
         r"&& !activeDeployRoleIds\.has\(id\)\)", body)
-    assert "loadedByRole" not in body
+    assert "roleListenerConflict([...loadedRoleIds], id)" in body
     assert ">loaded<" not in body
 
 

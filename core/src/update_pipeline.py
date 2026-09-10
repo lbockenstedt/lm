@@ -122,7 +122,17 @@ def _default_repo_for_key(module_key, sources):
         return None
     import re as _re
     m = _re.match(r"^(.*/)[^/]+?(?:\.git)?$", hub_repo)
-    return f"{m.group(1)}{module_key}.git" if m else None
+    derived = f"{m.group(1)}{module_key}.git" if m else None
+    # This fallback invents a URL from a module key, so a key naming a
+    # repository that is not distributed as source would resolve to it without
+    # anyone having configured anything. Returning None leaves the module with
+    # no repo, which the caller already handles as "latest unknown" and never
+    # flags as behind -- the same outcome as an unrecognised key.
+    if derived:
+        import repo_policy
+        if repo_policy.guard(derived, context="update_pipeline"):
+            return None
+    return derived
 
 
 # module_type (as reported by a spoke) → the repo directory basename that ships

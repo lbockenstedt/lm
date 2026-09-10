@@ -28,6 +28,8 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
+from sync_loop import run_sync_loop  # sibling leaf
+
 logger = logging.getLogger("Hub")
 
 # Module types that are not Debian hosts at all. `nw` nodes are switches/APs
@@ -42,6 +44,13 @@ _NEVER_PROBE_REASON = {
 
 _CHECK_TIMEOUT_S = 240.0
 _APPLY_TIMEOUT_S = 3700.0
+
+# Auto-check config lives in global_config["os_updates_check"]: {enabled,
+# interval_hours}. Enabled by default (seeded once — see
+# seed_os_updates_check_defaults) so the panel's status stays fresh without an
+# operator remembering to click "Check for updates"; every 6h by default.
+_OSU_AUTOCHECK_CFG_KEY = "os_updates_check"
+_OSU_AUTOCHECK_DEFAULT_HOURS = 6.0
 
 
 class HubOsUpdatesMixin:
@@ -145,6 +154,82 @@ class HubOsUpdatesMixin:
         st["nodes"] = {f"{n['kind']}:{n['id']}": n for n in nodes}
         st["checked_at"] = time.time()
         return self.osu_snapshot()
+
+    # ── auto-check schedule (WebUI-configurable) ────────────────────────────
+    def _osu_autocheck_cfg(self) -> Dict[str, Any]:
+        """Read the auto-check config fresh (enabled/interval_hours)."""
+        try:
+            return (self.state.system_state.get("global_config", {})
+                    .get(_OSU_AUTOCHECK_CFG_KEY, {})) or {}
+        except Exception:  # noqa: BLE001 — hub without state (tests)
+            return {}
+
+    def seed_os_updates_check_defaults(self) -> None:
+        """Seed ``global_config["os_updates_check"]`` defaults ONCE at startup
+        if the key is absent: ``enabled=True``, every 6 hours — so a
+        never-configured hub keeps the fleet's update status fresh without an
+        operator remembering to click "Check for updates". A hub that already
+        has the key set — including an explicit ``enabled=False`` — is NEVER
+        overwritten. Best-effort: a state/save failure is logged DEBUG and
+        swallowed (this must never block startup)."""
+        try:
+            sys_state = self.state.system_state
+            if sys_state is None:  # defensive — always a dict in practice
+                sys_state = self.state.system_state = {}
+            gc = sys_state.setdefault("global_config", {})
+            if _OSU_AUTOCHECK_CFG_KEY not in gc:
+                gc[_OSU_AUTOCHECK_CFG_KEY] = {"enabled": True,
+                                              "interval_hours": _OSU_AUTOCHECK_DEFAULT_HOURS}
+                self.state._mark_dirty()
+                logger.info("os-updates: seeded auto-check defaults (enabled=True, "
+                           "every %gh)", _OSU_AUTOCHECK_DEFAULT_HOURS)
+        except Exception as e:
+            logger.debug("os-updates: seed auto-check defaults skipped: %s", e)
+
+    def osu_autocheck_config(self) -> Dict[str, Any]:
+        """Current auto-check config for the WebUI: ``{enabled, interval_hours}``.
+        ``interval_hours`` is clamped >= 1 so a bad/blank stored value can't
+        hot-loop probing the whole fleet."""
+        cfg = self._osu_autocheck_cfg()
+        try:
+            hours = float(cfg.get("interval_hours", _OSU_AUTOCHECK_DEFAULT_HOURS))
+        except (TypeError, ValueError):
+            hours = _OSU_AUTOCHECK_DEFAULT_HOURS
+        return {"enabled": bool(cfg.get("enabled", True)), "interval_hours": max(1.0, hours)}
+
+    def osu_set_autocheck_config(self, enabled: bool, interval_hours: Any) -> Dict[str, Any]:
+        """Persist the auto-check config (``interval_hours`` clamped >= 1).
+        Read fresh on the NEXT loop cycle — a WebUI change takes effect
+        without a hub restart."""
+        try:
+            hours = float(interval_hours)
+        except (TypeError, ValueError):
+            hours = _OSU_AUTOCHECK_DEFAULT_HOURS
+        hours = max(1.0, hours)
+        gc = self.state.system_state.setdefault("global_config", {})
+        gc[_OSU_AUTOCHECK_CFG_KEY] = {"enabled": bool(enabled), "interval_hours": hours}
+        self.state._mark_dirty()
+        return self.osu_autocheck_config()
+
+    async def run_os_updates_check_loop(self):
+        """Periodically re-probe the whole fleet (the scheduled twin of the
+        "Check for updates" button), per the configured interval (default
+        every 6h). Reads the config fresh each cycle so a WebUI change takes
+        effect without a restart. Disabled -> short re-check sleep; enabled ->
+        a full ``osu_check_fleet(refresh=True)`` each cycle, same as a manual
+        click. Never raises — one bad cycle (a hung spoke, etc.) must not kill
+        the loop; see ``run_sync_loop``."""
+        def _guard() -> bool:
+            return bool(self.osu_autocheck_config()["enabled"])
+
+        def _delay() -> float:
+            cfg = self.osu_autocheck_config()
+            return (cfg["interval_hours"] * 3600.0) if cfg["enabled"] else 300.0
+
+        await run_sync_loop(stagger=45, guard=_guard,
+                            body=lambda: self.osu_check_fleet(refresh=True),
+                            delay=_delay,
+                            error_label="os-updates auto-check loop cycle failed")
 
     def osu_snapshot(self) -> Dict[str, Any]:
         st = self._osu_state()
