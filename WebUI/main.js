@@ -23938,8 +23938,12 @@ function _ddMemberEvidence(members) {
                             : '<span class="text-amber-600 font-bold">needs attention</span>')
             : '<span class="text-red-600 font-bold">unavailable</span>';
         const recs = (diag && diag.recommendations) || [];
+        // display_name (added server-side for DNS, see _dns_member_display_name)
+        // is the friendly label; raw id stays as a tooltip so identity is
+        // still traceable, same convention as the cluster/HA member tables.
+        const name = (diag && diag.display_name) || id;
         return `<div class="bg-white border border-slate-200 rounded-lg p-4">
-            <div class="text-sm font-semibold text-slate-700 mb-1">${escapeHtml(id)} — ${okBadge}</div>
+            <div class="text-sm font-semibold text-slate-700 mb-1" title="${escapeHtml(id)}">${escapeHtml(name)} — ${okBadge}</div>
             ${diag && diag.status !== 'SUCCESS' ? `<div class="text-xs text-red-600">${escapeHtml(diag.message || 'no response')}</div>` : ''}
             ${recs.length ? `<ul class="list-disc pl-5 space-y-1 text-xs text-slate-600 mt-1">${recs.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>`
                           : '<div class="text-xs text-slate-400">No findings reported.</div>'}
@@ -24395,7 +24399,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 <div class="flex items-center justify-between gap-3 mb-4">
                     <div>
                         <div class="text-sm font-semibold ${good ? 'text-emerald-700' : 'text-red-700'}">${good ? (cluster ? 'DNS cluster healthy' : 'DNS listener healthy') : (cluster ? 'DNS cluster needs attention' : 'DNS listener needs attention')}</div>
-                        <div class="text-xs text-slate-400">${cluster ? `Cluster of ${cluster.member_count || 0} resolver(s); evidence below is from ${escapeHtml(d.diagnostics_source || 'no reachable member')}.` : 'Live checks run on the Unbound server.'}</div>
+                        <div class="text-xs text-slate-400">${cluster ? `Cluster of ${cluster.member_count || 0} resolver(s); evidence below is from ${escapeHtml(d.diagnostics_source_name || d.diagnostics_source || 'no reachable member')}.` : 'Live checks run on the Unbound server.'}</div>
                     </div>
                     <div class="flex items-center gap-2">
                         ${serviceClusterButton('dns', cluster)}
