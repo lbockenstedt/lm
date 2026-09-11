@@ -1128,3 +1128,95 @@ def test_dns_diagnostics_evidence_defaults_to_id_with_no_naming_data():
     body = _client(ADMIN, hub).get("/api/dns/diagnostics").json()
     assert body["diagnostics_source_name"] == "dns-worker-agent-1"
     assert body["members"]["dns-worker-agent-1"]["display_name"] == "dns-worker-agent-1"
+
+
+def test_dhcp_diagnostics_evidence_source_and_per_member_cards_use_display_name():
+    """Same UUID/agent-id -> friendly-name treatment as the DNS diagnostics
+    endpoint, applied to the DHCP HA diagnostics screen: the 'evidence below
+    is from ...' source line, per-member evidence cards, and per-member
+    recommendation prefixes."""
+    hub = FakeHub({"dhcp-1": {"DHCP_DIAGNOSTICS": {
+        "status": "SUCCESS", "healthy": True,
+        "diagnostics_source": "dhcp-worker-agent-1",
+        "cluster": {"enabled": True, "mode": "hot-standby", "state": "healthy",
+                    "member_count": 2, "healthy_count": 2,
+                    "members": [
+                        {"id": "dhcp-worker-agent-1", "health": "healthy"},
+                        {"id": "dhcp-worker-agent-2", "health": "healthy"},
+                    ]},
+        "members": {
+            "dhcp-worker-agent-1": {"status": "SUCCESS", "healthy": True},
+            "dhcp-worker-agent-2": {"status": "ERROR", "message": "timeout"},
+        },
+        "recommendations": ["[dhcp-worker-agent-2] diagnostics unavailable: timeout"],
+    }}})
+    hub.state.system_state["module_names"] = {
+        "dhcp-worker-agent-1": "MIPBE-SVCS1",
+        "dhcp-worker-agent-2": "MIPBE-SVCS2",
+    }
+    body = _client(ADMIN, hub).get("/api/dhcp/diagnostics").json()
+    assert body["diagnostics_source_name"] == "MIPBE-SVCS1"
+    assert body["members"]["dhcp-worker-agent-1"]["display_name"] == "MIPBE-SVCS1"
+    assert body["members"]["dhcp-worker-agent-2"]["display_name"] == "MIPBE-SVCS2"
+    assert body["recommendations"] == ["[MIPBE-SVCS2] diagnostics unavailable: timeout"]
+    assert body["cluster"]["members"][0]["display_name"] == "MIPBE-SVCS1"
+    assert body["cluster"]["members"][1]["display_name"] == "MIPBE-SVCS2"
+
+
+def test_dhcp_diagnostics_evidence_defaults_to_id_with_no_naming_data():
+    hub = FakeHub({"dhcp-1": {"DHCP_DIAGNOSTICS": {
+        "status": "SUCCESS", "healthy": True,
+        "diagnostics_source": "dhcp-worker-agent-1",
+        "cluster": {"enabled": True, "mode": "hot-standby", "state": "healthy",
+                    "member_count": 1, "healthy_count": 1,
+                    "members": [{"id": "dhcp-worker-agent-1", "health": "healthy"}]},
+        "members": {"dhcp-worker-agent-1": {"status": "SUCCESS"}},
+    }}})
+    body = _client(ADMIN, hub).get("/api/dhcp/diagnostics").json()
+    assert body["diagnostics_source_name"] == "dhcp-worker-agent-1"
+    assert body["members"]["dhcp-worker-agent-1"]["display_name"] == "dhcp-worker-agent-1"
+
+
+def test_dhcp_ha_status_carries_display_name_per_member():
+    hub = FakeHub({"dhcp-1": {"DHCP_HA_STATUS": {
+        "status": "SUCCESS", "enabled": True, "mode": "hot-standby",
+        "state": "healthy", "healthy": True, "config_converged": True,
+        "member_count": 2, "healthy_count": 2,
+        "members": [
+            {"id": "kea-a", "health": "healthy"},
+            {"id": "kea-b", "health": "healthy"},
+        ],
+        "recommendations": [],
+    }}})
+    hub.state.system_state["module_names"] = {"kea-a": "MIPBE-SVCS1", "kea-b": "MIPBE-SVCS2"}
+    body = _client(ADMIN, hub).get("/api/dhcp/ha").json()
+    assert body["members"][0]["display_name"] == "MIPBE-SVCS1"
+    assert body["members"][1]["display_name"] == "MIPBE-SVCS2"
+
+
+def test_dhcp_diagnostics_kea_node_quoted_ids_and_missing_config_list_resolve_to_names():
+    """kea_ha.py's HA-pair-level recommendations use \"Kea node '<id>' ...\" and
+    \"Configuration state is unknown for: <id>, <id>\" formats (not the
+    '[<id>] ...' per-member prefix) — both must also resolve to friendly names."""
+    hub = FakeHub({"dhcp-1": {"DHCP_DIAGNOSTICS": {
+        "status": "SUCCESS", "healthy": False,
+        "diagnostics_source": "kea-a",
+        "cluster": {"enabled": True, "mode": "hot-standby", "state": "down",
+                    "member_count": 2, "healthy_count": 0,
+                    "members": [{"id": "kea-a", "health": "unreachable"},
+                                {"id": "kea-b", "health": "unreachable"}]},
+        "members": {"kea-a": {"status": "SUCCESS"}},
+        "recommendations": [
+            "Kea node 'kea-b' is not reachable through the DHCP module; "
+            "check lm-dhcp-worker and kea-ctrl-agent on that host.",
+            "Configuration state is unknown for: kea-a, kea-b — the pair "
+            "cannot be confirmed converged until every node reports its "
+            "running configuration.",
+        ],
+    }}})
+    hub.state.system_state["module_names"] = {"kea-a": "MIPBE-SVCS1", "kea-b": "MIPBE-SVCS2"}
+    body = _client(ADMIN, hub).get("/api/dhcp/diagnostics").json()
+    assert "kea-b" not in body["recommendations"][0]
+    assert "MIPBE-SVCS2" in body["recommendations"][0]
+    assert "kea-a" not in body["recommendations"][1] and "kea-b" not in body["recommendations"][1]
+    assert "MIPBE-SVCS1" in body["recommendations"][1] and "MIPBE-SVCS2" in body["recommendations"][1]

@@ -23900,7 +23900,7 @@ function _dhcpHaPanel(c) {
         const tone = _DD_MEMBER_TONE[m.health] || 'text-slate-600';
         const scopes = (m.scopes || []).join(', ') || '—';
         return `<tr class="border-b border-slate-100">
-            <td class="px-4 py-2 font-mono font-medium">${escapeHtml(m.id || '—')}</td>
+            <td class="px-4 py-2 font-mono font-medium" title="${escapeHtml(m.id || '—')}">${escapeHtml(m.display_name || m.id || '—')}</td>
             <td class="px-4 py-2 text-xs">${escapeHtml(m.ha_role || '—')}</td>
             <td class="px-4 py-2 text-xs font-bold ${tone}">${escapeHtml(m.health || 'unknown')}</td>
             <td class="px-4 py-2 text-xs">${escapeHtml(m.ha_enabled ? (m.ha_state || 'unknown') : 'HA hook not loaded')}</td>
@@ -23910,11 +23910,16 @@ function _dhcpHaPanel(c) {
         </tr>`;
     }).join('');
     const partial = apply.status && apply.status !== 'SUCCESS';
+    // Resolve raw member ids in "no report from ..." to friendly names, same
+    // convention as the table rows above (id kept as tooltip via title=).
+    const _nameById = {};
+    members.forEach(m => { if (m && m.id) _nameById[m.id] = m.display_name || m.id; });
+    const missingLabel = (c.config_digests_missing || []).map(id => _nameById[id] || id).join(', ');
     return `
         <div class="bg-white border border-slate-200 rounded-lg overflow-hidden mb-4">
             <div class="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-3">
                 <div class="text-sm font-semibold text-slate-700">Kea HA pair ${_ddClusterBadge(c.state)}</div>
-                <div class="text-xs text-slate-400">${escapeHtml(c.mode || 'hot-standby')} · ${c.healthy_count || 0}/${c.member_count || 0} in sync · configuration ${c.config_converged ? 'matched' : ((c.config_digests_missing || []).length ? `<b class="text-amber-600">UNKNOWN</b> (no report from ${escapeHtml((c.config_digests_missing || []).join(', '))})` : '<b class="text-red-600">MISMATCHED</b>')}</div>
+                <div class="text-xs text-slate-400">${escapeHtml(c.mode || 'hot-standby')} · ${c.healthy_count || 0}/${c.member_count || 0} in sync · configuration ${c.config_converged ? 'matched' : ((c.config_digests_missing || []).length ? `<b class="text-amber-600">UNKNOWN</b> (no report from ${escapeHtml(missingLabel)})` : '<b class="text-red-600">MISMATCHED</b>')}</div>
             </div>
             ${tableWrap(tableHead(['Node', 'Role', 'Health', 'HA state', 'Partner', 'Scopes', 'Config digest']) + `<tbody>${rows}</tbody>`)}
             ${partial ? `<div class="px-4 py-3 border-t border-slate-200 text-xs text-amber-700 bg-amber-50">
@@ -24325,6 +24330,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 _ddTile('Cache Hit Ratio', `${g.cache_hit_ratio || 0}%`, `${(g.cache_hits || 0).toLocaleString()} hits / ${(g.cache_misses || 0).toLocaleString()} miss`,
                         (g.cache_hit_ratio || 0) >= 70 ? 'text-emerald-600' : 'text-amber-600'),
                 _ddTile('Recursive Replies', (g.num_recursive || 0).toLocaleString(), `avg ${g.recursion_time_avg || 0}s`),
+                _ddTile('Uptime', _ddUptime(g.uptime_seconds), `${(g.prefetch || 0).toLocaleString()} prefetched`),
             ].join('');
             // Per-type query breakdown as proportion-of-total bars.
             const typeTotal = Object.values(qt).reduce((a, b) => a + b, 0) || 1;
@@ -28283,7 +28289,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                 <div class="flex items-center justify-between gap-3 mb-4">
                     <div>
                         <div class="text-sm font-semibold ${good ? 'text-emerald-700' : 'text-red-700'}">${good ? (haCluster ? 'Kea HA pair healthy' : 'Kea DHCP server healthy') : (haCluster ? 'Kea HA pair needs attention' : 'Kea DHCP server needs attention')}</div>
-                        <div class="text-xs text-slate-400">${haCluster ? `HA pair (${escapeHtml(haCluster.mode || 'hot-standby')}); evidence below is from ${escapeHtml(d.diagnostics_source || 'no reachable node')}.` : 'Live checks mirror the Sim DHCP (Kea) diagnostics: units, config, interfaces, listeners, control agent, and leases.'}</div>
+                        <div class="text-xs text-slate-400">${haCluster ? `HA pair (${escapeHtml(haCluster.mode || 'hot-standby')}); evidence below is from ${escapeHtml(d.diagnostics_source_name || d.diagnostics_source || 'no reachable node')}.` : 'Live checks mirror the Sim DHCP (Kea) diagnostics: units, config, interfaces, listeners, control agent, and leases.'}</div>
                     </div>
                     <div class="flex items-center gap-2">
                         ${serviceClusterButton('dhcp', haCluster)}
