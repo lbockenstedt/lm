@@ -401,6 +401,51 @@ def _bust_spokes_cache():
         logger.debug("diag cache bust skipped (setup_admin unavailable)", exc_info=True)
 
 
+async def _purge_spoke_from_dhcp_dns_clusters(hub, spoke_id: str):
+    """Remove ``spoke_id`` as a member from every connected DHCP (Kea HA) and
+    DNS (resolver cluster) spoke that currently lists it, so a deleted spoke
+    stops showing up as a permanently-unreachable "ghost" member on the
+    survivor's HA-pair/cluster diagnostics. Uses each module's own
+    HA_STATUS/CLUSTER_STATUS RPC to check membership first (cheap, and avoids
+    sending a rewrite to spokes that don't reference this id at all), then
+    the same HA_CONFIG/CLUSTER_CONFIG RPC the Edit Cluster UI uses to declare
+    the trimmed member list. Never raises — this is best-effort cleanup, not
+    a precondition for the delete itself; a spoke that is offline, errors, or
+    simply doesn't reference the id is skipped silently."""
+    for module_type, status_cmd, config_cmd in (
+            ("dhcp", "DHCP_HA_STATUS", "DHCP_HA_CONFIG"),
+            ("dns", "DNS_CLUSTER_STATUS", "DNS_CLUSTER_CONFIG")):
+        try:
+            candidates = hub.get_all_spokes_by_type(module_type) or []
+        except Exception:  # noqa: BLE001
+            candidates = []
+        for cluster_spoke_id in candidates:
+            if hub._primary_key(cluster_spoke_id) == hub._primary_key(spoke_id):
+                continue  # the deleted spoke can't purge itself
+            try:
+                status = await hub.request_response(
+                    cluster_spoke_id, status_cmd, {}, timeout=15.0)
+                payload = (status.get("payload", {}).get("data", status)
+                           if isinstance(status, dict) else status)
+                members = [m for m in (payload or {}).get("members") or []
+                           if isinstance(m, dict)]
+                remaining = [m for m in members
+                             if str(m.get("id") or "") != str(spoke_id)
+                             and hub._primary_key(str(m.get("id") or "")) != hub._primary_key(spoke_id)]
+                if len(remaining) == len(members):
+                    continue  # this cluster never referenced the deleted spoke
+                await hub.request_response(
+                    cluster_spoke_id, config_cmd, {"members": remaining},
+                    timeout=30.0)
+                logger.info(
+                    "purged deleted spoke '%s' from %s cluster on '%s'",
+                    spoke_id, module_type, cluster_spoke_id)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "could not purge deleted spoke '%s' from %s cluster on "
+                    "'%s': %s", spoke_id, module_type, cluster_spoke_id, e)
+
+
 async def hard_delete_spoke(hub, spoke_id: str):
     """Permanently remove a spoke/generic-agent registration and all of its
     runtime state — the single source of truth shared by the Global-Admin
@@ -423,6 +468,17 @@ async def hard_delete_spoke(hub, spoke_id: str):
             await ws.close(code=1008, reason="Removed")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"Could not close live WS for {spoke_id} during delete: {e}")
+    # A deleted spoke can still be a MEMBER of a Kea HA pair / DNS resolver
+    # cluster another DHCP/DNS spoke's own HA coordinator persists on disk
+    # (cluster_config / kea-ha.json equivalents) — the hub has no authority
+    # over that file, so simply removing the hub registration here left a
+    # "ghost" member the surviving node's diagnostics/HA-status pages kept
+    # fanning out to (and reporting unreachable) forever, with no UI action
+    # able to clear it. Best-effort ask every connected DHCP/DNS spoke to
+    # drop this id from its own topology BEFORE the hub forgets about it —
+    # never raises; a spoke that is offline or doesn't recognize the member
+    # is simply skipped (nothing to clean up there).
+    await _purge_spoke_from_dhcp_dns_clusters(hub, spoke_id)
     hub.approved_modules.pop(pk, None)
     hub.state.remove_module(spoke_id)
     hub.key_manager.delete_spoke_key(pk)
