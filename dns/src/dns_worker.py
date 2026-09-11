@@ -162,8 +162,9 @@ class DnsWorkerOps:
     def diagnostics(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         return self.mgr.diagnostics()
 
-    def stats(self, _data: Dict[str, Any]) -> Dict[str, Any]:
-        return self.mgr.get_stats()
+    def stats(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        d = data or {}
+        return self.mgr.get_stats(search=d.get("search"), source_prefixes=d.get("source_prefixes"))
 
     def forwarders(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         """``DNSW_FORWARDERS`` — this resolver's own upstream forwarders.
