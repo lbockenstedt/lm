@@ -24340,7 +24340,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 <div class="bg-white border border-slate-200 rounded-lg p-4">
                     <div class="flex items-center justify-between mb-2 gap-3">
                         <div class="text-sm font-semibold text-slate-700">Queries by Destination</div>
-                        <input id="dns-query-name-search" type="search" placeholder="Search name (e.g. www.dwx.com)"
+                        <input id="dns-query-name-search" type="search" placeholder="Search name"
                                class="text-xs border border-slate-300 rounded-md px-2 py-1 w-64 focus:outline-none focus:ring-1 focus:ring-blue-400" />
                     </div>
                     <div id="dns-query-name-list">${_ddQueryNameRows(d.query_names || [])}</div>
