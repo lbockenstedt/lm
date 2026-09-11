@@ -90,6 +90,18 @@ fi
 SPOKE_ID="${SPOKE_ID:-${SERVICE_NAME}-$(hostname -s)}"
 mkdir -p /var/log/lm
 
+# Unbound's per-name query-log directory. Owned by the "unbound" system user
+# (not $SVC_USER) since unbound itself opens/writes the logfile there; the
+# coordinator only tails it. Without this, unbound-managed's self-enabled
+# log-queries conf silently writes nothing (permission denied is swallowed by
+# unbound's log_init()) and DNS statistics' per-destination breakdown stays
+# empty forever. unbound_manager.py also re-chowns this on each poll as a
+# self-heal in case the dir gets recreated with the wrong owner.
+install -d -m 0755 /var/log/unbound
+if id -u unbound >/dev/null 2>&1; then
+    chown unbound:unbound /var/log/unbound
+fi
+
 # Coordinator state/config dirs, writable by the account the lm-dns unit runs as.
 for d in "${COORD_DIRS[@]}"; do
     install -d -m 0750 "$d"
