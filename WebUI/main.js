@@ -24115,9 +24115,12 @@ function openServiceClusterModal(kind, current) {
     // the wider/pinned-footer treatment is harmless there too.
     const wrapped = `
         <div class="flex-1 overflow-y-auto space-y-4 p-6">${body}</div>
-        <div class="shrink-0 flex justify-end gap-2 px-6 py-4 border-t border-slate-100">
-            <button onclick="document.getElementById('svc-cluster-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
-            <button onclick="saveServiceCluster('${escapeHtml(kind)}', ${alreadyEnabled}, ${!!m(0).ha_password_set})" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Save</button>
+        <div class="shrink-0 flex justify-between items-center gap-2 px-6 py-4 border-t border-slate-100">
+            ${alreadyEnabled ? `<button onclick="deleteServiceCluster('${escapeHtml(kind)}')" class="px-4 py-1.5 text-sm rounded-md border border-red-300 text-red-600 hover:bg-red-50 font-bold">Delete cluster</button>` : '<span></span>'}
+            <div class="flex gap-2">
+                <button onclick="document.getElementById('svc-cluster-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+                <button onclick="saveServiceCluster('${escapeHtml(kind)}', ${alreadyEnabled}, ${!!m(0).ha_password_set})" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Save</button>
+            </div>
         </div>`;
     openModal('svc-cluster-modal', wrapped, {
         backdropClose: true,
@@ -24196,6 +24199,33 @@ async function saveServiceCluster(kind, alreadyEnabled, haCredsStored) {
         }
         document.getElementById('svc-cluster-modal')?.remove();
     } catch (e) { fail(e.message); }
+    if (kind === 'dns') loadDNSData('Diagnostics'); else loadDHCPData('Diagnostics');
+}
+
+// "Delete cluster" button on an already-enabled Edit Cluster modal — posts an
+// empty member list to the same *_HA_CONFIG/*_CLUSTER_CONFIG endpoint
+// saveServiceCluster already uses for a 0-member save (which the spoke
+// already treats as "disable the pair/cluster and go back to single-host").
+// A confirm prompt guards it since this is destructive to the topology
+// (each node stands down and reverts to serving independently).
+async function deleteServiceCluster(kind) {
+    const label = kind === 'dns' ? 'resolver cluster' : 'HA pair';
+    if (!confirm(`Delete the ${label}? Both nodes will stand down and go back to serving independently. This does not remove any DHCP/DNS data — only the cluster topology.`)) {
+        return;
+    }
+    try {
+        const url = (kind === 'dns' ? '/api/dns/cluster' : '/api/dhcp/ha') + _tenantQS();
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ members: [] }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(data.detail || 'Delete failed', 'error'); return; }
+        if (data.status === 'ERROR') { showToast(data.message || 'Delete failed', 'error'); return; }
+        showToast(`${kind.toUpperCase()} cluster deleted — the module is single-host again`, 'success');
+        document.getElementById('svc-cluster-modal')?.remove();
+    } catch (e) { showToast(e.message, 'error'); }
     if (kind === 'dns') loadDNSData('Diagnostics'); else loadDHCPData('Diagnostics');
 }
 
