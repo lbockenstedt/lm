@@ -10,6 +10,27 @@ from cert_distribution import build_available_targets, target_owner_tenant
 import le_cert_access as _lca
 
 
+def _deploy_status_for_role(progress: dict, role: str) -> dict:
+    """Pick the GET_DEPLOY_STATUS entry for ``role`` out of a GET_DEPLOY_STATUS
+    response, instead of the singular ``progress["deploy"]`` (which is just
+    the MOST-RECENTLY-STARTED deploy role on that agent — see agent_spoke.py's
+    ``_deploy_status_by_role``). An agent that has ever run more than one
+    deploy role (e.g. it previously hosted netbox-server, or a cluster member
+    is loading dns-server and dhcp-server around the same time) would
+    otherwise have its poll loop here read a COMPLETELY UNRELATED role's
+    state/tail — a stale 'failed' netbox-server deploy from days earlier could
+    surface as "DHCP worker configuration failed on <sid>: <netbox output>"
+    even though the DHCP deploy itself is running fine or already done.
+    Falls back to the singular ``deploy`` field only if it already matches the
+    role we asked about (back-compat with an agent running an older build that
+    doesn't send ``deploys`` at all)."""
+    for entry in progress.get("deploys") or []:
+        if isinstance(entry, dict) and entry.get("role") == role:
+            return entry
+    single = progress.get("deploy") or {}
+    return single if single.get("role") == role else {}
+
+
 def register(app, hub, ctx):
     """Register net_services routes on the Hub app."""
     _filter_session = ctx._filter_session
@@ -400,9 +421,8 @@ def register(app, hub, ctx):
                     sid, "GET_DEPLOY_STATUS", {}, timeout=15.0)
                 progress = progress.get("payload", {}).get("data", progress)
                 progress = _spoke_payload_or_raise(progress)
-                active = progress.get("active_role")
-                state = (progress.get("deploy") or {}).get("state")
-                if active == "dns-server" and state == "running":
+                dns_status = _deploy_status_for_role(progress, "dns-server")
+                if dns_status.get("state") == "running":
                     deployed = {
                         "status": "SUCCESS",
                         "deploy": True,
@@ -420,12 +440,13 @@ def register(app, hub, ctx):
                         sid, "GET_DEPLOY_STATUS", {}, timeout=15.0)
                     progress = progress.get("payload", {}).get("data", progress)
                     progress = _spoke_payload_or_raise(progress)
-                    state = (progress.get("deploy") or {}).get("state")
+                    dns_status = _deploy_status_for_role(progress, "dns-server")
+                    state = dns_status.get("state")
                     if state == "completed":
                         break
                     if state in ("failed", "error"):
-                        detail = ((progress.get("deploy") or {}).get("tail")
-                                  or (progress.get("deploy") or {}).get("error")
+                        detail = (dns_status.get("tail")
+                                  or dns_status.get("error")
                                   or state)
                         raise HTTPException(
                             status_code=502,
@@ -3080,9 +3101,8 @@ def register(app, hub, ctx):
                     item["spoke_id"], "GET_DEPLOY_STATUS", {}, timeout=15.0)
                 progress = progress.get("payload", {}).get("data", progress)
                 progress = _spoke_payload_or_raise(progress)
-                active = progress.get("active_role")
-                state = (progress.get("deploy") or {}).get("state")
-                if active == "dhcp-server" and state == "running":
+                dhcp_status = _deploy_status_for_role(progress, "dhcp-server")
+                if dhcp_status.get("state") == "running":
                     deployed = {"status": "SUCCESS", "deploy": True}
                 else:
                     deployed = _spoke_payload_or_raise(deployed)
@@ -3095,12 +3115,13 @@ def register(app, hub, ctx):
                         item["spoke_id"], "GET_DEPLOY_STATUS", {}, timeout=15.0)
                     progress = progress.get("payload", {}).get("data", progress)
                     progress = _spoke_payload_or_raise(progress)
-                    state = (progress.get("deploy") or {}).get("state")
+                    dhcp_status = _deploy_status_for_role(progress, "dhcp-server")
+                    state = dhcp_status.get("state")
                     if state == "completed":
                         break
                     if state in ("failed", "error"):
-                        detail = ((progress.get("deploy") or {}).get("tail")
-                                  or (progress.get("deploy") or {}).get("error")
+                        detail = (dhcp_status.get("tail")
+                                  or dhcp_status.get("error")
                                   or state)
                         raise HTTPException(
                             status_code=502,
