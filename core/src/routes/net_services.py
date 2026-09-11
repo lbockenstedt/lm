@@ -707,12 +707,46 @@ def register(app, hub, ctx):
                                   "DNS_CLUSTER_RECONCILE", {},
                                   log_name="dns_cluster_reconcile", timeout=60)
 
+    async def _dns_stats_ip_to_host(request: Request, tenant: str = None) -> dict:
+        """Best-effort client-IP → hostname map for the DNS stats "queried by
+        host" enrichment, built from the tenant's own DHCP leases (the same
+        source ``dhcp_list_leases`` uses). Returns ``{}`` (never raises) if no
+        DHCP spoke is bound/reachable for this request — callers show the raw
+        IP in that case rather than failing the whole DNS stats response over
+        a DHCP outage."""
+        try:
+            dhcp_spoke = _dhcp_spoke_for_request(request, tenant)
+        except HTTPException:
+            return {}
+        try:
+            data = await _relay_spoke(dhcp_spoke, "DHCP_LIST_LEASES", {},
+                                       log_name="dns_stats_host_lookup")
+        except HTTPException:
+            return {}
+        out = {}
+        for lease in (data.get("leases") or []):
+            if not isinstance(lease, dict):
+                continue
+            ip = lease.get("ip-address") or lease.get("ip") or ""
+            host = lease.get("hostname") or ""
+            if ip and host:
+                out[ip] = host
+        return out
+
     @app.get("/api/dns/stats")
-    async def dns_stats(request: Request, tenant: str = None, search: str = None):
+    async def dns_stats(request: Request, tenant: str = None, search: str = None,
+                        host: str = None):
         """Unbound query statistics (total/cache-hit/recursion + per-type,
         plus a per-destination-name breakdown, each with its querying source
         IPs) for the DNS analytics panel. ``search`` filters the per-name
-        breakdown by substring match.
+        breakdown by substring match. ``host`` filters that same breakdown to
+        only rows with at least one source whose resolved hostname (or, when
+        unresolvable, raw IP) case-insensitively contains the substring.
+
+        Each returned source is enriched with a best-effort ``host`` field —
+        the DHCP lease hostname for that client IP if one exists, else the raw
+        IP is used for both search and display, so "queried by what host" degrades
+        gracefully when no lease/hostname mapping is available.
 
         A non-admin (or an admin/multi-tenant user with a tenant explicitly
         selected via the picker) only sees query-name rows whose SOURCE IP
@@ -738,10 +772,28 @@ def register(app, hub, ctx):
             # configured prefixes), so the spoke fails CLOSED (no source rows)
             # rather than treating an empty/omitted list as "unfiltered".
             payload["source_prefixes"] = source_prefixes
-        return await _relay_spoke(
+        data = await _relay_spoke(
             _dns_spoke_for_request(request, tenant), "DNS_STATS",
             payload, log_name="dns_stats",
         )
+        query_names = data.get("query_names")
+        if isinstance(query_names, list) and query_names:
+            ip_to_host = await _dns_stats_ip_to_host(request, tenant)
+            needle = (host or "").strip().lower()
+            filtered = []
+            for row in query_names:
+                sources = row.get("sources") if isinstance(row, dict) else None
+                if isinstance(sources, list):
+                    for s in sources:
+                        if isinstance(s, dict):
+                            s["host"] = ip_to_host.get(s.get("ip", ""), s.get("ip", ""))
+                if needle:
+                    hosts = [s.get("host", "") for s in (sources or []) if isinstance(s, dict)]
+                    if not any(needle in h.lower() for h in hosts):
+                        continue
+                filtered.append(row)
+            data["query_names"] = filtered
+        return data
 
     @app.get("/api/dns/forwarders")
     async def dns_forwarders(request: Request, tenant: str = None):
