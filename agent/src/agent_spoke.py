@@ -1414,6 +1414,25 @@ class GenericAgent(BaseSpoke):
                         _active_deploy_roles, installed_deploy_roles),
                     "netbox_installed": "netbox-server" in installed_deploy_roles}
 
+        if cmd == "CLEAR_DEPLOY_STATUS":
+            # Dismiss a stuck "failed"/"error"/"completed" badge for one deploy
+            # role. Only ever removes the IN-MEMORY tracking entry — it does
+            # NOT touch the actual installed service, so this is purely a UI
+            # acknowledgement, not a retry or uninstall. A "running" deploy
+            # can't be cleared (nothing to acknowledge yet; wait for it to
+            # finish). Re-loading the role starts a fresh entry regardless.
+            role_name = (data or {}).get("role")
+            if not role_name:
+                return {"status": "ERROR", "message": "role is required"}
+            entry = self._deploy_status_by_role.get(role_name)
+            if not entry:
+                return {"status": "SUCCESS", "message": f"No deploy status for '{role_name}' to clear."}
+            if entry.get("state") == "running":
+                return {"status": "ERROR",
+                        "message": f"Deploy of '{role_name}' is still running — wait for it to finish."}
+            del self._deploy_status_by_role[role_name]
+            return {"status": "SUCCESS", "message": f"Cleared deploy status for '{role_name}'."}
+
         if cmd == "NETBOX_RESET_ADMIN_PASSWORD":
             # Reset the admin password on the NetBox app this agent deployed
             # (netbox-server role). Runs install.sh's fast --reset-admin-password
