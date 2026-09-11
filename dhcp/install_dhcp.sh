@@ -179,6 +179,15 @@ LOGROTATE
 # whose agent has not yet dropped that file.
 DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y -qq kea-dhcp4-server kea-ctrl-agent
 
+# The Debian kea-dhcp4-server package creates /etc/kea at mode 0750, but its
+# own systemd unit's ConfigurationDirectory=kea expects 0755 — the mismatch
+# doesn't stop the service, but systemd logs
+# "ConfigurationDirectory 'kea' already exists but the mode is different"
+# on every start/reload. Realign it unconditionally (not just in the HA
+# branch below, which only runs for HA-worker installs) so plain/non-HA
+# installs don't carry this warning either.
+chmod 0755 /etc/kea 2>/dev/null || true
+
 # Write a clean kea-ctrl-agent config: loopback-only, port 8001, no auth.
 # The default Debian package config may prompt for HTTP auth credentials;
 # this replaces it unconditionally so the install is fully non-interactive.
