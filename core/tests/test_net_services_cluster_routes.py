@@ -459,6 +459,7 @@ def test_dns_worker_discovery_waits_for_existing_dns_deployment(monkeypatch):
                 "status": "SUCCESS",
                 "active_role": "dns-server",
                 "deploy": {
+                    "role": "dns-server",
                     "state": "running" if deployment_checks == 1 else "completed",
                 },
             }
@@ -606,6 +607,121 @@ def test_dhcp_worker_discovery_configures_exactly_two_server_roles():
     assert loads[0][2]["config"]["ha_key_pem"] == key
     assert hub.state.system_state["global_config"]["dhcp_instances"][0][
         "discovered"] is True
+
+
+def test_dhcp_worker_deploy_polling_ignores_a_stale_unrelated_role_failure(monkeypatch):
+    """Regression: GET_DEPLOY_STATUS's singular ``deploy`` field is just the
+    MOST-RECENTLY-STARTED deploy role on that agent (agent_spoke.py's
+    ``_deploy_status_by_role``), not necessarily the one this poll loop cares
+    about. An agent that once ran ``netbox-server`` (which then failed, or is
+    simply an older entry in the dict) and is NOW deploying ``dhcp-server``
+    must not have the DHCP enrollment loop read netbox-server's stale
+    'failed' tail and report "DHCP worker configuration failed" — it should
+    key off ``deploys`` (the per-role map) and only look at the entry whose
+    ``role`` is ``dhcp-server``."""
+    hub = FakeHub()
+    hub.spoke_module_types = {
+        "dhcp-a-agent": "agent",
+        "dhcp-b-agent": "agent",
+    }
+    hub.active_connections.update(hub.spoke_module_types)
+    cert = "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----"
+    key = "-----BEGIN PRIVATE KEY-----\nprivate\n-----END PRIVATE KEY-----"
+    ha_calls = 0
+    deploy_checks = {"dhcp-a-agent": 0, "dhcp-b-agent": 0}
+
+    async def no_sleep(_seconds):
+        pass
+
+    async def request_response(sid, cmd, payload=None, timeout=None):
+        nonlocal ha_calls
+        hub.forwarded.append((sid, cmd, payload))
+        if cmd == "GET_AVAILABLE_ROLES":
+            data = {
+                "status": "SUCCESS",
+                "installed_deploy_roles": ["dhcp-server"],
+                "active_deploy_roles": ["dhcp-server"],
+                "configured_worker_roles": [],
+                "configured_workers": [],
+                "service_addresses": [
+                    "10.0.1.10" if sid == "dhcp-a-agent" else "10.0.1.11"],
+            }
+        elif cmd == "DHCP_HA_STATUS":
+            ha_calls += 1
+            data = {
+                "status": "SUCCESS",
+                "enabled": ha_calls > 1,
+                "members": [] if ha_calls == 1 else [
+                    {"id": "dhcp-a-agent", "host": "10.0.1.10",
+                     "connected": True},
+                    {"id": "dhcp-b-agent", "host": "10.0.1.11",
+                     "connected": True},
+                ],
+            }
+        elif cmd == "DHCP_HA_ENROLL_WORKERS":
+            data = {
+                "status": "SUCCESS",
+                "workers": {
+                    member["id"]: {
+                        "member_id": member["id"],
+                        "coordinator": "dhcp-management.example",
+                        "worker_secret": "worker-secret",
+                        "coordinator_ca_pem": cert,
+                        "ha_user": "kea-ha",
+                        "ha_password": "ha-secret",
+                        "ha_ca_pem": cert,
+                        "ha_cert_pem": cert,
+                        "ha_key_pem": key,
+                        "ha_peers": [
+                            other["host"] for other in payload["members"]
+                            if other["id"] != member["id"]],
+                    }
+                    for member in payload["members"]
+                },
+            }
+        elif cmd == "DHCP_HA_COMMIT_ENROLLMENT":
+            data = {"status": "SUCCESS"}
+        elif cmd == "LOAD_ROLE":
+            # Only "dhcp-b-agent" is mid-deploy; "dhcp-a-agent" loads clean.
+            if sid == "dhcp-b-agent":
+                data = {"status": "ERROR", "message": "A deployment is already running"}
+            else:
+                data = {"status": "SUCCESS", "deploy": False}
+        elif cmd == "GET_DEPLOY_STATUS":
+            deploy_checks[sid] += 1
+            # A stale netbox-server failure sits ahead of the real dhcp-server
+            # entry in ``deploys`` — the buggy code read the singular
+            # ``deploy`` field (whichever role started MOST RECENTLY on this
+            # agent) without checking its ``role`` matches "dhcp-server", so a
+            # long-past failed netbox-server deploy could surface here as a
+            # false "DHCP worker configuration failed".
+            data = {
+                "status": "SUCCESS",
+                "active_role": "netbox-server",
+                "deploy": {
+                    "role": "netbox-server", "state": "failed",
+                    "tail": "unrelated NetBox install output",
+                },
+                "deploys": [
+                    {"role": "netbox-server", "state": "failed",
+                     "tail": "unrelated NetBox install output"},
+                    {"role": "dhcp-server",
+                     "state": "running" if deploy_checks[sid] == 1 else "completed"},
+                ],
+            }
+        else:
+            raise AssertionError(cmd)
+        return {"payload": {"data": data}}
+
+    monkeypatch.setattr("routes.net_services.asyncio.sleep", no_sleep)
+    hub.request_response = request_response
+
+    response = _client(ADMIN, hub).post("/api/dhcp/ha/discover")
+
+    assert response.status_code == 200
+    assert [worker["status"] for worker in response.json()["workers"]] == [
+        "configured", "configured"]
+    assert deploy_checks["dhcp-b-agent"] == 2
 
 
 def test_dhcp_worker_discovery_waits_until_two_servers_exist():
