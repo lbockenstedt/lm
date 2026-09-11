@@ -356,10 +356,29 @@ class UnboundManager:
         # permanently empty even though this snippet "looks" correct.
         want = (f'server:\n    log-queries: yes\n'
                 f'    use-syslog: no\n    logfile: "{QUERY_LOG}"\n')
+        log_dir = os.path.dirname(QUERY_LOG)
         try:
-            os.makedirs(os.path.dirname(QUERY_LOG), exist_ok=True)
+            os.makedirs(log_dir, exist_ok=True)
         except Exception as e:
             logger.warning("could not create unbound log dir: %s", e)
+        # The daemon that actually opens QUERY_LOG is the "unbound" system
+        # user (not whoever runs this coordinator process, e.g. svc_lm), and
+        # os.makedirs() above creates the dir owned by US. If unbound can't
+        # write into it, it silently drops the logfile directive (no error,
+        # no log line — see log_init()) and get_query_names() stays
+        # permanently empty even though the conf snippet below is correct.
+        # chown it to the unbound user/group (mode 0755 so this process can
+        # still read/tail the files unbound creates inside it) every call —
+        # cheap, and self-heals if the dir gets recreated with wrong owners.
+        try:
+            import pwd
+            pw = pwd.getpwnam("unbound")
+            os.chown(log_dir, pw.pw_uid, pw.pw_gid)
+            os.chmod(log_dir, 0o755)
+        except (KeyError, ImportError):
+            pass  # no "unbound" system user on this host (e.g. test env)
+        except Exception as e:
+            logger.warning("could not chown unbound log dir to unbound user: %s", e)
         try:
             current = open(LOGGING_CONF).read() if os.path.exists(LOGGING_CONF) else ""
         except Exception:
