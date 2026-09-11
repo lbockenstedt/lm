@@ -24106,12 +24106,23 @@ function openServiceClusterModal(kind, current) {
             <p class="text-[11px] text-slate-400 mt-1">Write-only. Choose it here and give the SAME value to each host's installer:
                 <code>--worker-secret &lt;value&gt;</code>. Nothing generates it for you — a secret you cannot read could never be handed to the workers — and it is never displayed again.</p>
         </div>
-        <div id="svc-cl-error" class="hidden text-xs text-red-600"></div>
-        <div class="flex justify-end gap-2 pt-2">
+        <div id="svc-cl-error" class="hidden text-xs text-red-600"></div>`;
+    // The Kea HA form has enough fields that the old single scrolling card let
+    // Save scroll out of view below the fold. Widen the card and split it into
+    // a scrollable content region + a footer pinned outside that scroll area
+    // (via flex-col + shrink-0) so Cancel/Save stay visible no matter how far
+    // the form scrolls. DNS's shorter form still fits without scrolling, but
+    // the wider/pinned-footer treatment is harmless there too.
+    const wrapped = `
+        <div class="flex-1 overflow-y-auto space-y-4 p-6">${body}</div>
+        <div class="shrink-0 flex justify-end gap-2 px-6 py-4 border-t border-slate-100">
             <button onclick="document.getElementById('svc-cluster-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
             <button onclick="saveServiceCluster('${escapeHtml(kind)}', ${alreadyEnabled}, ${!!m(0).ha_password_set})" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Save</button>
         </div>`;
-    openModal('svc-cluster-modal', body, { backdropClose: true });
+    openModal('svc-cluster-modal', wrapped, {
+        backdropClose: true,
+        card: 'w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden',
+    });
 }
 
 async function saveServiceCluster(kind, alreadyEnabled, haCredsStored) {
