@@ -212,6 +212,22 @@ cat > "$KEA_CA_CONF" <<'KEACONF'
 }
 KEACONF
 
+# The packaged kea-ctrl-agent.service unit gates startup on
+# ConditionFileNotEmpty=/etc/kea/kea-api-password — even though the config
+# above uses no HTTP basic-auth at all. Without this file present and
+# non-empty, systemd silently SKIPS starting the unit on every boot/enable
+# (no error, ActiveState stays inactive, "systemctl status" just shows
+# "skipped, unmet condition check"), which is exactly what made the Kea
+# CA unreachable at http://localhost:8001 while kea-dhcp4-server itself was
+# fine. The content is never read/validated by kea-ctrl-agent (auth is off
+# in the JSON config), it only has to exist and be non-empty, so a random
+# placeholder satisfies the condition without weakening anything.
+if [[ ! -s /etc/kea/kea-api-password ]]; then
+    head -c 32 /dev/urandom | base64 > /etc/kea/kea-api-password
+    chmod 640 /etc/kea/kea-api-password
+    chgrp _kea /etc/kea/kea-api-password 2>/dev/null || true
+fi
+
 # Non-fatal: the distro Kea often fails to start on a fresh box (no subnets/
 # interfaces yet), but the lm-dhcp spoke talks to the ctrl-agent at RUNTIME and
 # doesn't need Kea already up at install time — don't abort under `set -e`.
