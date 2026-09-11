@@ -24325,7 +24325,6 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 _ddTile('Cache Hit Ratio', `${g.cache_hit_ratio || 0}%`, `${(g.cache_hits || 0).toLocaleString()} hits / ${(g.cache_misses || 0).toLocaleString()} miss`,
                         (g.cache_hit_ratio || 0) >= 70 ? 'text-emerald-600' : 'text-amber-600'),
                 _ddTile('Recursive Replies', (g.num_recursive || 0).toLocaleString(), `avg ${g.recursion_time_avg || 0}s`),
-                _ddTile('Uptime', _ddUptime(g.uptime_seconds), `${(g.prefetch || 0).toLocaleString()} prefetched`),
             ].join('');
             // Per-type query breakdown as proportion-of-total bars.
             const typeTotal = Object.values(qt).reduce((a, b) => a + b, 0) || 1;
