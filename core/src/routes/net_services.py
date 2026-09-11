@@ -530,6 +530,33 @@ def register(app, hub, ctx):
         )
         if isinstance(data, dict) and isinstance(data.get("cluster"), dict):
             data = {**data, "cluster": _annotate_dns_cluster_members(data["cluster"])}
+        if isinstance(data, dict):
+            # Same UUID/agent-id -> friendly-name treatment as the cluster
+            # table above, applied to the other three places a raw member id
+            # otherwise leaks into this panel: the "evidence below is from
+            # ..." source line, each per-member evidence card's heading (the
+            # ``members`` dict is keyed by id), and the "[id] ..." prefix on
+            # any per-member recommendation/error line.
+            if data.get("diagnostics_source"):
+                data = {**data, "diagnostics_source_name":
+                         _dns_member_display_name(data["diagnostics_source"])}
+            if isinstance(data.get("members"), dict):
+                data = {**data, "members": {
+                    mid: ({**diag, "display_name": _dns_member_display_name(mid)}
+                          if isinstance(diag, dict) else diag)
+                    for mid, diag in data["members"].items()
+                }}
+            if isinstance(data.get("recommendations"), list):
+                def _rename_ids(text):
+                    if not isinstance(text, str):
+                        return text
+                    for mid in (data.get("members") or {}):
+                        name = _dns_member_display_name(mid)
+                        if name and name != mid:
+                            text = text.replace(f"[{mid}]", f"[{name}]")
+                    return text
+                data = {**data, "recommendations":
+                         [_rename_ids(r) for r in data["recommendations"]]}
         if not _is_admin(_session_user(request)) and isinstance(data, dict):
             data = {
                 **data,
