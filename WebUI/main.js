@@ -14548,9 +14548,15 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                 if (Array.isArray(active) && active.length > 0) {
                     parts.push(...active.map(r => `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700" title="${escapeHtml(r.sub_spoke_id || '')}">${escapeHtml((AGENT_ROLES[r.role] || {}).name || r.role)}</span>`));
                 }
-                // Live deploy-role badge (ephemeral — cleared on agent reload).
-                const dep = ds && ds.deploy;
-                if (dep && dep.role && dep.state) {
+                // Live deploy-role badges (ephemeral — cleared on agent reload).
+                // Render one badge PER tracked deploy role (ds.deploys), not just
+                // the single most-recent one — a singular ds.deploy previously
+                // meant loading a second deploy role (e.g. dhcp-server after
+                // dns-server) hid the first one's badge entirely.
+                const deps = Array.isArray(ds && ds.deploys) ? ds.deploys
+                           : (ds && ds.deploy ? [ds.deploy] : []);
+                for (const dep of deps) {
+                    if (!dep || !dep.role || !dep.state) continue;
                     const st = dep.state;
                     const cls = st === 'completed' ? 'bg-green-100 text-green-700'
                               : st === 'failed' || st === 'error' ? 'bg-red-100 text-red-700'
