@@ -1,8 +1,10 @@
+import base64
 import logging
 import re
 import requests
 import ipaddress
 import os
+import shutil
 import subprocess
 
 logger = logging.getLogger("KeaManager")
@@ -364,8 +366,80 @@ class KeaManager:
             "ca_url":       self.ca_url,
         }
 
+    #: File whose absence/emptiness silently blocks kea-ctrl-agent.service from
+    #: ever starting via its own ConditionFileNotEmpty= gate (see
+    #: install_dhcp.sh) — a fully mechanical, safe-to-recreate condition that
+    #: previously required the operator to notice and manually recreate the
+    #: file (or reinstall the whole role) before Kea's CA would come back.
+    _API_PASSWORD_FILE = "/etc/kea/kea-api-password"
+
+    def _self_heal(self) -> list:
+        """Best-effort, fixed-argv repair of conditions diagnostics() can fully
+        explain and safely fix without operator action — never anything that
+        touches DHCP scope/reservation data. Returns the list of repair
+        actions taken (each a short human-readable string) for the UI/log.
+        """
+        actions = []
+        try:
+            actions.extend(self._heal_api_password_file())
+        except Exception as e:  # noqa: BLE001 — self-heal must never crash diagnostics
+            logger.warning("self-heal (api password) failed: %s", e)
+        try:
+            actions.extend(self._heal_inactive_units())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("self-heal (units) failed: %s", e)
+        return actions
+
+    def _heal_api_password_file(self) -> list:
+        path = self._API_PASSWORD_FILE
+        try:
+            needs_create = not os.path.exists(path) or os.path.getsize(path) == 0
+        except OSError:
+            needs_create = True
+        if not needs_create:
+            return []
+        try:
+            with open(path, "wb") as fh:
+                fh.write(base64.b64encode(os.urandom(32)))
+            os.chmod(path, 0o640)
+            try:
+                shutil.chown(path, group="_kea")
+            except (LookupError, PermissionError, OSError):
+                pass  # best-effort, same as the installer
+        except OSError as e:
+            logger.warning("could not recreate %s: %s", path, e)
+            return []
+        logger.info("self-heal: recreated missing/empty %s", path)
+        return [f"recreated missing {path}"]
+
+    def _heal_inactive_units(self) -> list:
+        """Restart kea-dhcp4-server/kea-ctrl-agent if systemd reports them
+        failed/inactive-but-enabled. A crash-looped or one-off-killed unit is
+        exactly the case an uninstall/reinstall used to be needed to clear —
+        ``systemctl restart`` is the same fixed, argument-free recovery a
+        reinstall ultimately performs, without touching any configuration.
+        """
+        actions = []
+        for unit in ("kea-dhcp4-server", "kea-ctrl-agent"):
+            state = self._unit_status(unit)
+            active = state.get("ActiveState")
+            load = state.get("LoadState")
+            if load != "loaded" or active == "active":
+                continue
+            if active not in ("failed", "inactive"):
+                continue
+            result = self._run_diag(["systemctl", "restart", unit], timeout=20)
+            if result["ok"]:
+                actions.append(f"restarted {unit} (was {active})")
+                logger.info("self-heal: restarted %s (was %s)", unit, active)
+            else:
+                logger.warning(
+                    "self-heal: restart of %s failed: %s", unit, result["error"])
+        return actions
+
     def diagnostics(self) -> dict:
         """Return Kea service, config, interface, listener, CA, and lease checks."""
+        repairs = self._self_heal()
         units = {
             name: self._unit_status(name)
             for name in ("kea-dhcp4-server", "kea-ctrl-agent")
@@ -458,6 +532,8 @@ class KeaManager:
         ][-20:]
 
         recommendations = []
+        for action in repairs:
+            recommendations.append(f"Self-healed: {action}. Re-checking findings above.")
         if units["kea-dhcp4-server"].get("ActiveState") != "active":
             recommendations.append(
                 "Kea DHCP4 is not active; inspect its service status and recent log.")
@@ -510,6 +586,7 @@ class KeaManager:
         return {
             "status": "SUCCESS",
             "healthy": healthy,
+            "self_healed": repairs,
             "units": units,
             "ca": ca,
             "config_test": config_test,

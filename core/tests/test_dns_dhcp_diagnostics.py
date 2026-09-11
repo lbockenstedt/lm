@@ -85,8 +85,18 @@ def test_dns_stats_sum_threaded_query_type_counters(monkeypatch, tmp_path):
 
 def test_dns_add_forwarder_persists_config_and_reloads(monkeypatch, tmp_path):
     mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
-    monkeypatch.setattr(mgr, "list_forwarders",
-                        lambda: {"status": "SUCCESS", "forwarders": []})
+    # list_forwarders is called twice by add_forwarder: once before the write
+    # (duplicate check, no forwarders yet) and once after reload (confirming
+    # the new zone actually took effect) — mirror real Unbound by reading the
+    # zone back from the managed conf file rather than always answering "[]",
+    # which would make add_forwarder's own success confirmation impossible to
+    # exercise and mask the real reload silently not applying a change.
+    monkeypatch.setattr(
+        mgr, "list_forwarders",
+        lambda: {"status": "SUCCESS",
+                 "forwarders": [{"zone": z["zone"], "class": "IN",
+                                  "upstreams": z["upstreams"]}
+                                 for z in mgr._managed_forwarders()]})
     monkeypatch.setattr(mgr, "_reload",
                         lambda: {"ok": True, "error": ""})
 
@@ -97,6 +107,30 @@ def test_dns_add_forwarder_persists_config_and_reloads(monkeypatch, tmp_path):
     assert 'name: "."' in text
     assert "forward-addr: 1.1.1.1" in text
     assert "forward-addr: 2606:4700:4700::1111" in text
+
+
+def test_dns_add_forwarder_reports_error_when_reload_silently_drops_it(
+        monkeypatch, tmp_path):
+    """Regression test: Unbound's ``unbound-control reload`` ACKs immediately
+    and only re-parses/rebuilds the forwards tree afterward — a duplicate
+    zone name defined elsewhere (e.g. distro-default unbound.conf) is
+    silently dropped server-side with nothing surfaced over the control
+    channel. Without a post-reload confirmation, add_forwarder previously
+    reported SUCCESS even though the zone never actually took effect —
+    exactly the "no error, but it doesn't show up" symptom reported by a
+    user. add_forwarder must now confirm the zone is actually live before
+    calling this a success."""
+    mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
+    monkeypatch.setattr(mgr, "list_forwarders",
+                        lambda: {"status": "SUCCESS", "forwarders": []})
+    monkeypatch.setattr(mgr, "_reload",
+                        lambda: {"ok": True, "error": ""})
+
+    result = mgr.add_forwarder(".", ["1.1.1.1"])
+
+    assert result["status"] == "ERROR"
+    assert result["changed"] is False
+    assert "did not take effect" in result["message"]
 
 
 def test_dns_add_forwarder_rejects_invalid_or_duplicate_values(monkeypatch, tmp_path):
