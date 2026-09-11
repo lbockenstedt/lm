@@ -24183,17 +24183,28 @@ async function applyDhcpHaConfig() {
 
 // Renders the "Queries by Destination" rows — e.g. "A record for
 // www.dwx.com — 42 queries" — from the /api/dns/stats `query_names` list
-// (already sorted/filtered server-side; this just formats it).
+// (already sorted/filtered server-side; this just formats it), plus a
+// collapsed "source" line listing which client IP(s) made those queries.
 function _ddQueryNameRows(names) {
     if (!names.length) {
         return '<p class="text-slate-400 italic text-sm">No per-name query data yet (Unbound query logging may take a moment to start collecting after first enabled).</p>';
     }
-    return `<div class="max-h-80 overflow-y-auto divide-y divide-slate-100">${names.map(q => `
-        <div class="flex items-center justify-between gap-3 py-1.5 text-xs">
-            <span><span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium mr-2">${escapeHtml(q.type)}</span>
-                  <span class="font-mono text-slate-700">${escapeHtml(q.name)}</span></span>
-            <span class="font-mono text-slate-500 whitespace-nowrap">${(q.count || 0).toLocaleString()} queries</span>
-        </div>`).join('')}</div>`;
+    return `<div class="max-h-80 overflow-y-auto divide-y divide-slate-100">${names.map(q => {
+        const sources = q.sources || [];
+        const sourceLine = sources.length
+            ? `<div class="text-[11px] text-slate-400 font-mono mt-0.5">from ${sources.slice(0, 5).map(s =>
+                  `${escapeHtml(s.ip)} (${(s.count || 0).toLocaleString()})`).join(', ')}${sources.length > 5 ? `, +${sources.length - 5} more` : ''}</div>`
+            : '';
+        return `
+        <div class="py-1.5 text-xs">
+            <div class="flex items-center justify-between gap-3">
+                <span><span class="px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 font-medium mr-2">${escapeHtml(q.type)}</span>
+                      <span class="font-mono text-slate-700">${escapeHtml(q.name)}</span></span>
+                <span class="font-mono text-slate-500 whitespace-nowrap">${(q.count || 0).toLocaleString()} queries</span>
+            </div>
+            ${sourceLine}
+        </div>`;
+    }).join('')}</div>`;
 }
 
 // Best-effort "last NetBox → Unbound/Kea auto-sync" line for the analytics
