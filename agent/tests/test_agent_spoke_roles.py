@@ -550,6 +550,35 @@ def test_unload_dns_server_refuses_while_dns_module_is_loaded():
     assert "management role" in result["message"]
 
 
+def test_two_deploy_roles_track_status_independently(monkeypatch):
+    """Regression test: loading a SECOND deploy role (e.g. dhcp-server after
+    dns-server) must not clobber the first role's tracked deploy status —
+    this was the root cause of the WebUI 'roles:' badge only ever showing the
+    last-installed deploy role."""
+    agent = GenericAgent("agent-1", {})
+
+    async def _fake_run_deploy(role_name, cmd):
+        agent._deploy_status_by_role[role_name] = {
+            "state": "completed", "role": role_name, "returncode": 0, "tail": "",
+        }
+    monkeypatch.setattr(agent, "_run_deploy", _fake_run_deploy)
+    monkeypatch.setattr(agent, "_build_deploy_cmd", lambda role, spec, cfg: ["true"])
+
+    async def _run():
+        r1 = await agent.handle_command("LOAD_ROLE", {"role": "dns-server"})
+        await asyncio.sleep(0)
+        r2 = await agent.handle_command("LOAD_ROLE", {"role": "dhcp-server"})
+        await asyncio.sleep(0)
+        status = await agent.handle_command("GET_DEPLOY_STATUS", {})
+        return r1, r2, status
+    r1, r2, status = asyncio.run(_run())
+
+    assert r1["status"] == "SUCCESS" and r2["status"] == "SUCCESS"
+    by_role = {d["role"]: d for d in status["deploys"]}
+    assert by_role["dns-server"]["state"] == "completed"
+    assert by_role["dhcp-server"]["state"] == "completed"
+
+
 def test_load_role_is_idempotent(monkeypatch):
     """Re-loading an already-hosted role is a no-op success — boot _seed + a
     runtime LOAD could otherwise double-spawn a sub-spoke."""
