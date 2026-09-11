@@ -1381,7 +1381,14 @@ EnvironmentFile=-$BASE_DIR/.env
 # 443 without being root.
 Environment=LM_TLS_PORT=443 LM_PXMX_AGENT_PORT=8443 LM_HUB_TLS_VERIFY=$HUB_TLS_VERIFY_ENV$_TLS_CA_UNIT LM_DROP_FERNET_KEY_ENV=1
 AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# CapabilityBoundingSet also gates every CHILD process (sudo included) — it
+# must carry CAP_SETUID/CAP_SETGID/CAP_SETPCAP too, or the hub's own
+# `sudo -n <helper>` self-restart/self-heal calls (lm-self-restart,
+# lm-update-restart, lm-fix-perms, lm-spoke-recover, cert-push restart) fail
+# with "sudo: unable to change to root gid: Operation not permitted" even
+# though /etc/sudoers.d/lm grants the NOPASSWD rule — sudo itself can't switch
+# to the root uid/gid without those capabilities available to inherit.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_SETPCAP
 # ── Tier-0 root/LPE hardening (see docs/security-pentest.md §5I) ──
 # LM_DROP_FERNET_KEY_ENV=1 (above) makes the hub drop LM_FERNET_KEY from its own
 # /proc/<pid>/environ after load, so an SSL-port RCE / root reader can't slurp

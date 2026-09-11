@@ -974,3 +974,41 @@ def test_dns_diagnostics_cluster_block_carries_display_name_for_non_admin():
     assert "host" not in member
     # non-admin redaction of the outer diagnostics body is unaffected
     assert body["members"] == {}
+
+
+def test_dns_diagnostics_evidence_source_and_per_member_cards_use_display_name():
+    """The per-member evidence cards (top-level ``members`` dict, keyed by
+    raw id) and the "evidence below is from ..." source line used to show
+    the raw UUID/agent-id even where the cluster table already resolved a
+    friendly name. Both now carry the same display_name."""
+    hub = FakeHub({"dns-1": {"DNS_DIAGNOSTICS": {
+        "status": "SUCCESS", "healthy": True,
+        "diagnostics_source": "dns-worker-agent-1",
+        "cluster": _report_with_two_live_members(),
+        "members": {
+            "dns-worker-agent-1": {"status": "SUCCESS", "healthy": True},
+            "dns-worker-agent-2": {"status": "ERROR", "message": "timeout"},
+        },
+        "recommendations": ["[dns-worker-agent-2] diagnostics unavailable: timeout"],
+    }}})
+    hub.state.system_state["module_names"] = {
+        "dns-worker-agent-1": "MIPBE-SVCS1",
+        "dns-worker-agent-2": "MIPBE-SVCS2",
+    }
+    body = _client(ADMIN, hub).get("/api/dns/diagnostics").json()
+    assert body["diagnostics_source_name"] == "MIPBE-SVCS1"
+    assert body["members"]["dns-worker-agent-1"]["display_name"] == "MIPBE-SVCS1"
+    assert body["members"]["dns-worker-agent-2"]["display_name"] == "MIPBE-SVCS2"
+    assert body["recommendations"] == ["[MIPBE-SVCS2] diagnostics unavailable: timeout"]
+
+
+def test_dns_diagnostics_evidence_defaults_to_id_with_no_naming_data():
+    hub = FakeHub({"dns-1": {"DNS_DIAGNOSTICS": {
+        "status": "SUCCESS", "healthy": True,
+        "diagnostics_source": "dns-worker-agent-1",
+        "cluster": _report_with_two_live_members(),
+        "members": {"dns-worker-agent-1": {"status": "SUCCESS"}},
+    }}})
+    body = _client(ADMIN, hub).get("/api/dns/diagnostics").json()
+    assert body["diagnostics_source_name"] == "dns-worker-agent-1"
+    assert body["members"]["dns-worker-agent-1"]["display_name"] == "dns-worker-agent-1"
