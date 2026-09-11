@@ -372,6 +372,14 @@ class KeaManager:
         }
         config_test = self._run_diag(
             ["kea-dhcp4", "-t", "/etc/kea/kea-dhcp4.conf"], timeout=10)
+        # The control agent has its OWN config file (kea-ctrl-agent.conf) and
+        # its own syntax-check binary invocation. A "Control Agent is not
+        # active" recommendation with no further detail forced a manual SSH
+        # to find out WHY — this test + the dedicated journal tail below give
+        # the actual failure reason (bad JSON, socket path, port already
+        # bound, etc.) directly in the diagnostics panel.
+        ca_config_test = self._run_diag(
+            ["kea-ctrl-agent", "-t", "/etc/kea/kea-ctrl-agent.conf"], timeout=10)
         sockets = self._run_diag(["ss", "-H", "-lntup"])
         if not sockets["ok"]:
             sockets = self._run_diag(["ss", "-H", "-lntu"])
@@ -434,14 +442,41 @@ class KeaManager:
             line for line in recent["output"].splitlines()
             if line.strip() and "-- No entries --" not in line
         ][-20:]
+        # kea-ctrl-agent's OWN tail, unfiltered by priority. When the CA unit
+        # itself never came up (crash-looped, port already bound, bad JSON in
+        # kea-ctrl-agent.conf), the failure is usually logged at "info"/"err"
+        # around process exit — the combined "-p warning" tail above can miss
+        # it entirely if kea-dhcp4-server is chattier. This is what actually
+        # answers "why is Control Agent FAIL / connection refused".
+        ca_recent = self._run_diag([
+            "journalctl", "-u", "kea-ctrl-agent", "-n", "20",
+            "--no-pager", "-o", "cat",
+        ])
+        ca_recent_errors = [
+            line for line in ca_recent["output"].splitlines()
+            if line.strip() and "-- No entries --" not in line
+        ][-20:]
 
         recommendations = []
         if units["kea-dhcp4-server"].get("ActiveState") != "active":
             recommendations.append(
                 "Kea DHCP4 is not active; inspect its service status and recent log.")
-        if units["kea-ctrl-agent"].get("ActiveState") != "active":
+        ca_unit = units["kea-ctrl-agent"]
+        if ca_unit.get("ActiveState") != "active":
+            detail = (
+                f" (exit status {ca_unit['ExecMainStatus']})"
+                if ca_unit.get("ExecMainStatus") not in (None, "", "0") else "")
             recommendations.append(
-                "Kea Control Agent is not active; the LM DHCP module cannot manage Kea.")
+                "Kea Control Agent is not active; the LM DHCP module cannot "
+                f"manage Kea{detail}.")
+            if not ca_config_test["ok"]:
+                recommendations.append(
+                    "kea-ctrl-agent.conf failed its own syntax check: "
+                    + (ca_config_test["error"] or ca_config_test["output"]
+                       or "see config_test output").strip()[:300])
+            elif ca_recent_errors:
+                recommendations.append(
+                    "kea-ctrl-agent recent log: " + ca_recent_errors[-1][:300])
         if not config_test["ok"]:
             recommendations.append(
                 "Kea configuration validation failed; fix the reported config error.")
@@ -478,6 +513,8 @@ class KeaManager:
             "units": units,
             "ca": ca,
             "config_test": config_test,
+            "ca_config_test": ca_config_test,
+            "ca_recent_errors": ca_recent_errors,
             "interfaces_configured": interfaces,
             "interface_missing": missing_interfaces,
             "subnets": [
