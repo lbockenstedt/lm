@@ -370,6 +370,15 @@ EOF
     # of assuming the x86_64 triplet.
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq kea-common \
         || echo "⚠️  kea-common not available from apt — the DHCP module will report the missing HA libraries"
+    # kea-common's postinst creates the _kea user/group the daemon runs as.
+    # $HA_TLS_DIR was created root:root above (before this package existed),
+    # so kea-dhcp4 (running as _kea) could never traverse into it to read
+    # ha-ca.pem/node.crt/node.key — libdhcp_ha.so's load() then fails with
+    # "Permission denied" reading the CA file, which Kea only ever surfaces
+    # as the generic "One or more hook libraries failed to load". Group-own
+    # the directory now that _kea exists so the daemon can actually enter it;
+    # 0750 root:_kea keeps it closed to everyone else.
+    chgrp _kea "$HA_TLS_DIR" 2>/dev/null || true
     HOOK_DIR=""
     for cand in /usr/lib/*/kea/hooks /usr/lib/kea/hooks /usr/local/lib/kea/hooks; do
         if [[ -f "$cand/libdhcp_ha.so" ]]; then HOOK_DIR="$cand"; break; fi
@@ -407,7 +416,11 @@ EOF
     esac
 
     # The worker runs from the lm checkout (dhcp/src + core/src). A Kea host
-    # deployed via the curl-piped installer has no source yet — clone it.
+    # deployed via the curl-piped installer has no source yet — clone it. If
+    # it already exists (re-running this installer on an already-provisioned
+    # host), pull latest instead of silently no-op'ing: this worker has no
+    # other self-update mechanism, so "re-run the installer to pick up a fix"
+    # must actually update the code or every such instruction is a no-op.
     if [[ ! -f "$INSTALL_DIR/dhcp/src/dhcp_worker.py" ]]; then
         apt-get install -y -qq git
         rm -rf "$INSTALL_DIR.tmp-clone"
@@ -415,6 +428,10 @@ EOF
         mkdir -p "$INSTALL_DIR"
         cp -a "$INSTALL_DIR.tmp-clone/." "$INSTALL_DIR/"
         rm -rf "$INSTALL_DIR.tmp-clone"
+    elif [[ -d "$INSTALL_DIR/.git" ]]; then
+        echo "Existing checkout at $INSTALL_DIR — pulling latest before (re)install."
+        git -C "$INSTALL_DIR" fetch --depth 1 origin HEAD
+        git -C "$INSTALL_DIR" reset --hard FETCH_HEAD
     fi
     if [[ ! -x "$INSTALL_DIR/dhcp/venv/bin/python3" ]]; then
         apt-get install -y -qq python3-venv
