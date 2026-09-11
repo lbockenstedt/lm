@@ -454,10 +454,14 @@ class GenericAgent(BaseSpoke):
         # Set by AgentControlPlane after registration so LOAD_ROLE can read
         # hub_url + .env helpers and spawn RoleConnection sub-spokes.
         self.control_plane = None
-        # Background deployment state for deploy roles (e.g. ab).
-        self._deploy_role: Optional[str] = None
-        self._deploy_task: Optional[asyncio.Task] = None
-        self._deploy_status: Dict[str, Any] = {"state": "idle"}
+        # Background deployment state for deploy roles (e.g. ab, netbox-server,
+        # dns-server, dhcp-server) — keyed by role name so hosting TWO deploy
+        # roles at once (e.g. dns-server + dhcp-server on one node) tracks each
+        # independently. A singular (non-keyed) attribute here overwrote the
+        # first role's status/task the moment a second deploy role was loaded,
+        # so the WebUI's "roles:" line only ever showed the LAST one installed.
+        self._deploy_tasks: Dict[str, asyncio.Task] = {}
+        self._deploy_status_by_role: Dict[str, Dict[str, Any]] = {}
         # Roles with an _install_role currently running (installs are offloaded
         # to threads, so a second LOAD_ROLE for the same role could otherwise
         # start a concurrent apt/pip run mid-install → double-spawn).
@@ -821,9 +825,11 @@ class GenericAgent(BaseSpoke):
         """Run a deploy role's install script in the background and track status.
 
         The deployed service connects to the Hub on its own once install.sh
-        finishes; this method only monitors the install process.
+        finishes; this method only monitors the install process. Status is
+        keyed by ``role_name`` in ``_deploy_status_by_role`` so concurrent
+        deploy roles (e.g. dns-server + dhcp-server) never clobber each other.
         """
-        self._deploy_status = {"state": "running", "role": role_name}
+        self._deploy_status_by_role[role_name] = {"state": "running", "role": role_name}
         logger.info("Starting background deployment of role '%s'…", role_name)
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -836,7 +842,7 @@ class GenericAgent(BaseSpoke):
             tail = (stdout or b"").decode(errors="replace")[-2000:]
             if rc == 0:
                 logger.info("Deployment of '%s' completed successfully.", role_name)
-                self._deploy_status = {"state": "completed", "role": role_name,
+                self._deploy_status_by_role[role_name] = {"state": "completed", "role": role_name,
                                        "returncode": rc, "tail": tail}
             else:
                 # Dump the install script's own output to the log — without this
@@ -845,13 +851,13 @@ class GenericAgent(BaseSpoke):
                 # which is lost the moment the agent reloads on a SPOKE_UPDATE.
                 logger.error("Deployment of '%s' failed (rc=%s). Install output (last 2KB):\n%s",
                              role_name, rc, tail or "<no output captured>")
-                self._deploy_status = {"state": "failed", "role": role_name,
+                self._deploy_status_by_role[role_name] = {"state": "failed", "role": role_name,
                                        "returncode": rc, "tail": tail}
         except Exception as e:
             logger.error("Deployment of '%s' raised: %s", role_name, e)
-            self._deploy_status = {"state": "error", "role": role_name, "error": str(e)}
+            self._deploy_status_by_role[role_name] = {"state": "error", "role": role_name, "error": str(e)}
         finally:
-            self._deploy_task = None
+            self._deploy_tasks.pop(role_name, None)
 
     # ── Command dispatch ──────────────────────────────────────────────────────
 
@@ -1287,7 +1293,8 @@ class GenericAgent(BaseSpoke):
                         item["role"] for item in configured_workers],
                     "configured_workers": configured_workers,
                     "service_addresses": _local_service_addresses(),
-                    "deploy": self._deploy_status,
+                    "deploy": (list(self._deploy_status_by_role.values()) or [{"state": "idle"}])[-1],
+                    "deploys": list(self._deploy_status_by_role.values()),
                     "active": [{"role": r,
                                 "sub_spoke_id": e["conn"].spoke_id,
                                 "module_type": e["conn"].module_type}
@@ -1324,15 +1331,15 @@ class GenericAgent(BaseSpoke):
             # The agent does not host a sub-spoke; the deployed service connects
             # separately under its own spoke_id.
             if role_name in _DEPLOY_ROLES:
-                if self._deploy_task and not self._deploy_task.done():
+                existing_task = self._deploy_tasks.get(role_name)
+                if existing_task and not existing_task.done():
                     return {"status": "ERROR",
-                            "message": "A deployment is already running",
-                            "deploy_status": self._deploy_status}
+                            "message": f"A deployment of '{role_name}' is already running",
+                            "deploy_status": self._deploy_status_by_role.get(role_name)}
                 spec = _DEPLOY_ROLES[role_name]
-                self._deploy_role = role_name
                 deploy_cmd = self._build_deploy_cmd(role_name, spec,
                                                     data.get("config") or {})
-                self._deploy_task = asyncio.create_task(
+                self._deploy_tasks[role_name] = asyncio.create_task(
                     self._run_deploy(role_name, deploy_cmd))
                 return {"status": "SUCCESS", "role": role_name,
                         "module_type": spec["module_type"], "deploy": True,
@@ -1380,14 +1387,28 @@ class GenericAgent(BaseSpoke):
 
         if cmd == "GET_DEPLOY_STATUS":
             # netbox_installed survives an agent reload (which clears the live
-            # _deploy_status), so the WebUI can persistently offer the "reset
-            # NetBox admin password" knob on nodes that ran the netbox-server role.
+            # in-memory statuses), so the WebUI can persistently offer the
+            # "reset NetBox admin password" knob on nodes that ran the
+            # netbox-server role.
+            #
+            # ``deploys`` lists EVERY deploy role's status (keyed by role in
+            # _deploy_status_by_role), not just the most-recently-loaded one —
+            # a single ``deploy``/``active_role`` pair here used to clobber the
+            # first deploy's tracking the moment a SECOND deploy role was
+            # loaded (e.g. dns-server then dhcp-server), so the WebUI's
+            # "roles:" badge line only ever showed the last one installed.
+            # ``deploy``/``active_role`` are kept (most-recent-by-start) for
+            # back-compat with any caller still reading the singular shape.
             installed_deploy_roles = [
                 role for role, marker in _DEPLOY_ROLE_MARKERS.items()
                 if os.path.exists(marker)
             ]
-            return {"status": "SUCCESS", "deploy": self._deploy_status,
-                    "active_role": self._deploy_role,
+            deploys = list(self._deploy_status_by_role.values())
+            last = deploys[-1] if deploys else {"state": "idle"}
+            last_role = last.get("role") if deploys else None
+            return {"status": "SUCCESS", "deploy": last,
+                    "deploys": deploys,
+                    "active_role": last_role,
                     "installed_deploy_roles": installed_deploy_roles,
                     "active_deploy_roles": await asyncio.to_thread(
                         _active_deploy_roles, installed_deploy_roles),
@@ -1438,8 +1459,8 @@ class GenericAgent(BaseSpoke):
                             f"stopping '{role_name}'."
                         ),
                     }
-                if (self._deploy_task and not self._deploy_task.done()
-                        and self._deploy_role == role_name):
+                if (self._deploy_tasks.get(role_name)
+                        and not self._deploy_tasks[role_name].done()):
                     return {
                         "status": "ERROR",
                         "message": f"Deployment of '{role_name}' is still running.",
@@ -1467,8 +1488,7 @@ class GenericAgent(BaseSpoke):
                         "status": "ERROR",
                         "message": error or f"Could not stop '{role_name}'.",
                     }
-                self._deploy_status = {"state": "unloaded", "role": role_name}
-                self._deploy_role = None
+                self._deploy_status_by_role[role_name] = {"state": "unloaded", "role": role_name}
                 return {
                     "status": "SUCCESS",
                     "role": role_name,
@@ -1582,7 +1602,7 @@ class GenericAgent(BaseSpoke):
             "module":   "generic-agent",
             "roles":    roles_status,
             "status":   "IDLE" if not self._roles else "HOSTING",
-            "deploy":   self._deploy_status,
+            "deploy":   list(self._deploy_status_by_role.values()),
         }
 
     def get_version(self) -> str:
