@@ -346,3 +346,32 @@ def test_the_lm_kea_manager_update_is_a_single_write():
     assert body.count("self._set_config(") == 1, "must be ONE config write"
     assert "self.add_reservation(" not in body, "no second write"
     assert "Subnet {subnet_id} not found" in body
+
+
+# ── HA-TLS directory permission + demo-subnet cleanup ──────────────────────
+
+def test_ha_tls_dir_is_chgrp_to_kea_after_the_group_exists():
+    """REGRESSION: /etc/kea/ha-tls/ was created root:root before kea-common
+    (which creates the _kea user/group) was installed, and only the key FILE
+    was ever chgrp'd to _kea afterward -- never the directory -- so the
+    _kea-run kea-dhcp4-server daemon could never traverse into it to read its
+    HA trust anchor, regardless of file permissions. This is the actual root
+    cause behind the recurring "One or more hook libraries failed to load"
+    production incident (Kea's generic message masked the real
+    HA_CONFIGURATION_FAILED "Permission denied" underneath)."""
+    src = _read(DHCP_SH)
+    kea_common_idx = src.index("apt-get install -y -qq kea-common")
+    chgrp_idx = src.index('chgrp _kea "$HA_TLS_DIR"')
+    assert chgrp_idx > kea_common_idx, (
+        "the ha-tls dir must be chgrp'd to _kea AFTER kea-common (and thus "
+        "the _kea group) is installed")
+
+
+def test_dhcp_installer_strips_the_packaged_demo_subnet():
+    """The Debian kea-dhcp4-server package ships a stock demo
+    192.0.2.0/24 subnet4 entry. Before a real NetBox sync ever runs, that
+    placeholder was visible in diagnostics/UI and looked like a broken real
+    config. The installer must clear it out at install time."""
+    src = _read(DHCP_SH)
+    assert "kea-dhcp4.conf" in src
+    assert 'dhcp4["subnet4"] = []' in src

@@ -21,10 +21,10 @@ import subprocess
 from typing import Any, Dict, Optional
 
 try:
-    from kea_manager import KeaManager
+    from kea_manager import KeaManager, worker_code_version
     from kea_ha import config_fingerprint, hook_paths, parse_ha_status, resolve_hook_dir
 except ImportError:  # loaded as a package (src.X)
-    from src.kea_manager import KeaManager  # type: ignore
+    from src.kea_manager import KeaManager, worker_code_version  # type: ignore
     from src.kea_ha import (  # type: ignore
         config_fingerprint, hook_paths, parse_ha_status, resolve_hook_dir)
 
@@ -149,6 +149,12 @@ class DhcpWorkerOps:
         if "hook librar" not in (error or "").lower():
             return error
         detail = [error]
+        code_ver = worker_code_version()
+        if code_ver.get("commit"):
+            detail.append(
+                f"worker code: {code_ver['commit']}"
+                + (f" ({code_ver['commit_time']})" if code_ver.get("commit_time") else "")
+                + (" [locally modified]" if code_ver.get("dirty") else ""))
         try:
             hook_dir = resolve_hook_dir(hook_dir)
             entries = sorted(os.listdir(hook_dir)) if os.path.isdir(hook_dir) else []
@@ -164,17 +170,58 @@ class DhcpWorkerOps:
             os.path.join(hook_dir, "libdhcp_ha.so"))
         if ldd_issue:
             detail.append(f"libdhcp_ha.so dependency check: {ldd_issue}")
+        ha_tls_issue = DhcpWorkerOps._ha_tls_permission_issue()
+        if ha_tls_issue:
+            detail.append(f"HA-TLS material check: {ha_tls_issue}")
         try:
             proc = subprocess.run(
                 ["journalctl", "-u", "kea-dhcp4-server", "-n", "30", "--no-pager"],
                 capture_output=True, text=True, timeout=10)
-            lines = [ln for ln in (proc.stdout or "").splitlines()
-                    if "hook" in ln.lower() or "HOOKS_" in ln]
-            if lines:
-                detail.append("recent log: " + lines[-1][:300])
+            # Prefer the actual ERROR/FATAL line over a later benign
+            # "successfully closed" cleanup message — a real dlopen()/config
+            # failure (e.g. HA_CONFIGURATION_FAILED "... Permission denied")
+            # is almost always followed by Kea unloading the libraries it did
+            # manage to load, and picking the LAST hook-related line surfaced
+            # that harmless unload instead of the actual cause.
+            hook_lines = [ln for ln in (proc.stdout or "").splitlines()
+                         if "hook" in ln.lower() or "HOOKS_" in ln]
+            error_lines = [ln for ln in hook_lines
+                          if " ERROR " in ln or " FATAL " in ln]
+            chosen = (error_lines or hook_lines)
+            if chosen:
+                detail.append("recent log: " + chosen[-1][:300])
         except Exception:  # noqa: BLE001 — best-effort only
             pass
         return " | ".join(detail)
+
+    @staticmethod
+    def _ha_tls_permission_issue() -> str:
+        """Return a human-readable problem description if the HA-TLS material
+        the daemon (running as ``_kea``) needs to read isn't actually
+        readable by it — the #1 real cause behind a generic "hook libraries
+        failed to load" when the files themselves are present and intact
+        (see ``_repair_ha_tls_permissions``). Returns "" when fine or when the
+        directory/user don't apply (HA not configured on this node)."""
+        d = DhcpWorkerOps._HA_TLS_DIR
+        if not os.path.isdir(d):
+            return ""
+        try:
+            st = os.stat(d)
+            import grp
+            try:
+                kea_gid = grp.getgrnam("_kea").gr_gid
+            except KeyError:
+                return ""
+            mode = st.st_mode
+            group_can_enter = bool(mode & 0o010) and st.st_gid == kea_gid
+            world_can_enter = bool(mode & 0o001)
+            if not (group_can_enter or world_can_enter):
+                return (f"{d} is not readable by the _kea user (owner gid="
+                        f"{st.st_gid}, mode={oct(mode & 0o777)}) — the daemon "
+                        f"cannot traverse into it to read its HA trust anchor")
+        except Exception:  # noqa: BLE001 — best-effort only
+            pass
+        return ""
 
     #: Packages whose version alignment matters for hook-library ABI
     #: compatibility — kea-common ships the hooks, kea-dhcp4-server is the
@@ -260,17 +307,22 @@ class DhcpWorkerOps:
             # already checked that) but fails to dlopen() — corrupt package,
             # ABI mismatch after an unrelated OS update, bad permissions. This
             # used to be a dead end requiring a manual uninstall/reinstall of
-            # the whole DHCP role; try the one fixed, safe repair action first
-            # (reinstall the package that owns the libraries) and retry the
-            # SAME config-set once before giving up.
+            # the whole DHCP role; try the fixed, safe repair actions first
+            # (HA-TLS permission fix, then reinstall the package that owns
+            # the libraries) and retry the SAME config-set once before
+            # giving up.
             if "hook librar" in error.lower():
-                repaired = self._repair_hook_libraries(hook_dir)
-                if repaired:
+                healed = []
+                if self._repair_ha_tls_permissions():
+                    healed.append("fixed /etc/kea/ha-tls permissions")
+                if self._repair_hook_libraries(hook_dir):
+                    healed.append("reinstalled Kea hook libraries")
+                if healed:
                     retry = self.mgr.apply_config(copy.deepcopy(cfg))
                     if retry.get("set") and retry.get("written"):
                         return {"status": "SUCCESS", "version": data.get("version"),
                                 "mutated": True, "digest": config_fingerprint(cfg),
-                                "self_healed": ["reinstalled Kea hook libraries"]}
+                                "self_healed": healed}
                     if not retry.get("set"):
                         error = retry.get("error") or error
                     else:
@@ -301,6 +353,37 @@ class DhcpWorkerOps:
                             f"the local restore failed "
                             f"({restore.get('error')}) — this node is running "
                             f"the new, unpersisted configuration")}
+
+    #: The HA-TLS material the daemon (running as ``_kea``) must be able to
+    #: read for libdhcp_ha.so to load: the shared trust anchor + this node's
+    #: own cert/key. Installed root:root 0750 before kea-common (and thus the
+    #: ``_kea`` user) exists on a fresh HA-member install, then never
+    #: revisited — leaving the daemon permanently unable to even traverse
+    #: into the directory. Kea then only ever reports the generic "One or
+    #: more hook libraries failed to load", masking the real
+    #: HA_CONFIGURATION_FAILED "... Permission denied" underneath.
+    _HA_TLS_DIR = "/etc/kea/ha-tls"
+
+    @staticmethod
+    def _repair_ha_tls_permissions() -> bool:
+        """Group-own ``/etc/kea/ha-tls`` (and its contents) to ``_kea`` so the
+        daemon can read its HA trust anchor / cert / key. Fixed, argument-free
+        ``chgrp``/``chmod`` calls only — no caller-supplied path. Returns
+        ``True`` iff the directory exists and every fix-up call succeeded."""
+        d = DhcpWorkerOps._HA_TLS_DIR
+        if not os.path.isdir(d):
+            return False
+        try:
+            subprocess.run(["chgrp", "-R", "_kea", d],
+                            capture_output=True, text=True, timeout=10, check=True)
+            subprocess.run(["chmod", "0750", d],
+                            capture_output=True, text=True, timeout=10, check=True)
+            subprocess.run(["chmod", "-R", "g+rX", d],
+                            capture_output=True, text=True, timeout=10, check=True)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not repair %s permissions: %s", d, e)
+            return False
+        return True
 
     @staticmethod
     def _repair_hook_libraries(hook_dir: str) -> bool:

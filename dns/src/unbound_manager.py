@@ -2,6 +2,7 @@ import subprocess
 import logging
 import os
 import re
+import shutil
 import ipaddress
 import socket
 import struct
@@ -13,6 +14,38 @@ LM_CONF = "/etc/unbound/conf.d/lm-netbox.conf"
 UNBOUND_CONF_DIR = "/etc/unbound/conf.d"
 LOGGING_CONF = "/etc/unbound/conf.d/lm-logging.conf"
 QUERY_LOG = "/var/log/unbound/lm-queries.log"
+
+
+def worker_code_version() -> dict:
+    """Best-effort ``{commit, commit_time, dirty}`` for the running worker's
+    own checkout — mirrors ``kea_manager.worker_code_version`` so operators
+    can tell "still running old code" apart from "the fix is deployed but
+    the failure is real" without separate manual git access to the host,
+    since this worker's only code-update path is re-running the installer."""
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    out = {"commit": "", "commit_time": "", "dirty": None}
+    if not shutil.which("git") or not os.path.isdir(os.path.join(repo_root, ".git")):
+        return out
+    try:
+        commit = subprocess.run(
+            ["git", "-C", repo_root, "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10)
+        if commit.returncode == 0:
+            out["commit"] = commit.stdout.strip()
+        ctime = subprocess.run(
+            ["git", "-C", repo_root, "log", "-1", "--format=%cI"],
+            capture_output=True, text=True, timeout=10)
+        if ctime.returncode == 0:
+            out["commit_time"] = ctime.stdout.strip()
+        dirty = subprocess.run(
+            ["git", "-C", repo_root, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10)
+        if dirty.returncode == 0:
+            out["dirty"] = bool(dirty.stdout.strip())
+    except Exception:  # noqa: BLE001 — best-effort only
+        pass
+    return out
 
 # unbound-control's stats_noreset is aggregate-only (per-type/rcode/etc.) and
 # cannot report counts per queried NAME. The only way to get that is Unbound's
@@ -314,6 +347,7 @@ class UnboundManager:
 
         return {
             "status": "SUCCESS",
+            "worker_code_version": worker_code_version(),
             "healthy": (
                 service["ok"] and config["ok"] and has_lan_listener
                 and (lan_probe_ok if lan_addresses else False)
