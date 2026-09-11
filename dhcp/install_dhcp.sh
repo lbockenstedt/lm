@@ -233,9 +233,14 @@ if [[ -n "$MEMBER_ID" || -n "$COORDINATOR" || -n "$WORKER_SECRET" ]]; then
     # against the shared trust anchor; basic-auth credentials travel INSIDE that
     # session and are never exposed on the wire. Supplying the material is
     # required — there is no plaintext HTTP fallback for peer traffic.
-    if [[ -n "$HA_CA_IN" ]]; then install -m 0644 "$HA_CA_IN" "$HA_CA"; fi
-    if [[ -n "$HA_CERT_IN" ]]; then install -m 0644 "$HA_CERT_IN" "$HA_CERT"; fi
-    if [[ -n "$HA_KEY_IN" ]]; then install -m 0640 "$HA_KEY_IN" "$HA_KEY"; fi
+    # The agent may pre-stage HA PEM material directly at the destination
+    # path (e.g. $HA_CA already IS $HA_CA_IN when config was written straight
+    # into /etc/kea/ha-tls by the deploy-role handler). `install` refuses to
+    # copy a file onto itself, so skip the copy in that case instead of
+    # failing the whole deploy.
+    if [[ -n "$HA_CA_IN" && "$(readlink -f "$HA_CA_IN" 2>/dev/null)" != "$(readlink -f "$HA_CA" 2>/dev/null)" ]]; then install -m 0644 "$HA_CA_IN" "$HA_CA"; fi
+    if [[ -n "$HA_CERT_IN" && "$(readlink -f "$HA_CERT_IN" 2>/dev/null)" != "$(readlink -f "$HA_CERT" 2>/dev/null)" ]]; then install -m 0644 "$HA_CERT_IN" "$HA_CERT"; fi
+    if [[ -n "$HA_KEY_IN" && "$(readlink -f "$HA_KEY_IN" 2>/dev/null)" != "$(readlink -f "$HA_KEY" 2>/dev/null)" ]]; then install -m 0640 "$HA_KEY_IN" "$HA_KEY"; fi
     if [[ ! -s "$HA_CA" || ! -s "$HA_CERT" || ! -s "$HA_KEY" ]]; then
         echo "--ha-ca, --ha-cert and --ha-key are required: HA peer traffic is"
         echo "HTTPS with mutual certificate verification. Generate one CA, issue"
