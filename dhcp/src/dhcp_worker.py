@@ -3,8 +3,9 @@
 Runs on each Kea server and dials its coordinator's ``/ws/agent`` listener (the
 ``dhcp`` module spoke). Like the DNS worker this is deliberately NOT a generic
 agent: the op table below is everything it can be asked to do. The only shell
-command it ever runs is a fixed, argument-free package install for the Kea hook
-libraries — there is no caller-supplied command, path or URL anywhere.
+commands it ever runs are a small number of FIXED, argument-free apt-get/dpkg
+invocations for the Kea hook-library packages — there is no caller-supplied
+command, package name, path or URL anywhere.
 
 The apply op snapshots the running config before writing so the coordinator can
 roll a node back when its partner fails mid-transaction.
@@ -137,7 +138,13 @@ class DhcpWorkerOps:
         .so. Without this, that error was a dead end in the UI: the operator
         had to SSH in and grep journalctl themselves. Appends the resolved
         hook dir's actual listing (wrong arch triplet / missing file is
-        visible immediately) plus the last few HOOKS_* log lines.
+        visible immediately), the kea-dhcp4-server/kea-common package
+        versions (a mismatch here means the libraries are for a DIFFERENT
+        Kea ABI than the running daemon — a same-version ``--reinstall``
+        cannot fix that), an ``ldd`` of the HA hook .so (surfaces "not found"
+        shared-library dependencies, the #1 real dlopen() failure cause
+        distinct from a missing/corrupt file), plus the last few HOOKS_*
+        log lines.
         """
         if "hook librar" not in (error or "").lower():
             return error
@@ -149,6 +156,14 @@ class DhcpWorkerOps:
                           f"{', '.join(entries) if entries else '(missing or empty)'}")
         except Exception as e:  # noqa: BLE001
             detail.append(f"could not list hook dir: {e}")
+        pkg_versions = DhcpWorkerOps._installed_package_versions()
+        if pkg_versions:
+            detail.append("package versions: " + ", ".join(
+                f"{name}={ver}" for name, ver in pkg_versions.items()))
+        ldd_issue = DhcpWorkerOps._ldd_missing_deps(
+            os.path.join(hook_dir, "libdhcp_ha.so"))
+        if ldd_issue:
+            detail.append(f"libdhcp_ha.so dependency check: {ldd_issue}")
         try:
             proc = subprocess.run(
                 ["journalctl", "-u", "kea-dhcp4-server", "-n", "30", "--no-pager"],
@@ -160,6 +175,53 @@ class DhcpWorkerOps:
         except Exception:  # noqa: BLE001 — best-effort only
             pass
         return " | ".join(detail)
+
+    #: Packages whose version alignment matters for hook-library ABI
+    #: compatibility — kea-common ships the hooks, kea-dhcp4-server is the
+    #: daemon that dlopen()s them; a mismatch between the two after a partial
+    #: upgrade is the leading cause of an ALL-hooks load failure that a same-
+    #: version ``apt-get --reinstall kea-common`` can never fix.
+    _VERSION_CHECK_PACKAGES = ("kea-common", "kea-dhcp4-server", "kea-ctrl-agent")
+
+    @staticmethod
+    def _installed_package_versions() -> Dict[str, str]:
+        """``dpkg-query`` versions of the Kea packages, for the diagnostic
+        detail above — lets an operator (or this code, see
+        ``_repair_hook_libraries``) see at a glance whether kea-common and
+        kea-dhcp4-server drifted apart, which a plain existence check can't."""
+        if not shutil.which("dpkg-query"):
+            return {}
+        versions: Dict[str, str] = {}
+        for pkg in DhcpWorkerOps._VERSION_CHECK_PACKAGES:
+            try:
+                proc = subprocess.run(
+                    ["dpkg-query", "-W", "-f=${Version}", pkg],
+                    capture_output=True, text=True, timeout=10)
+                if proc.returncode == 0 and proc.stdout.strip():
+                    versions[pkg] = proc.stdout.strip()
+            except Exception:  # noqa: BLE001 — best-effort only
+                continue
+        return versions
+
+    @staticmethod
+    def _ldd_missing_deps(so_path: str) -> str:
+        """Run ``ldd`` against a hook .so and report any "not found" shared
+        library dependency — this is what an ABI/version mismatch (or a
+        half-upgraded libc/libssl) actually looks like at the dynamic-loader
+        level, versus Kea's own error which only says "failed to load".
+        Returns "" when the file is missing, ldd isn't available, or every
+        dependency resolves.
+        """
+        if not os.path.isfile(so_path) or not shutil.which("ldd"):
+            return ""
+        try:
+            proc = subprocess.run(
+                ["ldd", so_path], capture_output=True, text=True, timeout=10)
+        except Exception as e:  # noqa: BLE001
+            return f"ldd failed: {e}"
+        missing = [ln.strip() for ln in (proc.stdout or "").splitlines()
+                   if "not found" in ln]
+        return "; ".join(missing) if missing else ""
 
     def apply(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_APPLY`` — snapshot, ``config-set``, ``config-write``.
@@ -242,18 +304,48 @@ class DhcpWorkerOps:
 
     @staticmethod
     def _repair_hook_libraries(hook_dir: str) -> bool:
-        """Reinstall the package owning the Kea hook libraries and confirm the
-        files are present afterward. Same fixed, argument-free ``apt-get``
-        already used by ``install_hooks()`` — this just also covers files that
-        exist but are corrupt/ABI-mismatched, by forcing a reinstall rather
-        than only checking existence.
+        """Reinstall the package(s) owning the Kea hook libraries and confirm
+        the files are present afterward.
+
+        A plain ``apt-get install --reinstall kea-common`` (the original,
+        fixed repair) only re-lays down the SAME package version already on
+        disk — it cannot fix an ABI mismatch where ``kea-common`` (which ships
+        the hooks) and ``kea-dhcp4-server`` (the daemon that dlopen()s them)
+        have drifted to different versions, e.g. after a partial/interrupted
+        apt upgrade. That case makes EVERY hook fail with "failed to load"
+        (as opposed to one specific corrupt/missing file), which is exactly
+        what a repeated production failure with all 9 libraries listed looks
+        like. So: check whether kea-common and kea-dhcp4-server versions
+        match first; if they don't, refresh the apt cache and install BOTH
+        packages together so apt is free to bring them to the same version,
+        rather than reinstalling kea-common alone at its current (mismatched)
+        version. Falls back to the original same-version reinstall when the
+        versions already match (a corrupt/truncated file is the more likely
+        cause there) or when dpkg-query isn't available to tell.
         """
         if not shutil.which("apt-get"):
             return False
+        versions = DhcpWorkerOps._installed_package_versions()
+        common_ver = versions.get("kea-common")
+        daemon_ver = versions.get("kea-dhcp4-server")
+        mismatched = bool(common_ver and daemon_ver and common_ver != daemon_ver)
+        if mismatched:
+            logger.warning(
+                "kea-common (%s) and kea-dhcp4-server (%s) versions differ — "
+                "repairing by realigning both packages instead of a same-"
+                "version reinstall", common_ver, daemon_ver)
         try:
-            subprocess.run(
-                ["apt-get", "install", "--reinstall", "-y", "-qq", *_HOOK_PACKAGES],
-                capture_output=True, text=True, timeout=300)
+            if mismatched:
+                subprocess.run(["apt-get", "update", "-y", "-qq"],
+                                capture_output=True, text=True, timeout=300)
+                subprocess.run(
+                    ["apt-get", "install", "-y", "-qq",
+                     "kea-common", "kea-dhcp4-server"],
+                    capture_output=True, text=True, timeout=300)
+            else:
+                subprocess.run(
+                    ["apt-get", "install", "--reinstall", "-y", "-qq", *_HOOK_PACKAGES],
+                    capture_output=True, text=True, timeout=300)
         except Exception as e:  # noqa: BLE001
             logger.warning("hook library reinstall failed: %s", e)
             return False
@@ -264,8 +356,22 @@ class DhcpWorkerOps:
             logger.warning("hook libraries still missing after reinstall: %s",
                             ", ".join(still_missing))
             return False
-        logger.info("self-heal: reinstalled Kea hook libraries (%s)", resolved)
+        # File-existence was always insufficient to prove a real fix — the
+        # library can exist and still fail dlopen() (that's the whole bug
+        # this method exists to address). Cross-check with ldd so a repair
+        # that changed nothing meaningful doesn't get reported as a success
+        # right before the retried config-set fails again anyway.
+        ldd_issue = DhcpWorkerOps._ldd_missing_deps(paths.get("ha", ""))
+        if ldd_issue:
+            logger.warning("hook libraries present but still have unresolved "
+                            "dependencies after reinstall: %s", ldd_issue)
+            return False
+        after = DhcpWorkerOps._installed_package_versions()
+        logger.info("self-heal: reinstalled Kea hook libraries (%s); "
+                    "package versions now: %s", resolved,
+                    ", ".join(f"{k}={v}" for k, v in after.items()) or "unknown")
         return True
+
 
     def rollback(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_ROLLBACK`` — restore the config captured by the last apply."""
