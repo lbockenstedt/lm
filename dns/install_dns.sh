@@ -232,7 +232,11 @@ if [[ -n "$MEMBER_ID" || -n "$COORDINATOR" || -n "$WORKER_SECRET" ]]; then
     esac
 
     # The worker runs from the lm checkout (dns/src + core/src). A resolver host
-    # deployed via the curl-piped installer has no source yet — clone it.
+    # deployed via the curl-piped installer has no source yet — clone it. If
+    # it already exists (re-running this installer on an already-provisioned
+    # host), pull latest instead of silently no-op'ing: this worker has no
+    # other self-update mechanism, so "re-run the installer to pick up a fix"
+    # must actually update the code or every such instruction is a no-op.
     if [[ ! -f "$INSTALL_DIR/dns/src/dns_worker.py" ]]; then
         apt-get install -y -qq git
         rm -rf "$INSTALL_DIR.tmp-clone"
@@ -240,6 +244,10 @@ if [[ -n "$MEMBER_ID" || -n "$COORDINATOR" || -n "$WORKER_SECRET" ]]; then
         mkdir -p "$INSTALL_DIR"
         cp -a "$INSTALL_DIR.tmp-clone/." "$INSTALL_DIR/"
         rm -rf "$INSTALL_DIR.tmp-clone"
+    elif [[ -d "$INSTALL_DIR/.git" ]]; then
+        echo "Existing checkout at $INSTALL_DIR — pulling latest before (re)install."
+        git -C "$INSTALL_DIR" fetch --depth 1 origin HEAD
+        git -C "$INSTALL_DIR" reset --hard FETCH_HEAD
     fi
     if [[ ! -x "$INSTALL_DIR/dns/venv/bin/python3" ]]; then
         apt-get install -y -qq python3-venv

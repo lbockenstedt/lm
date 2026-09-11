@@ -139,6 +139,56 @@ def test_dns_forwarder_post_relays_zone_and_upstreams():
     )
 
 
+class StatefulForwarderHub(FakeHub):
+    """A hub whose ``DNS_FORWARDER_ADD``/``DNS_FORWARDERS`` replies actually
+    round-trip through a shared in-memory forwarder list, so a route-level
+    test can assert POST /api/dns/forwarders is visible on the very next
+    GET /api/dns/forwarders — the exact end-to-end path an operator hits from
+    the WebUI (add a forwarder, it must show up in the list), rather than
+    only pinning that POST relays its body (already covered above) or that
+    the spoke's own add/list plumbing round-trips in isolation (already
+    covered in test_dns_forwarder_cluster.py)."""
+
+    def __init__(self):
+        super().__init__()
+        self._forwarders = []
+
+    async def request_response(self, sid, cmd, payload=None, timeout=None):
+        self.forwarded.append((sid, cmd, payload))
+        payload = payload or {}
+        if cmd == "DNS_FORWARDER_ADD":
+            self._forwarders.append({
+                "zone": payload.get("zone", "."),
+                "class": "IN",
+                "upstreams": payload.get("upstreams", []),
+            })
+            return {"payload": {"data": {
+                "status": "SUCCESS", "zone": payload.get("zone", "."),
+                "upstreams": payload.get("upstreams", []),
+            }}}
+        if cmd == "DNS_FORWARDERS":
+            return {"payload": {"data": {
+                "status": "SUCCESS", "forwarders": list(self._forwarders),
+            }}}
+        data = (self.replies.get(sid) or {}).get(cmd, {"status": "SUCCESS"})
+        return {"payload": {"data": data}}
+
+
+def test_dns_forwarder_added_via_post_appears_in_the_next_get():
+    hub = StatefulForwarderHub()
+    client = _client(ADMIN, hub)
+
+    add = client.post("/api/dns/forwarders",
+                       json={"zone": "example.com", "upstreams": ["1.1.1.1"]})
+    assert add.status_code == 200
+    assert add.json()["status"] == "SUCCESS"
+
+    listing = client.get("/api/dns/forwarders")
+    assert listing.status_code == 200
+    zones = [f["zone"] for f in listing.json()["forwarders"]]
+    assert "example.com" in zones
+
+
 def test_dns_worker_discovery_enrolls_installed_server_role_without_user_secret():
     cert = "-----BEGIN CERTIFICATE-----\npublic\n-----END CERTIFICATE-----"
     hub = FakeHub({

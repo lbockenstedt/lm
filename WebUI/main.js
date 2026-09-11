@@ -24294,9 +24294,15 @@ function _ddQueryNameRows(names) {
     }
     return `<div class="max-h-80 overflow-y-auto divide-y divide-slate-100">${names.map(q => {
         const sources = q.sources || [];
+        // Each source carries a best-effort ``host`` (DHCP lease hostname for
+        // that client IP, falling back to the raw IP when no lease matches —
+        // see /api/dns/stats' ip_to_host enrichment) so operators can see
+        // WHICH DEVICE queried a name, not just its IP.
         const sourceLine = sources.length
-            ? `<div class="text-[11px] text-slate-400 font-mono mt-0.5">from ${sources.slice(0, 5).map(s =>
-                  `${escapeHtml(s.ip)} (${(s.count || 0).toLocaleString()})`).join(', ')}${sources.length > 5 ? `, +${sources.length - 5} more` : ''}</div>`
+            ? `<div class="text-[11px] text-slate-400 font-mono mt-0.5">from ${sources.slice(0, 5).map(s => {
+                  const host = s.host && s.host !== s.ip ? `${escapeHtml(s.host)} (${escapeHtml(s.ip)})` : escapeHtml(s.ip);
+                  return `${host} (${(s.count || 0).toLocaleString()})`;
+              }).join(', ')}${sources.length > 5 ? `, +${sources.length - 5} more` : ''}</div>`
             : '';
         return `
         <div class="py-1.5 text-xs">
@@ -24436,26 +24442,35 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 <div class="bg-white border border-slate-200 rounded-lg p-4">
                     <div class="flex items-center justify-between mb-2 gap-3">
                         <div class="text-sm font-semibold text-slate-700">Queries by Destination</div>
-                        <input id="dns-query-name-search" type="search" placeholder="Search name"
-                               class="text-xs border border-slate-300 rounded-md px-2 py-1 w-64 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                        <div class="flex gap-2">
+                            <input id="dns-query-name-search" type="search" placeholder="Search domain"
+                                   class="text-xs border border-slate-300 rounded-md px-2 py-1 w-56 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                            <input id="dns-query-host-search" type="search" placeholder="Search host/IP"
+                                   class="text-xs border border-slate-300 rounded-md px-2 py-1 w-56 focus:outline-none focus:ring-1 focus:ring-blue-400" />
+                        </div>
                     </div>
                     <div id="dns-query-name-list">${_ddQueryNameRows(d.query_names || [])}</div>
                 </div>
                 ${syncLine}`;
             const searchInput = document.getElementById('dns-query-name-search');
-            if (searchInput) {
+            const hostInput = document.getElementById('dns-query-host-search');
+            if (searchInput || hostInput) {
                 let debounce;
-                searchInput.addEventListener('input', () => {
+                const runSearch = () => {
                     clearTimeout(debounce);
-                    const q = searchInput.value;
                     debounce = setTimeout(async () => {
                         const list = document.getElementById('dns-query-name-list');
                         if (!list) return;
-                        const searchParam = q ? (_tenantQS() ? '&' : '?') + 'search=' + encodeURIComponent(q) : '';
-                        const { ok: ok2, data: d2 } = await _spokeFetch('/api/dns/stats' + _tenantQS() + searchParam);
+                        const params = [];
+                        if (searchInput && searchInput.value) params.push('search=' + encodeURIComponent(searchInput.value));
+                        if (hostInput && hostInput.value) params.push('host=' + encodeURIComponent(hostInput.value));
+                        const qs = params.length ? (_tenantQS() ? '&' : '?') + params.join('&') : '';
+                        const { ok: ok2, data: d2 } = await _spokeFetch('/api/dns/stats' + _tenantQS() + qs);
                         if (ok2 && d2) list.innerHTML = _ddQueryNameRows(d2.query_names || []);
                     }, 250);
-                });
+                };
+                if (searchInput) searchInput.addEventListener('input', runSearch);
+                if (hostInput) hostInput.addEventListener('input', runSearch);
             }
             return;
         }
