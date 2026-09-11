@@ -391,7 +391,8 @@ class KeaHACoordinator:
         for member_id in order:
             reply = await self.transport.call(
                 member_id, "KEAW_APPLY",
-                {"config": configs[member_id], "version": candidate_version},
+                {"config": configs[member_id], "version": candidate_version,
+                 "hook_dir": self.hook_dir},
                 timeout=timeout)
             if reply.get("status") == "SUCCESS":
                 applied.append(member_id)
