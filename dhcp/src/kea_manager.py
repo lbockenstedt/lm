@@ -10,6 +10,42 @@ import subprocess
 logger = logging.getLogger("KeaManager")
 
 
+def worker_code_version() -> dict:
+    """Best-effort ``{commit, commit_time, dirty}`` for the running worker's
+    own checkout — added because a recurring "same error keeps coming back"
+    report turned out to be a stale checkout that never received a merged
+    fix (this worker's only code-update path is re-running the installer;
+    there is no self-update). Surfacing the actual running commit + when it
+    landed in diagnostics lets an operator immediately tell "still on old
+    code" apart from "the fix is deployed but the failure is real", instead
+    of needing separate manual git access to the host.
+    """
+    repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))))
+    out = {"commit": "", "commit_time": "", "dirty": None}
+    if not shutil.which("git") or not os.path.isdir(os.path.join(repo_root, ".git")):
+        return out
+    try:
+        commit = subprocess.run(
+            ["git", "-C", repo_root, "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=10)
+        if commit.returncode == 0:
+            out["commit"] = commit.stdout.strip()
+        ctime = subprocess.run(
+            ["git", "-C", repo_root, "log", "-1", "--format=%cI"],
+            capture_output=True, text=True, timeout=10)
+        if ctime.returncode == 0:
+            out["commit_time"] = ctime.stdout.strip()
+        dirty = subprocess.run(
+            ["git", "-C", repo_root, "status", "--porcelain"],
+            capture_output=True, text=True, timeout=10)
+        if dirty.returncode == 0:
+            out["dirty"] = bool(dirty.stdout.strip())
+    except Exception:  # noqa: BLE001 — best-effort only
+        pass
+    return out
+
+
 def build_subnet4(subnets: list, reservations: list) -> tuple:
     """Translate LM/NetBox intent into Kea's ``subnet4`` list.
 
@@ -586,6 +622,7 @@ class KeaManager:
         return {
             "status": "SUCCESS",
             "healthy": healthy,
+            "worker_code_version": worker_code_version(),
             "self_healed": repairs,
             "units": units,
             "ca": ca,
