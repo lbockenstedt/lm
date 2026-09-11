@@ -193,9 +193,28 @@ class DhcpWorkerOps:
                     "mutated": True, "digest": config_fingerprint(cfg)}
         if not outcome.get("set"):
             hook_dir = str(data.get("hook_dir") or "")
+            error = outcome.get("error") or "config-set failed"
+            # A hook-load rejection can mean the .so EXISTS (install_hooks()
+            # already checked that) but fails to dlopen() — corrupt package,
+            # ABI mismatch after an unrelated OS update, bad permissions. This
+            # used to be a dead end requiring a manual uninstall/reinstall of
+            # the whole DHCP role; try the one fixed, safe repair action first
+            # (reinstall the package that owns the libraries) and retry the
+            # SAME config-set once before giving up.
+            if "hook librar" in error.lower():
+                repaired = self._repair_hook_libraries(hook_dir)
+                if repaired:
+                    retry = self.mgr.apply_config(copy.deepcopy(cfg))
+                    if retry.get("set") and retry.get("written"):
+                        return {"status": "SUCCESS", "version": data.get("version"),
+                                "mutated": True, "digest": config_fingerprint(cfg),
+                                "self_healed": ["reinstalled Kea hook libraries"]}
+                    if not retry.get("set"):
+                        error = retry.get("error") or error
+                    else:
+                        outcome = retry  # fall through to the write-failed path below
             return {"status": "ERROR", "mutated": False,
-                    "message": self._hook_load_failure_detail(
-                        outcome.get("error") or "config-set failed", hook_dir)}
+                    "message": self._hook_load_failure_detail(error, hook_dir)}
         # config-set landed, config-write did not: restore locally right now.
         # A restore counts ONLY when BOTH config-set and config-write succeeded.
         # A restore whose write failed leaves the node running the old config
@@ -220,6 +239,33 @@ class DhcpWorkerOps:
                             f"the local restore failed "
                             f"({restore.get('error')}) — this node is running "
                             f"the new, unpersisted configuration")}
+
+    @staticmethod
+    def _repair_hook_libraries(hook_dir: str) -> bool:
+        """Reinstall the package owning the Kea hook libraries and confirm the
+        files are present afterward. Same fixed, argument-free ``apt-get``
+        already used by ``install_hooks()`` — this just also covers files that
+        exist but are corrupt/ABI-mismatched, by forcing a reinstall rather
+        than only checking existence.
+        """
+        if not shutil.which("apt-get"):
+            return False
+        try:
+            subprocess.run(
+                ["apt-get", "install", "--reinstall", "-y", "-qq", *_HOOK_PACKAGES],
+                capture_output=True, text=True, timeout=300)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("hook library reinstall failed: %s", e)
+            return False
+        resolved = resolve_hook_dir(hook_dir)
+        paths = hook_paths(resolved)
+        still_missing = [name for name, path in paths.items() if not os.path.exists(path)]
+        if still_missing:
+            logger.warning("hook libraries still missing after reinstall: %s",
+                            ", ".join(still_missing))
+            return False
+        logger.info("self-heal: reinstalled Kea hook libraries (%s)", resolved)
+        return True
 
     def rollback(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_ROLLBACK`` — restore the config captured by the last apply."""
