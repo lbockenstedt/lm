@@ -23929,6 +23929,8 @@ function _dhcpHaPanel(c) {
             <div class="px-4 py-3 border-t border-slate-200">
                 <button onclick="applyDhcpHaConfig()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50">Re-apply configuration to both nodes</button>
                 <span class="text-xs text-slate-400 ml-2">Validates both nodes, then applies standby first and primary last.</span>
+                <button onclick="syncDhcpFromNetbox()" class="px-3 py-1.5 rounded-md text-xs font-bold bg-white border border-slate-300 hover:bg-slate-50 ml-2">Sync from NetBox</button>
+                <span class="text-xs text-slate-400 ml-2">Pulls subnets/reservations from NetBox first — needed before Re-apply if nothing has synced yet.</span>
             </div>
         </div>`;
 }
@@ -24180,6 +24182,23 @@ async function reconcileDnsCluster() {
                   data.status === 'SUCCESS' ? 'success' : 'error');
     } catch (e) { showToast(e.message, 'error'); }
     loadDNSData('Diagnostics');
+}
+
+// Manual "Sync from NetBox" for DHCP — pulls subnets/reservations into the
+// coordinator's desired state. Needed before the first Re-apply on a fresh
+// coordinator (DHCP_HA_APPLY refuses to push an empty subnet4 fleet-wide),
+// otherwise the operator would have to wait for the ~5min background loop.
+async function syncDhcpFromNetbox() {
+    try {
+        const res = await fetch('/api/dhcp/sync', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(data.detail || 'DHCP sync failed', 'error'); return; }
+        showToast(data.subnets_synced != null
+            ? `Synced ${data.subnets_synced} subnet(s) / ${data.reservations_synced || 0} reservation(s) from NetBox`
+            : (data.reason || data.message || 'DHCP sync complete'),
+            'success');
+    } catch (e) { showToast(e.message, 'error'); }
+    loadDHCPData('Diagnostics');
 }
 
 async function applyDhcpHaConfig() {
