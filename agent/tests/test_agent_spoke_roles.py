@@ -579,6 +579,43 @@ def test_two_deploy_roles_track_status_independently(monkeypatch):
     assert by_role["dhcp-server"]["state"] == "completed"
 
 
+def test_clear_deploy_status_removes_settled_entry():
+    """CLEAR_DEPLOY_STATUS dismisses a failed/completed deploy badge (e.g. the
+    WebUI 'NetBox Server: failed' badge) without touching the installed
+    service — it just forgets the in-memory tracking entry."""
+    agent = GenericAgent("agent-1", {})
+    agent._deploy_status_by_role["netbox-server"] = {
+        "state": "failed", "role": "netbox-server", "returncode": 1, "tail": "boom",
+    }
+
+    result = asyncio.run(
+        agent.handle_command("CLEAR_DEPLOY_STATUS", {"role": "netbox-server"}))
+
+    assert result["status"] == "SUCCESS"
+    assert "netbox-server" not in agent._deploy_status_by_role
+
+
+def test_clear_deploy_status_refuses_while_running():
+    agent = GenericAgent("agent-1", {})
+    agent._deploy_status_by_role["netbox-server"] = {
+        "state": "running", "role": "netbox-server",
+    }
+
+    result = asyncio.run(
+        agent.handle_command("CLEAR_DEPLOY_STATUS", {"role": "netbox-server"}))
+
+    assert result["status"] == "ERROR"
+    assert "netbox-server" in agent._deploy_status_by_role
+
+
+def test_clear_deploy_status_requires_role():
+    agent = GenericAgent("agent-1", {})
+
+    result = asyncio.run(agent.handle_command("CLEAR_DEPLOY_STATUS", {}))
+
+    assert result["status"] == "ERROR"
+
+
 def test_load_role_is_idempotent(monkeypatch):
     """Re-loading an already-hosted role is a no-op success — boot _seed + a
     runtime LOAD could otherwise double-spawn a sub-spoke."""

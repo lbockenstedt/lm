@@ -14562,7 +14562,14 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                               : st === 'failed' || st === 'error' ? 'bg-red-100 text-red-700'
                               : 'bg-amber-100 text-amber-700';
                     const word = st === 'running' ? 'deploying…' : st;
-                    parts.push(`<span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${cls}" title="deploy role">${escapeHtml((AGENT_ROLES[dep.role] || {}).name || dep.role)}: ${escapeHtml(word)}</span>`);
+                    // "running" can't be cleared (nothing to acknowledge yet);
+                    // every settled state gets an × so a stuck badge (most
+                    // often "failed") doesn't linger forever with no way to
+                    // dismiss it — clearing only forgets the in-memory status,
+                    // it never touches the installed service itself.
+                    const clearBtn = st === 'running' ? '' :
+                        `<button onclick="clearDeployStatus('${escapeHtml(aid)}','${escapeHtml(dep.role)}')" class="ml-1 font-bold leading-none hover:opacity-70" title="Clear this status">×</button>`;
+                    parts.push(`<span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${cls} inline-flex items-center" title="deploy role">${escapeHtml((AGENT_ROLES[dep.role] || {}).name || dep.role)}: ${escapeHtml(word)}${clearBtn}</span>`);
                 }
                 // Durable NetBox-server marker + reset-admin-password knob.
                 if (ds && ds.netbox_installed) {
@@ -17223,6 +17230,27 @@ async function fetchDeployStatus(spokeId) {
         if (!res.ok) return null;
         return await res.json();
     } catch (e) { return null; }
+}
+
+// Dismiss a settled (completed/failed/error) deploy-role badge — e.g. the
+// "NetBox Server: failed" badge that otherwise has no way to clear. Only
+// forgets the in-memory status on the agent; does NOT touch the installed
+// service, retry the deploy, or affect "installed_deploy_roles"/durable
+// markers. Re-loading the role starts a fresh status regardless.
+async function clearDeployStatus(spokeId, role) {
+    try {
+        const res = await fetch(`/api/agent/${encodeURIComponent(spokeId)}/command`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ command: 'CLEAR_DEPLOY_STATUS', data: { role } }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.status !== 'SUCCESS') {
+            showToast(data.message || data.detail || 'Clear failed', 'error');
+            return;
+        }
+        loadSpokesAndAgents();
+    } catch (e) { showToast(e.message, 'error'); }
 }
 
 // Prompt for a new NetBox admin password and reset it on the node that ran the
