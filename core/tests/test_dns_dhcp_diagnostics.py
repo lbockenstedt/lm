@@ -148,6 +148,56 @@ def test_dns_stats_sum_threaded_query_type_counters(monkeypatch, tmp_path):
     assert mgr.get_stats()["query_types"] == {"A": 6, "AAAA": 3}
 
 
+def test_dns_ensure_query_logging_chowns_log_dir_to_unbound_user(monkeypatch, tmp_path):
+    # Regression test: the query-log directory must be owned by the "unbound"
+    # system user (the daemon that actually opens/writes the logfile), not
+    # whoever runs the coordinator process — otherwise unbound silently drops
+    # the logfile directive and per-destination query stats stay empty
+    # forever. See unbound_manager._ensure_query_logging().
+    mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
+    log_path = tmp_path / "unbound-logs" / "lm-queries.log"
+    monkeypatch.setattr(dns_manager, "QUERY_LOG", str(log_path))
+    monkeypatch.setattr(dns_manager, "LOGGING_CONF", str(tmp_path / "lm-logging.conf"))
+
+    chown_calls = []
+    chmod_calls = []
+    monkeypatch.setattr(dns_manager.os, "chown",
+                         lambda path, uid, gid: chown_calls.append((path, uid, gid)))
+    monkeypatch.setattr(dns_manager.os, "chmod",
+                         lambda path, mode: chmod_calls.append((path, mode)))
+
+    class FakePwEntry:
+        pw_uid = 123
+        pw_gid = 456
+
+    import pwd
+    monkeypatch.setattr(pwd, "getpwnam", lambda name: FakePwEntry())
+
+    mgr._ensure_query_logging()
+
+    assert chown_calls == [(str(log_path.parent), 123, 456)]
+    assert chmod_calls == [(str(log_path.parent), 0o755)]
+
+
+def test_dns_ensure_query_logging_tolerates_missing_unbound_user(monkeypatch, tmp_path):
+    # On a host with no "unbound" system user (e.g. a test/dev box), the
+    # self-heal chown must be skipped quietly rather than raising.
+    mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
+    log_path = tmp_path / "unbound-logs" / "lm-queries.log"
+    monkeypatch.setattr(dns_manager, "QUERY_LOG", str(log_path))
+    monkeypatch.setattr(dns_manager, "LOGGING_CONF", str(tmp_path / "lm-logging.conf"))
+
+    import pwd
+
+    def raise_keyerror(name):
+        raise KeyError(name)
+    monkeypatch.setattr(pwd, "getpwnam", raise_keyerror)
+
+    # Should not raise despite no "unbound" user existing.
+    mgr._ensure_query_logging()
+    assert log_path.parent.is_dir()
+
+
 def test_dns_add_forwarder_persists_config_and_reloads(monkeypatch, tmp_path):
     mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
     # list_forwarders is called twice by add_forwarder: once before the write
