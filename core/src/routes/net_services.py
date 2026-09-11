@@ -618,12 +618,37 @@ def register(app, hub, ctx):
     @app.get("/api/dns/stats")
     async def dns_stats(request: Request, tenant: str = None, search: str = None):
         """Unbound query statistics (total/cache-hit/recursion + per-type,
-        plus a per-destination-name breakdown) for the DNS analytics panel.
-        ``search`` filters the per-name breakdown by substring match."""
+        plus a per-destination-name breakdown, each with its querying source
+        IPs) for the DNS analytics panel. ``search`` filters the per-name
+        breakdown by substring match.
+
+        A non-admin (or an admin/multi-tenant user with a tenant explicitly
+        selected via the picker) only sees query-name rows whose SOURCE IP
+        falls within their tenant's NetBox prefixes — mirroring the same
+        subnet-based tenant isolation ``_filter_tenant`` applies to DNS
+        records. An admin with no tenant selected sees every source
+        (unfiltered), same as records."""
         logger.debug("relay GET /api/dns/stats")
+        source_prefixes = None  # None => no tenant scoping (admin, unfiltered)
+        tid = _effective_tenant(request, tenant)
+        if tid:
+            if access.filter_enabled(hub, "dns"):
+                source_prefixes = await access.resolve_prefixes_for_tenant(hub, tid) or []
+        else:
+            sess = _session_user(request)
+            if sess and not _is_admin(sess) and access.filter_enabled(hub, "dns"):
+                source_prefixes = await access.resolve_prefixes(hub, sess) or []
+        payload = {}
+        if search:
+            payload["search"] = search
+        if source_prefixes is not None:
+            # Always sent once scoping applies — even `[]` (a tenant with no
+            # configured prefixes), so the spoke fails CLOSED (no source rows)
+            # rather than treating an empty/omitted list as "unfiltered".
+            payload["source_prefixes"] = source_prefixes
         return await _relay_spoke(
             _dns_spoke_for_request(request, tenant), "DNS_STATS",
-            {"search": search} if search else {}, log_name="dns_stats",
+            payload, log_name="dns_stats",
         )
 
     @app.get("/api/dns/forwarders")
