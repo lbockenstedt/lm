@@ -30283,7 +30283,7 @@ const INSTANCE_PRODUCTS = {
         endpoint: '/setup/dns-instances',
         listId: 'dns-instances-list',
         moduleType: 'dns',
-        rowSummary: inst => `${inst.member_id || inst.name || '—'} · ${inst.host || '—'}`,
+        rowSummary: inst => `${inst.host || '—'}`,
         fields: [
             { id: 'member_id', label: 'Worker ID (advanced)', placeholder: 'dns-a' },
             { id: 'host', label: 'DNS Server Host / IP', placeholder: '10.0.0.1' },
