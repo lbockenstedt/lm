@@ -228,6 +228,28 @@ if [[ ! -s /etc/kea/kea-api-password ]]; then
     chgrp _kea /etc/kea/kea-api-password 2>/dev/null || true
 fi
 
+# The Debian kea-dhcp4-server package ships /etc/kea/kea-dhcp4.conf with a
+# built-in demo "subnet4": [{"subnet": "192.0.2.0/24", ...}] entry. The LM
+# worker's sync() always fully replaces subnet4 once a real NetBox sync has
+# run, but on a fresh install — before that first sync — this stock demo
+# subnet is visible in diagnostics/UI and looks like a real (broken) config.
+# Strip it here so a freshly-installed node starts with an empty subnet4
+# instead of the packaged placeholder.
+KEA_DHCP4_CONF="/etc/kea/kea-dhcp4.conf"
+if [[ -f "$KEA_DHCP4_CONF" ]]; then
+    python3 - "$KEA_DHCP4_CONF" <<'PYEOF'
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    cfg = json.load(f)
+dhcp4 = cfg.get("Dhcp4", cfg)
+if dhcp4.get("subnet4"):
+    dhcp4["subnet4"] = []
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
+PYEOF
+fi
+
 # Non-fatal: the distro Kea often fails to start on a fresh box (no subnets/
 # interfaces yet), but the lm-dhcp spoke talks to the ctrl-agent at RUNTIME and
 # doesn't need Kea already up at install time — don't abort under `set -e`.
