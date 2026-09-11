@@ -28265,6 +28265,8 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
             const caUnit = units['kea-ctrl-agent'] || {};
             const ca = d.ca || {};
             const cfg = d.config_test || {};
+            const caCfg = d.ca_config_test || {};
+            const caRecentErrors = Array.isArray(d.ca_recent_errors) ? d.ca_recent_errors : [];
             const listeners = d.listeners || {};
             const missing = Array.isArray(d.interface_missing) ? d.interface_missing : [];
             const subnets = Array.isArray(d.subnets) ? d.subnets : [];
@@ -28299,7 +28301,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                 ${nodeEvidence}
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
                     ${check('DHCP4 Service', dhcp4.ActiveState === 'active', unitText(dhcp4))}
-                    ${check('Control Agent', caUnit.ActiveState === 'active' && !!ca.reachable, ca.error || unitText(caUnit))}
+                    ${check('Control Agent', caUnit.ActiveState === 'active' && !!ca.reachable, ca.error || (caCfg.ok === false ? `config error: ${(caCfg.error || caCfg.output || '').slice(0, 120)}` : unitText(caUnit)))}
                     ${check('Configuration', !!cfg.ok, cfg.output || cfg.error || 'valid')}
                     ${check('UDP/67 Listener', (listeners.dhcp4 || []).length > 0, (listeners.dhcp4 || []).length ? `${listeners.dhcp4.length} listener(s)` : (listeners.error || 'not listening'))}
                 </div>
@@ -28319,6 +28321,11 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                         <div class="text-sm font-semibold text-slate-700 mb-2">Listeners</div>
                         <pre class="text-[11px] whitespace-pre-wrap break-all text-slate-600">${escapeHtml([...(listeners.dhcp4 || []), ...(listeners.control_agent || [])].join('\n') || listeners.error || 'none')}</pre>
                     </div>
+                    ${(caUnit.ActiveState !== 'active') ? `<div class="bg-white border border-slate-200 rounded-lg p-4">
+                        <div class="text-sm font-semibold text-slate-700 mb-2">Control Agent log</div>
+                        <div class="text-xs text-slate-500 mb-1">${caCfg.ok === false ? `kea-ctrl-agent.conf syntax check: <span class="text-red-600">FAIL</span>` : caCfg.ok === true ? `kea-ctrl-agent.conf syntax check: <span class="text-emerald-600">OK</span>` : 'kea-ctrl-agent.conf syntax check unavailable'}</div>
+                        <pre class="text-[11px] whitespace-pre-wrap break-all text-slate-600">${escapeHtml(caRecentErrors.join('\n') || caCfg.error || caCfg.output || 'no recent log entries')}</pre>
+                    </div>` : ''}
                 </div>
                 <div class="bg-white border border-slate-200 rounded-lg overflow-hidden mb-4">
                     <div class="px-4 py-3 text-sm font-semibold text-slate-700 border-b border-slate-200">Configured scopes</div>
