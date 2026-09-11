@@ -50,8 +50,73 @@ def test_dns_diagnostics_detects_resolved_only_port_53(monkeypatch, tmp_path):
     assert any("loopback" in item for item in result["recommendations"])
 
 
+def test_dns_diagnostics_self_heals_failed_unbound_unit(monkeypatch, tmp_path):
+    """Mirrors ``KeaManager``'s DHCP-side ``_heal_inactive_units()`` test
+    coverage: a crash-looped/killed ``unbound`` unit (systemd reports it
+    loaded but failed) used to require an operator to notice and manually
+    restart it (or uninstall/reinstall the whole DNS role). ``diagnostics()``
+    must now restart it itself and surface the repair in ``self_healed`` /
+    the recommendations, exactly once per failing call."""
+    mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
+    restarts = []
+
+    def run(cmd, timeout=5):
+        if cmd == ["systemctl", "is-active", "unbound"]:
+            return _result(ok=False, error="failed")
+        if cmd[:2] == ["systemctl", "show"]:
+            return _result(output=(
+                "LoadState=loaded\nActiveState=failed\nSubState=failed\n"
+                "NRestarts=3\nExecMainStatus=1"))
+        if cmd[:2] == ["systemctl", "restart"]:
+            restarts.append(cmd[2])
+            return _result(ok=True)
+        if cmd[0] == "ss":
+            return _result(output="")
+        return _result(output="active")
+
+    monkeypatch.setattr(mgr, "_run_diag", run)
+    monkeypatch.setattr(mgr, "_local_ipv4s", lambda: [])
+    monkeypatch.setattr(mgr, "_dns_probe", lambda server: {
+        "server": server, "responded": False, "rcode": None,
+        "answers": 0, "latency_ms": None, "error": "timed out"})
+
+    result = mgr.diagnostics()
+    assert restarts == ["unbound"]
+    assert result["self_healed"] == ["restarted unbound (was failed)"]
+    assert any(item.startswith("Self-healed: restarted unbound")
+               for item in result["recommendations"])
+
+
+def test_dns_diagnostics_does_not_restart_healthy_unbound(monkeypatch, tmp_path):
+    mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
+    restarts = []
+
+    def run(cmd, timeout=5):
+        if cmd[:2] == ["systemctl", "show"]:
+            return _result(output=(
+                "LoadState=loaded\nActiveState=active\nSubState=running\n"
+                "NRestarts=0\nExecMainStatus=0"))
+        if cmd[:2] == ["systemctl", "restart"]:
+            restarts.append(cmd[2])
+            return _result(ok=True)
+        if cmd[0] == "ss":
+            return _result(output="")
+        return _result(output="active")
+
+    monkeypatch.setattr(mgr, "_run_diag", run)
+    monkeypatch.setattr(mgr, "_local_ipv4s", lambda: [])
+    monkeypatch.setattr(mgr, "_dns_probe", lambda server: {
+        "server": server, "responded": False, "rcode": None,
+        "answers": 0, "latency_ms": None, "error": "timed out"})
+
+    result = mgr.diagnostics()
+    assert restarts == []
+    assert result["self_healed"] == []
+
+
 def test_dns_diagnostics_reports_healthy_lan_probe(monkeypatch, tmp_path):
     mgr = dns_manager.UnboundManager(str(tmp_path / "records.conf"))
+
 
     def run(cmd, timeout=5):
         if cmd[0] == "ss":
