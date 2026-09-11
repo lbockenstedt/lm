@@ -127,6 +127,40 @@ class DhcpWorkerOps:
         return {"status": "SUCCESS", "config": cfg,
                 "digest": config_fingerprint(cfg)}
 
+    @staticmethod
+    def _hook_load_failure_detail(error: str, hook_dir: str) -> str:
+        """Enrich a Kea "hook libraries failed to load" config-set rejection.
+
+        Kea's own error string (e.g. "One or more hook libraries failed to
+        load") never says WHICH library or why — the real reason is only in
+        the kea-dhcp4-server journal at the instant it tried to dlopen() the
+        .so. Without this, that error was a dead end in the UI: the operator
+        had to SSH in and grep journalctl themselves. Appends the resolved
+        hook dir's actual listing (wrong arch triplet / missing file is
+        visible immediately) plus the last few HOOKS_* log lines.
+        """
+        if "hook librar" not in (error or "").lower():
+            return error
+        detail = [error]
+        try:
+            hook_dir = resolve_hook_dir(hook_dir)
+            entries = sorted(os.listdir(hook_dir)) if os.path.isdir(hook_dir) else []
+            detail.append(f"hook dir {hook_dir}: "
+                          f"{', '.join(entries) if entries else '(missing or empty)'}")
+        except Exception as e:  # noqa: BLE001
+            detail.append(f"could not list hook dir: {e}")
+        try:
+            proc = subprocess.run(
+                ["journalctl", "-u", "kea-dhcp4-server", "-n", "30", "--no-pager"],
+                capture_output=True, text=True, timeout=10)
+            lines = [ln for ln in (proc.stdout or "").splitlines()
+                    if "hook" in ln.lower() or "HOOKS_" in ln]
+            if lines:
+                detail.append("recent log: " + lines[-1][:300])
+        except Exception:  # noqa: BLE001 — best-effort only
+            pass
+        return " | ".join(detail)
+
     def apply(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_APPLY`` — snapshot, ``config-set``, ``config-write``.
 
@@ -158,8 +192,10 @@ class DhcpWorkerOps:
             return {"status": "SUCCESS", "version": data.get("version"),
                     "mutated": True, "digest": config_fingerprint(cfg)}
         if not outcome.get("set"):
+            hook_dir = str(data.get("hook_dir") or "")
             return {"status": "ERROR", "mutated": False,
-                    "message": outcome.get("error") or "config-set failed"}
+                    "message": self._hook_load_failure_detail(
+                        outcome.get("error") or "config-set failed", hook_dir)}
         # config-set landed, config-write did not: restore locally right now.
         # A restore counts ONLY when BOTH config-set and config-write succeeded.
         # A restore whose write failed leaves the node running the old config
