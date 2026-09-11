@@ -222,3 +222,102 @@ def test_hook_load_failure_detail_passthrough_for_unrelated_error(monkeypatch):
     detail = dhcp_worker.DhcpWorkerOps._hook_load_failure_detail(
         "some other config-set error", "/usr/lib/x86_64-linux-gnu/kea/hooks")
     assert detail == "some other config-set error"
+
+
+def test_repair_ha_tls_permissions_chgrp_and_chmod(monkeypatch, tmp_path):
+    ha_dir = tmp_path / "ha-tls"
+    ha_dir.mkdir()
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_HA_TLS_DIR", str(ha_dir))
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        return _proc(returncode=0)
+
+    monkeypatch.setattr(dhcp_worker.subprocess, "run", run)
+    assert dhcp_worker.DhcpWorkerOps._repair_ha_tls_permissions() is True
+    assert any(c[:2] == ["chgrp", "-R"] for c in calls)
+    assert any(c[0] == "chmod" for c in calls)
+
+
+def test_repair_ha_tls_permissions_false_when_dir_missing(tmp_path):
+    missing = tmp_path / "does-not-exist"
+    import unittest.mock as mock
+    with mock.patch.object(dhcp_worker.DhcpWorkerOps, "_HA_TLS_DIR", str(missing)):
+        assert dhcp_worker.DhcpWorkerOps._repair_ha_tls_permissions() is False
+
+
+def test_repair_ha_tls_permissions_false_on_subprocess_error(monkeypatch, tmp_path):
+    ha_dir = tmp_path / "ha-tls"
+    ha_dir.mkdir()
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_HA_TLS_DIR", str(ha_dir))
+
+    def run(cmd, **kwargs):
+        raise OSError("permission denied running chgrp")
+
+    monkeypatch.setattr(dhcp_worker.subprocess, "run", run)
+    assert dhcp_worker.DhcpWorkerOps._repair_ha_tls_permissions() is False
+
+
+def test_ha_tls_permission_issue_detects_unreadable_dir(monkeypatch, tmp_path):
+    # Reproduces the actual production root cause: /etc/kea/ha-tls created
+    # root:root 0750 before the kea-common package (and its _kea user) ever
+    # existed, so the daemon can never enter it — libdhcp_ha.so's load()
+    # then fails reading the HA trust anchor with EACCES, which Kea only
+    # ever surfaces as the generic "hook libraries failed to load".
+    ha_dir = tmp_path / "ha-tls"
+    ha_dir.mkdir(mode=0o750)
+    import os as _os
+    _os.chmod(str(ha_dir), 0o750)  # root:root-equivalent in this test's uid/gid
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_HA_TLS_DIR", str(ha_dir))
+
+    class FakeGrp:
+        @staticmethod
+        def getgrnam(name):
+            # A gid that will never match this dir's real gid in the test
+            # environment, simulating "_kea can't read this directory".
+            return SimpleNamespace(gr_gid=999999)
+
+    monkeypatch.setitem(sys.modules, "grp", FakeGrp())
+    issue = dhcp_worker.DhcpWorkerOps._ha_tls_permission_issue()
+    assert "not readable by the _kea user" in issue
+
+
+def test_ha_tls_permission_issue_empty_when_dir_absent(tmp_path):
+    missing = tmp_path / "does-not-exist"
+    import unittest.mock as mock
+    with mock.patch.object(dhcp_worker.DhcpWorkerOps, "_HA_TLS_DIR", str(missing)):
+        assert dhcp_worker.DhcpWorkerOps._ha_tls_permission_issue() == ""
+
+
+def test_hook_load_failure_detail_prefers_error_line_over_benign_close(monkeypatch, tmp_path):
+    # The real production log for this failure has an ERROR
+    # (HA_CONFIGURATION_FAILED ... Permission denied) line followed by benign
+    # "successfully closed" cleanup lines — picking the LAST hook-related
+    # line (as this used to) surfaced the useless cleanup message instead of
+    # the actual cause.
+    hook_dir = tmp_path / "hooks"
+    hook_dir.mkdir()
+    monkeypatch.setattr(dhcp_worker, "resolve_hook_dir", lambda hd: str(hook_dir))
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_installed_package_versions",
+                         staticmethod(lambda: {}))
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_ldd_missing_deps",
+                         staticmethod(lambda so_path: ""))
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_ha_tls_permission_issue",
+                         staticmethod(lambda: ""))
+    journal = "\n".join([
+        "kea-dhcp4[1]: ERROR HA_CONFIGURATION_FAILED failed to configure High "
+        "Availability hooks library: bad TLS config: load of CA file "
+        "'/etc/kea/ha-tls/ha-ca.pem' failed: Permission denied",
+        "kea-dhcp4[1]: INFO  HOOKS_LIBRARY_CLOSED hooks library "
+        "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_ha.so successfully closed",
+    ])
+    monkeypatch.setattr(
+        dhcp_worker.subprocess, "run",
+        lambda cmd, **kw: _proc(stdout=journal) if cmd[0] == "journalctl" else _proc())
+
+    detail = dhcp_worker.DhcpWorkerOps._hook_load_failure_detail(
+        "One or more hook libraries failed to load", str(hook_dir))
+
+    assert "HA_CONFIGURATION_FAILED" in detail
+    assert "Permission denied" in detail
