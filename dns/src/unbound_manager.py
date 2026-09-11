@@ -203,8 +203,56 @@ class UnboundManager:
             "conf_path":    self.conf_path,
         }
 
+    def _self_heal(self) -> list:
+        """Best-effort, fixed-argv repair of conditions diagnostics() can fully
+        explain and safely fix without operator action — never anything that
+        touches DNS record/forwarder data. Mirrors the DHCP-side
+        ``KeaManager._self_heal()``/``_heal_inactive_units()`` pattern: a
+        crash-looped or one-off-killed ``unbound`` unit used to require the
+        operator to notice and manually restart it (or uninstall/reinstall
+        the whole role) — ``systemctl restart`` is the same fixed,
+        argument-free recovery a reinstall ultimately performs, without
+        touching any configuration. Returns the list of repair actions taken
+        (each a short human-readable string) for the UI/log.
+        """
+        actions = []
+        try:
+            actions.extend(self._heal_inactive_unbound())
+        except Exception as e:  # noqa: BLE001 — self-heal must never crash diagnostics
+            logger.warning("self-heal (unbound unit) failed: %s", e)
+        return actions
+
+    def _heal_inactive_unbound(self) -> list:
+        state = self._unit_status("unbound")
+        active = state.get("ActiveState")
+        load = state.get("LoadState")
+        if load != "loaded" or active == "active":
+            return []
+        if active not in ("failed", "inactive"):
+            return []
+        result = self._run_diag(["systemctl", "restart", "unbound"], timeout=20)
+        if result["ok"]:
+            logger.info("self-heal: restarted unbound (was %s)", active)
+            return [f"restarted unbound (was {active})"]
+        logger.warning("self-heal: restart of unbound failed: %s", result["error"])
+        return []
+
+    def _unit_status(self, unit):
+        result = self._run_diag([
+            "systemctl", "show", unit,
+            "--property=LoadState,ActiveState,SubState,NRestarts,ExecMainStatus",
+        ])
+        values = {}
+        for line in result["output"].splitlines():
+            key, sep, value = line.partition("=")
+            if sep:
+                values[key] = value
+        values["error"] = result["error"]
+        return values
+
     def diagnostics(self) -> dict:
         """Return actionable Unbound service, config, listener, and query checks."""
+        repairs = self._self_heal()
         service = self._run_diag(["systemctl", "is-active", "unbound"])
         config = self._run_diag(["unbound-checkconf"])
         control = self._run_diag(["unbound-control", "status"])
@@ -245,6 +293,8 @@ class UnboundManager:
             p["responded"] for p in probes if p["server"] != "127.0.0.1"
         )
         recommendations = []
+        for action in repairs:
+            recommendations.append(f"Self-healed: {action}. Re-checking findings above.")
         if not service["ok"]:
             recommendations.append(
                 "Unbound is not active; inspect the service error and restart it.")
@@ -268,6 +318,7 @@ class UnboundManager:
                 service["ok"] and config["ok"] and has_lan_listener
                 and (lan_probe_ok if lan_addresses else False)
             ),
+            "self_healed": repairs,
             "service": service,
             "config": config,
             "control": control,
