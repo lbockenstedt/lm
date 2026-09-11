@@ -613,7 +613,23 @@ class UnboundManager:
                     "message": str(exc)}
 
     def add_forwarder(self, zone: str, upstreams) -> dict:
-        """Persist a new forwarding zone and reload Unbound."""
+        """Persist a new forwarding zone and reload Unbound.
+
+        ``unbound-control reload``'s "ok" reply is NOT proof the new config
+        was actually accepted: Unbound's own ``do_reload()`` sends "ok"
+        immediately and only re-parses/rebuilds the forwards tree
+        afterward, off the RPC thread — a duplicate zone name (e.g. a
+        distro-default root forward already present elsewhere in
+        unbound.conf/conf.d) is silently dropped with only a
+        ``log_err("duplicate forward zone ... ignored")`` in Unbound's own
+        log, never surfaced back over the control channel. That produced
+        exactly the reported symptom: "add forwarder" returns SUCCESS but
+        the zone never appears in the list. Re-reading ``list_forwarders()``
+        after reload (the same live ``list_forwards`` RPC the UI itself
+        polls) confirms the zone is ACTUALLY active before reporting
+        success — if Unbound silently dropped it, this now returns a clear
+        ERROR instead of a false SUCCESS.
+        """
         try:
             zone = self._normalize_forward_zone(zone)
             upstreams = self._normalize_upstreams(upstreams)
@@ -627,12 +643,32 @@ class UnboundManager:
             return {"status": "ERROR",
                     "message": f"forwarder zone {zone} already exists",
                     "changed": False}
-        result = self._write_forwarders([
-            *self._managed_forwarders(),
-            {"zone": zone, "upstreams": upstreams},
-        ])
-        return {**result, "zone": zone, "upstreams": upstreams,
-                "changed": result.get("status") == "SUCCESS"}
+        managed = self._managed_forwarders()
+        result = self._write_forwarders([*managed, {"zone": zone, "upstreams": upstreams}])
+        if result.get("status") != "SUCCESS":
+            return {**result, "zone": zone, "upstreams": upstreams, "changed": False}
+        confirm = self.list_forwarders()
+        applied = confirm.get("status") == "SUCCESS" and any(
+            self._normalize_forward_zone(item.get("zone")) == zone
+            for item in confirm.get("forwarders") or [])
+        if not applied:
+            # Roll the file back to what it was before this call so a silently
+            # rejected zone doesn't linger in our own managed config forever.
+            self._write_forwarders(managed)
+            return {
+                "status": "ERROR", "changed": False, "zone": zone,
+                "upstreams": upstreams,
+                "message": (
+                    f"Unbound reloaded but forwarder zone {zone} did not take "
+                    f"effect — it is likely a duplicate of an existing "
+                    f"forward-zone already defined outside Lab Manager's "
+                    f"managed config (check /etc/unbound/unbound.conf and "
+                    f"other files in conf.d for an existing '{zone}' "
+                    f"forward-zone, and the unbound journal for "
+                    f"'duplicate forward zone ... ignored')"),
+            }
+        return {**result, "zone": zone, "upstreams": upstreams, "changed": True}
+
 
     def remove_forwarder(self, zone: str) -> dict:
         """Remove an LM-managed forwarding zone. Used for cluster rollback."""
