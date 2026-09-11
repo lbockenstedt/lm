@@ -159,6 +159,50 @@ def register(app, hub, ctx):
         meta_name = (metadata.get(member_id) or {}).get("display_name")
         return meta_name or member_id
 
+    def _dhcp_member_display_name(member_id):
+        """Best-effort human-friendly name for a Kea HA member ``id`` (a raw
+        agent/spoke id, e.g. a UUID-ish worker id). Mirrors
+        ``_dns_member_display_name``'s fallback chain, checked against the
+        DHCP managed-device inventory instead of the DNS one:
+
+        1. The DHCP managed-device inventory (``dhcp_instances``, in
+           ``global_config`` — populated by ``/api/dhcp/ha/discover``).
+           Matched on ``member_id`` or ``source_agent_id``.
+        2. ``module_names`` / ``module_metadata[...].display_name`` directly.
+        3. The raw id, unchanged."""
+        if not member_id:
+            return member_id
+        instances = (hub.state.system_state.get("global_config", {}) or {}).get("dhcp_instances", []) or []
+        inst = next((i for i in instances
+                     if isinstance(i, dict) and i.get("name")
+                     and (i.get("member_id") == member_id
+                          or i.get("source_agent_id") == member_id)), None)
+        if inst:
+            return inst["name"]
+        module_names = hub.state.system_state.get("module_names", {}) or {}
+        if module_names.get(member_id):
+            return module_names[member_id]
+        metadata = hub.state.system_state.get("module_metadata", {}) or {}
+        meta_name = (metadata.get(member_id) or {}).get("display_name")
+        return meta_name or member_id
+
+    def _annotate_dhcp_cluster_members(cluster):
+        """Add a ``display_name`` to each member of a Kea HA cluster report,
+        non-destructively — same convention as ``_annotate_dns_cluster_members``."""
+        if not isinstance(cluster, dict):
+            return cluster
+        members = cluster.get("members")
+        if not isinstance(members, list):
+            return cluster
+        return {
+            **cluster,
+            "members": [
+                {**m, "display_name": _dhcp_member_display_name(m.get("id"))}
+                if isinstance(m, dict) else m
+                for m in members
+            ],
+        }
+
     def _annotate_dns_cluster_members(cluster):
         """Add a ``display_name`` to each member of a DNS cluster report,
         non-destructively (the raw ``id`` — the traceable UUID/spoke-id — is
@@ -217,8 +261,8 @@ def register(app, hub, ctx):
         out = {k: v for k, v in cluster.items() if k in keep}
         out["members"] = [
             {k: v for k, v in m.items()
-             if k in ("id", "connected", "health", "ha_role", "ha_state",
-                      "ha_enabled")}
+             if k in ("id", "display_name", "connected", "health", "ha_role",
+                      "ha_state", "ha_enabled")}
             for m in (cluster.get("members") or []) if isinstance(m, dict)
         ]
         out["peers"] = []
@@ -3261,6 +3305,47 @@ def register(app, hub, ctx):
             "DHCP_DIAGNOSTICS",
             log_name="dhcp_diagnostics",
         )
+        if isinstance(data, dict) and isinstance(data.get("cluster"), dict):
+            data = {**data, "cluster": _annotate_dhcp_cluster_members(data["cluster"])}
+        if isinstance(data, dict):
+            # Same UUID/agent-id -> friendly-name treatment as DNS diagnostics:
+            # the "evidence below is from ..." source line, each per-member
+            # evidence card's heading (``members`` dict keyed by id), and the
+            # "[id] ..." prefix on any per-member recommendation/error line.
+            if data.get("diagnostics_source"):
+                data = {**data, "diagnostics_source_name":
+                         _dhcp_member_display_name(data["diagnostics_source"])}
+            if isinstance(data.get("members"), dict):
+                data = {**data, "members": {
+                    mid: ({**diag, "display_name": _dhcp_member_display_name(mid)}
+                          if isinstance(diag, dict) else diag)
+                    for mid, diag in data["members"].items()
+                }}
+            if isinstance(data.get("recommendations"), list):
+                # Union of the two id sources that can appear in DHCP
+                # recommendation text: the per-fanout-member ``members`` dict
+                # (bracket-prefixed "[id] ..." lines) and the Kea-HA-pair-level
+                # ids in ``cluster.members`` (quoted "'id'" and bare
+                # comma-joined "Configuration state is unknown for: id, id"
+                # lines — see kea_ha.py). Sort longest-id-first so one id
+                # that is a prefix of another doesn't get partially replaced.
+                all_ids = set((data.get("members") or {}).keys())
+                for m in (data.get("cluster") or {}).get("members") or []:
+                    if isinstance(m, dict) and m.get("id"):
+                        all_ids.add(m["id"])
+
+                def _rename_dhcp_ids(text):
+                    if not isinstance(text, str):
+                        return text
+                    for mid in sorted(all_ids, key=len, reverse=True):
+                        name = _dhcp_member_display_name(mid)
+                        if name and name != mid:
+                            text = text.replace(f"[{mid}]", f"[{name}]")
+                            text = text.replace(f"'{mid}'", f"'{name}'")
+                            text = text.replace(mid, name)
+                    return text
+                data = {**data, "recommendations":
+                         [_rename_dhcp_ids(r) for r in data["recommendations"]]}
         if not _is_admin(_session_user(request)) and isinstance(data, dict):
             data = {
                 **data,
@@ -3311,6 +3396,7 @@ def register(app, hub, ctx):
         data = await _relay_spoke(_dhcp_spoke_for_request(request, tenant),
                                   "DHCP_HA_STATUS", log_name="dhcp_ha_status",
                                   timeout=30)
+        data = _annotate_dhcp_cluster_members(data)
         if not _is_admin(_session_user(request)) and isinstance(data, dict):
             data = {"status": data.get("status", "SUCCESS"),
                     **_redact_dhcp_cluster(data)}
