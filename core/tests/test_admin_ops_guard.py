@@ -361,6 +361,54 @@ def test_restart_service_enforces_loopback_and_token():
         assert ei.value.status_code == 403
 
 
+# ── unload-role: no WebUI affordance for a role loaded outside the caller's
+# tenant (e.g. a stray dhcp role picked up by get_spoke_by_type("dhcp") ahead
+# of the real cluster) ───────────────────────────────────────────────────────
+
+def test_unload_role_relays_unload_role_rpc():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        fn = app.routes[("POST", "/admin/ops/unload-role")]
+        out = asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {
+            "spoke_id": "cs-svr-06", "role": "dhcp"})))
+        assert out["status"] == "ok"
+        sid, cmd, data = hub.relayed[-1]
+        assert sid == "cs-svr-06" and cmd == "UNLOAD_ROLE"
+        assert data["role"] == "dhcp"
+
+
+def test_unload_role_requires_spoke_id_and_role():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        fn = app.routes[("POST", "/admin/ops/unload-role")]
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {"spoke_id": "cs-svr-06"})))
+        assert ei.value.status_code == 400
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {"role": "dhcp"})))
+        assert ei.value.status_code == 400
+
+
+def test_unload_role_rejects_disconnected_spoke():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        fn = app.routes[("POST", "/admin/ops/unload-role")]
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {
+                "spoke_id": "not-connected-agent", "role": "dhcp"})))
+        assert ei.value.status_code == 503
+
+
+def test_unload_role_enforces_loopback_and_token():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        fn = app.routes[("POST", "/admin/ops/unload-role")]
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(fn(_BodyRequest("10.0.0.5", tok, {
+                "spoke_id": "cs-svr-06", "role": "dhcp"})))
+        assert ei.value.status_code == 403
+
+
 def test_dhcp_ha_status_no_spoke_returns_disabled():
     with tempfile.TemporaryDirectory() as tmp:
         app, hub, tok = _reg_relay(tmp)

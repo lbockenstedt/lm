@@ -172,6 +172,38 @@ def register(app, hub, ctx):
         out["agent_spokes"] = agent_spokes
         return out
 
+    @app.post("/admin/ops/unload-role")
+    async def admin_ops_unload_role(request: Request):
+        """Force-unload a role from a generic agent via loopback, bypassing
+        the WebUI's tenant-ownership guard (``_tenant_role_guard`` in
+        ``routes/agents.py``). Added after a stray/accidental ``dhcp`` role
+        load on an out-of-tenant agent (e.g. picked up by
+        ``get_spoke_by_type("dhcp")`` ahead of the real cluster and left no
+        UI affordance to remove it, since the WebUI's unload button is scoped
+        to roles the caller's own tenant loaded). Relays the same UNLOAD_ROLE
+        RPC the WebUI uses; no new spoke-side surface. Body:
+        {"spoke_id": ..., "role": ...}."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        spoke_id = (body or {}).get("spoke_id")
+        role = (body or {}).get("role")
+        if not spoke_id or not role:
+            raise HTTPException(status_code=400, detail="spoke_id and role are required")
+        if hub._primary_key(spoke_id) not in hub.active_connections:
+            raise HTTPException(status_code=503, detail=f"spoke '{spoke_id}' not connected")
+        try:
+            result = await hub.request_response(spoke_id, "UNLOAD_ROLE",
+                                                {"role": role}, timeout=60.0)
+        except Exception as e:
+            logger.exception("admin_ops: unload-role failed for %s/%s", spoke_id, role)
+            raise HTTPException(status_code=500, detail=str(e))
+        logger.warning("admin_ops: unload-role driven via loopback for spoke=%s role=%s",
+                       spoke_id, role)
+        return {"status": "ok", "target": spoke_id, "role": role, "result": result}
+
     @app.post("/admin/ops/approve-agent")
     async def admin_ops_approve_agent(request: Request):
         """Approve a pending relayed node-agent — identical logic to the WebUI
