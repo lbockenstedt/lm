@@ -579,7 +579,11 @@ class KeaManager:
             config = self.get_config()
         except Exception as e:
             logger.warning("self-heal (interfaces): could not read config: %s", e)
-            return []
+            # Surface the failure instead of silently returning [] — a caller
+            # reading "no self-heal actions" has no way to tell "nothing
+            # needed fixing" apart from "the heal itself couldn't even check",
+            # which is exactly the ambiguity that let this stay broken.
+            return [f"could not check interfaces-config: {e}"]
         raw_interfaces = ((config.get("interfaces-config", {}) or {})
                           .get("interfaces", []) or [])
         # Filter out blank/whitespace-only entries — Kea's config-get has been
@@ -597,10 +601,11 @@ class KeaManager:
             result = self.apply_config(new_config)
         except Exception as e:
             logger.warning("self-heal (interfaces): apply failed: %s", e)
-            return []
+            return [f"failed to set interfaces-config: {e}"]
         if not (result.get("set") and result.get("written")):
             logger.warning("self-heal (interfaces): apply did not succeed: %s", result)
-            return []
+            return [f"could not set interfaces-config: "
+                    f"{result.get('error') or 'config-set/config-write did not report success'}"]
         restart = self._run_diag(["systemctl", "restart", "kea-dhcp4-server"], timeout=20)
         if not restart["ok"]:
             logger.warning(
