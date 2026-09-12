@@ -1,4 +1,5 @@
 import base64
+import copy
 import logging
 import re
 import requests
@@ -500,6 +501,10 @@ class KeaManager:
             actions.extend(self._heal_inactive_units())
         except Exception as e:  # noqa: BLE001
             logger.warning("self-heal (units) failed: %s", e)
+        try:
+            actions.extend(self._heal_missing_interfaces())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("self-heal (interfaces) failed: %s", e)
         return actions
 
     def _heal_api_password_file(self) -> list:
@@ -548,6 +553,61 @@ class KeaManager:
                 logger.warning(
                     "self-heal: restart of %s failed: %s", unit, result["error"])
         return actions
+
+    def _heal_missing_interfaces(self) -> list:
+        """Set ``interfaces-config.interfaces`` when it is empty.
+
+        ``interfaces-config`` is node-owned (see ``build_node_config`` /
+        ``COORDINATOR_OWNED_KEYS`` in ``kea_ha.py``) — the LM sync path never
+        touches it, and the stock Debian ``kea-dhcp4-server`` package ships it
+        as ``[]`` ("listen on nothing") with a comment telling the operator to
+        fill it in by hand. Nothing in ``install_dhcp.sh`` ever did, so a node
+        can run for a long time looking completely healthy — service active,
+        HA heartbeats fine, control agent answering, config-get fine — while
+        Kea has never actually opened a DHCPv4 socket and every real client is
+        silently getting no offer at all. This is exactly the case behind the
+        "Nothing is listening on DHCP server port UDP/67" recommendation.
+
+        Heals by setting ``interfaces`` to ``["*"]`` — listen on every
+        interface, the same safe default an operator would type by hand — via
+        ``config-set``/``config-write``, then restarting the daemon: Kea's
+        DHCPv4 socket set is bound once at startup, so a ``config-set`` alone
+        (no restart) updates the on-disk/running JSON but does not open the
+        new listener until the process restarts.
+        """
+        try:
+            config = self.get_config()
+        except Exception as e:
+            logger.warning("self-heal (interfaces): could not read config: %s", e)
+            return []
+        interfaces = ((config.get("interfaces-config", {}) or {})
+                      .get("interfaces", []) or [])
+        if interfaces:
+            return []
+        new_config = copy.deepcopy(config)
+        new_config.setdefault("interfaces-config", {})["interfaces"] = ["*"]
+        try:
+            result = self.apply_config(new_config)
+        except Exception as e:
+            logger.warning("self-heal (interfaces): apply failed: %s", e)
+            return []
+        if not (result.get("set") and result.get("written")):
+            logger.warning("self-heal (interfaces): apply did not succeed: %s", result)
+            return []
+        restart = self._run_diag(["systemctl", "restart", "kea-dhcp4-server"], timeout=20)
+        if not restart["ok"]:
+            logger.warning(
+                "self-heal (interfaces): config updated but restart failed: %s",
+                restart["error"])
+            return ["set interfaces-config to listen on all interfaces "
+                    "(restart failed — apply manually with systemctl restart "
+                    "kea-dhcp4-server)"]
+        logger.info(
+            "self-heal: interfaces-config was empty (Kea was listening on "
+            "nothing); set to listen on all interfaces and restarted "
+            "kea-dhcp4-server")
+        return ["set interfaces-config to listen on all interfaces "
+                "(was empty) and restarted kea-dhcp4-server"]
 
     def diagnostics(self) -> dict:
         """Return Kea service, config, interface, listener, CA, and lease checks."""
