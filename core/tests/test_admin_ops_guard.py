@@ -239,3 +239,157 @@ def test_spoke_diag_clamps_lines_and_validates_args():
             asyncio.run(diag_fn(_BodyRequest("127.0.0.1", tok, {
                 "target": "cs-svr-06", "unit": "lm-agent;reboot"})))
         assert ei.value.status_code == 400
+
+
+# ── Self-service ops added for the Kea HA-TLS deploy-verification loop:
+# /admin/ops/restart-service (restart a unit without an off-box shell/Azure
+# round-trip) and /admin/ops/force-dhcp-dns-sync (force an immediate NetBox
+# reconcile instead of waiting on the loop's skip-if-unchanged hash cache).
+
+class _SyncHub(_RelayHub):
+    """Adds the dns_dhcp_sync surface restart-service/force-sync touch."""
+    def __init__(self, data_dir, connected=("cs-svr-06",)):
+        super().__init__(data_dir, connected=connected)
+        self._last_sync_hashes = {"dns": "stale", "dhcp": "stale"}
+        self.synced = 0
+        self._dns_dhcp_sync_status = {
+            "dns": {"status": "ok"}, "dhcp": {"status": "ok"}}
+
+    async def _sync_dns_dhcp_once(self):
+        self.synced += 1
+        # Prove the hash cache really was reset before this ran.
+        assert self._last_sync_hashes == {}
+        self._dns_dhcp_sync_status = {
+            "dns": {"status": "ok", "records_synced": 3},
+            "dhcp": {"status": "ok", "subnets_synced": 1}}
+
+    @property
+    def dns_dhcp_sync_status(self):
+        return self._dns_dhcp_sync_status
+
+
+def _reg_sync(tmp, **kw):
+    app = _FakeApp()
+    hub = _SyncHub(tmp, **kw)
+    admin_ops.register(app, hub, ctx=None)
+    tok = open(os.path.join(tmp, "admin_ops_token")).read().strip()
+    return app, hub, tok
+
+
+def test_force_dhcp_dns_sync_resets_hash_cache_and_runs_once():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_sync(tmp)
+        fn = app.routes[("POST", "/admin/ops/force-dhcp-dns-sync")]
+        out = asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {})))
+        assert out["status"] == "ok"
+        assert hub.synced == 1
+        assert out["dhcp"]["subnets_synced"] == 1
+
+
+def test_force_dhcp_dns_sync_enforces_loopback_and_token():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_sync(tmp)
+        fn = app.routes[("POST", "/admin/ops/force-dhcp-dns-sync")]
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(fn(_BodyRequest("10.0.0.5", tok, {})))
+        assert ei.value.status_code == 403
+
+
+def test_restart_service_spoke_relays_systemctl_restart_no_shell():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        fn = app.routes[("POST", "/admin/ops/restart-service")]
+        out = asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {
+            "target": "cs-svr-06", "unit": "lm-dhcp-worker"})))
+        assert out["status"] == "ok"
+        sid, cmd, data = hub.relayed[-1]
+        assert sid == "cs-svr-06" and cmd == "RUN_COMMAND"
+        assert data["allow_shell"] is False
+        assert data["command"] == "systemctl restart lm-dhcp-worker"
+
+
+def test_restart_service_rejects_unknown_unit():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        fn = app.routes[("POST", "/admin/ops/restart-service")]
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {
+                "target": "cs-svr-06", "unit": "sshd"})))
+        assert ei.value.status_code == 400
+
+
+def test_restart_service_hub_only_supports_unit_lm():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        fn = app.routes[("POST", "/admin/ops/restart-service")]
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {
+                "target": "hub", "unit": "lm-dhcp-worker"})))
+        assert ei.value.status_code == 400
+
+
+def test_restart_service_hub_uses_sudo_self_restart_helper(monkeypatch):
+    import subprocess as _subprocess
+    calls = []
+
+    class _Proc:
+        returncode = 0
+        stdout = "ok"
+        stderr = ""
+
+    def _fake_run(argv, **kw):
+        calls.append(argv)
+        return _Proc()
+
+    monkeypatch.setattr(_subprocess, "run", _fake_run)
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        fn = app.routes[("POST", "/admin/ops/restart-service")]
+        out = asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {
+            "target": "hub", "unit": "lm"})))
+        assert out["status"] == "ok"
+        assert calls[-1] == ["sudo", "-n", "/usr/local/bin/lm-self-restart"]
+
+
+def test_restart_service_enforces_loopback_and_token():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        fn = app.routes[("POST", "/admin/ops/restart-service")]
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(fn(_BodyRequest("10.0.0.5", tok, {
+                "target": "cs-svr-06", "unit": "lm-agent"})))
+        assert ei.value.status_code == 403
+
+
+def test_dhcp_ha_status_no_spoke_returns_disabled():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        hub.get_spoke_by_type = lambda t: None
+        fn = app.routes[("GET", "/admin/ops/dhcp-ha-status")]
+        out = asyncio.run(fn(_FakeRequest("127.0.0.1", tok)))
+        assert out["enabled"] is False
+
+
+def test_dhcp_ha_status_relays_dhcp_ha_status_rpc():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        hub.get_spoke_by_type = lambda t: "cs-svr-06" if t == "dhcp" else None
+
+        async def _rr(sid, cmd, data, timeout=None):
+            assert sid == "cs-svr-06" and cmd == "DHCP_HA_STATUS"
+            return {"payload": {"data": {"status": "SUCCESS", "enabled": True,
+                                        "members": ["a", "b"]}}}
+        hub.request_response = _rr
+        fn = app.routes[("GET", "/admin/ops/dhcp-ha-status")]
+        out = asyncio.run(fn(_FakeRequest("127.0.0.1", tok)))
+        assert out["status"] == "ok"
+        assert out["result"]["enabled"] is True
+
+
+def test_dhcp_ha_status_enforces_loopback_and_token():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        fn = app.routes[("GET", "/admin/ops/dhcp-ha-status")]
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(fn(_FakeRequest("10.0.0.5", tok)))
+        assert ei.value.status_code == 403

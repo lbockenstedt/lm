@@ -32,6 +32,7 @@ import stat
 import secrets
 
 from api import HTTPException, Request, logger
+from access import unwrap_spoke
 
 # Argument-shape guard for the diagnostic bundle's unit / repo / log / lines
 # parameters. Deliberately strict: letters, digits, and the handful of path /
@@ -216,6 +217,128 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
         logger.warning("admin_ops: self-update driven via loopback")
         return {"status": "ok", "result": result}
+
+    @app.post("/admin/ops/force-dhcp-dns-sync")
+    async def admin_ops_force_dhcp_dns_sync(request: Request):
+        """Force an immediate NetBox → Unbound/Kea reconcile, bypassing the
+        ``run_dns_dhcp_sync_loop`` skip-if-unchanged hash cache.
+
+        The background loop (``dns_dhcp_sync.py``) only re-pushes DNS_SYNC /
+        DHCP_SYNC when the NetBox payload hash differs from the last
+        successful push — so after fixing a spoke-side bug (e.g. the Kea
+        HA-TLS permission repair baked into ``dhcp_worker.apply()``), the
+        fastest way to make the fleet re-apply is a full process restart
+        (clears ``self._last_sync_hashes``) or this route, which calls the
+        SAME ``_sync_dns_dhcp_once()`` the loop uses but resets the hash
+        cache first so the push is unconditional. Existing-only, so it is
+        safe: DNS_SYNC/DHCP_SYNC add missing records/subnets, they never
+        delete anything an operator added by hand on the resolver."""
+        _guard(request)
+        try:
+            hub._last_sync_hashes = {}
+            await hub._sync_dns_dhcp_once()
+        except Exception as e:
+            logger.exception("admin_ops: force-dhcp-dns-sync failed")
+            raise HTTPException(status_code=500, detail=str(e))
+        logger.warning("admin_ops: force-dhcp-dns-sync driven via loopback")
+        return {"status": "ok",
+                "dns": hub.dns_dhcp_sync_status.get("dns"),
+                "dhcp": hub.dns_dhcp_sync_status.get("dhcp")}
+
+    @app.get("/admin/ops/dhcp-ha-status")
+    async def admin_ops_dhcp_ha_status(request: Request):
+        """Read-only Kea HA pair status straight from the DHCP spoke's own
+        ``DHCP_HA_STATUS`` handler — the same RPC ``dhcp_spoke.py`` answers
+        for the WebUI HA tile (member state, lease-sync/drift,
+        recommendations). Saves a manual ``journalctl``/``ls -la /etc/kea/
+        ha-tls`` round-trip per host during a "is the HA pair actually up"
+        check: one call here returns the pair's real state as Kea itself
+        reports it, instead of inferring it from log lines on each node."""
+        _guard(request)
+        dhcp_spoke = hub.get_spoke_by_type("dhcp")
+        if not dhcp_spoke:
+            return {"status": "ok", "enabled": False,
+                    "reason": "no DHCP spoke connected"}
+        try:
+            resp = await hub.request_response(dhcp_spoke, "DHCP_HA_STATUS", {},
+                                              timeout=30.0)
+        except Exception as e:
+            logger.exception("admin_ops: dhcp-ha-status failed")
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "ok", "result": unwrap_spoke(resp)}
+
+    @app.post("/admin/ops/restart-service")
+    async def admin_ops_restart_service(request: Request):
+        """Restart one allowlisted systemd unit on a target — hub or a
+        connected spoke.
+
+        The regular ``/admin/ops/exec`` allowlist accepts ``systemctl
+        restart <unit>`` for SPOKES already (``systemctl`` is in
+        ``ALLOWED_BINARIES``), and that works there because the spoke agent
+        runs as root. Restarting the HUB's own ``lm.service`` needs different
+        handling: the app runs as an unprivileged service account AND a naive
+        self-restart races its own cgroup teardown (see install_all.sh's
+        ``lm-self-restart`` comment), so ``target == "hub"`` instead reuses
+        that same pre-existing, battle-tested helper via
+        ``sudo -n /usr/local/bin/lm-self-restart`` (the sudoers grant for this
+        exact path already exists — installed for the hub's own self-update
+        path). Restricted to a short unit allowlist (no arbitrary unit names)
+        so this can't become a general remote shell. Body:
+        ``{"target": "hub"|"<spoke_id>", "unit": "lm"|"lm-dhcp-worker"|
+        "lm-agent"|"lm-dns-worker"}`` (``unit`` must be ``"lm"`` when
+        ``target == "hub"``)."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        target = str((body or {}).get("target") or "hub").strip()
+        unit = str((body or {}).get("unit") or "").strip()
+        allowed_units = {"lm", "lm-dhcp-worker", "lm-dns-worker", "lm-agent"}
+        if unit not in allowed_units:
+            raise HTTPException(status_code=400,
+                                detail=f"unit must be one of {sorted(allowed_units)}")
+        # For the hub itself the app runs as an unprivileged service account,
+        # so a bare ``systemctl restart lm`` from inside the hub's own process
+        # would race the stop/start against its own cgroup (see
+        # install_all.sh's ``lm-self-restart`` comment) and could strand the
+        # unit inactive. Reuse the SAME hardened helper the hub's own
+        # self-update path already calls: ``sudo -n /usr/local/bin/lm-self-
+        # restart`` schedules the restart via ``systemd-run --no-block`` from a
+        # transient unit outside lm.service's cgroup, so it survives the hub
+        # being stopped. Only meaningful for ``unit == "lm"`` (the hub's own
+        # unit) — the other allowlisted units are spoke-side workers restarted
+        # via the normal ``systemctl restart <unit>`` exec allowlist below,
+        # since spoke agents run as root already.
+        logger.warning("admin_ops: restart-service via loopback target=%s unit=%s",
+                       target, unit)
+        if target == "hub":
+            if unit != "lm":
+                raise HTTPException(status_code=400,
+                                    detail="hub target only supports unit='lm' "
+                                          "(use exec/restart-service against the "
+                                          "specific spoke for worker units)")
+            import subprocess
+            try:
+                proc = subprocess.run(
+                    ["sudo", "-n", "/usr/local/bin/lm-self-restart"],
+                    capture_output=True, text=True, timeout=30.0)
+                res = {"ok": proc.returncode == 0, "rc": proc.returncode,
+                      "stdout": proc.stdout, "stderr": proc.stderr,
+                      "truncated": False, "error": "", "mode": "sudo-fixed-argv"}
+            except Exception as e:  # noqa: BLE001
+                logger.exception("admin_ops: restart-service failed for hub")
+                raise HTTPException(status_code=500, detail=str(e))
+            return {"status": "ok", "target": target, "unit": unit, "result": res}
+        command = f"systemctl restart {unit}"
+        try:
+            res = await _relay_exec(target, command, 30.0)
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            logger.exception("admin_ops: restart-service failed for target=%s", target)
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "ok", "target": target, "unit": unit, "result": res}
 
     # ── Diagnostics fan-out ──────────────────────────────────────────────────
     # Run a READ-ONLY diagnostic on the hub, any connected spoke, or a relayed
