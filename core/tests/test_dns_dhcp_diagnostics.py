@@ -283,6 +283,47 @@ def test_dns_add_forwarder_restores_previous_file_when_reload_fails(
     assert (tmp_path / "lm-forwarders.conf").read_text() == original
 
 
+def test_list_leases_omits_arguments_for_all_leases(monkeypatch):
+    """``lease4-get-all`` has no "all" sentinel value — Kea's lease_cmds hook
+    only understands a ``subnets`` list filter (or its total absence, which
+    means every subnet). A stray ``{"subnet-id": 0}`` argument previously
+    errored on every call ("'subnets' parameter not specified"), so lease
+    queries always failed regardless of whether the requested subnet existed.
+    """
+    mgr = dhcp_manager.KeaManager()
+    seen = {}
+
+    def rpc(service, command, args=None):
+        assert command == "lease4-get-all"
+        seen["args"] = args
+        return {"leases": [{"ip": "10.0.0.10"}]}
+
+    monkeypatch.setattr(mgr, "_rpc", rpc)
+
+    result = mgr.list_leases()
+
+    assert seen["args"] is None
+    assert result == [{"ip": "10.0.0.10"}]
+
+
+def test_list_leases_filters_by_subnets_list_when_subnet_given(monkeypatch):
+    mgr = dhcp_manager.KeaManager()
+    seen = {}
+
+    def rpc(service, command, args=None):
+        if command == "subnet4-list":
+            return {"subnets": [{"id": 7, "subnet": "10.0.0.0/24"}]}
+        assert command == "lease4-get-all"
+        seen["args"] = args
+        return {"leases": []}
+
+    monkeypatch.setattr(mgr, "_rpc", rpc)
+
+    mgr.list_leases(subnet="10.0.0.0/24")
+
+    assert seen["args"] == {"subnets": [7]}
+
+
 def test_dhcp_diagnostics_matches_kea_health_contract(monkeypatch):
     mgr = dhcp_manager.KeaManager()
     monkeypatch.setattr(mgr, "_unit_status", lambda unit: {
