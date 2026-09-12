@@ -445,3 +445,64 @@ def test_dhcp_diagnostics_does_not_touch_interfaces_when_already_set(monkeypatch
 
     result = mgr.diagnostics()
     assert result["self_healed"] == []
+
+
+def test_dhcp_diagnostics_self_heals_blank_placeholder_interfaces_entry(
+        monkeypatch):
+    """Regression test: Kea's ``config-get`` has been observed to echo an
+    unset ``interfaces`` list back as ``[""]`` (a single blank placeholder
+    entry) rather than a truly empty ``[]``. A plain truthiness check on that
+    list is fooled — ``[""]`` is a non-empty Python list — so the self-heal
+    would silently skip a node that is still listening on nothing. The fix
+    filters blank/whitespace-only entries before deciding, matching the same
+    stricter filtering diagnostics() already applies to interfaces_configured."""
+    mgr = dhcp_manager.KeaManager()
+    monkeypatch.setattr(mgr, "_unit_status", lambda unit: {
+        "ActiveState": "active", "SubState": "running",
+        "NRestarts": "0", "ExecMainStatus": "0", "error": "",
+    })
+
+    restarted = []
+
+    def run(cmd, timeout=5):
+        if cmd[0] == "systemctl" and cmd[1] == "restart":
+            restarted.append(cmd[2])
+            return _result(output="")
+        if cmd[0] == "ss":
+            return _result(output="udp UNCONN 0 0 10.0.0.5:67 0.0.0.0:*")
+        return _result(output="configuration check successful")
+
+    state = {"interfaces": [""]}
+    set_calls = []
+
+    def rpc(service, command, args=None):
+        if command == "version-get":
+            return {"version": "2.4.1"}
+        if command == "config-get":
+            return {"Dhcp4": {
+                "interfaces-config": {"interfaces": state["interfaces"]},
+                "lease-database": {"name": "/var/lib/kea/kea-leases4.csv"},
+                "subnet4": [],
+            }}
+        if command == "config-set":
+            set_calls.append(args)
+            state["interfaces"] = (args["Dhcp4"]["interfaces-config"]
+                                    ["interfaces"])
+            return {}
+        if command == "config-write":
+            return {}
+        if command == "lease4-get-all":
+            return {"leases": []}
+        raise AssertionError(command)
+
+    monkeypatch.setattr(mgr, "_run_diag", run)
+    monkeypatch.setattr(mgr, "_rpc", rpc)
+    monkeypatch.setattr(dhcp_manager.os.path, "exists", lambda path: True)
+
+    result = mgr.diagnostics()
+
+    assert set_calls, ("expected config-set to be called — a blank "
+                        "placeholder entry must not be treated as configured")
+    assert set_calls[0]["Dhcp4"]["interfaces-config"]["interfaces"] == ["*"]
+    assert restarted == ["kea-dhcp4-server"]
+    assert result["interfaces_configured"] == ["*"]

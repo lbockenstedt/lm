@@ -580,8 +580,15 @@ class KeaManager:
         except Exception as e:
             logger.warning("self-heal (interfaces): could not read config: %s", e)
             return []
-        interfaces = ((config.get("interfaces-config", {}) or {})
-                      .get("interfaces", []) or [])
+        raw_interfaces = ((config.get("interfaces-config", {}) or {})
+                          .get("interfaces", []) or [])
+        # Filter out blank/whitespace-only entries — Kea's config-get has been
+        # observed to echo an "empty" interfaces list back as ``[""]`` rather
+        # than ``[]``, which is still falsy/non-listening but IS a non-empty
+        # Python list, so a plain truthiness check would wrongly treat it as
+        # "already configured" and silently skip healing (matches the same
+        # stricter filtering diagnostics() already applies below).
+        interfaces = [v for v in raw_interfaces if str(v).strip()]
         if interfaces:
             return []
         new_config = copy.deepcopy(config)
