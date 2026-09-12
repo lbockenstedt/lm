@@ -189,7 +189,16 @@ class KeaManager:
             result = r.json()
             if isinstance(result, list):
                 result = result[0]
-            if result.get("result", 0) != 0:
+            code = result.get("result", 0)
+            # Kea's control channel uses result=3 ("empty") for queries that
+            # succeeded but found no matching data — e.g. lease4-get-all on a
+            # subnet with no active leases yet (exactly the case right after
+            # DHCP starts serving again). Treating it as an error made every
+            # diagnostics/list_leases call on an otherwise-healthy, freshly
+            # recovered node fail with a misleading "Kea error" / lease
+            # retrieval failure, even though there was genuinely nothing
+            # wrong — only 1 (error) and 2 (unsupported) are real failures.
+            if code not in (0, 3):
                 raise RuntimeError(result.get("text", "Kea error"))
             return result.get("arguments", {})
         except requests.RequestException as e:
