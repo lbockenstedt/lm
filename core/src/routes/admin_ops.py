@@ -242,6 +242,38 @@ def register(app, hub, ctx):
                        spoke_id, role)
         return {"status": "ok", "target": spoke_id, "role": role, "result": result}
 
+    @app.post("/admin/ops/dhcp-diagnostics")
+    async def admin_ops_dhcp_diagnostics(request: Request):
+        """Run (and self-heal) a DHCP module's Kea diagnostics via loopback,
+        bypassing the WebUI's session-authenticated ``/api/dhcp/diagnostics``
+        (e.g. the operator is locked out of the session). Relays the exact
+        same ``DHCP_DIAGNOSTICS`` RPC the WebUI diagnostics page sends — see
+        ``dhcp_diagnostics`` in ``routes/net_services.py`` and
+        ``KeaManager.diagnostics()`` in ``dhcp/src/kea_manager.py`` — which
+        also runs ``KeaManager._self_heal()`` as a side effect (recreates a
+        missing API-password file, restarts a failed unit, and now fixes an
+        empty ``interfaces-config`` so Kea isn't silently listening on
+        nothing). This route is the only way to force that self-heal to run
+        immediately rather than waiting for the next time someone happens to
+        open the diagnostics page. Body: {"spoke_id": ...}."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        spoke_id = (body or {}).get("spoke_id")
+        if not spoke_id:
+            raise HTTPException(status_code=400, detail="spoke_id is required")
+        if hub._primary_key(spoke_id) not in hub.active_connections:
+            raise HTTPException(status_code=503, detail=f"spoke '{spoke_id}' not connected")
+        try:
+            result = await hub.request_response(spoke_id, "DHCP_DIAGNOSTICS", {}, timeout=30.0)
+        except Exception as e:
+            logger.exception("admin_ops: dhcp-diagnostics failed for %s", spoke_id)
+            raise HTTPException(status_code=500, detail=str(e))
+        logger.warning("admin_ops: dhcp-diagnostics driven via loopback for spoke=%s", spoke_id)
+        return {"status": "ok", "target": spoke_id, "result": result}
+
     @app.post("/admin/ops/approve-agent")
     async def admin_ops_approve_agent(request: Request):
         """Approve a pending relayed node-agent — identical logic to the WebUI

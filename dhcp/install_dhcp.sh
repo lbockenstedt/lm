@@ -235,6 +235,19 @@ fi
 # subnet is visible in diagnostics/UI and looks like a real (broken) config.
 # Strip it here so a freshly-installed node starts with an empty subnet4
 # instead of the packaged placeholder.
+#
+# The same stock file also ships "interfaces-config": {"interfaces": []} —
+# i.e. "bind to nothing" — with a comment telling the operator to fill it in
+# by hand. interfaces-config is intentionally node-owned (see
+# COORDINATOR_OWNED_KEYS / build_node_config in kea_ha.py — the LM sync path
+# never touches it), so nothing else ever populates it either. Left alone, a
+# freshly-installed node runs looking completely healthy (service active, HA
+# heartbeats fine, control agent answering) while Kea has never opened a
+# DHCPv4 socket and silently answers no client at all. Default it to ["*"]
+# (listen on every interface — the same safe default an operator would type
+# by hand) here too, so a fresh install never starts in that state. (The
+# dhcp worker's diagnostics self-heal also fixes this at runtime if it is
+# ever found empty again, but a correct install should never need that.)
 KEA_DHCP4_CONF="/etc/kea/kea-dhcp4.conf"
 # A reinstall/repackage can leave this file empty or mid-write (e.g. a prior
 # config-write that failed on the permission bug fixed above, or a fresh
@@ -253,8 +266,14 @@ try:
 except (OSError, ValueError):
     sys.exit(0)
 dhcp4 = cfg.get("Dhcp4", cfg)
+changed = False
 if dhcp4.get("subnet4"):
     dhcp4["subnet4"] = []
+    changed = True
+if not (dhcp4.get("interfaces-config", {}) or {}).get("interfaces"):
+    dhcp4.setdefault("interfaces-config", {})["interfaces"] = ["*"]
+    changed = True
+if changed:
     with open(path, "w") as f:
         json.dump(cfg, f, indent=2)
 PYEOF
