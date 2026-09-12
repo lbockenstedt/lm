@@ -64,13 +64,30 @@ def build_dhcp_payload(pfx_data: Dict[str, Any],
     Subnets come from prefixes (gateway/dns_servers off custom_fields); a
     reservation is minted for every IP carrying a ``custom_fields.mac_address``.
     Shared by the loop and ``POST /api/dhcp/sync``.
+
+    Only prefixes explicitly opted into DHCP become Kea scopes — a bare
+    top-level allocation (e.g. a tenant's whole /17) must never turn into a
+    single giant scope covering the entire block. A prefix is eligible only
+    when BOTH:
+      - ``status`` is NOT ``container`` (NetBox's own convention for an
+        aggregate/parent block that is never meant to hand out addresses
+        directly — it exists only to be carved into child prefixes), and
+      - ``custom_fields.dhcp_enabled`` is truthy — the explicit opt-in
+        checkbox for "this specific prefix is a DHCP scope", so a tenant can
+        allocate a large parent block and then carve out smaller
+        active/dhcp-enabled child prefixes without the parent ever being
+        synced as a scope itself.
     """
     subnets: List[Dict[str, Any]] = []
     for p in (pfx_data.get("prefixes") or []):
         prefix_str = p.get("prefix", "")
         if not prefix_str:
             continue
+        if (p.get("status") or "").lower() == "container":
+            continue  # aggregate/parent block — never a DHCP scope itself
         cf = p.get("custom_fields") or {}
+        if not cf.get("dhcp_enabled"):
+            continue  # not opted in — carve child prefixes with the checkbox on
         dns_servers = cf.get("dns_servers") or ""
         subnets.append({
             "subnet":      prefix_str,

@@ -82,6 +82,13 @@ def build_subnet4(subnets: list, reservations: list) -> tuple:
             "pools":  pools,
             "option-data": [],
         }
+        # Carry the NetBox prefix description through in Kea's user-context so
+        # the UI can label a scope by its real name/purpose instead of a bare
+        # "subnet <id>" — Kea persists arbitrary user-context data untouched
+        # and returns it back on subnet4-list, so this round-trips for free.
+        description = (s.get("description") or "").strip()
+        if description:
+            kea_subnet["user-context"] = {"description": description}
         if s.get("gateway"):
             kea_subnet["option-data"].append(
                 {"name": "routers", "data": s["gateway"]}
@@ -366,6 +373,13 @@ class KeaManager:
             return val if isinstance(val, (int, float)) else 0
 
         id_to_cidr = {s.get("id"): s.get("subnet", "") for s in self.list_subnets()}
+        # user-context.description round-trips the NetBox prefix description
+        # (see build_subnet4) — used to label a scope by its real name instead
+        # of the bare "subnet <id>" fallback the UI used previously.
+        id_to_desc = {
+            s.get("id"): ((s.get("user-context") or {}).get("description") or "")
+            for s in self.list_subnets()
+        }
 
         subnet_ids = set()
         for k in raw:
@@ -382,6 +396,7 @@ class KeaManager:
             subnets.append({
                 "subnet_id":          sid,
                 "subnet":             id_to_cidr.get(sid, ""),
+                "description":        id_to_desc.get(sid, ""),
                 "total_addresses":    total,
                 "assigned_addresses": assigned,
                 "declined_addresses": declined,

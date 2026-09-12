@@ -23431,6 +23431,13 @@ async function showNetboxAllocatePrefixModal(editItem) {
         <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Subnet (optional)</label><input id="nb-p-prefix" class="${inputCls}" placeholder="10.0.0.16/28 — exact subnet to create; blank = auto"></div>`;
     const statusOpts = ['active', 'container', 'reserved', 'deprecated'].map(s =>
         `<option value="${s}"${editing && editItem.status === s ? ' selected' : ''}>${s}</option>`).join('');
+    // dhcp_enabled is the explicit opt-in checkbox: a prefix only becomes a
+    // Kea DHCP scope when this is checked (and status isn't "container") —
+    // so allocating a large parent block (e.g. a tenant's /17) never turns
+    // the WHOLE block into one giant scope. Carve smaller child prefixes
+    // below it and check this only on the ones meant to actually hand out
+    // addresses.
+    const dhcpChecked = editing ? !!(editItem?.custom_fields || {}).dhcp_enabled : false;
     const modal = openModal('nb-prefix-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Allocate'} Subnet${editing ? ` — <span class="font-mono text-sm">${val(editItem.prefix)}</span>` : ''}</h3>
         <div class="space-y-3">
@@ -23438,6 +23445,11 @@ async function showNetboxAllocatePrefixModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Description</label><input id="nb-p-desc" value="${val(editItem?.description)}" class="${inputCls}" placeholder="e.g. Lab Tenant A VLAN10"></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Site Slug (optional)</label><input id="nb-p-site" value="${val(editItem?.site)}" class="${inputCls}" placeholder="lab-a"></div>
             ${editing ? `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-p-status" class="${selectCls}">${statusOpts}</select></div>` : ''}
+            <label class="flex items-center gap-2 text-sm text-slate-600 pt-1">
+                <input type="checkbox" id="nb-p-dhcp" class="rounded border-slate-300 text-[#01A982]" ${dhcpChecked ? 'checked' : ''}>
+                Enable DHCP scope for this subnet
+            </label>
+            <p class="text-xs text-slate-400 -mt-1">Only checked, non-container prefixes are synced to Kea as a DHCP scope. Leave unchecked on a parent/aggregate block — carve smaller child subnets and enable this on those instead.</p>
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="submitNetboxAllocatePrefix()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Allocate'}</button>
@@ -23472,11 +23484,13 @@ async function submitNetboxAllocatePrefix() {
     const modal = document.getElementById('nb-prefix-modal');
     const editing = modal && modal.dataset.prefixId;
     const get = id => document.getElementById(id)?.value?.trim() || '';
+    const dhcpEnabled = !!document.getElementById('nb-p-dhcp')?.checked;
     if (editing) {
         const payload = {
             description: get('nb-p-desc'),
             status: get('nb-p-status') || 'active',
             site: get('nb-p-site') || undefined,
+            custom_fields: { dhcp_enabled: dhcpEnabled },
         };
         try {
             const d = await apiJson(`/api/netbox/prefixes/${modal.dataset.prefixId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
@@ -23492,6 +23506,7 @@ async function submitNetboxAllocatePrefix() {
         description: get('nb-p-desc'),
         site: get('nb-p-site') || undefined,
         status: 'active',
+        custom_fields: { dhcp_enabled: dhcpEnabled },
         tenant: (currentTenant && currentTenant !== 'default') ? currentTenant : undefined,
     };
     try {
@@ -28340,14 +28355,23 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                 _ddTile('DISCOVER / REQUEST', `${(g.pkt4_discover || 0).toLocaleString()} / ${(g.pkt4_request || 0).toLocaleString()}`, `${(g.pkt4_received || 0).toLocaleString()} received`),
                 _ddTile('OFFER / ACK / NAK', `${(g.pkt4_offer_sent || 0).toLocaleString()} / ${(g.pkt4_ack_sent || 0).toLocaleString()} / ${(g.pkt4_nak_sent || 0).toLocaleString()}`),
             ].join('');
-            const subnetRows = subnets.map(s => `
+            const subnetRows = subnets.map(s => {
+                // A subnet with no NetBox-sourced CIDR/description is not a
+                // real scope — most likely stale Kea state left over from a
+                // prior sync (e.g. a removed prefix). Flag it instead of
+                // rendering a meaningless "subnet <id>" label.
+                const label = s.subnet
+                    ? escapeHtml(s.subnet) + (s.description ? ` <span class="text-slate-400 font-normal">(${escapeHtml(s.description)})</span>` : '')
+                    : '<span class="text-red-500 italic">Unknown scope (not in NetBox — stale?)</span>';
+                return `
                 <div class="py-2 border-b border-slate-100 last:border-0">
                     <div class="flex items-center justify-between mb-1">
-                        <span class="font-mono text-sm font-medium text-slate-700">${escapeHtml(s.subnet || `subnet ${s.subnet_id}`)}</span>
+                        <span class="font-mono text-sm font-medium text-slate-700">${label}</span>
                         <span class="text-xs text-slate-500">${(s.assigned_addresses || 0).toLocaleString()} / ${(s.total_addresses || 0).toLocaleString()}${s.declined_addresses ? ` · ${s.declined_addresses} declined` : ''}</span>
                     </div>
                     ${_ddBar(s.utilization_pct)}
-                </div>`).join('');
+                </div>`;
+            }).join('');
             container.innerHTML = `
                 ${idleNote}
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">${tiles}</div>

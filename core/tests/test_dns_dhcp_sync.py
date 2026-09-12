@@ -22,8 +22,9 @@ def _ips_payload():
 
 def _prefixes_payload():
     return {"prefixes": [
-        {"prefix": "10.0.0.0/24", "description": "lab",
-         "custom_fields": {"gateway": "10.0.0.1", "dns_servers": "10.0.0.53,10.0.0.54"}},
+        {"prefix": "10.0.0.0/24", "description": "lab", "status": "active",
+         "custom_fields": {"gateway": "10.0.0.1", "dns_servers": "10.0.0.53,10.0.0.54",
+                            "dhcp_enabled": True}},
         {"prefix": "", "description": "skip-me"},                           # empty prefix → dropped
     ]}
 
@@ -69,6 +70,45 @@ def test_build_dhcp_payload_subnets_and_reservations():
     assert subs[0]["dns_servers"] == ["10.0.0.53", "10.0.0.54"]
     assert res == [{"ip": "10.0.0.5", "mac": "aa:bb:cc:dd:ee:ff",
                     "hostname": "host1.lab", "subnet": ""}]
+
+
+def test_build_dhcp_payload_skips_container_prefix():
+    """A NetBox 'container' prefix (a parent/aggregate block, e.g. a tenant's
+    whole /17) must never be synced as a DHCP scope itself, even if somehow
+    dhcp_enabled were set on it."""
+    pfx = {"prefixes": [
+        {"prefix": "172.17.0.0/17", "description": "SHARED tenant block",
+         "status": "container", "custom_fields": {"dhcp_enabled": True}},
+    ]}
+    subs, _ = build_dhcp_payload(pfx, {"ip_addresses": []})
+    assert subs == []
+
+
+def test_build_dhcp_payload_skips_prefix_not_opted_in():
+    """A normal (non-container) prefix without dhcp_enabled set must be
+    excluded — the checkbox is the only way a prefix becomes a Kea scope."""
+    pfx = {"prefixes": [
+        {"prefix": "10.0.1.0/24", "description": "not opted in",
+         "status": "active", "custom_fields": {}},
+    ]}
+    subs, _ = build_dhcp_payload(pfx, {"ip_addresses": []})
+    assert subs == []
+
+
+def test_build_dhcp_payload_includes_carved_child_prefix():
+    """Carving a smaller child prefix out of a container parent and enabling
+    dhcp_enabled on the CHILD (not the parent) is the supported way to scope
+    DHCP down from a large tenant allocation."""
+    pfx = {"prefixes": [
+        {"prefix": "172.17.0.0/17", "description": "SHARED parent",
+         "status": "container", "custom_fields": {}},
+        {"prefix": "172.17.0.0/24", "description": "SHARED - VLAN10",
+         "status": "active", "custom_fields": {"dhcp_enabled": True}},
+    ]}
+    subs, _ = build_dhcp_payload(pfx, {"ip_addresses": []})
+    assert len(subs) == 1
+    assert subs[0]["subnet"] == "172.17.0.0/24"
+    assert subs[0]["description"] == "SHARED - VLAN10"
 
 
 # ── sync_dns_from_netbox ─────────────────────────────────────────────────────
