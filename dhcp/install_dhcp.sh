@@ -236,12 +236,22 @@ fi
 # Strip it here so a freshly-installed node starts with an empty subnet4
 # instead of the packaged placeholder.
 KEA_DHCP4_CONF="/etc/kea/kea-dhcp4.conf"
-if [[ -f "$KEA_DHCP4_CONF" ]]; then
-    python3 - "$KEA_DHCP4_CONF" <<'PYEOF'
+# A reinstall/repackage can leave this file empty or mid-write (e.g. a prior
+# config-write that failed on the permission bug fixed above, or a fresh
+# `apt-get install --reinstall` that truncates it before repopulating). A bare
+# json.load() on that would raise JSONDecodeError and — under `set -e` — abort
+# the ENTIRE installer, leaving the node without lm-dhcp-worker/kea-ha-agent at
+# all. Treat a missing/empty/unparseable file as "nothing to strip" instead of
+# a fatal error; `|| true` also guards the rare case something else throws.
+if [[ -s "$KEA_DHCP4_CONF" ]]; then
+    python3 - "$KEA_DHCP4_CONF" <<'PYEOF' || true
 import json, sys
 path = sys.argv[1]
-with open(path) as f:
-    cfg = json.load(f)
+try:
+    with open(path) as f:
+        cfg = json.load(f)
+except (OSError, ValueError):
+    sys.exit(0)
 dhcp4 = cfg.get("Dhcp4", cfg)
 if dhcp4.get("subnet4"):
     dhcp4["subnet4"] = []
