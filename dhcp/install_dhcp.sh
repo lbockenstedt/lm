@@ -269,8 +269,13 @@ fi
 # its group was never widened for _kea (unlike kea-api-password/ha-tls, which
 # already get an explicit chgrp above), so it could apply-in-memory but never
 # persist, and a failed persist can't be rolled back on that node either.
+# 0660, NOT 0640: the file must be GROUP-WRITABLE for config-write to persist.
+# kea-api-password/ha-tls are 0640 correctly because _kea only ever READS
+# them; this file is the one _kea itself writes, so 0640 (group-READ only)
+# silently reproduced the exact same "Unable to open file ... for writing"
+# error this block exists to fix.
 chgrp _kea "$KEA_DHCP4_CONF" 2>/dev/null || true
-chmod 0640 "$KEA_DHCP4_CONF" 2>/dev/null || true
+chmod 0660 "$KEA_DHCP4_CONF" 2>/dev/null || true
 
 # Non-fatal: the distro Kea often fails to start on a fresh box (no subnets/
 # interfaces yet), but the lm-dhcp spoke talks to the ctrl-agent at RUNTIME and

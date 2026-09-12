@@ -336,7 +336,7 @@ def test_repair_kea_conf_permissions_chgrp_and_chmod(monkeypatch, tmp_path):
     monkeypatch.setattr(dhcp_worker.subprocess, "run", run)
     assert dhcp_worker.DhcpWorkerOps._repair_kea_conf_permissions() is True
     assert ["chgrp", "_kea", str(conf)] in calls
-    assert ["chmod", "0640", str(conf)] in calls
+    assert ["chmod", "0660", str(conf)] in calls
 
 
 def test_repair_kea_conf_permissions_false_when_file_missing(tmp_path):
