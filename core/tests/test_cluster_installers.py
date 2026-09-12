@@ -377,6 +377,19 @@ def test_dhcp_installer_strips_the_packaged_demo_subnet():
     assert 'dhcp4["subnet4"] = []' in src
 
 
+def test_dhcp_installer_grants_group_write_not_just_group_read():
+    """REGRESSION: the first fix for the config-write permission bug used
+    `chmod 0640` (rw-r-----), which only grants the _kea group READ access --
+    identical in shape to kea-api-password/ha-tls (also 0640), which are
+    correct at 0640 because _kea only ever READS those. This file is the one
+    _kea itself must WRITE via config-write, so 0640 silently reproduced the
+    exact "Unable to open file ... for writing" error live on both HA nodes
+    even after the "fix" was deployed. Must be 0660 (rw-rw----)."""
+    src = _read(DHCP_SH)
+    assert 'chmod 0660 "$KEA_DHCP4_CONF"' in src
+    assert 'chmod 0640 "$KEA_DHCP4_CONF"' not in src
+
+
 def test_dhcp_installer_demo_subnet_strip_tolerates_empty_or_bad_conf():
     """REGRESSION: a reinstall (or a prior config-write that failed on the
     permission bug fixed elsewhere in this installer) can leave
