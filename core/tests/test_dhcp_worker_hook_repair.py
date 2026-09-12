@@ -358,6 +358,68 @@ def test_repair_kea_conf_permissions_false_on_subprocess_error(monkeypatch, tmp_
     assert dhcp_worker.DhcpWorkerOps._repair_kea_conf_permissions() is False
 
 
+# ── AppArmor write-access self-heal ─────────────────────────────────────────
+# REGRESSION: even with Unix perms correctly at 0660 root:_kea, config-write
+# STILL failed live on one HA node with the IDENTICAL "Unable to open file
+# ... for writing" -- Ubuntu's shipped AppArmor profiles for kea-dhcp4/
+# kea-ctrl-agent grant only /etc/kea/ r + /etc/kea/** r (read-only), so
+# AppArmor denies the write() syscall before the kernel even checks the mode
+# bits. This masqueraded as the same permission bug this whole class of test
+# already covers.
+
+def test_repair_kea_apparmor_write_access_appends_override_and_reloads(monkeypatch, tmp_path):
+    aa_local = tmp_path / "local"
+    aa_local.mkdir()
+    aa_system = tmp_path / "system"
+    aa_system.mkdir()
+    (aa_system / "usr.sbin.kea-dhcp4").write_text("profile kea-dhcp4 {}\n")
+    (aa_system / "usr.sbin.kea-ctrl-agent").write_text("profile kea-ctrl-agent {}\n")
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_AA_LOCAL_DIR", str(aa_local))
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_AA_SYSTEM_DIR", str(aa_system))
+
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        return _proc(returncode=0)
+
+    monkeypatch.setattr(dhcp_worker.subprocess, "run", run)
+    assert dhcp_worker.DhcpWorkerOps._repair_kea_apparmor_write_access() is True
+    for profile in ("usr.sbin.kea-dhcp4", "usr.sbin.kea-ctrl-agent"):
+        override = aa_local / profile
+        assert "/etc/kea/kea-dhcp4.conf rw," in override.read_text()
+    reload_cmds = [c for c in calls if c[0] == "apparmor_parser"]
+    assert len(reload_cmds) == 2
+
+
+def test_repair_kea_apparmor_write_access_false_without_apparmor(tmp_path):
+    missing = tmp_path / "does-not-exist"
+    import unittest.mock as mock
+    with mock.patch.object(dhcp_worker.DhcpWorkerOps, "_AA_LOCAL_DIR", str(missing)):
+        assert dhcp_worker.DhcpWorkerOps._repair_kea_apparmor_write_access() is False
+
+
+def test_repair_kea_apparmor_write_access_idempotent(monkeypatch, tmp_path):
+    """A second call must not duplicate the override line."""
+    aa_local = tmp_path / "local"
+    aa_local.mkdir()
+    aa_system = tmp_path / "system"
+    aa_system.mkdir()
+    (aa_system / "usr.sbin.kea-dhcp4").write_text("profile kea-dhcp4 {}\n")
+    override = aa_local / "usr.sbin.kea-dhcp4"
+    override.write_text("  /etc/kea/kea-dhcp4.conf rw,\n")
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_AA_LOCAL_DIR", str(aa_local))
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_AA_SYSTEM_DIR", str(aa_system))
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_AA_PROFILES", ("usr.sbin.kea-dhcp4",))
+
+    def run(cmd, **kwargs):
+        return _proc(returncode=0)
+
+    monkeypatch.setattr(dhcp_worker.subprocess, "run", run)
+    assert dhcp_worker.DhcpWorkerOps._repair_kea_apparmor_write_access() is True
+    assert override.read_text().count("/etc/kea/kea-dhcp4.conf rw,") == 1
+
+
 class _FakeMgrConfWrite:
     """Minimal KeaManager stand-in for apply()'s config-write self-heal path.
 
@@ -389,9 +451,12 @@ def test_apply_self_heals_config_write_permission_and_succeeds(monkeypatch):
     worker.mgr = _FakeMgrConfWrite({"written": True, "error": ""})
     monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_repair_kea_conf_permissions",
                         staticmethod(lambda: True))
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_repair_kea_apparmor_write_access",
+                        classmethod(lambda cls: True))
     out = worker.apply({"config": {"subnet4": []}, "version": 7})
     assert out["status"] == "SUCCESS"
-    assert out["self_healed"] == ["fixed /etc/kea/kea-dhcp4.conf permissions"]
+    assert out["self_healed"] == ["fixed /etc/kea/kea-dhcp4.conf permissions",
+                                  "granted AppArmor write access to /etc/kea/kea-dhcp4.conf"]
     assert worker.mgr.write_config_calls == 1
 
 
@@ -400,6 +465,8 @@ def test_apply_falls_through_to_restore_when_conf_repair_fails(monkeypatch):
     worker.mgr = _FakeMgrConfWrite({"written": False, "error": "still broken"})
     monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_repair_kea_conf_permissions",
                         staticmethod(lambda: False))
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_repair_kea_apparmor_write_access",
+                        classmethod(lambda cls: False))
     out = worker.apply({"config": {"subnet4": []}, "version": 7})
     # Repair not attempted (returns False immediately) -> falls through to the
     # existing restore-and-report path, still reporting an error/partial verdict.
