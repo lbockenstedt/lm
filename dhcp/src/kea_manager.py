@@ -6,6 +6,7 @@ import ipaddress
 import os
 import shutil
 import subprocess
+import zlib
 
 logger = logging.getLogger("KeaManager")
 
@@ -46,6 +47,34 @@ def worker_code_version() -> dict:
     return out
 
 
+def _stable_subnet_id(subnet_str: str, taken: set) -> int:
+    """Deterministic Kea ``subnet-id`` for a CIDR, stable across syncs.
+
+    The old scheme assigned ``id = enumerate(subnets, start=1)`` — a bare
+    list POSITION. Any NetBox-side change that shifts the list (a scope
+    removed, reordered, or one inserted ahead of others) silently reassigns
+    every downstream subnet to a DIFFERENT numeric id on the very next sync.
+    Kea does not purge ``statistic-get-all`` history for an id that
+    disappears from ``subnet4`` on a ``config-set`` — those samples linger
+    in the running daemon's memory until it restarts — so each reshuffle
+    left the OLD id's stats behind as a permanent "Unknown scope (not in
+    NetBox — stale?)" 0/0 entry in the Overview, and every subsequent
+    NetBox edit minted a fresh batch of them.
+
+    Deriving the id from the CIDR itself instead means a given scope keeps
+    the same id release over release regardless of how many OTHER scopes
+    are added, removed, or reordered around it — nothing is orphaned, so
+    nothing goes stale. ``taken`` guards the astronomically unlikely CRC32
+    collision by linear-probing to the next free id.
+    """
+    base = zlib.crc32(subnet_str.encode()) & 0x7FFFFFFF or 1  # never 0
+    sid = base
+    while sid in taken:
+        sid = (sid % 0x7FFFFFFF) + 1
+    taken.add(sid)
+    return sid
+
+
 def build_subnet4(subnets: list, reservations: list) -> tuple:
     """Translate LM/NetBox intent into Kea's ``subnet4`` list.
 
@@ -57,13 +86,15 @@ def build_subnet4(subnets: list, reservations: list) -> tuple:
     """
     kea_subnets = []
     applied = [False] * len(reservations)
-    for idx, s in enumerate(subnets, start=1):
+    used_ids: set = set()
+    for s in subnets:
         subnet_str = s.get("subnet", "")
         try:
             net = ipaddress.ip_network(subnet_str, strict=False)
         except ValueError:
             logger.warning("Invalid subnet %s — skipping", subnet_str)
             continue
+        idx = _stable_subnet_id(subnet_str, used_ids)
 
         pools = [
             {"pool": f"{p['start']} - {p['end']}"}
@@ -386,6 +417,22 @@ class KeaManager:
             m = re.match(r"subnet\[(\d+)\]\.", k)
             if m:
                 subnet_ids.add(int(m.group(1)))
+
+        # Kea does NOT purge statistic-get-all history for a subnet-id that
+        # disappears from subnet4 on a config-set — those samples linger in
+        # the running daemon's memory until it restarts. Before build_subnet4
+        # switched to stable CIDR-derived ids, every NetBox-side reorder/
+        # add/remove reassigned ids and left the OLD id's stats behind
+        # forever as a meaningless "Unknown scope (not in NetBox — stale?)"
+        # 0/0 row. Those ids no longer belong to any currently-configured
+        # subnet — drop them outright instead of rendering a placeholder;
+        # they carry no scope to label and no address pool to report on.
+        stale_ids = subnet_ids - set(id_to_cidr)
+        if stale_ids:
+            logger.info("get_stats: dropping %d orphaned subnet stat id(s) "
+                        "no longer in the live Kea config: %s",
+                        len(stale_ids), sorted(stale_ids))
+        subnet_ids &= set(id_to_cidr)
 
         subnets = []
         for sid in sorted(subnet_ids):
