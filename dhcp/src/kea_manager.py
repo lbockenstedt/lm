@@ -193,6 +193,20 @@ class KeaManager:
             return {"set": True, "written": False, "error": str(e)}
         return {"set": True, "written": True, "error": ""}
 
+    def write_config(self) -> dict:
+        """Retry ``config-write`` alone against the ALREADY-set running config
+        — used by the worker's config-write-permission self-heal, which fixes
+        ``/etc/kea/kea-dhcp4.conf`` on disk and then just needs Kea to persist
+        what it's already running, with no need to re-send/re-validate the
+        whole config via ``config-set``. Returns ``{"written": bool,
+        "error": str}``."""
+        try:
+            self._rpc("dhcp4", "config-write", {})
+        except Exception as e:  # noqa: BLE001
+            return {"written": False, "error": str(e)}
+        return {"written": True, "error": ""}
+
+
     def sync(self, subnets: list, reservations: list) -> dict:
         """
         Full sync: replace all subnets and reservations.

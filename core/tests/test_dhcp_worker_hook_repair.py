@@ -321,3 +321,87 @@ def test_hook_load_failure_detail_prefers_error_line_over_benign_close(monkeypat
 
     assert "HA_CONFIGURATION_FAILED" in detail
     assert "Permission denied" in detail
+
+
+def test_repair_kea_conf_permissions_chgrp_and_chmod(monkeypatch, tmp_path):
+    conf = tmp_path / "kea-dhcp4.conf"
+    conf.write_text("{}")
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_KEA_DHCP4_CONF", str(conf))
+    calls = []
+
+    def run(cmd, **kwargs):
+        calls.append(cmd)
+        return _proc(returncode=0)
+
+    monkeypatch.setattr(dhcp_worker.subprocess, "run", run)
+    assert dhcp_worker.DhcpWorkerOps._repair_kea_conf_permissions() is True
+    assert ["chgrp", "_kea", str(conf)] in calls
+    assert ["chmod", "0640", str(conf)] in calls
+
+
+def test_repair_kea_conf_permissions_false_when_file_missing(tmp_path):
+    missing = tmp_path / "does-not-exist.conf"
+    import unittest.mock as mock
+    with mock.patch.object(dhcp_worker.DhcpWorkerOps, "_KEA_DHCP4_CONF", str(missing)):
+        assert dhcp_worker.DhcpWorkerOps._repair_kea_conf_permissions() is False
+
+
+def test_repair_kea_conf_permissions_false_on_subprocess_error(monkeypatch, tmp_path):
+    conf = tmp_path / "kea-dhcp4.conf"
+    conf.write_text("{}")
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_KEA_DHCP4_CONF", str(conf))
+
+    def run(cmd, **kwargs):
+        raise OSError("permission denied running chgrp")
+
+    monkeypatch.setattr(dhcp_worker.subprocess, "run", run)
+    assert dhcp_worker.DhcpWorkerOps._repair_kea_conf_permissions() is False
+
+
+class _FakeMgrConfWrite:
+    """Minimal KeaManager stand-in for apply()'s config-write self-heal path.
+
+    ``apply_config`` scripts a fixed sequence of (set, written, error) outcomes
+    (config-set always succeeds here; config-write fails with the permission
+    message on the first call). ``write_config`` scripts the standalone retry
+    used by the self-heal."""
+    def __init__(self, write_config_result):
+        self.get_config_calls = 0
+        self._write_config_result = write_config_result
+        self.write_config_calls = 0
+
+    def get_config(self):
+        self.get_config_calls += 1
+        return {}
+
+    def apply_config(self, cfg):
+        return {"set": True, "written": False,
+                "error": "Error during config-write: Unable to open file "
+                        "/etc/kea/kea-dhcp4.conf for writing"}
+
+    def write_config(self):
+        self.write_config_calls += 1
+        return self._write_config_result
+
+
+def test_apply_self_heals_config_write_permission_and_succeeds(monkeypatch):
+    worker = dhcp_worker.DhcpWorkerOps.__new__(dhcp_worker.DhcpWorkerOps)
+    worker.mgr = _FakeMgrConfWrite({"written": True, "error": ""})
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_repair_kea_conf_permissions",
+                        staticmethod(lambda: True))
+    out = worker.apply({"config": {"subnet4": []}, "version": 7})
+    assert out["status"] == "SUCCESS"
+    assert out["self_healed"] == ["fixed /etc/kea/kea-dhcp4.conf permissions"]
+    assert worker.mgr.write_config_calls == 1
+
+
+def test_apply_falls_through_to_restore_when_conf_repair_fails(monkeypatch):
+    worker = dhcp_worker.DhcpWorkerOps.__new__(dhcp_worker.DhcpWorkerOps)
+    worker.mgr = _FakeMgrConfWrite({"written": False, "error": "still broken"})
+    monkeypatch.setattr(dhcp_worker.DhcpWorkerOps, "_repair_kea_conf_permissions",
+                        staticmethod(lambda: False))
+    out = worker.apply({"config": {"subnet4": []}, "version": 7})
+    # Repair not attempted (returns False immediately) -> falls through to the
+    # existing restore-and-report path, still reporting an error/partial verdict.
+    assert out["status"] in ("ERROR", "PARTIAL")
+    assert worker.mgr.write_config_calls == 0
