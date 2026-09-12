@@ -277,6 +277,28 @@ fi
 chgrp _kea "$KEA_DHCP4_CONF" 2>/dev/null || true
 chmod 0660 "$KEA_DHCP4_CONF" 2>/dev/null || true
 
+# Even with 0660 root:_kea, config-write can STILL fail with the identical
+# "Unable to open file ... for writing" — Ubuntu's shipped AppArmor profiles
+# for kea-dhcp4 and kea-ctrl-agent grant only `/etc/kea/ r` + `/etc/kea/** r`
+# (read-only); AppArmor denies the write() syscall before the kernel even
+# checks the Unix mode bits, so this masquerades as the SAME error text as
+# the permission bug above and was previously misdiagnosed as fixed by 0660
+# alone. Drop a local override (the profile's own
+# `#include <local/usr.sbin.kea-...>` hook exists for exactly this) granting
+# write on the conf file to both profiles, then reload so it takes effect
+# without a kea restart.
+if [ -d /etc/apparmor.d/local ]; then
+    for profile in usr.sbin.kea-dhcp4 usr.sbin.kea-ctrl-agent; do
+        if [ -f "/etc/apparmor.d/$profile" ]; then
+            override="/etc/apparmor.d/local/$profile"
+            if ! grep -qs '/etc/kea/kea-dhcp4.conf rw,' "$override" 2>/dev/null; then
+                echo "  /etc/kea/kea-dhcp4.conf rw," >> "$override"
+            fi
+            apparmor_parser -r "/etc/apparmor.d/$profile" 2>/dev/null || true
+        fi
+    done
+fi
+
 # Non-fatal: the distro Kea often fails to start on a fresh box (no subnets/
 # interfaces yet), but the lm-dhcp spoke talks to the ctrl-agent at RUNTIME and
 # doesn't need Kea already up at install time — don't abort under `set -e`.
