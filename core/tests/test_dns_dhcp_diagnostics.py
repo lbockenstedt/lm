@@ -283,17 +283,22 @@ def test_dns_add_forwarder_restores_previous_file_when_reload_fails(
     assert (tmp_path / "lm-forwarders.conf").read_text() == original
 
 
-def test_list_leases_omits_arguments_for_all_leases(monkeypatch):
-    """``lease4-get-all`` has no "all" sentinel value — Kea's lease_cmds hook
-    only understands a ``subnets`` list filter (or its total absence, which
-    means every subnet). A stray ``{"subnet-id": 0}`` argument previously
-    errored on every call ("'subnets' parameter not specified"), so lease
-    queries always failed regardless of whether the requested subnet existed.
+def test_list_leases_passes_all_subnet_ids_explicitly_for_all_leases(monkeypatch):
+    """``lease4-get-all`` has no "all" sentinel value, and per ISC docs
+    omitting "arguments" entirely is supposed to mean "every subnet" — but
+    live testing against an HA-hooked node showed it rejects a bare/no-args
+    call with "'subnets' parameter not specified" regardless (the HA hook
+    likely intercepts lease4-get-all and requires an explicit subnet list).
+    Always pass every currently-configured subnet ID explicitly instead of
+    relying on that omission behaviour.
     """
     mgr = dhcp_manager.KeaManager()
     seen = {}
 
     def rpc(service, command, args=None):
+        if command == "subnet4-list":
+            return {"subnets": [{"id": 5, "subnet": "10.0.0.0/24"},
+                                {"id": 6, "subnet": "10.0.1.0/24"}]}
         assert command == "lease4-get-all"
         seen["args"] = args
         return {"leases": [{"ip": "10.0.0.10"}]}
@@ -302,7 +307,7 @@ def test_list_leases_omits_arguments_for_all_leases(monkeypatch):
 
     result = mgr.list_leases()
 
-    assert seen["args"] is None
+    assert seen["args"] == {"subnets": [5, 6]}
     assert result == [{"ip": "10.0.0.10"}]
 
 
