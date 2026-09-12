@@ -390,6 +390,24 @@ def test_dhcp_installer_grants_group_write_not_just_group_read():
     assert 'chmod 0640 "$KEA_DHCP4_CONF"' not in src
 
 
+def test_dhcp_installer_grants_apparmor_write_access_to_kea_conf():
+    """REGRESSION: even with Unix perms correctly at 0660 root:_kea,
+    config-write STILL failed live with the IDENTICAL "Unable to open file
+    ... for writing" error on one HA node -- Ubuntu's shipped AppArmor
+    profiles for kea-dhcp4/kea-ctrl-agent grant only `/etc/kea/ r` +
+    `/etc/kea/** r` (read-only). AppArmor denies the write() syscall before
+    the kernel even checks the mode bits, so this masqueraded as the same
+    permission bug and was previously believed fixed by 0660 alone. The
+    installer must drop a local AppArmor override granting write on the conf
+    file to BOTH profiles and reload them."""
+    src = _read(DHCP_SH)
+    assert "/etc/apparmor.d/local" in src
+    assert "usr.sbin.kea-dhcp4" in src
+    assert "usr.sbin.kea-ctrl-agent" in src
+    assert "/etc/kea/kea-dhcp4.conf rw," in src
+    assert "apparmor_parser -r" in src
+
+
 def test_dhcp_installer_demo_subnet_strip_tolerates_empty_or_bad_conf():
     """REGRESSION: a reinstall (or a prior config-write that failed on the
     permission bug fixed elsewhere in this installer) can leave
