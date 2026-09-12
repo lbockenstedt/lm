@@ -283,6 +283,96 @@ def test_dns_add_forwarder_restores_previous_file_when_reload_fails(
     assert (tmp_path / "lm-forwarders.conf").read_text() == original
 
 
+def test_rpc_treats_kea_empty_result_code_as_success_not_error(monkeypatch):
+    """Kea's control channel uses ``result: 3`` ("empty") for queries that
+    succeeded but found no matching data — e.g. ``lease4-get-all`` on a
+    subnet with no active leases yet, exactly the case right after DHCP
+    starts serving again post-outage. Only 1 (error) and 2 (unsupported)
+    are real failures; treating 3 as an error made every diagnostics call
+    on an otherwise-healthy, freshly recovered node report a misleading
+    lease-retrieval failure.
+    """
+    mgr = dhcp_manager.KeaManager()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"result": 3, "text": "0 IPv4 lease(s) found."}
+
+    monkeypatch.setattr(mgr._session, "post", lambda *a, **k: FakeResponse())
+
+    result = mgr._rpc("dhcp4", "lease4-get-all", {"subnets": [1]})
+
+    assert result == {}
+
+
+def test_rpc_still_raises_on_real_kea_error(monkeypatch):
+    mgr = dhcp_manager.KeaManager()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"result": 1, "text": "unsupported command"}
+
+    monkeypatch.setattr(mgr._session, "post", lambda *a, **k: FakeResponse())
+
+    try:
+        mgr._rpc("dhcp4", "bogus-command")
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert "unsupported command" in str(e)
+
+
+def test_list_leases_passes_all_subnet_ids_explicitly_for_all_leases(monkeypatch):
+    """``lease4-get-all`` has no "all" sentinel value, and per ISC docs
+    omitting "arguments" entirely is supposed to mean "every subnet" — but
+    live testing against an HA-hooked node showed it rejects a bare/no-args
+    call with "'subnets' parameter not specified" regardless (the HA hook
+    likely intercepts lease4-get-all and requires an explicit subnet list).
+    Always pass every currently-configured subnet ID explicitly instead of
+    relying on that omission behaviour.
+    """
+    mgr = dhcp_manager.KeaManager()
+    seen = {}
+
+    def rpc(service, command, args=None):
+        if command == "subnet4-list":
+            return {"subnets": [{"id": 5, "subnet": "10.0.0.0/24"},
+                                {"id": 6, "subnet": "10.0.1.0/24"}]}
+        assert command == "lease4-get-all"
+        seen["args"] = args
+        return {"leases": [{"ip": "10.0.0.10"}]}
+
+    monkeypatch.setattr(mgr, "_rpc", rpc)
+
+    result = mgr.list_leases()
+
+    assert seen["args"] == {"subnets": [5, 6]}
+    assert result == [{"ip": "10.0.0.10"}]
+
+
+def test_list_leases_filters_by_subnets_list_when_subnet_given(monkeypatch):
+    mgr = dhcp_manager.KeaManager()
+    seen = {}
+
+    def rpc(service, command, args=None):
+        if command == "subnet4-list":
+            return {"subnets": [{"id": 7, "subnet": "10.0.0.0/24"}]}
+        assert command == "lease4-get-all"
+        seen["args"] = args
+        return {"leases": []}
+
+    monkeypatch.setattr(mgr, "_rpc", rpc)
+
+    mgr.list_leases(subnet="10.0.0.0/24")
+
+    assert seen["args"] == {"subnets": [7]}
+
+
 def test_dhcp_diagnostics_matches_kea_health_contract(monkeypatch):
     mgr = dhcp_manager.KeaManager()
     monkeypatch.setattr(mgr, "_unit_status", lambda unit: {
@@ -346,3 +436,163 @@ def test_dhcp_diagnostics_is_unhealthy_when_config_retrieval_fails(monkeypatch):
     assert result["ca"]["config_loaded"] is False
     assert any("configuration retrieval failed" in item
                for item in result["recommendations"])
+
+
+def test_dhcp_diagnostics_self_heals_empty_interfaces_config(monkeypatch):
+    """A stock Debian kea-dhcp4.conf ships interfaces-config.interfaces == []
+    ("listen on nothing"), and nothing in the LM sync path (interfaces-config
+    is node-owned, see COORDINATOR_OWNED_KEYS in kea_ha.py) ever populates it.
+    The node looks entirely healthy — service active, HA fine, control agent
+    answering config-get — while Kea has never opened a DHCPv4 socket, which
+    is exactly "Nothing is listening on DHCP server port UDP/67". diagnostics()
+    must self-heal this by setting interfaces to ["*"] and restarting Kea so
+    the new interface binding actually takes effect."""
+    mgr = dhcp_manager.KeaManager()
+    monkeypatch.setattr(mgr, "_unit_status", lambda unit: {
+        "ActiveState": "active", "SubState": "running",
+        "NRestarts": "0", "ExecMainStatus": "0", "error": "",
+    })
+
+    restarted = []
+
+    def run(cmd, timeout=5):
+        if cmd[0] == "systemctl" and cmd[1] == "restart":
+            restarted.append(cmd[2])
+            return _result(output="")
+        if cmd[0] == "ss":
+            return _result(output="udp UNCONN 0 0 10.0.0.5:67 0.0.0.0:*")
+        return _result(output="configuration check successful")
+
+    state = {"interfaces": []}
+    set_calls = []
+
+    def rpc(service, command, args=None):
+        if command == "version-get":
+            return {"version": "2.4.1"}
+        if command == "config-get":
+            return {"Dhcp4": {
+                "interfaces-config": {"interfaces": state["interfaces"]},
+                "lease-database": {"name": "/var/lib/kea/kea-leases4.csv"},
+                "subnet4": [],
+            }}
+        if command == "config-set":
+            set_calls.append(args)
+            state["interfaces"] = (args["Dhcp4"]["interfaces-config"]
+                                    ["interfaces"])
+            return {}
+        if command == "config-write":
+            return {}
+        if command == "lease4-get-all":
+            return {"leases": []}
+        raise AssertionError(command)
+
+    monkeypatch.setattr(mgr, "_run_diag", run)
+    monkeypatch.setattr(mgr, "_rpc", rpc)
+    monkeypatch.setattr(dhcp_manager.os.path, "exists", lambda path: True)
+
+    result = mgr.diagnostics()
+
+    assert set_calls, "expected config-set to be called to fix interfaces"
+    assert set_calls[0]["Dhcp4"]["interfaces-config"]["interfaces"] == ["*"]
+    assert restarted == ["kea-dhcp4-server"]
+    assert result["self_healed"] == [
+        "set interfaces-config to listen on all interfaces "
+        "(was empty) and restarted kea-dhcp4-server"]
+    # the healed config is what the SECOND config-get (post self-heal) sees
+    assert result["interfaces_configured"] == ["*"]
+
+
+def test_dhcp_diagnostics_does_not_touch_interfaces_when_already_set(monkeypatch):
+    mgr = dhcp_manager.KeaManager()
+    monkeypatch.setattr(mgr, "_unit_status", lambda unit: {
+        "ActiveState": "active", "SubState": "running",
+        "NRestarts": "0", "ExecMainStatus": "0", "error": "",
+    })
+
+    def run(cmd, timeout=5):
+        if cmd[0] == "ss":
+            return _result(output="udp UNCONN 0 0 10.0.0.5:67 0.0.0.0:*")
+        return _result(output="configuration check successful")
+
+    def rpc(service, command, args=None):
+        if command == "version-get":
+            return {"version": "2.4.1"}
+        if command == "config-get":
+            return {"Dhcp4": {
+                "interfaces-config": {"interfaces": ["eth0"]},
+                "lease-database": {"name": "/var/lib/kea/kea-leases4.csv"},
+                "subnet4": [],
+            }}
+        if command == "config-set":
+            raise AssertionError("config-set must not be called")
+        if command == "lease4-get-all":
+            return {"leases": []}
+        raise AssertionError(command)
+
+    monkeypatch.setattr(mgr, "_run_diag", run)
+    monkeypatch.setattr(mgr, "_rpc", rpc)
+    monkeypatch.setattr(dhcp_manager.os.path, "exists", lambda path: True)
+
+    result = mgr.diagnostics()
+    assert result["self_healed"] == []
+
+
+def test_dhcp_diagnostics_self_heals_blank_placeholder_interfaces_entry(
+        monkeypatch):
+    """Regression test: Kea's ``config-get`` has been observed to echo an
+    unset ``interfaces`` list back as ``[""]`` (a single blank placeholder
+    entry) rather than a truly empty ``[]``. A plain truthiness check on that
+    list is fooled — ``[""]`` is a non-empty Python list — so the self-heal
+    would silently skip a node that is still listening on nothing. The fix
+    filters blank/whitespace-only entries before deciding, matching the same
+    stricter filtering diagnostics() already applies to interfaces_configured."""
+    mgr = dhcp_manager.KeaManager()
+    monkeypatch.setattr(mgr, "_unit_status", lambda unit: {
+        "ActiveState": "active", "SubState": "running",
+        "NRestarts": "0", "ExecMainStatus": "0", "error": "",
+    })
+
+    restarted = []
+
+    def run(cmd, timeout=5):
+        if cmd[0] == "systemctl" and cmd[1] == "restart":
+            restarted.append(cmd[2])
+            return _result(output="")
+        if cmd[0] == "ss":
+            return _result(output="udp UNCONN 0 0 10.0.0.5:67 0.0.0.0:*")
+        return _result(output="configuration check successful")
+
+    state = {"interfaces": [""]}
+    set_calls = []
+
+    def rpc(service, command, args=None):
+        if command == "version-get":
+            return {"version": "2.4.1"}
+        if command == "config-get":
+            return {"Dhcp4": {
+                "interfaces-config": {"interfaces": state["interfaces"]},
+                "lease-database": {"name": "/var/lib/kea/kea-leases4.csv"},
+                "subnet4": [],
+            }}
+        if command == "config-set":
+            set_calls.append(args)
+            state["interfaces"] = (args["Dhcp4"]["interfaces-config"]
+                                    ["interfaces"])
+            return {}
+        if command == "config-write":
+            return {}
+        if command == "lease4-get-all":
+            return {"leases": []}
+        raise AssertionError(command)
+
+    monkeypatch.setattr(mgr, "_run_diag", run)
+    monkeypatch.setattr(mgr, "_rpc", rpc)
+    monkeypatch.setattr(dhcp_manager.os.path, "exists", lambda path: True)
+
+    result = mgr.diagnostics()
+
+    assert set_calls, ("expected config-set to be called — a blank "
+                        "placeholder entry must not be treated as configured")
+    assert set_calls[0]["Dhcp4"]["interfaces-config"]["interfaces"] == ["*"]
+    assert restarted == ["kea-dhcp4-server"]
+    assert result["interfaces_configured"] == ["*"]

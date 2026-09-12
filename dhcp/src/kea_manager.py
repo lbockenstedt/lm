@@ -1,4 +1,5 @@
 import base64
+import copy
 import logging
 import re
 import requests
@@ -188,7 +189,16 @@ class KeaManager:
             result = r.json()
             if isinstance(result, list):
                 result = result[0]
-            if result.get("result", 0) != 0:
+            code = result.get("result", 0)
+            # Kea's control channel uses result=3 ("empty") for queries that
+            # succeeded but found no matching data — e.g. lease4-get-all on a
+            # subnet with no active leases yet (exactly the case right after
+            # DHCP starts serving again). Treating it as an error made every
+            # diagnostics/list_leases call on an otherwise-healthy, freshly
+            # recovered node fail with a misleading "Kea error" / lease
+            # retrieval failure, even though there was genuinely nothing
+            # wrong — only 1 (error) and 2 (unsupported) are real failures.
+            if code not in (0, 3):
                 raise RuntimeError(result.get("text", "Kea error"))
             return result.get("arguments", {})
         except requests.RequestException as e:
@@ -272,13 +282,20 @@ class KeaManager:
 
     def list_leases(self, subnet: str = None) -> list:
         try:
-            args = {"subnet-id": 0}  # 0 = all
+            # ``lease4-get-all`` has no "all leases" sentinel value, and per
+            # ISC docs omitting "arguments" entirely is supposed to mean
+            # "every subnet" — but this HA-hooked node rejects a bare/no-args
+            # call with "'subnets' parameter not specified" regardless (the
+            # HA hook likely intercepts lease4-get-all and requires an
+            # explicit subnet list to know which node's view is authoritative
+            # for each one). Always pass "subnets" explicitly: every
+            # currently-configured subnet ID for "all", or the one matching
+            # ``subnet`` when filtering.
+            kea_subnets = self.list_subnets()
+            ids = [s["id"] for s in kea_subnets if "id" in s]
             if subnet:
-                for s in self.list_subnets():
-                    if s.get("subnet") == subnet:
-                        args["subnet-id"] = s["id"]
-                        break
-            data = self._rpc("dhcp4", "lease4-get-all", args)
+                ids = [s["id"] for s in kea_subnets if s.get("subnet") == subnet]
+            data = self._rpc("dhcp4", "lease4-get-all", {"subnets": ids})
             return data.get("leases", [])
         except Exception as e:
             logger.error("list_leases failed: %s", e)
@@ -500,6 +517,10 @@ class KeaManager:
             actions.extend(self._heal_inactive_units())
         except Exception as e:  # noqa: BLE001
             logger.warning("self-heal (units) failed: %s", e)
+        try:
+            actions.extend(self._heal_missing_interfaces())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("self-heal (interfaces) failed: %s", e)
         return actions
 
     def _heal_api_password_file(self) -> list:
@@ -549,6 +570,73 @@ class KeaManager:
                     "self-heal: restart of %s failed: %s", unit, result["error"])
         return actions
 
+    def _heal_missing_interfaces(self) -> list:
+        """Set ``interfaces-config.interfaces`` when it is empty.
+
+        ``interfaces-config`` is node-owned (see ``build_node_config`` /
+        ``COORDINATOR_OWNED_KEYS`` in ``kea_ha.py``) — the LM sync path never
+        touches it, and the stock Debian ``kea-dhcp4-server`` package ships it
+        as ``[]`` ("listen on nothing") with a comment telling the operator to
+        fill it in by hand. Nothing in ``install_dhcp.sh`` ever did, so a node
+        can run for a long time looking completely healthy — service active,
+        HA heartbeats fine, control agent answering, config-get fine — while
+        Kea has never actually opened a DHCPv4 socket and every real client is
+        silently getting no offer at all. This is exactly the case behind the
+        "Nothing is listening on DHCP server port UDP/67" recommendation.
+
+        Heals by setting ``interfaces`` to ``["*"]`` — listen on every
+        interface, the same safe default an operator would type by hand — via
+        ``config-set``/``config-write``, then restarting the daemon: Kea's
+        DHCPv4 socket set is bound once at startup, so a ``config-set`` alone
+        (no restart) updates the on-disk/running JSON but does not open the
+        new listener until the process restarts.
+        """
+        try:
+            config = self.get_config()
+        except Exception as e:
+            logger.warning("self-heal (interfaces): could not read config: %s", e)
+            # Surface the failure instead of silently returning [] — a caller
+            # reading "no self-heal actions" has no way to tell "nothing
+            # needed fixing" apart from "the heal itself couldn't even check",
+            # which is exactly the ambiguity that let this stay broken.
+            return [f"could not check interfaces-config: {e}"]
+        raw_interfaces = ((config.get("interfaces-config", {}) or {})
+                          .get("interfaces", []) or [])
+        # Filter out blank/whitespace-only entries — Kea's config-get has been
+        # observed to echo an "empty" interfaces list back as ``[""]`` rather
+        # than ``[]``, which is still falsy/non-listening but IS a non-empty
+        # Python list, so a plain truthiness check would wrongly treat it as
+        # "already configured" and silently skip healing (matches the same
+        # stricter filtering diagnostics() already applies below).
+        interfaces = [v for v in raw_interfaces if str(v).strip()]
+        if interfaces:
+            return []
+        new_config = copy.deepcopy(config)
+        new_config.setdefault("interfaces-config", {})["interfaces"] = ["*"]
+        try:
+            result = self.apply_config(new_config)
+        except Exception as e:
+            logger.warning("self-heal (interfaces): apply failed: %s", e)
+            return [f"failed to set interfaces-config: {e}"]
+        if not (result.get("set") and result.get("written")):
+            logger.warning("self-heal (interfaces): apply did not succeed: %s", result)
+            return [f"could not set interfaces-config: "
+                    f"{result.get('error') or 'config-set/config-write did not report success'}"]
+        restart = self._run_diag(["systemctl", "restart", "kea-dhcp4-server"], timeout=20)
+        if not restart["ok"]:
+            logger.warning(
+                "self-heal (interfaces): config updated but restart failed: %s",
+                restart["error"])
+            return ["set interfaces-config to listen on all interfaces "
+                    "(restart failed — apply manually with systemctl restart "
+                    "kea-dhcp4-server)"]
+        logger.info(
+            "self-heal: interfaces-config was empty (Kea was listening on "
+            "nothing); set to listen on all interfaces and restarted "
+            "kea-dhcp4-server")
+        return ["set interfaces-config to listen on all interfaces "
+                "(was empty) and restarted kea-dhcp4-server"]
+
     def diagnostics(self) -> dict:
         """Return Kea service, config, interface, listener, CA, and lease checks."""
         repairs = self._self_heal()
@@ -596,8 +684,19 @@ class KeaManager:
             except Exception as e:
                 ca["error"] = str(e)
             try:
+                # Always pass "subnets" explicitly — per ISC docs, omitting
+                # "arguments" entirely means "every subnet", but this
+                # HA-hooked node rejects a bare/no-args call with
+                # "'subnets' parameter not specified" regardless (the HA hook
+                # likely intercepts lease4-get-all and requires an explicit
+                # subnet list to know which node's view is authoritative for
+                # each one). Reuse the subnet4 IDs from the config already
+                # fetched above rather than a second config-get/subnet4-list
+                # round trip.
+                subnet_ids = [s["id"] for s in (config.get("subnet4", []) or [])
+                              if "id" in s]
                 lease_data = self._rpc(
-                    "dhcp4", "lease4-get-all", {"subnet-id": 0})
+                    "dhcp4", "lease4-get-all", {"subnets": subnet_ids})
                 leases = lease_data.get("leases", [])
             except Exception as e:
                 if not ca["error"]:
