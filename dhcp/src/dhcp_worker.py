@@ -309,12 +309,17 @@ class DhcpWorkerOps:
             # and retry the SAME config-write once before falling through to
             # the restore-and-report path below.
             if "unable to open file" in write_err.lower() and "for writing" in write_err.lower():
+                healed = []
                 if self._repair_kea_conf_permissions():
+                    healed.append("fixed /etc/kea/kea-dhcp4.conf permissions")
+                if self._repair_kea_apparmor_write_access():
+                    healed.append("granted AppArmor write access to /etc/kea/kea-dhcp4.conf")
+                if healed:
                     retry_write = self.mgr.write_config()
                     if retry_write.get("written"):
                         return {"status": "SUCCESS", "version": data.get("version"),
                                 "mutated": True, "digest": config_fingerprint(cfg),
-                                "self_healed": ["fixed /etc/kea/kea-dhcp4.conf permissions"]}
+                                "self_healed": healed}
                     outcome = {**outcome, "error": retry_write.get("error") or write_err}
         if not outcome.get("set"):
             hook_dir = str(data.get("hook_dir") or "")
@@ -432,6 +437,56 @@ class DhcpWorkerOps:
             logger.warning("could not repair %s permissions: %s", f, e)
             return False
         return True
+
+    #: Ubuntu's shipped AppArmor profiles for kea-dhcp4 and kea-ctrl-agent
+    #: grant only ``/etc/kea/ r`` + ``/etc/kea/** r`` — read-only. Unix file
+    #: permissions on kea-dhcp4.conf can be perfectly correct (0660 root:_kea)
+    #: and config-write STILL fails with the identical "Unable to open file
+    #: ... for writing", because AppArmor denies the write() syscall before
+    #: the kernel even checks the file mode bits. This masqueraded as a
+    #: permissions bug (see ``_repair_kea_conf_permissions`` above) for a long
+    #: time because the error text is indistinguishable between the two
+    #: causes. Fix: drop a local override (the profile's own
+    #: ``#include <local/usr.sbin.kea-...>`` hook exists for exactly this)
+    #: granting write on the conf file, then reload the profile so it takes
+    #: effect without restarting kea.
+    _AA_LOCAL_DIR = "/etc/apparmor.d/local"
+    _AA_SYSTEM_DIR = "/etc/apparmor.d"
+    _AA_OVERRIDE_LINE = "  /etc/kea/kea-dhcp4.conf rw,\n"
+    _AA_PROFILES = ("usr.sbin.kea-dhcp4", "usr.sbin.kea-ctrl-agent")
+
+    @classmethod
+    def _repair_kea_apparmor_write_access(cls) -> bool:
+        """Append a local AppArmor override granting write on
+        ``kea-dhcp4.conf`` to both the ``kea-dhcp4`` and ``kea-ctrl-agent``
+        profiles (if not already present), then reload each profile with
+        ``apparmor_parser -r`` so it takes effect immediately. No-ops (and
+        returns ``False``) if AppArmor isn't in use on this host. Returns
+        ``True`` iff every profile needing the override got it applied."""
+        if not os.path.isdir(cls._AA_LOCAL_DIR):
+            return False
+        ok = True
+        for profile in cls._AA_PROFILES:
+            override_path = os.path.join(cls._AA_LOCAL_DIR, profile)
+            system_path = os.path.join(cls._AA_SYSTEM_DIR, profile)
+            if not os.path.isfile(system_path):
+                continue
+            try:
+                existing = ""
+                if os.path.isfile(override_path):
+                    with open(override_path, "r") as fh:
+                        existing = fh.read()
+                if cls._AA_OVERRIDE_LINE.strip() not in existing:
+                    with open(override_path, "a") as fh:
+                        fh.write(cls._AA_OVERRIDE_LINE)
+                subprocess.run(["apparmor_parser", "-r", system_path],
+                                capture_output=True, text=True, timeout=15, check=True)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("could not repair AppArmor write access for %s: %s",
+                               profile, e)
+                ok = False
+        return ok
+
 
     @staticmethod
     def _repair_hook_libraries(hook_dir: str) -> bool:
