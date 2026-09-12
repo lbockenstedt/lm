@@ -283,6 +283,50 @@ def test_dns_add_forwarder_restores_previous_file_when_reload_fails(
     assert (tmp_path / "lm-forwarders.conf").read_text() == original
 
 
+def test_rpc_treats_kea_empty_result_code_as_success_not_error(monkeypatch):
+    """Kea's control channel uses ``result: 3`` ("empty") for queries that
+    succeeded but found no matching data — e.g. ``lease4-get-all`` on a
+    subnet with no active leases yet, exactly the case right after DHCP
+    starts serving again post-outage. Only 1 (error) and 2 (unsupported)
+    are real failures; treating 3 as an error made every diagnostics call
+    on an otherwise-healthy, freshly recovered node report a misleading
+    lease-retrieval failure.
+    """
+    mgr = dhcp_manager.KeaManager()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"result": 3, "text": "0 IPv4 lease(s) found."}
+
+    monkeypatch.setattr(mgr._session, "post", lambda *a, **k: FakeResponse())
+
+    result = mgr._rpc("dhcp4", "lease4-get-all", {"subnets": [1]})
+
+    assert result == {}
+
+
+def test_rpc_still_raises_on_real_kea_error(monkeypatch):
+    mgr = dhcp_manager.KeaManager()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"result": 1, "text": "unsupported command"}
+
+    monkeypatch.setattr(mgr._session, "post", lambda *a, **k: FakeResponse())
+
+    try:
+        mgr._rpc("dhcp4", "bogus-command")
+        assert False, "expected RuntimeError"
+    except RuntimeError as e:
+        assert "unsupported command" in str(e)
+
+
 def test_list_leases_passes_all_subnet_ids_explicitly_for_all_leases(monkeypatch):
     """``lease4-get-all`` has no "all" sentinel value, and per ISC docs
     omitting "arguments" entirely is supposed to mean "every subnet" — but
