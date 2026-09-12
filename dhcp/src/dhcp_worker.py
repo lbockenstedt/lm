@@ -300,6 +300,22 @@ class DhcpWorkerOps:
         if outcome.get("set") and outcome.get("written"):
             return {"status": "SUCCESS", "version": data.get("version"),
                     "mutated": True, "digest": config_fingerprint(cfg)}
+        if outcome.get("set") and not outcome.get("written"):
+            write_err = str(outcome.get("error") or "")
+            # config-set landed (running config is already the new one) but
+            # config-write couldn't persist it — if that's the master conf
+            # file's own permissions (root:root 0644 with no group-write for
+            # _kea, the same class of bug as the HA-TLS directory), fix it
+            # and retry the SAME config-write once before falling through to
+            # the restore-and-report path below.
+            if "unable to open file" in write_err.lower() and "for writing" in write_err.lower():
+                if self._repair_kea_conf_permissions():
+                    retry_write = self.mgr.write_config()
+                    if retry_write.get("written"):
+                        return {"status": "SUCCESS", "version": data.get("version"),
+                                "mutated": True, "digest": config_fingerprint(cfg),
+                                "self_healed": ["fixed /etc/kea/kea-dhcp4.conf permissions"]}
+                    outcome = {**outcome, "error": retry_write.get("error") or write_err}
         if not outcome.get("set"):
             hook_dir = str(data.get("hook_dir") or "")
             error = outcome.get("error") or "config-set failed"
@@ -382,6 +398,33 @@ class DhcpWorkerOps:
                             capture_output=True, text=True, timeout=10, check=True)
         except Exception as e:  # noqa: BLE001
             logger.warning("could not repair %s permissions: %s", d, e)
+            return False
+        return True
+
+    #: The Debian package ships this root:root 0644 (world-readable, no
+    #: group-write). The daemon runs as _kea and "config-write" opens this
+    #: exact path for writing IN-PROCESS as _kea — without a group-write
+    #: grant every config-write (including a rollback's local restore) fails
+    #: with "Unable to open file ... for writing", identical in spirit to the
+    #: HA-TLS directory bug above but on the master config file itself.
+    _KEA_DHCP4_CONF = "/etc/kea/kea-dhcp4.conf"
+
+    @staticmethod
+    def _repair_kea_conf_permissions() -> bool:
+        """Group-own ``/etc/kea/kea-dhcp4.conf`` to ``_kea`` and grant
+        group-write so the daemon's own ``config-write`` RPC can persist it.
+        Fixed, argument-free ``chgrp``/``chmod`` calls only. Returns ``True``
+        iff the file exists and every fix-up call succeeded."""
+        f = DhcpWorkerOps._KEA_DHCP4_CONF
+        if not os.path.isfile(f):
+            return False
+        try:
+            subprocess.run(["chgrp", "_kea", f],
+                            capture_output=True, text=True, timeout=10, check=True)
+            subprocess.run(["chmod", "0640", f],
+                            capture_output=True, text=True, timeout=10, check=True)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("could not repair %s permissions: %s", f, e)
             return False
         return True
 

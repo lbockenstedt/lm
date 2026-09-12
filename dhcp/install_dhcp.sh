@@ -250,6 +250,18 @@ if dhcp4.get("subnet4"):
 PYEOF
 fi
 
+# The Debian package ships kea-dhcp4.conf root:root 0644 — world-readable but
+# NOT group-writable. The daemon runs as _kea and its "config-write" RPC
+# (called by every KEAW_APPLY, and by the HA rollback's local restore) opens
+# this exact path for writing IN-PROCESS as _kea, so without a group-write
+# grant every config-write fails with "Unable to open file ... for writing"
+# — discovered live: one HA member had this master file 0644/root:root while
+# its group was never widened for _kea (unlike kea-api-password/ha-tls, which
+# already get an explicit chgrp above), so it could apply-in-memory but never
+# persist, and a failed persist can't be rolled back on that node either.
+chgrp _kea "$KEA_DHCP4_CONF" 2>/dev/null || true
+chmod 0640 "$KEA_DHCP4_CONF" 2>/dev/null || true
+
 # Non-fatal: the distro Kea often fails to start on a fresh box (no subnets/
 # interfaces yet), but the lm-dhcp spoke talks to the ctrl-agent at RUNTIME and
 # doesn't need Kea already up at install time — don't abort under `set -e`.
