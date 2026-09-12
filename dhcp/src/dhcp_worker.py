@@ -421,7 +421,12 @@ class DhcpWorkerOps:
         try:
             subprocess.run(["chgrp", "_kea", f],
                             capture_output=True, text=True, timeout=10, check=True)
-            subprocess.run(["chmod", "0640", f],
+            # 0660 (not 0640): the file must be GROUP-WRITABLE for the _kea
+            # daemon's own config-write RPC to persist -- 0640 only grants the
+            # _kea group read, which looked identical to ha-tls/kea-api-password
+            # (both correctly 0640, but those are only ever read by the _kea
+            # process, never written) and silently never actually fixed the bug.
+            subprocess.run(["chmod", "0660", f],
                             capture_output=True, text=True, timeout=10, check=True)
         except Exception as e:  # noqa: BLE001
             logger.warning("could not repair %s permissions: %s", f, e)
