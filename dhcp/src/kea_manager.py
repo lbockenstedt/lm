@@ -273,19 +273,20 @@ class KeaManager:
 
     def list_leases(self, subnet: str = None) -> list:
         try:
-            # ``lease4-get-all`` has no "all leases" sentinel value — Kea only
-            # recognises a "subnets" list argument (or its total absence, which
-            # means "every subnet"). Passing ``{"subnet-id": 0}`` is not a
-            # parameter Kea's lease_cmds hook understands at all and errors out
-            # ("'subnets' parameter not specified"), so every lease query
-            # failed regardless of whether the requested subnet existed.
-            args = {}
+            # ``lease4-get-all`` has no "all leases" sentinel value, and per
+            # ISC docs omitting "arguments" entirely is supposed to mean
+            # "every subnet" — but this HA-hooked node rejects a bare/no-args
+            # call with "'subnets' parameter not specified" regardless (the
+            # HA hook likely intercepts lease4-get-all and requires an
+            # explicit subnet list to know which node's view is authoritative
+            # for each one). Always pass "subnets" explicitly: every
+            # currently-configured subnet ID for "all", or the one matching
+            # ``subnet`` when filtering.
+            kea_subnets = self.list_subnets()
+            ids = [s["id"] for s in kea_subnets if "id" in s]
             if subnet:
-                for s in self.list_subnets():
-                    if s.get("subnet") == subnet:
-                        args["subnets"] = [s["id"]]
-                        break
-            data = self._rpc("dhcp4", "lease4-get-all", args or None)
+                ids = [s["id"] for s in kea_subnets if s.get("subnet") == subnet]
+            data = self._rpc("dhcp4", "lease4-get-all", {"subnets": ids})
             return data.get("leases", [])
         except Exception as e:
             logger.error("list_leases failed: %s", e)
@@ -674,12 +675,19 @@ class KeaManager:
             except Exception as e:
                 ca["error"] = str(e)
             try:
-                # Omit "arguments" entirely for "every lease" — Kea's
-                # lease_cmds hook only understands a "subnets" list filter (or
-                # its absence); "subnet-id": 0 is not a real parameter and
-                # always errored, which is why lease counts were always
-                # unavailable even on an otherwise-healthy node.
-                lease_data = self._rpc("dhcp4", "lease4-get-all")
+                # Always pass "subnets" explicitly — per ISC docs, omitting
+                # "arguments" entirely means "every subnet", but this
+                # HA-hooked node rejects a bare/no-args call with
+                # "'subnets' parameter not specified" regardless (the HA hook
+                # likely intercepts lease4-get-all and requires an explicit
+                # subnet list to know which node's view is authoritative for
+                # each one). Reuse the subnet4 IDs from the config already
+                # fetched above rather than a second config-get/subnet4-list
+                # round trip.
+                subnet_ids = [s["id"] for s in (config.get("subnet4", []) or [])
+                              if "id" in s]
+                lease_data = self._rpc(
+                    "dhcp4", "lease4-get-all", {"subnets": subnet_ids})
                 leases = lease_data.get("leases", [])
             except Exception as e:
                 if not ca["error"]:
