@@ -273,13 +273,19 @@ class KeaManager:
 
     def list_leases(self, subnet: str = None) -> list:
         try:
-            args = {"subnet-id": 0}  # 0 = all
+            # ``lease4-get-all`` has no "all leases" sentinel value — Kea only
+            # recognises a "subnets" list argument (or its total absence, which
+            # means "every subnet"). Passing ``{"subnet-id": 0}`` is not a
+            # parameter Kea's lease_cmds hook understands at all and errors out
+            # ("'subnets' parameter not specified"), so every lease query
+            # failed regardless of whether the requested subnet existed.
+            args = {}
             if subnet:
                 for s in self.list_subnets():
                     if s.get("subnet") == subnet:
-                        args["subnet-id"] = s["id"]
+                        args["subnets"] = [s["id"]]
                         break
-            data = self._rpc("dhcp4", "lease4-get-all", args)
+            data = self._rpc("dhcp4", "lease4-get-all", args or None)
             return data.get("leases", [])
         except Exception as e:
             logger.error("list_leases failed: %s", e)
@@ -668,8 +674,12 @@ class KeaManager:
             except Exception as e:
                 ca["error"] = str(e)
             try:
-                lease_data = self._rpc(
-                    "dhcp4", "lease4-get-all", {"subnet-id": 0})
+                # Omit "arguments" entirely for "every lease" — Kea's
+                # lease_cmds hook only understands a "subnets" list filter (or
+                # its absence); "subnet-id": 0 is not a real parameter and
+                # always errored, which is why lease counts were always
+                # unavailable even on an otherwise-healthy node.
+                lease_data = self._rpc("dhcp4", "lease4-get-all")
                 leases = lease_data.get("leases", [])
             except Exception as e:
                 if not ca["error"]:
