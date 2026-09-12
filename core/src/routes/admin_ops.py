@@ -204,6 +204,44 @@ def register(app, hub, ctx):
                        spoke_id, role)
         return {"status": "ok", "target": spoke_id, "role": role, "result": result}
 
+    @app.post("/admin/ops/clear-deploy-status")
+    async def admin_ops_clear_deploy_status(request: Request):
+        """Force-dismiss a stuck deploy-role badge (e.g. "NetBox Server:
+        failed") via loopback, bypassing the WebUI's normal
+        ``CLEAR_DEPLOY_STATUS`` path when it's unreachable (e.g. the operator
+        is locked out of the session, or the badge keeps reappearing because
+        the owning agent process — not just the hub's record of it — never
+        actually forgot the failed attempt in memory).
+
+        Relays the exact same ``CLEAR_DEPLOY_STATUS`` RPC the WebUI's ×
+        button sends (see ``clearDeployStatus`` in main.js / the agent's
+        ``CLEAR_DEPLOY_STATUS`` handler in ``agent_spoke.py``) — it only
+        forgets the agent's in-memory ``_deploy_status_by_role`` entry for
+        that role. It does NOT touch the installed service, retry the
+        deploy, or affect the durable ``installed_deploy_roles`` marker;
+        re-loading the role starts a fresh status regardless. Body:
+        {"spoke_id": ..., "role": ...}."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        spoke_id = (body or {}).get("spoke_id")
+        role = (body or {}).get("role")
+        if not spoke_id or not role:
+            raise HTTPException(status_code=400, detail="spoke_id and role are required")
+        if hub._primary_key(spoke_id) not in hub.active_connections:
+            raise HTTPException(status_code=503, detail=f"spoke '{spoke_id}' not connected")
+        try:
+            result = await hub.request_response(spoke_id, "CLEAR_DEPLOY_STATUS",
+                                                {"role": role}, timeout=30.0)
+        except Exception as e:
+            logger.exception("admin_ops: clear-deploy-status failed for %s/%s", spoke_id, role)
+            raise HTTPException(status_code=500, detail=str(e))
+        logger.warning("admin_ops: clear-deploy-status driven via loopback for spoke=%s role=%s",
+                       spoke_id, role)
+        return {"status": "ok", "target": spoke_id, "role": role, "result": result}
+
     @app.post("/admin/ops/approve-agent")
     async def admin_ops_approve_agent(request: Request):
         """Approve a pending relayed node-agent — identical logic to the WebUI
