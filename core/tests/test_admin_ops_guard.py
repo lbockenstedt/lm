@@ -409,6 +409,54 @@ def test_unload_role_enforces_loopback_and_token():
         assert ei.value.status_code == 403
 
 
+# ── clear-deploy-status: force-dismiss a stuck deploy-role badge (e.g.
+# "NetBox Server: failed") when the WebUI's own × button is unreachable or
+# the badge keeps reappearing ────────────────────────────────────────────────
+
+def test_clear_deploy_status_relays_clear_deploy_status_rpc():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        fn = app.routes[("POST", "/admin/ops/clear-deploy-status")]
+        out = asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {
+            "spoke_id": "cs-svr-06", "role": "netbox-server"})))
+        assert out["status"] == "ok"
+        sid, cmd, data = hub.relayed[-1]
+        assert sid == "cs-svr-06" and cmd == "CLEAR_DEPLOY_STATUS"
+        assert data["role"] == "netbox-server"
+
+
+def test_clear_deploy_status_requires_spoke_id_and_role():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        fn = app.routes[("POST", "/admin/ops/clear-deploy-status")]
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {"spoke_id": "cs-svr-06"})))
+        assert ei.value.status_code == 400
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {"role": "netbox-server"})))
+        assert ei.value.status_code == 400
+
+
+def test_clear_deploy_status_rejects_disconnected_spoke():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        fn = app.routes[("POST", "/admin/ops/clear-deploy-status")]
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {
+                "spoke_id": "not-connected-agent", "role": "netbox-server"})))
+        assert ei.value.status_code == 503
+
+
+def test_clear_deploy_status_enforces_loopback_and_token():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_relay(tmp)
+        fn = app.routes[("POST", "/admin/ops/clear-deploy-status")]
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(fn(_BodyRequest("10.0.0.5", tok, {
+                "spoke_id": "cs-svr-06", "role": "netbox-server"})))
+        assert ei.value.status_code == 403
+
+
 def test_dhcp_ha_status_no_spoke_returns_disabled():
     with tempfile.TemporaryDirectory() as tmp:
         app, hub, tok = _reg_relay(tmp)
