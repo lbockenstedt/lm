@@ -375,3 +375,25 @@ def test_dhcp_installer_strips_the_packaged_demo_subnet():
     src = _read(DHCP_SH)
     assert "kea-dhcp4.conf" in src
     assert 'dhcp4["subnet4"] = []' in src
+
+
+def test_dhcp_installer_demo_subnet_strip_tolerates_empty_or_bad_conf():
+    """REGRESSION: a reinstall (or a prior config-write that failed on the
+    permission bug fixed elsewhere in this installer) can leave
+    kea-dhcp4.conf empty or mid-write. The old code did a bare `-f` existence
+    check + json.load() with no guard, so under `set -e` a truncated/invalid
+    file raised JSONDecodeError and aborted the ENTIRE install -- observed
+    live as 'Deployment of dhcp-server failed (rc=1)' on both HA nodes after
+    a reinstall. The strip step must treat an empty/unparseable file as
+    nothing-to-strip, not a fatal error."""
+    src = _read(DHCP_SH)
+    # `-s` (non-empty) instead of the old bare `-f` (exists), so a
+    # zero-byte file skips the python step entirely.
+    assert '-s "$KEA_DHCP4_CONF"' in src
+    # The python side must also survive a non-empty-but-invalid file.
+    assert "except (OSError, ValueError):" in src
+    assert "sys.exit(0)" in src
+    # And the whole heredoc invocation itself must not be able to trip `set -e`.
+    strip_idx = src.index('python3 - "$KEA_DHCP4_CONF" <<')
+    line_end = src.index("\n", strip_idx)
+    assert src[strip_idx:line_end].rstrip().endswith("|| true")
