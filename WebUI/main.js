@@ -23881,12 +23881,30 @@ function _spokeErrorBanner(detail, fallback) {
 // ── Shared stat-tile + utilization-bar helpers for the DNS/DHCP analytics
 // panels (Phase 3). Kept local to the resolver views; mirror the compact
 // tile look used elsewhere in the app.
-function _ddTile(label, value, sub, valueColor) {
+function _ddTile(label, value, sub, valueColor, actionHtml) {
     return `<div class="bg-white border border-slate-200 rounded-lg p-4">
         <div class="text-[11px] uppercase tracking-wide text-slate-400 font-semibold">${escapeHtml(label)}</div>
         <div class="mt-1 text-2xl font-bold ${valueColor || 'text-slate-800'}">${escapeHtml(String(value))}</div>
-        ${sub ? `<div class="text-xs text-slate-400 mt-0.5">${escapeHtml(String(sub))}</div>` : ''}
+        ${(sub || actionHtml) ? `<div class="text-xs text-slate-400 mt-0.5 flex items-center justify-between gap-1">${sub ? `<span class="truncate">${escapeHtml(String(sub))}</span>` : '<span></span>'}${actionHtml || ''}</div>` : ''}
     </div>`;
+}
+
+function _showDhcpConfigDetailsModal() {
+    const cfg = window._dhcpConfigTest || {};
+    const text = (cfg.output || cfg.error || 'No output recorded.').trim();
+    const status = cfg.ok ? '<span class="text-emerald-600 font-bold">PASS</span>' : '<span class="text-red-600 font-bold">FAIL</span>';
+    openModal('dhcp-cfg-details-modal', `
+        <div class="flex items-center justify-between pb-3 border-b border-slate-200">
+            <h3 class="text-base font-bold text-[#263040]">Kea DHCP Configuration Test — ${status}</h3>
+            <button onclick="document.getElementById('dhcp-cfg-details-modal').remove()" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+        </div>
+        <div class="mt-3">
+            <div class="text-xs font-semibold text-slate-500 uppercase mb-1">Command Output</div>
+            <pre class="bg-slate-900 text-slate-100 p-3 rounded font-mono text-xs whitespace-pre-wrap max-h-96 overflow-y-auto">${escapeHtml(text)}</pre>
+        </div>
+        <div class="flex justify-end pt-3">
+            <button onclick="document.getElementById('dhcp-cfg-details-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
+        </div>`, { card: 'w-full max-w-2xl p-6 space-y-3 max-h-[90vh] overflow-y-auto', backdropClose: true });
 }
 
 // A horizontal utilization/percentage bar, green→amber→red by threshold.
@@ -28548,9 +28566,13 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
             const subnets = Array.isArray(d.subnets) ? d.subnets : [];
             const recommendations = Array.isArray(d.recommendations) ? d.recommendations : [];
             const unitText = u => `${u.ActiveState || '?'} / ${u.SubState || '?'}${u.NRestarts && u.NRestarts !== '0' ? ` · ${u.NRestarts} restart(s)` : ''}`;
-            const check = (label, pass, detailText) => _ddTile(
+            const check = (label, pass, detailText, actionHtml) => _ddTile(
                 label, pass ? 'PASS' : 'FAIL', detailText || '',
-                pass ? 'text-emerald-600' : 'text-red-600');
+                pass ? 'text-emerald-600' : 'text-red-600', actionHtml);
+            window._dhcpConfigTest = cfg;
+            const hasCfgDetails = Boolean((cfg.output || cfg.error) && String(cfg.output || cfg.error).trim());
+            const cfgSub = cfg.ok ? 'syntax valid' : (cfg.error || cfg.output ? 'syntax error' : 'syntax invalid');
+            const cfgAction = hasCfgDetails ? `<button onclick="_showDhcpConfigDetailsModal()" class="text-xs text-[#01A982] hover:underline font-semibold ml-auto flex-shrink-0">Details</button>` : '';
             const subnetRows = subnets.map(s => `<tr class="border-b border-slate-100">
                 <td class="px-4 py-2 text-xs">${escapeHtml(String(s.id == null ? '—' : s.id))}</td>
                 <td class="px-4 py-2 font-mono text-xs">${escapeHtml(s.subnet || '—')}</td>
@@ -28578,7 +28600,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
                     ${check('DHCP4 Service', dhcp4.ActiveState === 'active', unitText(dhcp4))}
                     ${check('Control Agent', caUnit.ActiveState === 'active' && !!ca.reachable, ca.error || (caCfg.ok === false ? `config error: ${(caCfg.error || caCfg.output || '').slice(0, 120)}` : unitText(caUnit)))}
-                    ${check('Configuration', !!cfg.ok, cfg.output || cfg.error || 'valid')}
+                    ${check('Configuration', !!cfg.ok, cfgSub, cfgAction)}
                     ${check('UDP/67 Listener', (listeners.dhcp4 || []).length > 0, (listeners.dhcp4 || []).length ? `${listeners.dhcp4.length} listener(s)` : (listeners.error || 'not listening'))}
                 </div>
                 ${recommendations.length ? `<div class="mb-4 p-4 rounded-lg bg-amber-50 border border-amber-200">
