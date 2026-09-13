@@ -340,9 +340,9 @@ def test_list_leases_passes_all_subnet_ids_explicitly_for_all_leases(monkeypatch
     seen = {}
 
     def rpc(service, command, args=None):
-        if command == "subnet4-list":
-            return {"subnets": [{"id": 5, "subnet": "10.0.0.0/24"},
-                                {"id": 6, "subnet": "10.0.1.0/24"}]}
+        if command == "config-get":
+            return {"Dhcp4": {"subnet4": [{"id": 5, "subnet": "10.0.0.0/24"},
+                                          {"id": 6, "subnet": "10.0.1.0/24"}]}}
         assert command == "lease4-get-all"
         seen["args"] = args
         return {"leases": [{"ip": "10.0.0.10"}]}
@@ -360,8 +360,8 @@ def test_list_leases_filters_by_subnets_list_when_subnet_given(monkeypatch):
     seen = {}
 
     def rpc(service, command, args=None):
-        if command == "subnet4-list":
-            return {"subnets": [{"id": 7, "subnet": "10.0.0.0/24"}]}
+        if command == "config-get":
+            return {"Dhcp4": {"subnet4": [{"id": 7, "subnet": "10.0.0.0/24"}]}}
         assert command == "lease4-get-all"
         seen["args"] = args
         return {"leases": []}
@@ -371,6 +371,36 @@ def test_list_leases_filters_by_subnets_list_when_subnet_given(monkeypatch):
     mgr.list_leases(subnet="10.0.0.0/24")
 
     assert seen["args"] == {"subnets": [7]}
+
+
+def test_list_subnets_sources_config_get_not_subnet4_list(monkeypatch):
+    """``subnet4-list`` requires ``libdhcp_subnet_cmds.so`` to be loaded — a
+    live production install had only ``lease_cmds`` + ``ha`` loaded, so that
+    RPC always answered "command not supported" (result 2). ``list_subnets``
+    swallowed the resulting exception and returned an empty list, which then
+    propagated into ``get_stats`` (Overview "No subnets configured"),
+    ``list_leases`` (no subnet IDs to query), and the WebUI's Subnets tab —
+    all reporting nothing configured despite Kea actually serving a
+    correctly-synced subnet. ``list_subnets`` must source subnet4 from
+    ``config-get`` (a core command with no optional-hook dependency) instead.
+    """
+    mgr = dhcp_manager.KeaManager()
+
+    def rpc(service, command, args=None):
+        if command == "subnet4-list":
+            raise RuntimeError("'subnet4-list' command not supported.")
+        assert command == "config-get"
+        return {"Dhcp4": {"subnet4": [
+            {"id": 3, "subnet": "172.17.0.0/24",
+             "pools": [{"pool": "172.17.0.10 - 172.17.0.254"}]},
+        ]}}
+
+    monkeypatch.setattr(mgr, "_rpc", rpc)
+
+    result = mgr.list_subnets()
+
+    assert result == [{"id": 3, "subnet": "172.17.0.0/24",
+                       "pools": [{"pool": "172.17.0.10 - 172.17.0.254"}]}]
 
 
 def test_dhcp_diagnostics_matches_kea_health_contract(monkeypatch):
