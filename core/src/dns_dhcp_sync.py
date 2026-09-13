@@ -111,6 +111,7 @@ def build_dhcp_payload(pfx_data: Dict[str, Any],
             "netbios_name_servers": _csv(cf.get("netbios_name_servers")),
             "broadcast_address":   (cf.get("broadcast_address") or "").strip(),
             "lease_time":          cf.get("lease_time") or None,
+            "exclusion_ranges":    (cf.get("exclusion_ranges") or cf.get("exclusions") or "").strip(),
             "pools":               [],
         })
 
