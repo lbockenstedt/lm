@@ -28703,6 +28703,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(validUntil)}</td>
                     <td class="px-4 py-2 whitespace-nowrap text-right">
                         ${ip && mac ? `<button onclick="convertLeaseToReservation('${eIp}')" title="Convert to static reservation" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2.5 py-1 rounded transition-colors font-medium">Reserve</button>` : ''}
+                        ${ip ? `<button onclick="deleteDhcpLease('${eIp}')" title="Delete lease" class="p-1 text-slate-300 hover:text-red-500 transition-colors ml-1">${delIcon}</button>` : ''}
                     </td>
                 </tr>`;
             }).join('');
@@ -28803,6 +28804,7 @@ function showDhcpReservationModal(editItem, isConvert = false) {
             <button onclick="document.getElementById('dhcp-res-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) modal.dataset.editIp = editItem.ip;
+    if (isConvert && editItem?.ip) modal.dataset.oldLeaseIp = editItem.ip;
     _loadDhcpSubnetOptions('dhcp-res-subnet', editItem?.subnet_id);
 }
 
@@ -28821,6 +28823,7 @@ async function saveDhcpReservation() {
         return;
     }
     if (editing) payload.old_ip = modal.dataset.editIp;
+    else if (modal.dataset.oldLeaseIp) payload.old_ip = modal.dataset.oldLeaseIp;
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservation' + _taTenantQuery(), {
             method: editing ? 'PUT' : 'POST',
@@ -28829,6 +28832,23 @@ async function saveDhcpReservation() {
         });
         if (ok && d.status === 'SUCCESS') { modal.remove(); loadDHCPData('Reservations'); }
         else showToast('Error: ' + (detail || d?.message || 'Operation failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+async function deleteDhcpLease(ip) {
+    if (!await showConfirmToast(`Delete active lease for ${ip}?`)) return;
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/lease' + _taTenantQuery(), {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ip }),
+        });
+        if (ok && d.status === 'SUCCESS') {
+            showToast(`Lease for ${ip} deleted`, 'success');
+            loadDHCPData('Leases');
+        } else {
+            showToast('Error: ' + (detail || d?.message || 'Delete lease failed'), 'error');
+        }
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
