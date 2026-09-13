@@ -72,6 +72,45 @@ def test_build_dhcp_payload_subnets_and_reservations():
                     "hostname": "host1.lab", "subnet": ""}]
 
 
+def test_build_dhcp_payload_reads_advanced_dhcp_option_custom_fields():
+    pfx = {"prefixes": [
+        {"prefix": "10.0.2.0/24", "description": "advanced opts", "status": "active",
+         "custom_fields": {
+             "dhcp_enabled": True,
+             "gateway": "10.0.2.1",
+             "dns_servers": "10.0.2.53",
+             "search_domain": "lab.local, corp.local",
+             "domain_name": "lab.local",
+             "ntp_servers": "10.0.2.4",
+             "tftp_server_name": "tftp.lab.local",
+             "boot_file_name": "pxelinux.0",
+             "netbios_name_servers": "10.0.2.5",
+             "broadcast_address": "10.0.2.255",
+             "lease_time": 7200,
+         }},
+    ]}
+    subs, _ = build_dhcp_payload(pfx, {"ip_addresses": []})
+    assert len(subs) == 1
+    s = subs[0]
+    assert s["search_domains"] == ["lab.local", "corp.local"]
+    assert s["domain_name"] == "lab.local"
+    assert s["ntp_servers"] == ["10.0.2.4"]
+    assert s["tftp_server_name"] == "tftp.lab.local"
+    assert s["boot_file_name"] == "pxelinux.0"
+    assert s["netbios_name_servers"] == ["10.0.2.5"]
+    assert s["broadcast_address"] == "10.0.2.255"
+    assert s["lease_time"] == 7200
+
+
+def test_build_dhcp_payload_advanced_options_default_empty():
+    subs, _ = build_dhcp_payload(_prefixes_payload(), _ips_payload())
+    s = subs[0]
+    assert s["search_domains"] == []
+    assert s["domain_name"] == ""
+    assert s["ntp_servers"] == []
+    assert s["lease_time"] is None
+
+
 def test_build_dhcp_payload_skips_container_prefix():
     """A NetBox 'container' prefix (a parent/aggregate block, e.g. a tenant's
     whole /17) must never be synced as a DHCP scope itself, even if somehow
