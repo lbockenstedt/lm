@@ -3309,6 +3309,13 @@ def register(app, hub, ctx):
         data = await _dhcp_list_or_merge(request, tenant, "DHCP_LIST_LEASES", {"subnet": subnet}, "leases", "dhcp_list_leases")
         return await _filter_tenant(request, data, "dhcp", ["ip", "address", "ip-address", "ip_address"], tenant)
 
+    @app.delete("/api/dhcp/lease")
+    async def dhcp_delete_lease(request: Request, tenant: str = None):
+        """Delete an active DHCP lease from Kea's lease database."""
+        body = await request.json()
+        await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP lease")
+        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_DEL_LEASE", body, log_name="dhcp_delete_lease")
+
     @app.post("/api/dhcp/reservation")
     async def dhcp_add_reservation(request: Request, tenant: str = None):
         body = await request.json()

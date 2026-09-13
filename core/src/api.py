@@ -1922,7 +1922,7 @@ def create_app(hub):
         # (routes/net_services.py _constrain_shared_write) restricts it to a
         # record whose IP is in the caller's tenant subnets. Checked BEFORE the
         # admin-only prefix so record/reservation aren't swept up by /api/dns/ .
-        _SHARED_CONSTRAINED_WRITE_PREFIXES = ("/api/dns/record", "/api/dhcp/reservation")
+        _SHARED_CONSTRAINED_WRITE_PREFIXES = ("/api/dns/record", "/api/dhcp/reservation", "/api/dhcp/lease")
         # HE.NET record/credential writes now carry per-object tenant ownership
         # (see the /api/henet/ read-gate comment above and net_services.py's
         # _henet_assert_can_write / _henet_tenant_scope) — same per-object-owner
