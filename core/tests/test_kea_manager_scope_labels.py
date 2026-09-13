@@ -43,6 +43,46 @@ def test_build_subnet4_omits_user_context_when_no_description():
     assert "user-context" not in subs[0]
 
 
+def test_build_subnet4_applies_full_dhcp_option_suite():
+    subs, _applied, _skipped = kea_manager.build_subnet4([{
+        "subnet": "10.0.0.0/24", "pools": [],
+        "gateway": "10.0.0.1",
+        "dns_servers": ["10.0.0.2", "10.0.0.3"],
+        "search_domains": ["lab.local", "corp.local"],
+        "domain_name": "lab.local",
+        "ntp_servers": ["10.0.0.4"],
+        "tftp_server_name": "tftp.lab.local",
+        "boot_file_name": "pxelinux.0",
+        "netbios_name_servers": ["10.0.0.5"],
+        "broadcast_address": "10.0.0.255",
+        "lease_time": 7200,
+    }], [])
+    opts = {o["name"]: o["data"] for o in subs[0]["option-data"]}
+    assert opts["routers"] == "10.0.0.1"
+    assert opts["domain-name-servers"] == "10.0.0.2, 10.0.0.3"
+    assert opts["domain-search"] == "lab.local, corp.local"
+    assert opts["domain-name"] == "lab.local"
+    assert opts["ntp-servers"] == "10.0.0.4"
+    assert opts["tftp-server-name"] == "tftp.lab.local"
+    assert opts["boot-file-name"] == "pxelinux.0"
+    assert opts["netbios-name-servers"] == "10.0.0.5"
+    assert opts["broadcast-address"] == "10.0.0.255"
+    assert subs[0]["valid-lifetime"] == 7200
+
+
+def test_build_subnet4_omits_advanced_options_when_absent():
+    subs, _applied, _skipped = kea_manager.build_subnet4(
+        [{"subnet": "10.0.0.0/24", "pools": []}], [])
+    assert subs[0]["option-data"] == []
+    assert "valid-lifetime" not in subs[0]
+
+
+def test_build_subnet4_ignores_non_numeric_lease_time():
+    subs, _applied, _skipped = kea_manager.build_subnet4(
+        [{"subnet": "10.0.0.0/24", "pools": [], "lease_time": "not-a-number"}], [])
+    assert "valid-lifetime" not in subs[0]
+
+
 def test_get_stats_surfaces_subnet_description_from_user_context():
     mgr = kea_manager.KeaManager.__new__(kea_manager.KeaManager)
     mgr.ca_url = "http://localhost:8001"

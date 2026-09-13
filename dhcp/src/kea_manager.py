@@ -76,6 +76,35 @@ def _stable_subnet_id(subnet_str: str, taken: set) -> int:
     return sid
 
 
+def _add_option(kea_subnet: dict, name: str, value) -> None:
+    """Append one Kea ``option-data`` entry if ``value`` is non-empty.
+
+    ``value`` may be a plain string or a list (comma-joined the way Kea
+    expects a multi-value option, e.g. multiple NTP servers).
+    """
+    if isinstance(value, (list, tuple)):
+        value = ", ".join(v for v in value if v)
+    if not value:
+        return
+    kea_subnet["option-data"].append({"name": name, "data": value})
+
+
+# Standard DHCPv4 options beyond gateway/DNS that a scope may carry, sourced
+# from the same NetBox prefix custom_fields as gateway/dns_servers (see
+# ``dns_dhcp_sync.build_dhcp_payload``). Table-driven so adding another
+# standard option is a one-line addition here plus the matching
+# custom_fields read on the sync side, instead of a new one-off `if` block
+# per option. Each entry is (subnet-dict key, Kea option-data "name").
+_ADVANCED_OPTION_MAP = [
+    ("domain_name",          "domain-name"),
+    ("ntp_servers",          "ntp-servers"),
+    ("tftp_server_name",     "tftp-server-name"),
+    ("boot_file_name",       "boot-file-name"),
+    ("netbios_name_servers", "netbios-name-servers"),
+    ("broadcast_address",    "broadcast-address"),
+]
+
+
 def build_subnet4(subnets: list, reservations: list) -> tuple:
     """Translate LM/NetBox intent into Kea's ``subnet4`` list.
 
@@ -130,6 +159,19 @@ def build_subnet4(subnets: list, reservations: list) -> tuple:
             kea_subnet["option-data"].append(
                 {"name": "domain-name-servers", "data": ", ".join(dns)}
             )
+        _add_option(kea_subnet, "domain-search", s.get("search_domains"))
+        for key, opt_name in _ADVANCED_OPTION_MAP:
+            _add_option(kea_subnet, opt_name, s.get(key))
+        # valid-lifetime is a Kea subnet-level property (the DHCP lease time
+        # in seconds), not an option-data entry — only set it when the scope
+        # opted out of Kea's built-in global default.
+        lease_time = s.get("lease_time")
+        try:
+            if lease_time:
+                kea_subnet["valid-lifetime"] = int(lease_time)
+        except (TypeError, ValueError):
+            logger.warning("Ignoring non-numeric lease_time %r for %s",
+                           lease_time, subnet_str)
 
         # Attach reservations that belong to this subnet. Guard ip/mac with
         # .get and wrap ip_network in try — one malformed reservation (missing
