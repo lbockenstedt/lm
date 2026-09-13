@@ -2,6 +2,7 @@ import base64
 import copy
 import logging
 import re
+from typing import Any, Dict, List, Optional, Tuple, Union
 import requests
 import ipaddress
 import os
@@ -74,6 +75,16 @@ def _stable_subnet_id(subnet_str: str, taken: set) -> int:
         sid = (sid % 0x7FFFFFFF) + 1
     taken.add(sid)
     return sid
+
+
+def _normalize_mac(mac: str) -> str:
+    """Normalize MAC address to colon-separated lowercase format (aa:bb:cc:dd:ee:ff)."""
+    if not mac:
+        return ""
+    clean = re.sub(r'[^0-9a-fA-F]', '', str(mac)).lower()
+    if len(clean) == 12:
+        return ":".join(clean[i:i+2] for i in range(0, 12, 2))
+    return str(mac).strip().lower().replace("-", ":")
 
 
 def _add_option(kea_subnet: dict, name: str, value) -> None:
@@ -243,6 +254,7 @@ def build_subnet4(subnets: list, reservations: list) -> tuple:
             "pools":  pools,
             "option-data": [],
             "reservations-lookup-first": True,
+            "reservation-mode": "all",
         }
         # Carry the NetBox prefix description through in Kea's user-context so
         # the UI can label a scope by its real name/purpose instead of a bare
@@ -284,14 +296,15 @@ def build_subnet4(subnets: list, reservations: list) -> tuple:
             if not ip or not mac:
                 continue
             try:
-                in_subnet = (r.get("subnet") == subnet_str
+                in_subnet = (str(r.get("subnet_id")) == str(idx)
+                             or r.get("subnet") == subnet_str
                              or net.overlaps(ipaddress.ip_network(f"{ip}/32")))
             except ValueError:
                 continue  # malformed reservation IP
             if in_subnet:
                 subnet_res.append({
                     "ip-address": ip,
-                    "hw-address": mac.lower().replace("-", ":"),
+                    "hw-address": _normalize_mac(mac),
                     "hostname": r.get("hostname", ""),
                 })
                 applied[res_idx] = True
@@ -470,23 +483,46 @@ class KeaManager:
             logger.debug("delete_lease %s: %s", ip, e)
             return {"status": "SUCCESS", "message": str(e), "not_found": True}
 
+    def purge_leases_for_mac_or_ip(self, mac: str = None, ip: str = None) -> list:
+        """Purge any active lease for a given MAC or IP address."""
+        purged = []
+        if ip:
+            self.delete_lease(ip)
+            purged.append(ip)
+        if mac:
+            norm_mac = _normalize_mac(mac)
+            try:
+                leases = self.list_leases()
+                for l in leases:
+                    l_ip = l.get("ip-address") or l.get("ip")
+                    l_mac = _normalize_mac(l.get("hw-address") or l.get("mac"))
+                    if l_mac and l_mac == norm_mac and l_ip and l_ip not in purged:
+                        self.delete_lease(l_ip)
+                        purged.append(l_ip)
+            except Exception as e:
+                logger.debug("purge_leases_for_mac_or_ip failed: %s", e)
+        return purged
+
     # ── Manual reservation CRUD ───────────────────────────────────────
 
-    def add_reservation(self, subnet_id: int, ip: str, mac: str, hostname: str = "") -> dict:
+    def add_reservation(self, subnet_id: Any, ip: str, mac: str, hostname: str = "") -> dict:
         cfg = self.get_config()
+        norm_mac = _normalize_mac(mac)
         for sub in cfg.get("subnet4", []):
-            if sub["id"] == subnet_id:
+            if str(sub.get("id")) == str(subnet_id):
+                sub["reservations-lookup-first"] = True
+                sub["reservation-mode"] = "all"
                 sub.setdefault("reservations", [])
                 sub["reservations"].append({
                     "ip-address": ip,
-                    "hw-address": mac.lower().replace("-", ":"),
+                    "hw-address": norm_mac,
                     "hostname":   hostname,
                 })
                 break
         else:
             return {"status": "ERROR", "message": f"Subnet {subnet_id} not found"}
         self._set_config(cfg)
-        self.delete_lease(ip)
+        self.purge_leases_for_mac_or_ip(mac=norm_mac, ip=ip)
         return {"status": "SUCCESS"}
 
     def list_reservations(self) -> list:
@@ -508,7 +544,7 @@ class KeaManager:
                 })
         return out
 
-    def update_reservation(self, old_ip: str, subnet_id: int, ip: str,
+    def update_reservation(self, old_ip: str, subnet_id: Any, ip: str,
                            mac: str, hostname: str = "") -> dict:
         """Update a reservation by IP in ONE config write.
 
@@ -523,9 +559,12 @@ class KeaManager:
             return {"status": "ERROR", "message": "subnet_id, ip, and mac are required"}
         cfg = self.get_config()
         target = None
+        norm_mac = _normalize_mac(mac)
         for sub in cfg.get("subnet4", []):
-            if sub["id"] == int(subnet_id):
+            if str(sub.get("id")) == str(subnet_id):
                 target = sub
+                sub["reservations-lookup-first"] = True
+                sub["reservation-mode"] = "all"
             sub["reservations"] = [
                 r for r in sub.get("reservations", [])
                 if r.get("ip-address") != old_ip
@@ -535,15 +574,14 @@ class KeaManager:
         target.setdefault("reservations", [])
         target["reservations"].append({
             "ip-address": ip,
-            "hw-address": mac.lower().replace("-", ":"),
+            "hw-address": norm_mac,
             "hostname":   hostname,
         })
         try:
             self._set_config(cfg)
-            if old_ip:
-                self.delete_lease(old_ip)
-            if ip and ip != old_ip:
-                self.delete_lease(ip)
+            self.purge_leases_for_mac_or_ip(mac=norm_mac, ip=ip)
+            if old_ip and old_ip != ip:
+                self.purge_leases_for_mac_or_ip(ip=old_ip)
         except Exception as e:
             return {"status": "ERROR", "message": str(e)}
         return {"status": "SUCCESS"}
