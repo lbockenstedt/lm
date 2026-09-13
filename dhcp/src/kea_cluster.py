@@ -529,8 +529,10 @@ class KeaHACoordinator:
         }
         if status != "SUCCESS":
             nodes = ", ".join(failed) or "unknown"
+            err_details = "; ".join(f"{k}: {v}" for k, v in errors.items() if v)
+            detail_str = f" ({err_details})" if err_details else ""
             verdict["message"] = message or (
-                f"Kea HA {stage} failed on: {nodes}"
+                f"Kea HA {stage} failed on: {nodes}{detail_str}"
                 + (f"; rolled back {', '.join(rolled_back)}" if rolled_back else "")
                 + (f"; still applied on {', '.join(applied)}" if applied else ""))
             logger.error("Kea HA apply %s at stage %s — applied=%s failed=%s",
