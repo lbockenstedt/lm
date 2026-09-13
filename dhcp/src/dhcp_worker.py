@@ -121,7 +121,20 @@ class DhcpWorkerOps:
         try:
             cfg = self.mgr.get_config()
         except Exception as e:  # noqa: BLE001
-            return {"status": "ERROR", "message": str(e)}
+            err_msg = str(e)
+            if any(term in err_msg.lower() for term in ("likely to be offline", "permission denied", "connection refused", "unable to forward")):
+                logger.warning("Kea DHCP4 appears offline or inaccessible (%s); attempting service restart & permission repair", err_msg)
+                if self._restart_kea_dhcp4_service():
+                    import time
+                    time.sleep(1.0)
+                    try:
+                        cfg = self.mgr.get_config()
+                    except Exception as retry_e:  # noqa: BLE001
+                        return {"status": "ERROR", "message": f"{err_msg} (restart retry failed: {retry_e})"}
+                else:
+                    return {"status": "ERROR", "message": err_msg}
+            else:
+                return {"status": "ERROR", "message": err_msg}
         if not isinstance(cfg, dict):
             return {"status": "ERROR",
                     "message": f"Kea returned {type(cfg).__name__}, not a config"}
@@ -558,6 +571,32 @@ class DhcpWorkerOps:
                     ", ".join(f"{k}={v}" for k, v in after.items()) or "unknown")
         return True
 
+    @classmethod
+    def _restart_kea_dhcp4_service(cls) -> bool:
+        """Attempt to repair permissions and start/restart kea-dhcp4-server if offline."""
+        cls._repair_ha_tls_permissions()
+        cls._repair_kea_conf_permissions()
+        cls._repair_kea_apparmor_write_access()
+        try:
+            if shutil.which("systemctl"):
+                proc = subprocess.run(
+                    ["systemctl", "restart", "kea-dhcp4-server"],
+                    capture_output=True, text=True, timeout=15)
+                if proc.returncode == 0:
+                    logger.info("Successfully restarted kea-dhcp4-server service")
+                    return True
+                logger.warning("systemctl restart kea-dhcp4-server returned %d: %s",
+                               proc.returncode, (proc.stderr or proc.stdout).strip())
+            elif shutil.which("service"):
+                proc = subprocess.run(
+                    ["service", "kea-dhcp4-server", "restart"],
+                    capture_output=True, text=True, timeout=15)
+                if proc.returncode == 0:
+                    logger.info("Successfully restarted kea-dhcp4-server service")
+                    return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to restart kea-dhcp4-server service: %s", e)
+        return False
 
     def rollback(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_ROLLBACK`` — restore the config captured by the last apply."""
