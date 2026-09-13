@@ -23438,7 +23438,28 @@ async function showNetboxAllocatePrefixModal(editItem) {
     // the WHOLE block into one giant scope. Carve smaller child prefixes
     // below it and check this only on the ones meant to actually hand out
     // addresses.
-    const dhcpChecked = editing ? !!(editItem?.custom_fields || {}).dhcp_enabled : false;
+    const cf = editItem?.custom_fields || {};
+    const dhcpChecked = editing ? !!cf.dhcp_enabled : false;
+    // DHCP option fields all live on the same NetBox prefix custom_fields
+    // (see lm's dns_dhcp_sync.build_dhcp_payload / kea_manager.build_subnet4
+    // for the full option → Kea option-data mapping) — Gateway/DNS/Search
+    // Domain are the common ones an operator sets on nearly every scope;
+    // everything else is tucked behind "Advanced options" so the common case
+    // stays a short form.
+    const opt = (id, label, placeholder, value) =>
+        `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">${label}</label><input id="${id}" value="${val(value)}" class="${inputCls}" placeholder="${placeholder}"></div>`;
+    const commonOptionFields = `
+            ${opt('nb-p-gateway', 'Gateway', 'e.g. 10.0.0.1', cf.gateway)}
+            ${opt('nb-p-dns', 'DNS Servers', 'comma-separated, e.g. 10.0.0.53, 10.0.0.54', cf.dns_servers)}
+            ${opt('nb-p-search', 'Search Domain', 'comma-separated, e.g. lab.local', cf.search_domain)}`;
+    const advancedOptionFields = `
+            ${opt('nb-p-domain', 'Domain Name', 'e.g. lab.local', cf.domain_name)}
+            ${opt('nb-p-ntp', 'NTP Servers', 'comma-separated', cf.ntp_servers)}
+            ${opt('nb-p-tftp', 'TFTP Server Name', 'e.g. tftp.lab.local', cf.tftp_server_name)}
+            ${opt('nb-p-bootfile', 'Boot File Name', 'e.g. pxelinux.0', cf.boot_file_name)}
+            ${opt('nb-p-netbios', 'NetBIOS Name Servers', 'comma-separated', cf.netbios_name_servers)}
+            ${opt('nb-p-bcast', 'Broadcast Address', 'e.g. 10.0.0.255', cf.broadcast_address)}
+            ${opt('nb-p-lease', 'Lease Time (seconds)', 'blank = Kea default', cf.lease_time)}`;
     const modal = openModal('nb-prefix-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Allocate'} Subnet${editing ? ` — <span class="font-mono text-sm">${val(editItem.prefix)}</span>` : ''}</h3>
         <div class="space-y-3">
@@ -23451,11 +23472,17 @@ async function showNetboxAllocatePrefixModal(editItem) {
                 Enable DHCP scope for this subnet
             </label>
             <p class="text-xs text-slate-400 -mt-1">Only checked, non-container prefixes are synced to Kea as a DHCP scope. Leave unchecked on a parent/aggregate block — carve smaller child subnets and enable this on those instead.</p>
+            <div class="border-t border-slate-200 pt-3 space-y-3">
+                <div class="text-xs font-bold uppercase text-slate-500">DHCP Options</div>
+                ${commonOptionFields}
+                <button type="button" onclick="document.getElementById('nb-p-advanced').classList.toggle('hidden'); this.textContent = this.textContent.startsWith('Show') ? 'Hide advanced options' : 'Show advanced options ▾'" class="text-xs font-bold text-[#01A982] hover:underline">Show advanced options ▾</button>
+                <div id="nb-p-advanced" class="hidden space-y-3">${advancedOptionFields}</div>
+            </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="submitNetboxAllocatePrefix()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Allocate'}</button>
             <button onclick="document.getElementById('nb-prefix-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+        </div>`, { card: 'w-full max-w-lg p-6 space-y-4 max-h-[85vh] overflow-y-auto' });
     if (editing) modal.dataset.prefixId = editItem.id;
 
     if (editing) return;
@@ -23486,12 +23513,27 @@ async function submitNetboxAllocatePrefix() {
     const editing = modal && modal.dataset.prefixId;
     const get = id => document.getElementById(id)?.value?.trim() || '';
     const dhcpEnabled = !!document.getElementById('nb-p-dhcp')?.checked;
+    // Every DHCP option lives in NetBox custom_fields (see
+    // custom_fields_spec.CUSTOM_FIELDS_SPEC in the netbox repo) — shared by
+    // both the create and edit submit paths so they can never drift.
+    const dhcpOptionFields = {
+        gateway:               get('nb-p-gateway'),
+        dns_servers:           get('nb-p-dns'),
+        search_domain:         get('nb-p-search'),
+        domain_name:           get('nb-p-domain'),
+        ntp_servers:           get('nb-p-ntp'),
+        tftp_server_name:      get('nb-p-tftp'),
+        boot_file_name:        get('nb-p-bootfile'),
+        netbios_name_servers:  get('nb-p-netbios'),
+        broadcast_address:     get('nb-p-bcast'),
+        lease_time:            get('nb-p-lease') ? parseInt(get('nb-p-lease')) || undefined : undefined,
+    };
     if (editing) {
         const payload = {
             description: get('nb-p-desc'),
             status: get('nb-p-status') || 'active',
             site: get('nb-p-site') || undefined,
-            custom_fields: { dhcp_enabled: dhcpEnabled },
+            custom_fields: { dhcp_enabled: dhcpEnabled, ...dhcpOptionFields },
         };
         try {
             const d = await apiJson(`/api/netbox/prefixes/${modal.dataset.prefixId}`, { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload) });
@@ -23507,7 +23549,7 @@ async function submitNetboxAllocatePrefix() {
         description: get('nb-p-desc'),
         site: get('nb-p-site') || undefined,
         status: 'active',
-        custom_fields: { dhcp_enabled: dhcpEnabled },
+        custom_fields: { dhcp_enabled: dhcpEnabled, ...dhcpOptionFields },
         tenant: (currentTenant && currentTenant !== 'default') ? currentTenant : undefined,
     };
     try {
@@ -24016,7 +24058,7 @@ function _dhcpHaPanel(c) {
 }
 
 // Per-member evidence blocks (each worker's own diagnostics recommendations).
-function _ddMemberEvidence(members) {
+function _ddMemberEvidence(members, kind) {
     const entries = Object.entries(members || {});
     if (!entries.length) return '';
     const cards = entries.map(([id, diag]) => {
@@ -24029,14 +24071,51 @@ function _ddMemberEvidence(members) {
         // is the friendly label; raw id stays as a tooltip so identity is
         // still traceable, same convention as the cluster/HA member tables.
         const name = (diag && diag.display_name) || id;
+        // DNS carries full per-node Unbound evidence (interfaces, detected
+        // IPv4s, access-control lines, port-53 listeners, query probes) in
+        // EVERY member's own diagnostics reply — previously only ONE named
+        // "source" member's copy was ever rendered (the big tiles below the
+        // cluster panel), so a 2nd/3rd healthy resolver's own interfaces/
+        // probes were invisible. Render them per-member here instead.
+        const dnsEvidence = (kind === 'dns' && diag && diag.status === 'SUCCESS') ? (() => {
+            const sockets = diag.sockets || {};
+            const listeners = Array.isArray(sockets.listeners) ? sockets.listeners : [];
+            const probes = Array.isArray(diag.probes) ? diag.probes : [];
+            const probeRows = probes.map(p => `<tr class="border-b border-slate-100">
+                <td class="px-3 py-1.5 font-mono text-xs">${escapeHtml(p.server || '—')}:53</td>
+                <td class="px-3 py-1.5 font-bold text-xs ${p.responded ? 'text-emerald-600' : 'text-red-600'}">${p.responded ? 'Responded' : 'No response'}</td>
+                <td class="px-3 py-1.5 text-xs">${p.rcode == null ? '—' : escapeHtml(String(p.rcode))}</td>
+                <td class="px-3 py-1.5 text-xs">${p.latency_ms == null ? '—' : `${escapeHtml(String(p.latency_ms))} ms`}</td>
+            </tr>`).join('');
+            return `
+            <div class="grid sm:grid-cols-2 gap-3 mt-3 text-xs">
+                <div>
+                    <div class="font-semibold text-slate-600 mb-1">Configured interfaces</div>
+                    <div class="font-mono text-slate-600">${(diag.configured_interfaces || []).map(escapeHtml).join('<br>') || 'none found'}</div>
+                    <div class="font-semibold text-slate-600 mt-2 mb-1">Detected local IPv4 addresses</div>
+                    <div class="font-mono text-slate-600">${(diag.local_ipv4s || []).map(escapeHtml).join('<br>') || 'none found'}</div>
+                    <div class="font-semibold text-slate-600 mt-2 mb-1">Access controls</div>
+                    <div class="font-mono text-slate-600">${(diag.access_controls || []).map(escapeHtml).join('<br>') || 'none found'}</div>
+                </div>
+                <div>
+                    <div class="font-semibold text-slate-600 mb-1">Port 53 listeners</div>
+                    <pre class="whitespace-pre-wrap break-all font-mono text-slate-600">${escapeHtml(listeners.join('\n') || sockets.error || 'none')}</pre>
+                </div>
+            </div>
+            <div class="mt-3">
+                <div class="font-semibold text-slate-600 mb-1 text-xs">Local DNS query probes</div>
+                ${tw(th(['Target', 'Result', 'RCODE', 'Latency']) + `<tbody>${probeRows}</tbody>`)}
+            </div>`;
+        })() : '';
         return `<div class="bg-white border border-slate-200 rounded-lg p-4">
             <div class="text-sm font-semibold text-slate-700 mb-1" title="${escapeHtml(id)}">${escapeHtml(name)} — ${okBadge}</div>
             ${diag && diag.status !== 'SUCCESS' ? `<div class="text-xs text-red-600">${escapeHtml(diag.message || 'no response')}</div>` : ''}
             ${recs.length ? `<ul class="list-disc pl-5 space-y-1 text-xs text-slate-600 mt-1">${recs.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>`
                           : '<div class="text-xs text-slate-400">No findings reported.</div>'}
+            ${dnsEvidence}
         </div>`;
     }).join('');
-    return `<div class="grid lg:grid-cols-2 gap-4 mb-4">${cards}</div>`;
+    return `<div class="grid ${kind === 'dns' ? '' : 'lg:grid-cols-2'} gap-4 mb-4">${cards}</div>`;
 }
 
 // Query-string suffix carrying the tenant picker's current selection. EVERY
@@ -24401,11 +24480,14 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
         return loadExternalDNS();
     }
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
-    // ALL per-tab action buttons — "+ Add Server" (self-service onboarding,
-    // every tab), "+ Add Record" (Records tab only), "+ Add Forwarder"
-    // (Forwarders tab only) — render into the trailing #top-nav-actions strip
-    // in the sub-nav bar, pinned right next to the help "i" icon (see
-    // renderTopNav), rather than a page-body button row.
+    // ALL per-tab action buttons — "+ Add Record" (Records tab only), "+ Add
+    // Forwarder" (Forwarders tab only) — render into the trailing
+    // #top-nav-actions strip in the sub-nav bar, pinned right next to the
+    // help "i" icon (see renderTopNav), rather than a page-body button row.
+    // No "+ Add Server" here: a DNS module is provisioned by loading the DNS
+    // Server role onto a host (Fleet → Load Role), not by self-service
+    // onboarding a standalone spoke — the button offered a path that never
+    // actually worked for this module.
     if (navActions) {
         const addRecordBtn = ((subMenu === 'Records' || !subMenu) && (isAdmin() || isTenantAdmin()))
             ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Record</button>`
@@ -24413,7 +24495,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
         const addForwarderBtn = (subMenu === 'Forwarders' && isAdmin())
             ? `<button id="dns-forwarder-add-btn" onclick="showDnsForwarderModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Forwarder</button>`
             : '';
-        navActions.innerHTML = addServerButtonHtml('dns', 'DNS') + addRecordBtn + addForwarderBtn;
+        navActions.innerHTML = addRecordBtn + addForwarderBtn;
     }
 
     const th = tableHead, tw = tableWrap;  // shared table helpers
@@ -24556,12 +24638,13 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
             const check = (label, pass, detailText) => _ddTile(
                 label, pass ? 'PASS' : 'FAIL', detailText || '',
                 pass ? 'text-emerald-600' : 'text-red-600');
-            // Clustered DNS: the module drives 2+ resolvers. The evidence tiles
-            // below are ONE named member's (diagnostics_source); the cluster
-            // panel carries convergence/drift for the whole set.
+            // Clustered DNS: the module drives 2+ resolvers. Each member's own
+            // interfaces/IPv4s/access-controls/listeners/probes are rendered
+            // individually (kind='dns'); the cluster panel separately carries
+            // convergence/drift for the whole set.
             const cluster = d.cluster && d.cluster.enabled !== false ? d.cluster : null;
             const clusterPanel = _dnsClusterPanel(cluster);
-            const memberEvidence = cluster ? _ddMemberEvidence(d.members) : '';
+            const memberEvidence = cluster ? _ddMemberEvidence(d.members, 'dns') : '';
             container.innerHTML = `
                 <div class="flex items-center justify-between gap-3 mb-4">
                     <div>
@@ -28339,17 +28422,18 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
     const container = document.getElementById('dhcp-content');
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
-    // ALL per-tab action buttons — "+ Add Server" (self-service onboarding,
-    // every tab) and "+ Add Reservation" (Reservations tab only) — render
-    // into the trailing #top-nav-actions strip in the sub-nav bar, pinned
-    // right next to the help "i" icon (see renderTopNav), rather than a
-    // page-body button row.
+    // ALL per-tab action buttons — "+ Add Reservation" (Reservations tab
+    // only) — render into the trailing #top-nav-actions strip in the sub-nav
+    // bar, pinned right next to the help "i" icon (see renderTopNav), rather
+    // than a page-body button row. No "+ Add Server" here: a DHCP module is
+    // provisioned by loading the DHCP Server (Kea) role onto a host
+    // (Fleet → Load Role), not by self-service onboarding a standalone spoke.
     const navActions = document.getElementById('top-nav-actions');
     if (navActions) {
         const addResBtn = (subMenu === 'Reservations' && (isAdmin() || isTenantAdmin()))
             ? `<button id="dhcp-add-btn" onclick="showDhcpReservationModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Reservation</button>`
             : '';
-        navActions.innerHTML = addServerButtonHtml('dhcp', 'DHCP') + addResBtn;
+        navActions.innerHTML = addResBtn;
     }
 
     const th = tableHead, tw = tableWrap;  // shared table helpers
