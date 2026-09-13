@@ -207,9 +207,26 @@ class KeaManager:
     # ── Subnet (scope) management ─────────────────────────────────────
 
     def list_subnets(self) -> list:
+        """Configured subnet4 scopes, straight from the running config.
+
+        Deliberately NOT the ``subnet4-list`` command — that RPC requires
+        ``libdhcp_subnet_cmds.so`` to be loaded, which this install's
+        hooks-libraries does NOT include (only ``lease_cmds`` + ``ha`` are
+        loaded; see kea-dhcp4.conf). Without that hook Kea answers
+        ``result: 2`` ("command not supported"); our own ``_rpc()`` raises
+        on any code other than 0/3, so this used to be silently swallowed by
+        the try/except below, returning an empty list — every caller
+        (get_stats' pool utilization, the WebUI Subnets/Overview tabs,
+        diagnostics' id_to_cidr map) then saw ZERO subnets even though the
+        subnet was correctly synced and actively serving DHCP.
+        ``config-get`` is a core Kea command needing no optional hook, and
+        its ``Dhcp4.subnet4`` array carries the exact same id/subnet/pools/
+        user-context shape build_subnet4() writes — so this sources the
+        identical data the removed RPC would have returned, just from a
+        command guaranteed to exist.
+        """
         try:
-            data = self._rpc("dhcp4", "subnet4-list")
-            return data.get("subnets", [])
+            return self.get_config().get("subnet4", []) or []
         except Exception as e:
             logger.error("list_subnets failed: %s", e)
             return []
