@@ -23454,18 +23454,21 @@ async function showNetboxAllocatePrefixModal(editItem) {
     // stays a short form.
     const opt = (id, label, placeholder, value) =>
         `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">${label}</label><input id="${id}" value="${val(value)}" class="${inputCls}" placeholder="${placeholder}"></div>`;
+    const leaseVal = (cf.lease_time != null && String(cf.lease_time).trim() !== '') ? cf.lease_time : '2419200';
+    const exclVal = cf.exclusion_ranges || cf.exclusions || '';
     const commonOptionFields = `
             ${opt('nb-p-gateway', 'Gateway', 'e.g. 10.0.0.1', cf.gateway)}
             ${opt('nb-p-dns', 'DNS Servers', 'comma-separated, e.g. 10.0.0.53, 10.0.0.54', cf.dns_servers)}
-            ${opt('nb-p-search', 'Search Domain', 'comma-separated, e.g. lab.local', cf.search_domain)}`;
-    const advancedOptionFields = `
             ${opt('nb-p-domain', 'Domain Name', 'e.g. lab.local', cf.domain_name)}
+            ${opt('nb-p-search', 'Search Domain', 'comma-separated, e.g. lab.local', cf.search_domain)}
+            ${opt('nb-p-lease', 'Lease Time (seconds)', '2419200', leaseVal)}
+            ${opt('nb-p-exclusions', 'Exclusion Range(s)', 'comma-separated, e.g. 10.0.0.1-10.0.0.20, 10.0.0.200-10.0.0.254', exclVal)}`;
+    const advancedOptionFields = `
             ${opt('nb-p-ntp', 'NTP Servers', 'comma-separated', cf.ntp_servers)}
             ${opt('nb-p-tftp', 'TFTP Server Name', 'e.g. tftp.lab.local', cf.tftp_server_name)}
             ${opt('nb-p-bootfile', 'Boot File Name', 'e.g. pxelinux.0', cf.boot_file_name)}
             ${opt('nb-p-netbios', 'NetBIOS Name Servers', 'comma-separated', cf.netbios_name_servers)}
-            ${opt('nb-p-bcast', 'Broadcast Address', 'e.g. 10.0.0.255', cf.broadcast_address)}
-            ${opt('nb-p-lease', 'Lease Time (seconds)', 'blank = Kea default', cf.lease_time)}`;
+            ${opt('nb-p-bcast', 'Broadcast Address', 'e.g. 10.0.0.255', cf.broadcast_address)}`;
     const modal = openModal('nb-prefix-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Allocate'} Subnet${editing ? ` — <span class="font-mono text-sm">${val(editItem.prefix)}</span>` : ''}</h3>
         <div class="space-y-3">
@@ -23533,6 +23536,7 @@ async function submitNetboxAllocatePrefix() {
         netbios_name_servers:  get('nb-p-netbios'),
         broadcast_address:     get('nb-p-bcast'),
         lease_time:            get('nb-p-lease') ? parseInt(get('nb-p-lease')) || undefined : undefined,
+        exclusion_ranges:      get('nb-p-exclusions'),
     };
     if (editing) {
         const payload = {
@@ -28722,7 +28726,11 @@ async function _loadDhcpSubnetOptions(selId, preferredSubnetId) {
         const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/subnets?tenant=' + encodeURIComponent(currentTenant));
         const subnets = ok ? (d.subnets || []) : [];
         sel.innerHTML = subnets.length
-            ? subnets.map(s => `<option value="${escapeHtml(String(s.id))}">${escapeHtml(String(s.id))} — ${escapeHtml(s.subnet)}</option>`).join('')
+            ? subnets.map(s => {
+                const desc = s.description || (s['user-context'] && s['user-context'].description) || (s.user_context && s.user_context.description) || '';
+                const label = desc ? `${s.subnet} (${desc})` : s.subnet;
+                return `<option value="${escapeHtml(String(s.id))}">${escapeHtml(label)}</option>`;
+            }).join('')
             : `<option value="">${ok ? 'No subnets configured' : (detail || 'Could not load subnets')}</option>`;
         if (subnets.length) {
             if (preferredSubnetId != null && subnets.some(s => String(s.id) === String(preferredSubnetId))) {

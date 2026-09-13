@@ -30,20 +30,23 @@ def _submit_fn():
 
 def test_modal_renders_common_option_fields_always_visible():
     fn = _modal_fn()
-    for field_id in ("nb-p-gateway", "nb-p-dns", "nb-p-search"):
+    for field_id in ("nb-p-gateway", "nb-p-dns", "nb-p-search", "nb-p-domain", "nb-p-lease", "nb-p-exclusions"):
         assert f"opt('{field_id}'" in fn
     # These sit above the advanced toggle, not inside the hidden container.
     common_block = fn.split("commonOptionFields = `", 1)[1].split("`;", 1)[0]
     assert "nb-p-gateway" in common_block
     assert "nb-p-dns" in common_block
     assert "nb-p-search" in common_block
+    assert "nb-p-domain" in common_block
+    assert "nb-p-lease" in common_block
+    assert "nb-p-exclusions" in common_block
 
 
 def test_modal_renders_advanced_option_fields_behind_toggle():
     fn = _modal_fn()
     advanced_block = fn.split("advancedOptionFields = `", 1)[1].split("`;", 1)[0]
-    for field_id in ("nb-p-domain", "nb-p-ntp", "nb-p-tftp", "nb-p-bootfile",
-                     "nb-p-netbios", "nb-p-bcast", "nb-p-lease"):
+    for field_id in ("nb-p-ntp", "nb-p-tftp", "nb-p-bootfile",
+                     "nb-p-netbios", "nb-p-bcast"):
         assert f"opt('{field_id}'" in advanced_block
     assert 'id="nb-p-advanced" class="hidden' in fn
     assert "Show advanced options" in fn
@@ -53,7 +56,8 @@ def test_submit_includes_all_dhcp_option_fields_in_custom_fields_for_create_and_
     fn = _submit_fn()
     for cf_key in ("gateway", "dns_servers", "search_domain", "domain_name",
                    "ntp_servers", "tftp_server_name", "boot_file_name",
-                   "netbios_name_servers", "broadcast_address", "lease_time"):
+                   "netbios_name_servers", "broadcast_address", "lease_time",
+                   "exclusion_ranges"):
         assert cf_key in fn
     # Shared object spread into BOTH the edit PUT payload and the create POST
     # payload, so the two paths can never drift.
@@ -148,6 +152,16 @@ def test_dhcp_leases_renders_convert_to_reservation_button():
     assert "Expired" in fn
     assert "validUntil" in fn
     assert "toLocaleString" in fn
+
+
+def test_dhcp_subnet_options_renders_subnet_and_description_without_id_prefix():
+    source = _source()
+    fn = source.split("async function _loadDhcpSubnetOptions(selId, preferredSubnetId)", 1)[1]
+    fn = fn.split("\nfunction convertLeaseToReservation", 1)[0]
+    assert "s.subnet" in fn
+    assert "desc" in fn
+    assert "s.id" in fn
+
 
 
 

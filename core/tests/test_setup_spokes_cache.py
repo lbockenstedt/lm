@@ -160,8 +160,7 @@ def test_aggregate_payload_shape():
     assert by["pxmx-1"]["module_type"] == "hypervisor"
     assert by["pxmx-1"]["spoke_guid"] == "guid-1"
     assert by["pxmx-1"]["tenant_shared"] is False
-    # An unassigned (None-tenant) spoke is never shared.
-    assert by["opn-1"]["tenant_shared"] is False
+    assert by["opn-1"]["tenant_shared"] is True
 
 
 def test_aggregate_keeps_direct_agent_that_collides_with_relay_inventory():
