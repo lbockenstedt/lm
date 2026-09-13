@@ -242,6 +242,7 @@ def build_subnet4(subnets: list, reservations: list) -> tuple:
             "subnet": str(net),
             "pools":  pools,
             "option-data": [],
+            "reservations-lookup-first": True,
         }
         # Carry the NetBox prefix description through in Kea's user-context so
         # the UI can label a scope by its real name/purpose instead of a bare
