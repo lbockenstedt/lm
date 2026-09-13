@@ -913,7 +913,7 @@ def shared_tenant_id():
 
 
 def tenant_is_shared(tenant_id) -> bool:
-    return bool(tenant_id) and tenant_id == _SHARED_TENANT_ID
+    return bool(tenant_id) and (tenant_id == _SHARED_TENANT_ID or str(tenant_id).strip().lower() == "shared")
 
 
 # ── NW per-tenant poll config (jitter / caps / default cadence) ──────────────
@@ -1435,6 +1435,8 @@ async def filter_fw(hub, sessions: dict, request: "Request", data, endpoint: str
             return data
         prefixes = await resolve_prefixes(hub, sess)
     if not prefixes:
+        if tenant_is_shared(tid):
+            return data
         return _empty_filter_result(data)
     # OPNsense category attribution: for rules/nat/aliases, a record whose
     # `category` belongs to the tenant is shown regardless of subnet. The admin
@@ -1606,6 +1608,8 @@ async def filter_nw(hub, sessions: dict, request: "Request", data, endpoint: str
             return data
         prefixes = await resolve_prefixes(hub, sess)
     if not prefixes:
+        if tenant_is_shared(tid):
+            return data
         return _empty_filter_result(data)
     drop_no_ip = endpoint not in ("macs", "arp", "endpoints")
     before = _list_len(data)
@@ -1751,10 +1755,13 @@ async def filter_tenant(hub, sessions: dict, request: "Request", data, module: s
         if not prefixes:
             # Hypervisor attributes by tenant TAG + template pool too, so a
             # no-prefix tenant may still own tag-attributed VMs — don't blank
-            # it (filter_hypervisor_vms applies those overrides). Every other
-            # (purely subnet-filtered) module FAILS CLOSED: a tenant with no
-            # prefixes sees nothing, not the whole fleet.
-            if module == "hypervisor":
+            # it (filter_hypervisor_vms applies those overrides). The SHARED
+            # tenant represents shared infrastructure (unbound / shared across
+            # tenants) — when no explicit prefixes are scoped to it in NetBox,
+            # show shared infrastructure rather than blanking the view.
+            # Every other (purely subnet-filtered private) module FAILS CLOSED:
+            # a tenant with no prefixes sees nothing, not the whole fleet.
+            if module == "hypervisor" or tenant_is_shared(tid):
                 return data
             return _empty_filter_result(data)
         if module == "hypervisor":
