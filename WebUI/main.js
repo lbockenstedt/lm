@@ -22762,12 +22762,12 @@ async function loadNetboxData(subMenu) {
     const actions = document.getElementById('top-nav-actions');
     if (actions) {
         if (writable.includes(subMenu)) {
-            // The Prefixes sub-view also gets a "New Subnet" finder button:
+            // The Prefixes sub-view also gets an "Add Prefix" finder button:
             // it searches for the closest available subnet to one the tenant
             // already has (RFC1918 free-space scan) and assigns the pick. The
             // manual "+ Add" (carve-from-parent) flow stays alongside it.
             const findBtn = subMenu === 'Prefixes'
-                ? `<button onclick="showFindSubnetModal()" class="bg-white border border-[#01A982] text-[#01A982] hover:bg-[#01A982] hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2">New Subnet</button>`
+                ? `<button onclick="showFindSubnetModal()" class="bg-white border border-[#01A982] text-[#01A982] hover:bg-[#01A982] hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2">Add Prefix</button>`
                 : '';
             // Admin-only Excel rack-layout importer (Setup → Module Management
             // gating is mirrored here: only admins see the button; the hub
@@ -22891,12 +22891,18 @@ async function loadNetboxData(subMenu) {
             if (!r.ok || d.status === 'ERROR') { container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || d.detail || 'NetBox spoke not connected'}</p>`; return; }
             const prefixes = d.prefixes || [];
             window._nbPrefixes = prefixes;
-            const cols = ['Prefix', 'Status', 'Site', 'VRF', 'Is Pool', 'Description', ''];
+            const cols = ['Prefix', 'Status', 'DHCP', 'Site', 'VRF', 'Is Pool', 'Description', ''];
             const rows = prefixes.map(p => {
                 const statusCls = p.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500';
+                const cf = p.custom_fields || {};
+                const isDhcp = !!cf.dhcp_enabled && p.status !== 'container';
+                const dhcpBadge = isDhcp
+                    ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800" title="DHCP scope enabled">DHCP</span>'
+                    : '<span class="text-slate-300 text-xs">—</span>';
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                     <td class="px-4 py-2 font-mono font-medium">${escapeHtml(p.prefix)}</td>
                     <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusCls}">${escapeHtml(p.status)}</span></td>
+                    <td class="px-4 py-2 text-center">${dhcpBadge}</td>
                     <td class="px-4 py-2 text-xs">${p.site || '—'}</td>
                     <td class="px-4 py-2 text-xs">${p.vrf || 'Global'}</td>
                     <td class="px-4 py-2 text-center text-xs">${p.is_pool ? '✓' : ''}</td>
@@ -23573,9 +23579,9 @@ async function deleteNetboxPrefix(prefixId) {
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
-// ─── New Subnet finder + release-to-pool ─────────────────────────────────────
+// ─── Add Prefix finder + release-to-pool ─────────────────────────────────────
 //
-// "New Subnet": search for the closest available subnet to one the tenant
+// "Add Prefix": search for the closest available subnet to one the tenant
 // already has (free = undefined-in-NetBox or defined-but-unassigned, RFC1918
 // only), ranked by numeric distance; the user picks one and Assigns it. Size is
 // given as a prefix length or as a host count (smallest mask that fits). If
@@ -23597,7 +23603,7 @@ async function showFindSubnetModal() {
     if (existing) { existing.remove(); return; }
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const modal = openModal('nb-find-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">New Subnet</h3>
+        <h3 class="text-lg font-bold text-[#263040]">Add Prefix</h3>
         <p class="text-xs text-slate-500 -mt-2">Finds the closest available subnet to one you already have (RFC1918 only; free = not in NetBox or unassigned).</p>
         <div class="space-y-3">
             <div class="space-y-1">
@@ -28628,16 +28634,26 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
             const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/leases?tenant=' + encodeURIComponent(currentTenant));
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); return; }
             const leases = d.leases || [];
+            window._dhcpLeases = leases;
             const showTenantCol = leases.some(l => l && l._tenant);
-            const cols = (showTenantCol ? ['Tenant'] : []).concat(['IP Address', 'MAC', 'Hostname', 'State', 'Valid Until']);
-            const rows = leases.map(l => `<tr class="border-b border-slate-100 hover:bg-slate-50">
-                ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(l._tenant || '—')}</td>` : ''}
-                <td class="px-4 py-2 font-mono font-medium">${escapeHtml(l['ip-address'] || l.ip || '—')}</td>
-                <td class="px-4 py-2 font-mono text-xs">${escapeHtml(l['hw-address'] || l.mac || '—')}</td>
-                <td class="px-4 py-2 text-xs">${escapeHtml(l.hostname || '—')}</td>
-                <td class="px-4 py-2 text-xs">${escapeHtml(l.state || (l['state'] === 0 ? 'default' : (l['state'] === 1 ? 'declined' : 'expired')))}</td>
-                <td class="px-4 py-2 font-mono text-xs">${escapeHtml(String(l['valid-lft'] || '—'))}</td>
-            </tr>`).join('');
+            const cols = (showTenantCol ? ['Tenant'] : []).concat(['IP Address', 'MAC', 'Hostname', 'State', 'Valid Until', '']);
+            const rows = leases.map(l => {
+                const ip = l['ip-address'] || l.ip || '';
+                const mac = l['hw-address'] || l.mac || '';
+                const host = l.hostname || '';
+                const eIp = escJsAttr(ip);
+                return `<tr class="border-b border-slate-100 hover:bg-slate-50">
+                    ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(l._tenant || '—')}</td>` : ''}
+                    <td class="px-4 py-2 font-mono font-medium">${escapeHtml(ip || '—')}</td>
+                    <td class="px-4 py-2 font-mono text-xs">${escapeHtml(mac || '—')}</td>
+                    <td class="px-4 py-2 text-xs">${escapeHtml(host || '—')}</td>
+                    <td class="px-4 py-2 text-xs">${escapeHtml(l.state || (l['state'] === 0 ? 'default' : (l['state'] === 1 ? 'declined' : 'expired')))}</td>
+                    <td class="px-4 py-2 font-mono text-xs">${escapeHtml(String(l['valid-lft'] || '—'))}</td>
+                    <td class="px-4 py-2 whitespace-nowrap text-right">
+                        ${ip && mac ? `<button onclick="convertLeaseToReservation('${eIp}')" title="Convert to static reservation" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2.5 py-1 rounded transition-colors font-medium">Reserve</button>` : ''}
+                    </td>
+                </tr>`;
+            }).join('');
             container.innerHTML = leases.length === 0
                 ? '<p class="p-4 text-slate-400 italic text-sm">No active leases.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`);
@@ -28672,7 +28688,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
     }
 }
 
-async function _loadDhcpSubnetOptions(selId) {
+async function _loadDhcpSubnetOptions(selId, preferredSubnetId) {
     const sel = document.getElementById(selId);
     if (!sel) return;
     sel.innerHTML = '<option value="">Loading…</option>';
@@ -28682,10 +28698,28 @@ async function _loadDhcpSubnetOptions(selId) {
         sel.innerHTML = subnets.length
             ? subnets.map(s => `<option value="${escapeHtml(String(s.id))}">${escapeHtml(String(s.id))} — ${escapeHtml(s.subnet)}</option>`).join('')
             : `<option value="">${ok ? 'No subnets configured' : (detail || 'Could not load subnets')}</option>`;
+        if (subnets.length) {
+            if (preferredSubnetId != null && subnets.some(s => String(s.id) === String(preferredSubnetId))) {
+                sel.value = String(preferredSubnetId);
+            } else if (subnets.length === 1) {
+                sel.value = String(subnets[0].id);
+            }
+        }
     } catch (err) {
         console.error('_loadDhcpSubnetOptions: could not load subnets', err);
         sel.innerHTML = '<option value="">Could not load subnets</option>';
     }
+}
+
+function convertLeaseToReservation(ip) {
+    const item = (window._dhcpLeases || []).find(l => (l['ip-address'] || l.ip) === ip);
+    if (!item) { showToast('Lease data not found — refresh and try again', 'error'); return; }
+    showDhcpReservationModal({
+        ip: item['ip-address'] || item.ip || '',
+        mac: item['hw-address'] || item.mac || '',
+        hostname: item.hostname || '',
+        subnet_id: item['subnet-id'] ?? item.subnet_id ?? null,
+    }, true);
 }
 
 function editDhcpReservation(ip) {
@@ -28694,12 +28728,14 @@ function editDhcpReservation(ip) {
     showDhcpReservationModal(item);
 }
 
-function showDhcpReservationModal(editItem) {
-    const editing = !!editItem;
+function showDhcpReservationModal(editItem, isConvert = false) {
+    const editing = !isConvert && !!editItem;
     const val = v => (v == null ? '' : String(v).replace(/"/g, '&quot;'));
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
+    const title = editing ? 'Edit DHCP Reservation' : (isConvert ? 'Convert Lease to Reservation' : 'Add DHCP Reservation');
+    const btnText = editing ? 'Save Changes' : 'Add Reservation';
     const modal = openModal('dhcp-res-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} DHCP Reservation</h3>
+        <h3 class="text-lg font-bold text-[#263040]">${title}</h3>
         <div class="space-y-3">
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Subnet</label><select id="dhcp-res-subnet" class="${inputCls}"><option value="">Loading…</option></select></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">IP Address</label><input id="dhcp-res-ip" value="${val(editItem?.ip)}" class="${inputCls}" placeholder="10.0.0.50"></div>
@@ -28707,16 +28743,11 @@ function showDhcpReservationModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Hostname (optional)</label><input id="dhcp-res-host" value="${val(editItem?.hostname)}" class="${inputCls}" placeholder="printer-01"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDhcpReservation()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Reservation'}</button>
+            <button onclick="saveDhcpReservation()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${btnText}</button>
             <button onclick="document.getElementById('dhcp-res-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) modal.dataset.editIp = editItem.ip;
-    _loadDhcpSubnetOptions('dhcp-res-subnet').then(() => {
-        if (editing && editItem.subnet_id != null) {
-            const sel = document.getElementById('dhcp-res-subnet');
-            if (sel) sel.value = String(editItem.subnet_id);
-        }
-    });
+    _loadDhcpSubnetOptions('dhcp-res-subnet', editItem?.subnet_id);
 }
 
 async function saveDhcpReservation() {
