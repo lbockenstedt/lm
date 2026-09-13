@@ -11,9 +11,16 @@ def _source():
 
 
 def test_forwarder_add_button_is_global_admin_only():
+    """"+ Add Forwarder" renders into the shared #top-nav-actions strip
+    (pinned next to the help "i" icon), gated to global admins and the
+    Forwarders tab only, rather than a page-body button toggled via its
+    own id."""
     source = _source()
-    assert "${isAdmin() ? `<button id=\"dns-forwarder-add-btn\"" in source
-    assert "addForwarderBtn.classList.toggle('hidden', subMenu !== 'Forwarders')" in source
+    load_fn = source.split("async function loadDNSData(subMenu", 1)[1]
+    load_fn = load_fn.split("\nasync function ", 1)[0]
+    assert "const addForwarderBtn = (subMenu === 'Forwarders' && isAdmin())" in load_fn
+    assert 'id="dns-forwarder-add-btn"' in load_fn
+    assert "navActions.innerHTML = addServerButtonHtml('dns', 'DNS') + addRecordBtn + addForwarderBtn" in load_fn
 
 
 def test_forwarder_modal_posts_zone_and_upstreams():
