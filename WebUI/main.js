@@ -28652,13 +28652,29 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     stateLabel = 'Expired';
                     stateBadge = 'bg-amber-50 text-amber-700 border-amber-200';
                 }
+                let validUntil = '—';
+                const cltt = Number(l.cltt || l['cltt']);
+                const validLft = Number(l['valid-lft'] || l.valid_lft || l['valid_lft']);
+                const exp = Number(l.expire || l.expires || l['expire-time'] || l['expire_time']);
+                if (exp && !isNaN(exp)) {
+                    const d = new Date(exp > 1e11 ? exp : exp * 1000);
+                    if (!isNaN(d.getTime())) validUntil = d.toLocaleString();
+                } else if (cltt && !isNaN(cltt) && validLft && !isNaN(validLft)) {
+                    const d = new Date((cltt + validLft) * 1000);
+                    if (!isNaN(d.getTime())) validUntil = d.toLocaleString();
+                } else if (l['valid-until'] || l['valid_until'] || l.validUntil) {
+                    const d = new Date(l['valid-until'] || l['valid_until'] || l.validUntil);
+                    if (!isNaN(d.getTime())) validUntil = d.toLocaleString();
+                } else if (l['valid-lft'] !== undefined && l['valid-lft'] !== null && String(l['valid-lft']).trim() !== '') {
+                    validUntil = String(l['valid-lft']);
+                }
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                     ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(l._tenant || '—')}</td>` : ''}
                     <td class="px-4 py-2 font-mono font-medium">${escapeHtml(ip || '—')}</td>
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(mac || '—')}</td>
                     <td class="px-4 py-2 text-xs">${escapeHtml(host || '—')}</td>
                     <td class="px-4 py-2 text-xs"><span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium border ${stateBadge}">${escapeHtml(stateLabel)}</span></td>
-                    <td class="px-4 py-2 font-mono text-xs">${escapeHtml(String(l['valid-lft'] || '—'))}</td>
+                    <td class="px-4 py-2 font-mono text-xs">${escapeHtml(validUntil)}</td>
                     <td class="px-4 py-2 whitespace-nowrap text-right">
                         ${ip && mac ? `<button onclick="convertLeaseToReservation('${eIp}')" title="Convert to static reservation" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2.5 py-1 rounded transition-colors font-medium">Reserve</button>` : ''}
                     </td>
