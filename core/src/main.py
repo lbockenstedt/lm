@@ -741,6 +741,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         # (rate-limits re-pushing the current session key to a spoke that's
         # still signing with a previous/rotated-out key — missed rotation push).
         self._rotation_repush_at: Dict[str, float] = {}
+        # Per-spoke last-re-provision timestamp for
+        # _maybe_reprovision_hub_secret (rate-limits re-pushing the CURRENT
+        # hub root secret to a spoke that just verified this Hub via an OLDER
+        # entry in the rotation-window ``signatures`` list rather than the
+        # newest secret — see the mutual-auth block below). Same rate-limit
+        # instinct as ``_rotation_repush_at``: this fires once per handshake
+        # after a match on the fallback list, and reconnects can happen in a
+        # tight loop while a spoke is offline-flapping.
+        self._hub_secret_repush_at: Dict[str, float] = {}
         # Key-clone probe state (surface G). When a spoke's CURRENT and a BACKUP
         # key are seen in simultaneous use from two DIFFERENT source IPs, we
         # cannot yet tell a real clone from a legitimate DHCP move that left a
@@ -3381,6 +3390,59 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         except Exception as e:  # noqa: BLE001
             logger.error(f"Re-deliver session key to {spoke_id} failed: {e}")
 
+    async def _maybe_reprovision_hub_secret(self, spoke_id: str) -> None:
+        """Re-push the CURRENT hub root secret to a spoke that just verified
+        this Hub via an OLDER entry in the ``signatures`` rotation window.
+
+        Mirrors ``_maybe_redeliver_session_key``'s shape and rate-limiting
+        instinct, but for the OTHER direction of the mutual-auth handshake:
+        that method notices when a SPOKE's session key has drifted behind
+        (still signing with a rotated-out key) and re-pushes the current one;
+        this notices when the HUB's root secret has drifted behind on a spoke
+        (it only verified via ``hub_secrets[1]``/``[2]``, not the newest) and
+        re-pushes the current root secret the same way.
+
+        This is what makes the 3-entry rotation window (KeyManager.
+        rotate_hub_secret) self-correcting instead of merely
+        forgiving-once: without it, a spoke that missed one rotation would
+        keep verifying via an older-and-older window entry every reconnect,
+        silently consuming its retention budget, until a THIRD missed
+        rotation finally pushed it out of the window entirely and it hit the
+        unverified-hub refusal this whole feature exists to avoid. Called
+        only when the spoke reported ``hub_secret_index > 0`` on HUB_OK (see
+        the mutual-auth block above) — a spoke that verified via index 0 is
+        already current and this is never invoked for it.
+
+        Rate-limited to once per 60s per spoke — a spoke stuck offline-flapping
+        without ever completing a real reconnect would otherwise get this
+        pushed on every retry. Deliberately does NOT touch the 30-day root
+        rotation cadence or its fleet-wide fanout (``run_key_rotation_loop``):
+        this is a narrow, best-effort top-up for one spoke that's behind, not
+        a rotation trigger — it never calls ``rotate_hub_secret()``.
+        """
+        now = time.time()
+        if now - self._hub_secret_repush_at.get(spoke_id, 0.0) < 60:
+            return
+        pk = self._primary_key(spoke_id)
+        if pk not in self.active_connections:
+            return
+        self._hub_secret_repush_at[spoke_id] = now
+        current_root_secret = self.key_manager.hub_secrets[0]
+        msg = Message(
+            header=MessageHeader(
+                message_id=str(uuid.uuid4()), timestamp=time.time(),
+                sender_id="hub", destination_id=spoke_id),
+            payload=MessagePayload(
+                type="SPOKE_SET_HUB_SECRET", data={"hub_secret": current_root_secret}))
+        try:
+            await self.send_to_spoke(msg)
+            logger.info(f"Re-provisioned current hub root secret to {spoke_id} "
+                        f"(verified via an older rotation-window entry).")
+            self.record_spoke_event(spoke_id, "hub_secret_reprovisioned",
+                                    "spoke verified via an older retained hub secret — current root re-pushed")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Re-provision hub secret to {spoke_id} failed: {e}")
+
     async def rotate_all_spoke_secrets_now(self) -> Dict[str, Any]:
         """On-demand in-place rotation for every approved spoke with a key
         (item 9b) — the operator's "rotate everything after an incident" lever.
@@ -5160,6 +5222,23 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                     "challenge": challenge,
                     "signature": signature
                 }
+                # Rotation-window proof: the KeyManager retains the last 3 hub
+                # root secrets specifically "so spokes can verify the Hub's
+                # identity even if they have not yet received the latest
+                # rotation update or if they were restored from a backup"
+                # (key_manager.rotate_hub_secret docstring) — but that window
+                # was dead unless the spoke happened to hold hub_secrets[0].
+                # Ship a signature for every retained secret so a spoke
+                # holding an older-but-still-retained secret can verify via
+                # ``signatures`` instead of only the single newest-secret
+                # ``signature`` above. Additive field — the spoke verifies
+                # over ``challenge`` only (see the ``enc`` comment below), so
+                # a legacy spoke that only reads ``signature`` is unaffected.
+                try:
+                    proof["signatures"] = self.key_manager.sign_hub_challenge_all(
+                        challenge.encode())
+                except Exception:  # noqa: BLE001 — never block the legacy proof on this
+                    logger.debug("sign_hub_challenge_all failed; proceeding with single signature only", exc_info=True)
                 # H4: advertise app-layer-encryption capability to the spoke. The
                 # spoke verifies the signature over ``challenge`` ONLY (it never
                 # re-serializes or re-signs this proof dict), so adding an
@@ -5206,6 +5285,24 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         return
                     logger.info(f"Mutual authentication complete for {spoke_id}.")
                     self.record_spoke_event(spoke_id, "mutual_auth_complete", "")
+                    # The spoke told us (additive/optional ``hub_secret_index``)
+                    # which entry of our ``signatures`` rotation-window list it
+                    # matched. Index 0 = our current root secret — nothing to
+                    # do. Index > 0 = it's still holding an OLDER retained
+                    # secret (missed one or more root rotations); proactively
+                    # push it the current one now instead of leaving it to
+                    # keep drifting — a spoke that never reconnects during a
+                    # rotation's brief propagation window would otherwise
+                    # accumulate rotations behind until it eventually falls
+                    # OUT of the 3-entry window and hits the unverified-hub
+                    # refusal this whole feature exists to prevent. A legacy
+                    # spoke omits the field entirely and this is a no-op.
+                    try:
+                        matched_index = hub_response.get("hub_secret_index")
+                        if isinstance(matched_index, int) and matched_index > 0:
+                            await self._maybe_reprovision_hub_secret(spoke_id)
+                    except Exception:  # noqa: BLE001 — best-effort, never break the handshake
+                        logger.debug("hub_secret reprovision check failed for %s", spoke_id, exc_info=True)
                 except asyncio.TimeoutError:
                     if not secret:
                         logger.info(f"No response for Hub proof from {spoke_id} (expected for secret-less connection).")
@@ -5215,6 +5312,39 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         self.record_spoke_event(spoke_id, "mutual_auth_timeout", "spoke did not respond to hub proof within 2s")
                         await websocket.close(1008, "Mutual authentication timed out")
                         return
+                except websockets.ConnectionClosed as e:
+                    # The spoke closes the socket (instead of replying HUB_OK)
+                    # when it refuses this Hub's identity proof — see
+                    # control_plane.py's "Hub identity unverified (TLS verify
+                    # off)" refuse branch: every known hub_secret (plus the
+                    # signatures/psk_signature fallbacks) failed to verify,
+                    # and TLS isn't authenticating the hub either, so the
+                    # spoke keeps its stale secret(s) and drops the connection
+                    # rather than risk trusting a possible MITM hub. Before
+                    # this, the Hub recorded NOTHING for this case — the
+                    # operator only ever saw the spoke as "offline" with no
+                    # cause, even though the Hub is the side watching the
+                    # close frame go by. Surface it through record_spoke_event
+                    # + spoke_telemetry so it flows into /setup/diagnostics
+                    # (last_status/last_error/flapping) instead of vanishing.
+                    # The decision + recording is factored into
+                    # _record_hub_identity_rejection (rather than kept inline)
+                    # so it's unit-testable without driving a full fake-
+                    # websocket handshake through this method.
+                    close_code = e.rcvd.code if getattr(e, "rcvd", None) else None
+                    close_reason = ((e.rcvd.reason if getattr(e, "rcvd", None) else "") or "")
+                    identity_rejected = self._record_hub_identity_rejection(
+                        spoke_id, pk, close_code, close_reason)
+                    if not identity_rejected:
+                        # Not an identity-rejection close — preserve the prior
+                        # fallback behavior (this used to fall through to the
+                        # generic "Mutual authentication error" handler below).
+                        logger.error(f"Mutual authentication error for {spoke_id}: {e}")
+                        try:
+                            await websocket.close(1008, "Mutual authentication failed")
+                        except Exception:
+                            pass
+                    return
             except Exception as e:
                 logger.error(f"Mutual authentication error for {spoke_id}: {e}")
                 await websocket.close(1008, "Mutual authentication failed")
@@ -8674,6 +8804,48 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             "detail": detail,
         })
         logger.info(f"[spoke-event] {spoke_id} {event}" + (f": {detail}" if detail else ""))
+
+    def _record_hub_identity_rejection(self, spoke_id: str, pk: str,
+                                        close_code: Optional[int],
+                                        close_reason: str) -> bool:
+        """Record telemetry for a spoke that closed the mutual-auth socket
+        because it refused THIS Hub's identity proof — see the
+        ``websockets.ConnectionClosed`` handler in the mutual-auth block of
+        ``handle_connection``, and control_plane.py's "Hub identity
+        unverified (TLS verify off)" refuse branch that produces this close.
+
+        Before this existed, the Hub recorded NOTHING when a spoke refused
+        it: the operator only ever saw the spoke as generically "offline"
+        (or flapping, once enough drops accumulated) with no indication that
+        the CAUSE was a stale hub root secret rather than a network issue, a
+        crashed spoke process, or a wrong secret. The Hub is the side that
+        watches the close frame go by, so it is the only side that CAN
+        record this — surfacing it here is the fix.
+
+        Returns True (and records ``hub_identity_rejected`` +
+        ``spoke_telemetry``) only when ``close_code``/``close_reason`` match
+        the specific identity-rejection close; returns False (no telemetry)
+        for any other close so callers can fall back to their prior generic
+        handling. Never raises — a telemetry failure must not disrupt the
+        handshake path (mirrors the other best-effort blocks in
+        handle_connection), so any exception here is swallowed and logged at
+        debug level.
+        """
+        if not (close_code == 1008 and "identity" in (close_reason or "").lower()):
+            return False
+        try:
+            self.record_spoke_event(
+                spoke_id, "hub_identity_rejected",
+                f"spoke refused hub proof: {close_reason}")
+            self.spoke_telemetry[pk] = {
+                "last_attempt": time.time(),
+                "status": "HUB_IDENTITY_REJECTED",
+                "error": close_reason,
+            }
+            return True
+        except Exception:  # noqa: BLE001 — telemetry must never break the handshake path
+            logger.debug("Failed to record hub_identity_rejected telemetry", exc_info=True)
+            return False
 
     def _handle_edge_probe_report(self, spoke_id, reporter_ip: Optional[str],
                                   data: dict) -> None:

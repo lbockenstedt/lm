@@ -1115,6 +1115,76 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
             logger.warning("Hub auto-discovery found no hub (no lm-hub DNS record / "
                            "mDNS broadcast); will retry on reconnect. Pass --hub to pin.")
 
+    def _verify_hub_challenge(self, challenge: str, signature, signatures_field):
+        """Check the Hub's mutual-auth challenge signature against every
+        retained ``hub_secrets`` entry we hold, trying the single
+        ``signature`` field first (today's sole check — kept byte-for-byte,
+        including its behavior when ``signatures_field`` is absent or
+        malformed) and falling back to the additive rotation-window
+        ``signatures`` list only if that fails.
+
+        Extracted out of ``_connect_and_serve`` (rather than kept inline) so
+        the rotation-window fallback logic — the actual fix for spokes
+        locking out after a missed hub root-secret rotation — can be unit
+        tested directly instead of only via a full fake-websocket handshake.
+
+        Returns ``(verified, matched_index)`` where ``matched_index`` is the
+        position in the effective signatures list that matched: 0 means the
+        Hub's CURRENT (newest) root secret (either via ``signature`` itself,
+        or via ``signatures[0]`` — the two are always equal since the Hub
+        signs both with ``hub_secrets[0]``); >0 means an OLDER retained
+        secret matched, i.e. we're behind on rotations. ``None`` means
+        nothing matched (or ``signatures_field`` was absent/malformed, so
+        only the single-signature check ran) — the caller falls through to
+        the PSK/refuse handling exactly as before this fallback existed.
+        """
+        verified = False
+        matched_index = None
+        for hs in self.hub_secrets:
+            expected_sig = hmac.new(
+                hs.encode(),
+                challenge.encode(),
+                hashlib.sha256
+            ).hexdigest()
+            if hmac.compare_digest(expected_sig, signature):
+                verified = True
+                matched_index = 0
+                break
+
+        # Rotation-window fallback: KeyManager retains the last 3 hub root
+        # secrets specifically "so spokes can verify the Hub's identity even
+        # if they have not yet received the latest rotation update or if
+        # they were restored from a backup" (rotate_hub_secret docstring) —
+        # but until the hub started sending a ``signatures`` entry per
+        # retained secret, that window was unusable: this spoke's
+        # hub_secrets[1] or [2] had no matching signature to check against,
+        # so a spoke that missed even one root rotation could never verify
+        # and (with LM_HUB_TLS_VERIFY=0 and no onboarding PSK) hit the
+        # refuse-forever branch in the caller. Only consulted when the single
+        # ``signature`` above didn't verify, and only when the hub sent a
+        # well-formed list — a legacy hub (no ``signatures`` field) or any
+        # other malformed shape (not a list, non-string entries) leaves
+        # ``verified``/``matched_index`` exactly as the single-signature
+        # check left them, i.e. today's behavior, byte-for-byte.
+        if not verified and isinstance(signatures_field, list):
+            for hs in self.hub_secrets:
+                expected_sig = hmac.new(
+                    hs.encode(),
+                    challenge.encode(),
+                    hashlib.sha256
+                ).hexdigest()
+                for idx, sig in enumerate(signatures_field):
+                    if not isinstance(sig, str):
+                        continue
+                    if hmac.compare_digest(expected_sig, sig):
+                        verified = True
+                        matched_index = idx
+                        break
+                if verified:
+                    break
+
+        return verified, matched_index
+
     async def _connect_and_serve(self):
         # Disable per-message-deflate. A deflate-context desync between this
         # spoke's client and the hub manifests as "decompression failed"
@@ -1221,16 +1291,8 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                     signature = hub_proof.get("signature")
 
                     if self.hub_secrets:
-                        verified = False
-                        for hs in self.hub_secrets:
-                            expected_sig = hmac.new(
-                                hs.encode(),
-                                challenge.encode(),
-                                hashlib.sha256
-                            ).hexdigest()
-                            if hmac.compare_digest(expected_sig, signature):
-                                verified = True
-                                break
+                        verified, matched_signature_index = self._verify_hub_challenge(
+                            challenge, signature, hub_proof.get("signatures"))
 
                         if verified:
                             logger.info("Hub identity verified successfully.")
@@ -1246,7 +1308,18 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                             # "new version is good" signal; its absence past the
                             # deadline triggers a rollback.
                             self._touch_healthy_marker()
-                            await websocket.send(json.dumps({"status": "HUB_OK"}, separators=(',', ':')))
+                            hub_ok = {"status": "HUB_OK"}
+                            # Additive/optional: report which signatures[]
+                            # entry verified us. A legacy hub only checks
+                            # ``status`` on this reply and ignores unknown
+                            # fields, so always including it is safe. The hub
+                            # uses index > 0 as the signal to re-provision us
+                            # onto its current root secret (see
+                            # _maybe_reprovision_hub_secret) so we don't keep
+                            # drifting further behind each rotation.
+                            if matched_signature_index is not None:
+                                hub_ok["hub_secret_index"] = matched_signature_index
+                            await websocket.send(json.dumps(hub_ok, separators=(',', ':')))
                         else:
                             # All known hub_secrets failed to verify the hub's
                             # challenge — a stale hub root key (hub restart, a

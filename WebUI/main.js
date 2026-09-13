@@ -16085,6 +16085,16 @@ const SPOKE_EVENT_LABELS = {
     stale_key_rejected:   { label: 'Stale key rejected',     tone: 'text-red-600' },
     spoke_out_of_contact: { label: 'Out of contact (alert)', tone: 'text-amber-600' },
     spoke_back_in_contact:{ label: 'Back in contact',        tone: 'text-green-600' },
+    // Spoke refused the Hub's identity proof (all known hub_secrets stale +
+    // TLS verify off) — see the ConnectionClosed handler in main.py's
+    // mutual-auth block. Previously invisible: the hub recorded nothing here
+    // and the spoke retries forever, so this event is the only trace.
+    hub_identity_rejected:{ label: 'Hub identity rejected',  tone: 'text-red-600' },
+    // Spoke verified the Hub via an OLDER entry in the rotation-window
+    // signatures list (not the current root secret) — the hub proactively
+    // re-pushed SPOKE_SET_HUB_SECRET so it doesn't keep drifting behind.
+    // See LabManagerHub._maybe_reprovision_hub_secret.
+    hub_secret_reprovisioned:{ label: 'Hub secret re-provisioned', tone: 'text-amber-600' },
 };
 
 // Map a spoke's last_status + authenticated + flapping flags to a single
@@ -16104,6 +16114,12 @@ function spokeStatusMessage(s) {
         case 'DISCONNECTED':    return { text: 'Disconnected (clean exit) — likely self-update restart that systemd did not revive', tone: 'text-red-600' };
         case 'ERROR':           return { text: `Connection error: ${s.last_error || 'see hub logs'}`, tone: 'text-red-600' };
         case 'CONNECTED':       return { text: 'Briefly connected then dropped (see event log)', tone: 'text-amber-600' };
+        // Spoke refused this Hub's identity proof (its stored hub_secrets —
+        // including the rotation window — didn't match, and TLS verify is
+        // off so there's no independent authenticator). Without this case
+        // it fell into the generic default below and showed as "Never
+        // connected", hiding the actual cause from the operator.
+        case 'HUB_IDENTITY_REJECTED': return { text: `Hub identity rejected by spoke: ${s.last_error || 'see event log'}`, tone: 'text-red-600' };
         default:
             // After a hub reboot, spoke_telemetry is empty so last_status is
             // UNKNOWN and we land here — but a persisted last_seen (re-seeded
