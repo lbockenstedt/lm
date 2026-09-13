@@ -58,9 +58,9 @@ def test_get_stats_surfaces_subnet_description_from_user_context():
                 "pkt4-discover-received": [[0, "2024-01-01"]],
                 "pkt4-request-received": [[0, "2024-01-01"]],
             }
-        if command == "subnet4-list":
-            return {"subnets": [{"id": 1, "subnet": "10.0.0.0/24",
-                                  "user-context": {"description": "Lab Tenant A VLAN10"}}]}
+        if command == "config-get":
+            return {"Dhcp4": {"subnet4": [{"id": 1, "subnet": "10.0.0.0/24",
+                                           "user-context": {"description": "Lab Tenant A VLAN10"}}]}}
         return {}
 
     mgr._rpc = MagicMock(side_effect=fake_rpc)
@@ -84,8 +84,8 @@ def test_get_stats_empty_description_when_no_user_context():
                 "pkt4-discover-received": [[0, "2024-01-01"]],
                 "pkt4-request-received": [[0, "2024-01-01"]],
             }
-        if command == "subnet4-list":
-            return {"subnets": [{"id": 1, "subnet": "10.0.0.0/24"}]}
+        if command == "config-get":
+            return {"Dhcp4": {"subnet4": [{"id": 1, "subnet": "10.0.0.0/24"}]}}
         return {}
 
     mgr._rpc = MagicMock(side_effect=fake_rpc)
@@ -149,8 +149,8 @@ def test_get_stats_drops_orphaned_subnet_ids_not_in_live_config():
                 "pkt4-discover-received": [[0, "2024-01-01"]],
                 "pkt4-request-received": [[0, "2024-01-01"]],
             }
-        if command == "subnet4-list":
-            return {"subnets": [{"id": 1, "subnet": "10.0.0.0/24"}]}
+        if command == "config-get":
+            return {"Dhcp4": {"subnet4": [{"id": 1, "subnet": "10.0.0.0/24"}]}}
         return {}
 
     mgr._rpc = MagicMock(side_effect=fake_rpc)
