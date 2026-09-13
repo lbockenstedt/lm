@@ -16,6 +16,10 @@ import access  # noqa: E402
 class _FakeState:
     def __init__(self, tenants):
         self.tenant_state = {"tenants": tenants}
+        self.system_state = {}
+
+    def get_tenant(self, tenant_id):
+        return self.tenant_state.get("tenants", {}).get(tenant_id, {})
 
 
 class _FakeHub:
@@ -61,3 +65,28 @@ def test_no_shared_tenant_defaults_none():
     # Unassigned still admin-only; own tenant still visible.
     assert not access.spoke_visible_to_session(_user(["acme"]), "")
     assert access.spoke_visible_to_session(_user(["acme"]), "acme")
+
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_filter_tenant_shared_tenant_keeps_unscoped_data():
+    hub = _FakeHub({"shared": {"shared": True}, "acme": {}})
+    access.refresh_shared_tenant(hub)
+
+    class _FakeReq:
+        cookies = {"lm_session": "adm_token"}
+        client = None
+
+    sessions = {"adm_token": {"user": {"permissions": {"admin": True}}, "expires": 9999999999}}
+    raw_data = {"leases": [{"ip-address": "172.17.0.50", "hw-address": "00:11:22:33:44:55"}]}
+
+    # When explicit_tenant is 'shared' or 'SHARED' and no NetBox prefixes exist for it,
+    # shared infrastructure data is preserved rather than blanked.
+    res_lower = await access.filter_tenant(hub, sessions, _FakeReq(), raw_data, "dhcp", ["ip", "address", "ip-address", "ip_address"], explicit_tenant="shared")
+    assert res_lower == raw_data
+
+    res_upper = await access.filter_tenant(hub, sessions, _FakeReq(), raw_data, "dhcp", ["ip", "address", "ip-address", "ip_address"], explicit_tenant="SHARED")
+    assert res_upper == raw_data
+
