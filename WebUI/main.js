@@ -28642,12 +28642,22 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                 const mac = l['hw-address'] || l.mac || '';
                 const host = l.hostname || '';
                 const eIp = escJsAttr(ip);
+                const rawState = l.state !== undefined ? l.state : l['state'];
+                let stateLabel = 'Active';
+                let stateBadge = 'bg-emerald-50 text-emerald-700 border-emerald-200';
+                if (rawState === 1 || rawState === '1' || rawState === 'declined') {
+                    stateLabel = 'Declined';
+                    stateBadge = 'bg-rose-50 text-rose-700 border-rose-200';
+                } else if (rawState === 2 || rawState === '2' || rawState === 'expired') {
+                    stateLabel = 'Expired';
+                    stateBadge = 'bg-amber-50 text-amber-700 border-amber-200';
+                }
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                     ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(l._tenant || '—')}</td>` : ''}
                     <td class="px-4 py-2 font-mono font-medium">${escapeHtml(ip || '—')}</td>
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(mac || '—')}</td>
                     <td class="px-4 py-2 text-xs">${escapeHtml(host || '—')}</td>
-                    <td class="px-4 py-2 text-xs">${escapeHtml(l.state || (l['state'] === 0 ? 'default' : (l['state'] === 1 ? 'declined' : 'expired')))}</td>
+                    <td class="px-4 py-2 text-xs"><span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium border ${stateBadge}">${escapeHtml(stateLabel)}</span></td>
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(String(l['valid-lft'] || '—'))}</td>
                     <td class="px-4 py-2 whitespace-nowrap text-right">
                         ${ip && mac ? `<button onclick="convertLeaseToReservation('${eIp}')" title="Convert to static reservation" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2.5 py-1 rounded transition-colors font-medium">Reserve</button>` : ''}

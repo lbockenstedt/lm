@@ -143,4 +143,8 @@ def test_dhcp_leases_renders_convert_to_reservation_button():
     assert "convertLeaseToReservation" in fn
     assert "window._dhcpLeases" in fn
     assert "showDhcpReservationModal" in source
+    assert "Active" in fn
+    assert "Declined" in fn
+    assert "Expired" in fn
+
 
