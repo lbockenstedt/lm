@@ -603,7 +603,13 @@ class DHCPSpoke(BaseSpoke):
                   "declined_addresses": 0, "pkt4_received": 0,
                   "pkt4_discover": 0, "pkt4_request": 0, "pkt4_offer_sent": 0,
                   "pkt4_ack_sent": 0, "pkt4_nak_sent": 0}
-        subnets: List[Dict[str, Any]] = []
+        # Both HA nodes serve the identical subnet4 config, so every member
+        # reports the SAME subnets back — collect per-subnet numbers keyed by
+        # subnet_id (falling back to the CIDR) and average them below rather
+        # than blindly appending each member's copy, which used to render
+        # every scope twice in the Overview tab (one row per node).
+        subnet_totals: Dict[Any, Dict[str, Any]] = {}
+        subnet_hits: Dict[Any, int] = {}
         for member_id, reply in (fan.get("results") or {}).items():
             per_member[member_id] = reply
             if not isinstance(reply, dict) or reply.get("status") != "SUCCESS":
@@ -612,7 +618,26 @@ class DHCPSpoke(BaseSpoke):
             for key in totals:
                 totals[key] += int(g.get(key) or 0)
             for sub in reply.get("subnets") or []:
-                subnets.append({**sub, "member_id": member_id})
+                key = sub.get("subnet_id", sub.get("subnet"))
+                if key not in subnet_totals:
+                    subnet_totals[key] = dict(sub)
+                    subnet_hits[key] = 1
+                else:
+                    subnet_hits[key] += 1
+                    for num_key in ("total_addresses", "assigned_addresses",
+                                    "declined_addresses"):
+                        subnet_totals[key][num_key] = (
+                            subnet_totals[key].get(num_key, 0) + sub.get(num_key, 0))
+        subnets: List[Dict[str, Any]] = []
+        for key, sub in subnet_totals.items():
+            hits = max(1, subnet_hits[key])
+            for num_key in ("total_addresses", "assigned_addresses", "declined_addresses"):
+                sub[num_key] = sub.get(num_key, 0) // hits
+            sub["utilization_pct"] = (
+                round(sub["assigned_addresses"] / sub["total_addresses"] * 100, 1)
+                if sub.get("total_addresses") else 0.0)
+            subnets.append(sub)
+        subnets.sort(key=lambda s: s.get("subnet_id") if s.get("subnet_id") is not None else 0)
         # Pool capacity is the SAME address space on both nodes — summing it
         # would double-count. Report one node's view of capacity/usage.
         node_count = max(1, sum(1 for r in per_member.values()
