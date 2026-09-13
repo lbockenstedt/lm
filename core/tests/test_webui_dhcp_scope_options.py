@@ -146,5 +146,8 @@ def test_dhcp_leases_renders_convert_to_reservation_button():
     assert "Active" in fn
     assert "Declined" in fn
     assert "Expired" in fn
+    assert "validUntil" in fn
+    assert "toLocaleString" in fn
+
 
 
