@@ -4160,28 +4160,22 @@ function _viewTemplate(viewId) {
 </div>`;
 
         case 'dns':
-            // "+ Add Server" and "+ Add Record" now render into the trailing
-            // #top-nav-actions strip in the sub-nav bar (pinned right next to
-            // the help "i" icon) instead of a page-body button row — see
-            // loadDNSData(). "+ Add Forwarder" stays here: it is Forwarders-
-            // tab-only and toggled in place by loadDNSData via its own id.
+            // ALL per-tab action buttons ("+ Add Server", "+ Add Record",
+            // "+ Add Forwarder") render into the trailing #top-nav-actions
+            // strip in the sub-nav bar (pinned right next to the help "i"
+            // icon) instead of a page-body button row — see loadDNSData().
+            // No page-body actions row needed any more.
             return `<div class="space-y-6">
-  <div id="dns-actions" class="flex justify-end gap-2">
-    ${isAdmin() ? `<button id="dns-forwarder-add-btn" onclick="showDnsForwarderModal()" class="${btn} hidden">+ Add Forwarder</button>` : ''}
-  </div>
   <div id="dns-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;
 
         case 'dhcp':
-            // "+ Add Server" now renders into the trailing #top-nav-actions
-            // strip in the sub-nav bar (pinned right next to the help "i"
-            // icon) instead of this page-body button row — see
-            // loadDHCPData(). "+ Add Reservation" stays here: it is
-            // Reservations-tab-only and toggled in place by loadDHCPData.
+            // ALL per-tab action buttons ("+ Add Server", "+ Add
+            // Reservation") render into the trailing #top-nav-actions strip
+            // in the sub-nav bar (pinned right next to the help "i" icon)
+            // instead of a page-body button row — see loadDHCPData(). No
+            // page-body actions row needed any more.
             return `<div class="space-y-6">
-  <div class="flex justify-end gap-2">
-    ${(isAdmin() || isTenantAdmin()) ? `<button id="dhcp-add-btn" onclick="showDhcpReservationModal()" class="${btn}">+ Add Reservation</button>` : ''}
-  </div>
   <div id="dhcp-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;
 
@@ -23895,10 +23889,10 @@ function _dnsClusterPanel(c) {
     const desired = c.desired || {};
     const members = Array.isArray(c.members) ? c.members : [];
     const commit = c.last_commit || {};
+    const admin = typeof isAdmin === 'function' && isAdmin();
     const rows = members.map(m => {
         const tone = _DD_MEMBER_TONE[m.convergence] || 'text-slate-600';
         const ver = m.applied_version == null ? '—' : `v${m.applied_version}`;
-        const dig = m.applied_digest ? String(m.applied_digest).slice(0, 12) + '…' : '—';
         const seen = m.seconds_since_seen == null ? '—' : `${m.seconds_since_seen}s ago`;
         // Human-friendly name is the primary label (see display_name in
         // core/src/routes/net_services.py); the raw id (UUID/agent-id) is
@@ -23908,6 +23902,7 @@ function _dnsClusterPanel(c) {
         // secondary line — unchanged from before this field existed.
         const memberName = m.display_name || m.id || '—';
         const showId = m.id && m.display_name && m.display_name !== m.id;
+        const eId = escJsAttr(m.id || '');
         return `<tr class="border-b border-slate-100">
             <td class="px-4 py-2 font-medium" title="${escapeHtml(m.id || '')}">
                 ${escapeHtml(memberName)}
@@ -23916,9 +23911,11 @@ function _dnsClusterPanel(c) {
             <td class="px-4 py-2 font-mono text-xs">${escapeHtml(m.host || '—')}</td>
             <td class="px-4 py-2 text-xs font-bold ${tone}">${escapeHtml(m.convergence || 'unknown')}</td>
             <td class="px-4 py-2 text-xs">${escapeHtml(ver)}</td>
-            <td class="px-4 py-2 font-mono text-[11px] text-slate-500">${escapeHtml(dig)}</td>
             <td class="px-4 py-2 text-xs">${m.unbound_running === false ? '<span class="text-red-600 font-bold">stopped</span>' : (m.unbound_running ? 'running' : '—')}</td>
             <td class="px-4 py-2 text-xs text-slate-500">${escapeHtml(seen)}</td>
+            ${admin ? `<td class="px-4 py-2 text-right">
+                <button onclick="removeDnsClusterMember('${eId}')" title="Remove this member from the resolver cluster" class="p-1 text-slate-300 hover:text-red-500 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+            </td>` : ''}
         </tr>`;
     }).join('');
     const partial = commit.status && commit.status !== 'SUCCESS';
@@ -23928,7 +23925,7 @@ function _dnsClusterPanel(c) {
                 <div class="text-sm font-semibold text-slate-700">Resolver cluster ${_ddClusterBadge(c.state)}</div>
                 <div class="text-xs text-slate-400">${c.converged_count || 0}/${c.member_count || 0} converged on desired set v${desired.version == null ? '?' : desired.version} (${desired.record_count || 0} records)</div>
             </div>
-            ${tableWrap(tableHead(['Member', 'Host', 'Convergence', 'Applied', 'Digest', 'Unbound', 'Last seen']) + `<tbody>${rows}</tbody>`)}
+            ${tableWrap(tableHead(['Member', 'Host', 'Convergence', 'Applied', 'Unbound', 'Last seen'].concat(admin ? [''] : [])) + `<tbody>${rows}</tbody>`)}
             ${partial ? `<div class="px-4 py-3 border-t border-slate-200 text-xs text-amber-700 bg-amber-50">
                 Last commit v${escapeHtml(String(commit.version))} reported <b>${escapeHtml(commit.status)}</b> — applied on ${escapeHtml((commit.applied || []).join(', ') || 'no member')}; not applied on ${escapeHtml((commit.failed || []).join(', ') || 'none')}.
                 ${Object.entries(commit.errors || {}).map(([k, v]) => `<div class="mt-1 font-mono">${escapeHtml(k)}: ${escapeHtml(String(v))}</div>`).join('')}
@@ -23938,6 +23935,39 @@ function _dnsClusterPanel(c) {
                 <span class="text-xs text-slate-400 ml-2">Re-pushes the desired record set to any resolver that has drifted.</span>
             </div>
         </div>`;
+}
+
+// Drop a single member from the resolver cluster (e.g. a host whose DNS Server
+// role was uninstalled/decommissioned and will never converge again) without
+// touching the others — posts the remaining member set to the same
+// DNS_CLUSTER_CONFIG endpoint the "Edit cluster" modal uses. Only {id, host}
+// travel back: the rest of each row (convergence, applied version/digest,
+// last-seen …) is live reporting data, not configuration, and must not be
+// persisted into cluster.json.
+async function removeDnsClusterMember(id) {
+    const cluster = (window._svcClusterState || {}).dns;
+    const current = (cluster && Array.isArray(cluster.members)) ? cluster.members : [];
+    if (!current.some(m => m && m.id === id)) {
+        showToast('Could not find that member in the current cluster report — try refreshing.', 'error');
+        return;
+    }
+    if (!confirm(`Remove "${id}" from the DNS resolver cluster? Use this for a host that was decommissioned or had its DNS Server role uninstalled — the remaining resolver(s) keep serving.`)) {
+        return;
+    }
+    const remaining = current.filter(m => m && m.id !== id)
+        .map(m => ({ id: m.id, host: m.host || '' }));
+    try {
+        const res = await fetch('/api/dns/cluster' + _tenantQS(), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ members: remaining }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(data.detail || 'Remove failed', 'error'); return; }
+        if (data.status === 'ERROR') { showToast(data.message || 'Remove failed', 'error'); return; }
+        showToast(`Removed "${id}" from the resolver cluster`, 'success');
+    } catch (e) { showToast(e.message, 'error'); }
+    loadDNSData('Diagnostics');
 }
 
 // A real Kea HA pair behind one DHCP module: per-node HA state + lease sync +
@@ -24364,29 +24394,27 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
     // External DNS subtab: "all things DNS" also covers internet-facing DNS
     // providers (HE.NET, …). Each connected provider is rendered as its own
     // tile (or drilled straight into when only one is connected) inside the
-    // shared dns-content pane, so hide the Unbound header actions and hand off.
-    const dnsActions = document.getElementById('dns-actions');
+    // shared dns-content pane, so hide the top-nav actions and hand off.
     const navActions = document.getElementById('top-nav-actions');
     if (subMenu === 'External DNS') {
-        if (dnsActions) dnsActions.classList.add('hidden');
         if (navActions) navActions.innerHTML = '';
         return loadExternalDNS();
     }
-    if (dnsActions) dnsActions.classList.remove('hidden');
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
-    // "+ Add Server" (self-service onboarding) and "+ Add Record" (Records tab
-    // only) render into the trailing #top-nav-actions strip in the sub-nav
-    // bar, pinned right next to the help "i" icon (see renderTopNav) — rather
-    // than a page-body button row. "+ Add Forwarder" (Forwarders-tab-only)
-    // stays a page-body button; toggled below via its own id as before.
+    // ALL per-tab action buttons — "+ Add Server" (self-service onboarding,
+    // every tab), "+ Add Record" (Records tab only), "+ Add Forwarder"
+    // (Forwarders tab only) — render into the trailing #top-nav-actions strip
+    // in the sub-nav bar, pinned right next to the help "i" icon (see
+    // renderTopNav), rather than a page-body button row.
     if (navActions) {
         const addRecordBtn = ((subMenu === 'Records' || !subMenu) && (isAdmin() || isTenantAdmin()))
             ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Record</button>`
             : '';
-        navActions.innerHTML = addServerButtonHtml('dns', 'DNS') + addRecordBtn;
+        const addForwarderBtn = (subMenu === 'Forwarders' && isAdmin())
+            ? `<button id="dns-forwarder-add-btn" onclick="showDnsForwarderModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Forwarder</button>`
+            : '';
+        navActions.innerHTML = addServerButtonHtml('dns', 'DNS') + addRecordBtn + addForwarderBtn;
     }
-    const addForwarderBtn = document.getElementById('dns-forwarder-add-btn');
-    if (addForwarderBtn) addForwarderBtn.classList.toggle('hidden', subMenu !== 'Forwarders');
 
     const th = tableHead, tw = tableWrap;  // shared table helpers
     const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
@@ -28311,13 +28339,18 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
     const container = document.getElementById('dhcp-content');
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
-    const addBtn = document.getElementById('dhcp-add-btn');
-    if (addBtn) addBtn.classList.toggle('hidden', subMenu !== 'Reservations');
-    // "+ Add Server" (self-service onboarding) renders into the trailing
-    // #top-nav-actions strip in the sub-nav bar, pinned right next to the
-    // help "i" icon (see renderTopNav) — rather than a page-body button row.
+    // ALL per-tab action buttons — "+ Add Server" (self-service onboarding,
+    // every tab) and "+ Add Reservation" (Reservations tab only) — render
+    // into the trailing #top-nav-actions strip in the sub-nav bar, pinned
+    // right next to the help "i" icon (see renderTopNav), rather than a
+    // page-body button row.
     const navActions = document.getElementById('top-nav-actions');
-    if (navActions) navActions.innerHTML = addServerButtonHtml('dhcp', 'DHCP');
+    if (navActions) {
+        const addResBtn = (subMenu === 'Reservations' && (isAdmin() || isTenantAdmin()))
+            ? `<button id="dhcp-add-btn" onclick="showDhcpReservationModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Reservation</button>`
+            : '';
+        navActions.innerHTML = addServerButtonHtml('dhcp', 'DHCP') + addResBtn;
+    }
 
     const th = tableHead, tw = tableWrap;  // shared table helpers
     const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
@@ -28494,12 +28527,11 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
             // Admin combined view (2+ dhcp spokes): tagged _tenant by the merge
             // fanout — see net_services.py's _dhcp_merge_fanout.
             const showTenantCol = subnets.some(s => s && s._tenant);
-            const cols = (showTenantCol ? ['Tenant'] : []).concat(['ID', 'Subnet', 'Pools']);
+            const cols = (showTenantCol ? ['Tenant'] : []).concat(['Subnet', 'Pools']);
             const rows = subnets.map(s => {
                 const pools = (s.pools || []).map(p => p.pool || p).join(', ');
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                     ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(s._tenant || '—')}</td>` : ''}
-                    <td class="px-4 py-2 text-center text-xs">${escapeHtml(String(s.id))}</td>
                     <td class="px-4 py-2 font-mono font-medium">${escapeHtml(s.subnet)}</td>
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(pools || '—')}</td>
                 </tr>`;
