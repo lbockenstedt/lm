@@ -23471,27 +23471,35 @@ async function showNetboxAllocatePrefixModal(editItem) {
             ${opt('nb-p-bcast', 'Broadcast Address', 'e.g. 10.0.0.255', cf.broadcast_address)}`;
     const modal = openModal('nb-prefix-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Allocate'} Subnet${editing ? ` — <span class="font-mono text-sm">${val(editItem.prefix)}</span>` : ''}</h3>
-        <div class="space-y-3">
-            ${allocFields}
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Description</label><input id="nb-p-desc" value="${val(editItem?.description)}" class="${inputCls}" placeholder="e.g. Lab Tenant A VLAN10"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Site Slug (optional)</label><input id="nb-p-site" value="${val(editItem?.site)}" class="${inputCls}" placeholder="lab-a"></div>
-            ${editing ? `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-p-status" class="${selectCls}">${statusOpts}</select></div>` : ''}
-            <label class="flex items-center gap-2 text-sm text-slate-600 pt-1">
-                <input type="checkbox" id="nb-p-dhcp" class="rounded border-slate-300 text-[#01A982]" ${dhcpChecked ? 'checked' : ''}>
-                Enable DHCP scope for this subnet
-            </label>
-            <p class="text-xs text-slate-400 -mt-1">Only checked, non-container prefixes are synced to Kea as a DHCP scope. Leave unchecked on a parent/aggregate block — carve smaller child subnets and enable this on those instead.</p>
+        <div class="space-y-4">
+            ${allocFields ? `<div class="grid grid-cols-1 md:grid-cols-3 gap-3">${allocFields}</div>` : ''}
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Description</label><input id="nb-p-desc" value="${val(editItem?.description)}" class="${inputCls}" placeholder="e.g. Lab Tenant A VLAN10"></div>
+                <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Site Slug (optional)</label><input id="nb-p-site" value="${val(editItem?.site)}" class="${inputCls}" placeholder="lab-a"></div>
+                ${editing ? `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-p-status" class="${selectCls}">${statusOpts}</select></div>` : ''}
+            </div>
+            <div>
+                <label class="flex items-center gap-2 text-sm text-slate-600">
+                    <input type="checkbox" id="nb-p-dhcp" class="rounded border-slate-300 text-[#01A982]" ${dhcpChecked ? 'checked' : ''}>
+                    Enable DHCP scope for this subnet
+                </label>
+                <p class="text-xs text-slate-400 mt-0.5">Only checked, non-container prefixes are synced to Kea as a DHCP scope. Leave unchecked on a parent/aggregate block — carve smaller child subnets and enable this on those instead.</p>
+            </div>
             <div class="border-t border-slate-200 pt-3 space-y-3">
                 <div class="text-xs font-bold uppercase text-slate-500">DHCP Options</div>
-                ${commonOptionFields}
-                <button type="button" onclick="document.getElementById('nb-p-advanced').classList.toggle('hidden'); this.textContent = this.textContent.startsWith('Show') ? 'Hide advanced options' : 'Show advanced options ▾'" class="text-xs font-bold text-[#01A982] hover:underline">Show advanced options ▾</button>
-                <div id="nb-p-advanced" class="hidden space-y-3">${advancedOptionFields}</div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                    ${commonOptionFields}
+                </div>
+                <div>
+                    <button type="button" onclick="document.getElementById('nb-p-advanced').classList.toggle('hidden'); this.textContent = this.textContent.startsWith('Show') ? 'Hide advanced options' : 'Show advanced options ▾'" class="text-xs font-bold text-[#01A982] hover:underline">Show advanced options ▾</button>
+                </div>
+                <div id="nb-p-advanced" class="hidden grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 pt-1">${advancedOptionFields}</div>
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="submitNetboxAllocatePrefix()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Allocate'}</button>
             <button onclick="document.getElementById('nb-prefix-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>`, { card: 'w-full max-w-lg p-6 space-y-4 max-h-[85vh] overflow-y-auto' });
+        </div>`, { card: 'w-full max-w-4xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
     if (editing) modal.dataset.prefixId = editItem.id;
 
     if (editing) return;
@@ -23610,39 +23618,45 @@ async function showFindSubnetModal() {
         <h3 class="text-lg font-bold text-[#263040]">Add Prefix</h3>
         <p class="text-xs text-slate-500 -mt-2">Finds the closest available subnet to one you already have (RFC1918 only; free = not in NetBox or unassigned).</p>
         <div class="space-y-3">
-            <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Close to (your existing subnet)</label>
-                <select id="nb-f-near" class="${inputCls}"><option value="">Loading…</option></select>
-            </div>
-            <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Size</label>
-                <div class="flex gap-2 items-center">
-                    <select id="nb-f-size-mode" class="${inputCls} flex-none w-36" onchange="_onFindSizeModeChange()">
-                        <option value="mask">Prefix length</option>
-                        <option value="hosts">Hosts needed</option>
-                    </select>
-                    <select id="nb-f-mask" class="${inputCls} flex-1">
-                        ${[22,23,24,25,26,27,28,29,30].map(m => `<option value="${m}">/${m}</option>`).join('')}
-                    </select>
-                    <input id="nb-f-hosts" type="number" min="1" value="60" class="${inputCls} flex-1 hidden" oninput="_updateFindSizeHint()">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div class="space-y-1">
+                    <label class="text-xs text-slate-500 font-bold uppercase">Close to (your existing subnet)</label>
+                    <select id="nb-f-near" class="${inputCls}"><option value="">Loading…</option></select>
                 </div>
-                <p id="nb-f-size-hint" class="text-[10px] text-slate-400"></p>
+                <div class="space-y-1">
+                    <label class="text-xs text-slate-500 font-bold uppercase">Size</label>
+                    <div class="flex gap-2 items-center">
+                        <select id="nb-f-size-mode" class="${inputCls} flex-none w-36" onchange="_onFindSizeModeChange()">
+                            <option value="mask">Prefix length</option>
+                            <option value="hosts">Hosts needed</option>
+                        </select>
+                        <select id="nb-f-mask" class="${inputCls} flex-1">
+                            ${[22,23,24,25,26,27,28,29,30].map(m => `<option value="${m}">/${m}</option>`).join('')}
+                        </select>
+                        <input id="nb-f-hosts" type="number" min="1" value="60" class="${inputCls} flex-1 hidden" oninput="_updateFindSizeHint()">
+                    </div>
+                    <p id="nb-f-size-hint" class="text-[10px] text-slate-400"></p>
+                </div>
             </div>
-            <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Description (optional)</label>
-                <input id="nb-f-desc" class="${inputCls}" placeholder="e.g. Lab Tenant A VLAN11">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div class="space-y-1">
+                    <label class="text-xs text-slate-500 font-bold uppercase">Description (optional)</label>
+                    <input id="nb-f-desc" class="${inputCls}" placeholder="e.g. Lab Tenant A VLAN11">
+                </div>
+                <div class="space-y-1 flex items-end">
+                    <button onclick="searchAvailableSubnets()" class="bg-slate-700 hover:bg-slate-800 text-white px-4 py-2 rounded-md text-sm font-bold w-full h-[38px]">Search Available Subnets</button>
+                </div>
             </div>
             <div class="space-y-1 hidden" id="nb-f-typewrap">
                 <label class="text-xs text-slate-500 font-bold uppercase">Type a subnet to search near (exact tried first, else nearest)</label>
                 <input id="nb-f-typed" class="${inputCls}" placeholder="10.50.0.0/24">
             </div>
-            <button onclick="searchAvailableSubnets()" class="bg-slate-700 hover:bg-slate-800 text-white px-4 py-2 rounded-md text-sm font-bold w-full">Search</button>
-            <div id="nb-f-results" class="space-y-1"></div>
+            <div id="nb-f-results" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 max-h-48 overflow-y-auto"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button id="nb-f-assign-btn" onclick="submitFindSubnetAssign()" disabled class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold disabled:opacity-40 disabled:cursor-not-allowed">Assign</button>
             <button onclick="document.getElementById('nb-find-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>`, { backdropClose: true });
+        </div>`, { card: 'w-full max-w-4xl p-6 space-y-4 max-h-[90vh] overflow-y-auto', backdropClose: true });
     window._nbFindAvail = [];
     window._nbFindSelected = null;
 
@@ -23802,16 +23816,16 @@ function showNetboxAllocateIPModal(prefixHint, editItem) {
         `<option value="${s}"${editing && editItem.status === s ? ' selected' : ''}>${s}</option>`).join('');
     const modal = openModal('nb-ip-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Allocate'} IP Address${editing ? ` — <span class="font-mono text-sm">${val(editItem.address)}</span>` : ''}</h3>
-        <div class="space-y-3">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             ${allocFields}
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">DNS Name (optional)</label><input id="nb-ip-dns" value="${val(editItem?.dns_name)}" class="${inputCls}" placeholder="host.example.com"></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Description (optional)</label><input id="nb-ip-desc" value="${val(editItem?.description)}" class="${inputCls}" placeholder="e.g. Gateway VM"></div>
-            ${editing ? `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-ip-status" class="${inputCls}">${statusOpts}</select></div>` : ''}
+            ${editing ? `<div class="space-y-1 col-span-1 md:col-span-2"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-ip-status" class="${inputCls}">${statusOpts}</select></div>` : ''}
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="submitNetboxAllocateIP()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Allocate'}</button>
             <button onclick="document.getElementById('nb-ip-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+        </div>`, { card: 'w-full max-w-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
     if (editing) modal.dataset.ipId = editItem.id;
 }
 
