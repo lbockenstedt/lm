@@ -446,6 +446,30 @@ class KeaManager:
             for s in self.list_subnets()
         }
 
+        # Kea's "assigned-addresses" statistic is a counter that only moves on
+        # allocation/explicit release/reclamation events — it is NOT
+        # guaranteed to reflect what's actually in the lease table right now
+        # (e.g. a lease that vanished from lease4-get-all without Kea running
+        # its reclamation timer leaves the counter stuck showing it as still
+        # "assigned"). That drift is exactly what surfaced as "1 assigned
+        # lease" on the Overview tile while the Leases tab — which reads
+        # lease4-get-all directly — showed nothing. Count live, non-expired
+        # leases ourselves so the two tabs can never disagree.
+        assigned_by_subnet = {}
+        try:
+            for lease in self.list_leases():
+                sid = lease.get("subnet-id")
+                if sid is None:
+                    continue
+                # state: 0 = default/active, 1 = declined, 2 = expired-reclaimed.
+                if lease.get("state", 0) not in (0, None):
+                    continue
+                assigned_by_subnet[sid] = assigned_by_subnet.get(sid, 0) + 1
+        except Exception as e:
+            logger.warning("get_stats: live lease count failed, falling back "
+                           "to Kea's assigned-addresses statistic: %s", e)
+            assigned_by_subnet = {}
+
         subnet_ids = set()
         for k in raw:
             m = re.match(r"subnet\[(\d+)\]\.", k)
@@ -471,7 +495,7 @@ class KeaManager:
         subnets = []
         for sid in sorted(subnet_ids):
             total    = num(f"subnet[{sid}].total-addresses")
-            assigned = num(f"subnet[{sid}].assigned-addresses")
+            assigned = assigned_by_subnet.get(sid, 0)
             declined = num(f"subnet[{sid}].declined-addresses")
             util = round(assigned / total * 100, 1) if total else 0.0
             subnets.append({

@@ -158,3 +158,67 @@ def test_get_stats_drops_orphaned_subnet_ids_not_in_live_config():
     ids = [s["subnet_id"] for s in stats["subnets"]]
     assert ids == [1]
     assert 42 not in ids
+
+
+def test_get_stats_assigned_addresses_reflects_live_leases_not_stale_stat():
+    """Kea's ``assigned-addresses`` statistic doesn't reliably decrement when
+    a lease disappears without Kea's reclamation timer running — this used
+    to surface as "1 assigned lease" on the Overview tile while the Leases
+    tab (``lease4-get-all``) showed nothing. Overview must count live leases
+    itself so the two tabs can never disagree.
+    """
+    mgr = kea_manager.KeaManager.__new__(kea_manager.KeaManager)
+    mgr.ca_url = "http://localhost:8001"
+
+    def fake_rpc(service, command, args=None):
+        if command == "statistic-get-all":
+            # Stale counter says 1 assigned address, but no lease actually exists.
+            return {
+                "subnet[1].total-addresses": [[254, "2024-01-01"]],
+                "subnet[1].assigned-addresses": [[1, "2024-01-01"]],
+                "subnet[1].declined-addresses": [[0, "2024-01-01"]],
+                "declined-addresses": [[0, "2024-01-01"]],
+                "pkt4-received": [[0, "2024-01-01"]],
+                "pkt4-discover-received": [[0, "2024-01-01"]],
+                "pkt4-request-received": [[0, "2024-01-01"]],
+            }
+        if command == "config-get":
+            return {"Dhcp4": {"subnet4": [{"id": 1, "subnet": "10.0.0.0/24"}]}}
+        if command == "lease4-get-all":
+            return {"leases": []}
+        return {}
+
+    mgr._rpc = MagicMock(side_effect=fake_rpc)
+    stats = mgr.get_stats()
+    assert stats["subnets"][0]["assigned_addresses"] == 0
+    assert stats["global"]["assigned_addresses"] == 0
+
+
+def test_get_stats_assigned_addresses_counts_only_active_leases():
+    mgr = kea_manager.KeaManager.__new__(kea_manager.KeaManager)
+    mgr.ca_url = "http://localhost:8001"
+
+    def fake_rpc(service, command, args=None):
+        if command == "statistic-get-all":
+            return {
+                "subnet[1].total-addresses": [[254, "2024-01-01"]],
+                "subnet[1].assigned-addresses": [[0, "2024-01-01"]],
+                "subnet[1].declined-addresses": [[0, "2024-01-01"]],
+                "declined-addresses": [[0, "2024-01-01"]],
+                "pkt4-received": [[0, "2024-01-01"]],
+                "pkt4-discover-received": [[0, "2024-01-01"]],
+                "pkt4-request-received": [[0, "2024-01-01"]],
+            }
+        if command == "config-get":
+            return {"Dhcp4": {"subnet4": [{"id": 1, "subnet": "10.0.0.0/24"}]}}
+        if command == "lease4-get-all":
+            return {"leases": [
+                {"ip-address": "10.0.0.5", "subnet-id": 1, "state": 0},
+                {"ip-address": "10.0.0.6", "subnet-id": 1, "state": 2},  # expired-reclaimed
+                {"ip-address": "10.0.0.7", "subnet-id": 1, "state": 1},  # declined
+            ]}
+        return {}
+
+    mgr._rpc = MagicMock(side_effect=fake_rpc)
+    stats = mgr.get_stats()
+    assert stats["subnets"][0]["assigned_addresses"] == 1
