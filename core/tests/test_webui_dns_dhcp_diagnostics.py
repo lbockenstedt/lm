@@ -28,3 +28,12 @@ def test_global_admin_dhcp_view_auto_discovers_the_ha_pair():
     assert "isAdmin()) {" in src
     assert "'/api/dhcp/ha/discover' + _tenantQS()" in src
     assert "loadDHCPData(subMenu, true)" in src
+
+
+def test_dhcp_configuration_tile_renders_details_button_and_modal():
+    src = MAIN_JS.read_text(encoding="utf-8")
+    assert "_showDhcpConfigDetailsModal" in src
+    assert "dhcp-cfg-details-modal" in src
+    assert "check('Configuration', !!cfg.ok, cfgSub, cfgAction)" in src
+    assert "syntax valid" in src
+
