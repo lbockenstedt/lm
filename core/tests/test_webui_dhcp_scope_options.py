@@ -117,3 +117,30 @@ def test_dhcp_ha_diagnostics_uses_summary_only_evidence_not_dns_kind():
     its own per-member evidence tiles."""
     source = _source()
     assert "_ddMemberEvidence(d.members)" in source
+
+
+def test_prefixes_table_renders_dhcp_indicator_column_and_badge():
+    source = _source()
+    fn = source.split("} else if (subMenu === 'Prefixes') {", 1)[1]
+    fn = fn.split("} else if (subMenu === 'IP Addresses') {", 1)[0]
+    assert "'DHCP'" in fn
+    assert "cf.dhcp_enabled" in fn
+    assert "DHCP scope enabled" in fn
+
+
+def test_prefixes_nav_action_renders_add_prefix_button():
+    source = _source()
+    fn = source.split("async function loadNetboxData(subMenu)", 1)[1]
+    fn = fn.split("async function showNetboxAddModal()", 1)[0]
+    assert ">Add Prefix</button>" in fn
+    assert ">New Subnet</button>" not in fn
+
+
+def test_dhcp_leases_renders_convert_to_reservation_button():
+    source = _source()
+    fn = source.split("} else if (subMenu === 'Leases') {", 1)[1]
+    fn = fn.split("} else if (subMenu === 'Reservations') {", 1)[0]
+    assert "convertLeaseToReservation" in fn
+    assert "window._dhcpLeases" in fn
+    assert "showDhcpReservationModal" in source
+
