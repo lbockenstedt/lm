@@ -77,7 +77,17 @@ def build_dhcp_payload(pfx_data: Dict[str, Any],
         allocate a large parent block and then carve out smaller
         active/dhcp-enabled child prefixes without the parent ever being
         synced as a scope itself.
+
+    All other DHCP options (search domain, NTP servers, TFTP/boot file,
+    NetBIOS servers, broadcast address, lease time, …) are likewise plain
+    NetBox prefix ``custom_fields`` — see ``dhcp/src/kea_manager.py``'s
+    ``_ADVANCED_OPTION_MAP`` for the full option → Kea option-data mapping.
+    NetBox itself is still the single source of truth for a scope's config;
+    this function only translates its custom fields into Kea's shape.
     """
+    def _csv(raw: str) -> List[str]:
+        return [v.strip() for v in (raw or "").split(",") if v.strip()]
+
     subnets: List[Dict[str, Any]] = []
     for p in (pfx_data.get("prefixes") or []):
         prefix_str = p.get("prefix", "")
@@ -88,13 +98,20 @@ def build_dhcp_payload(pfx_data: Dict[str, Any],
         cf = p.get("custom_fields") or {}
         if not cf.get("dhcp_enabled"):
             continue  # not opted in — carve child prefixes with the checkbox on
-        dns_servers = cf.get("dns_servers") or ""
         subnets.append({
-            "subnet":      prefix_str,
-            "description": p.get("description", ""),
-            "gateway":     cf.get("gateway", ""),
-            "dns_servers": [s for s in dns_servers.split(",") if s] if dns_servers else [],
-            "pools":       [],
+            "subnet":              prefix_str,
+            "description":         p.get("description", ""),
+            "gateway":             cf.get("gateway", ""),
+            "dns_servers":         _csv(cf.get("dns_servers")),
+            "search_domains":      _csv(cf.get("search_domain")),
+            "domain_name":         (cf.get("domain_name") or "").strip(),
+            "ntp_servers":         _csv(cf.get("ntp_servers")),
+            "tftp_server_name":    (cf.get("tftp_server_name") or "").strip(),
+            "boot_file_name":      (cf.get("boot_file_name") or "").strip(),
+            "netbios_name_servers": _csv(cf.get("netbios_name_servers")),
+            "broadcast_address":   (cf.get("broadcast_address") or "").strip(),
+            "lease_time":          cf.get("lease_time") or None,
+            "pools":               [],
         })
 
     reservations: List[Dict[str, Any]] = []

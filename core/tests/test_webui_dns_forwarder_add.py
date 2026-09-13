@@ -20,7 +20,7 @@ def test_forwarder_add_button_is_global_admin_only():
     load_fn = load_fn.split("\nasync function ", 1)[0]
     assert "const addForwarderBtn = (subMenu === 'Forwarders' && isAdmin())" in load_fn
     assert 'id="dns-forwarder-add-btn"' in load_fn
-    assert "navActions.innerHTML = addServerButtonHtml('dns', 'DNS') + addRecordBtn + addForwarderBtn" in load_fn
+    assert "navActions.innerHTML = addRecordBtn + addForwarderBtn" in load_fn
 
 
 def test_forwarder_modal_posts_zone_and_upstreams():
