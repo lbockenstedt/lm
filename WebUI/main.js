@@ -4160,28 +4160,22 @@ function _viewTemplate(viewId) {
 </div>`;
 
         case 'dns':
-            // "+ Add Server" and "+ Add Record" now render into the trailing
-            // #top-nav-actions strip in the sub-nav bar (pinned right next to
-            // the help "i" icon) instead of a page-body button row — see
-            // loadDNSData(). "+ Add Forwarder" stays here: it is Forwarders-
-            // tab-only and toggled in place by loadDNSData via its own id.
+            // ALL per-tab action buttons ("+ Add Server", "+ Add Record",
+            // "+ Add Forwarder") render into the trailing #top-nav-actions
+            // strip in the sub-nav bar (pinned right next to the help "i"
+            // icon) instead of a page-body button row — see loadDNSData().
+            // No page-body actions row needed any more.
             return `<div class="space-y-6">
-  <div id="dns-actions" class="flex justify-end gap-2">
-    ${isAdmin() ? `<button id="dns-forwarder-add-btn" onclick="showDnsForwarderModal()" class="${btn} hidden">+ Add Forwarder</button>` : ''}
-  </div>
   <div id="dns-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;
 
         case 'dhcp':
-            // "+ Add Server" now renders into the trailing #top-nav-actions
-            // strip in the sub-nav bar (pinned right next to the help "i"
-            // icon) instead of this page-body button row — see
-            // loadDHCPData(). "+ Add Reservation" stays here: it is
-            // Reservations-tab-only and toggled in place by loadDHCPData.
+            // ALL per-tab action buttons ("+ Add Server", "+ Add
+            // Reservation") render into the trailing #top-nav-actions strip
+            // in the sub-nav bar (pinned right next to the help "i" icon)
+            // instead of a page-body button row — see loadDHCPData(). No
+            // page-body actions row needed any more.
             return `<div class="space-y-6">
-  <div class="flex justify-end gap-2">
-    ${(isAdmin() || isTenantAdmin()) ? `<button id="dhcp-add-btn" onclick="showDhcpReservationModal()" class="${btn}">+ Add Reservation</button>` : ''}
-  </div>
   <div id="dhcp-content" class="${card}"><p class="text-sm text-slate-400 italic">Loading…</p></div>
 </div>`;
 
@@ -24364,29 +24358,27 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
     // External DNS subtab: "all things DNS" also covers internet-facing DNS
     // providers (HE.NET, …). Each connected provider is rendered as its own
     // tile (or drilled straight into when only one is connected) inside the
-    // shared dns-content pane, so hide the Unbound header actions and hand off.
-    const dnsActions = document.getElementById('dns-actions');
+    // shared dns-content pane, so hide the top-nav actions and hand off.
     const navActions = document.getElementById('top-nav-actions');
     if (subMenu === 'External DNS') {
-        if (dnsActions) dnsActions.classList.add('hidden');
         if (navActions) navActions.innerHTML = '';
         return loadExternalDNS();
     }
-    if (dnsActions) dnsActions.classList.remove('hidden');
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
-    // "+ Add Server" (self-service onboarding) and "+ Add Record" (Records tab
-    // only) render into the trailing #top-nav-actions strip in the sub-nav
-    // bar, pinned right next to the help "i" icon (see renderTopNav) — rather
-    // than a page-body button row. "+ Add Forwarder" (Forwarders-tab-only)
-    // stays a page-body button; toggled below via its own id as before.
+    // ALL per-tab action buttons — "+ Add Server" (self-service onboarding,
+    // every tab), "+ Add Record" (Records tab only), "+ Add Forwarder"
+    // (Forwarders tab only) — render into the trailing #top-nav-actions strip
+    // in the sub-nav bar, pinned right next to the help "i" icon (see
+    // renderTopNav), rather than a page-body button row.
     if (navActions) {
         const addRecordBtn = ((subMenu === 'Records' || !subMenu) && (isAdmin() || isTenantAdmin()))
             ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Record</button>`
             : '';
-        navActions.innerHTML = addServerButtonHtml('dns', 'DNS') + addRecordBtn;
+        const addForwarderBtn = (subMenu === 'Forwarders' && isAdmin())
+            ? `<button id="dns-forwarder-add-btn" onclick="showDnsForwarderModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Forwarder</button>`
+            : '';
+        navActions.innerHTML = addServerButtonHtml('dns', 'DNS') + addRecordBtn + addForwarderBtn;
     }
-    const addForwarderBtn = document.getElementById('dns-forwarder-add-btn');
-    if (addForwarderBtn) addForwarderBtn.classList.toggle('hidden', subMenu !== 'Forwarders');
 
     const th = tableHead, tw = tableWrap;  // shared table helpers
     const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
@@ -28311,13 +28303,18 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
     const container = document.getElementById('dhcp-content');
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
-    const addBtn = document.getElementById('dhcp-add-btn');
-    if (addBtn) addBtn.classList.toggle('hidden', subMenu !== 'Reservations');
-    // "+ Add Server" (self-service onboarding) renders into the trailing
-    // #top-nav-actions strip in the sub-nav bar, pinned right next to the
-    // help "i" icon (see renderTopNav) — rather than a page-body button row.
+    // ALL per-tab action buttons — "+ Add Server" (self-service onboarding,
+    // every tab) and "+ Add Reservation" (Reservations tab only) — render
+    // into the trailing #top-nav-actions strip in the sub-nav bar, pinned
+    // right next to the help "i" icon (see renderTopNav), rather than a
+    // page-body button row.
     const navActions = document.getElementById('top-nav-actions');
-    if (navActions) navActions.innerHTML = addServerButtonHtml('dhcp', 'DHCP');
+    if (navActions) {
+        const addResBtn = (subMenu === 'Reservations' && (isAdmin() || isTenantAdmin()))
+            ? `<button id="dhcp-add-btn" onclick="showDhcpReservationModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Reservation</button>`
+            : '';
+        navActions.innerHTML = addServerButtonHtml('dhcp', 'DHCP') + addResBtn;
+    }
 
     const th = tableHead, tw = tableWrap;  // shared table helpers
     const editIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>`;
