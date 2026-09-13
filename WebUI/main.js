@@ -22908,10 +22908,10 @@ async function loadNetboxData(subMenu) {
                     <td class="px-4 py-2 text-center text-xs">${p.is_pool ? '✓' : ''}</td>
                     <td class="px-4 py-2 text-xs">${p.description || '—'}</td>
                     <td class="px-4 py-2 whitespace-nowrap">
-                        <button onclick="showNetboxAllocateIPModal('${p.prefix}')" title="Allocate IP" class="p-1 text-slate-400 hover:text-[#01A982] transition-colors text-xs font-medium">+IP</button>
-                        <button onclick="releaseSubnetToPool(${p.id}, '${p.prefix}')" title="Return to pool" class="p-1 text-slate-400 hover:text-amber-600 transition-colors text-xs font-medium">Pool</button>
-                        <button onclick="editNetboxPrefix(${p.id})" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                        <button onclick="deleteNetboxPrefix(${p.id})" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
+                        <button onclick="showNetboxAllocateIPModal('${p.prefix}')" title="Allocate IP address in this subnet" class="p-1 text-slate-400 hover:text-[#01A982] transition-colors text-xs font-medium">+IP</button>
+                        <button onclick="releaseSubnetToPool(${p.id}, '${p.prefix}')" title="Return to pool — releases subnet and all its allocated IPs back to available pool for reassignment" class="p-1 text-slate-400 hover:text-amber-600 transition-colors text-xs font-medium">Pool</button>
+                        <button onclick="editNetboxPrefix(${p.id})" title="Edit subnet details" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
+                        <button onclick="deleteNetboxPrefix(${p.id})" title="Delete subnet directly from NetBox" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
                     </td>
                 </tr>`;
             }).join('');
