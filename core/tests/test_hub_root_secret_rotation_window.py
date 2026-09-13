@@ -38,7 +38,7 @@ import time
 import main  # noqa: E402  (core/src on sys.path via conftest)
 from security.key_manager import KeyManager, ManagedKey  # noqa: E402
 from security.signer import MessageSigner  # noqa: E402
-from core.src.messaging.control_plane import BaseControlPlane  # noqa: E402
+from messaging.control_plane import BaseControlPlane  # noqa: E402
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
