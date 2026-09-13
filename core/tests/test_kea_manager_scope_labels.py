@@ -83,6 +83,32 @@ def test_build_subnet4_ignores_non_numeric_lease_time():
     assert "valid-lifetime" not in subs[0]
 
 
+def test_build_subnet4_carves_single_and_multiple_exclusion_ranges():
+    # Carve exclusions out of default base range (10.0.0.1 - 10.0.0.254)
+    subs, _applied, _skipped = kea_manager.build_subnet4([{
+        "subnet": "10.0.0.0/24",
+        "exclusion_ranges": "10.0.0.1-10.0.0.20, 10.0.0.100-10.0.0.110, 10.0.0.250-10.0.0.254",
+    }], [])
+    assert len(subs) == 1
+    assert subs[0]["pools"] == [
+        {"pool": "10.0.0.21 - 10.0.0.99"},
+        {"pool": "10.0.0.111 - 10.0.0.249"},
+    ]
+
+
+def test_build_subnet4_carves_exclusions_out_of_explicit_pools():
+    subs, _applied, _skipped = kea_manager.build_subnet4([{
+        "subnet": "10.0.0.0/24",
+        "pools": [{"start": "10.0.0.50", "end": "10.0.0.150"}],
+        "exclusion_ranges": "10.0.0.70-10.0.0.80",
+    }], [])
+    assert len(subs) == 1
+    assert subs[0]["pools"] == [
+        {"pool": "10.0.0.50 - 10.0.0.69"},
+        {"pool": "10.0.0.81 - 10.0.0.150"},
+    ]
+
+
 def test_get_stats_surfaces_subnet_description_from_user_context():
     mgr = kea_manager.KeaManager.__new__(kea_manager.KeaManager)
     mgr.ca_url = "http://localhost:8001"

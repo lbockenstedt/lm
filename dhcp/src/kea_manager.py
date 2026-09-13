@@ -105,6 +105,86 @@ _ADVANCED_OPTION_MAP = [
 ]
 
 
+def _parse_exclusion_ranges(raw_exclusions) -> list:
+    """Parse exclusion ranges string or list into a list of (start_int, end_int) tuples."""
+    if not raw_exclusions:
+        return []
+    items = []
+    if isinstance(raw_exclusions, str):
+        items = [x.strip() for x in raw_exclusions.replace(";", ",").split(",") if x.strip()]
+    elif isinstance(raw_exclusions, (list, tuple, set)):
+        items = list(raw_exclusions)
+
+    parsed = []
+    for item in items:
+        if isinstance(item, dict):
+            s, e = item.get("start"), item.get("end")
+            if s and e:
+                try:
+                    s_int = int(ipaddress.ip_address(str(s).strip()))
+                    e_int = int(ipaddress.ip_address(str(e).strip()))
+                    parsed.append((min(s_int, e_int), max(s_int, e_int)))
+                except ValueError:
+                    continue
+        elif isinstance(item, str):
+            item = item.strip()
+            if not item:
+                continue
+            if "-" in item:
+                parts = item.split("-", 1)
+                try:
+                    s_int = int(ipaddress.ip_address(parts[0].strip()))
+                    e_int = int(ipaddress.ip_address(parts[1].strip()))
+                    parsed.append((min(s_int, e_int), max(s_int, e_int)))
+                except ValueError:
+                    continue
+            else:
+                try:
+                    ip_int = int(ipaddress.ip_address(item))
+                    parsed.append((ip_int, ip_int))
+                except ValueError:
+                    continue
+    return parsed
+
+
+def _carve_pools(base_ranges: list, exclusions: list) -> list:
+    """Carve exclusion ranges out of base IP ranges [(start_int, end_int)]."""
+    if not exclusions:
+        return [{"pool": f"{ipaddress.ip_address(s)} - {ipaddress.ip_address(e)}"}
+                for s, e in base_ranges if s <= e]
+
+    sorted_ex = sorted(exclusions, key=lambda x: x[0])
+    merged_ex = []
+    for ex_s, ex_e in sorted_ex:
+        if not merged_ex:
+            merged_ex.append((ex_s, ex_e))
+        else:
+            prev_s, prev_e = merged_ex[-1]
+            if ex_s <= prev_e + 1:
+                merged_ex[-1] = (prev_s, max(prev_e, ex_e))
+            else:
+                merged_ex.append((ex_s, ex_e))
+
+    result_pools = []
+    for base_s, base_e in base_ranges:
+        curr = base_s
+        for ex_s, ex_e in merged_ex:
+            if ex_e < curr or ex_s > base_e:
+                continue
+            if ex_s > curr:
+                result_pools.append({
+                    "pool": f"{ipaddress.ip_address(curr)} - {ipaddress.ip_address(min(ex_s - 1, base_e))}"
+                })
+            curr = max(curr, ex_e + 1)
+            if curr > base_e:
+                break
+        if curr <= base_e:
+            result_pools.append({
+                "pool": f"{ipaddress.ip_address(curr)} - {ipaddress.ip_address(base_e)}"
+            })
+    return result_pools
+
+
 def build_subnet4(subnets: list, reservations: list) -> tuple:
     """Translate LM/NetBox intent into Kea's ``subnet4`` list.
 
@@ -131,11 +211,31 @@ def build_subnet4(subnets: list, reservations: list) -> tuple:
             for p in s.get("pools", [])
             if p.get("start") and p.get("end")
         ]
-        if not pools:
+        excl_raw = s.get("exclusion_ranges") or s.get("exclusions")
+        if excl_raw:
+            exclusions = _parse_exclusion_ranges(excl_raw)
+            if pools:
+                base_ranges = []
+                for p in s.get("pools", []):
+                    if p.get("start") and p.get("end"):
+                        try:
+                            s_int = int(ipaddress.ip_address(p["start"]))
+                            e_int = int(ipaddress.ip_address(p["end"]))
+                            if s_int <= e_int:
+                                base_ranges.append((s_int, e_int))
+                        except ValueError:
+                            pass
+            else:
+                first = int(net.network_address) + 1
+                last = int(net.broadcast_address) - 1
+                base_ranges = [(first, last)] if first <= last else []
+            pools = _carve_pools(base_ranges, exclusions)
+        elif not pools:
             # Default pool: .10 → .254
             first = int(net.network_address) + 10
             last  = int(net.broadcast_address) - 1
-            pools = [{"pool": f"{ipaddress.ip_address(first)} - {ipaddress.ip_address(last)}"}]
+            if first <= last:
+                pools = [{"pool": f"{ipaddress.ip_address(first)} - {ipaddress.ip_address(last)}"}]
 
         kea_subnet = {
             "id":     idx,

@@ -87,6 +87,7 @@ def test_build_dhcp_payload_reads_advanced_dhcp_option_custom_fields():
              "netbios_name_servers": "10.0.2.5",
              "broadcast_address": "10.0.2.255",
              "lease_time": 7200,
+             "exclusion_ranges": "10.0.2.1-10.0.2.20, 10.0.2.200-10.0.2.254",
          }},
     ]}
     subs, _ = build_dhcp_payload(pfx, {"ip_addresses": []})
@@ -100,6 +101,7 @@ def test_build_dhcp_payload_reads_advanced_dhcp_option_custom_fields():
     assert s["netbios_name_servers"] == ["10.0.2.5"]
     assert s["broadcast_address"] == "10.0.2.255"
     assert s["lease_time"] == 7200
+    assert s["exclusion_ranges"] == "10.0.2.1-10.0.2.20, 10.0.2.200-10.0.2.254"
 
 
 def test_build_dhcp_payload_advanced_options_default_empty():
