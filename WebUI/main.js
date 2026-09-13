@@ -28491,12 +28491,11 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
             // Admin combined view (2+ dhcp spokes): tagged _tenant by the merge
             // fanout — see net_services.py's _dhcp_merge_fanout.
             const showTenantCol = subnets.some(s => s && s._tenant);
-            const cols = (showTenantCol ? ['Tenant'] : []).concat(['ID', 'Subnet', 'Pools']);
+            const cols = (showTenantCol ? ['Tenant'] : []).concat(['Subnet', 'Pools']);
             const rows = subnets.map(s => {
                 const pools = (s.pools || []).map(p => p.pool || p).join(', ');
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                     ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(s._tenant || '—')}</td>` : ''}
-                    <td class="px-4 py-2 text-center text-xs">${escapeHtml(String(s.id))}</td>
                     <td class="px-4 py-2 font-mono font-medium">${escapeHtml(s.subnet)}</td>
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(pools || '—')}</td>
                 </tr>`;
