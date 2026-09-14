@@ -483,3 +483,54 @@ def _cached_command_queue(hub_obj, sid):
     cached = (getattr(hub_obj, "simulations_cache", {}) or {}).get(sid) or {}
     cq = cached.get("command_queue")
     return cq if isinstance(cq, list) else None
+
+
+def bridge_undeliverable_message(agent_rows, targets):
+    """Name the target hosts whose agent the CS bridge will NEVER relay to, or
+    "" when at least one target is deliverable.
+
+    A VM action (delete/start/stop/reclone) only reaches a Proxmox host by being
+    queued on the cs spoke and then relayed by the hub's CS bridge to that
+    host's pxmx agent. The bridge only relays to an agent whose stored
+    ``agent_config[...].client_simulation.enabled`` is true — with it off it
+    logs ``SKIP not-enabled`` and never polls that host's inbox, so the command
+    sits ``pending`` until it silently expires while the UI reported "queued"
+    ("Delete does nothing"). A hub state reset produces exactly this: the
+    agent_config entries are re-created by tenant inheritance WITHOUT the enable
+    flag, so every host goes quietly undeliverable at once.
+
+    ``agent_rows`` is ``CSBridgePoller.status_snapshot()["agents"]``. Only a
+    definite, persistent SKIP counts — an unknown host (the bridge hasn't seen
+    it yet) or an offline agent still queues, because those are transient and
+    the queue exists precisely to ride them out.
+    """
+    skipped = {}
+    for row in agent_rows or []:
+        if not isinstance(row, dict):
+            continue
+        hn = str(row.get("hostname") or "").strip().rstrip(".").lower()
+        if not hn:
+            continue
+        not_enabled = str(row.get("decision") or "").startswith("SKIP not-enabled")
+        for alias in {hn, hn.split(".", 1)[0]}:
+            # A host with several rows is undeliverable only if EVERY one of
+            # them is skipped.
+            skipped[alias] = skipped.get(alias, True) and not_enabled
+    blocked = []
+    for target in targets or ():
+        t = str(target or "").strip().rstrip(".").lower()
+        if not t or t == "proxmox":
+            continue
+        for alias in (t, t.split(".", 1)[0]):
+            if skipped.get(alias):
+                blocked.append(t)
+                break
+        else:
+            return ""   # at least one target IS reachable — let it queue
+    if not blocked:
+        return ""
+    hosts = ", ".join(sorted(set(blocked)))
+    return (f"Client Simulation mode is disabled for {hosts} — the CS bridge will "
+            f"never relay this command to that host's agent, so it would sit "
+            f"queued until it expired. Enable 'Client Simulation mode on this "
+            f"host' for it (Proxmox → Agents → agent → Config), then retry.")
