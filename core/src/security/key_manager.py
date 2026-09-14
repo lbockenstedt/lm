@@ -46,7 +46,8 @@ class KeyManager:
 
     Persistence is handled independently via encrypted JSON files in the data directory.
     """
-    def __init__(self, system_path="keys.json", hub_secret_path="hub_secret.json"):
+    def __init__(self, system_path="keys.json", hub_secret_path="hub_secret.json",
+                 recovery_root_path="hub_recovery_root.json"):
         # Resolve absolute paths to avoid PermissionErrors under systemd/different CWDs
         base_dir = os.path.dirname(os.path.abspath(__file__))
         data_dir = os.path.abspath(os.path.join(base_dir, "../../data"))
@@ -66,7 +67,9 @@ class KeyManager:
         self.hub_secret_path = os.path.join(data_dir, hub_secret_path)
         self.keys: Dict[str, ManagedKey] = {} # { spoke_id: current_key }
         self.history: Dict[str, List[ManagedKey]] = {} # { spoke_id: [previous_keys] }
+        self.recovery_root_path = os.path.join(data_dir, recovery_root_path)
         self.hub_secrets = self._load_or_generate_hub_secrets()
+        self._recovery_root = self._load_or_generate_recovery_root()
         self.load_keys()
 
     @staticmethod
@@ -120,6 +123,91 @@ class KeyManager:
         secrets_list = [secrets.token_urlsafe(64)]
         self._save_hub_secrets(secrets_list)
         return secrets_list
+
+    def _load_or_generate_recovery_root(self) -> str:
+        """Loads (or mints once) the Hub's recovery root — the seed for every
+        spoke's durable recovery PSK.
+
+        This secret is deliberately NEVER rotated, and that is the entire point.
+        Every other hub→spoke authenticator rotates, and rotation is exactly
+        what stranded the cs-svr-0* fleet: a spoke offline across more than
+        ``len(hub_secrets)`` root rotations holds nothing that can verify the
+        Hub, and with ``LM_HUB_TLS_VERIFY=0`` and no onboarding PSK it refuses
+        the Hub forever (control_plane.py, "Hub identity unverified"). Recovery
+        needed a physical reinstall. A non-rotating seed means the derived PSK a
+        spoke persisted on its LAST good connect still verifies the Hub no
+        matter how many rotations it missed.
+
+        Confidentiality budget: this only ever proves Hub IDENTITY (it signs a
+        Hub-generated challenge). It authorizes nothing and is never accepted as
+        a spoke credential, so its compromise buys an attacker Hub impersonation
+        against a spoke whose hub_secret is already stale — which already
+        requires MITM position. Stored Fernet-encrypted at 0600 like the root
+        secrets."""
+        if os.path.exists(self.recovery_root_path):
+            try:
+                with open(self.recovery_root_path, "rb") as f:
+                    content = f.read()
+                try:
+                    data = json.loads(hub_encryption.decrypt(content))
+                    if isinstance(data, str) and data:
+                        return data
+                except Exception:
+                    # Same fail-closed posture as the root-secret store: a blob
+                    # that won't decrypt is NOT plaintext unless the operator
+                    # has left the migration path open.
+                    if not self._plaintext_fallback_allowed():
+                        logger.error(
+                            "hub_recovery_root.json decryption failed and "
+                            "LM_ALLOW_PLAINTEXT_FALLBACK=0 — refusing plaintext "
+                            "fallback.")
+                        raise
+                    text = content.decode().strip()
+                    if text:
+                        logger.warning(
+                            "hub_recovery_root.json decrypted as PLAINTEXT "
+                            "(pre-encryption migration).")
+                        return text
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"Failed to load hub recovery root: {e}")
+
+        root = secrets.token_urlsafe(64)
+        self._save_recovery_root(root)
+        logger.info("Minted a new Hub recovery root (spoke recovery PSK seed).")
+        return root
+
+    def _save_recovery_root(self, root: str) -> None:
+        try:
+            encrypted = hub_encryption.encrypt(json.dumps(root, separators=(',', ':')))
+            with open(self.recovery_root_path, "wb") as f:
+                f.write(encrypted)
+            try:
+                os.chmod(self.recovery_root_path, 0o600)
+            except OSError:
+                pass
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Failed to save hub recovery root: {e}")
+
+    def recovery_psk_for(self, spoke_id: str) -> str:
+        """The durable per-spoke recovery PSK: ``HMAC(recovery_root, spoke_id)``.
+
+        Derived rather than stored so the Hub can recompute it for any spoke at
+        any time — including a spoke whose registry entry was hard-deleted and
+        then re-added, which is precisely the "delete and re-add didn't help"
+        case. Each spoke learns only its own value, and HMAC is one-way, so a
+        rogue spoke cannot walk back to the root or sideways to a peer's PSK."""
+        return hmac.new(self._recovery_root.encode(), spoke_id.encode(),
+                        hashlib.sha256).hexdigest()
+
+    def sign_hub_challenge_recovery(self, challenge_bytes: bytes, spoke_id: str) -> str:
+        """Signs ``challenge_bytes`` with ``spoke_id``'s recovery PSK.
+
+        Rides alongside ``sign_hub_challenge``/``sign_hub_challenge_all`` as a
+        third, rotation-independent proof of Hub identity. A spoke that has
+        fallen outside the root-secret window verifies THIS instead and can then
+        safely drop its stale hub_secrets and let the Hub re-provision."""
+        return hmac.new(self.recovery_psk_for(spoke_id).encode(), challenge_bytes,
+                        hashlib.sha256).hexdigest()
 
     def _save_hub_secrets(self, secrets_list: List[str]):
         try:

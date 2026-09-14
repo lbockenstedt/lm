@@ -70,6 +70,39 @@ cannot accumulate drift across several short outages.
 > missed rotation locked the agent out permanently. If a fleet is running an
 > older hub, assume the limit is "one 30-day rotation", not 60 days.
 
+### The recovery PSK removes the limit entirely
+
+The 60-day budget above describes the **root-secret** path. Alongside it the hub
+provisions every approved spoke a durable **recovery PSK** — `HMAC(recovery_root,
+spoke_id)`, derived from a root in `data/hub_recovery_root.json` that is **never
+rotated**. It is pushed on every approved connect (`SPOKE_SET_RECOVERY_PSK`) and
+persisted spoke-side as `LM_RECOVERY_PSK` in `.env`.
+
+The hub signs its challenge with it as `recovery_signature`, alongside
+`signature` and `signatures`. So a spoke that has drifted past the 3-deep window
+still has one proof it can check, verifies the hub, drops its stale
+`hub_secrets`, and lets the hub re-provision. **An agent holding a recovery PSK
+has no offline limit at all.**
+
+This does not soften the MITM guard that the refusal branch exists for. The PSK
+is a shared secret an impersonating hub does not hold, so honoring it is safe
+even with `LM_HUB_TLS_VERIFY=0` — the same reasoning that already applied to the
+onboarding PSK. `_recovery_psk_verifies` fails closed on a missing or malformed
+proof, and the derivation is per-`spoke_id`, so a compromised spoke cannot
+impersonate the hub to its peers.
+
+Two caveats worth knowing:
+
+- **It only covers spokes that connected at least once after this shipped.** A
+  spoke already locked out cannot receive its first PSK, because receiving it
+  requires the connection it is being refused. Those still need the manual
+  recovery below (or the reinstall that was the only option before).
+- **The recovery root is not rotated by design.** If it is ever believed
+  compromised, delete `data/hub_recovery_root.json` and restart the hub: a new
+  root is minted and every spoke is re-provisioned on its next connect. Spokes
+  offline across that event lose the escape hatch and fall back to the 60-day
+  root-secret budget.
+
 ## What a locked-out agent looks like
 
 The agent process is healthy and retrying, which is exactly why the box looks
