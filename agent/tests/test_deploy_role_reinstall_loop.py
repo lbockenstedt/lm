@@ -25,7 +25,6 @@ Three defects combined:
    loop treated deploy roles as hosted sub-spokes.
 """
 import asyncio
-import os
 
 from agent_spoke import (GenericAgent, _DEPLOY_ROLES, _DEPLOY_ROLE_MARKERS,
                          _DEPLOY_ROLE_UNITS)
@@ -54,15 +53,37 @@ def test_every_deploy_role_has_an_install_marker():
 
 # ── 2. LOAD_ROLE is idempotent when already installed ────────────────────────
 
-def test_load_role_does_not_reinstall_when_marker_present(monkeypatch):
+def _stub_deploy(agent, monkeypatch):
+    """Record deploy attempts without ever spawning the installer.
+
+    Both the command build and the background runner are replaced: letting the
+    real ``_run_deploy`` through starts a subprocess and leaves a pending task
+    behind, which hangs the run.
+    """
+    ran = []
+    monkeypatch.setattr(agent, "_build_deploy_cmd", lambda *a, **k: ["true"])
+
+    async def _fake_run(role_name, cmd):
+        ran.append(role_name)
+
+    monkeypatch.setattr(agent, "_run_deploy", _fake_run)
+    return ran
+
+
+def _set_marker(monkeypatch, role, path, exists):
+    """Point ``role``'s install marker at a real (or deliberately missing) path
+    instead of monkeypatching ``os.path.exists`` globally."""
+    if exists:
+        path.write_text("installed")
+    monkeypatch.setitem(_DEPLOY_ROLE_MARKERS, role, str(path))
+
+
+def test_load_role_does_not_reinstall_when_marker_present(monkeypatch, tmp_path):
     """The reboot-reinstall bug: dhcp-server is already installed, so a
     re-pushed LOAD_ROLE must NOT run the installer again."""
     agent = _agent()
-    ran = []
-    monkeypatch.setattr(agent, "_build_deploy_cmd",
-                        lambda *a, **k: ran.append(a) or ["true"])
-    monkeypatch.setattr(os.path, "exists",
-                        lambda p: p == _DEPLOY_ROLE_MARKERS["dhcp-server"])
+    ran = _stub_deploy(agent, monkeypatch)
+    _set_marker(monkeypatch, "dhcp-server", tmp_path / "kea-dhcp4", exists=True)
 
     res = asyncio.run(_load(agent, "dhcp-server"))
 
@@ -72,33 +93,30 @@ def test_load_role_does_not_reinstall_when_marker_present(monkeypatch):
     assert "dhcp-server" not in agent._deploy_tasks
 
 
-def test_load_role_installs_when_marker_absent(monkeypatch):
+def test_load_role_installs_when_marker_absent(monkeypatch, tmp_path):
     """Not vacuous: a genuinely missing install still deploys."""
     agent = _agent()
-    ran = []
-    monkeypatch.setattr(agent, "_build_deploy_cmd",
-                        lambda *a, **k: ran.append(a) or ["true"])
-    monkeypatch.setattr(os.path, "exists", lambda p: False)
+    ran = _stub_deploy(agent, monkeypatch)
+    _set_marker(monkeypatch, "dhcp-server", tmp_path / "absent", exists=False)
 
     res = asyncio.run(_load(agent, "dhcp-server"))
+
     assert res["status"] == "SUCCESS", res
     assert not res.get("already_installed"), res
-    assert ran, "installer was NOT run for a missing deploy role"
+    assert ran == ["dhcp-server"], "installer was NOT run for a missing deploy role"
 
 
-def test_force_re_runs_the_installer_even_when_installed(monkeypatch):
+def test_force_re_runs_the_installer_even_when_installed(monkeypatch, tmp_path):
     """The repair path stays available."""
     agent = _agent()
-    ran = []
-    monkeypatch.setattr(agent, "_build_deploy_cmd",
-                        lambda *a, **k: ran.append(a) or ["true"])
-    monkeypatch.setattr(os.path, "exists",
-                        lambda p: p == _DEPLOY_ROLE_MARKERS["dns-server"])
+    ran = _stub_deploy(agent, monkeypatch)
+    _set_marker(monkeypatch, "dns-server", tmp_path / "unbound", exists=True)
 
     res = asyncio.run(_load(agent, "dns-server", force=True))
+
     assert res["status"] == "SUCCESS", res
     assert not res.get("already_installed"), res
-    assert ran, "force did not re-run the installer"
+    assert ran == ["dns-server"], "force did not re-run the installer"
 
 
 # ── 3. UNLOAD_ROLE works for unit-less deploy roles ──────────────────────────
