@@ -23908,6 +23908,23 @@ function _spokeErrorBanner(detail, fallback) {
     return `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${escapeHtml(detail || fallback)}</p>`;
 }
 
+// Admin combined DHCP view: the hub fans the list out to EVERY dhcp spoke and
+// merges. A spoke whose Kea is unreachable used to be dropped silently, so a
+// DOWN cluster looked exactly like an EMPTY one — "DHCP shows no reservations"
+// with nothing to explain it. _dhcp_merge_fanout now reports the casualties in
+// `_degraded`; surface them above the table so the missing cluster is named.
+function _dhcpDegradedBanner(d) {
+    const bad = (d && d._degraded) || [];
+    if (!bad.length) return '';
+    const items = bad.map(b => `<li><span class="font-medium">${escapeHtml(b.tenant || b.spoke || 'unknown')}</span>
+        <span class="text-amber-700/70">— ${escapeHtml(b.error || 'unreachable')}</span></li>`).join('');
+    return `<div class="mb-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+        <div class="font-semibold">Showing a partial list — ${bad.length} DHCP cluster${bad.length > 1 ? 's' : ''} did not respond.</div>
+        <ul class="mt-1 ml-4 list-disc text-xs space-y-0.5">${items}</ul>
+        <div class="mt-1 text-xs text-amber-700/80">Rows owned by ${bad.length > 1 ? 'those clusters' : 'that cluster'} are missing, not deleted. Check DHCP → Diagnostics.</div>
+    </div>`;
+}
+
 // ── Shared stat-tile + utilization-bar helpers for the DNS/DHCP analytics
 // panels (Phase 3). Kept local to the resolver views; mirror the compact
 // tile look used elsewhere in the app.
@@ -28738,9 +28755,9 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(pools || '—')}</td>
                 </tr>`;
             }).join('');
-            container.innerHTML = subnets.length === 0
+            container.innerHTML = _dhcpDegradedBanner(d) + (subnets.length === 0
                 ? '<p class="p-4 text-slate-400 italic text-sm">No subnets configured.</p>'
-                : tw(th(cols) + `<tbody>${rows}</tbody>`);
+                : tw(th(cols) + `<tbody>${rows}</tbody>`));
 
         } else if (subMenu === 'Leases') {
             const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/leases?tenant=' + encodeURIComponent(currentTenant));
@@ -28794,9 +28811,9 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     </td>
                 </tr>`;
             }).join('');
-            container.innerHTML = leases.length === 0
+            container.innerHTML = _dhcpDegradedBanner(d) + (leases.length === 0
                 ? '<p class="p-4 text-slate-400 italic text-sm">No active leases.</p>'
-                : tw(th(cols) + `<tbody>${rows}</tbody>`);
+                : tw(th(cols) + `<tbody>${rows}</tbody>`));
 
         } else if (subMenu === 'Reservations') {
             const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservations?tenant=' + encodeURIComponent(currentTenant));
@@ -28820,9 +28837,9 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     </td>
                 </tr>`;
             }).join('');
-            container.innerHTML = res.length === 0
+            container.innerHTML = _dhcpDegradedBanner(d) + (res.length === 0
                 ? '<p class="p-4 text-slate-400 italic text-sm">No static reservations configured.</p>'
-                : tw(th(cols) + `<tbody>${rows}</tbody>`);
+                : tw(th(cols) + `<tbody>${rows}</tbody>`));
         }
     } catch (err) {
         container.innerHTML = `<p class="p-4 text-red-500 text-sm">Error: ${err.message}</p>`;
