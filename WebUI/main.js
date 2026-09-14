@@ -28886,6 +28886,14 @@ async function saveDhcpReservation() {
             body: JSON.stringify(payload),
         });
         if (ok && d.status === 'SUCCESS') { modal.remove(); loadDHCPData('Reservations'); }
+        else if (ok && d.status === 'PARTIAL') {
+            // The reservation applied but the old lease survived, so the client
+            // stays on its current address. Close and refresh (the reservation
+            // IS live) but say so rather than reporting a clean success.
+            modal.remove();
+            loadDHCPData('Reservations');
+            showToast(d.message || 'Reservation saved, but the previous lease could not be removed', 'error');
+        }
         else showToast('Error: ' + (detail || d?.message || 'Operation failed'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
