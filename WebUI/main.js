@@ -24076,9 +24076,11 @@ function _dhcpHaPanel(c) {
     if (!c || c.enabled === false) return '';
     const members = Array.isArray(c.members) ? c.members : [];
     const apply = c.last_apply || {};
+    const admin = typeof isAdmin === 'function' && isAdmin();
     const rows = members.map(m => {
         const tone = _DD_MEMBER_TONE[m.health] || 'text-slate-600';
         const scopes = (m.scopes || []).join(', ') || '—';
+        const eId = escJsAttr(m.id || '');
         return `<tr class="border-b border-slate-100">
             <td class="px-4 py-2 font-mono font-medium" title="${escapeHtml(m.id || '—')}">${escapeHtml(m.display_name || m.id || '—')}</td>
             <td class="px-4 py-2 text-xs">${escapeHtml(m.ha_role || '—')}</td>
@@ -24087,6 +24089,9 @@ function _dhcpHaPanel(c) {
             <td class="px-4 py-2 text-xs">${escapeHtml(m.remote_state || '—')}${m.communication_interrupted ? ' <span class="text-red-600 font-bold">(interrupted)</span>' : ''}</td>
             <td class="px-4 py-2 font-mono text-[11px] text-slate-500">${escapeHtml(scopes)}</td>
             <td class="px-4 py-2 font-mono text-[11px] text-slate-500">${escapeHtml(m.config_digest ? String(m.config_digest).slice(0, 12) + '…' : '—')}</td>
+            ${admin ? `<td class="px-4 py-2 text-right">
+                <button onclick="removeDhcpHaMember('${eId}')" title="Remove this node from the Kea HA pair" class="p-1 text-slate-300 hover:text-red-500 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+            </td>` : ''}
         </tr>`;
     }).join('');
     const partial = apply.status && apply.status !== 'SUCCESS';
@@ -24101,7 +24106,7 @@ function _dhcpHaPanel(c) {
                 <div class="text-sm font-semibold text-slate-700">Kea HA pair ${_ddClusterBadge(c.state)}</div>
                 <div class="text-xs text-slate-400">${escapeHtml(c.mode || 'hot-standby')} · ${c.healthy_count || 0}/${c.member_count || 0} in sync · configuration ${c.config_converged ? 'matched' : ((c.config_digests_missing || []).length ? `<b class="text-amber-600">UNKNOWN</b> (no report from ${escapeHtml(missingLabel)})` : '<b class="text-red-600">MISMATCHED</b>')}</div>
             </div>
-            ${tableWrap(tableHead(['Node', 'Role', 'Health', 'HA state', 'Partner', 'Scopes', 'Config digest']) + `<tbody>${rows}</tbody>`)}
+            ${tableWrap(tableHead(['Node', 'Role', 'Health', 'HA state', 'Partner', 'Scopes', 'Config digest'].concat(admin ? [''] : [])) + `<tbody>${rows}</tbody>`)}
             ${partial ? `<div class="px-4 py-3 border-t border-slate-200 text-xs text-amber-700 bg-amber-50">
                 Last apply reported <b>${escapeHtml(apply.status)}</b> at stage <b>${escapeHtml(apply.stage || '?')}</b> — applied on ${escapeHtml((apply.applied || []).join(', ') || 'no node')}${(apply.rolled_back || []).length ? `, rolled back ${escapeHtml(apply.rolled_back.join(', '))}` : ''}.
                 ${Object.entries(apply.errors || {}).map(([k, v]) => `<div class="mt-1 font-mono">${escapeHtml(k)}: ${escapeHtml(String(v))}</div>`).join('')}
@@ -24113,6 +24118,57 @@ function _dhcpHaPanel(c) {
                 <span class="text-xs text-slate-400 ml-2">Pulls subnets/reservations from NetBox first — needed before Re-apply if nothing has synced yet.</span>
             </div>
         </div>`;
+}
+
+// Drop a single Kea node from the HA pair — the DHCP twin of
+// removeDnsClusterMember, and the only way to retire a decommissioned /
+// permanently-offline DHCP server from the Diagnostics tab where the operator
+// actually sees it failing. Posts the remaining member set to the same
+// DHCP_HA_CONFIG endpoint the "Edit cluster" modal uses; only {id, host}
+// travel back, because everything else on the row (health, HA state, scopes,
+// config digest …) is live reporting data, not configuration.
+//
+// Unlike DNS, a Kea pair is exactly two nodes: the spoke treats fewer than two
+// members as "stand down and serve single-host", so dropping either node ends
+// HA. The confirm text says so rather than implying the survivor stays paired.
+// This removes the node from the DHCP topology only — the host's spoke/agent
+// record is deleted separately from Setup → Spokes & Agents (Unload Role,
+// then Delete).
+async function removeDhcpHaMember(id) {
+    const cluster = (window._svcClusterState || {}).dhcp;
+    const current = (cluster && Array.isArray(cluster.members)) ? cluster.members : [];
+    const victim = current.find(m => m && m.id === id);
+    if (!victim) {
+        showToast('Could not find that node in the current HA report — try refreshing.', 'error');
+        return;
+    }
+    const label = victim.display_name || id;
+    const remaining = current.filter(m => m && m.id !== id)
+        .map(m => ({ id: m.id, host: m.host || '' }));
+    const after = remaining.length >= 2
+        ? `The remaining ${remaining.length} nodes stay paired.`
+        : (remaining.length === 1
+            ? `Only one node is left, so the HA pair stands down and that node serves DHCP on its own.`
+            : `No nodes are left, so this DHCP module goes back to single-host.`);
+    if (!confirm(`Remove "${label}" from the Kea HA pair? ${after} This edits the DHCP topology only — it does not delete the host's spoke record (do that from Setup → Spokes & Agents) and does not remove any scopes, leases or reservations.`)) {
+        return;
+    }
+    try {
+        const res = await fetch('/api/dhcp/ha' + _tenantQS(), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ members: remaining }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(data.detail || 'Remove failed', 'error'); return; }
+        if (data.status === 'ERROR') { showToast(data.message || 'Remove failed', 'error'); return; }
+        if (data.status === 'PARTIAL') {
+            showToast(data.message || `Removed "${label}", but cleanup was incomplete`, 'error');
+        } else {
+            showToast(`Removed "${label}" from the Kea HA pair`, 'success');
+        }
+    } catch (e) { showToast(e.message, 'error'); }
+    loadDHCPData('Diagnostics');
 }
 
 // Per-member evidence blocks (each worker's own diagnostics recommendations).
@@ -28698,6 +28754,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                 const mac = l['hw-address'] || l.mac || '';
                 const host = l.hostname || '';
                 const eIp = escJsAttr(ip);
+                const eSpoke = escJsAttr(l._spoke || '');
                 const rawState = l.state !== undefined ? l.state : l['state'];
                 let stateLabel = 'Active';
                 let stateBadge = 'bg-emerald-50 text-emerald-700 border-emerald-200';
@@ -28732,8 +28789,8 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     <td class="px-4 py-2 text-xs"><span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium border ${stateBadge}">${escapeHtml(stateLabel)}</span></td>
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(validUntil)}</td>
                     <td class="px-4 py-2 whitespace-nowrap text-right">
-                        ${ip && mac ? `<button onclick="convertLeaseToReservation('${eIp}')" title="Convert to static reservation" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2.5 py-1 rounded transition-colors font-medium">Reserve</button>` : ''}
-                        ${ip ? `<button onclick="deleteDhcpLease('${eIp}')" title="Delete lease" class="p-1 text-slate-300 hover:text-red-500 transition-colors ml-1">${delIcon}</button>` : ''}
+                        ${ip && mac ? `<button onclick="convertLeaseToReservation('${eIp}', '${eSpoke}')" title="Convert to static reservation" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2.5 py-1 rounded transition-colors font-medium">Reserve</button>` : ''}
+                        ${ip ? `<button onclick="deleteDhcpLease('${eIp}', '${eSpoke}')" title="Delete lease" class="p-1 text-slate-300 hover:text-red-500 transition-colors ml-1">${delIcon}</button>` : ''}
                     </td>
                 </tr>`;
             }).join('');
@@ -28750,6 +28807,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
             const cols = (showTenantCol ? ['Tenant'] : []).concat(['IP Address', 'MAC', 'Hostname', 'Subnet', '']);
             const rows = res.map(r => {
                 const eIp = escJsAttr(r.ip);
+                const eSpoke = escJsAttr(r._spoke || '');
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                     ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(r._tenant || '—')}</td>` : ''}
                     <td class="px-4 py-2 font-mono font-medium">${escapeHtml(r.ip)}</td>
@@ -28757,8 +28815,8 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                     <td class="px-4 py-2 text-xs">${escapeHtml(r.hostname || '—')}</td>
                     <td class="px-4 py-2 font-mono text-xs">${escapeHtml(r.subnet || '—')}</td>
                     <td class="px-4 py-2 whitespace-nowrap">
-                        <button onclick="editDhcpReservation('${eIp}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                        <button onclick="deleteDhcpReservation('${eIp}')" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
+                        <button onclick="editDhcpReservation('${eIp}', '${eSpoke}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
+                        <button onclick="deleteDhcpReservation('${eIp}', '${eSpoke}')" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
                     </td>
                 </tr>`;
             }).join('');
@@ -28771,18 +28829,26 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
     }
 }
 
-async function _loadDhcpSubnetOptions(selId, preferredSubnetId) {
+async function _loadDhcpSubnetOptions(selId, preferredSubnetId, spoke) {
     const sel = document.getElementById(selId);
     if (!sel) return;
     sel.innerHTML = '<option value="">Loading…</option>';
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/subnets?tenant=' + encodeURIComponent(currentTenant));
-        const subnets = ok ? (d.subnets || []) : [];
+        let subnets = ok ? (d.subnets || []) : [];
+        // In the admin combined view the list spans every dhcp spoke. Offering
+        // another cluster's scopes here would let the reservation be filed
+        // against a subnet the target Kea does not have.
+        if (spoke && subnets.some(s => s && s._spoke)) {
+            subnets = subnets.filter(s => s._spoke === spoke);
+        }
         sel.innerHTML = subnets.length
             ? subnets.map(s => {
                 const desc = s.description || (s['user-context'] && s['user-context'].description) || (s.user_context && s.user_context.description) || '';
                 const label = desc ? `${s.subnet} (${desc})` : s.subnet;
-                return `<option value="${escapeHtml(String(s.id))}">${escapeHtml(label)}</option>`;
+                // data-spoke lets the save path route an Add (which has no
+                // originating row) to the Kea that owns the chosen scope.
+                return `<option value="${escapeHtml(String(s.id))}" data-spoke="${escapeHtml(String(s._spoke || ''))}">${escapeHtml(label)}</option>`;
             }).join('')
             : `<option value="">${ok ? 'No subnets configured' : (detail || 'Could not load subnets')}</option>`;
         if (subnets.length) {
@@ -28798,19 +28864,23 @@ async function _loadDhcpSubnetOptions(selId, preferredSubnetId) {
     }
 }
 
-function convertLeaseToReservation(ip) {
-    const item = (window._dhcpLeases || []).find(l => (l['ip-address'] || l.ip) === ip);
+function convertLeaseToReservation(ip, spoke) {
+    const leases = window._dhcpLeases || [];
+    const match = l => (l['ip-address'] || l.ip) === ip && (!spoke || l._spoke === spoke);
+    const item = leases.find(match);
     if (!item) { showToast('Lease data not found — refresh and try again', 'error'); return; }
     showDhcpReservationModal({
         ip: item['ip-address'] || item.ip || '',
         mac: item['hw-address'] || item.mac || '',
         hostname: item.hostname || '',
         subnet_id: item['subnet-id'] ?? item.subnet_id ?? null,
+        _spoke: item._spoke || '',
     }, true);
 }
 
-function editDhcpReservation(ip) {
-    const item = (window._dhcpReservations || []).find(r => r.ip === ip);
+function editDhcpReservation(ip, spoke) {
+    const item = (window._dhcpReservations || []).find(
+        r => r.ip === ip && (!spoke || r._spoke === spoke));
     if (!item) { showToast('Row data not found — refresh and try again', 'error'); return; }
     showDhcpReservationModal(item);
 }
@@ -28835,7 +28905,11 @@ function showDhcpReservationModal(editItem, isConvert = false) {
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) modal.dataset.editIp = editItem.ip;
     if (isConvert && editItem?.ip) modal.dataset.oldLeaseIp = editItem.ip;
-    _loadDhcpSubnetOptions('dhcp-res-subnet', editItem?.subnet_id);
+    // Which dhcp spoke this row came from (admin combined view tags rows with
+    // _spoke). Every dhcp spoke is a separate Kea, so the write has to go back
+    // to the same one or it lands in the wrong cluster.
+    if (editItem?._spoke) modal.dataset.spokeId = editItem._spoke;
+    _loadDhcpSubnetOptions('dhcp-res-subnet', editItem?.subnet_id, editItem?._spoke);
 }
 
 async function saveDhcpReservation() {
@@ -28854,6 +28928,13 @@ async function saveDhcpReservation() {
     }
     if (editing) payload.old_ip = modal.dataset.editIp;
     else if (modal.dataset.oldLeaseIp) payload.old_ip = modal.dataset.oldLeaseIp;
+    if (modal.dataset.spokeId) payload.spoke_id = modal.dataset.spokeId;
+    else {
+        // Plain "Add Reservation": no originating row, so take the owning spoke
+        // from the selected scope (admin combined view tags subnets too).
+        const opt = document.getElementById('dhcp-res-subnet')?.selectedOptions?.[0];
+        if (opt?.dataset?.spoke) payload.spoke_id = opt.dataset.spoke;
+    }
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservation' + _taTenantQuery(), {
             method: editing ? 'PUT' : 'POST',
@@ -28861,17 +28942,27 @@ async function saveDhcpReservation() {
             body: JSON.stringify(payload),
         });
         if (ok && d.status === 'SUCCESS') { modal.remove(); loadDHCPData('Reservations'); }
+        else if (ok && d.status === 'PARTIAL') {
+            // The reservation applied but the old lease survived, so the client
+            // stays on its current address. Close and refresh (the reservation
+            // IS live) but say so rather than reporting a clean success.
+            modal.remove();
+            loadDHCPData('Reservations');
+            showToast(d.message || 'Reservation saved, but the previous lease could not be removed', 'error');
+        }
         else showToast('Error: ' + (detail || d?.message || 'Operation failed'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
-async function deleteDhcpLease(ip) {
+async function deleteDhcpLease(ip, spoke) {
     if (!await showConfirmToast(`Delete active lease for ${ip}?`)) return;
     try {
+        const body = { ip };
+        if (spoke) body.spoke_id = spoke;
         const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/lease' + _taTenantQuery(), {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ip }),
+            body: JSON.stringify(body),
         });
         if (ok && d.status === 'SUCCESS') {
             showToast(`Lease for ${ip} deleted`, 'success');
@@ -28882,13 +28973,15 @@ async function deleteDhcpLease(ip) {
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
-async function deleteDhcpReservation(ip) {
+async function deleteDhcpReservation(ip, spoke) {
     if (!await showConfirmToast(`Delete reservation for ${ip}?`)) return;
     try {
+        const body = { ip };
+        if (spoke) body.spoke_id = spoke;
         const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservation' + _taTenantQuery(), {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ ip }),
+            body: JSON.stringify(body),
         });
         if (ok && d.status === 'SUCCESS') loadDHCPData('Reservations');
         else showToast('Error: ' + (detail || d?.message || 'Delete failed'), 'error');
