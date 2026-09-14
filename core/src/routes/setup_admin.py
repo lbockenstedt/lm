@@ -216,7 +216,14 @@ async def _aggregate_diagnostics(hub):
         recent = [e for e in events if now - e["ts"] <= 300]
         flap_drops = sum(1 for e in recent if e["event"] in
                          ("connection_closed", "connection_error",
-                          "auth_failed", "mutual_auth_failed", "mutual_auth_timeout"))
+                          "auth_failed", "mutual_auth_failed", "mutual_auth_timeout",
+                          # Spoke-side refusal of the Hub's identity proof
+                          # (stale/rotated-out hub_secret + TLS verify off) —
+                          # counts toward flapping the same as the other
+                          # mutual-auth failure events above, since a spoke
+                          # stuck in this loop reconnects/refuses on the same
+                          # 5-300s backoff cadence.
+                          "hub_identity_rejected"))
         flapping = flap_drops >= 3
 
         # Heartbeat age: seconds since the last inbound heartbeat frame, or

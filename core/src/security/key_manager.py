@@ -165,6 +165,29 @@ class KeyManager:
             hashlib.sha256
         ).hexdigest()
 
+    def sign_hub_challenge_all(self, challenge_bytes: bytes) -> List[str]:
+        """Signs a challenge with EVERY retained Hub secret (newest first).
+
+        ``sign_hub_challenge`` only ever signs with ``hub_secrets[0]`` — the
+        newest root secret. The 3-entry rotation window documented on
+        ``rotate_hub_secret`` was meant to let a spoke that missed a rotation
+        (or was restored from an older backup) still verify the Hub, but
+        without this method that promise was never kept: a spoke holding
+        ``hub_secrets[1]`` or ``[2]`` has no signature to check it against and
+        falls through to the unverified-hub refusal path (fatal when
+        LM_HUB_TLS_VERIFY=0 and no onboarding PSK is configured — the spoke
+        retries forever). Returning a signature per retained secret lets the
+        spoke try each of ITS stored hub_secrets against each of these,
+        so any overlap between the two windows verifies. Callers must keep
+        treating ``sign_hub_challenge``'s single-signature output as the
+        canonical field for legacy spokes — this is an additive companion,
+        not a replacement.
+        """
+        return [
+            hmac.new(hs.encode(), challenge_bytes, hashlib.sha256).hexdigest()
+            for hs in self.hub_secrets
+        ]
+
     def _save_keys(self):
         data = {
             "current": {sid: asdict(k) for sid, k in self.keys.items()},
@@ -251,8 +274,16 @@ class KeyManager:
             if spoke_id not in self.history:
                 self.history[spoke_id] = []
             self.history[spoke_id].insert(0, existing)
-            # Keep only 1 previous key (Total: Current + 1 Previous)
-            self.history[spoke_id] = self.history[spoke_id][:1]
+            # Keep 3 previous keys (Total: Current + 3 Previous) — mirrors the
+            # hub root secret's 3-entry rotation window (see
+            # KeyManager.rotate_hub_secret). A spoke that was connected during
+            # a rotation but dropped before adopting the pushed
+            # SPOKE_UPDATE_SESSION_KEY, then missed a SECOND rotation while
+            # offline, previously had no path back: only 1 previous key was
+            # kept, so its stale-but-real secret fell out of the window and
+            # get_valid_key/verify_signature both rejected it, forcing a full
+            # re-onboard. 3 deep tolerates that double-miss.
+            self.history[spoke_id] = self.history[spoke_id][:3]
 
         secret = secrets.token_urlsafe(32)
         key = ManagedKey(
@@ -274,8 +305,10 @@ class KeyManager:
             if spoke_id not in self.history:
                 self.history[spoke_id] = []
             self.history[spoke_id].insert(0, old_key)
-            # Keep only 1 previous key (Total: Current + 1 Previous)
-            self.history[spoke_id] = self.history[spoke_id][:1]
+            # Keep 3 previous keys (Total: Current + 3 Previous) — see the
+            # matching comment in generate_first_secret for the rationale
+            # (mirrors the hub root secret's 3-deep rotation window).
+            self.history[spoke_id] = self.history[spoke_id][:3]
 
         new_key = ManagedKey(
             key_id=str(uuid.uuid4()),
@@ -449,7 +482,11 @@ class KeyManager:
         Used to sign a re-delivered ``SPOKE_UPDATE_SESSION_KEY`` so a spoke that
         missed the rotation push can verify the redelivery with the key it still
         has (its ``self.signer`` == this previous secret when auth passed via the
-        history window — ``get_valid_key`` only accepts the single kept entry).
+        history window). ``get_valid_key``/``verify_signature`` now tolerate up
+        to 3 kept entries (see ``rotate_key``), but this always returns only the
+        MOST RECENT one — a spoke that authenticated via an OLDER entry than
+        that (2 or 3 rotations back) needs a full ``SPOKE_UPDATE_SESSION_KEY``
+        redelivery signed some other way, not this shortcut.
         """
         hist = self.history.get(spoke_id, [])
         return hist[0].secret if hist else None
