@@ -121,7 +121,20 @@ class DhcpWorkerOps:
         try:
             cfg = self.mgr.get_config()
         except Exception as e:  # noqa: BLE001
-            return {"status": "ERROR", "message": str(e)}
+            err_msg = str(e)
+            if any(term in err_msg.lower() for term in ("likely to be offline", "permission denied", "connection refused", "unable to forward")):
+                logger.warning("Kea DHCP4 appears offline or inaccessible (%s); attempting service restart & permission repair", err_msg)
+                if self._restart_kea_dhcp4_service():
+                    import time
+                    time.sleep(1.0)
+                    try:
+                        cfg = self.mgr.get_config()
+                    except Exception as retry_e:  # noqa: BLE001
+                        return {"status": "ERROR", "message": f"{err_msg} (restart retry failed: {retry_e})"}
+                else:
+                    return {"status": "ERROR", "message": err_msg}
+            else:
+                return {"status": "ERROR", "message": err_msg}
         if not isinstance(cfg, dict):
             return {"status": "ERROR",
                     "message": f"Kea returned {type(cfg).__name__}, not a config"}
@@ -558,6 +571,32 @@ class DhcpWorkerOps:
                     ", ".join(f"{k}={v}" for k, v in after.items()) or "unknown")
         return True
 
+    @classmethod
+    def _restart_kea_dhcp4_service(cls) -> bool:
+        """Attempt to repair permissions and start/restart kea-dhcp4-server if offline."""
+        cls._repair_ha_tls_permissions()
+        cls._repair_kea_conf_permissions()
+        cls._repair_kea_apparmor_write_access()
+        try:
+            if shutil.which("systemctl"):
+                proc = subprocess.run(
+                    ["systemctl", "restart", "kea-dhcp4-server"],
+                    capture_output=True, text=True, timeout=15)
+                if proc.returncode == 0:
+                    logger.info("Successfully restarted kea-dhcp4-server service")
+                    return True
+                logger.warning("systemctl restart kea-dhcp4-server returned %d: %s",
+                               proc.returncode, (proc.stderr or proc.stdout).strip())
+            elif shutil.which("service"):
+                proc = subprocess.run(
+                    ["service", "kea-dhcp4-server", "restart"],
+                    capture_output=True, text=True, timeout=15)
+                if proc.returncode == 0:
+                    logger.info("Successfully restarted kea-dhcp4-server service")
+                    return True
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to restart kea-dhcp4-server service: %s", e)
+        return False
 
     def rollback(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         """``KEAW_ROLLBACK`` — restore the config captured by the last apply."""
@@ -637,6 +676,29 @@ class DhcpWorkerOps:
     def list_reservations(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "SUCCESS", "reservations": self.mgr.list_reservations()}
 
+    def delete_lease(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        ip = data.get("ip") or data.get("ip-address")
+        old_ip = data.get("old_ip")
+        mac = data.get("mac") or data.get("hw-address")
+        if not ip and not mac and not old_ip:
+            return {"status": "ERROR", "message": "ip, old_ip, or mac is required"}
+        purged = set()
+        if hasattr(self.mgr, "purge_leases_for_mac_or_ip"):
+            if ip:
+                purged.update(self.mgr.purge_leases_for_mac_or_ip(mac=mac, ip=ip))
+            if old_ip and old_ip != ip:
+                purged.update(self.mgr.purge_leases_for_mac_or_ip(mac=mac, ip=old_ip))
+            if mac and not ip and not old_ip:
+                purged.update(self.mgr.purge_leases_for_mac_or_ip(mac=mac))
+        else:
+            if ip:
+                self.mgr.delete_lease(ip)
+                purged.add(ip)
+            if old_ip and old_ip != ip:
+                self.mgr.delete_lease(old_ip)
+                purged.add(old_ip)
+        return {"status": "SUCCESS", "purged": list(purged)}
+
     def diagnostics(self, _data: Dict[str, Any]) -> Dict[str, Any]:
         return self.mgr.diagnostics()
 
@@ -656,6 +718,7 @@ class DhcpWorkerOps:
             "KEAW_LIST_SUBNETS": self.list_subnets,
             "KEAW_LIST_LEASES": self.list_leases,
             "KEAW_LIST_RES": self.list_reservations,
+            "KEAW_DEL_LEASE": self.delete_lease,
             "KEAW_DIAGNOSTICS": self.diagnostics,
             "KEAW_STATS": self.stats,
         }

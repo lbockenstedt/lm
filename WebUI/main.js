@@ -22778,12 +22778,12 @@ async function loadNetboxData(subMenu) {
     const actions = document.getElementById('top-nav-actions');
     if (actions) {
         if (writable.includes(subMenu)) {
-            // The Prefixes sub-view also gets a "New Subnet" finder button:
+            // The Prefixes sub-view also gets an "Add Prefix" finder button:
             // it searches for the closest available subnet to one the tenant
             // already has (RFC1918 free-space scan) and assigns the pick. The
             // manual "+ Add" (carve-from-parent) flow stays alongside it.
             const findBtn = subMenu === 'Prefixes'
-                ? `<button onclick="showFindSubnetModal()" class="bg-white border border-[#01A982] text-[#01A982] hover:bg-[#01A982] hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2">New Subnet</button>`
+                ? `<button onclick="showFindSubnetModal()" class="bg-white border border-[#01A982] text-[#01A982] hover:bg-[#01A982] hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2">Add Prefix</button>`
                 : '';
             // Admin-only Excel rack-layout importer (Setup → Module Management
             // gating is mirrored here: only admins see the button; the hub
@@ -22907,21 +22907,27 @@ async function loadNetboxData(subMenu) {
             if (!r.ok || d.status === 'ERROR') { container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || d.detail || 'NetBox spoke not connected'}</p>`; return; }
             const prefixes = d.prefixes || [];
             window._nbPrefixes = prefixes;
-            const cols = ['Prefix', 'Status', 'Site', 'VRF', 'Is Pool', 'Description', ''];
+            const cols = ['Prefix', 'Status', 'DHCP', 'Site', 'VRF', 'Is Pool', 'Description', ''];
             const rows = prefixes.map(p => {
                 const statusCls = p.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500';
+                const cf = p.custom_fields || {};
+                const isDhcp = !!cf.dhcp_enabled && p.status !== 'container';
+                const dhcpBadge = isDhcp
+                    ? '<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800" title="DHCP scope enabled">DHCP</span>'
+                    : '<span class="text-slate-300 text-xs">—</span>';
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                     <td class="px-4 py-2 font-mono font-medium">${escapeHtml(p.prefix)}</td>
                     <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusCls}">${escapeHtml(p.status)}</span></td>
+                    <td class="px-4 py-2 text-center">${dhcpBadge}</td>
                     <td class="px-4 py-2 text-xs">${p.site || '—'}</td>
                     <td class="px-4 py-2 text-xs">${p.vrf || 'Global'}</td>
                     <td class="px-4 py-2 text-center text-xs">${p.is_pool ? '✓' : ''}</td>
                     <td class="px-4 py-2 text-xs">${p.description || '—'}</td>
                     <td class="px-4 py-2 whitespace-nowrap">
-                        <button onclick="showNetboxAllocateIPModal('${p.prefix}')" title="Allocate IP" class="p-1 text-slate-400 hover:text-[#01A982] transition-colors text-xs font-medium">+IP</button>
-                        <button onclick="releaseSubnetToPool(${p.id}, '${p.prefix}')" title="Return to pool" class="p-1 text-slate-400 hover:text-amber-600 transition-colors text-xs font-medium">Pool</button>
-                        <button onclick="editNetboxPrefix(${p.id})" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
-                        <button onclick="deleteNetboxPrefix(${p.id})" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
+                        <button onclick="showNetboxAllocateIPModal('${p.prefix}')" title="Allocate IP address in this subnet" class="p-1 text-slate-400 hover:text-[#01A982] transition-colors text-xs font-medium">+IP</button>
+                        <button onclick="releaseSubnetToPool(${p.id}, '${p.prefix}')" title="Return to pool — releases subnet and all its allocated IPs back to available pool for reassignment" class="p-1 text-slate-400 hover:text-amber-600 transition-colors text-xs font-medium">Pool</button>
+                        <button onclick="editNetboxPrefix(${p.id})" title="Edit subnet details" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
+                        <button onclick="deleteNetboxPrefix(${p.id})" title="Delete subnet directly from NetBox" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
                     </td>
                 </tr>`;
             }).join('');
@@ -23464,41 +23470,52 @@ async function showNetboxAllocatePrefixModal(editItem) {
     // stays a short form.
     const opt = (id, label, placeholder, value) =>
         `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">${label}</label><input id="${id}" value="${val(value)}" class="${inputCls}" placeholder="${placeholder}"></div>`;
+    const leaseVal = (cf.lease_time != null && String(cf.lease_time).trim() !== '') ? cf.lease_time : '2419200';
+    const exclVal = cf.exclusion_ranges || cf.exclusions || '';
     const commonOptionFields = `
             ${opt('nb-p-gateway', 'Gateway', 'e.g. 10.0.0.1', cf.gateway)}
             ${opt('nb-p-dns', 'DNS Servers', 'comma-separated, e.g. 10.0.0.53, 10.0.0.54', cf.dns_servers)}
-            ${opt('nb-p-search', 'Search Domain', 'comma-separated, e.g. lab.local', cf.search_domain)}`;
-    const advancedOptionFields = `
             ${opt('nb-p-domain', 'Domain Name', 'e.g. lab.local', cf.domain_name)}
+            ${opt('nb-p-search', 'Search Domain', 'comma-separated, e.g. lab.local', cf.search_domain)}
+            ${opt('nb-p-lease', 'Lease Time (seconds)', '2419200', leaseVal)}
+            ${opt('nb-p-exclusions', 'Exclusion Range(s)', 'comma-separated, e.g. 10.0.0.1-10.0.0.20, 10.0.0.200-10.0.0.254', exclVal)}`;
+    const advancedOptionFields = `
             ${opt('nb-p-ntp', 'NTP Servers', 'comma-separated', cf.ntp_servers)}
             ${opt('nb-p-tftp', 'TFTP Server Name', 'e.g. tftp.lab.local', cf.tftp_server_name)}
             ${opt('nb-p-bootfile', 'Boot File Name', 'e.g. pxelinux.0', cf.boot_file_name)}
             ${opt('nb-p-netbios', 'NetBIOS Name Servers', 'comma-separated', cf.netbios_name_servers)}
-            ${opt('nb-p-bcast', 'Broadcast Address', 'e.g. 10.0.0.255', cf.broadcast_address)}
-            ${opt('nb-p-lease', 'Lease Time (seconds)', 'blank = Kea default', cf.lease_time)}`;
+            ${opt('nb-p-bcast', 'Broadcast Address', 'e.g. 10.0.0.255', cf.broadcast_address)}`;
     const modal = openModal('nb-prefix-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Allocate'} Subnet${editing ? ` — <span class="font-mono text-sm">${val(editItem.prefix)}</span>` : ''}</h3>
-        <div class="space-y-3">
-            ${allocFields}
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Description</label><input id="nb-p-desc" value="${val(editItem?.description)}" class="${inputCls}" placeholder="e.g. Lab Tenant A VLAN10"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Site Slug (optional)</label><input id="nb-p-site" value="${val(editItem?.site)}" class="${inputCls}" placeholder="lab-a"></div>
-            ${editing ? `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-p-status" class="${selectCls}">${statusOpts}</select></div>` : ''}
-            <label class="flex items-center gap-2 text-sm text-slate-600 pt-1">
-                <input type="checkbox" id="nb-p-dhcp" class="rounded border-slate-300 text-[#01A982]" ${dhcpChecked ? 'checked' : ''}>
-                Enable DHCP scope for this subnet
-            </label>
-            <p class="text-xs text-slate-400 -mt-1">Only checked, non-container prefixes are synced to Kea as a DHCP scope. Leave unchecked on a parent/aggregate block — carve smaller child subnets and enable this on those instead.</p>
+        <div class="space-y-4">
+            ${allocFields ? `<div class="grid grid-cols-1 md:grid-cols-3 gap-3">${allocFields}</div>` : ''}
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Description</label><input id="nb-p-desc" value="${val(editItem?.description)}" class="${inputCls}" placeholder="e.g. Lab Tenant A VLAN10"></div>
+                <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Site Slug (optional)</label><input id="nb-p-site" value="${val(editItem?.site)}" class="${inputCls}" placeholder="lab-a"></div>
+                ${editing ? `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-p-status" class="${selectCls}">${statusOpts}</select></div>` : ''}
+            </div>
+            <div>
+                <label class="flex items-center gap-2 text-sm text-slate-600">
+                    <input type="checkbox" id="nb-p-dhcp" class="rounded border-slate-300 text-[#01A982]" ${dhcpChecked ? 'checked' : ''}>
+                    Enable DHCP scope for this subnet
+                </label>
+                <p class="text-xs text-slate-400 mt-0.5">Only checked, non-container prefixes are synced to Kea as a DHCP scope. Leave unchecked on a parent/aggregate block — carve smaller child subnets and enable this on those instead.</p>
+            </div>
             <div class="border-t border-slate-200 pt-3 space-y-3">
                 <div class="text-xs font-bold uppercase text-slate-500">DHCP Options</div>
-                ${commonOptionFields}
-                <button type="button" onclick="document.getElementById('nb-p-advanced').classList.toggle('hidden'); this.textContent = this.textContent.startsWith('Show') ? 'Hide advanced options' : 'Show advanced options ▾'" class="text-xs font-bold text-[#01A982] hover:underline">Show advanced options ▾</button>
-                <div id="nb-p-advanced" class="hidden space-y-3">${advancedOptionFields}</div>
+                <div class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                    ${commonOptionFields}
+                </div>
+                <div>
+                    <button type="button" onclick="document.getElementById('nb-p-advanced').classList.toggle('hidden'); this.textContent = this.textContent.startsWith('Show') ? 'Hide advanced options' : 'Show advanced options ▾'" class="text-xs font-bold text-[#01A982] hover:underline">Show advanced options ▾</button>
+                </div>
+                <div id="nb-p-advanced" class="hidden grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 pt-1">${advancedOptionFields}</div>
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="submitNetboxAllocatePrefix()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Allocate'}</button>
             <button onclick="document.getElementById('nb-prefix-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>`, { card: 'w-full max-w-lg p-6 space-y-4 max-h-[85vh] overflow-y-auto' });
+        </div>`, { card: 'w-full max-w-4xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
     if (editing) modal.dataset.prefixId = editItem.id;
 
     if (editing) return;
@@ -23543,6 +23560,7 @@ async function submitNetboxAllocatePrefix() {
         netbios_name_servers:  get('nb-p-netbios'),
         broadcast_address:     get('nb-p-bcast'),
         lease_time:            get('nb-p-lease') ? parseInt(get('nb-p-lease')) || undefined : undefined,
+        exclusion_ranges:      get('nb-p-exclusions'),
     };
     if (editing) {
         const payload = {
@@ -23589,9 +23607,9 @@ async function deleteNetboxPrefix(prefixId) {
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
-// ─── New Subnet finder + release-to-pool ─────────────────────────────────────
+// ─── Add Prefix finder + release-to-pool ─────────────────────────────────────
 //
-// "New Subnet": search for the closest available subnet to one the tenant
+// "Add Prefix": search for the closest available subnet to one the tenant
 // already has (free = undefined-in-NetBox or defined-but-unassigned, RFC1918
 // only), ranked by numeric distance; the user picks one and Assigns it. Size is
 // given as a prefix length or as a host count (smallest mask that fits). If
@@ -23613,42 +23631,48 @@ async function showFindSubnetModal() {
     if (existing) { existing.remove(); return; }
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const modal = openModal('nb-find-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">New Subnet</h3>
+        <h3 class="text-lg font-bold text-[#263040]">Add Prefix</h3>
         <p class="text-xs text-slate-500 -mt-2">Finds the closest available subnet to one you already have (RFC1918 only; free = not in NetBox or unassigned).</p>
         <div class="space-y-3">
-            <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Close to (your existing subnet)</label>
-                <select id="nb-f-near" class="${inputCls}"><option value="">Loading…</option></select>
-            </div>
-            <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Size</label>
-                <div class="flex gap-2 items-center">
-                    <select id="nb-f-size-mode" class="${inputCls} flex-none w-36" onchange="_onFindSizeModeChange()">
-                        <option value="mask">Prefix length</option>
-                        <option value="hosts">Hosts needed</option>
-                    </select>
-                    <select id="nb-f-mask" class="${inputCls} flex-1">
-                        ${[22,23,24,25,26,27,28,29,30].map(m => `<option value="${m}">/${m}</option>`).join('')}
-                    </select>
-                    <input id="nb-f-hosts" type="number" min="1" value="60" class="${inputCls} flex-1 hidden" oninput="_updateFindSizeHint()">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div class="space-y-1">
+                    <label class="text-xs text-slate-500 font-bold uppercase">Close to (your existing subnet)</label>
+                    <select id="nb-f-near" class="${inputCls}"><option value="">Loading…</option></select>
                 </div>
-                <p id="nb-f-size-hint" class="text-[10px] text-slate-400"></p>
+                <div class="space-y-1">
+                    <label class="text-xs text-slate-500 font-bold uppercase">Size</label>
+                    <div class="flex gap-2 items-center">
+                        <select id="nb-f-size-mode" class="${inputCls} flex-none w-36" onchange="_onFindSizeModeChange()">
+                            <option value="mask">Prefix length</option>
+                            <option value="hosts">Hosts needed</option>
+                        </select>
+                        <select id="nb-f-mask" class="${inputCls} flex-1">
+                            ${[22,23,24,25,26,27,28,29,30].map(m => `<option value="${m}">/${m}</option>`).join('')}
+                        </select>
+                        <input id="nb-f-hosts" type="number" min="1" value="60" class="${inputCls} flex-1 hidden" oninput="_updateFindSizeHint()">
+                    </div>
+                    <p id="nb-f-size-hint" class="text-[10px] text-slate-400"></p>
+                </div>
             </div>
-            <div class="space-y-1">
-                <label class="text-xs text-slate-500 font-bold uppercase">Description (optional)</label>
-                <input id="nb-f-desc" class="${inputCls}" placeholder="e.g. Lab Tenant A VLAN11">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div class="space-y-1">
+                    <label class="text-xs text-slate-500 font-bold uppercase">Description (optional)</label>
+                    <input id="nb-f-desc" class="${inputCls}" placeholder="e.g. Lab Tenant A VLAN11">
+                </div>
+                <div class="space-y-1 flex items-end">
+                    <button onclick="searchAvailableSubnets()" class="bg-slate-700 hover:bg-slate-800 text-white px-4 py-2 rounded-md text-sm font-bold w-full h-[38px]">Search Available Subnets</button>
+                </div>
             </div>
             <div class="space-y-1 hidden" id="nb-f-typewrap">
                 <label class="text-xs text-slate-500 font-bold uppercase">Type a subnet to search near (exact tried first, else nearest)</label>
                 <input id="nb-f-typed" class="${inputCls}" placeholder="10.50.0.0/24">
             </div>
-            <button onclick="searchAvailableSubnets()" class="bg-slate-700 hover:bg-slate-800 text-white px-4 py-2 rounded-md text-sm font-bold w-full">Search</button>
-            <div id="nb-f-results" class="space-y-1"></div>
+            <div id="nb-f-results" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 max-h-48 overflow-y-auto"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button id="nb-f-assign-btn" onclick="submitFindSubnetAssign()" disabled class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold disabled:opacity-40 disabled:cursor-not-allowed">Assign</button>
             <button onclick="document.getElementById('nb-find-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>`, { backdropClose: true });
+        </div>`, { card: 'w-full max-w-4xl p-6 space-y-4 max-h-[90vh] overflow-y-auto', backdropClose: true });
     window._nbFindAvail = [];
     window._nbFindSelected = null;
 
@@ -23808,16 +23832,16 @@ function showNetboxAllocateIPModal(prefixHint, editItem) {
         `<option value="${s}"${editing && editItem.status === s ? ' selected' : ''}>${s}</option>`).join('');
     const modal = openModal('nb-ip-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Allocate'} IP Address${editing ? ` — <span class="font-mono text-sm">${val(editItem.address)}</span>` : ''}</h3>
-        <div class="space-y-3">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             ${allocFields}
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">DNS Name (optional)</label><input id="nb-ip-dns" value="${val(editItem?.dns_name)}" class="${inputCls}" placeholder="host.example.com"></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Description (optional)</label><input id="nb-ip-desc" value="${val(editItem?.description)}" class="${inputCls}" placeholder="e.g. Gateway VM"></div>
-            ${editing ? `<div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-ip-status" class="${inputCls}">${statusOpts}</select></div>` : ''}
+            ${editing ? `<div class="space-y-1 col-span-1 md:col-span-2"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-ip-status" class="${inputCls}">${statusOpts}</select></div>` : ''}
         </div>
         <div class="flex justify-end gap-2 pt-2">
             <button onclick="submitNetboxAllocateIP()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Allocate'}</button>
             <button onclick="document.getElementById('nb-ip-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
-        </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+        </div>`, { card: 'w-full max-w-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
     if (editing) modal.dataset.ipId = editItem.id;
 }
 
@@ -23887,12 +23911,30 @@ function _spokeErrorBanner(detail, fallback) {
 // ── Shared stat-tile + utilization-bar helpers for the DNS/DHCP analytics
 // panels (Phase 3). Kept local to the resolver views; mirror the compact
 // tile look used elsewhere in the app.
-function _ddTile(label, value, sub, valueColor) {
+function _ddTile(label, value, sub, valueColor, actionHtml) {
     return `<div class="bg-white border border-slate-200 rounded-lg p-4">
         <div class="text-[11px] uppercase tracking-wide text-slate-400 font-semibold">${escapeHtml(label)}</div>
         <div class="mt-1 text-2xl font-bold ${valueColor || 'text-slate-800'}">${escapeHtml(String(value))}</div>
-        ${sub ? `<div class="text-xs text-slate-400 mt-0.5">${escapeHtml(String(sub))}</div>` : ''}
+        ${(sub || actionHtml) ? `<div class="text-xs text-slate-400 mt-0.5 flex items-center justify-between gap-1">${sub ? `<span class="truncate">${escapeHtml(String(sub))}</span>` : '<span></span>'}${actionHtml || ''}</div>` : ''}
     </div>`;
+}
+
+function _showDhcpConfigDetailsModal() {
+    const cfg = window._dhcpConfigTest || {};
+    const text = (cfg.output || cfg.error || 'No output recorded.').trim();
+    const status = cfg.ok ? '<span class="text-emerald-600 font-bold">PASS</span>' : '<span class="text-red-600 font-bold">FAIL</span>';
+    openModal('dhcp-cfg-details-modal', `
+        <div class="flex items-center justify-between pb-3 border-b border-slate-200">
+            <h3 class="text-base font-bold text-[#263040]">Kea DHCP Configuration Test — ${status}</h3>
+            <button onclick="document.getElementById('dhcp-cfg-details-modal').remove()" class="text-slate-400 hover:text-slate-600 text-lg leading-none">&times;</button>
+        </div>
+        <div class="mt-3">
+            <div class="text-xs font-semibold text-slate-500 uppercase mb-1">Command Output</div>
+            <pre class="bg-slate-900 text-slate-100 p-3 rounded font-mono text-xs whitespace-pre-wrap max-h-96 overflow-y-auto">${escapeHtml(text)}</pre>
+        </div>
+        <div class="flex justify-end pt-3">
+            <button onclick="document.getElementById('dhcp-cfg-details-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm font-medium">Close</button>
+        </div>`, { card: 'w-full max-w-2xl p-6 space-y-3 max-h-[90vh] overflow-y-auto', backdropClose: true });
 }
 
 // A horizontal utilization/percentage bar, green→amber→red by threshold.
@@ -28554,9 +28596,13 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
             const subnets = Array.isArray(d.subnets) ? d.subnets : [];
             const recommendations = Array.isArray(d.recommendations) ? d.recommendations : [];
             const unitText = u => `${u.ActiveState || '?'} / ${u.SubState || '?'}${u.NRestarts && u.NRestarts !== '0' ? ` · ${u.NRestarts} restart(s)` : ''}`;
-            const check = (label, pass, detailText) => _ddTile(
+            const check = (label, pass, detailText, actionHtml) => _ddTile(
                 label, pass ? 'PASS' : 'FAIL', detailText || '',
-                pass ? 'text-emerald-600' : 'text-red-600');
+                pass ? 'text-emerald-600' : 'text-red-600', actionHtml);
+            window._dhcpConfigTest = cfg;
+            const hasCfgDetails = Boolean((cfg.output || cfg.error) && String(cfg.output || cfg.error).trim());
+            const cfgSub = cfg.ok ? 'syntax valid' : (cfg.error || cfg.output ? 'syntax error' : 'syntax invalid');
+            const cfgAction = hasCfgDetails ? `<button onclick="_showDhcpConfigDetailsModal()" class="text-xs text-[#01A982] hover:underline font-semibold ml-auto flex-shrink-0">Details</button>` : '';
             const subnetRows = subnets.map(s => `<tr class="border-b border-slate-100">
                 <td class="px-4 py-2 text-xs">${escapeHtml(String(s.id == null ? '—' : s.id))}</td>
                 <td class="px-4 py-2 font-mono text-xs">${escapeHtml(s.subnet || '—')}</td>
@@ -28584,7 +28630,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
                     ${check('DHCP4 Service', dhcp4.ActiveState === 'active', unitText(dhcp4))}
                     ${check('Control Agent', caUnit.ActiveState === 'active' && !!ca.reachable, ca.error || (caCfg.ok === false ? `config error: ${(caCfg.error || caCfg.output || '').slice(0, 120)}` : unitText(caUnit)))}
-                    ${check('Configuration', !!cfg.ok, cfg.output || cfg.error || 'valid')}
+                    ${check('Configuration', !!cfg.ok, cfgSub, cfgAction)}
                     ${check('UDP/67 Listener', (listeners.dhcp4 || []).length > 0, (listeners.dhcp4 || []).length ? `${listeners.dhcp4.length} listener(s)` : (listeners.error || 'not listening'))}
                 </div>
                 ${recommendations.length ? `<div class="mb-4 p-4 rounded-lg bg-amber-50 border border-amber-200">
@@ -28644,16 +28690,53 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
             const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/leases?tenant=' + encodeURIComponent(currentTenant));
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); return; }
             const leases = d.leases || [];
+            window._dhcpLeases = leases;
             const showTenantCol = leases.some(l => l && l._tenant);
-            const cols = (showTenantCol ? ['Tenant'] : []).concat(['IP Address', 'MAC', 'Hostname', 'State', 'Valid Until']);
-            const rows = leases.map(l => `<tr class="border-b border-slate-100 hover:bg-slate-50">
-                ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(l._tenant || '—')}</td>` : ''}
-                <td class="px-4 py-2 font-mono font-medium">${escapeHtml(l['ip-address'] || l.ip || '—')}</td>
-                <td class="px-4 py-2 font-mono text-xs">${escapeHtml(l['hw-address'] || l.mac || '—')}</td>
-                <td class="px-4 py-2 text-xs">${escapeHtml(l.hostname || '—')}</td>
-                <td class="px-4 py-2 text-xs">${escapeHtml(l.state || (l['state'] === 0 ? 'default' : (l['state'] === 1 ? 'declined' : 'expired')))}</td>
-                <td class="px-4 py-2 font-mono text-xs">${escapeHtml(String(l['valid-lft'] || '—'))}</td>
-            </tr>`).join('');
+            const cols = (showTenantCol ? ['Tenant'] : []).concat(['IP Address', 'MAC', 'Hostname', 'State', 'Valid Until', '']);
+            const rows = leases.map(l => {
+                const ip = l['ip-address'] || l.ip || '';
+                const mac = l['hw-address'] || l.mac || '';
+                const host = l.hostname || '';
+                const eIp = escJsAttr(ip);
+                const rawState = l.state !== undefined ? l.state : l['state'];
+                let stateLabel = 'Active';
+                let stateBadge = 'bg-emerald-50 text-emerald-700 border-emerald-200';
+                if (rawState === 1 || rawState === '1' || rawState === 'declined') {
+                    stateLabel = 'Declined';
+                    stateBadge = 'bg-rose-50 text-rose-700 border-rose-200';
+                } else if (rawState === 2 || rawState === '2' || rawState === 'expired') {
+                    stateLabel = 'Expired';
+                    stateBadge = 'bg-amber-50 text-amber-700 border-amber-200';
+                }
+                let validUntil = '—';
+                const cltt = Number(l.cltt || l['cltt']);
+                const validLft = Number(l['valid-lft'] || l.valid_lft || l['valid_lft']);
+                const exp = Number(l.expire || l.expires || l['expire-time'] || l['expire_time']);
+                if (exp && !isNaN(exp)) {
+                    const d = new Date(exp > 1e11 ? exp : exp * 1000);
+                    if (!isNaN(d.getTime())) validUntil = d.toLocaleString();
+                } else if (cltt && !isNaN(cltt) && validLft && !isNaN(validLft)) {
+                    const d = new Date((cltt + validLft) * 1000);
+                    if (!isNaN(d.getTime())) validUntil = d.toLocaleString();
+                } else if (l['valid-until'] || l['valid_until'] || l.validUntil) {
+                    const d = new Date(l['valid-until'] || l['valid_until'] || l.validUntil);
+                    if (!isNaN(d.getTime())) validUntil = d.toLocaleString();
+                } else if (l['valid-lft'] !== undefined && l['valid-lft'] !== null && String(l['valid-lft']).trim() !== '') {
+                    validUntil = String(l['valid-lft']);
+                }
+                return `<tr class="border-b border-slate-100 hover:bg-slate-50">
+                    ${showTenantCol ? `<td class="px-4 py-2 text-xs font-medium text-slate-500">${escapeHtml(l._tenant || '—')}</td>` : ''}
+                    <td class="px-4 py-2 font-mono font-medium">${escapeHtml(ip || '—')}</td>
+                    <td class="px-4 py-2 font-mono text-xs">${escapeHtml(mac || '—')}</td>
+                    <td class="px-4 py-2 text-xs">${escapeHtml(host || '—')}</td>
+                    <td class="px-4 py-2 text-xs"><span class="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium border ${stateBadge}">${escapeHtml(stateLabel)}</span></td>
+                    <td class="px-4 py-2 font-mono text-xs">${escapeHtml(validUntil)}</td>
+                    <td class="px-4 py-2 whitespace-nowrap text-right">
+                        ${ip && mac ? `<button onclick="convertLeaseToReservation('${eIp}')" title="Convert to static reservation" class="text-xs bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-2.5 py-1 rounded transition-colors font-medium">Reserve</button>` : ''}
+                        ${ip ? `<button onclick="deleteDhcpLease('${eIp}')" title="Delete lease" class="p-1 text-slate-300 hover:text-red-500 transition-colors ml-1">${delIcon}</button>` : ''}
+                    </td>
+                </tr>`;
+            }).join('');
             container.innerHTML = leases.length === 0
                 ? '<p class="p-4 text-slate-400 italic text-sm">No active leases.</p>'
                 : tw(th(cols) + `<tbody>${rows}</tbody>`);
@@ -28688,7 +28771,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
     }
 }
 
-async function _loadDhcpSubnetOptions(selId) {
+async function _loadDhcpSubnetOptions(selId, preferredSubnetId) {
     const sel = document.getElementById(selId);
     if (!sel) return;
     sel.innerHTML = '<option value="">Loading…</option>';
@@ -28696,12 +28779,34 @@ async function _loadDhcpSubnetOptions(selId) {
         const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/subnets?tenant=' + encodeURIComponent(currentTenant));
         const subnets = ok ? (d.subnets || []) : [];
         sel.innerHTML = subnets.length
-            ? subnets.map(s => `<option value="${escapeHtml(String(s.id))}">${escapeHtml(String(s.id))} — ${escapeHtml(s.subnet)}</option>`).join('')
+            ? subnets.map(s => {
+                const desc = s.description || (s['user-context'] && s['user-context'].description) || (s.user_context && s.user_context.description) || '';
+                const label = desc ? `${s.subnet} (${desc})` : s.subnet;
+                return `<option value="${escapeHtml(String(s.id))}">${escapeHtml(label)}</option>`;
+            }).join('')
             : `<option value="">${ok ? 'No subnets configured' : (detail || 'Could not load subnets')}</option>`;
+        if (subnets.length) {
+            if (preferredSubnetId != null && subnets.some(s => String(s.id) === String(preferredSubnetId))) {
+                sel.value = String(preferredSubnetId);
+            } else if (subnets.length === 1) {
+                sel.value = String(subnets[0].id);
+            }
+        }
     } catch (err) {
         console.error('_loadDhcpSubnetOptions: could not load subnets', err);
         sel.innerHTML = '<option value="">Could not load subnets</option>';
     }
+}
+
+function convertLeaseToReservation(ip) {
+    const item = (window._dhcpLeases || []).find(l => (l['ip-address'] || l.ip) === ip);
+    if (!item) { showToast('Lease data not found — refresh and try again', 'error'); return; }
+    showDhcpReservationModal({
+        ip: item['ip-address'] || item.ip || '',
+        mac: item['hw-address'] || item.mac || '',
+        hostname: item.hostname || '',
+        subnet_id: item['subnet-id'] ?? item.subnet_id ?? null,
+    }, true);
 }
 
 function editDhcpReservation(ip) {
@@ -28710,12 +28815,14 @@ function editDhcpReservation(ip) {
     showDhcpReservationModal(item);
 }
 
-function showDhcpReservationModal(editItem) {
-    const editing = !!editItem;
+function showDhcpReservationModal(editItem, isConvert = false) {
+    const editing = !isConvert && !!editItem;
     const val = v => (v == null ? '' : String(v).replace(/"/g, '&quot;'));
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
+    const title = editing ? 'Edit DHCP Reservation' : (isConvert ? 'Convert Lease to Reservation' : 'Add DHCP Reservation');
+    const btnText = editing ? 'Save Changes' : 'Add Reservation';
     const modal = openModal('dhcp-res-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} DHCP Reservation</h3>
+        <h3 class="text-lg font-bold text-[#263040]">${title}</h3>
         <div class="space-y-3">
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Subnet</label><select id="dhcp-res-subnet" class="${inputCls}"><option value="">Loading…</option></select></div>
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">IP Address</label><input id="dhcp-res-ip" value="${val(editItem?.ip)}" class="${inputCls}" placeholder="10.0.0.50"></div>
@@ -28723,16 +28830,12 @@ function showDhcpReservationModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Hostname (optional)</label><input id="dhcp-res-host" value="${val(editItem?.hostname)}" class="${inputCls}" placeholder="printer-01"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDhcpReservation()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Reservation'}</button>
+            <button onclick="saveDhcpReservation()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${btnText}</button>
             <button onclick="document.getElementById('dhcp-res-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) modal.dataset.editIp = editItem.ip;
-    _loadDhcpSubnetOptions('dhcp-res-subnet').then(() => {
-        if (editing && editItem.subnet_id != null) {
-            const sel = document.getElementById('dhcp-res-subnet');
-            if (sel) sel.value = String(editItem.subnet_id);
-        }
-    });
+    if (isConvert && editItem?.ip) modal.dataset.oldLeaseIp = editItem.ip;
+    _loadDhcpSubnetOptions('dhcp-res-subnet', editItem?.subnet_id);
 }
 
 async function saveDhcpReservation() {
@@ -28750,6 +28853,7 @@ async function saveDhcpReservation() {
         return;
     }
     if (editing) payload.old_ip = modal.dataset.editIp;
+    else if (modal.dataset.oldLeaseIp) payload.old_ip = modal.dataset.oldLeaseIp;
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservation' + _taTenantQuery(), {
             method: editing ? 'PUT' : 'POST',
@@ -28758,6 +28862,23 @@ async function saveDhcpReservation() {
         });
         if (ok && d.status === 'SUCCESS') { modal.remove(); loadDHCPData('Reservations'); }
         else showToast('Error: ' + (detail || d?.message || 'Operation failed'), 'error');
+    } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+async function deleteDhcpLease(ip) {
+    if (!await showConfirmToast(`Delete active lease for ${ip}?`)) return;
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/lease' + _taTenantQuery(), {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ip }),
+        });
+        if (ok && d.status === 'SUCCESS') {
+            showToast(`Lease for ${ip} deleted`, 'success');
+            loadDHCPData('Leases');
+        } else {
+            showToast('Error: ' + (detail || d?.message || 'Delete lease failed'), 'error');
+        }
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 

@@ -2,6 +2,7 @@ import base64
 import copy
 import logging
 import re
+from typing import Any, Dict, List, Optional, Tuple, Union
 import requests
 import ipaddress
 import os
@@ -76,6 +77,16 @@ def _stable_subnet_id(subnet_str: str, taken: set) -> int:
     return sid
 
 
+def _normalize_mac(mac: str) -> str:
+    """Normalize MAC address to colon-separated lowercase format (aa:bb:cc:dd:ee:ff)."""
+    if not mac:
+        return ""
+    clean = re.sub(r'[^0-9a-fA-F]', '', str(mac)).lower()
+    if len(clean) == 12:
+        return ":".join(clean[i:i+2] for i in range(0, 12, 2))
+    return str(mac).strip().lower().replace("-", ":")
+
+
 def _add_option(kea_subnet: dict, name: str, value) -> None:
     """Append one Kea ``option-data`` entry if ``value`` is non-empty.
 
@@ -105,6 +116,86 @@ _ADVANCED_OPTION_MAP = [
 ]
 
 
+def _parse_exclusion_ranges(raw_exclusions) -> list:
+    """Parse exclusion ranges string or list into a list of (start_int, end_int) tuples."""
+    if not raw_exclusions:
+        return []
+    items = []
+    if isinstance(raw_exclusions, str):
+        items = [x.strip() for x in raw_exclusions.replace(";", ",").split(",") if x.strip()]
+    elif isinstance(raw_exclusions, (list, tuple, set)):
+        items = list(raw_exclusions)
+
+    parsed = []
+    for item in items:
+        if isinstance(item, dict):
+            s, e = item.get("start"), item.get("end")
+            if s and e:
+                try:
+                    s_int = int(ipaddress.ip_address(str(s).strip()))
+                    e_int = int(ipaddress.ip_address(str(e).strip()))
+                    parsed.append((min(s_int, e_int), max(s_int, e_int)))
+                except ValueError:
+                    continue
+        elif isinstance(item, str):
+            item = item.strip()
+            if not item:
+                continue
+            if "-" in item:
+                parts = item.split("-", 1)
+                try:
+                    s_int = int(ipaddress.ip_address(parts[0].strip()))
+                    e_int = int(ipaddress.ip_address(parts[1].strip()))
+                    parsed.append((min(s_int, e_int), max(s_int, e_int)))
+                except ValueError:
+                    continue
+            else:
+                try:
+                    ip_int = int(ipaddress.ip_address(item))
+                    parsed.append((ip_int, ip_int))
+                except ValueError:
+                    continue
+    return parsed
+
+
+def _carve_pools(base_ranges: list, exclusions: list) -> list:
+    """Carve exclusion ranges out of base IP ranges [(start_int, end_int)]."""
+    if not exclusions:
+        return [{"pool": f"{ipaddress.ip_address(s)} - {ipaddress.ip_address(e)}"}
+                for s, e in base_ranges if s <= e]
+
+    sorted_ex = sorted(exclusions, key=lambda x: x[0])
+    merged_ex = []
+    for ex_s, ex_e in sorted_ex:
+        if not merged_ex:
+            merged_ex.append((ex_s, ex_e))
+        else:
+            prev_s, prev_e = merged_ex[-1]
+            if ex_s <= prev_e + 1:
+                merged_ex[-1] = (prev_s, max(prev_e, ex_e))
+            else:
+                merged_ex.append((ex_s, ex_e))
+
+    result_pools = []
+    for base_s, base_e in base_ranges:
+        curr = base_s
+        for ex_s, ex_e in merged_ex:
+            if ex_e < curr or ex_s > base_e:
+                continue
+            if ex_s > curr:
+                result_pools.append({
+                    "pool": f"{ipaddress.ip_address(curr)} - {ipaddress.ip_address(min(ex_s - 1, base_e))}"
+                })
+            curr = max(curr, ex_e + 1)
+            if curr > base_e:
+                break
+        if curr <= base_e:
+            result_pools.append({
+                "pool": f"{ipaddress.ip_address(curr)} - {ipaddress.ip_address(base_e)}"
+            })
+    return result_pools
+
+
 def build_subnet4(subnets: list, reservations: list) -> tuple:
     """Translate LM/NetBox intent into Kea's ``subnet4`` list.
 
@@ -131,11 +222,31 @@ def build_subnet4(subnets: list, reservations: list) -> tuple:
             for p in s.get("pools", [])
             if p.get("start") and p.get("end")
         ]
-        if not pools:
+        excl_raw = s.get("exclusion_ranges") or s.get("exclusions")
+        if excl_raw:
+            exclusions = _parse_exclusion_ranges(excl_raw)
+            if pools:
+                base_ranges = []
+                for p in s.get("pools", []):
+                    if p.get("start") and p.get("end"):
+                        try:
+                            s_int = int(ipaddress.ip_address(p["start"]))
+                            e_int = int(ipaddress.ip_address(p["end"]))
+                            if s_int <= e_int:
+                                base_ranges.append((s_int, e_int))
+                        except ValueError:
+                            pass
+            else:
+                first = int(net.network_address) + 1
+                last = int(net.broadcast_address) - 1
+                base_ranges = [(first, last)] if first <= last else []
+            pools = _carve_pools(base_ranges, exclusions)
+        elif not pools:
             # Default pool: .10 → .254
             first = int(net.network_address) + 10
             last  = int(net.broadcast_address) - 1
-            pools = [{"pool": f"{ipaddress.ip_address(first)} - {ipaddress.ip_address(last)}"}]
+            if first <= last:
+                pools = [{"pool": f"{ipaddress.ip_address(first)} - {ipaddress.ip_address(last)}"}]
 
         kea_subnet = {
             "id":     idx,
@@ -183,14 +294,15 @@ def build_subnet4(subnets: list, reservations: list) -> tuple:
             if not ip or not mac:
                 continue
             try:
-                in_subnet = (r.get("subnet") == subnet_str
+                in_subnet = (str(r.get("subnet_id")) == str(idx)
+                             or r.get("subnet") == subnet_str
                              or net.overlaps(ipaddress.ip_network(f"{ip}/32")))
             except ValueError:
                 continue  # malformed reservation IP
             if in_subnet:
                 subnet_res.append({
                     "ip-address": ip,
-                    "hw-address": mac.lower().replace("-", ":"),
+                    "hw-address": _normalize_mac(mac),
                     "hostname": r.get("hostname", ""),
                 })
                 applied[res_idx] = True
@@ -360,22 +472,53 @@ class KeaManager:
             logger.error("list_leases failed: %s", e)
             return []
 
+    def delete_lease(self, ip: str) -> dict:
+        """Delete an active lease by IP from Kea via lease4-del RPC."""
+        try:
+            res = self._rpc("dhcp4", "lease4-del", {"ip-address": ip})
+            return {"status": "SUCCESS", "result": res}
+        except Exception as e:
+            logger.debug("delete_lease %s: %s", ip, e)
+            return {"status": "SUCCESS", "message": str(e), "not_found": True}
+
+    def purge_leases_for_mac_or_ip(self, mac: str = None, ip: str = None) -> list:
+        """Purge any active lease for a given MAC or IP address."""
+        purged = []
+        if ip:
+            self.delete_lease(ip)
+            purged.append(ip)
+        if mac:
+            norm_mac = _normalize_mac(mac)
+            try:
+                leases = self.list_leases()
+                for l in leases:
+                    l_ip = l.get("ip-address") or l.get("ip")
+                    l_mac = _normalize_mac(l.get("hw-address") or l.get("mac"))
+                    if l_mac and l_mac == norm_mac and l_ip and l_ip not in purged:
+                        self.delete_lease(l_ip)
+                        purged.append(l_ip)
+            except Exception as e:
+                logger.debug("purge_leases_for_mac_or_ip failed: %s", e)
+        return purged
+
     # ── Manual reservation CRUD ───────────────────────────────────────
 
-    def add_reservation(self, subnet_id: int, ip: str, mac: str, hostname: str = "") -> dict:
+    def add_reservation(self, subnet_id: Any, ip: str, mac: str, hostname: str = "") -> dict:
         cfg = self.get_config()
+        norm_mac = _normalize_mac(mac)
         for sub in cfg.get("subnet4", []):
-            if sub["id"] == subnet_id:
+            if str(sub.get("id")) == str(subnet_id):
                 sub.setdefault("reservations", [])
                 sub["reservations"].append({
                     "ip-address": ip,
-                    "hw-address": mac.lower().replace("-", ":"),
+                    "hw-address": norm_mac,
                     "hostname":   hostname,
                 })
                 break
         else:
             return {"status": "ERROR", "message": f"Subnet {subnet_id} not found"}
         self._set_config(cfg)
+        self.purge_leases_for_mac_or_ip(mac=norm_mac, ip=ip)
         return {"status": "SUCCESS"}
 
     def list_reservations(self) -> list:
@@ -397,7 +540,7 @@ class KeaManager:
                 })
         return out
 
-    def update_reservation(self, old_ip: str, subnet_id: int, ip: str,
+    def update_reservation(self, old_ip: str, subnet_id: Any, ip: str,
                            mac: str, hostname: str = "") -> dict:
         """Update a reservation by IP in ONE config write.
 
@@ -412,8 +555,9 @@ class KeaManager:
             return {"status": "ERROR", "message": "subnet_id, ip, and mac are required"}
         cfg = self.get_config()
         target = None
+        norm_mac = _normalize_mac(mac)
         for sub in cfg.get("subnet4", []):
-            if sub["id"] == int(subnet_id):
+            if str(sub.get("id")) == str(subnet_id):
                 target = sub
             sub["reservations"] = [
                 r for r in sub.get("reservations", [])
@@ -424,11 +568,14 @@ class KeaManager:
         target.setdefault("reservations", [])
         target["reservations"].append({
             "ip-address": ip,
-            "hw-address": mac.lower().replace("-", ":"),
+            "hw-address": norm_mac,
             "hostname":   hostname,
         })
         try:
             self._set_config(cfg)
+            self.purge_leases_for_mac_or_ip(mac=norm_mac, ip=ip)
+            if old_ip and old_ip != ip:
+                self.purge_leases_for_mac_or_ip(ip=old_ip)
         except Exception as e:
             return {"status": "ERROR", "message": str(e)}
         return {"status": "SUCCESS"}

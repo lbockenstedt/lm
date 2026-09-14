@@ -111,6 +111,7 @@ def build_dhcp_payload(pfx_data: Dict[str, Any],
             "netbios_name_servers": _csv(cf.get("netbios_name_servers")),
             "broadcast_address":   (cf.get("broadcast_address") or "").strip(),
             "lease_time":          cf.get("lease_time") or None,
+            "exclusion_ranges":    (cf.get("exclusion_ranges") or cf.get("exclusions") or "").strip(),
             "pools":               [],
         })
 
@@ -184,43 +185,83 @@ class DnsDhcpSyncMixin:
         )
         return unwrap_spoke(pfx_raw), unwrap_spoke(ips_raw)
 
+    def _get_dhcp_spokes(self) -> List[str]:
+        """All connected, approved DHCP spokes to sync to."""
+        if hasattr(self, "get_all_spokes_by_type") and hasattr(self, "active_connections"):
+            all_spokes = [
+                s for s in (self.get_all_spokes_by_type("dhcp") or [])
+                if s in self.active_connections and getattr(self, "approved_modules", {}).get(s, False)
+            ]
+            if all_spokes:
+                return all_spokes
+        single = self.get_spoke_by_type("dhcp")
+        return [single] if single else []
+
+    def _get_dns_spokes(self) -> List[str]:
+        """All connected, approved DNS spokes to sync to."""
+        if hasattr(self, "get_all_spokes_by_type") and hasattr(self, "active_connections"):
+            all_spokes = [
+                s for s in (self.get_all_spokes_by_type("dns") or [])
+                if s in self.active_connections and getattr(self, "approved_modules", {}).get(s, False)
+            ]
+            if all_spokes:
+                return all_spokes
+        single = self.get_spoke_by_type("dns")
+        return [single] if single else []
+
     async def sync_dns_from_netbox(self) -> Dict[str, Any]:
         """Reconcile Unbound to NetBox DNS names. Returns a status dict.
 
         ``status`` is ``ok`` on success, ``skipped`` when a required spoke is
         offline (loop no-ops quietly), or ``error`` on failure.
         """
-        dns_spoke = self.get_spoke_by_type("dns")
-        if not dns_spoke or not self.get_spoke_by_type("ipam"):
-            missing = "DNS" if not dns_spoke else "NetBox"
+        dns_spokes = self._get_dns_spokes()
+        if not dns_spokes or not self.get_spoke_by_type("ipam"):
+            missing = "DNS" if not dns_spokes else "NetBox"
             return self._record_status("dns", status="skipped",
                                        reason=f"{missing} spoke not connected")
         try:
             records = build_dns_records(await self._netbox_ips())
-            result = await self.request_response(dns_spoke, "DNS_SYNC", {"records": records}, timeout=30.0)
+            results = await asyncio.gather(*[
+                self.request_response(sid, "DNS_SYNC", {"records": records}, timeout=30.0)
+                for sid in dns_spokes
+            ], return_exceptions=True)
+            spoke_errors = [r for r in results if isinstance(r, Exception)]
+            if spoke_errors:
+                logger.warning("DNS auto-sync failed: %s", spoke_errors[0])
+                return self._record_status("dns", status="error", error=str(spoke_errors[0]))
+            spoke_results = [unwrap_spoke(r) for r in results]
             return self._record_status("dns", status="ok",
                                        records_synced=len(records),
-                                       spoke_result=unwrap_spoke(result))
+                                       spoke_result=spoke_results[0] if len(spoke_results) == 1 else spoke_results)
         except Exception as e:  # noqa: BLE001 — best-effort loop must not die
             logger.warning("DNS auto-sync failed: %s", e)
             return self._record_status("dns", status="error", error=str(e))
 
     async def sync_dhcp_from_netbox(self) -> Dict[str, Any]:
         """Reconcile Kea to NetBox prefixes + reservations. Returns a status dict."""
-        dhcp_spoke = self.get_spoke_by_type("dhcp")
-        if not dhcp_spoke or not self.get_spoke_by_type("ipam"):
-            missing = "DHCP" if not dhcp_spoke else "NetBox"
+        dhcp_spokes = self._get_dhcp_spokes()
+        if not dhcp_spokes or not self.get_spoke_by_type("ipam"):
+            missing = "DHCP" if not dhcp_spokes else "NetBox"
             return self._record_status("dhcp", status="skipped",
                                        reason=f"{missing} spoke not connected")
         try:
             pfx_data, ips_data = await self._netbox_prefixes_and_ips()
             subnets, reservations = build_dhcp_payload(pfx_data, ips_data)
-            result = await self.request_response(dhcp_spoke, "DHCP_SYNC", {
-                "subnets": subnets, "reservations": reservations}, timeout=30.0)
+            results = await asyncio.gather(*[
+                self.request_response(sid, "DHCP_SYNC", {
+                    "subnets": subnets, "reservations": reservations}, timeout=30.0)
+                for sid in dhcp_spokes
+            ], return_exceptions=True)
+            spoke_errors = [r for r in results if isinstance(r, Exception)]
+            if spoke_errors:
+                logger.warning("DHCP auto-sync failed: %s", spoke_errors[0])
+                return self._record_status("dhcp", status="error", error=str(spoke_errors[0]))
+            spoke_results = [unwrap_spoke(r) for r in results]
             return self._record_status("dhcp", status="ok",
                                        subnets_synced=len(subnets),
                                        reservations_synced=len(reservations),
-                                       spoke_result=unwrap_spoke(result))
+                                       spoke_result=spoke_results[0] if len(spoke_results) == 1 else spoke_results)
         except Exception as e:  # noqa: BLE001
             logger.warning("DHCP auto-sync failed: %s", e)
             return self._record_status("dhcp", status="error", error=str(e))
@@ -242,9 +283,9 @@ class DnsDhcpSyncMixin:
         ipam = self.get_spoke_by_type("ipam")
         if not ipam:
             return
-        dns_spoke = self.get_spoke_by_type("dns")
-        dhcp_spoke = self.get_spoke_by_type("dhcp")
-        if not dns_spoke and not dhcp_spoke:
+        dns_spokes = self._get_dns_spokes()
+        dhcp_spokes = self._get_dhcp_spokes()
+        if not dns_spokes and not dhcp_spokes:
             return
         try:
             pfx_data, ips_data = await self._netbox_prefixes_and_ips()
@@ -268,12 +309,18 @@ class DnsDhcpSyncMixin:
         dhcp_changed = last.get("dhcp") != dhcp_hash
 
         pushes = []
-        if dns_spoke and dns_changed:
-            pushes.append(self.request_response(dns_spoke, "DNS_SYNC",
-                                                {"records": records}, timeout=30.0))
-        if dhcp_spoke and dhcp_changed:
-            pushes.append(self.request_response(dhcp_spoke, "DHCP_SYNC", {
-                "subnets": subnets, "reservations": reservations}, timeout=30.0))
+        dns_indices = []
+        dhcp_indices = []
+        if dns_spokes and dns_changed:
+            for sid in dns_spokes:
+                dns_indices.append(len(pushes))
+                pushes.append(self.request_response(sid, "DNS_SYNC",
+                                                    {"records": records}, timeout=30.0))
+        if dhcp_spokes and dhcp_changed:
+            for sid in dhcp_spokes:
+                dhcp_indices.append(len(pushes))
+                pushes.append(self.request_response(sid, "DHCP_SYNC", {
+                    "subnets": subnets, "reservations": reservations}, timeout=30.0))
 
         if not pushes:
             # Nothing changed — record a "skipped (unchanged)" status so the UI
@@ -292,29 +339,33 @@ class DnsDhcpSyncMixin:
         # old hash in place so the change is retried next cycle rather than
         # latched-as-synced forever.
         new_hashes = dict(getattr(self, "_last_sync_hashes", None) or {})
-        ri = 0
-        if dns_spoke and dns_changed:
-            r = results[ri]; ri += 1
-            if isinstance(r, Exception):
-                logger.warning("DNS auto-sync push failed: %s", r)
-                self._record_status("dns", status="error", error=str(r))
+        if dns_spokes and dns_changed:
+            dns_res = [results[i] for i in dns_indices]
+            dns_errors = [r for r in dns_res if isinstance(r, Exception)]
+            if dns_errors:
+                logger.warning("DNS auto-sync push failed: %s", dns_errors[0])
+                self._record_status("dns", status="error", error=str(dns_errors[0]))
             else:
+                spoke_res = [unwrap_spoke(r) for r in dns_res]
                 self._record_status("dns", status="ok", records_synced=len(records),
-                                    spoke_result=unwrap_spoke(r))
+                                    spoke_result=spoke_res[0] if len(spoke_res) == 1 else spoke_res)
                 new_hashes["dns"] = dns_hash
         else:
             self._record_status("dns", status="ok", records_synced=len(records),
                                 skipped_unchanged=True)
             new_hashes["dns"] = dns_hash
-        if dhcp_spoke and dhcp_changed:
-            r = results[ri]
-            if isinstance(r, Exception):
-                logger.warning("DHCP auto-sync push failed: %s", r)
-                self._record_status("dhcp", status="error", error=str(r))
+
+        if dhcp_spokes and dhcp_changed:
+            dhcp_res = [results[i] for i in dhcp_indices]
+            dhcp_errors = [r for r in dhcp_res if isinstance(r, Exception)]
+            if dhcp_errors:
+                logger.warning("DHCP auto-sync push failed: %s", dhcp_errors[0])
+                self._record_status("dhcp", status="error", error=str(dhcp_errors[0]))
             else:
+                spoke_res = [unwrap_spoke(r) for r in dhcp_res]
                 self._record_status("dhcp", status="ok", subnets_synced=len(subnets),
                                     reservations_synced=len(reservations),
-                                    spoke_result=unwrap_spoke(r))
+                                    spoke_result=spoke_res[0] if len(spoke_res) == 1 else spoke_res)
                 new_hashes["dhcp"] = dhcp_hash
         else:
             self._record_status("dhcp", status="ok", subnets_synced=len(subnets),

@@ -3307,12 +3307,19 @@ def register(app, hub, ctx):
         leases are combined across every spoke (tagged _tenant)."""
         logger.debug("relay %s %s subnet=%s", request.method, request.url.path, subnet)
         data = await _dhcp_list_or_merge(request, tenant, "DHCP_LIST_LEASES", {"subnet": subnet}, "leases", "dhcp_list_leases")
-        return await _filter_tenant(request, data, "dhcp", ["ip", "address"], tenant)
+        return await _filter_tenant(request, data, "dhcp", ["ip", "address", "ip-address", "ip_address"], tenant)
+
+    @app.delete("/api/dhcp/lease")
+    async def dhcp_delete_lease(request: Request, tenant: str = None):
+        """Delete an active DHCP lease from Kea's lease database."""
+        body = await request.json()
+        await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP lease")
+        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_DEL_LEASE", body, log_name="dhcp_delete_lease")
 
     @app.post("/api/dhcp/reservation")
     async def dhcp_add_reservation(request: Request, tenant: str = None):
         body = await request.json()
-        await _constrain_shared_write(request, body, ["ip", "address"], "DHCP reservation")
+        await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
         return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_ADD_RES", body, log_name="dhcp_add_reservation")
 
     @app.get("/api/dhcp/reservations")
@@ -3328,18 +3335,18 @@ def register(app, hub, ctx):
         reservations are combined across every spoke (tagged _tenant)."""
         logger.debug("relay GET /api/dhcp/reservations")
         data = await _dhcp_list_or_merge(request, tenant, "DHCP_LIST_RES", {}, "reservations", "dhcp_list_reservations")
-        return await _filter_tenant(request, data, "dhcp", ["ip"], tenant)
+        return await _filter_tenant(request, data, "dhcp", ["ip", "address", "ip-address", "ip_address"], tenant)
 
     @app.put("/api/dhcp/reservation")
     async def dhcp_update_reservation(request: Request, tenant: str = None):
         body = await request.json()
-        await _constrain_shared_write(request, body, ["ip", "address"], "DHCP reservation")
+        await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
         return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_UPDATE_RES", body, log_name="dhcp_update_reservation")
 
     @app.delete("/api/dhcp/reservation")
     async def dhcp_delete_reservation(request: Request, tenant: str = None):
         body = await request.json()
-        await _constrain_shared_write(request, body, ["ip", "address"], "DHCP reservation")
+        await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
         return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_DEL_RES", body, log_name="dhcp_delete_reservation")
 
     @app.get("/api/dhcp/status")
