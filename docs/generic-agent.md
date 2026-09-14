@@ -67,6 +67,7 @@ role's live status.
 
 ## Notable behaviors & gotchas
 
+- **An agent offline too long cannot reconnect on its own — and deleting it makes recovery HARDER.** The limit is the hub ROOT secret window (2 rotations survived, so 60 days guaranteed and up to 90), never the session key, which has no enforced expiry and is not rotated while the agent is away. A hard Delete wipes recoverable crypto state and mints a 1-hour first secret that can never reach an unreachable box; **decommission** a temporarily-down agent instead. Full explanation, the exact journal line to grep for, and the recovery runbook: [agent-offline-and-key-rotation.md](agent-offline-and-key-rotation.md).
 - **Boot `--role` does NOT run `_install_role`** — `install_agent.sh` stages a boot `--role`/`--roles` but only pre-installs system packages; the role class loads on first `LOAD_ROLE` from the hub (staged roles auto-load at startup).
 - **9 sibling repos auto-clone on `LOAD_ROLE`** — `dns`/`dhcp`/`console` ship in-repo (staged from the `/opt/lm` clone); the other 9 roles (`network`, `netbox`, `opnsense`, `ldap`, `simulation`, `cppm`, `proxmox`, `le`, `truenas`) clone from their own GitHub repos. Covers every canonical hub module type except `agent`.
 
