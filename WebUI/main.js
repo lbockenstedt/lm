@@ -24076,9 +24076,11 @@ function _dhcpHaPanel(c) {
     if (!c || c.enabled === false) return '';
     const members = Array.isArray(c.members) ? c.members : [];
     const apply = c.last_apply || {};
+    const admin = typeof isAdmin === 'function' && isAdmin();
     const rows = members.map(m => {
         const tone = _DD_MEMBER_TONE[m.health] || 'text-slate-600';
         const scopes = (m.scopes || []).join(', ') || '—';
+        const eId = escJsAttr(m.id || '');
         return `<tr class="border-b border-slate-100">
             <td class="px-4 py-2 font-mono font-medium" title="${escapeHtml(m.id || '—')}">${escapeHtml(m.display_name || m.id || '—')}</td>
             <td class="px-4 py-2 text-xs">${escapeHtml(m.ha_role || '—')}</td>
@@ -24087,6 +24089,9 @@ function _dhcpHaPanel(c) {
             <td class="px-4 py-2 text-xs">${escapeHtml(m.remote_state || '—')}${m.communication_interrupted ? ' <span class="text-red-600 font-bold">(interrupted)</span>' : ''}</td>
             <td class="px-4 py-2 font-mono text-[11px] text-slate-500">${escapeHtml(scopes)}</td>
             <td class="px-4 py-2 font-mono text-[11px] text-slate-500">${escapeHtml(m.config_digest ? String(m.config_digest).slice(0, 12) + '…' : '—')}</td>
+            ${admin ? `<td class="px-4 py-2 text-right">
+                <button onclick="removeDhcpHaMember('${eId}')" title="Remove this node from the Kea HA pair" class="p-1 text-slate-300 hover:text-red-500 transition-colors"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg></button>
+            </td>` : ''}
         </tr>`;
     }).join('');
     const partial = apply.status && apply.status !== 'SUCCESS';
@@ -24101,7 +24106,7 @@ function _dhcpHaPanel(c) {
                 <div class="text-sm font-semibold text-slate-700">Kea HA pair ${_ddClusterBadge(c.state)}</div>
                 <div class="text-xs text-slate-400">${escapeHtml(c.mode || 'hot-standby')} · ${c.healthy_count || 0}/${c.member_count || 0} in sync · configuration ${c.config_converged ? 'matched' : ((c.config_digests_missing || []).length ? `<b class="text-amber-600">UNKNOWN</b> (no report from ${escapeHtml(missingLabel)})` : '<b class="text-red-600">MISMATCHED</b>')}</div>
             </div>
-            ${tableWrap(tableHead(['Node', 'Role', 'Health', 'HA state', 'Partner', 'Scopes', 'Config digest']) + `<tbody>${rows}</tbody>`)}
+            ${tableWrap(tableHead(['Node', 'Role', 'Health', 'HA state', 'Partner', 'Scopes', 'Config digest'].concat(admin ? [''] : [])) + `<tbody>${rows}</tbody>`)}
             ${partial ? `<div class="px-4 py-3 border-t border-slate-200 text-xs text-amber-700 bg-amber-50">
                 Last apply reported <b>${escapeHtml(apply.status)}</b> at stage <b>${escapeHtml(apply.stage || '?')}</b> — applied on ${escapeHtml((apply.applied || []).join(', ') || 'no node')}${(apply.rolled_back || []).length ? `, rolled back ${escapeHtml(apply.rolled_back.join(', '))}` : ''}.
                 ${Object.entries(apply.errors || {}).map(([k, v]) => `<div class="mt-1 font-mono">${escapeHtml(k)}: ${escapeHtml(String(v))}</div>`).join('')}
@@ -24113,6 +24118,57 @@ function _dhcpHaPanel(c) {
                 <span class="text-xs text-slate-400 ml-2">Pulls subnets/reservations from NetBox first — needed before Re-apply if nothing has synced yet.</span>
             </div>
         </div>`;
+}
+
+// Drop a single Kea node from the HA pair — the DHCP twin of
+// removeDnsClusterMember, and the only way to retire a decommissioned /
+// permanently-offline DHCP server from the Diagnostics tab where the operator
+// actually sees it failing. Posts the remaining member set to the same
+// DHCP_HA_CONFIG endpoint the "Edit cluster" modal uses; only {id, host}
+// travel back, because everything else on the row (health, HA state, scopes,
+// config digest …) is live reporting data, not configuration.
+//
+// Unlike DNS, a Kea pair is exactly two nodes: the spoke treats fewer than two
+// members as "stand down and serve single-host", so dropping either node ends
+// HA. The confirm text says so rather than implying the survivor stays paired.
+// This removes the node from the DHCP topology only — the host's spoke/agent
+// record is deleted separately from Setup → Spokes & Agents (Unload Role,
+// then Delete).
+async function removeDhcpHaMember(id) {
+    const cluster = (window._svcClusterState || {}).dhcp;
+    const current = (cluster && Array.isArray(cluster.members)) ? cluster.members : [];
+    const victim = current.find(m => m && m.id === id);
+    if (!victim) {
+        showToast('Could not find that node in the current HA report — try refreshing.', 'error');
+        return;
+    }
+    const label = victim.display_name || id;
+    const remaining = current.filter(m => m && m.id !== id)
+        .map(m => ({ id: m.id, host: m.host || '' }));
+    const after = remaining.length >= 2
+        ? `The remaining ${remaining.length} nodes stay paired.`
+        : (remaining.length === 1
+            ? `Only one node is left, so the HA pair stands down and that node serves DHCP on its own.`
+            : `No nodes are left, so this DHCP module goes back to single-host.`);
+    if (!confirm(`Remove "${label}" from the Kea HA pair? ${after} This edits the DHCP topology only — it does not delete the host's spoke record (do that from Setup → Spokes & Agents) and does not remove any scopes, leases or reservations.`)) {
+        return;
+    }
+    try {
+        const res = await fetch('/api/dhcp/ha' + _tenantQS(), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ members: remaining }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { showToast(data.detail || 'Remove failed', 'error'); return; }
+        if (data.status === 'ERROR') { showToast(data.message || 'Remove failed', 'error'); return; }
+        if (data.status === 'PARTIAL') {
+            showToast(data.message || `Removed "${label}", but cleanup was incomplete`, 'error');
+        } else {
+            showToast(`Removed "${label}" from the Kea HA pair`, 'success');
+        }
+    } catch (e) { showToast(e.message, 'error'); }
+    loadDHCPData('Diagnostics');
 }
 
 // Per-member evidence blocks (each worker's own diagnostics recommendations).
