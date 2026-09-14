@@ -1388,7 +1388,10 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 # with "sudo: unable to change to root gid: Operation not permitted" even
 # though /etc/sudoers.d/lm grants the NOPASSWD rule — sudo itself can't switch
 # to the root uid/gid without those capabilities available to inherit.
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_SETPCAP
+# CAP_AUDIT_WRITE belongs here too: without it sudo cannot emit its audit
+# record and dies in "error initializing audit plugin sudoers_audit" before it
+# ever evaluates the sudoers policy.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_AUDIT_WRITE
 # ── Tier-0 root/LPE hardening (see docs/security-pentest.md §5I) ──
 # LM_DROP_FERNET_KEY_ENV=1 (above) makes the hub drop LM_FERNET_KEY from its own
 # /proc/<pid>/environ after load, so an SSL-port RCE / root reader can't slurp
