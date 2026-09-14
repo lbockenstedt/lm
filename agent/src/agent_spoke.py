@@ -1336,6 +1336,20 @@ class GenericAgent(BaseSpoke):
                     return {"status": "ERROR",
                             "message": f"A deployment of '{role_name}' is already running",
                             "deploy_status": self._deploy_status_by_role.get(role_name)}
+                # Idempotent, mirroring the hosted-role no-op below: a deploy
+                # role that is ALREADY installed is not re-installed. The hub
+                # re-pushes LOAD_ROLE for every recorded role when an agent
+                # reconnects, so without this a reboot re-ran the Kea/Unbound
+                # installer every time. ``force`` keeps the deliberate
+                # re-install/repair path available.
+                marker = _DEPLOY_ROLE_MARKERS.get(role_name)
+                if not data.get("force") and marker and os.path.exists(marker):
+                    return {"status": "SUCCESS", "role": role_name,
+                            "module_type": _DEPLOY_ROLES[role_name]["module_type"],
+                            "deploy": True, "already_installed": True,
+                            "message": (f"Role '{role_name}' is already installed "
+                                        f"— not re-deploying (pass force to re-run "
+                                        f"the installer)")}
                 spec = _DEPLOY_ROLES[role_name]
                 deploy_cmd = self._build_deploy_cmd(role_name, spec,
                                                     data.get("config") or {})
@@ -1468,6 +1482,33 @@ class GenericAgent(BaseSpoke):
 
         if cmd == "UNLOAD_ROLE":
             role_name = data.get("role")
+            if role_name in _DEPLOY_ROLES and role_name not in _DEPLOY_ROLE_UNITS:
+                # Deploy roles with no managed units (netbox-server, ldap-server,
+                # ab) had NO unload path at all: they fell through to the hosted-
+                # role branch, which reported "Role 'netbox-server' is not loaded"
+                # as an ERROR. The hub only forgets an assignment when UNLOAD_ROLE
+                # does NOT error (see _track_role_rpc), so the role stayed on
+                # record forever and was re-pushed on every reconnect — there was
+                # no way to stop the hub trying to deploy NetBox to a node.
+                # Nothing to stop here, so report success and let the hub drop the
+                # assignment. The installed software is left alone: unloading the
+                # role means "stop managing/deploying this", not "uninstall".
+                if (self._deploy_tasks.get(role_name)
+                        and not self._deploy_tasks[role_name].done()):
+                    return {
+                        "status": "ERROR",
+                        "message": f"Deployment of '{role_name}' is still running.",
+                    }
+                self._deploy_status_by_role.pop(role_name, None)
+                return {
+                    "status": "SUCCESS",
+                    "role": role_name,
+                    "deploy": True,
+                    "message": (
+                        f"Role '{role_name}' unloaded — the hub will no longer "
+                        f"deploy it to this host (installed software left in place)"
+                    ),
+                }
             if role_name in _DEPLOY_ROLE_UNITS:
                 module_role = role_name.removesuffix("-server")
                 if module_role in self._roles:
