@@ -3320,10 +3320,12 @@ def register(app, hub, ctx):
                 data = _spoke_payload_or_raise(data)
             except Exception as e:  # noqa: BLE001 — one bad/offline spoke must not fail the merge
                 logger.debug("dhcp merge fanout: %s failed: %s", sid, e)
-                return []
+                return [], {"spoke": sid, "tenant": hub.state.get_spoke_tenant(sid) or "",
+                            "error": str(e) or e.__class__.__name__}
             recs = data.get(list_key) if isinstance(data, dict) else None
             if not isinstance(recs, list):
-                return []
+                return [], {"spoke": sid, "tenant": hub.state.get_spoke_tenant(sid) or "",
+                            "error": f"spoke returned no '{list_key}' list"}
             tid = hub.state.get_spoke_tenant(sid) or ""
             # ``_spoke`` is the routing key for the WRITE side: each dhcp spoke
             # is its own Kea (usually its own HA pair), so a row from the merged
@@ -3331,10 +3333,21 @@ def register(app, hub, ctx):
             # this tag a "reserve this lease" write lands on whichever spoke
             # _dhcp_spoke_for_request happens to pick — i.e. the wrong cluster.
             return [{**r, "_tenant": tid, "_spoke": sid} if isinstance(r, dict) else r
-                    for r in recs]
+                    for r in recs], None
 
-        merged = [r for recs in await asyncio.gather(*[_one(s) for s in spokes]) for r in recs]
-        return {list_key: merged, "total": len(merged)}
+        # A failing spoke must not sink the merge — but it must not vanish
+        # either. Dropping it silently makes an unreachable Kea cluster look
+        # like "there are no reservations", which is indistinguishable from a
+        # genuinely empty Kea and sent an operator hunting a phantom data-loss
+        # bug. Report the casualties alongside the rows so the UI can say WHICH
+        # cluster is missing and why.
+        pairs = await asyncio.gather(*[_one(s) for s in spokes])
+        merged = [r for recs, _ in pairs for r in recs]
+        degraded = [d for _, d in pairs if d]
+        out = {list_key: merged, "total": len(merged)}
+        if degraded:
+            out["_degraded"] = degraded
+        return out
 
     async def _dhcp_list_or_merge(request: Request, tenant: str, cmd: str,
                                   payload: dict, list_key: str, log_name: str):
