@@ -2404,6 +2404,29 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             await self.send_to_spoke(secret_msg)
             logger.info(f"Pushed hub secret to {spoke_id}")
 
+            # Durable recovery PSK, re-pushed on EVERY approved connect so a
+            # spoke that predates this feature picks one up the first time it
+            # reconnects. Unlike the hub secret above this value never changes,
+            # so the spoke keeps a working proof of Hub identity even after it
+            # drifts past the 3-deep root-secret rotation window — the state
+            # that bricked cs-svr-0* until they were physically reinstalled.
+            # Best-effort: a failure here must never cost us the hub-secret push
+            # or the config push below.
+            try:
+                await self.send_to_spoke(Message(
+                    header=MessageHeader(
+                        message_id=str(uuid.uuid4()),
+                        timestamp=time.time(),
+                        sender_id="hub",
+                        destination_id=spoke_id
+                    ),
+                    payload=MessagePayload(
+                        type="SPOKE_SET_RECOVERY_PSK",
+                        data={"recovery_psk": self.key_manager.recovery_psk_for(spoke_id)})
+                ))
+            except Exception:  # noqa: BLE001
+                logger.debug("Recovery PSK push to %s failed", spoke_id, exc_info=True)
+
             # Reconcile the operator-set hub URL on every (re)connect: if
             # global_config["hub"]["url"] is set, re-push SPOKE_SET_HUB_URL so a
             # spoke that was offline when the hub's DNS name changed (or that
@@ -5239,6 +5262,23 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         challenge.encode())
                 except Exception:  # noqa: BLE001 — never block the legacy proof on this
                     logger.debug("sign_hub_challenge_all failed; proceeding with single signature only", exc_info=True)
+                # Rotation-INDEPENDENT proof. ``signatures`` above only rescues a
+                # spoke still inside the 3-deep root window; one that missed more
+                # rotations than that has nothing left to check and hard-refuses
+                # us forever when LM_HUB_TLS_VERIFY=0 (the cs-svr-0* lockout —
+                # 77k log lines, only a reinstall cleared it). The per-spoke
+                # recovery PSK is derived from a root that never rotates, so a
+                # spoke that persisted it on ANY prior good connect can still
+                # verify us regardless of how far behind it has drifted. Signed
+                # per spoke_id and one-way, so a stranger claiming some other
+                # spoke's id learns nothing it can replay. Additive — verified
+                # over ``challenge`` only, so legacy spokes ignore it.
+                try:
+                    if spoke_id:
+                        proof["recovery_signature"] = self.key_manager.sign_hub_challenge_recovery(
+                            challenge.encode(), spoke_id)
+                except Exception:  # noqa: BLE001 — never block connect on the escape hatch
+                    logger.debug("sign_hub_challenge_recovery failed; proceeding without it", exc_info=True)
                 # H4: advertise app-layer-encryption capability to the spoke. The
                 # spoke verifies the signature over ``challenge`` ONLY (it never
                 # re-serializes or re-signs this proof dict), so adding an
