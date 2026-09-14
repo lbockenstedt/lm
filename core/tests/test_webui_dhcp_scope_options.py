@@ -156,7 +156,7 @@ def test_dhcp_leases_renders_convert_to_reservation_button():
 
 def test_dhcp_subnet_options_renders_subnet_and_description_without_id_prefix():
     source = _source()
-    fn = source.split("async function _loadDhcpSubnetOptions(selId, preferredSubnetId)", 1)[1]
+    fn = source.split("async function _loadDhcpSubnetOptions(selId, preferredSubnetId", 1)[1]
     fn = fn.split("\nfunction convertLeaseToReservation", 1)[0]
     assert "s.subnet" in fn
     assert "desc" in fn
