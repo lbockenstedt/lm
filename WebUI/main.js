@@ -24218,7 +24218,7 @@ function _ddMemberEvidence(members, kind) {
             </div>
             <div class="mt-3">
                 <div class="font-semibold text-slate-600 mb-1 text-xs">Local DNS query probes</div>
-                ${tw(th(['Target', 'Result', 'RCODE', 'Latency']) + `<tbody>${probeRows}</tbody>`)}
+                ${tableWrap(tableHead(['Target', 'Result', 'RCODE', 'Latency']) + `<tbody>${probeRows}</tbody>`)}
             </div>`;
         })() : '';
         return `<div class="bg-white border border-slate-200 rounded-lg p-4">
