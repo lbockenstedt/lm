@@ -16,6 +16,7 @@ without constructing a LabManagerHub (which pulls in at-rest encryption).
 wrappers that pass ``self.request_response`` / ``self.get_spoke_by_type`` /
 ``self.CERT_CAPABLE_MODULES``.
 """
+import asyncio
 import logging
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -438,6 +439,55 @@ async def distribute_mtls_materials_to_all_spokes(
 
     def _current(sid: str) -> bool:
         return bool(material_hash) and push_state.get(_key(sid)) == material_hash
+
+    # Incident: mipbe-svcs01/02 + RSVBE-LM-AGENT sat "missing materials" in the
+    # mTLS readiness panel FOREVER despite being online and answering the hub.
+    # Root cause — the block above trusted push_state as ground truth: hub pushes
+    # once, stamps the hash, box gets rebuilt/reimaged and loses the files on
+    # disk, stamp still reads "done", spoke is filtered out of stale_spokes below
+    # and never touched again. The hub already asks every spoke for its actual
+    # on-disk state elsewhere (SPOKE_GET_MTLS_STATUS, see
+    # HubCertDistributionMixin.mtls_readiness in hub_cert_distribution.py) — this
+    # loop just never consulted it before deciding "current". Fix: before
+    # filtering, verify each hash-current spoke actually reports all three
+    # materials present; a spoke that CONTRADICTS its own stamp gets the stamp
+    # cleared so it falls through to stale_spokes and gets re-pushed, then the
+    # existing SUCCESS path below re-stamps it cleanly.
+    #
+    # The trap: only a spoke that ANSWERS and reports a material missing may
+    # force this. A spoke that doesn't reply (offline, mid-reconnect, RPC
+    # timeout) must be left exactly as _current() already found it. Treating
+    # "no answer" as "missing" would re-arm the durable mailbox push for every
+    # offline spoke on every distribution cycle — and because installing
+    # materials restarts the spoke "to arm verification" (see the _key()
+    # ping-pong note above), that reproduces the exact fleet-wide flapping this
+    # module was written to prevent, just from the opposite direction.
+    _stamped_current = [(sid, mt) for (sid, mt) in primary if _current(sid)]
+
+    async def _verify_still_present(sid: str) -> Optional[Dict[str, Any]]:
+        try:
+            res = await rr(sid, "SPOKE_GET_MTLS_STATUS", {}, timeout=4.0)
+        except Exception:  # noqa: BLE001 - no reply == unreachable, NOT "missing"
+            return None
+        d = unwrap_spoke(res)
+        if isinstance(d, dict) and d.get("status") == "SUCCESS" and isinstance(d.get("mtls"), dict):
+            return d["mtls"]
+        return None  # malformed/failed reply — treat like no answer, never like "missing"
+
+    if _stamped_current:
+        _verify_results = await asyncio.gather(
+            *[_verify_still_present(sid) for sid, _mt in _stamped_current])
+        for (sid, _mt), mstat in zip(_stamped_current, _verify_results):
+            if mstat is None:
+                continue  # unreachable — leave the stamp alone, do NOT re-arm
+            if not (mstat.get("ca_present") and mstat.get("client_cert_present")
+                    and mstat.get("client_key_present")):
+                logger.warning(
+                    "[mtls] %s: %s stamped current but reports material missing "
+                    "(ca=%s cert=%s key=%s) — clearing stamp for re-push",
+                    domain, sid, mstat.get("ca_present"),
+                    mstat.get("client_cert_present"), mstat.get("client_key_present"))
+                push_state.pop(_key(sid), None)
 
     stale_spokes = [(sid, mt) for (sid, mt) in primary if not _current(sid)]
     hub_current = (not include_hub) or (bool(material_hash)

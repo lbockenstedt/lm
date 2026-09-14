@@ -231,6 +231,92 @@ def test_no_primary_spokes_no_hub_callable_is_noop():
     assert pcalls == []
 
 
+# ── verify-before-skip: push_state stamp vs SPOKE_GET_MTLS_STATUS ─────────────
+# Regression for mipbe-svcs01/02 + RSVBE-LM-AGENT: they sat "missing materials"
+# in the mTLS readiness panel FOREVER despite being online and answering the
+# hub. The hub pushed once, stamped push_state[sid]=hash, the box was later
+# rebuilt/reimaged and lost the files on disk, the stamp still read "done" so
+# the spoke was filtered out of stale_spokes and never touched again. Fix:
+# a hash-current spoke is now cross-checked against SPOKE_GET_MTLS_STATUS
+# before being trusted as skippable.
+
+def test_stamped_spoke_reporting_missing_material_forces_repush():
+    """A spoke whose push_state stamp matches the current hash, but which
+    ANSWERS SPOKE_GET_MTLS_STATUS reporting one of the three materials absent,
+    must be re-pushed -- and its stale stamp cleared so the live-SUCCESS path
+    re-stamps it cleanly afterward (not left permanently cleared)."""
+    rr, calls = _fake_rr({
+        (_LE, "LE_GET_CERT"): _le_get_cert_ok(),
+        (_AGENT, "SPOKE_GET_MTLS_STATUS"): {"payload": {"data": {
+            "status": "SUCCESS", "mtls": {
+                "ca_present": True, "client_cert_present": False,
+                "client_key_present": True}}}},
+    })
+    push, pcalls = _fake_push({})
+    state = {f"mtls|{_WILDCARD}|{_AGENT}": _H}
+    summary = _run(cd.distribute_mtls_materials_to_all_spokes(
+        rr, push, _primary([(_AGENT, "agent")]), _LE, _WILDCARD, _H, state,
+        install_on_hub=None))
+    pushed = [c for c in pcalls if c["cmd"] == "SPOKE_SET_MTLS_MATERIALS"]
+    assert len(pushed) == 1 and pushed[0]["spoke"] == _AGENT
+    spoke_entry = [s for s in summary if s.get("identifier") == _AGENT][0]
+    assert spoke_entry["status"] == "SUCCESS"
+    # Re-stamped after the fresh live push -- not left cleared forever.
+    assert state[f"mtls|{_WILDCARD}|{_AGENT}"] == _H
+
+
+def test_stamped_spoke_reporting_all_present_stays_skipped():
+    """The common case: a stamped-current spoke whose SPOKE_GET_MTLS_STATUS
+    confirms all three materials present stays skipped -- no LE_GET_CERT pull,
+    no push. Verifying the stamp must not turn into a re-push storm on every
+    healthy spoke every distribution cycle."""
+    rr, calls = _fake_rr({
+        (_AGENT, "SPOKE_GET_MTLS_STATUS"): {"payload": {"data": {
+            "status": "SUCCESS", "mtls": {
+                "ca_present": True, "client_cert_present": True,
+                "client_key_present": True}}}},
+    })
+    push, pcalls = _fake_push({})
+    state = {f"mtls|{_WILDCARD}|{_AGENT}": _H}
+    summary = _run(cd.distribute_mtls_materials_to_all_spokes(
+        rr, push, _primary([(_AGENT, "agent")]), _LE, _WILDCARD, _H, state,
+        install_on_hub=None))
+    assert len(summary) == 1 and summary[0].get("skipped") is True
+    assert pcalls == []
+    assert not [c for c in calls if c["cmd"] == "LE_GET_CERT"]
+    assert state[f"mtls|{_WILDCARD}|{_AGENT}"] == _H
+
+
+def test_unreachable_stamped_spoke_is_left_alone_no_repush():
+    """The trap this fix has to avoid: a stamped-current spoke that does NOT
+    answer SPOKE_GET_MTLS_STATUS (offline, mid-reconnect, RPC timeout) must be
+    left exactly alone -- neither confirmed present nor forced stale. Treating
+    "no answer" as "missing" would re-arm the durable mailbox push for every
+    offline spoke on every cycle, and because installing materials restarts the
+    spoke "to arm verification" that reproduces the exact fleet-wide flapping
+    the domain-qualified push_state key (see
+    test_two_wildcard_domains_do_not_clobber_push_state) was written to
+    prevent -- just triggered from the opposite direction. Only a POSITIVE
+    report of absence may re-arm the push."""
+    calls = []
+
+    async def rr(spoke_id, command, data=None, timeout=None):
+        calls.append({"spoke": spoke_id, "cmd": command})
+        if command == "SPOKE_GET_MTLS_STATUS":
+            raise TimeoutError("spoke did not answer")
+        return {"payload": {"data": {"status": "ERROR", "message": "no stub"}}}
+
+    push, pcalls = _fake_push({})
+    state = {f"mtls|{_WILDCARD}|{_AGENT}": _H}
+    summary = _run(cd.distribute_mtls_materials_to_all_spokes(
+        rr, push, _primary([(_AGENT, "agent")]), _LE, _WILDCARD, _H, state,
+        install_on_hub=None))
+    assert len(summary) == 1 and summary[0].get("skipped") is True
+    assert pcalls == []  # no mailbox push armed for the unreachable spoke
+    assert state[f"mtls|{_WILDCARD}|{_AGENT}"] == _H  # stamp untouched
+    assert any(c["cmd"] == "SPOKE_GET_MTLS_STATUS" for c in calls)  # verify WAS attempted
+
+
 # ── mtls runtime material registry ────────────────────────────────────────────
 
 def test_runtime_materials_take_precedence_over_env(monkeypatch=None):
