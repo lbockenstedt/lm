@@ -369,6 +369,60 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
         return {"status": "ok", "result": unwrap_spoke(resp)}
 
+    @app.post("/admin/ops/dhcp-reservation")
+    async def admin_ops_dhcp_reservation(request: Request):
+        """Drive a reservation CRUD against a CHOSEN dhcp spoke and return
+        that spoke's raw verdict.
+
+        ``/api/dhcp/reservation`` maps a spoke-side ``status: "ERROR"`` onto a
+        bare HTTP 502 whose detail only ever reaches the browser, so an
+        operator debugging a failing reservation has nothing to go on. This
+        returns the spoke's untouched reply instead of translating it.
+
+        It also takes an explicit ``spoke_id``. Each dhcp spoke fronts its own
+        independent Kea (usually its own HA pair), and the WebUI's combined
+        view merges rows from all of them, so "which cluster did this actually
+        land on" is the first question worth answering. Body: ``{"spoke_id":
+        "<id>", "action": "add"|"update"|"delete", "ip": ..., "mac": ...,
+        "old_ip": ..., "hostname": ..., "subnet": ...}``. ``spoke_id``
+        defaults to the usual ``get_spoke_by_type("dhcp")`` pick."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        action = str((body or {}).get("action") or "add").strip().lower()
+        commands = {"add": "DHCP_ADD_RES", "update": "DHCP_UPDATE_RES",
+                    "delete": "DHCP_DEL_RES"}
+        if action not in commands:
+            raise HTTPException(status_code=400,
+                                detail=f"action must be one of {sorted(commands)}")
+        spoke_id = str((body or {}).get("spoke_id") or "").strip()
+        if spoke_id:
+            valid = set(hub.get_all_spokes_by_type("dhcp") or [])
+            if spoke_id not in valid:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{spoke_id}' is not a DHCP spoke; known: {sorted(valid)}")
+        else:
+            spoke_id = hub.get_spoke_by_type("dhcp")
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="no DHCP spoke connected")
+        payload = {k: v for k, v in (body or {}).items()
+                   if k in ("ip", "mac", "old_ip", "hostname", "subnet", "subnet_id")}
+        if not payload.get("ip"):
+            raise HTTPException(status_code=400, detail="ip is required")
+        logger.warning("admin_ops: dhcp-reservation %s ip=%s spoke=%s via loopback",
+                       action, payload.get("ip"), spoke_id)
+        try:
+            resp = await hub.request_response(spoke_id, commands[action],
+                                              payload, timeout=90.0)
+        except Exception as e:
+            logger.exception("admin_ops: dhcp-reservation failed")
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "ok", "spoke_id": spoke_id, "action": action,
+                "sent": payload, "result": unwrap_spoke(resp)}
+
     @app.post("/admin/ops/restart-service")
     async def admin_ops_restart_service(request: Request):
         """Restart one allowlisted systemd unit on a target — hub or a
