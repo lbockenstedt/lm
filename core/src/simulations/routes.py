@@ -55,6 +55,7 @@ from .helpers import (  # noqa: F401
     _usb_dev_vidpid, _reclassify_host_usb, _usb_keys_summary,
     _usb_structure_dump, _usb_provisioning_status_payload,
     _cached_command_queue,
+    bridge_undeliverable_message,
 )
 
 
@@ -845,6 +846,19 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if not sids:
             return []
         return list(await asyncio.gather(*[_one(s) for s in sids]))
+
+    def _bridge_undeliverable(targets) -> str:
+        """Read the CS bridge's per-agent decisions and delegate to
+        ``bridge_undeliverable_message`` — see it for WHY this gate exists.
+        A missing/unreadable bridge never blocks an action."""
+        bridge = getattr(hub, "cs_bridge", None)
+        if bridge is None or not hasattr(bridge, "status_snapshot"):
+            return ""
+        try:
+            rows = (bridge.status_snapshot() or {}).get("agents") or []
+        except Exception:  # noqa: BLE001 — never block an action on a diag read
+            return ""
+        return bridge_undeliverable_message(rows, targets)
 
     def _tenant_cache(tenant_id: str) -> dict:
         """The merged CS_TELEMETRY cache for the tenant's spokes (read-only)."""
@@ -4167,6 +4181,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 })
             if not norm:
                 raise HTTPException(status_code=400, detail="no valid items")
+            blocked = _bridge_undeliverable({it["target"] for it in norm})
+            if blocked:
+                raise HTTPException(status_code=409, detail=blocked)
             return await _cs_forward(tenant_id, "CS_QUEUE_COMMAND", {"items": norm})
         action = str(body.get("action") or "").strip()
         if not action:
@@ -4174,6 +4191,9 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         args = body.get("args") if isinstance(body.get("args"), dict) else \
             {k: v for k, v in body.items() if k not in ("action", "target", "type")}
         target = body.get("target") or _default_target()
+        blocked = _bridge_undeliverable({target})
+        if blocked:
+            raise HTTPException(status_code=409, detail=blocked)
         payload = {"target": target, "action": action, "args": args, "type": body.get("type")}
         return await _cs_forward(tenant_id, "CS_QUEUE_COMMAND", payload)
 
