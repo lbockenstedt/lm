@@ -44,6 +44,50 @@ cert_log = logging.getLogger("le.distribution")
 _LM_SELF_RESTART = "/usr/local/bin/lm-self-restart"
 
 
+def _diagnose_self_restart_failure(detail: str) -> str:
+    """Turn a raw ``sudo``/helper failure into a message that names the actual
+    remedy, instead of surfacing the bare stderr in a 502.
+
+    Two distinct, non-obvious environment faults produce an identical-looking
+    dead end in the Hub Status → Restart button, and neither is guessable from
+    the raw text:
+
+    * ``unable to change to root gid`` — ``lm.service``'s
+      ``CapabilityBoundingSet`` gates every CHILD process, sudo included. A unit
+      installed before CAP_SETUID/CAP_SETGID/CAP_SETPCAP/CAP_AUDIT_WRITE were
+      added to that line leaves setuid-root sudo unable to switch uid/gid, so it
+      fails before it ever reads ``/etc/sudoers.d/lm``. Self-update ships code
+      but never rewrites the unit file, so an old hub keeps the broken line
+      indefinitely — and, because the same sudo powers ``lm-update-restart``, it
+      also silently stops the hub applying its OWN updates (they pile up as
+      "process is STALE: running vX but on-disk is vY").
+    * helper missing — ``lm-self-restart`` renamed to ``.off`` disables the
+      restart path deliberately; say so rather than reporting "exited 1".
+    """
+    d = (detail or "").strip()
+    low = d.lower()
+    if "unable to change to root gid" in low or "operation not permitted" in low \
+            or "audit plugin" in low:
+        return (f"{d} — lm.service's CapabilityBoundingSet is missing "
+                f"CAP_SETUID/CAP_SETGID/CAP_SETPCAP/CAP_AUDIT_WRITE, so sudo "
+                f"cannot become root and fails before reading /etc/sudoers.d/lm. "
+                f"This also blocks the hub applying its own updates. Fix: add "
+                f"those to CapabilityBoundingSet in /etc/systemd/system/lm.service "
+                f"(install_all.sh already ships the corrected line — self-update "
+                f"does NOT rewrite unit files), then systemctl daemon-reload && "
+                f"systemctl restart lm.")
+    if "no such file" in low or "command not found" in low:
+        return (f"{d} — {_LM_SELF_RESTART} is missing (check for a "
+                f"{_LM_SELF_RESTART}.off: the helper is renamed to disable "
+                f"self-restart deliberately). Restore it, or restart the hub "
+                f"out-of-band with systemctl restart lm.")
+    if "a password is required" in low or "not allowed to execute" in low:
+        return (f"{d} — /etc/sudoers.d/lm does not grant this helper NOPASSWD "
+                f"to the hub's service user. Re-run install_all.sh to reinstate "
+                f"the sudoers rule.")
+    return d
+
+
 class HubCertDistributionMixin:
     """Hub-brokered cert distribution: pull renewed material from the le spoke
     and push it to each cert's target spokes (opnsense today). Thin wrappers over
@@ -398,7 +442,7 @@ class HubCertDistributionMixin:
                 detail = (result.get("stderr") or result.get("error")
                          or result.get("stdout") or "no output").strip()[:300]
                 cert_log.warning("[cert] hub-self restart command failed (rc=%s): %s → direct fallback",
-                                 result.get("rc"), detail)
+                                 result.get("rc"), _diagnose_self_restart_failure(detail))
             except Exception as e:  # noqa: BLE001
                 cert_log.warning("[cert] hub-self RUN_COMMAND restart error → direct fallback: %s", e)
         try:
@@ -414,7 +458,8 @@ class HubCertDistributionMixin:
             if proc.returncode == 0:
                 return "lm.service restarting to apply"
             detail = (err or out or b"").decode(errors="replace").strip()[:300]
-            raise RuntimeError(f"self-restart exited {proc.returncode}: {detail or 'no output captured'}")
+            raise RuntimeError(f"self-restart exited {proc.returncode}: "
+                               f"{_diagnose_self_restart_failure(detail) or 'no output captured'}")
         except RuntimeError:
             raise
         except Exception as e:  # noqa: BLE001
