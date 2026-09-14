@@ -95,6 +95,7 @@ flag live in the repo-root `README.md` **Installation** block and in
 - [webui.md](webui.md) — the browser UI: panels/tabs, view router, HTTP+WS comms.
 - [credential-vault.md](credential-vault.md) — hub-side encrypted secret store (buckets, `psk` vs automation-readable `hub` modes, Azure Key Vault / local Fernet); the `{bucket,name}` reference + server-side resolve pattern LE / HE.NET / Console use.
 - [generic-agent.md](generic-agent.md) — the agent-spoke `_ROLE_MAP` role loader (15 hosted roles + ab/netbox-server deploy roles). The legacy `GenericLeafAgent` leaf was removed.
+- [agent-offline-and-key-rotation.md](agent-offline-and-key-rotation.md) — how long an agent may be offline before it can no longer reconnect on its own (60 days guaranteed, up to 90), why deleting an offline spoke/agent does NOT fix it (decommission instead), and the recovery runbook.
 
 ## Spokes
 

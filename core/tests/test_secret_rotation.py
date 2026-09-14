@@ -289,7 +289,8 @@ def test_generate_first_secret_saves_old_key_to_history():
     # can authenticate (and the hub can redeliver the current key signed with it).
     assert km.previous_session_secret("s1") == first
     assert km.get_valid_key("s1", first) is not None  # old secret still accepted
-    # History window stays bounded at 1 previous (Total: Current + 1 Previous).
+    # History window stays bounded at 3 previous (Total: Current + 3 Previous)
+    # — mirrors the hub root secret's 3-entry rotation window.
     assert len(km.history["s1"]) == 1
 
 
