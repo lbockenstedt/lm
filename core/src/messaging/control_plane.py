@@ -320,6 +320,12 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
         # transits the WS but is never logged and is never persisted by the hub.
         self.onboarding_psk = (onboarding_psk or os.environ.get("LM_ONBOARDING_PSK", "")).strip()
         self.tenant_id_hint = (tenant_id_hint or os.environ.get("LM_TENANT_ID_HINT", "")).strip()
+        # Durable recovery PSK, pushed by the hub on every approved connect and
+        # persisted here. Unlike HUB_SECRET it never rotates, so it stays a valid
+        # proof of hub identity no matter how many root rotations this spoke
+        # sleeps through — the escape hatch out of the permanent
+        # "Hub identity unverified (TLS verify off)" refusal below.
+        self.recovery_psk = os.environ.get("LM_RECOVERY_PSK", "").strip()
         self.modules: Dict[str, Any] = {} # { module_name: BaseSpoke instance }
         self.signer = MessageSigner(secret) if secret else None
         # H4: True once the hub advertised ``enc="v1"`` in its HUB_VERIFIED proof
@@ -1346,6 +1352,26 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                                 ).hexdigest()
                                 psk_verified = hmac.compare_digest(
                                     expected_psk_sig, psk_sig)
+                            # Second independent authenticator, and the one that
+                            # actually covers the fleet: the onboarding PSK above
+                            # only exists if someone passed --onboarding-psk at
+                            # install time, so spokes onboarded through the
+                            # normal admin-approval flow had NO fallback at all
+                            # and bricked permanently. The recovery PSK is pushed
+                            # to every approved spoke on every connect and is
+                            # derived from a hub root that never rotates, so it
+                            # still verifies after any number of missed
+                            # rotations. Same MITM properties as the onboarding
+                            # PSK — a shared secret an impersonating hub does not
+                            # hold — so it is safe to honour with TLS verify off.
+                            if not psk_verified and self._recovery_psk_verifies(
+                                    challenge, hub_proof.get("recovery_signature")):
+                                psk_verified = True
+                                logger.warning(
+                                    "Hub identity verified via durable recovery PSK — "
+                                    "stored hub_secret(s) are more than %d rotation(s) "
+                                    "stale. Self-healing: dropping them so the hub can "
+                                    "re-provision.", len(self.hub_secrets))
                             # How safe it is to proceed WITHOUT a PSK proof hinges
                             # on whether TLS authenticates the hub:
                             #
@@ -2132,6 +2158,21 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
                 return {"status": "SUCCESS", "message": "Hub secret updated successfully"}
             return {"status": "ERROR", "message": "Missing hub_secret in data"}
 
+        if cmd_type == "SPOKE_SET_RECOVERY_PSK":
+            # Arrives on every approved connect and is idempotent — the hub
+            # derives it from a root it never rotates, so the value is stable for
+            # the life of this spoke_id. Persisting it is the whole point: it has
+            # to survive the months of downtime that push this spoke past the
+            # root-secret rotation window.
+            new_psk = data.get("recovery_psk")
+            if new_psk:
+                if new_psk != self.recovery_psk:
+                    self.recovery_psk = new_psk
+                    self._persist_recovery_psk(new_psk)
+                    logger.info("Recovery PSK provisioned for %s.", self.spoke_id)
+                return {"status": "SUCCESS", "message": "Recovery PSK stored"}
+            return {"status": "ERROR", "message": "Missing recovery_psk in data"}
+
         if cmd_type == "SPOKE_SET_WATCHDOG":
             # Fleet-wide hub-contact watchdog config, pushed by the hub on every
             # (re)connect and on each WebUI save. Persist it locally so it applies
@@ -2762,6 +2803,31 @@ class BaseControlPlane(CodeDriftWatchdogMixin, SelfUpdateMixin, LogRelayMixin, H
     def _persist_hub_secret(self, new_secret: str) -> None:
         """Writes the hub's identity secret to .env so mutual auth survives spoke restarts."""
         self._persist_secret_to_env("HUB_SECRET", new_secret)
+
+    def _recovery_psk_verifies(self, challenge: str, recovery_signature: Any) -> bool:
+        """Whether ``recovery_signature`` proves hub identity under our stored
+        recovery PSK. Extracted from the mutual-auth handshake so the self-heal
+        decision is unit-testable without standing up a websocket.
+
+        Fails CLOSED on every missing piece — no stored PSK, no signature from
+        the hub, a non-string signature — because this is the last authenticator
+        consulted before the possible-MITM refusal. A spoke that never received a
+        recovery PSK must keep refusing exactly as it did before this existed."""
+        if not self.recovery_psk or not challenge:
+            return False
+        if not isinstance(recovery_signature, str) or not recovery_signature:
+            return False
+        expected = hmac.new(self.recovery_psk.encode(), challenge.encode(),
+                            hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, recovery_signature)
+
+    def _persist_recovery_psk(self, new_psk: str) -> None:
+        """Writes the durable recovery PSK to .env.
+
+        Read back by ``__init__`` as ``LM_RECOVERY_PSK``. This must outlive both
+        restarts and long offline stretches — it is the only hub authenticator
+        that survives an unbounded number of root-secret rotations."""
+        self._persist_secret_to_env("LM_RECOVERY_PSK", new_psk)
 
     def _sign(self, msg):
         if not self.signer:
