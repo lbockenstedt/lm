@@ -9020,6 +9020,14 @@ async function runNwNetboxImport(btn) {
 }
 
 // ── Network Scan (discovery) config + run (Setup → Module Management) ────────
+// The active tenant for NW scan calls. 'default' is the admin's unscoped global
+// view, not a real tenant — send nothing so the server applies its own default
+// rather than trying to resolve a tenant literally named "default".
+function _nwActiveTenant() {
+    return (typeof currentTenant === 'string' && currentTenant && currentTenant !== 'default')
+        ? currentTenant : '';
+}
+
 function _nwScanParseList(v) {
     return String(v || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
 }
@@ -9103,6 +9111,11 @@ async function runNwScan(btn, dryRun) {
             targets: _nwScanParseList(document.getElementById('nwscan-targets')?.value),
             max_targets: parseInt(document.getElementById('nwscan-maxtargets')?.value, 10) || 1024,
         };
+        // Scope the scan to the tenant the admin is actually viewing. Without
+        // this the server fell back to the shared tenant, so the scan ran with
+        // another tenant's targets/agent.
+        const _t = _nwActiveTenant();
+        if (_t) body.tenant = _t;
         const r = await setupFetch('/setup/nw-scan/run', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -16603,6 +16616,17 @@ function escJsAttr(s) {
  *   backdropClose: true → clicking the dimmed backdrop closes the modal.
  * @returns {HTMLElement} The overlay element.
  */
+// Withdraw the per-tab "+ Add …" action. Those buttons render into the
+// trailing #top-nav-actions strip (see renderTopNav), so there is no local
+// element handle to hide -- the error paths below used to reach for an
+// `addBtn` variable that no longer exists anywhere, which threw a
+// ReferenceError and aborted the whole loader, replacing the spoke-error
+// banner it was about to draw with a bare JS error.
+function _clearTopNavActions() {
+    const el = document.getElementById('top-nav-actions');
+    if (el) el.innerHTML = '';
+}
+
 function openModal(id, bodyHtml, opts = {}) {
     document.getElementById(id)?.remove();
     const modal = document.createElement('div');
@@ -18622,7 +18646,9 @@ async function _renderNwScanTab() {
     try {
         const [cfgR, credR] = await Promise.all([
             setupFetch(`/api/nw/tenant-config${tenantQs}`),
-            setupFetch('/setup/nw-scan-credentials'),
+            // Same tenant scope as the config — otherwise an admin sees every
+            // tenant's credential sets listed under whichever tenant is selected.
+            setupFetch(`/setup/nw-scan-credentials${tenantQs}`),
         ]);
         if (cfgR.ok) cfg = await cfgR.json();
         if (credR.ok) creds = (await credR.json()).instances || [];
@@ -18644,11 +18670,22 @@ async function _renderNwScanTab() {
             <input type="checkbox" class="nwt-cred rounded border-slate-300 text-[#01A982] focus:ring-green-500" value="${escapeHtml(String(cr.id))}" ${selectedCreds.has(String(cr.id)) ? 'checked' : ''}>
             <span class="font-mono">${escapeHtml(cr.name || cr.id)}</span>${cr.username ? `<span class="text-slate-400">· ${escapeHtml(cr.username)}</span>` : ''}
           </label>`).join('')
-        : `<p class="text-xs text-slate-400 italic">No scan credential sets available. Add one in Setup → Network Devices → Scan Credentials.</p>`;
+        : `<p class="text-xs text-slate-400 italic">No scan credential sets belong to this tenant (or the shared tenant). Add one in Setup → Network Devices → Scan Credentials and bind it to this tenant.</p>`;
 
     const opt = (opts, cur) => opts.map(([v, l]) =>
         `<option value="${escapeHtml(v)}" ${String(cur) === v ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('');
     const pollVal = (k) => (poll.overridden && poll.overridden[k]) ? String(poll[k]) : '';
+
+    // Agent picker — the tenant's own nw agents plus any shared one. Scans only
+    // ever run on these; an agent belonging to another tenant is never offered.
+    const nwSpokes = cfg.spokes || [];
+    const spokeRows = nwSpokes.length
+        ? `<select id="nwt-spoke" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+             ${nwSpokes.map(s => `<option value="${escapeHtml(s.spoke_id)}" ${String(scan.spoke_id || '') === s.spoke_id ? 'selected' : ''} ${s.connected ? '' : 'disabled'}>
+               ${escapeHtml(s.name)} — ${s.scope === 'shared' ? 'shared' : 'your tenant'}${s.connected ? '' : ' (offline)'}
+             </option>`).join('')}
+           </select>`
+        : `<p class="text-xs text-amber-600 italic">No Network Devices agent is deployed in this tenant, and no shared agent is available. Deploy the nw module to scan.</p>`;
 
     const card = 'bg-white rounded-xl border border-slate-200 p-5';
     const lblCls = 'block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1';
@@ -18659,6 +18696,10 @@ async function _renderNwScanTab() {
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-700 mb-1">Network Discovery Scan</h3>
         <p class="text-xs text-slate-400 mb-4">Discover manageable devices on your network and (optionally) add them to your fleet. Scans run on your tenant's Network Devices spoke.</p>
+        <div class="mb-4">
+          <p class="${lblCls}">Scan Agent</p>
+          ${spokeRows}
+        </div>
         <div class="mb-4">
           <p class="${lblCls}">Scan Credential Sets</p>
           <div id="nwt-creds" class="space-y-1.5">${credRows}</div>
@@ -18739,6 +18780,7 @@ function _nwtScanConfigBody() {
     return {
         crawl: !!document.getElementById('nwt-crawl')?.checked,
         try_snmp: !!document.getElementById('nwt-snmp')?.checked,
+        spoke_id: document.getElementById('nwt-spoke')?.value || '',
         auto_add: !!document.getElementById('nwt-autoadd')?.checked,
         credential_ids: _nwtSelectedCreds(),
         ip_sources: _nwtSources(),
@@ -18818,6 +18860,8 @@ async function runNwTenantScan(btn, dryRun) {
         targets: _nwtParseList(document.getElementById('nwt-targets')?.value),
         max_targets: parseInt(document.getElementById('nwt-maxtargets')?.value, 10) || 1024,
     };
+    const _sp = document.getElementById('nwt-spoke')?.value;
+    if (_sp) body.spoke_id = _sp;
     if (currentTenant) body.tenant = currentTenant;
     try {
         const r = await setupFetch('/setup/nw-scan/run', {
@@ -25307,7 +25351,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
         const { ok, data: d, detail } = await _spokeFetch('/api/dns/records?tenant=' + encodeURIComponent(currentTenant));
         if (!ok) {
             container.innerHTML = `${_spokeErrorBanner(detail, 'DNS spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Verify the Unbound configuration in Setup → DNS.</p>`;
-            if (addBtn) addBtn.classList.add('hidden');
+            _clearTopNavActions();
             return;
         }
         // Only show forward records in the editable list; auto-generated PTRs
@@ -29261,7 +29305,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
 
         } else if (subMenu === 'Reservations') {
             const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservations?tenant=' + encodeURIComponent(currentTenant));
-            if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); if (addBtn) addBtn.classList.add('hidden'); return; }
+            if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); _clearTopNavActions(); return; }
             const res = d.reservations || [];
             window._dhcpReservations = res;
             const showTenantCol = res.some(r => r && r._tenant);
@@ -31383,6 +31427,17 @@ const DEVICE_TYPES = {
     dhcp:  Object.assign({}, INSTANCE_PRODUCTS.dhcp,  { badgeLabel: 'DHCP', payloadKey: 'instance', responseKey: 'instances', spokeFilter: s => s.module_type === 'dhcp' }),
 };
 
+// Owning-tenant badge for the Setup instance lists. These lists are the ADMIN's
+// global view, so they mix every tenant's entries — without this the only clue
+// to ownership is whatever someone typed into the name, which is exactly how a
+// pair of LRB-owned scan credentials called "Admin - …" got mistaken for the
+// Admin tenant's own. Unassigned (no tenant_id) is admin-only, not global.
+function _instanceTenantBadge(inst) {
+    const tid = (inst && inst.tenant_id) ? String(inst.tenant_id) : '';
+    if (!tid) return `<span class="ml-2 text-xs text-slate-400" title="Not bound to a tenant — visible to admins only, and not usable by a tenant-scoped scan">unassigned</span>`;
+    return `<span class="ml-2 text-xs text-indigo-600" title="Owning tenant: ${escapeHtml(tid)}">tenant: ${escapeHtml(tid)}</span>`;
+}
+
 async function loadInstances(productKey) {
     const p = INSTANCE_PRODUCTS[productKey];
     if (!p) return;
@@ -31398,7 +31453,7 @@ async function loadInstances(productKey) {
         }
         listEl.innerHTML = instances.map(inst => `
             <div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
-                <div><span class="text-sm font-medium text-slate-700">${inst.name || inst.id}</span><span class="ml-2 text-xs text-slate-400">${p.rowSummary(inst)}${inst.spoke_id ? ' · ' + inst.spoke_id : ''}</span>${(inst.vault_credential && inst.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(inst.vault_credential.bucket)} › ${escapeHtml(inst.vault_credential.name)}">🔐 vault</span>` : ''}</div>
+                <div><span class="text-sm font-medium text-slate-700">${inst.name || inst.id}</span><span class="ml-2 text-xs text-slate-400">${p.rowSummary(inst)}${inst.spoke_id ? ' · ' + inst.spoke_id : ''}</span>${_instanceTenantBadge(inst)}${(inst.vault_credential && inst.vault_credential.name) ? `<span class="ml-2 text-xs text-emerald-600" title="Secret supplied from Credential Vault: ${escapeHtml(inst.vault_credential.bucket)} › ${escapeHtml(inst.vault_credential.name)}">🔐 vault</span>` : ''}</div>
                 <div class="flex gap-2">
                     <button onclick="editInstance('${productKey}','${inst.id}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
                     <button onclick="deleteInstance('${productKey}','${inst.id}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
