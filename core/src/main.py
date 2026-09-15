@@ -10410,9 +10410,44 @@ def _preflight() -> int:
         return 1
 
 
+def _enable_wedge_stack_dumps() -> None:
+    """Make a wedged hub self-diagnosing.
+
+    ``lm-watchdog`` sends SIGUSR1 before it SIGKILLs an unresponsive hub;
+    ``faulthandler`` then dumps EVERY thread's Python stack to
+    ``/var/log/lm/wedge-stacks.log``. The handler is installed at the C level,
+    so it still fires when the asyncio loop is deadlocked and the GIL is held
+    by a blocked thread — the one case where nothing in-process can report.
+
+    Without this, the evidence dies with the SIGKILL: a hub that wedges and is
+    force-restarted every few minutes leaves no trace of WHERE it wedged, which
+    is exactly what made a production event-loop deadlock take hours to pin
+    down (it needed py-spy attached by hand between restarts).
+
+    Best-effort and never fatal: a hub that cannot open the dump file must
+    still start.
+    """
+    try:
+        import faulthandler
+        import signal as _signal
+
+        os.makedirs("/var/log/lm", exist_ok=True)
+        # Kept open for the process lifetime on purpose — faulthandler writes to
+        # the raw fd from a signal handler, so it must outlive this function.
+        f = open("/var/log/lm/wedge-stacks.log", "a", buffering=1)
+        globals()["_WEDGE_STACK_FILE"] = f
+        faulthandler.enable(file=f, all_threads=True)
+        if hasattr(_signal, "SIGUSR1"):
+            faulthandler.register(_signal.SIGUSR1, file=f,
+                                  all_threads=True, chain=False)
+    except Exception:  # noqa: BLE001 — diagnostics must never block startup
+        pass
+
+
 if __name__ == "__main__":
     if "--preflight" in sys.argv:
         sys.exit(_preflight())
+    _enable_wedge_stack_dumps()
     hub = LabManagerHub()
     try:
         asyncio.run(hub.start())
