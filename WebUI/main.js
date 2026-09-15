@@ -16605,6 +16605,17 @@ function escJsAttr(s) {
  *   backdropClose: true → clicking the dimmed backdrop closes the modal.
  * @returns {HTMLElement} The overlay element.
  */
+// Withdraw the per-tab "+ Add …" action. Those buttons render into the
+// trailing #top-nav-actions strip (see renderTopNav), so there is no local
+// element handle to hide -- the error paths below used to reach for an
+// `addBtn` variable that no longer exists anywhere, which threw a
+// ReferenceError and aborted the whole loader, replacing the spoke-error
+// banner it was about to draw with a bare JS error.
+function _clearTopNavActions() {
+    const el = document.getElementById('top-nav-actions');
+    if (el) el.innerHTML = '';
+}
+
 function openModal(id, bodyHtml, opts = {}) {
     document.getElementById(id)?.remove();
     const modal = document.createElement('div');
@@ -25327,7 +25338,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
         const { ok, data: d, detail } = await _spokeFetch('/api/dns/records?tenant=' + encodeURIComponent(currentTenant));
         if (!ok) {
             container.innerHTML = `${_spokeErrorBanner(detail, 'DNS spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Verify the Unbound configuration in Setup → DNS.</p>`;
-            if (addBtn) addBtn.classList.add('hidden');
+            _clearTopNavActions();
             return;
         }
         // Only show forward records in the editable list; auto-generated PTRs
@@ -29281,7 +29292,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
 
         } else if (subMenu === 'Reservations') {
             const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/reservations?tenant=' + encodeURIComponent(currentTenant));
-            if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); if (addBtn) addBtn.classList.add('hidden'); return; }
+            if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP spoke not connected'); _clearTopNavActions(); return; }
             const res = d.reservations || [];
             window._dhcpReservations = res;
             const showTenantCol = res.some(r => r && r._tenant);
