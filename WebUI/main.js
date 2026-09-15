@@ -9020,6 +9020,14 @@ async function runNwNetboxImport(btn) {
 }
 
 // ── Network Scan (discovery) config + run (Setup → Module Management) ────────
+// The active tenant for NW scan calls. 'default' is the admin's unscoped global
+// view, not a real tenant — send nothing so the server applies its own default
+// rather than trying to resolve a tenant literally named "default".
+function _nwActiveTenant() {
+    return (typeof currentTenant === 'string' && currentTenant && currentTenant !== 'default')
+        ? currentTenant : '';
+}
+
 function _nwScanParseList(v) {
     return String(v || '').split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
 }
@@ -9103,6 +9111,11 @@ async function runNwScan(btn, dryRun) {
             targets: _nwScanParseList(document.getElementById('nwscan-targets')?.value),
             max_targets: parseInt(document.getElementById('nwscan-maxtargets')?.value, 10) || 1024,
         };
+        // Scope the scan to the tenant the admin is actually viewing. Without
+        // this the server fell back to the shared tenant, so the scan ran with
+        // another tenant's targets/agent.
+        const _t = _nwActiveTenant();
+        if (_t) body.tenant = _t;
         const r = await setupFetch('/setup/nw-scan/run', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -18639,6 +18652,17 @@ async function _renderNwScanTab() {
         `<option value="${escapeHtml(v)}" ${String(cur) === v ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('');
     const pollVal = (k) => (poll.overridden && poll.overridden[k]) ? String(poll[k]) : '';
 
+    // Agent picker — the tenant's own nw agents plus any shared one. Scans only
+    // ever run on these; an agent belonging to another tenant is never offered.
+    const nwSpokes = cfg.spokes || [];
+    const spokeRows = nwSpokes.length
+        ? `<select id="nwt-spoke" class="w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+             ${nwSpokes.map(s => `<option value="${escapeHtml(s.spoke_id)}" ${String(scan.spoke_id || '') === s.spoke_id ? 'selected' : ''} ${s.connected ? '' : 'disabled'}>
+               ${escapeHtml(s.name)} — ${s.scope === 'shared' ? 'shared' : 'your tenant'}${s.connected ? '' : ' (offline)'}
+             </option>`).join('')}
+           </select>`
+        : `<p class="text-xs text-amber-600 italic">No Network Devices agent is deployed in this tenant, and no shared agent is available. Deploy the nw module to scan.</p>`;
+
     const card = 'bg-white rounded-xl border border-slate-200 p-5';
     const lblCls = 'block text-xs font-bold text-slate-500 uppercase tracking-wider mb-1';
     const inCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
@@ -18648,6 +18672,10 @@ async function _renderNwScanTab() {
       <div class="${card}">
         <h3 class="text-sm font-bold text-slate-700 mb-1">Network Discovery Scan</h3>
         <p class="text-xs text-slate-400 mb-4">Discover manageable devices on your network and (optionally) add them to your fleet. Scans run on your tenant's Network Devices spoke.</p>
+        <div class="mb-4">
+          <p class="${lblCls}">Scan Agent</p>
+          ${spokeRows}
+        </div>
         <div class="mb-4">
           <p class="${lblCls}">Scan Credential Sets</p>
           <div id="nwt-creds" class="space-y-1.5">${credRows}</div>
@@ -18728,6 +18756,7 @@ function _nwtScanConfigBody() {
     return {
         crawl: !!document.getElementById('nwt-crawl')?.checked,
         try_snmp: !!document.getElementById('nwt-snmp')?.checked,
+        spoke_id: document.getElementById('nwt-spoke')?.value || '',
         auto_add: !!document.getElementById('nwt-autoadd')?.checked,
         credential_ids: _nwtSelectedCreds(),
         ip_sources: _nwtSources(),
@@ -18807,6 +18836,8 @@ async function runNwTenantScan(btn, dryRun) {
         targets: _nwtParseList(document.getElementById('nwt-targets')?.value),
         max_targets: parseInt(document.getElementById('nwt-maxtargets')?.value, 10) || 1024,
     };
+    const _sp = document.getElementById('nwt-spoke')?.value;
+    if (_sp) body.spoke_id = _sp;
     if (currentTenant) body.tenant = currentTenant;
     try {
         const r = await setupFetch('/setup/nw-scan/run', {
