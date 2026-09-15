@@ -91,9 +91,13 @@ class SourceHub:
     production?" answerable by reading twenty lines rather than auditing every
     call site."""
 
-    def __init__(self, base_url, insecure=True, token=""):
+    def __init__(self, base_url, insecure=True, token="", refresh_token=""):
         self.base = base_url.rstrip("/")
         self.token = (token or "").strip()
+        # Access tokens are short-lived (4h — api_tokens.issue_pair). Without a
+        # refresh token a long feed dies overnight and reads as "it randomly
+        # stopped"; with one, _get_json rotates the pair on the first 401.
+        self.refresh_token = (refresh_token or "").strip()
         self.jar = http.cookiejar.CookieJar()
         ctx = ssl._create_unverified_context() if insecure else ssl.create_default_context()
         self.opener = urllib.request.build_opener(
@@ -121,11 +125,45 @@ class SourceHub:
         if not any(c.name == "lm_session" for c in self.jar):
             raise SystemExit("Login returned no lm_session cookie — is --source the hub's WebUI URL?")
 
-    def _get_json(self, path):
+    def _raw_get(self, path):
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         req = urllib.request.Request(f"{self.base}{path}", headers=headers, method="GET")
         with self.opener.open(req, timeout=30) as r:
             return json.loads(r.read().decode())
+
+    def _rotate(self):
+        """Exchange the refresh token for a new access+refresh pair.
+
+        Refresh tokens are SINGLE-USE and reuse revokes the whole family, so the
+        new pair must replace the old one before the next attempt — a retry that
+        re-sent the spent token would lock this feed out entirely."""
+        if not self.refresh_token:
+            return False
+        body = json.dumps({"refresh_token": self.refresh_token}).encode()
+        req = urllib.request.Request(
+            f"{self.base}/auth/token/refresh", data=body,
+            headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with self.opener.open(req, timeout=20) as r:
+                d = json.loads(r.read().decode())
+        except Exception as e:  # noqa: BLE001
+            print(f"  ! token refresh failed: {e}", file=sys.stderr)
+            self.refresh_token = ""   # spent or rejected; don't spin on it
+            return False
+        self.token = d.get("access_token") or self.token
+        self.refresh_token = d.get("refresh_token") or ""
+        print("  token refreshed")
+        return True
+
+    def _get_json(self, path):
+        try:
+            return self._raw_get(path)
+        except urllib.error.HTTPError as e:
+            # One rotation attempt, then re-raise. Retrying blindly would turn an
+            # actually-revoked token into an infinite loop against the source.
+            if e.code != 401 or not self._rotate():
+                raise
+            return self._raw_get(path)
 
     def snapshot(self):
         """One fleet snapshot.
@@ -368,6 +406,12 @@ def main():
         description="Replay production fleet data into a dev/qa/lrb hub.")
     ap.add_argument("--source", required=True,
                     help="SOURCE hub WebUI base URL, read-only (https://HOST)")
+    ap.add_argument("--token", default="",
+                    help="source hub API access token (Bearer). Preferred over "
+                         "--source-user/--source-pass; skips the login entirely.")
+    ap.add_argument("--refresh-token", default="",
+                    help="refresh token from the SAME pair, so a long run can "
+                         "rotate its own access token instead of dying at expiry")
     ap.add_argument("--source-user", default="admin", help="source hub login")
     ap.add_argument("--source-pass", default="-",
                     help="source password; '-' reads stdin / prompts (default)")
@@ -399,8 +443,14 @@ def main():
 
     salt = args.salt or hashlib.sha256(os.urandom(32)).hexdigest()[:16]
 
-    source = SourceHub(args.source)
-    source.login(args.source_user, _read_password(args.source_pass))
+    source = SourceHub(args.source, token=args.token,
+                       refresh_token=args.refresh_token)
+    # A token authenticates on its own — only fall back to the interactive
+    # username/password login when none was supplied. Logging in anyway would
+    # prompt for a password in a context (the hub's child process) that has no
+    # terminal to prompt on.
+    if not args.token:
+        source.login(args.source_user, _read_password(args.source_pass))
 
     if args.dry_run:
         payloads = build_payloads(source.snapshot(), salt, args.prefix)

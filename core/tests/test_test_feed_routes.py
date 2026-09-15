@@ -170,22 +170,37 @@ def test_there_is_no_tenant_setting():
     assert not any("tenant" in k for k in _DEFAULTS)
 
 
+def test_there_is_no_operator_supplied_psk():
+    """The onboarding PSK only auto-approves the synthetic spokes on THIS hub,
+    which is also what spawns them. Start mints an ephemeral one and stop
+    revokes it, so a stored PSK would be a standing auto-approve credential for
+    the shared tenant with nothing to scope it."""
+    assert not any("psk" in k.lower() for k in _DEFAULTS)
+
+
+def test_both_halves_of_the_token_pair_are_configurable():
+    """Access tokens expire after a few hours; without the refresh half a long
+    feed dies overnight and reads as 'it randomly stopped'."""
+    assert "receiver_token" in _DEFAULTS
+    assert "receiver_refresh_token" in _DEFAULTS
+
+
 def test_test_feed_redaction():
     """Secrets come back as booleans, never values. A regression here hands the
     source hub's API token to anyone who can open the Setup page."""
     def _redact(c):
         out = dict(c)
-        for k in ("receiver_token", "receiver_psk", "source_salt"):
+        for k in ("receiver_token", "receiver_refresh_token", "source_salt"):
             out[k] = bool(out.get(k))
         return out
 
     red = _redact({**_DEFAULTS, "receiver_token": "secret-tok",
-                   "receiver_psk": "secret-psk", "source_salt": "abc",
+                   "receiver_refresh_token": "secret-refresh", "source_salt": "abc",
                    "receiver_source_url": "https://src"})
     assert red["receiver_token"] is True
-    assert red["receiver_psk"] is True
+    assert red["receiver_refresh_token"] is True
     assert red["source_salt"] is True
     assert "secret-tok" not in repr(red)
-    assert "secret-psk" not in repr(red)
+    assert "secret-refresh" not in repr(red)
     # Non-secret config still round-trips so the form can be populated.
     assert red["receiver_source_url"] == "https://src"
