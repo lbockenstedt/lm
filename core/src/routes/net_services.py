@@ -3,8 +3,8 @@ import asyncio
 import ipaddress
 import time
 from api import (
-    HTTPException, Request, _spoke_payload_or_raise, access, get_spoke_or_503,
-    logger, spoke_or_503,
+    HTTPException, Request, _refresh_module_all_tenants,
+    _spoke_payload_or_raise, access, get_spoke_or_503, logger, spoke_or_503,
 )
 from cert_distribution import build_available_targets, target_owner_tenant
 import le_cert_access as _lca
@@ -3541,6 +3541,16 @@ def register(app, hub, ctx):
             ipam, "NETBOX_UPDATE_IP_ADDR",
             {"ip_id": new_id, "custom_fields": {"mac_address": mac}},
             timeout=30.0))
+        # Every other NetBox mutation goes through netbox.py's _netbox_write,
+        # which invalidates the cached IP list for all tenants and kicks a
+        # background re-fetch. This path talks to the spoke directly, so it has
+        # to do the same by hand — otherwise the IPAM "IP Addresses" table
+        # keeps serving a 300s-old snapshot that has no row for the address we
+        # just created, and the operator sees a reservation pointing at an IP
+        # the UI says does not exist. (The DHCP sync itself reads NetBox live,
+        # so the reservation is durable either way — this is purely about the
+        # read-side view agreeing with it.)
+        _refresh_module_all_tenants(hub, "netbox_ips")
         logger.info("dhcp reservation write-back: created NetBox IP %s (%s) "
                     "in %s with mac_address=%r", ip, new_id, best[1], mac)
         return {"status": "created", "ip": ip, "ip_id": new_id,

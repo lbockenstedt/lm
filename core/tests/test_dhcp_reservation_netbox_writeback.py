@@ -330,3 +330,42 @@ def test_garbage_address_does_not_explode():
     assert r.status_code == 200
     assert r.json()["netbox_writeback"]["status"] == "not_found"
     assert not _allocations(hub)
+
+
+# ── the read side must agree with what was just created ─────────────────────
+
+def test_creating_an_ip_invalidates_the_cached_ip_list(monkeypatch):
+    """GET /api/netbox/ips serves a per-tenant cache refreshed every 300s.
+
+    Every other NetBox mutation invalidates it via netbox.py's _netbox_write.
+    This path calls the spoke directly, so without an explicit invalidation the
+    IPAM table keeps serving a snapshot with no row for the address just
+    created — a reservation pointing at an IP the UI says does not exist.
+    """
+    import routes.net_services as ns
+
+    refreshed = []
+    monkeypatch.setattr(ns, "_refresh_module_all_tenants",
+                        lambda hub, key: refreshed.append(key))
+    hub = _hub(ip_addresses=[])
+    c = _build(_admin(), hub)
+    r = c.post("/api/dhcp/reservation",
+               json={"ip": "172.17.1.199", "mac": "bc:24:11:df:63:5e"})
+    assert r.json()["netbox_writeback"]["status"] == "created"
+    assert "netbox_ips" in refreshed, (
+        "created a NetBox IP object without invalidating the cached IP list")
+
+
+def test_no_needless_invalidation_when_nothing_was_created(monkeypatch):
+    """Updating an existing IP's MAC does not change the IP LIST, so leave the
+    cache alone rather than making every reservation save evict it."""
+    import routes.net_services as ns
+
+    refreshed = []
+    monkeypatch.setattr(ns, "_refresh_module_all_tenants",
+                        lambda hub, key: refreshed.append(key))
+    hub = _hub()
+    c = _build(_admin(), hub)
+    c.post("/api/dhcp/reservation",
+           json={"ip": "172.17.1.199", "mac": "bc:24:11:df:63:5e"})
+    assert refreshed == []
