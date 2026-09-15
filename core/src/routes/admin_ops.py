@@ -62,6 +62,9 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
 _ADMIN_TOKEN_HEADER = "x-lm-admin-token"
 _ADMIN_TOKEN_ENV = "LM_ADMIN_OPS_TOKEN"
 
+# Sentinel so "tenant_id absent" is distinguishable from an explicit null/"".
+_UNSET = object()
+
 
 def _token_path(hub) -> str:
     return os.path.join(hub.state.data_dir, "admin_ops_token")
@@ -102,6 +105,34 @@ def _load_or_mint_token(hub) -> str:
     except Exception:  # noqa: BLE001
         logger.exception("admin_ops: could not persist token to %s — using in-memory only", path)
     return tok
+
+
+def apply_cs_mode_entry(entry, enabled, tenant_id=_UNSET):
+    """Merge a Client-Simulation-mode change into one ``agent_config`` entry.
+
+    Mirrors the merge the WebUI's ``POST /api/pxmx/agents/{id}/config`` performs
+    (``routes/pxmx.py``): ``enabled``/``tenant_id`` are overwritten, a non-empty
+    tenant sets ``tenant_pinned`` so ``_inherit_agent_tenant`` can't roll a
+    shared spoke's tenant back over the operator's choice, and every other key
+    the CS bridge stores (``usb_config``, ``protected_vmids``, …) is preserved.
+
+    Differs from the UI route in ONE deliberate way: the UI always submits a
+    tenant, so an absent tenant there means "clear it". An ops caller is
+    typically only flipping ``enabled`` on a host whose tenant is already
+    correct, so omitting ``tenant_id`` here means **keep the existing pin**
+    rather than silently unpinning it. Pass ``tenant_id=None`` (or "") to
+    explicitly clear.
+
+    Pure: returns a NEW entry dict and never mutates the input."""
+    new_entry = dict(entry or {})
+    cs_cfg = dict(new_entry.get("client_simulation") or {})
+    cs_cfg["enabled"] = bool(enabled)
+    if tenant_id is not _UNSET:
+        tenant_in = (str(tenant_id).strip() or None) if tenant_id is not None else None
+        cs_cfg["tenant_id"] = tenant_in
+        cs_cfg["tenant_pinned"] = bool(tenant_in)
+    new_entry["client_simulation"] = cs_cfg
+    return new_entry
 
 
 def _peer_is_loopback(request: Request) -> bool:
@@ -203,6 +234,75 @@ def register(app, hub, ctx):
         logger.warning("admin_ops: unload-role driven via loopback for spoke=%s role=%s",
                        spoke_id, role)
         return {"status": "ok", "target": spoke_id, "role": role, "result": result}
+
+    @app.post("/admin/ops/set-cs-mode")
+    async def admin_ops_set_cs_mode(request: Request):
+        """Turn a pxmx node's **Client Simulation mode** on/off via loopback,
+        bypassing the WebUI's session-authenticated
+        ``POST /api/pxmx/agents/{agent_id}/config``.
+
+        Why this exists: per-agent ``client_simulation.enabled`` is the flag the
+        hub's CS bridge uses to decide whether to poll that host's command
+        inbox at all (``gateway/cs_bridge.py`` — with it off the cycle logs
+        ``SKIP not-enabled`` and NEVER relays). A hub state reset can empty
+        ``agent_config``, after which tenant inheritance re-creates entries that
+        carry only ``tenant_id`` — leaving every CS host silently undeliverable,
+        so VM start/stop/delete queue forever instead of failing. Recovering
+        that previously required a browser admin session; this gives the same
+        lever to an operator on the hub box.
+
+        Writes the SAME merged shape the WebUI route writes (see
+        ``apply_cs_mode_entry``) and reuses the SAME ``push_pxmx_agent_config``
+        delivery contract, so there is no new spoke-side surface and no second
+        definition of the config shape to drift.
+
+        Body: {"agent_id": ..., "enabled": true|false,
+               "tenant_id": "lrb"}   # optional — omit to keep the current pin
+        """
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body or {}
+        agent_id = body.get("agent_id")
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="agent_id is required")
+        if "enabled" not in body:
+            raise HTTPException(status_code=400, detail="enabled is required")
+        enabled = bool(body.get("enabled"))
+        tenant_id = body["tenant_id"] if "tenant_id" in body else _UNSET
+
+        # Imported here (not at module import) to avoid a circular import:
+        # routes/pxmx.py imports from this package's siblings at load time.
+        from routes.pxmx import push_pxmx_agent_config, bust_pxmx_agents_cache
+
+        store = hub.state.system_state.setdefault("agent_config", {})
+        agent_pk = hub._agent_primary_key(agent_id)
+        before = dict(store.get(agent_pk, {}))
+        entry = apply_cs_mode_entry(before, enabled, tenant_id)
+        store[agent_pk] = entry
+        hub.state._mark_dirty()
+
+        cs_cfg = entry["client_simulation"]
+        try:
+            pushed, queued = await push_pxmx_agent_config(
+                hub, agent_id, {"client_simulation": cs_cfg})
+        except Exception as e:  # noqa: BLE001 — persisted already; report push failure
+            logger.exception("admin_ops: set-cs-mode push failed for %s", agent_id)
+            raise HTTPException(status_code=500, detail=f"persisted but push failed: {e}")
+        bust_pxmx_agents_cache()
+
+        before_cs = (before.get("client_simulation") or {})
+        logger.warning("admin_ops: set-cs-mode via loopback agent=%s enabled=%s->%s tenant=%s",
+                       agent_id, before_cs.get("enabled"), cs_cfg.get("enabled"),
+                       cs_cfg.get("tenant_id"))
+        return {"status": "ok", "agent_id": agent_id,
+                "before": {"enabled": before_cs.get("enabled"),
+                           "tenant_id": before_cs.get("tenant_id")},
+                "after": {"enabled": cs_cfg.get("enabled"),
+                          "tenant_id": cs_cfg.get("tenant_id")},
+                "pushed": pushed, "queued": queued}
 
     @app.post("/admin/ops/clear-deploy-status")
     async def admin_ops_clear_deploy_status(request: Request):
