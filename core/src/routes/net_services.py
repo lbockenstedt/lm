@@ -3057,7 +3057,18 @@ def register(app, hub, ctx):
 
     async def _discover_dhcp_workers(request: Request, tenant: str = None):
         """Build the tenant's Kea HA pair from active DHCP Server roles."""
-        dhcp_spoke = _dhcp_spoke_for_request(request, tenant)
+        return await _discover_dhcp_workers_for_spoke(
+            _dhcp_spoke_for_request(request, tenant))
+
+    async def _discover_dhcp_workers_for_spoke(dhcp_spoke: str):
+        """Discovery/enrollment proper, against an ALREADY-RESOLVED dhcp spoke.
+
+        Split out from the request-scoped wrapper so a loopback operator can
+        drive the same enrollment without a browser session — re-forming a
+        cluster is exactly the kind of recovery that has to be possible when
+        the UI path is unavailable. The request was only ever used to pick the
+        spoke, so nothing below it changes.
+        """
         current = await _relay_spoke(
             dhcp_spoke, "DHCP_HA_STATUS",
             log_name="dhcp_worker_discovery_status", timeout=30)
@@ -3653,16 +3664,26 @@ def register(app, hub, ctx):
         if not _is_admin(_session_user(request)):
             raise HTTPException(status_code=403, detail="Admin access required")
         spoke_id = _dhcp_spoke_for_request(request, tenant)
+        return await _dhcp_discover_locked(spoke_id)
+
+    async def _dhcp_discover_locked(spoke_id: str):
+        """Serialize enrollment per spoke, then discover. Shared by the session
+        route and the loopback lever so the two can never race each other into
+        a half-enrolled pair."""
         locks = getattr(app.state, "_dhcp_discovery_locks", None)
         if locks is None:
             locks = app.state._dhcp_discovery_locks = {}
         lock = locks.setdefault(hub._primary_key(spoke_id), asyncio.Lock())
         try:
             async with lock:
-                return await _discover_dhcp_workers(request, tenant)
+                return await _discover_dhcp_workers_for_spoke(spoke_id)
         except HTTPException as exc:
             logger.warning("DHCP worker discovery failed: %s", exc.detail)
             raise
+
+    # Loopback lever (admin_ops) reuses the exact enrollment the UI button
+    # runs — re-forming a cluster must not require a browser session.
+    app.state.dhcp_discover_locked = _dhcp_discover_locked
 
     @app.post("/api/dhcp/ha/apply")
     async def dhcp_ha_apply(request: Request, tenant: str = None):
