@@ -14,7 +14,6 @@ from /proc/self/environ while leaving other variables intact.
 import os
 import subprocess
 import sys
-import textwrap
 
 import pytest
 
@@ -107,41 +106,48 @@ def test_proc_env_bounds_matches_the_environ_the_kernel_serves():
         assert end - start == len(fh.read())
 
 
-_E2E = textwrap.dedent(r"""
-    import os, sys
-    sys.path.insert(0, %(src)r)
-    SENTINEL = "canary-value-do-not-leak"
-    if os.environ.get("_LM_STAGE") != "2":
-        os.environ["_LM_STAGE"] = "2"
-        os.environ["LM_FERNET_KEY"] = SENTINEL
-        os.environ["LM_UNRELATED"] = "keep-me"
-        os.execv(sys.executable, [sys.executable, __file__])
+_E2E = r"""
+import os, sys
+sys.path.insert(0, "__SRC__")
+if os.environ.get("_LM_STAGE") != "2":
+    # Importing security.encryption builds the module-level singleton, which
+    # fail-closes unless LM_FERNET_KEY is a REAL Fernet key -- so the sentinel
+    # has to be one. That also makes this a faithful test: we are proving a
+    # genuine at-rest key stops being readable.
+    from cryptography.fernet import Fernet
+    os.environ["_LM_STAGE"] = "2"
+    os.environ["LM_FERNET_KEY"] = Fernet.generate_key().decode()
+    os.environ["LM_UNRELATED"] = "keep-me"
+    # Re-exec so the value lands in the ORIGINAL stack env block, which is the
+    # only thing /proc/<pid>/environ ever shows.
+    os.execv(sys.executable, [sys.executable, __file__])
 
-    from security.encryption import HubEncryption
+SENTINEL = os.environ["LM_FERNET_KEY"].encode()
+from security.encryption import HubEncryption
 
-    def environ_blob():
-        with open("/proc/self/environ", "rb") as fh:
-            return fh.read()
+def environ_blob():
+    with open("/proc/self/environ", "rb") as fh:
+        return fh.read()
 
-    before = SENTINEL.encode() in environ_blob()
-    os.environ.pop("LM_FERNET_KEY", None)
-    after_pop = SENTINEL.encode() in environ_blob()
+before = SENTINEL in environ_blob()
+os.environ.pop("LM_FERNET_KEY", None)
+after_pop = SENTINEL in environ_blob()
 
-    enc = HubEncryption.__new__(HubEncryption)
-    scrubbed = HubEncryption._scrub_proc_environ(
-        enc, ["LM_FERNET_KEY", "LM_FERNET_KEY_PREVIOUS"])
+enc = HubEncryption.__new__(HubEncryption)
+scrubbed = HubEncryption._scrub_proc_environ(
+    enc, ["LM_FERNET_KEY", "LM_FERNET_KEY_PREVIOUS"])
 
-    blob = environ_blob()
-    print("before=%%s pop=%%s after=%%s scrubbed=%%s other=%%s" %% (
-        before, after_pop, SENTINEL.encode() in blob,
-        "LM_FERNET_KEY" in scrubbed, b"LM_UNRELATED=keep-me" in blob))
-""")
+blob = environ_blob()
+print("before=%s pop=%s after=%s scrubbed=%s other=%s" % (
+    before, after_pop, SENTINEL in blob,
+    "LM_FERNET_KEY" in scrubbed, b"LM_UNRELATED=keep-me" in blob))
+"""
 
 
 @LINUX_ONLY
 def test_scrub_really_removes_the_key_from_proc_environ(tmp_path):
     script = tmp_path / "e2e.py"
-    script.write_text(_E2E % {"src": SRC})
+    script.write_text(_E2E.replace("__SRC__", SRC))
     proc = subprocess.run([sys.executable, str(script)],
                           capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stdout + proc.stderr
