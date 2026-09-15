@@ -19,7 +19,7 @@ from fw_discovery_sync import FwDiscoverySyncMixin
 from _fakes import FakeState
 
 
-REQUIRED_SOURCE_KEYS = {"module_type", "dhcp_command", "arp_command", "label"}
+REQUIRED_SOURCE_KEYS = {"module_type", "dhcp_command", "label"}
 
 
 # ── registry / config contract (sync) ───────────────────────────────────────
@@ -28,6 +28,11 @@ def test_firewall_sources_registry_shape():
     for name, entry in FwDiscoverySyncMixin.FIREWALL_DISCOVERY_SOURCES.items():
         assert REQUIRED_SOURCE_KEYS <= set(entry), \
             f"source {name} missing keys: {REQUIRED_SOURCE_KEYS - set(entry)}"
+        # arp_command is OPTIONAL — a source may have no ARP table at all (Kea
+        # only knows what it leased). If declared it must be usable, because
+        # the pull skips ARP entirely on a falsy value.
+        if "arp_command" in entry:
+            assert entry["arp_command"], f"source {name} has an empty arp_command"
     assert "opnsense" in FwDiscoverySyncMixin.FIREWALL_DISCOVERY_SOURCES
 
 
@@ -105,7 +110,8 @@ class _SyncHub(FwDiscoverySyncMixin):
     hub.get_spoke_by_type('ipam') + hub.state.get_tenant, both faked)."""
 
     def __init__(self, responses=None, tenants=None, global_config=None,
-                 fw_spokes=None, netbox_spoke="netbox-spoke-1"):
+                 fw_spokes=None, netbox_spoke="netbox-spoke-1",
+                 fw_spoke_type="firewall"):
         # The sync mixins read cfg from ``state.system_state["global_config"]``
         # (not FakeState._global_config), so embed it there.
         self.state = FakeState(
@@ -116,6 +122,7 @@ class _SyncHub(FwDiscoverySyncMixin):
         self.simulations_store = _FakeSimulationsStore()
         self._responses = responses or {}
         self._fw_spokes = fw_spokes if fw_spokes is not None else ["opn-fw1"]
+        self._fw_spoke_type = fw_spoke_type
         self._netbox_spoke = netbox_spoke
         self.request_log = []
 
@@ -123,7 +130,7 @@ class _SyncHub(FwDiscoverySyncMixin):
         return self._netbox_spoke if module_type == "ipam" else None
 
     def get_all_spokes_by_type(self, module_type):
-        return list(self._fw_spokes) if module_type == "firewall" else []
+        return list(self._fw_spokes) if module_type == self._fw_spoke_type else []
 
     def get_spoke_for_firewall(self, firewall_id):
         return self._fw_spokes[0] if self._fw_spokes else None
@@ -323,3 +330,114 @@ async def test_push_with_errors_emits_sync_error_marker_with_message(caplog):
                and "first error: device_type required" in r.getMessage()
                and "tenant=acme" in r.getMessage() for r in warns), \
         "expected a [sync-error] WARNING with the sink's first-error message"
+
+# ── Kea (LM DHCP) source ────────────────────────────────────────────────────
+# When DHCP moves off the firewall onto the LM DHCP module, OPNsense stops
+# seeing leases and nothing reaches NetBox — the leases are visible in the DHCP
+# UI (which reads Kea directly) and go nowhere else. These lock in the Kea
+# source end-to-end: spoke selection by the registry's module_type, Kea's own
+# response envelope/field names, and no ARP command being invented for it.
+
+def test_kea_source_contract():
+    se = FwDiscoverySyncMixin.FIREWALL_DISCOVERY_SOURCES["kea"]
+    assert se["module_type"] == "dhcp"          # not "firewall"
+    assert se["dhcp_command"] == "DHCP_LIST_LEASES"
+    assert se["rows_key"] == "leases"           # Kea answers {"leases": [...]}
+    assert "arp_command" not in se              # Kea has no ARP table
+
+
+def _kea_cfg(**over):
+    cfg = {"source": "kea"}
+    cfg.update(over)
+    return {"opnsense_netbox_device_sync": cfg}
+
+
+def _kea_lease_payload():
+    # Kea's native envelope + field names, as dhcp_spoke returns them:
+    # {"status": "SUCCESS", "leases": [{"ip-address", "hw-address", ...}]}
+    return {"payload": {"data": {"status": "SUCCESS", "leases": [
+        {"ip-address": "10.20.0.5", "hw-address": "AA-BB-CC-DD-EE-05",
+         "hostname": "kea-ws", "state": 0},
+        {"ip-address": "10.20.0.77", "hw-address": "aa:bb:cc:dd:ee:77",
+         "hostname": "", "state": 0},
+    ]}}}
+
+
+def _kea_hub(**over):
+    return _SyncHub(global_config=_kea_cfg(**over), fw_spokes=["dhcp-spoke-1"],
+                    fw_spoke_type="dhcp", responses={
+        ("dhcp-spoke-1", "DHCP_LIST_LEASES"): _kea_lease_payload(),
+        ("netbox-spoke-1", "NETBOX_GET_PREFIXES"): _prefixes_payload(),
+        ("netbox-spoke-1", "NETBOX_SYNC_DEVICES"): _sync_devices_ok(2),
+    })
+
+
+def test_kea_source_selects_dhcp_spokes_not_firewall_spokes():
+    h = _kea_hub()
+    assert h._fw_firewall_spokes() == ["dhcp-spoke-1"]
+
+
+def test_pinned_firewall_id_is_ignored_for_a_non_firewall_source():
+    # firewall_id pins an OPNsense box; it must not hijack the Kea pull. The
+    # old hard-coded path took the pinned branch for ANY source and would
+    # return the firewall spoke here.
+    h = _kea_hub(firewall_id="fw-abc")
+    h.get_spoke_for_firewall = lambda firewall_id: "opn-fw1"
+    assert h._fw_firewall_spokes() == ["dhcp-spoke-1"]
+
+
+@pytest.mark.asyncio
+async def test_kea_leases_are_parsed_from_native_envelope_and_fields():
+    h = _kea_hub()
+    records, info = await h._fw_pull_discovered()
+    assert info["errors"] == []
+    by_ip = {r["ip"]: r for r in records}
+    assert set(by_ip) == {"10.20.0.5", "10.20.0.77"}
+    # hw-address read + normalized even though the key isn't "mac"
+    assert by_ip["10.20.0.5"]["mac"] == "aa:bb:cc:dd:ee:05"
+    assert by_ip["10.20.0.5"]["hostname"] == "kea-ws"
+    assert by_ip["10.20.0.77"]["mac"] == "aa:bb:cc:dd:ee:77"
+
+
+@pytest.mark.asyncio
+async def test_kea_pull_never_issues_an_arp_command():
+    # source_data defaults to "both"; with no arp_command the ARP fetch must be
+    # skipped rather than falling back to OPNSENSE_GET_ARP_TABLE, which a DHCP
+    # spoke cannot answer (it would error every cycle).
+    h = _kea_hub()
+    records, info = await h._fw_pull_discovered()
+    cmds = [c for _, c, _ in h.request_log]
+    assert "OPNSENSE_GET_ARP_TABLE" not in cmds
+    assert "DHCP_LIST_LEASES" in cmds
+    assert info["errors"] == []
+    assert len(records) == 2
+
+
+@pytest.mark.asyncio
+async def test_kea_discovered_leases_reach_the_netbox_push():
+    h = _kea_hub()
+    records, _ = await h._fw_pull_discovered()
+    buckets, dropped = await h._fw_attribute(records)
+    assert dropped == 0
+    assert {r["ip"] for r in buckets["acme"]} == {"10.20.0.5", "10.20.0.77"}
+
+
+@pytest.mark.asyncio
+async def test_dhcp_hostname_wins_over_arp_on_merge():
+    # Regression: the merge compared _src against lowercase "dhcp" while the
+    # fetch tags rows "DHCP", so this rule never fired and ARP's hostname could
+    # overwrite the authoritative DHCP one.
+    h = _SyncHub(responses={
+        ("opn-fw1", "OPNSENSE_GET_DHCP_LEASES"): {"payload": {"data": {
+            "status": "SUCCESS", "data": [
+                {"ip": "10.20.0.5", "mac": "aa:bb:cc:dd:ee:05", "hostname": "from-dhcp"},
+            ]}}},
+        ("opn-fw1", "OPNSENSE_GET_ARP_TABLE"): {"payload": {"data": {
+            "status": "SUCCESS", "data": [
+                {"ip": "10.20.0.5", "mac": "aa:bb:cc:dd:ee:05", "hostname": "from-arp"},
+            ]}}},
+        ("netbox-spoke-1", "NETBOX_GET_PREFIXES"): _prefixes_payload(),
+    })
+    records, _ = await h._fw_pull_discovered()
+    assert len(records) == 1
+    assert records[0]["hostname"] == "from-dhcp"

@@ -105,6 +105,19 @@ class FwDiscoverySyncMixin:
             "arp_command": "OPNSENSE_GET_ARP_TABLE",
             "label": "OPNsense",
         },
+        # LM's own Kea. When DHCP moves off the firewall and onto the DHCP
+        # module, OPNsense stops seeing leases, so nothing reaches NetBox even
+        # though the leases are plainly visible in the DHCP UI (which reads Kea
+        # directly via the same command). No ARP table — Kea only knows what it
+        # leased, so static-IP devices still need the firewall or nw/ARP source.
+        # Kea answers with {"leases": [...]} in Kea-native field names, hence
+        # rows_key + the ip-address/hw-address aliases in _fw_pull_discovered.
+        "kea": {
+            "module_type": "dhcp",
+            "dhcp_command": "DHCP_LIST_LEASES",
+            "rows_key": "leases",
+            "label": "Kea (LM DHCP)",
+        },
     }
 
     # NetBox (IPAM spoke) is the device-record writer. Fixed today.
@@ -127,18 +140,23 @@ class FwDiscoverySyncMixin:
         return self.FIREWALL_DISCOVERY_SOURCES.get(name) or self.FIREWALL_DISCOVERY_SOURCES["opnsense"]
 
     def _fw_firewall_spokes(self) -> List[str]:
-        """Connected firewall spoke ids to pull from this cycle.
+        """Connected source spoke ids to pull from this cycle.
 
-        A pinned ``firewall_id`` (→ ``get_spoke_for_firewall``) scopes the pull
-        to one firewall; unset → every connected firewall spoke
-        (``get_all_spokes_by_type("firewall")``). Empty when none are connected.
+        The spoke type comes from the configured source registry entry's
+        ``module_type`` — it used to be hard-coded to ``"firewall"``, which made
+        that registry field dead metadata and meant a non-firewall source (Kea)
+        could never resolve a spoke. A pinned ``firewall_id``
+        (→ ``get_spoke_for_firewall``) scopes the pull to one firewall; it only
+        applies to firewall-type sources. Unset (or a non-firewall source) →
+        every connected spoke of the source's type. Empty when none connected.
         """
         cfg = self._fw_discovery_cfg()
+        module_type = self._fw_discovery_source().get("module_type", "firewall")
         pinned = str(cfg.get("firewall_id") or "").strip()
-        if pinned:
+        if pinned and module_type == "firewall":
             sid = self.get_spoke_for_firewall(pinned)
             return [sid] if sid else []
-        return list(self.get_all_spokes_by_type("firewall") or [])
+        return list(self.get_all_spokes_by_type(module_type) or [])
 
     def _fw_discovery_concurrency(self) -> int:
         """Max tenants pushed in parallel per cycle. Clamp 1..8; default 4."""
@@ -199,12 +217,17 @@ class FwDiscoverySyncMixin:
                 if isinstance(d, dict) and d.get("status") == "ERROR":
                     errors.append(f"{tag}({sid}): {d.get('message', 'error')}")
                     return
-                rows = (d.get("data") if isinstance(d, dict) else None) or []
+                # Sources do not agree on where the list lives: OPNsense answers
+                # under "data", Kea under "leases".
+                rows_key = se.get("rows_key", "data")
+                rows = (d.get(rows_key) if isinstance(d, dict) else None) or []
                 for row in rows or []:
                     if not isinstance(row, dict):
                         continue
-                    ip = str(row.get("ip") or "").strip()
-                    mac = self._fw_norm_mac(row.get("mac"))
+                    # ...nor on field names: Kea returns its native
+                    # ip-address/hw-address rather than ip/mac.
+                    ip = str(row.get("ip") or row.get("ip-address") or "").strip()
+                    mac = self._fw_norm_mac(row.get("mac") or row.get("hw-address"))
                     hostname = str(row.get("hostname") or "").strip()
                     if hostname == "unknown":
                         hostname = ""
@@ -221,9 +244,12 @@ class FwDiscoverySyncMixin:
             if want_dhcp:
                 fetches.append(_fetch(sid, se.get("dhcp_command", "OPNSENSE_GET_DHCP_LEASES"),
                                       {"limit": 0}, "DHCP"))
-            if want_arp:
-                fetches.append(_fetch(sid, se.get("arp_command", "OPNSENSE_GET_ARP_TABLE"),
-                                      {}, "ARP"))
+            # Only pull ARP from a source that actually has an ARP table. This
+            # used to default to the OPNsense command for ANY source, which
+            # would send OPNSENSE_GET_ARP_TABLE to a Kea spoke that cannot
+            # answer it and log a per-cycle error.
+            if want_arp and se.get("arp_command"):
+                fetches.append(_fetch(sid, se["arp_command"], {}, "ARP"))
         await asyncio.gather(*fetches, return_exceptions=True)
 
         # Merge + dedup: key by MAC (primary), else by ip:<ip>. DHCP hostname
@@ -238,7 +264,12 @@ class FwDiscoverySyncMixin:
             if ex is None:
                 merged[key] = {"ip": ip, "mac": mac, "hostname": rec.get("hostname", "")}
             else:
-                if rec.get("_src") == "dhcp" and rec.get("hostname"):
+                # The DHCP hostname is the authoritative one (the client told
+                # the server its name); ARP only ever has a reverse-lookup
+                # guess. This compared against lowercase "dhcp" while _fetch
+                # tags rows "DHCP", so the rule never fired and an ARP hostname
+                # could win.
+                if str(rec.get("_src", "")).lower() == "dhcp" and rec.get("hostname"):
                     ex["hostname"] = rec["hostname"]
                 elif not ex.get("hostname") and rec.get("hostname"):
                     ex["hostname"] = rec["hostname"]
