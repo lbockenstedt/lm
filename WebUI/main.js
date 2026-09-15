@@ -2614,6 +2614,33 @@ let _statusBackoffUntil = 0;   // hub-requested polling backoff (protect mode)
 let _statusDownToast = null;   // sticky "update/restart in progress" toast handle
 let _statusDownTicks = 0;      // consecutive unreachable poll ticks (×10s)
 let _statusDownFromVersion = null; // hub version observed just before it went down
+let _pageLoadHubVersion = null; // hub version this tab's JS bundle was loaded against
+let _versionDriftReloading = false; // a drift reload is already scheduled
+
+// Stale-bundle guard. The reload on the reconnect path above only fires if the
+// poller actually SAW the hub go down (_statusDownToast). A self-update that
+// restarts between two 10s polls -- or a WebUI-only asset change with no
+// restart at all -- never sets that toast, so the tab keeps running the JS it
+// loaded hours ago while talking to a newer API. That is unrecoverable on its
+// own: assets are served `immutable, max-age=1yr` (see serve_ui) and this is a
+// SPA, so index.html -- the only no-store document, and the only thing that
+// hands out a fresh ?v= token -- is never re-fetched. Symptom is a control that
+// silently does nothing because its handler only exists in the new bundle.
+// So: compare every poll against the version this page loaded with, and reload
+// on any change. Cheap when assets did NOT change (same ?v= = 304s).
+function _checkWebuiVersionDrift(version) {
+    if (!version || _versionDriftReloading) return;
+    if (!_pageLoadHubVersion) { _pageLoadHubVersion = version; return; }
+    if (version === _pageLoadHubVersion) return;
+    // Never yank a modal out from under someone mid-edit -- polling continues,
+    // so this reloads on a later tick once the dialog is closed.
+    if (document.querySelector('.fixed.inset-0')) return;
+    _versionDriftReloading = true;
+    if (typeof showToast === 'function') {
+        showToast(`Hub updated (${_pageLoadHubVersion} → ${version}) — reloading to load the new version…`, 'success');
+    }
+    setTimeout(() => window.location.reload(), 1500);
+}
 async function updateStatus() {
     // Honor hub overload backpressure: if the hub told us to back off, skip
     // this tick instead of hammering a saturated loop.
@@ -2871,6 +2898,7 @@ function _updateMetrics(statusData) {
         versionEl.innerHTML = `<span class="inline-block w-2 h-2 rounded-full ${dotTone}${dotGlow} transition-all align-middle mr-1.5" title="${escapeHtml(title)}"></span>Version | ${escapeHtml(m.version)}`;
         window.__lmHubVersion = m.version;  // for File-a-Bug context (running version)
         window.__lmTargetVersion = target || null;  // on-disk VERSION, for the Update toast
+        _checkWebuiVersionDrift(m.version);
     }
 
     // Out-of-contact alerts (SpokeAlertMixin) — surfaced on the already-polled
