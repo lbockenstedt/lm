@@ -18670,7 +18670,7 @@ async function _renderNwScanTab() {
             <input type="checkbox" class="nwt-cred rounded border-slate-300 text-[#01A982] focus:ring-green-500" value="${escapeHtml(String(cr.id))}" ${selectedCreds.has(String(cr.id)) ? 'checked' : ''}>
             <span class="font-mono">${escapeHtml(cr.name || cr.id)}</span>${cr.username ? `<span class="text-slate-400">· ${escapeHtml(cr.username)}</span>` : ''}
           </label>`).join('')
-        : `<p class="text-xs text-slate-400 italic">No scan credential sets belong to this tenant (or the shared tenant). Add one in Setup → Network Devices → Scan Credentials and bind it to this tenant.</p>`;
+        : `<p class="text-xs text-slate-400 italic">No scan credential sets belong to this tenant (or the shared tenant). Add one in Setup → Network Devices → Scan Credentials, bind it to this tenant, and point it at a Credential Vault entry. Note a vault credential on its own is not enough — the scan uses the credential <em>set</em> that references it.</p>`;
 
     const opt = (opts, cur) => opts.map(([v, l]) =>
         `<option value="${escapeHtml(v)}" ${String(cur) === v ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('');
