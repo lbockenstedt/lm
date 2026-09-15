@@ -124,7 +124,39 @@ A spoke that authenticates but isn't yet approved stays connected in a **pending
 - **Manage tenants (create / edit / delete)** — Setup → Tenants. Add a tenant, edit its display name / description / quotas / scoping, or **Delete** it (`DELETE /setup/tenants/{tenant_id}`). Delete prompts for confirmation, detaches the tenant from every user, and frees its records; the **`default` tenant cannot be deleted** (returns 400). Creating/deleting a tenant stays Global-Admin-only.
 - **Turn on debug logging** — the Debug Logging toggle in Setup (`POST /setup/debug-mode {"enabled": true|false}`). This flips the hub's own log level immediately AND broadcasts `SET_LOG_LEVEL` to every connected spoke/agent, so one switch raises (or lowers) verbosity fleet-wide.
 - **Trigger an update** — `POST /setup/update` updates the hub itself (git pull + scheduled self-restart); `POST /setup/update/spokes` pushes `SPOKE_UPDATE` to every approved spoke without touching the hub (this is what AppBuilder typically calls right after landing a fix). Agents have their own `update_agents_only` counterpart.
+- **Populate a dev/qa/lrb hub with realistic data** — Setup → **Test Data Feed**. One hub *publishes* an anonymised snapshot of its fleet; another *subscribes* and replays it as synthetic spokes, so a branch hub gets production's shape without a duplicate lab. See "Test Data Feed" below for the full setup.
 - **Force an out-of-cycle sync** — most sync cards (NetBox↔CPPM, hypervisor↔NetBox VM sync, firewall/network discovery, staleness sweep, realtime NAC) expose a "Sync now"/"Sweep now" button that runs the loop immediately instead of waiting for its interval.
+
+## Test Data Feed
+
+Testing a branch hub means giving it a populated fleet, and standing up duplicate spoke VMs, Proxmox nodes and client sims per branch is expensive and drifts out of sync. This feature lets one hub publish an anonymised snapshot of its fleet and another replay it as synthetic spokes.
+
+Both halves are configured from the same page (Setup → Test Data Feed, Global-Admin only), but **a given hub only ever uses one of them**: publish on production, subscribe on the branch hub.
+
+### On the SOURCE hub (production)
+
+1. Settings → **API Tokens** — issue a token for the receiving hub. Revoking it later stops that feed immediately.
+2. Setup → Test Data Feed → tick **Publish this hub's fleet as a test-data feed**.
+
+Publishing is **off by default**; deploying the code never turns a hub into a data source. Once on, `GET /api/test-feed/snapshot` serves the fleet to any client holding a valid token — already scrubbed, so raw hostnames, addresses, MACs, serials and user names never leave this box, and secret-bearing fields are dropped entirely rather than pseudonymised. What the snapshot *does* preserve is the fleet's shape: spoke count, clients per spoke, platform mix, VM counts. That is the point — it is what makes the branch hub useful — but it is also real information about your estate, so treat the token accordingly.
+
+**Regenerate pseudonyms** mints a new salt. Every synthetic identity published afterwards changes, and a receiver already running sees its whole roster replaced on the next poll.
+
+### On the RECEIVER hub (dev/qa/lrb)
+
+Fill in the source URL, the API token from step 1, and the **tenant and onboarding PSK belonging to this hub** — the PSK auto-approves the synthetic spokes so their telemetry is accepted instead of sitting at "pending". Then:
+
+- **Test source** fetches one snapshot and shows what it would replay, without starting anything. Always worth a pass first.
+- **Start feed** launches `scripts/hub_feed.py` as a child process that polls the source and replays into this hub over its loopback spoke WebSocket.
+- **Stop feed** terminates it. The synthetic spokes go offline but stay registered — they are prefixed (`feed-` by default) so you can bulk-delete them from Setup → Spokes & Agents.
+
+The feeder is a normal process, not a service: it does **not** survive a hub restart. After a reboot the feed simply reads as stopped, which is the honest state rather than a stale "running" flag.
+
+### Notes
+
+- Stored secrets are **write-only from the page's perspective** — the config endpoint returns whether a token/PSK is set, never its value, so reading the Setup page cannot leak the source hub's credential.
+- The feeder refuses to run when source and target resolve to the same host:port. Feeding a hub its own data would write synthetic spokes into real state.
+- The same thing is scriptable without the UI: `scripts/hub_feed.py --source … --token … --target … --dry-run`.
 
 ## Troubleshooting / common questions
 
@@ -132,6 +164,8 @@ A spoke that authenticates but isn't yet approved stays connected in a **pending
 - **"An action / button returned a 502 error."** The spoke IS connected but returned `ERROR` for that specific command — the 502's message is the spoke's own error text, not a hub bug. (Contrast with a 503, which means the spoke wasn't connected at all.)
 - **"The hub won't start / can't bind 443."** Two usual causes: (1) binding a port below 1024 as the non-root `svc_lm` user needs `CAP_NET_BIND_SERVICE` (the installers set `AmbientCapabilities=CAP_NET_BIND_SERVICE` in the systemd unit — check it's present if you hand-rolled the unit); (2) a configured `LM_TLS_CERT`/`LM_TLS_KEY` is broken — the hub fails fast rather than serving plaintext, so a crash-loop right after a "TLS cert load failed" log line means fix or unset the cert.
 - **"The hub crashes on boot complaining about a Fernet key."** `LM_FERNET_KEY` is required and fail-closed by design. Generate one (`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`) and set it — see `.env.example`.
+- **"The Test Data Feed says the source refused (403)."** Publishing is off on the source hub — turn on "Publish this hub's fleet as a test-data feed" there. A 401 instead means the API token was revoked or expired; issue a new one under Settings → API Tokens on the source.
+- **"The feed is running but no spokes appeared."** The synthetic spokes connected but were not approved, so their telemetry is discarded — check the tenant and onboarding PSK are the *receiving* hub's, not the source's.
 - **"A spoke keeps rejecting the hub's identity (`mutual_auth_failed`)."** Usually a stale secret after a hub restart or key rotation — the spoke needs its session key refreshed/re-approved.
 
 ## Related pages
