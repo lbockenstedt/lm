@@ -129,6 +129,44 @@ def build_dhcp_payload(pfx_data: Dict[str, Any],
     return subnets, reservations
 
 
+def dhcp_skip_warning(spoke_result: Any) -> Dict[str, Any]:
+    """``{"warning": ...}`` when Kea silently dropped reservations, else ``{}``.
+
+    A push whose every reservation was skipped still returns SUCCESS — the
+    spoke did exactly what it was told, there was simply no enabled scope to
+    put them in. The hub then records ``status: "ok"`` and the WebUI shows an
+    empty reservation list, which is indistinguishable from "you have no
+    reservations". A live fleet sat at 123 sent / 0 applied for exactly this
+    reason and the only way to find out was to diff kea-dhcp4.conf by hand.
+
+    A reservation lands only when its IP falls inside a prefix synced as a
+    scope (see ``build_dhcp_payload``), so the fix is almost always ticking
+    ``dhcp_enabled`` on the prefix that owns those addresses. Say so.
+    """
+    results = spoke_result if isinstance(spoke_result, list) else [spoke_result]
+    skipped = applied = 0
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        try:
+            skipped += int(r.get("reservations_skipped") or 0)
+            applied += int(r.get("reservations") or 0)
+        except (TypeError, ValueError):
+            continue
+    if skipped <= 0:
+        return {}
+    what = "every" if applied == 0 else f"{skipped} of {skipped + applied}"
+    return {"warning": (
+        f"{what} reservation was not applied because its address falls outside "
+        f"every DHCP-enabled prefix. Tick 'dhcp_enabled' on the NetBox prefix "
+        f"that owns those addresses, or move the reservations into a synced "
+        f"scope." if applied == 0 else
+        f"{what} reservations were not applied because their addresses fall "
+        f"outside every DHCP-enabled prefix. Tick 'dhcp_enabled' on the NetBox "
+        f"prefix that owns those addresses."),
+        "reservations_skipped": skipped}
+
+
 class DnsDhcpSyncMixin:
     """Periodic NetBox → Unbound/Kea reconciliation for ``LabManagerHub``.
 
@@ -258,10 +296,12 @@ class DnsDhcpSyncMixin:
                 logger.warning("DHCP auto-sync failed: %s", spoke_errors[0])
                 return self._record_status("dhcp", status="error", error=str(spoke_errors[0]))
             spoke_results = [unwrap_spoke(r) for r in results]
+            single = spoke_results[0] if len(spoke_results) == 1 else spoke_results
             return self._record_status("dhcp", status="ok",
                                        subnets_synced=len(subnets),
                                        reservations_synced=len(reservations),
-                                       spoke_result=spoke_results[0] if len(spoke_results) == 1 else spoke_results)
+                                       **dhcp_skip_warning(single),
+                                       spoke_result=single)
         except Exception as e:  # noqa: BLE001
             logger.warning("DHCP auto-sync failed: %s", e)
             return self._record_status("dhcp", status="error", error=str(e))
@@ -363,9 +403,11 @@ class DnsDhcpSyncMixin:
                 self._record_status("dhcp", status="error", error=str(dhcp_errors[0]))
             else:
                 spoke_res = [unwrap_spoke(r) for r in dhcp_res]
+                single = spoke_res[0] if len(spoke_res) == 1 else spoke_res
                 self._record_status("dhcp", status="ok", subnets_synced=len(subnets),
                                     reservations_synced=len(reservations),
-                                    spoke_result=spoke_res[0] if len(spoke_res) == 1 else spoke_res)
+                                    **dhcp_skip_warning(single),
+                                    spoke_result=single)
                 new_hashes["dhcp"] = dhcp_hash
         else:
             self._record_status("dhcp", status="ok", subnets_synced=len(subnets),
