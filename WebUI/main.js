@@ -24965,7 +24965,14 @@ async function _ddSyncStatusLine(side) {
         const detail = side === 'dns'
             ? (s.records_synced != null ? `${s.records_synced} records` : (s.reason || s.error || ''))
             : (s.subnets_synced != null ? `${s.subnets_synced} subnets / ${s.reservations_synced} reservations` : (s.reason || s.error || ''));
-        return `<div class="text-xs text-slate-400 mt-2">NetBox auto-sync: <span class="${badge} font-medium">${escapeHtml(s.status)}</span> · ${escapeHtml(detail)} · <span title="${escapeHtml(when)}">${escapeHtml(when)}</span></div>`;
+        // A sync that applied NO reservations still reports "ok" — the spoke
+        // did as it was told, there was just no enabled scope to put them in.
+        // Without this the list is simply empty, which reads as "you have no
+        // reservations" rather than "123 of them were dropped".
+        const warn = s.warning
+            ? `<div class="text-xs text-amber-600 bg-amber-50 border border-amber-200 rounded px-2 py-1 mt-2">⚠ ${escapeHtml(s.warning)}</div>`
+            : '';
+        return `${warn}<div class="text-xs text-slate-400 mt-2">NetBox auto-sync: <span class="${badge} font-medium">${escapeHtml(s.status)}</span> · ${escapeHtml(detail)} · <span title="${escapeHtml(when)}">${escapeHtml(when)}</span></div>`;
     } catch (_e) { return ''; }
 }
 
