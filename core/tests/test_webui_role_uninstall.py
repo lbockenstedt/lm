@@ -54,14 +54,50 @@ def test_stopped_server_is_labelled_as_such():
     assert "(stopped)" in body
 
 
-def test_uninstall_is_blocked_while_the_management_module_is_loaded():
-    """Mirrors the agent-side guard — purging Kea out from under a live dhcp
-    sub-spoke would leave both in an undefined state."""
+def test_uninstall_passes_the_blocking_management_module_to_the_handler():
+    """The agent refuses to purge a server while its management sub-spoke is
+    loaded. That guard used to surface as a greyed-out button with only a
+    tooltip — a dead end: the operator can see the action but can never reach
+    it. The button now stays live and hands the blocking module to the
+    handler, which unloads it first."""
     body = _modal()
     idx = body.index("uninstallRole(")
     window = body[idx:idx + 400]
     assert "moduleLoaded ?" in window
-    assert "disabled" in window
+    # Third argument: the blocking module id, or null when nothing blocks.
+    assert "'null'" in window
+    # The dead end is gone — the operator must be able to click it.
+    assert "disabled" not in window
+
+
+def test_blocked_uninstall_unloads_the_management_module_first():
+    fn = _fn("uninstallRole")
+    assert "blockingModule" in fn.split("\n")[0]
+    unload_at = fn.index("'UNLOAD_ROLE'")
+    uninstall_at = fn.index("'UNINSTALL_ROLE'")
+    assert unload_at < uninstall_at, "must unload BEFORE purging"
+    assert "/unload-role" in fn and "/uninstall-role" in fn
+
+
+def test_a_failed_unload_aborts_before_anything_is_purged():
+    """Going ahead would only hit the agent-side guard, having unloaded the
+    management module for nothing."""
+    fn = _fn("uninstallRole")
+    unload_at = fn.index("'UNLOAD_ROLE'")
+    uninstall_at = fn.index("'UNINSTALL_ROLE'")
+    between = fn[unload_at:uninstall_at]
+    assert "return" in between, "no early return between unload and uninstall"
+    assert "left installed" in between
+
+
+def test_the_confirmation_names_the_blocking_module(tmp_path=None):
+    """An operator must know the management role is about to be unloaded."""
+    fn = _fn("uninstallRole")
+    preamble = fn[:fn.index("showConfirmToast")]
+    assert "moduleLabel" in preamble
+    assert "unloaded first" in fn
+    # The unblocked wording must still be the plain one.
+    assert "Uninstall \"${roleLabel}\" from ${spokeId}? " in fn
 
 
 def test_uninstall_is_not_offered_during_an_in_flight_deploy():
