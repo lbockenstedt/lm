@@ -14539,12 +14539,15 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
         all.forEach(a => {
             if (a._kind !== 'spoke' || a._status !== 'connected') return;
             const aid = a.agent_id;
-            // Fetch hosted roles AND deploy status together so the cell reflects
-            // both (a deploy role like netbox-server hosts NO sub-role, so without
-            // this it always read "none (idle)" with no sign it deployed anything).
-            Promise.all([fetchLoadedRoles(aid), fetchDeployStatus(aid)]).then(([active, ds]) => {
+            // Fetch hosted roles, durable deploy-role markers AND live deploy
+            // status together so the cell reflects all three. A deploy role like
+            // dns-server/dhcp-server/netbox-server hosts NO sub-role and its live
+            // status is cleared on agent reload, so without the durable markers
+            // this always read "none (idle)" with no sign it deployed anything.
+            Promise.all([fetchAgentRoleState(aid), fetchDeployStatus(aid)]).then(([roleState, ds]) => {
                 const cell = agentsWrap.querySelector(`.lm-agent-role-cell[data-role-cell="${CSS.escape(aid)}"]`);
                 if (!cell) return;
+                const active = (roleState && roleState.active) || [];
                 const parts = [];
                 if (Array.isArray(active) && active.length > 0) {
                     parts.push(...active.map(r => `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-100 text-blue-700" title="${escapeHtml(r.sub_spoke_id || '')}">${escapeHtml((AGENT_ROLES[r.role] || {}).name || r.role)}</span>`));
@@ -14556,8 +14559,10 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                 // dns-server) hid the first one's badge entirely.
                 const deps = Array.isArray(ds && ds.deploys) ? ds.deploys
                            : (ds && ds.deploy ? [ds.deploy] : []);
+                const shownDeploy = new Set();
                 for (const dep of deps) {
                     if (!dep || !dep.role || !dep.state) continue;
+                    shownDeploy.add(dep.role);
                     const st = dep.state;
                     const cls = st === 'completed' ? 'bg-green-100 text-green-700'
                               : st === 'failed' || st === 'error' ? 'bg-red-100 text-red-700'
@@ -14572,8 +14577,30 @@ async function _renderAgentsTable(agentsWrap, genericAgents, pxmxAgents, diagBy)
                         `<button onclick="clearDeployStatus('${escapeHtml(aid)}','${escapeHtml(dep.role)}')" class="ml-1 font-bold leading-none hover:opacity-70" title="Clear this status">×</button>`;
                     parts.push(`<span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${cls} inline-flex items-center" title="deploy role">${escapeHtml((AGENT_ROLES[dep.role] || {}).name || dep.role)}: ${escapeHtml(word)}${clearBtn}</span>`);
                 }
+                // Durable deploy-role badges. A deploy role (dns-server,
+                // dhcp-server, …) is an INSTALL, not a hosted sub-spoke, so it
+                // never shows up in `active`; and ds.deploys is in-memory on the
+                // agent, so it is empty after any agent restart. Without this the
+                // tile read "none (idle)" for a node that is demonstrably running
+                // Unbound/Kea — while the Roles dialog, which reads these same
+                // durable markers, correctly listed them as loaded. Read the
+                // marker (installed_deploy_roles) and the unit state
+                // (active_deploy_roles) so the two views agree.
+                const installedDeploy = (roleState && roleState.installed_deploy_roles) || [];
+                const enabledDeploy = new Set((roleState && roleState.active_deploy_roles) || []);
+                for (const role of installedDeploy) {
+                    // netbox-server has its own dedicated badge + knob below.
+                    if (role === 'netbox-server' || shownDeploy.has(role)) continue;
+                    const on = enabledDeploy.has(role);
+                    const cls = on ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-600';
+                    const word = on ? 'installed' : 'installed (stopped)';
+                    parts.push(`<span class="px-2 py-0.5 rounded-full text-[10px] font-bold ${cls}" title="deploy role — installed on this node">${escapeHtml((AGENT_ROLES[role] || {}).name || role)}: ${word}</span>`);
+                }
                 // Durable NetBox-server marker + reset-admin-password knob.
-                if (ds && ds.netbox_installed) {
+                // installed_deploy_roles is the tenant-admin-visible fallback:
+                // fetchDeployStatus is Global-Admin-only and returns null for
+                // tenant admins, which used to hide the badge from them.
+                if ((ds && ds.netbox_installed) || installedDeploy.includes('netbox-server')) {
                     parts.push(`<span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-600" title="NetBox application deployed on this node">NetBox</span>`);
                     parts.push(`<button onclick="resetNetboxAdmin('${escapeHtml(aid)}')" class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-white text-[#01A982] border border-[#01A982] hover:bg-green-50 transition-colors" title="Reset the NetBox admin password">Reset admin pw</button>`);
                 }
