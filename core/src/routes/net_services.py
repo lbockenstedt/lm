@@ -3473,6 +3473,79 @@ def register(app, hub, ctx):
             return result
         return {"result": result, "netbox_writeback": writeback}
 
+    async def _create_netbox_ip_for_reservation(hub, ipam, ip, mac, body):
+        """Create the missing NetBox IP object so a reservation can survive.
+
+        Reaching here means the operator asked for a reservation on an address
+        NetBox has never heard of. Reporting "not_found" and walking away is
+        technically honest but useless: the Kea write already succeeded, the row
+        appears in the list, and ``core.dns_dhcp_sync`` then deletes it minutes
+        later when it rebuilds ``subnet4`` from NetBox alone. The operator's
+        intent is unambiguous — reserve this address for this MAC — so mint the
+        IP object that makes that intent durable.
+
+        NetBox requires the address to live inside a known prefix, so the
+        containing prefix is resolved first; the narrowest match wins, matching
+        how NetBox itself nests prefixes. If no prefix contains the address we
+        genuinely cannot create it, and the original honest warning stands.
+
+        Two calls because ``allocate_ip`` cannot set custom fields: create the
+        address, then write ``mac_address`` onto it. A create that succeeds but
+        whose MAC write-back fails is reported as an error rather than a
+        success — the IP object alone does not make a reservation, so the sync
+        would still drop it.
+
+        Best-effort like its caller: the Kea write has already been applied, so
+        nothing in here may raise.
+        """
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return {"status": "not_found", "ip": ip,
+                    "reason": f"{ip!r} is not a valid IP address"}
+
+        prefixes = access.unwrap_spoke(await hub.request_response(
+            ipam, "NETBOX_GET_PREFIXES", {}, timeout=30.0)) or {}
+        best = None
+        for row in (prefixes.get("prefixes") or []):
+            cidr = (row.get("prefix") or "").strip()
+            if not cidr:
+                continue
+            try:
+                net = ipaddress.ip_network(cidr, strict=False)
+            except ValueError:
+                continue
+            if addr in net and (best is None or net.prefixlen > best[0].prefixlen):
+                best = (net, cidr)
+        if not best:
+            return {"status": "not_found", "ip": ip,
+                    "reason": "no NetBox IP object for this address and no "
+                              "NetBox prefix contains it, so one cannot be "
+                              "created; the reservation will be dropped by "
+                              "the next NetBox→Kea sync"}
+
+        hostname = ((body or {}).get("hostname")
+                    or (body or {}).get("host") or "").strip()
+        created = access.unwrap_spoke(await hub.request_response(
+            ipam, "NETBOX_ALLOCATE_IP",
+            {"prefix": best[1], "address": ip, "dns_name": hostname,
+             "description": "DHCP reservation (created by Lab Manager)"},
+            timeout=30.0)) or {}
+        new_id = created.get("id")
+        if str(created.get("status", "")).upper() == "ERROR" or not new_id:
+            return {"status": "error", "ip": ip,
+                    "error": created.get("message")
+                             or "NetBox refused to create the IP object"}
+
+        access.unwrap_spoke(await hub.request_response(
+            ipam, "NETBOX_UPDATE_IP_ADDR",
+            {"ip_id": new_id, "custom_fields": {"mac_address": mac}},
+            timeout=30.0))
+        logger.info("dhcp reservation write-back: created NetBox IP %s (%s) "
+                    "in %s with mac_address=%r", ip, new_id, best[1], mac)
+        return {"status": "created", "ip": ip, "ip_id": new_id,
+                "prefix": best[1], "mac_address": mac}
+
     async def _reservation_netbox_writeback(body, *, clear=False):
         """Mirror a reservation's MAC onto its NetBox IP object.
 
@@ -3486,10 +3559,16 @@ def register(app, hub, ctx):
         carrying ``custom_fields.mac_address``), so the MAC has to land there
         for the reservation to be durable.
 
+        When NetBox has no IP object for the address at all, one is CREATED
+        (see ``_create_netbox_ip_for_reservation``) rather than merely reported
+        — the operator asked for a durable reservation, and a warning they
+        cannot act on from the WebUI leaves it doomed.
+
         Best-effort by design: the Kea write has already succeeded by the time
-        this runs, so a missing ipam spoke, an address NetBox doesn't know, or
-        a NetBox error must be reported — never raised. Returns a small dict
-        describing the outcome for the caller to surface.
+        this runs, so a missing ipam spoke, an address no NetBox prefix
+        contains, or a NetBox error must be reported — never raised. Returns a
+        small dict describing the outcome (``ok``/``created``/``unchanged``/
+        ``skipped``/``not_found``/``error``) for the caller to surface.
         """
         hub = app.state.hub
         ip = _res_field(body, _RES_IP_KEYS)
@@ -3509,10 +3588,12 @@ def register(app, hub, ctx):
                     match = entry
                     break
             if not match or not match.get("id"):
-                return {"status": "not_found", "ip": ip,
-                        "reason": "no NetBox IP object for this address; the "
-                                  "reservation will be dropped by the next "
-                                  "NetBox→Kea sync"}
+                if clear or not mac:
+                    # Nothing to preserve: removing a reservation whose address
+                    # NetBox never knew about is already the desired state.
+                    return {"status": "unchanged", "ip": ip}
+                return await _create_netbox_ip_for_reservation(
+                    hub, ipam, ip, mac, body)
             current = ((match.get("custom_fields") or {})
                        .get("mac_address") or "").strip()
             if current.lower() == mac.lower():

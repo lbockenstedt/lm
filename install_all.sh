@@ -1571,6 +1571,76 @@ rollback_if_bad(){
     runuser -u svc_lm -- git -C /opt/lm reset --hard "$lg" 2>/dev/null || true
   fi
 }
+# ── Wedge diagnostics + restart-loop control ────────────────────────────────
+# A force-restart is only a cure for a TRANSIENT wedge. When the hub is wedged
+# by a code-level defect (e.g. an event-loop deadlock) it wedges again within
+# a minute of every restart, and the old behaviour — 3 strikes, SIGKILL, reset
+# the strike counter, repeat — hammered the hub every ~3 minutes indefinitely
+# while capturing nothing. That is actively harmful: each SIGKILL triggers a
+# full spoke-reconnect stampede, and the evidence of WHERE it wedged dies with
+# the process. So: capture stacks BEFORE the kill, and back off once it is
+# clear restarting is not working.
+WEDGE_DIR=/var/log/lm
+RESTARTS=/var/lib/lm/watchdog-restarts            # "<count> <epoch>" of consecutive force-restarts
+LOOP_MARKER=/var/lib/lm/state/hub-wedge-loop      # operator/WebUI-visible breadcrumb
+HEAL_GRACE="${LM_WATCHDOG_HEAL_GRACE:-900}"       # healthy this long ⇒ the loop is over
+
+# Seconds to wait after the Nth consecutive force-restart before another is
+# allowed: 1st immediate, then 5/10/15 min, capped at 15. Capped low on purpose
+# — a genuinely recoverable hub must not be left down for an hour.
+restart_backoff(){
+  case "${1:-0}" in
+    0|1) echo 0 ;;
+    2)   echo 300 ;;
+    3)   echo 600 ;;
+    *)   echo 900 ;;
+  esac
+}
+
+# Dump everything needed to diagnose a wedge post-mortem, then keep the 10
+# newest reports. Every step is best-effort and time-bounded: diagnostics must
+# never delay or block the recovery restart.
+capture_wedge_diag(){
+  local pid ts out t
+  pid=$(systemctl show lm.service -p MainPID --value 2>/dev/null || echo 0)
+  [ -n "$pid" ] && [ "$pid" != 0 ] || return 0
+  ts=$(date -u +%Y%m%dT%H%M%SZ)
+  out="$WEDGE_DIR/wedge-$ts.txt"
+  mkdir -p "$WEDGE_DIR" 2>/dev/null || true
+  {
+    echo "=== lm hub wedge diagnostics $ts (pid $pid) ==="
+    echo "--- process (low CPU here ⇒ blocked, not spinning) ---"
+    ps -o pid,stat,etime,times,pcpu,pmem,rss -p "$pid" 2>/dev/null
+    echo "--- main-thread wchan ---"
+    cat "/proc/$pid/wchan" 2>/dev/null; echo
+    echo "--- per-thread wchan (futex_wait_queue ⇒ blocked on a lock) ---"
+    for t in /proc/$pid/task/*; do
+      printf '%s %s\n' "${t##*/}" "$(cat "$t/wchan" 2>/dev/null)"
+    done 2>/dev/null | head -40
+    echo "--- listeners ---"
+    ss -lntp 2>/dev/null | head -20
+    echo "--- hub.log tail ---"
+    tail -n 25 "$WEDGE_DIR/hub.log" 2>/dev/null
+  } > "$out" 2>&1
+
+  # Python stacks. SIGUSR1 is registered by main.py's faulthandler, whose
+  # handler runs at the C level — so it reports even when the loop is
+  # deadlocked and a blocked thread holds the GIL.
+  if kill -USR1 "$pid" 2>/dev/null; then
+    sleep 2
+    echo "--- faulthandler stacks (all threads) ---" >> "$out"
+    tail -n 150 "$WEDGE_DIR/wedge-stacks.log" >> "$out" 2>/dev/null || true
+  fi
+  # Richer still, if an operator installed it. Never required.
+  if command -v py-spy >/dev/null 2>&1; then
+    echo "--- py-spy dump ---" >> "$out"
+    timeout 25 py-spy dump --pid "$pid" >> "$out" 2>&1 || true
+  fi
+
+  log "wedge diagnostics captured -> $out"
+  ls -1t "$WEDGE_DIR"/wedge-*.txt 2>/dev/null | tail -n +11 | xargs -r rm -f 2>/dev/null || true
+}
+
 if systemctl is-enabled --quiet lm.service 2>/dev/null; then
   state=$(systemctl is-active lm.service 2>/dev/null || echo unknown)
   case "$state" in
@@ -1578,20 +1648,57 @@ if systemctl is-enabled --quiet lm.service 2>/dev/null; then
       if hub_healthy; then
         [ -f "$STATE" ] && { rm -f "$STATE"; log "hub healthy again"; } || true
         record_last_good
+        # Clear the restart-loop ladder only after a SUSTAINED healthy run. A
+        # wedging hub answers /status for a few seconds after each restart, and
+        # resetting on that single good probe would rearm the hammer every time.
+        if [ -f "$RESTARTS" ]; then
+          rc_last=$(cut -d' ' -f2 "$RESTARTS" 2>/dev/null || echo 0)
+          if [ $(( $(date +%s) - ${rc_last:-0} )) -ge "$HEAL_GRACE" ]; then
+            rm -f "$RESTARTS" "$LOOP_MARKER" 2>/dev/null || true
+            log "wedge loop cleared: hub healthy for ${HEAL_GRACE}s"
+          fi
+        fi
       else
         fails=$(( $(cat "$STATE" 2>/dev/null || echo 0) + 1 ))
         echo "$fails" > "$STATE"
         log "hub unresponsive: unit active but /status not 200 (strike $fails/$MAX_FAILS)"
         if [ "$fails" -ge "$MAX_FAILS" ]; then
-          rollback_if_bad
-          log "FORCE-RESTART: SIGKILL wedged hub + free :443/:8000, then restart"
-          systemctl kill -s KILL lm.service 2>/dev/null || true
-          command -v fuser >/dev/null 2>&1 && fuser -k -9 443/tcp 8000/tcp 2>/dev/null || true
-          sleep 2
-          timeout 60 systemctl restart lm.service 2>/dev/null \
-            || timeout 30 systemctl start lm.service 2>/dev/null || true
-          rm -f "$STATE"
-          log "hub restart issued"
+          rc_n=$(cut -d' ' -f1 "$RESTARTS" 2>/dev/null || echo 0)
+          rc_last=$(cut -d' ' -f2 "$RESTARTS" 2>/dev/null || echo 0)
+          now=$(date +%s)
+          wait_s=$(restart_backoff "${rc_n:-0}")
+          if [ "${rc_n:-0}" -gt 0 ] && [ $(( now - ${rc_last:-0} )) -lt "$wait_s" ]; then
+            # Restarting is demonstrably NOT fixing this one. Stop hammering:
+            # every SIGKILL stampedes the whole fleet into reconnecting, which
+            # makes the hub slower and recovery less likely, and it buries the
+            # operator's window to intervene. The strike counter is left
+            # standing so the next tick re-evaluates.
+            log "wedge persists after ${rc_n} force-restart(s) — backing off $(( wait_s - (now - ${rc_last:-0}) ))s (code-level wedge? see $WEDGE_DIR/wedge-*.txt)"
+          else
+            capture_wedge_diag   # BEFORE the kill — the evidence dies with it
+            rollback_if_bad      # revert to last-good if we're crash-looping on new code
+            log "FORCE-RESTART: SIGKILL wedged hub + free :443/:8000, then restart"
+            systemctl kill -s KILL lm.service 2>/dev/null || true
+            if command -v fuser >/dev/null 2>&1; then
+              fuser -k -9 443/tcp 8000/tcp 2>/dev/null || true
+            fi
+            sleep 2
+            # `timeout` guards against a restart that itself hangs on a legacy
+            # detached unit; the hub is already dead so stop completes instantly.
+            timeout 60 systemctl restart lm.service 2>/dev/null \
+              || timeout 30 systemctl start lm.service 2>/dev/null || true
+            rc_n=$(( ${rc_n:-0} + 1 ))
+            printf '%s %s' "$rc_n" "$now" > "$RESTARTS" 2>/dev/null || true
+            rm -f "$STATE"
+            log "hub restart issued (force-restart #$rc_n)"
+            if [ "$rc_n" -ge 3 ]; then
+              mkdir -p "$(dirname "$LOOP_MARKER")" 2>/dev/null || true
+              printf 'hub wedged and force-restarted %s times; latest %s\nstacks: %s\n' \
+                "$rc_n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$WEDGE_DIR/wedge-*.txt" \
+                > "$LOOP_MARKER" 2>/dev/null || true
+              log "RESTART LOOP: $rc_n consecutive wedges — a restart is not healing this; see $WEDGE_DIR/wedge-*.txt"
+            fi
+          fi
         fi
       fi
       ;;
