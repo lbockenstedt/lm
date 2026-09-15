@@ -973,8 +973,19 @@ function showToast(message, type = 'success') {
     // "Failed to fetch" / "Load failed" / etc.) and are pure noise — the sticky
     // "an update or restart is in progress — please wait…" toast already explains
     // the outage. Real, actionable errors (with a real message) still show.
-    if (type === 'error' && /load failed|failed to fetch|networkerror|could not connect|connection refused|err_connection|net::/i.test(String(message || ''))) {
-        return;
+    //
+    // Match the BARE browser error only (optionally behind an "Error: " prefix),
+    // never a phrase buried inside a longer one. A server-reported failure
+    // routinely quotes a connection error of its OWN: a 502 from the DHCP
+    // module reads "Kea CA unreachable: ... [Errno 111] Connection refused".
+    // An unanchored search swallowed precisely the error the operator needed,
+    // so "Add Reservation" looked like a dead button — no toast, no clue, and
+    // the click retried against a Kea that was never going to answer.
+    if (type === 'error') {
+        const bare = String(message || '').replace(/^\s*error:\s*/i, '').trim();
+        if (/^(load failed|failed to fetch|networkerror\b.*|could not connect\b.*|connection refused|err_connection\w*|net::\w+)\.?$/i.test(bare)) {
+            return;
+        }
     }
     // Green for everything except errors (red) — no grey/info toasts.
     const colors = { success: '#01A982', error: '#e53e3e', info: '#01A982' };
