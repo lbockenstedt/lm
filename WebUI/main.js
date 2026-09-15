@@ -1608,7 +1608,7 @@ const VIEW_SUBMENUS = {
     dashboard: ['Overview'],
     settings: ['General', 'User Access', 'Cloud', 'Tenant Config', 'Sync', 'Hub Status', 'API Tokens', 'Self-Backup', 'Collab', 'Notifications', 'Icons', 'Diagnostics'],
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-console', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs', 'logs-features'],
-    setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'OS Updates'],
+    setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'OS Updates', 'Test Data Feed'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
     pxmx: ['Overview', 'Virtual Machines', 'Settings'],
     ldap: ['Users', 'Groups'],
@@ -12137,6 +12137,245 @@ async function saveOidcConfig() {
     }
 }
 
+// ── Setup → Test Data Feed (Global-Admin) ───────────────────────────────────
+// Two ends of one feature, so one page sets up both — but a given hub uses only
+// one of them. SOURCE (production): publish this hub's fleet as a scrubbed
+// snapshot at /api/test-feed/snapshot. RECEIVER (dev/qa/lrb): pull that snapshot
+// on an interval and replay it into THIS hub as synthetic spokes, so a branch
+// hub gets production's shape with no duplicate lab hardware.
+// The scrub runs on the SOURCE, so raw hostnames/addresses never leave it.
+// Endpoints: /api/test-feed/{config,snapshot,status,start,stop,test}.
+let _tfPoll = null;
+
+function _renderSetupTestFeedTile(content) {
+    const { card, inputCls, labelCls, btnCls, btnSecCls } = _SETUP_CLS;
+    content.innerHTML = `
+        <div class="${card} space-y-4">
+            <div class="flex items-center justify-between">
+                <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Test Data Feed ${helpIcon('lm-hub', null, 'Hub help')}</h3>
+                <span id="tf-status" class="text-xs text-slate-400"></span>
+            </div>
+            <div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-[11px] text-amber-800 leading-snug">
+                Gives a dev/qa/lrb hub a realistic fleet without duplicating lab hardware — <b>Global-Admin only, every change is audit-logged</b>.
+                One hub <b>publishes</b> an anonymised snapshot; another <b>subscribes</b> and replays it as synthetic spokes.
+                Hostnames, addresses, MACs, serials and user names are replaced <b>on the publishing hub</b>, so raw fleet data never leaves it; secrets are dropped entirely.
+                <b>Set up only one half on any given hub</b> — publish on production, subscribe on the branch hub.
+            </div>
+
+            <div class="border border-slate-200 rounded-md p-4 space-y-3">
+                <div class="flex items-center justify-between">
+                    <h4 class="text-xs font-bold text-slate-600 uppercase tracking-wider">This hub as a SOURCE</h4>
+                    <span id="tf-src-badge" class="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">off</span>
+                </div>
+                <p class="text-[11px] text-slate-500 leading-snug">
+                    Publishing serves this hub's fleet, scrubbed, to any client holding a valid API token.
+                    Issue one under <b>Settings → API Tokens</b> and give it to the receiving hub; revoking it stops that feed immediately.
+                </p>
+                <label class="flex items-center gap-2 text-sm text-slate-700">
+                    <input type="checkbox" id="tf-source-enabled" class="w-4 h-4 text-green-600 rounded" onchange="tfSaveSource()">
+                    Publish this hub's fleet as a test-data feed
+                </label>
+                <div class="flex flex-wrap items-center gap-2">
+                    <button onclick="tfRegenSalt()" class="${btnSecCls} text-xs" title="Mint a new pseudonym salt, so every synthetic identity this hub publishes from now on is different and cannot be correlated with anything already sent">↻ Regenerate pseudonyms</button>
+                    <span id="tf-salt-state" class="text-[11px] text-slate-400"></span>
+                </div>
+            </div>
+
+            <div class="border border-slate-200 rounded-md p-4 space-y-3">
+                <div class="flex items-center justify-between">
+                    <h4 class="text-xs font-bold text-slate-600 uppercase tracking-wider">This hub as a RECEIVER</h4>
+                    <span id="tf-rcv-badge" class="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">stopped</span>
+                </div>
+                <p class="text-[11px] text-slate-500 leading-snug">
+                    Pulls from the source on an interval and replays it into this hub as synthetic spokes, prefixed so you can bulk-delete them later from <b>Spokes &amp; Agents</b>.
+                    The tenant and PSK below belong to <b>this</b> hub — the PSK auto-approves the synthetic spokes so their telemetry is accepted rather than sitting at "pending".
+                </p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Source hub URL</label>
+                        <input type="text" id="tf-source-url" placeholder="https://lm-hub.example.com" class="${inputCls}">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">API token <span id="tf-token-set" class="normal-case font-normal text-slate-400"></span></label>
+                        <input type="password" id="tf-token" placeholder="paste to set / change" class="${inputCls}">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Tenant on this hub</label>
+                        <input type="text" id="tf-tenant" placeholder="tenant id" class="${inputCls}">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Onboarding PSK <span id="tf-psk-set" class="normal-case font-normal text-slate-400"></span></label>
+                        <input type="password" id="tf-psk" placeholder="paste to set / change" class="${inputCls}">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Spoke id prefix</label>
+                        <input type="text" id="tf-prefix" value="feed-" class="${inputCls}">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Poll interval (seconds)</label>
+                        <input type="number" id="tf-interval" min="15" step="5" value="60" class="${inputCls}">
+                    </div>
+                </div>
+                <div class="flex flex-wrap items-center gap-2 pt-1">
+                    <button onclick="tfTestSource()" class="${btnSecCls} text-xs" title="Fetch one snapshot from the source and show what it would replay, without starting the feed or connecting any synthetic spoke">Test source</button>
+                    <button onclick="tfStart()" id="tf-start" class="${btnCls}" title="Start pulling from the source and replaying it into this hub as synthetic spokes">Start feed</button>
+                    <button onclick="tfStop()" id="tf-stop" class="bg-red-100 hover:bg-red-200 text-red-700 px-4 py-2 rounded-md text-sm font-bold border border-red-200" title="Stop the feeder; the synthetic spokes go offline but stay registered until you delete them">Stop feed</button>
+                    <button onclick="tfSaveReceiver()" class="${btnSecCls} ml-auto" title="Save the source URL, credentials and polling settings without starting the feed">Save</button>
+                </div>
+                <div id="tf-output" class="hidden">
+                    <pre id="tf-output-body" class="bg-slate-900 text-slate-100 text-[11px] font-mono rounded-md p-3 overflow-x-auto max-h-64"></pre>
+                </div>
+            </div>
+        </div>`;
+    tfLoad();
+    if (_tfPoll) clearInterval(_tfPoll);
+    _tfPoll = setInterval(tfRefreshStatus, 5000);
+}
+
+// status → badge class, local to this view (LM has no central status registry).
+function _tfBadge(el, text, tone) {
+    if (!el) return;
+    const tones = {
+        on:   'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]',
+        off:  'bg-slate-100 text-slate-500',
+        warn: 'bg-amber-100 text-amber-700',
+        err:  'bg-red-100 text-red-700',
+    };
+    el.className = `text-[11px] px-2 py-0.5 rounded-full ${tones[tone] || tones.off}`;
+    el.textContent = text;
+}
+
+async function tfLoad() {
+    try {
+        const r = await setupFetch('/api/test-feed/config');
+        const c = await r.json().catch(() => ({}));
+        if (!r.ok) return;
+        const set = (id, v) => { const e = document.getElementById(id); if (e && v != null) e.value = v; };
+        const chk = document.getElementById('tf-source-enabled');
+        if (chk) chk.checked = !!c.source_enabled;
+        set('tf-source-url', c.receiver_source_url || '');
+        set('tf-tenant', c.receiver_tenant || '');
+        set('tf-prefix', c.receiver_prefix || 'feed-');
+        set('tf-interval', c.receiver_interval || 60);
+        // Secrets come back as booleans, never values — say whether one is stored
+        // rather than rendering a fake masked value the operator might trust.
+        const tok = document.getElementById('tf-token-set');
+        if (tok) tok.textContent = c.receiver_token ? '· stored' : '· not set';
+        const psk = document.getElementById('tf-psk-set');
+        if (psk) psk.textContent = c.receiver_psk ? '· stored' : '· not set';
+        const salt = document.getElementById('tf-salt-state');
+        if (salt) salt.textContent = c.source_salt ? 'pseudonyms active' : 'minted on first publish';
+        _tfBadge(document.getElementById('tf-src-badge'),
+                 c.source_enabled ? 'publishing' : 'off', c.source_enabled ? 'on' : 'off');
+    } catch (e) { console.error('tfLoad failed', e); }
+    tfRefreshStatus();
+}
+
+async function tfRefreshStatus() {
+    if (!document.getElementById('tf-rcv-badge')) {
+        if (_tfPoll) { clearInterval(_tfPoll); _tfPoll = null; }
+        return;
+    }
+    try {
+        const r = await setupFetch('/api/test-feed/status');
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) return;
+        const badge = document.getElementById('tf-rcv-badge');
+        if (d.running) {
+            const mins = Math.floor((d.uptime_s || 0) / 60);
+            _tfBadge(badge, `running · ${mins}m`, 'on');
+        } else if (d.exit_code) {
+            _tfBadge(badge, `stopped · exit ${d.exit_code}`, 'err');
+        } else {
+            _tfBadge(badge, 'stopped', 'off');
+        }
+        if (d.last_output) {
+            const wrap = document.getElementById('tf-output');
+            const body = document.getElementById('tf-output-body');
+            if (wrap && body) { wrap.classList.remove('hidden'); body.textContent = d.last_output; }
+        }
+    } catch (e) { /* transient; the next tick retries */ }
+}
+
+async function tfSaveSource() {
+    const enabled = !!document.getElementById('tf-source-enabled')?.checked;
+    if (enabled && !confirm('Publish this hub\'s fleet as a test-data feed?\n\nAny client with a valid API token will be able to read an anonymised snapshot of every client and VM this hub knows about. Identifying fields are replaced and secrets dropped, but the fleet\'s SHAPE (spoke count, client counts, platform mix) is exactly real.')) {
+        const c = document.getElementById('tf-source-enabled'); if (c) c.checked = false;
+        return;
+    }
+    await _tfPost('/api/test-feed/config', { source_enabled: enabled },
+                  enabled ? 'Publishing enabled.' : 'Publishing disabled.');
+    tfLoad();
+}
+
+async function tfRegenSalt() {
+    if (!confirm('Regenerate pseudonyms?\n\nEvery synthetic identity published from now on changes. A receiver already running will see its whole roster replaced by new names on the next poll.')) return;
+    await _tfPost('/api/test-feed/config', { regenerate_salt: true }, 'Pseudonyms regenerated.');
+    tfLoad();
+}
+
+async function tfSaveReceiver() {
+    const body = {
+        receiver_source_url: document.getElementById('tf-source-url')?.value?.trim() || '',
+        receiver_tenant: document.getElementById('tf-tenant')?.value?.trim() || '',
+        receiver_prefix: document.getElementById('tf-prefix')?.value?.trim() || 'feed-',
+        receiver_interval: Number(document.getElementById('tf-interval')?.value) || 60,
+        receiver_token: document.getElementById('tf-token')?.value?.trim() || '',
+        receiver_psk: document.getElementById('tf-psk')?.value?.trim() || '',
+    };
+    const ok = await _tfPost('/api/test-feed/config', body, 'Saved.');
+    if (ok) {
+        // Clear the secret inputs once stored — leaving a token sitting in a
+        // form field is how it ends up in a screenshot.
+        ['tf-token', 'tf-psk'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
+        tfLoad();
+    }
+}
+
+async function tfTestSource() {
+    if (typeof showToast === 'function') showToast('Contacting source…', 'info');
+    try {
+        const r = await setupFetch('/api/test-feed/test', { method: 'POST' });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { showToast('Source test failed: ' + (d.detail || r.status), 'error'); return; }
+        showToast(`Source OK — ${d.spoke_count} spoke(s), ${d.client_count} client(s).`, 'success');
+        const wrap = document.getElementById('tf-output');
+        const bodyEl = document.getElementById('tf-output-body');
+        if (wrap && bodyEl) {
+            wrap.classList.remove('hidden');
+            bodyEl.textContent = JSON.stringify(d.sample_clients || [], null, 2);
+        }
+    } catch (e) { if (typeof showToast === 'function') showToast('Source test failed: ' + (e.message || e), 'error'); }
+}
+
+async function tfStart() {
+    if (typeof showToast === 'function') showToast('Starting feed…', 'info');
+    if (await _tfPost('/api/test-feed/start', {}, 'Feed started.')) tfRefreshStatus();
+}
+
+async function tfStop() {
+    if (await _tfPost('/api/test-feed/stop', {}, 'Feed stopped.')) tfRefreshStatus();
+}
+
+async function _tfPost(url, body, okMsg) {
+    try {
+        const r = await setupFetch(url, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body || {}),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) {
+            if (typeof showToast === 'function') showToast('Failed: ' + (d.detail || r.status), 'error');
+            return false;
+        }
+        if (okMsg && typeof showToast === 'function') showToast(okMsg, 'success');
+        return true;
+    } catch (e) {
+        if (typeof showToast === 'function') showToast('Failed: ' + (e.message || e), 'error');
+        return false;
+    }
+}
+
 const SETUP_TILES = {
     'Spokes & Agents':  _renderSetupSpokesTile,
     'Module Management': _renderSetupModuleMgmtTile,
@@ -12146,6 +12385,7 @@ const SETUP_TILES = {
     'Simulations':      _renderSetupSimulationsTile,
     'Remote Console':   _renderSetupRemoteConsoleTile,
     'OS Updates':       _renderSetupOsUpdatesTile,
+    'Test Data Feed':   _renderSetupTestFeedTile,
 };
 
 // Global Learned Values (Global Admin only) — now the "Learned Values" tab of
