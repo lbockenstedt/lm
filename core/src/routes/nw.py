@@ -1708,6 +1708,21 @@ def register(app, hub, ctx):
             if not _is_admin(sess):
                 instances = [i for i in instances
                              if isinstance(i, dict) and access.spoke_visible_to_session(sess, i.get("tenant_id", ""))]
+            # Optional explicit tenant scope (``?tenant=``): narrow to that
+            # tenant's own instances plus shared ones. Opt-in and additive — no
+            # caller that omits the param changes behavior. This is what lets a
+            # tenant-scoped surface (e.g. the NW Scan tab) stop showing an ADMIN
+            # every other tenant's entries just because admins bypass the
+            # visibility filter above. An unassigned instance (no tenant_id) is
+            # admin-only by the shared-tenant invariant, so it is excluded too.
+            req_tenant = str(request.query_params.get("tenant") or "").strip()
+            if req_tenant and req_tenant != "default":
+                shared_tid = access.shared_tenant_id() or ""
+                scope = {req_tenant}
+                if shared_tid:
+                    scope.add(shared_tid)
+                instances = [i for i in instances
+                             if isinstance(i, dict) and i.get("tenant_id", "") in scope]
             return {"instances": instances}
 
         @app.post(f"/setup/{route_prefix}", operation_id=f"add_{op}")
