@@ -23434,17 +23434,28 @@ async function loadNetboxData(subMenu) {
             if (!r.ok || d.status === 'ERROR') { container.innerHTML = `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${d.message || d.detail || 'NetBox spoke not connected'}</p>`; return; }
             const ips = d.ip_addresses || [];
             window._nbIPs = ips;
-            const cols = ['Address', 'Status', 'DNS Name', 'Description', 'Assigned To', 'Device', ''];
+            const cols = ['Address', 'Status', 'MAC', 'DNS Name', 'Description', 'Assigned To', 'Device', ''];
             const rows = ips.map(ip => {
                 const statusCls = ip.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500';
+                // mac_address is a NetBox custom field, written by the
+                // firewall/Kea→NetBox discovery sync. It was already fetched
+                // (the CPPM endpoint sync needs it) but never shown, and it is
+                // what a DHCP reservation matches the client on — so surface it
+                // and gate the Reserve action on it.
+                const nbMac = (ip.custom_fields || {}).mac_address || '';
+                const reserveBtn = nbMac
+                    ? `<button onclick="reserveNetboxIP(${ip.id})" title="Create a DHCP reservation pinning this address to ${escapeHtml(nbMac)}" class="p-1 text-slate-400 hover:text-[#01A982] transition-colors text-xs font-medium">Reserve</button>`
+                    : `<span title="No MAC on this NetBox IP record yet — a DHCP reservation needs one to match the client. Discovery fills it in once the device is seen." class="p-1 text-slate-200 text-xs cursor-not-allowed">Reserve</span>`;
                 return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                     <td class="px-4 py-2 font-mono font-medium">${escapeHtml(ip.address)}</td>
                     <td class="px-4 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-medium ${statusCls}">${escapeHtml(ip.status)}</span></td>
+                    <td class="px-4 py-2 text-xs font-mono">${nbMac ? escapeHtml(nbMac) : '—'}</td>
                     <td class="px-4 py-2 text-xs">${ip.dns_name || '—'}</td>
                     <td class="px-4 py-2 text-xs">${ip.description || '—'}</td>
                     <td class="px-4 py-2 text-xs">${ip.assigned_to || '—'}</td>
                     <td class="px-4 py-2 text-xs">${ip.device || '—'}</td>
                     <td class="px-4 py-2 whitespace-nowrap">
+                        ${reserveBtn}
                         <button onclick="editNetboxIP(${ip.id})" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
                         <button onclick="releaseNetboxIP(${ip.id})" title="Release" class="p-1 text-slate-300 hover:text-red-500 transition-colors text-xs">Release</button>
                     </td>
@@ -29345,7 +29356,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
     }
 }
 
-async function _loadDhcpSubnetOptions(selId, preferredSubnetId, spoke) {
+async function _loadDhcpSubnetOptions(selId, preferredSubnetId, spoke, preferredIp) {
     const sel = document.getElementById(selId);
     if (!sel) return;
     sel.innerHTML = '<option value="">Loading…</option>';
@@ -29368,8 +29379,18 @@ async function _loadDhcpSubnetOptions(selId, preferredSubnetId, spoke) {
             }).join('')
             : `<option value="">${ok ? 'No subnets configured' : (detail || 'Could not load subnets')}</option>`;
         if (subnets.length) {
+            const byIp = preferredIp
+                ? subnets.find(s => s.subnet && _isIPInCIDR(preferredIp, s.subnet))
+                : null;
             if (preferredSubnetId != null && subnets.some(s => String(s.id) === String(preferredSubnetId))) {
                 sel.value = String(preferredSubnetId);
+            } else if (byIp) {
+                // No usable subnet-id (an IPAM row has none, and a lease's can
+                // miss after a Kea reconfigure) — fall back to the scope that
+                // actually contains the address rather than silently leaving
+                // whichever option happens to sort first selected, which files
+                // the reservation against the wrong scope.
+                sel.value = String(byIp.id);
             } else if (subnets.length === 1) {
                 sel.value = String(subnets[0].id);
             }
@@ -29401,8 +29422,36 @@ function editDhcpReservation(ip, spoke) {
     showDhcpReservationModal(item);
 }
 
-function showDhcpReservationModal(editItem, isConvert = false) {
-    const editing = !isConvert && !!editItem;
+// IPAM → DHCP: create a Kea reservation straight from a NetBox IP record.
+// The address is already allocated in NetBox, but that alone does not pin the
+// client to it — only a DHCP reservation does. A reservation matches on MAC,
+// which lives in the IP record's mac_address custom field (written by the
+// discovery sync), so this refuses rather than opening a modal that cannot be
+// submitted. Opens the shared modal in prefill mode: a plain Add with the
+// fields filled in, NOT an edit of an existing reservation and not a lease
+// conversion (there may be no lease to purge).
+function reserveNetboxIP(id) {
+    const item = (window._nbIPs || []).find(r => String(r.id) === String(id));
+    if (!item) { showToast('Row data not found — refresh and try again', 'error'); return; }
+    const mac = (item.custom_fields || {}).mac_address || '';
+    if (!mac) {
+        showToast('This IP has no MAC on its NetBox record — a DHCP reservation needs one to match the client', 'error');
+        return;
+    }
+    showDhcpReservationModal({
+        // NetBox stores the address as CIDR; Kea wants the bare host address.
+        ip: String(item.address || '').split('/')[0],
+        mac,
+        hostname: item.dns_name || '',
+    }, false, true);
+}
+
+function showDhcpReservationModal(editItem, isConvert = false, prefillOnly = false) {
+    // prefillOnly = an ADD with the fields pre-populated from another module's
+    // row (IPAM). Without it, passing an editItem implies "edit this existing
+    // reservation" and the save would PUT against a reservation that does not
+    // exist yet.
+    const editing = !isConvert && !prefillOnly && !!editItem;
     const val = v => (v == null ? '' : String(v).replace(/"/g, '&quot;'));
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     const title = editing ? 'Edit DHCP Reservation' : (isConvert ? 'Convert Lease to Reservation' : 'Add DHCP Reservation');
@@ -29425,7 +29474,7 @@ function showDhcpReservationModal(editItem, isConvert = false) {
     // _spoke). Every dhcp spoke is a separate Kea, so the write has to go back
     // to the same one or it lands in the wrong cluster.
     if (editItem?._spoke) modal.dataset.spokeId = editItem._spoke;
-    _loadDhcpSubnetOptions('dhcp-res-subnet', editItem?.subnet_id, editItem?._spoke);
+    _loadDhcpSubnetOptions('dhcp-res-subnet', editItem?.subnet_id, editItem?._spoke, editItem?.ip);
 }
 
 async function saveDhcpReservation() {
