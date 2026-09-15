@@ -29363,7 +29363,12 @@ async function saveDhcpReservation() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
         });
-        if (ok && d.status === 'SUCCESS') { modal.remove(); loadDHCPData('Reservations'); }
+        if (ok && d.status === 'SUCCESS') {
+            modal.remove();
+            loadDHCPData('Reservations');
+            const w = _reservationWritebackWarning(d);
+            if (w) showToast(w, 'error');
+        }
         else if (ok && d.status === 'PARTIAL') {
             // The reservation applied but the old lease survived, so the client
             // stays on its current address. Close and refresh (the reservation
@@ -29374,6 +29379,26 @@ async function saveDhcpReservation() {
         }
         else showToast('Error: ' + (detail || d?.message || 'Operation failed'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
+}
+
+// A reservation lives in Kea, but core.dns_dhcp_sync rebuilds Kea's entire
+// subnet4 from NetBox alone and config-sets it — so a reservation whose MAC
+// never landed on a NetBox IP object is deleted by the next sync, minutes
+// later and silently. The API reports that outcome in netbox_writeback
+// (see _with_writeback in core/src/routes/net_services.py); surface it instead
+// of showing a clean success the operator has no way to act on.
+// `removing` flips the message for the delete path, where a write-back that
+// failed to CLEAR the MAC means the next sync recreates what was just deleted.
+function _reservationWritebackWarning(d, removing) {
+    const w = d && d.netbox_writeback;
+    if (!w || w.status === 'ok' || w.status === 'unchanged') return '';
+    const ip = w.ip || 'this address';
+    const why = w.status === 'not_found'
+        ? `NetBox has no IP object for ${ip}`
+        : (w.reason || w.error || 'the NetBox write-back failed');
+    return removing
+        ? `Removed from Kea, but ${why} — the next NetBox sync may restore this reservation.`
+        : `Saved to Kea, but ${why} — the next NetBox sync will drop this reservation.`;
 }
 
 async function deleteDhcpLease(ip, spoke) {
@@ -29405,7 +29430,11 @@ async function deleteDhcpReservation(ip, spoke) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
-        if (ok && d.status === 'SUCCESS') loadDHCPData('Reservations');
+        if (ok && d.status === 'SUCCESS') {
+            loadDHCPData('Reservations');
+            const w = _reservationWritebackWarning(d, true);
+            if (w) showToast(w, 'error');
+        }
         else showToast('Error: ' + (detail || d?.message || 'Delete failed'), 'error');
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
