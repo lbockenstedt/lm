@@ -3162,10 +3162,33 @@ def register(app, hub, ctx):
             coordinator_addresses[0] if coordinator_addresses else "")
 
         workers = []
+        # Why each connected agent in this tenant was passed over. Without it
+        # the "< 2" answer below is unactionable: an operator looking at a
+        # fleet where several nodes run Kea is told only that two are required,
+        # with nothing to say which tenant was searched or why the nodes they
+        # can see were not counted. (Observed with four active dhcp-server
+        # roles fleet-wide and exactly one in the spoke's tenant.)
+        skipped = []
+
+        def _agent_label(sid):
+            names = hub.state.system_state.get("module_names", {}) or {}
+            meta = hub.state.system_state.get("module_metadata", {}) or {}
+            return (names.get(sid)
+                    or (meta.get(sid) or {}).get("display_name")
+                    or sid)
+
         for sid, report in reports:
+            if not report:
+                skipped.append({"spoke_id": sid, "name": _agent_label(sid),
+                                "reason": "agent did not answer the roles query"})
+                continue
             if "dhcp-server" not in (report.get("installed_deploy_roles") or []):
+                skipped.append({"spoke_id": sid, "name": _agent_label(sid),
+                                "reason": "DHCP Server role is not installed"})
                 continue
             if "dhcp-server" not in (report.get("active_deploy_roles") or []):
+                skipped.append({"spoke_id": sid, "name": _agent_label(sid),
+                                "reason": "DHCP Server role is installed but not active"})
                 continue
             worker_info = next((
                 item for item in (report.get("configured_workers") or [])
@@ -3191,20 +3214,42 @@ def register(app, hub, ctx):
         for item in workers:
             _upsert_instance(item["spoke_id"], item["id"], item["host"])
         if len(workers) < 2:
+            tenant_label = dhcp_tenant or "unassigned"
+            message = (
+                f"Found {len(workers)} of the 2 active DHCP Server roles Kea HA "
+                f"requires in tenant {tenant_label} (searched {len(candidates)} "
+                f"connected agent(s) in that tenant)."
+            )
+            if skipped:
+                message += " Passed over: " + "; ".join(
+                    f"{item['name']} — {item['reason']}" for item in skipped)
+            else:
+                message += (" Load the DHCP Server role onto another agent in "
+                            "this tenant, then run discovery again.")
             return {
                 "status": "SUCCESS",
                 "workers": [{"spoke_id": item["spoke_id"], "status": "waiting"}
                             for item in workers],
                 "discovered_count": len(workers),
+                "candidate_count": len(candidates),
+                "tenant_id": dhcp_tenant,
+                "skipped": skipped,
                 "cluster_ready": False,
-                "message": "Two active DHCP Server roles are required for Kea HA.",
+                "message": message,
             }
         if len(workers) > 2:
+            # Name them: "exactly two" is only actionable if the operator can
+            # see which nodes are competing for the pair.
+            listed = ", ".join(
+                f"{_agent_label(item['spoke_id'])} ({item['host']})"
+                for item in workers)
             raise HTTPException(
                 status_code=409,
                 detail=(
                     f"Found {len(workers)} active DHCP Server roles for tenant "
-                    f"{dhcp_tenant or 'unassigned'}; Kea HA requires exactly two."))
+                    f"{dhcp_tenant or 'unassigned'}; Kea HA requires exactly two. "
+                    f"Active: {listed}. Unload the DHCP Server role from the "
+                    "extras, then run discovery again."))
 
         already_configured = all(
             item["configured"]
