@@ -12156,7 +12156,7 @@ function _renderSetupTestFeedTile(content) {
                 <span id="tf-status" class="text-xs text-slate-400"></span>
             </div>
             <div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-[11px] text-amber-800 leading-snug">
-                Gives a dev/qa/lrb hub a realistic fleet without duplicating lab hardware — <b>Global-Admin only, every change is audit-logged</b>.
+                Gives a test hub a realistic fleet without duplicating lab hardware — <b>Global-Admin only, every change is audit-logged</b>.
                 One hub <b>publishes</b> an anonymised snapshot; another <b>subscribes</b> and replays it as synthetic spokes.
                 Hostnames, addresses, MACs, serials and user names are replaced <b>on the publishing hub</b>, so raw fleet data never leaves it; secrets are dropped entirely.
                 <b>Set up only one half on any given hub</b> — publish on production, subscribe on the branch hub.
