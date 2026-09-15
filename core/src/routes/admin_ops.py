@@ -527,6 +527,78 @@ def register(app, hub, ctx):
                 "dns": hub.dns_dhcp_sync_status.get("dns"),
                 "dhcp": hub.dns_dhcp_sync_status.get("dhcp")}
 
+    @app.get("/admin/ops/dhcp-sync-preview")
+    async def admin_ops_dhcp_sync_preview(request: Request):
+        """Read-only: show EXACTLY what a NetBox -> Kea DHCP sync would push,
+        and — critically — which reservations would be silently dropped.
+
+        The sync reports ``status: "ok"`` even when the Kea spoke skips every
+        reservation it was handed (``reservations_skipped: 123`` with
+        ``reservations: 0``), because from the hub's point of view the push
+        succeeded. That is indistinguishable from "there are no reservations"
+        and gives an operator asking "why is my reservation missing?" nothing
+        to go on.
+
+        A reservation only lands if its IP falls inside a prefix that is
+        actually synced as a scope, i.e. a NetBox prefix that is NOT
+        ``status=container`` AND has ``custom_fields.dhcp_enabled`` ticked
+        (see ``dns_dhcp_sync.build_dhcp_payload``). The usual cause of a
+        missing reservation is therefore a perfectly good IP+MAC in NetBox
+        sitting in a prefix nobody opted into DHCP.
+
+        This recomputes the payload with the SAME function the sync uses and
+        classifies every reservation as matched/unmatched, so the answer is
+        one call instead of a config diff on each Kea node. Nothing is pushed.
+        """
+        _guard(request)
+        import ipaddress
+        from dns_dhcp_sync import build_dhcp_payload
+        try:
+            pfx_data, ips_data = await hub._netbox_prefixes_and_ips()
+        except Exception as e:
+            logger.exception("admin_ops: dhcp-sync-preview failed")
+            raise HTTPException(status_code=500, detail=str(e))
+        subnets, reservations = build_dhcp_payload(pfx_data, ips_data)
+
+        nets = []
+        for s in subnets:
+            try:
+                nets.append((s["subnet"], ipaddress.ip_network(s["subnet"], strict=False)))
+            except ValueError:
+                continue
+        matched, unmatched = [], []
+        for r in reservations:
+            hit = None
+            try:
+                addr = ipaddress.ip_address(r["ip"])
+                hit = next((label for label, net in nets if addr in net), None)
+            except ValueError:
+                hit = None
+            (matched if hit else unmatched).append({**r, "subnet_match": hit})
+
+        # Every prefix NetBox knows about, with the reason it is or isn't a
+        # scope — this is the actionable half: the fix is almost always
+        # "tick dhcp_enabled on <prefix>".
+        prefixes = []
+        for p in (pfx_data.get("prefixes") or []):
+            cf = p.get("custom_fields") or {}
+            status = (p.get("status") or "")
+            reason = ("container (aggregate prefix, never a scope)"
+                      if status.lower() == "container"
+                      else ("" if cf.get("dhcp_enabled")
+                            else "custom_fields.dhcp_enabled is not set"))
+            prefixes.append({"prefix": p.get("prefix", ""), "status": status,
+                             "synced_as_scope": not reason, "reason": reason})
+
+        return {"status": "ok",
+                "scopes": [s["subnet"] for s in subnets],
+                "totals": {"reservations": len(reservations),
+                           "would_apply": len(matched),
+                           "would_skip": len(unmatched)},
+                "unmatched_reservations": unmatched,
+                "matched_reservations": matched,
+                "prefixes": prefixes}
+
     @app.get("/admin/ops/dhcp-ha-status")
     async def admin_ops_dhcp_ha_status(request: Request):
         """Read-only Kea HA pair status straight from the DHCP spoke's own
