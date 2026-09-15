@@ -235,6 +235,54 @@ def register(app, hub, ctx):
                        spoke_id, role)
         return {"status": "ok", "target": spoke_id, "role": role, "result": result}
 
+    @app.post("/admin/ops/agent-roles")
+    async def admin_ops_agent_roles(request: Request):
+        """Show exactly what the WebUI's role views see for a generic agent.
+
+        The Agents tile and the Roles dialog both derive their badges from two
+        agent RPCs, and they historically disagreed — the tile read only the
+        hosted sub-spoke list while the dialog read the durable deploy-role
+        markers, so a node running Unbound and Kea rendered as "none (idle)".
+        Diagnosing that from the outside was guesswork: both RPCs ride
+        session-authenticated ``/api/agent/*`` routes, which a loopback operator
+        cannot call. This relays the same two READ-ONLY commands and returns
+        their raw payloads, so the agent's own answer can be compared against
+        what the UI draws.
+
+        Strictly read-only: only GET_AVAILABLE_ROLES and GET_DEPLOY_STATUS are
+        ever sent, so this adds no mutation surface. Body: {"spoke_id": ...}."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        spoke_id = (body or {}).get("spoke_id")
+        if not spoke_id:
+            raise HTTPException(status_code=400, detail="spoke_id is required")
+        if hub._primary_key(spoke_id) not in hub.active_connections:
+            raise HTTPException(status_code=503, detail=f"spoke '{spoke_id}' not connected")
+        out = {"status": "ok", "target": spoke_id}
+        for cmd, key in (("GET_AVAILABLE_ROLES", "roles"),
+                         ("GET_DEPLOY_STATUS", "deploy_status")):
+            try:
+                result = await hub.request_response(spoke_id, cmd, {}, timeout=30.0)
+                data = result.get("payload", {}).get("data", result) \
+                    if isinstance(result, dict) else result
+                out[key] = data
+            except Exception as e:  # one command failing must not hide the other
+                out[key] = {"error": str(e)}
+        # Mirror the two UI derivations so a disagreement is visible directly.
+        roles = out.get("roles") or {}
+        if isinstance(roles, dict):
+            out["ui_view"] = {
+                "hosted_active": [r.get("role") for r in (roles.get("active") or [])
+                                  if isinstance(r, dict)],
+                "installed_deploy_roles": roles.get("installed_deploy_roles"),
+                "active_deploy_roles": roles.get("active_deploy_roles"),
+            }
+        out["hub_recorded_roles"] = hub.agent_assigned_roles(spoke_id)
+        return out
+
     @app.post("/admin/ops/set-cs-mode")
     async def admin_ops_set_cs_mode(request: Request):
         """Turn a pxmx node's **Client Simulation mode** on/off via loopback,
