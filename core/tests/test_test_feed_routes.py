@@ -169,11 +169,12 @@ def test_publishing_is_off_by_default():
     assert _DEFAULTS["receiver_enabled"] is False
 
 
-def test_there_is_no_tenant_setting():
-    """The replayed fleet joins the hub's SHARED tenant so every tenant can see
-    it. A stored tenant would silently win over that resolution and wall the
-    fleet into one tenant again."""
-    assert not any("tenant" in k for k in _DEFAULTS)
+def test_tenant_defaults_to_shared_but_can_be_overridden():
+    """Blank means the shared tenant (visible in Spokes & Agents everywhere).
+    An explicit tenant is needed to appear in that tenant's Simulations views,
+    because SimulationsService._spokes_for_tenant matches with strict equality
+    and does not union shared — see the note on _DEFAULTS."""
+    assert _DEFAULTS["receiver_tenant"] == ""
 
 
 def test_there_is_no_operator_supplied_psk():
