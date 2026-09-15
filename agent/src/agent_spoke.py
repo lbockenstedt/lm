@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shlex
+import shutil
 import socket
 import ssl
 import subprocess
@@ -298,6 +299,35 @@ _DEPLOY_ROLE_EXTRA_UNITS = {
     "dhcp-server": ("lm-dhcp-worker", "kea-ha-agent"),
 }
 
+# UNINSTALL_ROLE recipes — the true inverse of a deploy role's install.
+#
+# UNLOAD_ROLE deliberately only stops+disables the units ("stop managing this",
+# not "uninstall"), which leaves the node reporting the role as
+# "installed (stopped)" forever: the installed/active badge is driven by
+# _DEPLOY_ROLE_MARKERS, i.e. the SERVICE BINARY still being on disk. There was
+# no way to get a node back to a clean state short of rebuilding it, so a
+# decommissioned DHCP/DNS server kept advertising a role it no longer ran.
+#
+# ``packages`` are apt-purged (config files included), ``unit_files`` are the
+# LM-authored sidecar units that no package owns and so must be deleted by
+# hand, and ``paths`` are the config/state/runtime trees left behind by the
+# installer that dpkg does not track. Only roles listed here can be
+# uninstalled; anything else is refused rather than guessed at.
+_SYSTEMD_UNIT_DIR = "/etc/systemd/system"
+_DEPLOY_ROLE_PURGE = {
+    "dns-server": {
+        "packages": ("unbound", "unbound-anchor"),
+        "unit_files": ("lm-dns-worker.service",),
+        "paths": ("/etc/unbound", "/var/lib/unbound", "/etc/lm-dns-worker"),
+    },
+    "dhcp-server": {
+        "packages": ("kea-dhcp4-server", "kea-ctrl-agent", "kea-common"),
+        "unit_files": ("lm-dhcp-worker.service", "kea-ha-agent.service"),
+        "paths": ("/etc/kea", "/var/lib/kea", "/run/kea",
+                  "/etc/lm-dhcp-worker", "/var/log/kea"),
+    },
+}
+
 
 def _configured_service_workers() -> list:
     """Non-secret identity for configured DNS/DHCP worker sidecars."""
@@ -381,6 +411,104 @@ def _active_deploy_roles(installed_roles: list) -> list:
         if enabled:
             active.append(role)
     return active
+
+
+def _purge_deploy_role(role_name: str) -> dict:
+    """Blocking package/config purge for a deploy role. Run via ``to_thread``.
+
+    Ordering matters: units are stopped and disabled BEFORE the packages go, so
+    dpkg never trips over a running daemon holding its own files open, and the
+    LM-authored unit files are removed before the daemon-reload that forgets
+    them. Every step is best-effort and recorded — a node part-way through an
+    uninstall must still converge on a re-run rather than wedging, so this is
+    idempotent: already-absent packages, units and paths are simply skipped.
+
+    Returns a report; the caller decides SUCCESS vs PARTIAL from
+    ``marker_before``/``marker_after``.
+    """
+    spec = _DEPLOY_ROLE_PURGE[role_name]
+    marker = _DEPLOY_ROLE_MARKERS.get(role_name)
+    report = {
+        "marker": marker,
+        "marker_before": bool(marker and os.path.exists(marker)),
+        "units_stopped": [],
+        "packages_purged": [],
+        "unit_files_removed": [],
+        "paths_removed": [],
+        "errors": [],
+    }
+
+    def _run(cmd, timeout):
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              check=False, timeout=timeout)
+
+    units = list(_DEPLOY_ROLE_UNITS.get(role_name, ()))
+    units += [u for u in _DEPLOY_ROLE_EXTRA_UNITS.get(role_name, ())
+              if u not in units]
+    if units:
+        try:
+            _run(["systemctl", "disable", "--now", *units], 120)
+            report["units_stopped"] = units
+        except (OSError, subprocess.SubprocessError) as e:
+            report["errors"].append(f"stopping units: {e}")
+
+    for unit_file in spec.get("unit_files", ()):
+        path = Path(_SYSTEMD_UNIT_DIR) / unit_file
+        try:
+            if path.exists():
+                path.unlink()
+                report["unit_files_removed"].append(str(path))
+        except OSError as e:
+            report["errors"].append(f"removing {path}: {e}")
+
+    packages = list(spec.get("packages", ()))
+    if packages:
+        env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
+        try:
+            # Purge each package on its own: apt aborts the WHOLE transaction if
+            # any named package is unknown to dpkg, so one never-installed
+            # package (kea-ctrl-agent is packaged separately on some releases)
+            # would otherwise leave every other package behind.
+            for pkg in packages:
+                proc = subprocess.run(
+                    ["apt-get", *_APT_LOCK_FLAGS, "purge", "-y", "-qq", pkg],
+                    capture_output=True, text=True, check=False,
+                    timeout=_APT_INSTALL_TIMEOUT_S, env=env,
+                )
+                if proc.returncode == 0:
+                    report["packages_purged"].append(pkg)
+                else:
+                    err = (proc.stderr or proc.stdout or "").strip()
+                    if "unable to locate package" not in err.lower():
+                        report["errors"].append(f"purging {pkg}: {err[:200]}")
+            subprocess.run(
+                ["apt-get", *_APT_LOCK_FLAGS, "autoremove", "-y", "-qq"],
+                capture_output=True, text=True, check=False,
+                timeout=_APT_INSTALL_TIMEOUT_S, env=env,
+            )
+        except (OSError, subprocess.SubprocessError) as e:
+            report["errors"].append(f"apt purge: {e}")
+
+    for raw in spec.get("paths", ()):
+        path = Path(raw)
+        try:
+            if path.is_dir() and not path.is_symlink():
+                shutil.rmtree(path)
+                report["paths_removed"].append(raw)
+            elif path.exists() or path.is_symlink():
+                path.unlink()
+                report["paths_removed"].append(raw)
+        except OSError as e:
+            report["errors"].append(f"removing {raw}: {e}")
+
+    try:
+        _run(["systemctl", "daemon-reload"], 60)
+        _run(["systemctl", "reset-failed"], 60)
+    except (OSError, subprocess.SubprocessError) as e:
+        report["errors"].append(f"daemon-reload: {e}")
+
+    report["marker_after"] = bool(marker and os.path.exists(marker))
+    return report
 class _RoleAdapter(BaseSpoke):
     """Adapter that lets a non-BaseSpoke spoke (e.g. cppm's CPPMSpoke) be loaded
     as a role. Delegates handle_command/get_version to the inner instance and
@@ -1479,6 +1607,70 @@ class GenericAgent(BaseSpoke):
             except Exception as e:
                 logger.error("NetBox admin password reset raised: %s", e)
                 return {"status": "ERROR", "message": str(e)}
+
+        if cmd == "UNINSTALL_ROLE":
+            # The true inverse of a deploy-role install. UNLOAD_ROLE only stops
+            # and disables the units, which leaves the node reporting the role
+            # as "installed (stopped)" indefinitely because the installed badge
+            # is driven by the service binary still being present. This removes
+            # the packages, LM-authored sidecar units and config/state trees so
+            # a decommissioned node stops advertising a role it no longer runs.
+            role_name = data.get("role")
+            if role_name not in _DEPLOY_ROLE_PURGE:
+                return {
+                    "status": "ERROR",
+                    "message": (
+                        f"Role '{role_name}' cannot be uninstalled "
+                        f"(supported: {', '.join(sorted(_DEPLOY_ROLE_PURGE))})."
+                    ),
+                }
+            # Same guards as UNLOAD_ROLE, and for the same reasons — purging the
+            # server out from under a live management sub-spoke or a running
+            # deploy would leave both in an undefined state.
+            module_role = role_name.removesuffix("-server")
+            if module_role in self._roles:
+                return {
+                    "status": "ERROR",
+                    "message": (
+                        f"Unload the '{module_role}' management role before "
+                        f"uninstalling '{role_name}'."
+                    ),
+                }
+            if (self._deploy_tasks.get(role_name)
+                    and not self._deploy_tasks[role_name].done()):
+                return {
+                    "status": "ERROR",
+                    "message": f"Deployment of '{role_name}' is still running.",
+                }
+            report = await asyncio.to_thread(_purge_deploy_role, role_name)
+            self._deploy_status_by_role.pop(role_name, None)
+            if report.get("marker_after"):
+                # The binary surviving the purge is the one outcome we must not
+                # report as success: the hub would drop the role assignment
+                # while the node still advertises the role as installed.
+                return {
+                    "status": "ERROR",
+                    "role": role_name,
+                    "deploy": True,
+                    "report": report,
+                    "message": (
+                        f"Uninstall of '{role_name}' did not complete — "
+                        f"{report.get('marker')} is still present. "
+                        + ("; ".join(report.get("errors") or [])
+                           or "the package may be held or owned by another source.")
+                    ),
+                }
+            removed = ", ".join(report.get("packages_purged") or []) or "no packages"
+            return {
+                "status": "SUCCESS",
+                "role": role_name,
+                "deploy": True,
+                "report": report,
+                "message": (
+                    f"Role '{role_name}' uninstalled ({removed} purged, "
+                    f"{len(report.get('paths_removed') or [])} path(s) removed)"
+                ),
+            }
 
         if cmd == "UNLOAD_ROLE":
             role_name = data.get("role")

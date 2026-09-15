@@ -235,6 +235,38 @@ def register(app, hub, ctx):
                        spoke_id, role)
         return {"status": "ok", "target": spoke_id, "role": role, "result": result}
 
+    @app.post("/admin/ops/uninstall-role")
+    async def admin_ops_uninstall_role(request: Request):
+        """Uninstall a deploy role from a generic agent via loopback.
+
+        Loopback twin of ``/tenant/agent/{id}/uninstall-role``, bypassing the
+        tenant-ownership guard for the same reason ``unload-role`` above does.
+        Where unload only stops and disables the units — leaving the node
+        reporting the role as "installed (stopped)" forever — this purges the
+        packages, LM-authored sidecar units and config/state trees so a
+        decommissioned node stops advertising a role it no longer runs.
+        Body: {"spoke_id": ..., "role": ...}."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        spoke_id = (body or {}).get("spoke_id")
+        role = (body or {}).get("role")
+        if not spoke_id or not role:
+            raise HTTPException(status_code=400, detail="spoke_id and role are required")
+        if hub._primary_key(spoke_id) not in hub.active_connections:
+            raise HTTPException(status_code=503, detail=f"spoke '{spoke_id}' not connected")
+        try:
+            result = await hub.request_response(spoke_id, "UNINSTALL_ROLE",
+                                                {"role": role}, timeout=1260.0)
+        except Exception as e:
+            logger.exception("admin_ops: uninstall-role failed for %s/%s", spoke_id, role)
+            raise HTTPException(status_code=500, detail=str(e))
+        logger.warning("admin_ops: uninstall-role driven via loopback for spoke=%s role=%s",
+                       spoke_id, role)
+        return {"status": "ok", "target": spoke_id, "role": role, "result": result}
+
     @app.post("/admin/ops/agent-roles")
     async def admin_ops_agent_roles(request: Request):
         """Show exactly what the WebUI's role views see for a generic agent.
