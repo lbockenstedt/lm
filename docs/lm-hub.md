@@ -144,7 +144,11 @@ Publishing is **off by default**; deploying the code never turns a hub into a da
 
 ### On the RECEIVER hub (dev/qa/lrb)
 
-Fill in the source URL, the API token from step 1, and the **tenant and onboarding PSK belonging to this hub** — the PSK auto-approves the synthetic spokes so their telemetry is accepted instead of sitting at "pending". Then:
+Fill in the source URL, the API token from step 1, and this hub's **shared-tenant onboarding PSK** — the PSK auto-approves the synthetic spokes so their telemetry is accepted instead of sitting at "pending".
+
+There is no tenant to pick: the replayed fleet always joins **this hub's shared tenant**, which makes it visible to every tenant rather than walled into one. The page shows which tenant that resolves to. If no tenant on the hub is flagged shared, Start refuses with that reason — mark one in Setup → Tenants first. (Leaving the spokes unassigned would not do: unassigned is admin-only, so the fleet would be invisible to exactly the people testing against it.)
+
+Then:
 
 - **Test source** fetches one snapshot and shows what it would replay, without starting anything. Always worth a pass first.
 - **Start feed** launches `scripts/hub_feed.py` as a child process that polls the source and replays into this hub over its loopback spoke WebSocket.
@@ -165,7 +169,8 @@ The feeder is a normal process, not a service: it does **not** survive a hub res
 - **"The hub won't start / can't bind 443."** Two usual causes: (1) binding a port below 1024 as the non-root `svc_lm` user needs `CAP_NET_BIND_SERVICE` (the installers set `AmbientCapabilities=CAP_NET_BIND_SERVICE` in the systemd unit — check it's present if you hand-rolled the unit); (2) a configured `LM_TLS_CERT`/`LM_TLS_KEY` is broken — the hub fails fast rather than serving plaintext, so a crash-loop right after a "TLS cert load failed" log line means fix or unset the cert.
 - **"The hub crashes on boot complaining about a Fernet key."** `LM_FERNET_KEY` is required and fail-closed by design. Generate one (`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`) and set it — see `.env.example`.
 - **"The Test Data Feed says the source refused (403)."** Publishing is off on the source hub — turn on "Publish this hub's fleet as a test-data feed" there. A 401 instead means the API token was revoked or expired; issue a new one under Settings → API Tokens on the source.
-- **"The feed is running but no spokes appeared."** The synthetic spokes connected but were not approved, so their telemetry is discarded — check the tenant and onboarding PSK are the *receiving* hub's, not the source's.
+- **"The feed is running but no spokes appeared."** The synthetic spokes connected but were not approved, so their telemetry is discarded — check the onboarding PSK is the *receiving* hub's shared tenant's, not the source's.
+- **"Start says there is no shared tenant."** The replayed fleet joins the shared tenant so every tenant can see it, and this hub has none flagged. Mark one in Setup → Tenants; exactly one tenant may carry the flag.
 - **"A spoke keeps rejecting the hub's identity (`mutual_auth_failed`)."** Usually a stale secret after a hub restart or key rotation — the spoke needs its session key refreshed/re-approved.
 
 ## Related pages
