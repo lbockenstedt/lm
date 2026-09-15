@@ -134,15 +134,61 @@ def _iter_state_files(state_dir: str) -> List[str]:
     return out
 
 
+def _key_vault_source(env_file: Optional[str]) -> Optional[str]:
+    """Name of the Key Vault secret the hub would prefer over ``.env``, or None.
+
+    ``HubEncryption._resolve_primary_key`` checks Key Vault FIRST and only falls
+    back to ``LM_FERNET_KEY`` when the vault is unreachable. This rotator is
+    env-only: it cannot write the new key back to the vault. So on a
+    vault-backed hub a "successful" rotation is a time-bomb -- state is
+    re-encrypted under the new env key while the vault still holds the OLD one,
+    and the moment the vault becomes reachable again (SDK installed, managed
+    identity granted, network restored) the hub loads the old key and every
+    rotated file becomes undecryptable. Note the fallback is SILENT, so an
+    operator can easily believe the vault is not in play.
+
+    Checked in the live environment first, then in ``env_file`` -- the rotator
+    normally runs with the hub stopped, where the vars are only on disk."""
+    secret = os.environ.get("LM_FERNET_KEY_KV_SECRET", "").strip()
+    url = os.environ.get("LM_KEYVAULT_URL", "").strip()
+    if not (secret and url) and env_file and os.path.exists(env_file):
+        found = {}
+        with open(env_file, "r") as f:
+            for line in f:
+                line = line.strip()
+                for var in ("LM_FERNET_KEY_KV_SECRET", "LM_KEYVAULT_URL"):
+                    if line.startswith(var + "="):
+                        found[var] = line.split("=", 1)[1].strip().strip("'\"")
+        secret = secret or found.get("LM_FERNET_KEY_KV_SECRET", "")
+        url = url or found.get("LM_KEYVAULT_URL", "")
+    return secret if (secret and url) else None
+
+
 def rotate(state_dir: str, env_file: Optional[str], apply_env: bool, dry_run: bool,
-           keys_dir: Optional[str] = None) -> Tuple[int, int, str]:
+           keys_dir: Optional[str] = None,
+           allow_key_vault: bool = False) -> Tuple[int, int, str]:
     """Rotate the Fernet key over every decryptable file in ``state_dir`` AND
     ``keys_dir`` (the KeyManager data dir holding ``keys.json`` +
     ``hub_secret.json``).
 
+    Refuses to run on a Key-Vault-backed hub unless ``allow_key_vault`` is set,
+    because this rotator cannot update the vault secret — see
+    ``_key_vault_source``.
+
     Returns (rotated_count, skipped_count, new_key_str). Raises on any error
     before ``.env`` is touched.
     """
+    kv_secret = _key_vault_source(env_file)
+    if kv_secret and not allow_key_vault:
+        raise RuntimeError(
+            "This hub is configured to take LM_FERNET_KEY from Azure Key Vault "
+            f"(LM_FERNET_KEY_KV_SECRET={kv_secret!r}), which the hub prefers over "
+            ".env. This tool rotates the ENV key only and cannot update the vault, "
+            "so rotating now would re-encrypt state under a key the hub will stop "
+            "using as soon as the vault is reachable — stranding every rotated "
+            "file. Rotate the vault secret to the new key FIRST (or unset "
+            "LM_FERNET_KEY_KV_SECRET/LM_KEYVAULT_URL to go env-only), then re-run "
+            "with --allow-key-vault to confirm you have done so.")
     old_key = _resolve_old_key(env_file)
     _validate_key(old_key, "current (old) LM_FERNET_KEY")
 
@@ -265,11 +311,18 @@ def main(argv: Optional[List[str]] = None) -> int:
                    help="Write the new LM_FERNET_KEY to --env-file (backup first). Without it, just print the new line.")
     p.add_argument("--dry-run", action="store_true",
                    help="Report what would rotate; write nothing.")
+    p.add_argument("--allow-key-vault", action="store_true",
+                   help="Proceed even though the hub reads LM_FERNET_KEY from Azure "
+                        "Key Vault. ONLY pass this after you have already stored the "
+                        "NEW key in the vault secret — otherwise the hub will load the "
+                        "old key from the vault and every rotated file becomes "
+                        "undecryptable.")
     args = p.parse_args(argv)
 
     try:
         rotated, skipped, new_key = rotate(args.state_dir, args.env_file, args.apply_env,
-                                           args.dry_run, keys_dir=args.keys_dir or None)
+                                           args.dry_run, keys_dir=args.keys_dir or None,
+                                           allow_key_vault=args.allow_key_vault)
     except RuntimeError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
