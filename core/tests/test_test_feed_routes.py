@@ -157,6 +157,12 @@ def test_probe_sends_the_token_as_a_bearer_header(monkeypatch):
 # Config defaults / redaction
 # --------------------------------------------------------------------------
 
+def test_anonymising_is_off_by_default():
+    """Verbatim is the point: duplicate the production fleet so an issue
+    reproduces against the identifiers actually seen in the field."""
+    assert _DEFAULTS["source_anonymise"] is False
+
+
 def test_publishing_is_off_by_default():
     """Deploying this code must never turn a production hub into a data source."""
     assert _DEFAULTS["source_enabled"] is False

@@ -12157,8 +12157,8 @@ function _renderSetupTestFeedTile(content) {
             </div>
             <div class="rounded-md bg-amber-50 border border-amber-200 p-3 text-[11px] text-amber-800 leading-snug">
                 Gives a test hub a realistic fleet without duplicating lab hardware — <b>Global-Admin only, every change is audit-logged</b>.
-                One hub <b>publishes</b> an anonymised snapshot; another <b>subscribes</b> and replays it as synthetic spokes.
-                Hostnames, addresses, MACs, serials and user names are replaced <b>on the publishing hub</b>, so raw fleet data never leaves it; secrets are dropped entirely.
+                One hub <b>publishes</b> a snapshot of its fleet; another <b>subscribes</b> and replays it as synthetic spokes.
+                By default the copy is <b>verbatim</b> — real hostnames, addresses, MACs and serials — so a production issue reproduces against the identifiers you actually see in the field. Passwords, tokens and keys are <b>never</b> included either way.
                 <b>Set up only one half on any given hub</b> — publish on production, subscribe on the branch hub.
             </div>
 
@@ -12168,14 +12168,19 @@ function _renderSetupTestFeedTile(content) {
                     <span id="tf-src-badge" class="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-500">off</span>
                 </div>
                 <p class="text-[11px] text-slate-500 leading-snug">
-                    Publishing serves this hub's fleet, scrubbed, to any client holding a valid API token.
+                    Publishing serves this hub's fleet to any client holding a valid API token.
                     Issue one under <b>Settings → API Tokens</b> and give it to the receiving hub; revoking it stops that feed immediately.
                 </p>
                 <label class="flex items-center gap-2 text-sm text-slate-700">
                     <input type="checkbox" id="tf-source-enabled" class="w-4 h-4 text-green-600 rounded" onchange="tfSaveSource()">
                     Publish this hub's fleet as a test-data feed
                 </label>
-                <div class="flex flex-wrap items-center gap-2">
+                <label class="flex items-center gap-2 text-sm text-slate-700">
+                    <input type="checkbox" id="tf-anonymise" class="w-4 h-4 text-green-600 rounded" onchange="tfSaveSource()">
+                    Anonymise before publishing — replace hostnames, addresses, MACs and serials
+                </label>
+                <p id="tf-mode-state" class="text-[11px] leading-snug"></p>
+                <div id="tf-salt-row" class="flex flex-wrap items-center gap-2 hidden">
                     <button onclick="tfRegenSalt()" class="${btnSecCls} text-xs" title="Mint a new pseudonym salt, so every synthetic identity this hub publishes from now on is different and cannot be correlated with anything already sent">↻ Regenerate pseudonyms</button>
                     <span id="tf-salt-state" class="text-[11px] text-slate-400"></span>
                 </div>
@@ -12262,8 +12267,25 @@ async function tfLoad() {
         if (tok) tok.textContent = c.receiver_token ? '· stored' : '· not set';
         const rt = document.getElementById('tf-refresh-set');
         if (rt) rt.textContent = c.receiver_refresh_token ? '· stored' : '· not set';
+        const anon = document.getElementById('tf-anonymise');
+        if (anon) anon.checked = !!c.source_anonymise;
+        const saltRow = document.getElementById('tf-salt-row');
+        if (saltRow) saltRow.classList.toggle('hidden', !c.source_anonymise);
         const salt = document.getElementById('tf-salt-state');
         if (salt) salt.textContent = c.source_salt ? 'pseudonyms active' : 'minted on first publish';
+        // Say plainly which mode is live. "Verbatim" is the default and the
+        // whole point, but it is also the mode where real identifiers leave
+        // this hub, so it should never be something you have to infer.
+        const mode = document.getElementById('tf-mode-state');
+        if (mode) {
+            if (c.source_anonymise) {
+                mode.className = 'text-[11px] leading-snug text-slate-500';
+                mode.textContent = 'Anonymised: identifiers are replaced with stable stand-ins before anything leaves this hub.';
+            } else {
+                mode.className = 'text-[11px] leading-snug text-amber-700 font-semibold';
+                mode.textContent = 'Verbatim: real hostnames, addresses, MACs and serials leave this hub as-is. Secrets are still never included.';
+            }
+        }
         // The landing tenant is derived, not chosen. Say which one it is — and
         // say plainly when there ISN'T one, because Start will refuse and the
         // reason is not something the operator can guess from this page.
@@ -12311,11 +12333,14 @@ async function tfRefreshStatus() {
 
 async function tfSaveSource() {
     const enabled = !!document.getElementById('tf-source-enabled')?.checked;
-    if (enabled && !confirm('Publish this hub\'s fleet as a test-data feed?\n\nAny client with a valid API token will be able to read an anonymised snapshot of every client and VM this hub knows about. Identifying fields are replaced and secrets dropped, but the fleet\'s SHAPE (spoke count, client counts, platform mix) is exactly real.')) {
+    const anonymise = !!document.getElementById('tf-anonymise')?.checked;
+    // Confirm on the combination that actually matters: publishing verbatim is
+    // what sends real identifiers off this hub.
+    if (enabled && !anonymise && !confirm('Publish this hub\'s fleet VERBATIM?\n\nAny client with a valid API token will be able to read every client and VM this hub knows about, with REAL hostnames, addresses, MACs and serials. Passwords, tokens and keys are never included.\n\nTick "Anonymise before publishing" first if you want identifiers replaced.')) {
         const c = document.getElementById('tf-source-enabled'); if (c) c.checked = false;
         return;
     }
-    await _tfPost('/api/test-feed/config', { source_enabled: enabled },
+    await _tfPost('/api/test-feed/config', { source_enabled: enabled, source_anonymise: anonymise },
                   enabled ? 'Publishing enabled.' : 'Publishing disabled.');
     tfLoad();
 }

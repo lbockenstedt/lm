@@ -124,12 +124,12 @@ A spoke that authenticates but isn't yet approved stays connected in a **pending
 - **Manage tenants (create / edit / delete)** — Setup → Tenants. Add a tenant, edit its display name / description / quotas / scoping, or **Delete** it (`DELETE /setup/tenants/{tenant_id}`). Delete prompts for confirmation, detaches the tenant from every user, and frees its records; the **`default` tenant cannot be deleted** (returns 400). Creating/deleting a tenant stays Global-Admin-only.
 - **Turn on debug logging** — the Debug Logging toggle in Setup (`POST /setup/debug-mode {"enabled": true|false}`). This flips the hub's own log level immediately AND broadcasts `SET_LOG_LEVEL` to every connected spoke/agent, so one switch raises (or lowers) verbosity fleet-wide.
 - **Trigger an update** — `POST /setup/update` updates the hub itself (git pull + scheduled self-restart); `POST /setup/update/spokes` pushes `SPOKE_UPDATE` to every approved spoke without touching the hub (this is what AppBuilder typically calls right after landing a fix). Agents have their own `update_agents_only` counterpart.
-- **Populate a dev/qa/lrb hub with realistic data** — Setup → **Test Data Feed**. One hub *publishes* an anonymised snapshot of its fleet; another *subscribes* and replays it as synthetic spokes, so a branch hub gets production's shape without a duplicate lab. See "Test Data Feed" below for the full setup.
+- **Populate a dev/qa/lrb hub with realistic data** — Setup → **Test Data Feed**. One hub *publishes* a snapshot of its fleet; another *subscribes* and replays it as synthetic spokes, so a test hub carries a duplicate of the production fleet without duplicate hardware. See "Test Data Feed" below for the full setup.
 - **Force an out-of-cycle sync** — most sync cards (NetBox↔CPPM, hypervisor↔NetBox VM sync, firewall/network discovery, staleness sweep, realtime NAC) expose a "Sync now"/"Sweep now" button that runs the loop immediately instead of waiting for its interval.
 
 ## Test Data Feed
 
-Testing a branch hub means giving it a populated fleet, and standing up duplicate spoke VMs, Proxmox nodes and client sims per branch is expensive and drifts out of sync. This feature lets one hub publish an anonymised snapshot of its fleet and another replay it as synthetic spokes.
+Testing a branch hub means giving it a populated fleet, and standing up duplicate spoke VMs, Proxmox nodes and client sims per branch is expensive and drifts out of sync. This feature lets one hub publish a snapshot of its fleet and another replay it as synthetic spokes.
 
 Both halves are configured from the same page (Setup → Test Data Feed, Global-Admin only), but **a given hub only ever uses one of them**: publish on production, subscribe on the branch hub.
 
@@ -138,9 +138,13 @@ Both halves are configured from the same page (Setup → Test Data Feed, Global-
 1. Settings → **API Tokens** — issue a token for the receiving hub. Revoking it later stops that feed immediately.
 2. Setup → Test Data Feed → tick **Publish this hub's fleet as a test-data feed**.
 
-Publishing is **off by default**; deploying the code never turns a hub into a data source. Once on, `GET /api/test-feed/snapshot` serves the fleet to any client holding a valid token — already scrubbed, so raw hostnames, addresses, MACs, serials and user names never leave this box, and secret-bearing fields are dropped entirely rather than pseudonymised. What the snapshot *does* preserve is the fleet's shape: spoke count, clients per spoke, platform mix, VM counts. That is the point — it is what makes the branch hub useful — but it is also real information about your estate, so treat the token accordingly.
+Publishing is **off by default**; deploying the code never turns a hub into a data source. Once on, `GET /api/test-feed/snapshot` serves the fleet to any client holding a valid token.
 
-**Regenerate pseudonyms** mints a new salt. Every synthetic identity published afterwards changes, and a receiver already running sees its whole roster replaced on the next poll.
+**The copy is verbatim by default.** Real hostnames, addresses, MACs and serials are published as-is, because the point of the feed is to reproduce a production issue against the identifiers you actually see in the field — pseudonyms defeat that. The page says which mode is live, and enabling publishing while verbatim asks for confirmation naming what leaves the hub. Treat the API token as what it is: a read key to a full picture of your estate.
+
+**Passwords, tokens and keys are never included, in either mode.** That is not a toggle. Copying real hostnames to a test hub is a judgement you make about your own estate; copying live credentials onto a less-hardened box is a different category of exposure, and duplicating fleet data faithfully never requires it.
+
+**Anonymise before publishing** (optional) replaces hostnames, addresses, MACs, serials and user names with stable stand-ins, preserving the fleet's shape — spoke count, clients per spoke, platform mix, VM counts — without the identifiers. When it is on, **Regenerate pseudonyms** mints a new salt: every synthetic identity published afterwards changes, and a receiver already running sees its whole roster replaced on the next poll.
 
 ### On the RECEIVER hub (dev/qa/lrb)
 
