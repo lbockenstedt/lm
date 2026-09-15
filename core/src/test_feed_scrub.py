@@ -1,18 +1,27 @@
-"""Anonymisation + reshaping for the test-data feed (``scripts/hub_feed.py``
-and ``routes/test_feed.py`` share this module).
+"""Filtering + reshaping for the test-data feed (``scripts/hub_feed.py`` and
+``routes/test_feed.py`` share this module).
 
 Lives in ``core/src`` rather than beside the script because BOTH ends of the
-feed need it and they must not drift: the SOURCE hub scrubs before serving
-``/api/test-feed/snapshot`` (so raw fleet data never leaves the production box
-at all), and the receiving feeder scrubs again on the way in (so a snapshot
-from an older source hub, or a hand-fed fixture, is still covered). Running it
-twice is harmless — pseudonymising a pseudonym just maps it again, and the
-result is still stable per salt.
+feed need it and they must not drift: the SOURCE hub filters before serving
+``/api/test-feed/snapshot``, and the receiving feeder runs the same pass on the
+way in (so a snapshot from an older source hub, or a hand-fed fixture, is still
+covered). Running it twice is harmless in either mode.
 
-The scrub is deliberately over-broad. Over-scrubbing a test feed costs a
-slightly less readable lab dataset; under-scrubbing ships real hostnames,
-addresses and user names to a hub that is, by design, less hardened than the
-one they came from.
+TWO RULES, and they are not the same kind of rule:
+
+* **Secrets are always dropped** (``DROP_FIELDS``). Not a toggle, not a
+  default — no path through this module forwards a password, token, key or
+  certificate. Duplicating *fleet* data faithfully never requires them, and
+  the receiving hub is by design less hardened than the source.
+* **Identifiers are forwarded verbatim** unless the operator opts into
+  ``pseudonymise=True``. The feed exists to duplicate a production fleet so an
+  issue reproduces against the hostnames and addresses actually seen in the
+  field; rewriting them defeats the purpose. Anonymising remains available for
+  when the shape of the fleet is wanted without the identities.
+
+``IDENTIFYING_FIELDS``/``IDENTIFYING_SUBSTRINGS`` are deliberately over-broad,
+so that when anonymising IS on, a schema addition upstream does not quietly
+start leaking a new identifier.
 """
 import hashlib
 
@@ -100,24 +109,36 @@ def _is_dropped(key):
     return any(d == k or d in k for d in DROP_FIELDS)
 
 
-def scrub_snapshot(obj, salt):
-    """Recursively pseudonymise identifying fields and drop secret-bearing ones.
+def scrub_snapshot(obj, salt, pseudonymise=False):
+    """Drop secret-bearing fields and — when ``pseudonymise`` is True — replace
+    identifying ones with stable stand-ins.
 
-    Structure is preserved exactly — counts, nesting, list lengths, non-string
-    values — because the structure IS the thing being reproduced on the target.
-    Only leaf identifiers change. Applied before ANY data leaves this process."""
+    Structure is preserved exactly: counts, nesting, list lengths, non-string
+    values. Only leaf values ever change, because the structure IS what the
+    target is reproducing.
+
+    ``pseudonymise`` defaults to **False** (verbatim). This feature exists to
+    duplicate a production fleet into a test hub so a real issue can be
+    reproduced against the real identifiers, and pseudonymised hostnames and
+    addresses defeat that — so the operator chose verbatim as the default.
+    Passing True restores the anonymising behaviour (Setup → Test Data Feed).
+
+    Dropping secrets is NOT optional in either mode. Copying real hostnames to
+    a test hub is a judgement the operator makes about their own estate;
+    copying live credentials onto a less-hardened box is a different category
+    of exposure, and duplicating *fleet* data faithfully never requires it."""
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
             if _is_dropped(k):
                 continue
-            if _is_identifying(k) and isinstance(v, str) and v:
+            if pseudonymise and _is_identifying(k) and isinstance(v, str) and v:
                 out[k] = _pseudonym(v, salt, _kind_for(k))
             else:
-                out[k] = scrub_snapshot(v, salt)
+                out[k] = scrub_snapshot(v, salt, pseudonymise)
         return out
     if isinstance(obj, list):
-        return [scrub_snapshot(v, salt) for v in obj]
+        return [scrub_snapshot(v, salt, pseudonymise) for v in obj]
     return obj
 
 

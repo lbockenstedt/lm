@@ -1,15 +1,15 @@
-"""Test Data Feed — publish a scrubbed fleet snapshot, or subscribe to one.
+"""Test Data Feed — publish a fleet snapshot, or subscribe to one.
 
 Testing a dev/qa/lrb hub means giving it a populated fleet, and standing up a
 duplicate lab per branch is expensive and drifts. This module lets ONE hub
-publish an anonymised snapshot of its fleet and ANOTHER replay it as synthetic
-spokes, so a branch hub gets production's shape with no real hardware attached.
+publish a snapshot of its fleet and ANOTHER replay it as synthetic spokes, so a
+test hub carries a duplicate of the production fleet with no real hardware.
 
 Both halves live here because they are two ends of one feature and an operator
 sets them up from the same page — but a given hub only ever uses one:
 
-  SOURCE (production)   ``source_enabled`` ON → serves GET /api/test-feed/snapshot,
-                        already scrubbed. Nothing else changes; no new process runs.
+  SOURCE (production)   ``source_enabled`` ON → serves GET /api/test-feed/snapshot.
+                        Nothing else changes; no new process runs there.
   RECEIVER (dev/qa/lrb) holds the source URL + an API token, and runs
                         scripts/hub_feed.py as a child process that pulls on an
                         interval and replays into ITSELF over the normal spoke
@@ -18,11 +18,14 @@ sets them up from the same page — but a given hub only ever uses one:
 Security posture:
   * Global-Admin only on every route (also listed in api.py's
     ``_ADMIN_API_PREFIXES`` so the gate is enforced twice).
-  * Publishing is OFF by default. A hub never serves fleet data — even scrubbed
-    — until an operator deliberately turns it on.
-  * The snapshot is scrubbed BEFORE it leaves the source (test_feed_scrub), so
-    raw hostnames/addresses/user names do not cross the wire even if the
-    receiver is misconfigured or compromised.
+  * Publishing is OFF by default. A hub never serves fleet data until an
+    operator deliberately turns it on.
+  * The copy is VERBATIM by default — real hostnames and addresses — because
+    the feed exists to reproduce production issues against real identifiers.
+    ``source_anonymise`` opts into pseudonyms instead. Either way the API
+    token is a read key to a full picture of the estate.
+  * Secrets are dropped on the source in BOTH modes (test_feed_scrub's
+    DROP_FIELDS) — no path here forwards a password, token or key.
   * The receiver authenticates to the source with a normal API token (Settings →
     API Tokens on the source). No new credential type, and revoking the token
     stops the feed immediately.
@@ -46,21 +49,29 @@ except ImportError:  # test/bare-package path
 #: just gets these on its next read — no migration step.
 _DEFAULTS = {
     "source_enabled": False,       # publish this hub's fleet as a feed
-    "source_salt": "",             # pseudonym salt; minted on first publish
+    # Verbatim by default: the point of the feed is to duplicate a production
+    # fleet so an issue can be reproduced against the REAL identifiers, and
+    # pseudonymised hostnames/addresses defeat that. Flip this on to publish
+    # anonymised instead. Secrets are dropped either way (test_feed_scrub).
+    "source_anonymise": False,
+    "source_salt": "",             # pseudonym salt; only used when anonymising
     "receiver_enabled": False,     # this hub pulls a feed
     "receiver_source_url": "",     # https://<source hub>
-    "receiver_token": "",          # API token issued BY the source hub
-    # No tenant field: the synthetic spokes always join THIS hub's SHARED
-    # tenant, so the replayed fleet is visible to every tenant rather than
-    # walled into one. Asking the operator to pick a tenant was both an extra
-    # step and the wrong default — a test hub wants the data everywhere.
-    # Resolved at start time via access.refresh_shared_tenant (see _shared_tenant).
-    # No PSK field either. The PSK exists only to auto-approve the synthetic
-    # spokes on THIS hub — and this hub spawns them, so asking an operator to
-    # fetch a shared secret for the hub to authenticate to itself was ceremony.
-    # Start mints an ephemeral PSK, registers it on the shared tenant for the
-    # life of the feed, and revokes it on stop.
-    "receiver_refresh_token": "",  # refresh token from the SAME source-hub pair
+    "receiver_token": "",          # access token issued BY the source hub
+    "receiver_refresh_token": "",  # refresh half of the SAME pair (auto-rotate)
+    #
+    # Two things deliberately ABSENT from this dict:
+    #
+    #   tenant — the synthetic spokes always join THIS hub's SHARED tenant, so
+    #     the replayed fleet is visible to every tenant rather than walled into
+    #     one. Resolved at start via access.refresh_shared_tenant. A stored
+    #     value would silently win over that resolution if the flag ever moved.
+    #
+    #   psk — the onboarding PSK only auto-approves the synthetic spokes on
+    #     THIS hub, which is also what spawns them. Start mints an ephemeral
+    #     one, registers it on the shared tenant, and revokes it on stop; a
+    #     stored PSK would be a standing auto-approve credential with nothing
+    #     scoping it.
     "receiver_prefix": "feed-",    # synthetic spoke id prefix (for cleanup)
     "receiver_interval": 60,       # seconds between source polls
 }
@@ -104,9 +115,9 @@ def register(app, hub, ctx):
 
     def _redact(c: dict) -> dict:
         """Never hand a stored secret back to the browser. The UI shows whether
-        one is SET, not what it is — a saved token/PSK is write-only from the
-        page's point of view, so an admin session that is merely reading the
-        config page cannot walk away with the source hub's credential."""
+        one is SET, not what it is — a saved token is write-only from the page's
+        point of view, so an admin session that is merely reading the config
+        page cannot walk away with the source hub's credentials."""
         out = dict(c)
         for k in ("receiver_token", "receiver_refresh_token", "source_salt"):
             out[k] = bool(out.get(k))
@@ -141,7 +152,7 @@ def register(app, hub, ctx):
 
     @app.get("/api/test-feed/snapshot")
     async def get_feed_snapshot(request: Request):
-        """Serve this hub's fleet, scrubbed and grouped per spoke.
+        """Serve this hub's fleet, filtered and grouped per spoke.
 
         Gated on ``source_enabled`` — a hub that has not opted in returns 403,
         so merely deploying this code never turns a production hub into a data
@@ -155,15 +166,16 @@ def register(app, hub, ctx):
                 status_code=403,
                 detail="Test Data Feed publishing is disabled on this hub — "
                        "enable it in Setup → Test Data Feed")
+        anonymise = bool(c.get("source_anonymise"))
         salt = c.get("source_salt") or ""
-        if not salt:
-            # Mint on first serve so a pseudonym is stable for the life of the
-            # publish, and rotating it (Regenerate) genuinely re-randomises.
+        if anonymise and not salt:
+            # Mint on first anonymised serve so a pseudonym is stable for the
+            # life of the publish, and Regenerate genuinely re-randomises.
             salt = os.urandom(16).hex()
             _save({"source_salt": salt})
 
         raw = await asyncio.to_thread(_collect_fleet, hub)
-        scrubbed = scrub_snapshot(raw, salt)
+        scrubbed = scrub_snapshot(raw, salt, pseudonymise=anonymise)
         spokes = {}
         for sid, bucket in shard_by_spoke(scrubbed).items():
             spokes[str(sid)] = {
@@ -194,7 +206,7 @@ def register(app, hub, ctx):
         sess = _require_admin(request)
         data = await request.json()
         patch = {}
-        for k in ("source_enabled", "receiver_enabled"):
+        for k in ("source_enabled", "receiver_enabled", "source_anonymise"):
             if k in data:
                 patch[k] = bool(data[k])
         for k in ("receiver_source_url", "receiver_prefix"):
@@ -221,9 +233,13 @@ def register(app, hub, ctx):
             patch["source_salt"] = os.urandom(16).hex()
 
         cur = _save(patch)
+        # anonymise is audited explicitly: turning it off means this hub starts
+        # serving real hostnames/addresses, which is exactly the kind of change
+        # someone will later want to know the who and when of.
         logger.warning("[test-feed] config changed by %s → source_enabled=%s "
-                       "receiver_enabled=%s source_url=%s",
+                       "anonymise=%s receiver_enabled=%s source_url=%s",
                        _who(sess), cur.get("source_enabled"),
+                       cur.get("source_anonymise"),
                        cur.get("receiver_enabled"), cur.get("receiver_source_url"))
         return {"status": "ok", **_redact(_cfg())}
 
