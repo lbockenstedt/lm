@@ -17661,10 +17661,20 @@ async function showLoadRoleModal(spokeId) {
     const stoppableServers = [...activeDeployRoleIds]
         .filter(id => (id === 'dns-server' || id === 'dhcp-server')
             && !(roleState.deploy?.state === 'running' && roleState.deploy?.role === id));
-    const loadedControlIds = [
+    // Servers whose package is still on disk. A role that was unloaded is
+    // STOPPED but still installed, so it drops out of activeDeployRoleIds and
+    // used to render no control at all — leaving "installed (stopped)" on the
+    // node with no way to remove it from the UI. Uninstall is offered for these
+    // too, which is the only action that clears the installed marker.
+    const installedDeployRoleIds = new Set(roleState.installed_deploy_roles || []);
+    const uninstallableServers = [...installedDeployRoleIds]
+        .filter(id => (id === 'dns-server' || id === 'dhcp-server')
+            && !(roleState.deploy?.state === 'running' && roleState.deploy?.role === id));
+    const loadedControlIds = [...new Set([
         ...(active || []).map(item => item.role),
         ...stoppableServers,
-    ];
+        ...uninstallableServers,
+    ])];
     if (loadedControls && loadedControlIds.length) {
         loadedControls.classList.remove('hidden');
         loadedControls.innerHTML = `
@@ -17672,12 +17682,19 @@ async function showLoadRoleModal(spokeId) {
             <div class="flex flex-wrap gap-2">${loadedControlIds.map(id => {
                 const isServer = id.endsWith('-server');
                 const moduleLoaded = isServer && loadedRoleIds.has(id.replace(/-server$/, ''));
+                const running = activeDeployRoleIds.has(id);
+                const installed = installedDeployRoleIds.has(id);
+                const stateNote = (isServer && installed && !running)
+                    ? ' <span class="text-[10px] text-slate-500">(stopped)</span>' : '';
                 return `
                 <div class="flex items-center gap-2 rounded-md border border-green-200 bg-green-50 px-3 py-2">
-                    <span class="text-sm font-medium text-slate-700">${escapeHtml(AGENT_ROLES[id]?.name || id)}</span>
-                    <button onclick="unloadRole('${spokeId}','${id}')"
+                    <span class="text-sm font-medium text-slate-700">${escapeHtml(AGENT_ROLES[id]?.name || id)}${stateNote}</span>
+                    ${(!isServer || running) ? `<button onclick="unloadRole('${spokeId}','${id}')"
                         ${moduleLoaded ? 'disabled title="Unload the management module first"' : ''}
-                        class="text-xs font-bold text-red-600 hover:text-red-700 disabled:text-slate-400 disabled:cursor-not-allowed">Unload</button>
+                        class="text-xs font-bold text-red-600 hover:text-red-700 disabled:text-slate-400 disabled:cursor-not-allowed">Unload</button>` : ''}
+                    ${(isServer && installed) ? `<button onclick="uninstallRole('${spokeId}','${id}')"
+                        ${moduleLoaded ? 'disabled title="Unload the management module first"' : ''}
+                        class="text-xs font-bold text-red-700 hover:text-red-800 underline disabled:text-slate-400 disabled:cursor-not-allowed disabled:no-underline">Uninstall</button>` : ''}
                 </div>`;
             }).join('')}</div>`;
     }
@@ -17822,6 +17839,49 @@ async function loadRole(spokeId) {
     // Agents table (Active Role column) or a tenant-admin's My Devices list.
     if (currentView === 'setup') loadSpokesAndAgents();
     if (typeof loadMyDeviceSpokes === 'function' && document.getElementById('my-spokes-list')) loadMyDeviceSpokes();
+}
+
+async function uninstallRole(spokeId, role) {
+    const roleLabel = AGENT_ROLES[role]?.name || role;
+    // Deliberately blunt and type-to-confirm-free but explicit: this is
+    // destructive and, unlike Unload, cannot be undone by a restart.
+    if (!await showConfirmToast(
+        `Uninstall "${roleLabel}" from ${spokeId}? The service will be stopped and its ` +
+        `packages, configuration and data will be PERMANENTLY REMOVED from the host. ` +
+        `This cannot be undone — re-adding the role means a fresh deploy.`)) return;
+    const modalOpen = !!document.getElementById('load-role-modal');
+    showToast(`Uninstalling "${roleLabel}" from ${spokeId} — this can take a few minutes…`, 'info');
+    try {
+        const _admin = (typeof isAdmin === 'function') && isAdmin();
+        // Same split as unloadRole: Global Admin uses the arbitrary-command
+        // relay, a tenant-admin the ownership-checked role-only route.
+        const res = _admin
+            ? await fetch(`/api/agent/${encodeURIComponent(spokeId)}/command`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ command: 'UNINSTALL_ROLE', data: { role } }),
+              })
+            : await fetch(`/tenant/agent/${encodeURIComponent(spokeId)}/uninstall-role`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ role }),
+              });
+        const data = await res.json();
+        const payload = data.payload?.data || data.payload || data;
+        if (res.ok && (data.status === 'SUCCESS' || payload?.status === 'SUCCESS')) {
+            showToast(payload?.message || `"${roleLabel}" uninstalled from ${spokeId}`, 'success');
+            if (currentView === 'setup') loadSpokesAndAgents();
+            if (typeof loadMyDeviceSpokes === 'function' && document.getElementById('my-spokes-list')) loadMyDeviceSpokes();
+            if (modalOpen) showLoadRoleModal(spokeId);
+        } else {
+            const msg = res.status === 503
+                ? `${spokeId} is not connected — reconnect the agent to manage its roles.`
+                : (payload?.message || data.detail || data.message || JSON.stringify(data));
+            showToast('Failed to uninstall role: ' + msg, 'error');
+        }
+    } catch (err) {
+        showToast('Error uninstalling role: ' + err.message, 'error');
+    }
 }
 
 async function unloadRole(spokeId, role) {
