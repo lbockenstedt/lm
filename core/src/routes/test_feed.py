@@ -50,8 +50,12 @@ _DEFAULTS = {
     "receiver_enabled": False,     # this hub pulls a feed
     "receiver_source_url": "",     # https://<source hub>
     "receiver_token": "",          # API token issued BY the source hub
-    "receiver_tenant": "",         # tenant on THIS hub the synthetic spokes join
-    "receiver_psk": "",            # that tenant's onboarding PSK (auto-approve)
+    # No tenant field: the synthetic spokes always join THIS hub's SHARED
+    # tenant, so the replayed fleet is visible to every tenant rather than
+    # walled into one. Asking the operator to pick a tenant was both an extra
+    # step and the wrong default — a test hub wants the data everywhere.
+    # Resolved at start time via access.refresh_shared_tenant (see _shared_tenant).
+    "receiver_psk": "",            # the SHARED tenant's onboarding PSK (auto-approve)
     "receiver_prefix": "feed-",    # synthetic spoke id prefix (for cleanup)
     "receiver_interval": 60,       # seconds between source polls
 }
@@ -104,6 +108,27 @@ def register(app, hub, ctx):
         p = _proc["p"]
         return bool(p and p.poll() is None)
 
+    def _shared_tenant():
+        """THIS hub's shared tenant — the one the replayed fleet joins.
+
+        A spoke bound to the shared tenant is visible to every tenant (see
+        access.tenant_is_shared and the registry's _spoke_effective_tenants
+        union), which is what a test hub wants: one feed that everybody can
+        see, not a fleet walled into whichever tenant the operator happened to
+        type. Returns None when no tenant is flagged shared — the caller turns
+        that into an actionable error rather than silently binding somewhere
+        arbitrary or leaving the spokes unassigned (unassigned is admin-only,
+        so the fleet would be invisible to exactly the people testing)."""
+        try:
+            from access import refresh_shared_tenant
+        except ImportError:  # test/bare-package path
+            from core.src.access import refresh_shared_tenant  # type: ignore
+        try:
+            return refresh_shared_tenant(hub)
+        except Exception:  # noqa: BLE001
+            logger.debug("[test-feed] shared-tenant lookup failed", exc_info=True)
+            return None
+
     # ── SOURCE side ─────────────────────────────────────────────────────────
 
     @app.get("/api/test-feed/snapshot")
@@ -151,7 +176,10 @@ def register(app, hub, ctx):
     @app.get("/api/test-feed/config")
     async def get_feed_config(request: Request):
         _require_admin(request)
-        return _redact(_cfg())
+        # shared_tenant is derived, not stored — the UI shows which tenant the
+        # fleet will land in (and warns when none is flagged shared) instead of
+        # asking the operator to choose one.
+        return {**_redact(_cfg()), "shared_tenant": _shared_tenant()}
 
     @app.post("/api/test-feed/config")
     async def set_feed_config(request: Request):
@@ -161,7 +189,7 @@ def register(app, hub, ctx):
         for k in ("source_enabled", "receiver_enabled"):
             if k in data:
                 patch[k] = bool(data[k])
-        for k in ("receiver_source_url", "receiver_tenant", "receiver_prefix"):
+        for k in ("receiver_source_url", "receiver_prefix"):
             if k in data:
                 patch[k] = str(data[k] or "").strip()
         # Secrets: an empty string means "leave what is stored alone" so the UI
@@ -213,12 +241,20 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=409, detail="Feed is already running")
         c = _cfg()
         missing = [k for k in ("receiver_source_url", "receiver_token",
-                               "receiver_tenant", "receiver_psk") if not c.get(k)]
+                               "receiver_psk") if not c.get(k)]
         if missing:
             raise HTTPException(
                 status_code=400,
                 detail="Not configured: " + ", ".join(
                     m.replace("receiver_", "") for m in missing))
+
+        tenant = _shared_tenant()
+        if not tenant:
+            raise HTTPException(
+                status_code=400,
+                detail="No shared tenant on this hub. The replayed fleet joins the "
+                       "shared tenant so every tenant can see it — mark one tenant "
+                       "'shared' in Setup → Tenants first.")
 
         script = os.path.join(_repo_root(), "scripts", "hub_feed.py")
         if not os.path.isfile(script):
@@ -234,7 +270,7 @@ def register(app, hub, ctx):
                 "--source", c["receiver_source_url"],
                 "--token", c["receiver_token"],
                 "--target", target,
-                "--tenant", c["receiver_tenant"],
+                "--tenant", tenant,
                 "--psk", c["receiver_psk"],
                 "--prefix", c.get("receiver_prefix") or "feed-",
                 "--interval", str(c.get("receiver_interval") or 60)]
@@ -244,8 +280,8 @@ def register(app, hub, ctx):
             [os.path.join(_repo_root(), "core", "src"), env.get("PYTHONPATH", "")])
 
         # AUDIT before spawning — the token is NOT logged, only its presence.
-        logger.warning("[test-feed] START by %s → source=%s tenant=%s prefix=%s",
-                       _who(sess), c["receiver_source_url"], c["receiver_tenant"],
+        logger.warning("[test-feed] START by %s → source=%s tenant=%s (shared) prefix=%s",
+                       _who(sess), c["receiver_source_url"], tenant,
                        c.get("receiver_prefix"))
         try:
             p = await asyncio.to_thread(

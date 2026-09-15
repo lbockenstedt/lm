@@ -12188,7 +12188,9 @@ function _renderSetupTestFeedTile(content) {
                 </div>
                 <p class="text-[11px] text-slate-500 leading-snug">
                     Pulls from the source on an interval and replays it into this hub as synthetic spokes, prefixed so you can bulk-delete them later from <b>Spokes &amp; Agents</b>.
-                    The tenant and PSK below belong to <b>this</b> hub — the PSK auto-approves the synthetic spokes so their telemetry is accepted rather than sitting at "pending".
+                    The replayed fleet joins this hub's <b>shared tenant</b>, so it is visible to every tenant rather than walled into one.
+                    The PSK below is that tenant's, on <b>this</b> hub — it auto-approves the synthetic spokes so their telemetry is accepted instead of sitting at "pending".
+                    <span id="tf-tenant-state" class="block mt-1"></span>
                 </p>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div class="space-y-1">
@@ -12200,11 +12202,7 @@ function _renderSetupTestFeedTile(content) {
                         <input type="password" id="tf-token" placeholder="paste to set / change" class="${inputCls}">
                     </div>
                     <div class="space-y-1">
-                        <label class="${labelCls}">Tenant on this hub</label>
-                        <input type="text" id="tf-tenant" placeholder="tenant id" class="${inputCls}">
-                    </div>
-                    <div class="space-y-1">
-                        <label class="${labelCls}">Onboarding PSK <span id="tf-psk-set" class="normal-case font-normal text-slate-400"></span></label>
+                        <label class="${labelCls}">Shared-tenant onboarding PSK <span id="tf-psk-set" class="normal-case font-normal text-slate-400"></span></label>
                         <input type="password" id="tf-psk" placeholder="paste to set / change" class="${inputCls}">
                     </div>
                     <div class="space-y-1">
@@ -12254,7 +12252,6 @@ async function tfLoad() {
         const chk = document.getElementById('tf-source-enabled');
         if (chk) chk.checked = !!c.source_enabled;
         set('tf-source-url', c.receiver_source_url || '');
-        set('tf-tenant', c.receiver_tenant || '');
         set('tf-prefix', c.receiver_prefix || 'feed-');
         set('tf-interval', c.receiver_interval || 60);
         // Secrets come back as booleans, never values — say whether one is stored
@@ -12265,6 +12262,19 @@ async function tfLoad() {
         if (psk) psk.textContent = c.receiver_psk ? '· stored' : '· not set';
         const salt = document.getElementById('tf-salt-state');
         if (salt) salt.textContent = c.source_salt ? 'pseudonyms active' : 'minted on first publish';
+        // The landing tenant is derived, not chosen. Say which one it is — and
+        // say plainly when there ISN'T one, because Start will refuse and the
+        // reason is not something the operator can guess from this page.
+        const ten = document.getElementById('tf-tenant-state');
+        if (ten) {
+            if (c.shared_tenant) {
+                ten.className = 'block mt-1 text-[#01A982]';
+                ten.textContent = `Fleet will land in shared tenant "${c.shared_tenant}".`;
+            } else {
+                ten.className = 'block mt-1 text-red-600 font-semibold';
+                ten.textContent = 'No tenant on this hub is marked shared — mark one in Setup → Tenants, or the feed cannot start.';
+            }
+        }
         _tfBadge(document.getElementById('tf-src-badge'),
                  c.source_enabled ? 'publishing' : 'off', c.source_enabled ? 'on' : 'off');
     } catch (e) { console.error('tfLoad failed', e); }
@@ -12317,7 +12327,6 @@ async function tfRegenSalt() {
 async function tfSaveReceiver() {
     const body = {
         receiver_source_url: document.getElementById('tf-source-url')?.value?.trim() || '',
-        receiver_tenant: document.getElementById('tf-tenant')?.value?.trim() || '',
         receiver_prefix: document.getElementById('tf-prefix')?.value?.trim() || 'feed-',
         receiver_interval: Number(document.getElementById('tf-interval')?.value) || 60,
         receiver_token: document.getElementById('tf-token')?.value?.trim() || '',
