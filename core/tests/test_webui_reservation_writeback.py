@@ -110,3 +110,85 @@ def test_lease_delete_keeps_its_confirmation_prompt():
     """deleteDhcpLease sits next to the edited code; its confirm must survive."""
     body = _fn("deleteDhcpLease")
     assert "showConfirmToast" in body
+
+
+# ── the hub now FIXES the missing-IP case, so it must stop warning ──────────
+#
+# Previously "NetBox has no IP object for 172.17.1.199" was the end of the
+# story: honest, but the operator had no way to act on it from the WebUI. The
+# hub now creates the IP object (status 'created'), so the reservation IS
+# durable — warning about it would be plain wrong.
+
+JSC = ("/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/"
+       "Helpers/jsc")
+
+
+def _js_engine():
+    import shutil
+    if os.path.exists(JSC):
+        return [JSC]
+    node = shutil.which("node")
+    return [node] if node else None
+
+
+def _warn(d, removing=False):
+    """Run the REAL _reservationWritebackWarning and return what it produces."""
+    import json
+    import subprocess
+    import tempfile
+
+    import pytest as _pytest
+    engine = _js_engine()
+    if not engine:
+        _pytest.skip("no JavaScript engine (jsc/node) available")
+    # jsc exposes print(); node exposes console.log. Support both engines.
+    harness = (
+        _fn("_reservationWritebackWarning")
+        + "\nvar _out = _reservationWritebackWarning(%s, %s);\n"
+          "var _say = (typeof print === 'function') ? print : console.log;\n"
+          "_say(JSON.stringify({ w: _out }));\n"
+        % (json.dumps(d), json.dumps(bool(removing)))
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+        fh.write(harness)
+        path = fh.name
+    try:
+        out = subprocess.run(engine + [path], capture_output=True, text=True,
+                             timeout=60)
+        assert out.returncode == 0, out.stderr
+        return json.loads(out.stdout.strip().splitlines()[-1])["w"]
+    finally:
+        os.unlink(path)
+
+
+def test_created_writeback_produces_no_warning():
+    assert _warn({"netbox_writeback": {"status": "created",
+                                       "ip": "172.17.1.199",
+                                       "ip_id": 99}}) == ""
+
+
+def test_ok_and_unchanged_still_produce_no_warning():
+    assert _warn({"netbox_writeback": {"status": "ok"}}) == ""
+    assert _warn({"netbox_writeback": {"status": "unchanged"}}) == ""
+    assert _warn({}) == ""
+
+
+def test_unfixable_not_found_still_warns_with_the_address():
+    """No containing prefix means the hub genuinely cannot create it."""
+    w = _warn({"netbox_writeback": {"status": "not_found",
+                                    "ip": "10.0.0.5"}})
+    assert "10.0.0.5" in w
+    assert "will drop this reservation" in w
+
+
+def test_netbox_error_still_warns():
+    w = _warn({"netbox_writeback": {"status": "error", "ip": "172.17.1.199",
+                                    "error": "netbox 500"}})
+    assert "netbox 500" in w
+    assert "will drop this reservation" in w
+
+
+def test_delete_path_keeps_its_opposite_message():
+    w = _warn({"netbox_writeback": {"status": "error", "ip": "172.17.1.199",
+                                    "error": "netbox 500"}}, removing=True)
+    assert "may restore this reservation" in w
