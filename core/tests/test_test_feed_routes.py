@@ -163,6 +163,13 @@ def test_publishing_is_off_by_default():
     assert _DEFAULTS["receiver_enabled"] is False
 
 
+def test_there_is_no_tenant_setting():
+    """The replayed fleet joins the hub's SHARED tenant so every tenant can see
+    it. A stored tenant would silently win over that resolution and wall the
+    fleet into one tenant again."""
+    assert not any("tenant" in k for k in _DEFAULTS)
+
+
 def test_test_feed_redaction():
     """Secrets come back as booleans, never values. A regression here hands the
     source hub's API token to anyone who can open the Setup page."""
