@@ -29467,14 +29467,20 @@ async function saveDhcpReservation() {
 // A reservation lives in Kea, but core.dns_dhcp_sync rebuilds Kea's entire
 // subnet4 from NetBox alone and config-sets it — so a reservation whose MAC
 // never landed on a NetBox IP object is deleted by the next sync, minutes
-// later and silently. The API reports that outcome in netbox_writeback
+// later and silently. The hub now creates that IP object when NetBox is
+// missing it (status 'created'), so this warning is left for the cases it
+// genuinely cannot fix: no containing prefix, no ipam spoke, or a NetBox
+// error. The API reports that outcome in netbox_writeback
 // (see _with_writeback in core/src/routes/net_services.py); surface it instead
 // of showing a clean success the operator has no way to act on.
 // `removing` flips the message for the delete path, where a write-back that
 // failed to CLEAR the MAC means the next sync recreates what was just deleted.
 function _reservationWritebackWarning(d, removing) {
     const w = d && d.netbox_writeback;
-    if (!w || w.status === 'ok' || w.status === 'unchanged') return '';
+    // 'created' = NetBox had no IP object, so the hub minted one carrying the
+    // MAC; the reservation is durable and there is nothing to warn about.
+    if (!w || w.status === 'ok' || w.status === 'unchanged'
+        || w.status === 'created') return '';
     const ip = w.ip || 'this address';
     const why = w.status === 'not_found'
         ? `NetBox has no IP object for ${ip}`
