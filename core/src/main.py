@@ -6458,6 +6458,22 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         ip = str(tel.get("remote_ip") or "").strip().lower()
         return ip in ("127.0.0.1", "::1", "localhost")
 
+    def _is_role_subspoke(self, spoke_id: str) -> bool:
+        """True if this spoke is a ROLE sub-spoke sharing a parent agent's
+        process and TLS connection. Same class of case as ``_is_loopback_spoke``:
+        it can NEVER present its own mTLS client cert, because the spoke-side
+        ``SPOKE_SET_MTLS_CLIENT_CERT`` handler returns early for any spoke with a
+        ``parent_spoke_id`` ("skipped — role sub-spoke; parent carries the mTLS
+        client cert"). The parent IS the transport endpoint and gets its own
+        push."""
+        pk = self._primary_key(spoke_id)
+        _pm = getattr(self, "spoke_parent_map", None) or {}
+        return bool(_pm.get(pk) or _pm.get(spoke_id))
+
+    # Consecutive failed cert-less self-heals before the hub stops re-issuing.
+    # Each re-issue restarts the spoke, so an unbounded retry is an outage loop.
+    _MTLS_HEAL_MAX_ATTEMPTS = 3
+
     async def _provision_spoke_mtls_cert(self, spoke_id: str, force: bool = False) -> Dict[str, Any]:
         """Fleet mTLS: issue + deliver a Hub-Local-CA clientAuth client cert to a
         spoke so it presents a VERIFIED mTLS identity (public CAs no longer issue
@@ -6482,6 +6498,15 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             return {"status": "skipped", "reason": "loopback",
                     "message": "co-located spoke connects over loopback (ws://127.0.0.1) — "
                                "mTLS is remote-only (wss); no client cert can be presented"}
+        # Role sub-spokes share the parent agent's process + TLS connection and
+        # the spoke-side handler refuses to install a cert for them ("parent
+        # carries the mTLS client cert"). Issuing anyway is not merely wasted
+        # work: the cert-less self-heal below can never observe a verified
+        # identity on a sub-spoke, so it re-issued every 10 minutes forever.
+        if self._is_role_subspoke(spoke_id):
+            return {"status": "skipped", "reason": "role-subspoke",
+                    "message": "role sub-spoke shares its parent agent's connection — "
+                               "the parent carries the mTLS client cert"}
         # A (re)issue clears any revocation — this IS the "un-revoke".
         try:
             (self.state.system_state.get("mtls_revoked", {}) or {}).pop(pk, None)
@@ -6492,6 +6517,13 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         reg = self.state.system_state.setdefault("mtls_client_certs", {})
         entry = reg.get(pk)
         now = time.time()
+        # Consecutive cert-less self-heal attempts carried into the rewritten
+        # registry entry below, so the ceiling survives the re-issue that the
+        # heal itself performs. An EXPLICIT force (operator re-issue, or the
+        # <7d expiry renewal) is a deliberate "try again" and restores the full
+        # budget — note `force` is still the caller's value here; the self-heal
+        # sets it further down.
+        heal_attempts = 0 if force else int((entry or {}).get("heal_attempts") or 0)
         # Renew 7 days before expiry (skip while the current cert has >7d left).
         if not force and entry and (entry.get("not_after_ts") or 0) - now > 7 * 86400:
             # Self-heal: the registry says a current cert exists, but if the spoke
@@ -6500,16 +6532,50 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             # split left pre-split spokes with only the old mtls-client.* — the new
             # _present_client_cert looks for the dedicated file and presents
             # nothing). Re-push so the spoke gets a presentable cert + restarts to
-            # present it. Guarded by a 10-min min re-issue interval so a genuinely
-            # broken spoke can't restart-loop, and only when we can actually see
-            # the live ws (don't force on unknown state).
+            # present it — only when we can actually see the live ws (don't force
+            # on unknown state).
+            #
+            # The 10-minute interval below PACES this; it does not bound it. Each
+            # re-issue mints a fresh serial, so the spoke always sees changed=True
+            # and always restarts — meaning any spoke whose cert the hub cannot
+            # observe gets restarted every 10 minutes, forever. That is a real
+            # fleet-wide outage loop, not a hypothetical: observed on live hosts
+            # where the client cert never reaches the app (TLS terminated by an
+            # intermediary), taking every role the agent hosts down with it.
+            # So: give up after _MTLS_HEAL_MAX_ATTEMPTS consecutive failed heals
+            # and leave the spoke connected-but-cert-less, which is degraded yet
+            # STABLE, and record why. A verified identity resets the counter.
             _ws = (self.active_connections or {}).get(pk)
             if _ws is not None and not getattr(_ws, "peer_cert_identity", None):
+                _tries = int(entry.get("heal_attempts") or 0)
+                if _tries >= self._MTLS_HEAL_MAX_ATTEMPTS:
+                    return {"status": "heal-exhausted",
+                            "reason": "cert never presented",
+                            "attempts": _tries,
+                            "not_after": entry.get("not_after"),
+                            "message": (
+                                f"{spoke_id} has not presented a verified mTLS client "
+                                f"cert after {_tries} re-push attempts; not re-issuing "
+                                f"again (each re-push restarts the spoke). The cert is "
+                                f"most likely never reaching the hub — check for TLS "
+                                f"termination between this spoke and the hub.")}
                 if (now - float(entry.get("issued_at") or 0)) >= 600:
                     logger.info(f"[mtls] {spoke_id} connected cert-less despite a "
                                 f"current registry cert — re-pushing (cert file "
-                                f"missing/stale on the spoke)")
+                                f"missing/stale on the spoke), attempt "
+                                f"{_tries + 1}/{self._MTLS_HEAL_MAX_ATTEMPTS}")
+                    heal_attempts = _tries + 1
                     force = True
+            elif _ws is not None:
+                # Verified identity observed — the heal worked (or was never
+                # needed). Clear the strike count so a future genuine staleness
+                # gets a full budget again.
+                if entry.get("heal_attempts"):
+                    entry["heal_attempts"] = 0
+                    try:
+                        self.state._mark_dirty()
+                    except Exception:  # noqa: BLE001
+                        pass
             if not force:
                 return {"status": "current", "not_after": entry.get("not_after")}
         # SANs: ab includes the pinned identities so _hub_request_authorized
@@ -6659,7 +6725,8 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
             pass
         reg[pk] = {"spoke_id": spoke_id, "module_type": module_type, "san": sans, "cn": cn,
                    "issued_at": now, "not_after": na_iso, "not_after_ts": na_ts,
-                   "serial": serial, "source": "hub-ca", "ab": bool(is_bf)}
+                   "serial": serial, "source": "hub-ca", "ab": bool(is_bf),
+                   "heal_attempts": heal_attempts}
         self.state.system_state["mtls_client_certs"] = reg
         try:
             await self.state.save_state_now()
