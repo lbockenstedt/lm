@@ -20,6 +20,7 @@ per-message wire signing — that is ``security/signer.py``.
 
 import os
 import base64
+import sys
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -197,15 +198,90 @@ class HubEncryption:
                            secret_name, exc)
             return None
 
+    @staticmethod
+    def _proc_env_bounds() -> tuple:
+        """``(env_start, env_end)`` of this process's ORIGINAL environment block
+        as the kernel records it in ``mm_struct`` — the exact region
+        ``/proc/<pid>/environ`` serves. Parsed from ``/proc/self/stat``, whose
+        fields 50/51 (1-based, see proc(5)) hold those addresses. ``comm``
+        (field 2) can contain spaces and parentheses, so the split starts after
+        the LAST ``)``; the remainder begins at field 3, hence the ``- 3``
+        offsets. Returns ``(0, 0)`` if anything is off."""
+        try:
+            with open("/proc/self/stat", "r", encoding="utf-8",
+                      errors="replace") as fh:
+                stat = fh.read()
+            tail = stat[stat.rindex(")") + 2:].split()
+            return int(tail[50 - 3]), int(tail[51 - 3])
+        except Exception:  # noqa: BLE001 — never fatal, hardening is best-effort
+            return 0, 0
+
+    def _scrub_proc_environ(self, names) -> list:
+        """Zero out ``NAME=value`` entries in the process's original stack
+        environment block so they vanish from ``/proc/<pid>/environ``.
+
+        ``os.environ.pop()`` is NOT sufficient: it calls ``unsetenv``, which
+        edits the C ``environ`` pointer array, while ``/proc/<pid>/environ`` is
+        served straight from the immutable ``env_start..env_end`` stack range
+        recorded at ``execve`` time. So a popped secret stayed fully readable by
+        root — the precise exposure this control exists to close. Writing zeros
+        over the entry through ``/proc/self/mem`` (a process may always write
+        its own memory) actually removes it.
+
+        Only the matched entries are overwritten, so every other variable stays
+        visible to operators. Linux-only and entirely best-effort: any failure
+        is logged at debug and ignored, since failing to harden must never stop
+        the hub from booting. Returns the names actually scrubbed."""
+        if not names or not sys.platform.startswith("linux"):
+            return []
+        env_start, env_end = self._proc_env_bounds()
+        if env_end <= env_start:
+            return []
+        scrubbed = []
+        try:
+            with open("/proc/self/mem", "r+b", buffering=0) as mem:
+                mem.seek(env_start)
+                block = mem.read(env_end - env_start)
+                for name in names:
+                    needle = (name + "=").encode()
+                    pos = 0
+                    while True:
+                        idx = block.find(needle, pos)
+                        if idx == -1:
+                            break
+                        # Entries are NUL-separated; a match must start one.
+                        # Guards against LM_FERNET_KEY matching inside
+                        # X_LM_FERNET_KEY=... or a value that quotes the name.
+                        if idx != 0 and block[idx - 1] != 0:
+                            pos = idx + 1
+                            continue
+                        end = block.find(b"\0", idx)
+                        if end == -1:
+                            end = len(block)
+                        mem.seek(env_start + idx)
+                        mem.write(b"\0" * (end - idx))
+                        if name not in scrubbed:
+                            scrubbed.append(name)
+                        pos = end
+        except Exception as exc:  # noqa: BLE001 — best-effort hardening
+            logger.debug("/proc/self/mem environ scrub skipped: %s", exc)
+        return scrubbed
+
     def _maybe_drop_env_key(self) -> None:
         """Remove ``LM_FERNET_KEY``/``LM_FERNET_KEY_PREVIOUS`` from ``os.environ``
-        once they are loaded (Tier-0 root/LPE hardening).
+        AND from ``/proc/<pid>/environ`` once they are loaded (Tier-0 root/LPE
+        hardening).
 
         The key material stays in-process (Fernet objects + ``_primary_key_str``);
-        this only removes it from ``/proc/<pid>/environ``, which a root reader can
-        slurp WITHOUT ptrace or a core dump. systemd re-sources the key from
-        ``.env`` (``EnvironmentFile``) on every restart, so this does not affect
-        the hub's own restart path.
+        this only removes it from the environment, which a root reader can slurp
+        WITHOUT ptrace or a core dump. systemd re-sources the key from ``.env``
+        (``EnvironmentFile``) on every restart, so this does not affect the hub's
+        own restart path.
+
+        Two steps are required, and the second used to be missing: ``os.environ``
+        for anything that re-reads the var in-process, and a ``/proc/self/mem``
+        scrub of the original stack block for ``/proc/<pid>/environ``, which
+        ``unsetenv`` does not touch. See ``_scrub_proc_environ``.
 
         OPT-IN (default OFF): enabled by ``LM_DROP_FERNET_KEY_ENV=1`` — set by the
         installer in the hub's systemd unit. Kept opt-in so the test suite and any
@@ -219,16 +295,23 @@ class HubEncryption:
             return
         if not self._primary_key_str:
             return
+        names = ("LM_FERNET_KEY", "LM_FERNET_KEY_PREVIOUS")
         dropped = []
-        for var in ("LM_FERNET_KEY", "LM_FERNET_KEY_PREVIOUS"):
+        for var in names:
             if os.environ.pop(var, None) is not None:
                 dropped.append(var)
-        if dropped:
+        # Always attempt the /proc scrub, even when os.environ no longer carries
+        # the var: the stack block keeps whatever execve() was handed, so a var
+        # already popped by other code is still sitting there in the clear.
+        scrubbed = self._scrub_proc_environ(names)
+        if dropped or scrubbed:
             logger.info(
                 "Dropped %s from the process environment after load "
                 "(root/LPE hardening: /proc/<pid>/environ no longer exposes the "
-                "at-rest key). Unset LM_DROP_FERNET_KEY_ENV to disable.",
-                ", ".join(dropped),
+                "at-rest key; scrubbed there: %s). Unset LM_DROP_FERNET_KEY_ENV "
+                "to disable.",
+                ", ".join(dropped) or "nothing",
+                ", ".join(scrubbed) or "nothing",
             )
 
     def primary_key(self) -> str:
