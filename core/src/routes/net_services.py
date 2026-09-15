@@ -3393,12 +3393,94 @@ def register(app, hub, ctx):
         spoke = _dhcp_write_spoke(request, tenant, body)
         return await _relay_spoke(spoke, "DHCP_DEL_LEASE", _dhcp_write_body(body), log_name="dhcp_delete_lease")
 
+    # ── Reservation → NetBox write-back ──────────────────────────────────────
+    _RES_IP_KEYS = ("ip", "address", "ip-address", "ip_address")
+    _RES_MAC_KEYS = ("mac", "hw-address", "hw_address", "mac_address")
+
+    def _res_field(body, keys):
+        for k in keys:
+            v = (body or {}).get(k)
+            if v:
+                return str(v).split("/")[0].strip()
+        return ""
+
+    def _with_writeback(result, writeback):
+        """Attach the NetBox write-back outcome to a relayed Kea reply.
+
+        Additive only — the existing keys the WebUI reads are untouched. An
+        operator who adds a reservation for an address NetBox has never heard
+        of needs to know it won't survive, and the Kea reply alone can't tell
+        them."""
+        if isinstance(result, dict):
+            result = dict(result)
+            result["netbox_writeback"] = writeback
+            return result
+        return {"result": result, "netbox_writeback": writeback}
+
+    async def _reservation_netbox_writeback(body, *, clear=False):
+        """Mirror a reservation's MAC onto its NetBox IP object.
+
+        A reservation written straight to Kea is invisible to NetBox, but
+        ``core.dns_dhcp_sync`` rebuilds Kea's whole ``subnet4`` from NetBox
+        alone and ``config-set``s it — so the next NetBox change silently
+        DELETES every Kea-only reservation. The loss is invisible: the add
+        returned SUCCESS, the row showed up in the list, and it simply
+        disappeared some minutes later. NetBox is the declared source of
+        truth for reservations (``build_dhcp_payload`` mints one for any IP
+        carrying ``custom_fields.mac_address``), so the MAC has to land there
+        for the reservation to be durable.
+
+        Best-effort by design: the Kea write has already succeeded by the time
+        this runs, so a missing ipam spoke, an address NetBox doesn't know, or
+        a NetBox error must be reported — never raised. Returns a small dict
+        describing the outcome for the caller to surface.
+        """
+        hub = app.state.hub
+        ip = _res_field(body, _RES_IP_KEYS)
+        mac = "" if clear else _res_field(body, _RES_MAC_KEYS)
+        if not ip:
+            return {"status": "skipped", "reason": "no ip in body"}
+        ipam = hub.get_spoke_by_type("ipam")
+        if not ipam:
+            return {"status": "skipped", "reason": "no ipam spoke connected",
+                    "ip": ip}
+        try:
+            ips = access.unwrap_spoke(await hub.request_response(
+                ipam, "NETBOX_GET_IPS", {}, timeout=30.0)) or {}
+            match = None
+            for entry in (ips.get("ip_addresses") or []):
+                if (entry.get("address") or "").split("/")[0].strip() == ip:
+                    match = entry
+                    break
+            if not match or not match.get("id"):
+                return {"status": "not_found", "ip": ip,
+                        "reason": "no NetBox IP object for this address; the "
+                                  "reservation will be dropped by the next "
+                                  "NetBox→Kea sync"}
+            current = ((match.get("custom_fields") or {})
+                       .get("mac_address") or "").strip()
+            if current.lower() == mac.lower():
+                return {"status": "unchanged", "ip": ip, "ip_id": match["id"]}
+            payload = {"ip_id": match["id"],
+                       "custom_fields": {"mac_address": mac}}
+            access.unwrap_spoke(await hub.request_response(
+                ipam, "NETBOX_UPDATE_IP_ADDR", payload, timeout=30.0))
+            logger.info("dhcp reservation write-back: NetBox IP %s (%s) "
+                        "mac_address=%r", ip, match["id"], mac)
+            return {"status": "ok", "ip": ip, "ip_id": match["id"],
+                    "mac_address": mac}
+        except Exception as e:  # noqa: BLE001 — never fail an applied Kea write
+            logger.warning("dhcp reservation write-back to NetBox failed "
+                           "for %s: %s", ip, e)
+            return {"status": "error", "ip": ip, "error": str(e)}
+
     @app.post("/api/dhcp/reservation")
     async def dhcp_add_reservation(request: Request, tenant: str = None):
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
         spoke = _dhcp_write_spoke(request, tenant, body)
-        return await _relay_spoke(spoke, "DHCP_ADD_RES", _dhcp_write_body(body), log_name="dhcp_add_reservation")
+        result = await _relay_spoke(spoke, "DHCP_ADD_RES", _dhcp_write_body(body), log_name="dhcp_add_reservation")
+        return _with_writeback(result, await _reservation_netbox_writeback(body))
 
     @app.get("/api/dhcp/reservations")
     async def dhcp_list_reservations(request: Request, tenant: str = None):
@@ -3420,14 +3502,24 @@ def register(app, hub, ctx):
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
         spoke = _dhcp_write_spoke(request, tenant, body)
-        return await _relay_spoke(spoke, "DHCP_UPDATE_RES", _dhcp_write_body(body), log_name="dhcp_update_reservation")
+        result = await _relay_spoke(spoke, "DHCP_UPDATE_RES", _dhcp_write_body(body), log_name="dhcp_update_reservation")
+        # A re-addressed reservation leaves a stale mac_address behind on the
+        # OLD NetBox IP, which the next sync would faithfully turn back into a
+        # reservation for an address the operator just moved away from.
+        old_ip = _res_field(body, ("old_ip", "old-ip"))
+        if old_ip and old_ip != _res_field(body, _RES_IP_KEYS):
+            await _reservation_netbox_writeback({"ip": old_ip}, clear=True)
+        return _with_writeback(result, await _reservation_netbox_writeback(body))
 
     @app.delete("/api/dhcp/reservation")
     async def dhcp_delete_reservation(request: Request, tenant: str = None):
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
         spoke = _dhcp_write_spoke(request, tenant, body)
-        return await _relay_spoke(spoke, "DHCP_DEL_RES", _dhcp_write_body(body), log_name="dhcp_delete_reservation")
+        result = await _relay_spoke(spoke, "DHCP_DEL_RES", _dhcp_write_body(body), log_name="dhcp_delete_reservation")
+        # Without clearing the NetBox mac_address the next sync would simply
+        # recreate the reservation the operator just deleted.
+        return _with_writeback(result, await _reservation_netbox_writeback(body, clear=True))
 
     @app.get("/api/dhcp/status")
     async def dhcp_status(request: Request, tenant: str = None):
