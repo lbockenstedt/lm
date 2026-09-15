@@ -12225,6 +12225,7 @@ function _renderSetupTestFeedTile(content) {
                     Both tokens come from <b>one pair</b> issued on the SOURCE hub (Settings → API Tokens there). The access token expires after a few hours; with the refresh token the feed rotates it on its own instead of stopping overnight.
                     No onboarding PSK to supply — this hub mints an ephemeral one when the feed starts and revokes it on stop.
                     <br>The sync is <b>additive</b>: agents already installed here are untouched, and the production fleet appears alongside them.
+                    <br><b>Name a real tenant</b> if the fleet should show in that tenant's Simulations views — a shared-tenant binding is visible in Spokes &amp; Agents but not there.
                     <span id="tf-tenant-state" class="block mt-1"></span>
                 </p>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -12239,6 +12240,10 @@ function _renderSetupTestFeedTile(content) {
                     <div class="space-y-1">
                         <label class="${labelCls}">Refresh token <span id="tf-refresh-set" class="normal-case font-normal text-slate-400"></span></label>
                         <input type="password" id="tf-refresh" placeholder="paste to set / change" class="${inputCls}">
+                    </div>
+                    <div class="space-y-1">
+                        <label class="${labelCls}">Tenant <span class="normal-case font-normal text-slate-400">· blank = shared</span></label>
+                        <input type="text" id="tf-tenant" placeholder="leave blank for the shared tenant" class="${inputCls}">
                     </div>
                     <div class="space-y-1">
                         <label class="${labelCls}">Spoke id prefix</label>
@@ -12287,6 +12292,7 @@ async function tfLoad() {
         const chk = document.getElementById('tf-source-enabled');
         if (chk) chk.checked = !!c.source_enabled;
         set('tf-source-url', c.receiver_source_url || '');
+        set('tf-tenant', c.receiver_tenant || '');
         set('tf-prefix', c.receiver_prefix || 'feed-');
         set('tf-interval', c.receiver_interval || 60);
         // Secrets come back as booleans, never values — say whether one is stored
@@ -12321,10 +12327,14 @@ async function tfLoad() {
         if (ten) {
             if (c.shared_tenant) {
                 ten.className = 'block mt-1 text-[#01A982]';
-                ten.textContent = `Fleet will land in shared tenant "${c.shared_tenant}".`;
+                ten.textContent = c.receiver_tenant
+                    ? `Fleet will land in tenant "${c.receiver_tenant}".`
+                    : `Fleet will land in shared tenant "${c.shared_tenant}" — visible in Spokes & Agents, but name a real tenant above to see it in Simulations.`;
             } else {
                 ten.className = 'block mt-1 text-red-600 font-semibold';
-                ten.textContent = 'No tenant on this hub is marked shared — mark one in Setup → Tenants, or the feed cannot start.';
+                ten.textContent = c.receiver_tenant
+                    ? `Fleet will land in tenant "${c.receiver_tenant}".`
+                    : 'No tenant named above and none marked shared — name one, or mark a tenant shared in Setup → Tenants.';
             }
         }
         _tfBadge(document.getElementById('tf-src-badge'),
@@ -12382,6 +12392,7 @@ async function tfRegenSalt() {
 async function tfSaveReceiver() {
     const body = {
         receiver_source_url: document.getElementById('tf-source-url')?.value?.trim() || '',
+        receiver_tenant: document.getElementById('tf-tenant')?.value?.trim() || '',
         receiver_prefix: document.getElementById('tf-prefix')?.value?.trim() || 'feed-',
         receiver_interval: Number(document.getElementById('tf-interval')?.value) || 60,
         receiver_token: document.getElementById('tf-token')?.value?.trim() || '',
