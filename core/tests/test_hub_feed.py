@@ -232,3 +232,92 @@ def test_booleans_alongside_scrubbed_keys_are_untouched():
     row = next(iter(payloads.values()))["clients"][0]
     assert row["spoke_online"] is True
     assert row["online"] is False
+
+
+# --------------------------------------------------------------------------
+# Access-token rotation
+# --------------------------------------------------------------------------
+
+class _Resp(__import__("io").BytesIO):
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+
+
+def _mk_source(monkeypatch, token="t0", refresh="r0"):
+    return hub_feed.SourceHub("https://src", token=token, refresh_token=refresh)
+
+
+def test_expired_access_token_is_rotated_and_the_call_retried(monkeypatch):
+    """A 401 mid-feed must refresh and retry, not kill the feed."""
+    import json
+    import urllib.error
+    src = _mk_source(monkeypatch)
+    calls = {"get": 0}
+
+    def _open(req, *a, **kw):
+        url = req.full_url
+        if url.endswith("/auth/token/refresh"):
+            return _Resp(json.dumps({"access_token": "t1", "refresh_token": "r1"}).encode())
+        calls["get"] += 1
+        if calls["get"] == 1:
+            raise urllib.error.HTTPError(url, 401, "expired", {}, None)
+        return _Resp(json.dumps({"ok": True}).encode())
+
+    monkeypatch.setattr(src.opener, "open", _open)
+    assert src._get_json("/api/test-feed/snapshot") == {"ok": True}
+    assert src.token == "t1"
+    assert src.refresh_token == "r1", "the rotated refresh token must replace the spent one"
+
+
+def test_a_spent_refresh_token_is_not_reused(monkeypatch):
+    """Refresh tokens are single-use and reuse revokes the whole family — a
+    retry that re-sent the spent token would lock the feed out for good."""
+    import urllib.error
+    src = _mk_source(monkeypatch)
+    seen = []
+
+    def _open(req, *a, **kw):
+        if req.full_url.endswith("/auth/token/refresh"):
+            seen.append(1)
+            raise urllib.error.HTTPError(req.full_url, 401, "spent", {}, None)
+        raise urllib.error.HTTPError(req.full_url, 401, "expired", {}, None)
+
+    monkeypatch.setattr(src.opener, "open", _open)
+    with pytest.raises(urllib.error.HTTPError):
+        src._get_json("/api/test-feed/snapshot")
+    assert src.refresh_token == "", "a rejected refresh token must be discarded"
+    # A second call must not attempt the refresh again.
+    with pytest.raises(urllib.error.HTTPError):
+        src._get_json("/api/test-feed/snapshot")
+    assert len(seen) == 1
+
+
+def test_without_a_refresh_token_a_401_propagates(monkeypatch):
+    """No silent infinite retry against a genuinely revoked token."""
+    import urllib.error
+    src = _mk_source(monkeypatch, refresh="")
+
+    def _open(req, *a, **kw):
+        raise urllib.error.HTTPError(req.full_url, 401, "revoked", {}, None)
+
+    monkeypatch.setattr(src.opener, "open", _open)
+    with pytest.raises(urllib.error.HTTPError):
+        src._get_json("/api/test-feed/snapshot")
+
+
+def test_non_401_errors_are_not_retried(monkeypatch):
+    """A 500 on the source is not an auth problem; rotating on it would burn a
+    refresh token for nothing."""
+    import urllib.error
+    src = _mk_source(monkeypatch)
+    tried = {"refresh": 0}
+
+    def _open(req, *a, **kw):
+        if req.full_url.endswith("/auth/token/refresh"):
+            tried["refresh"] += 1
+        raise urllib.error.HTTPError(req.full_url, 500, "boom", {}, None)
+
+    monkeypatch.setattr(src.opener, "open", _open)
+    with pytest.raises(urllib.error.HTTPError):
+        src._get_json("/api/test-feed/snapshot")
+    assert tried["refresh"] == 0

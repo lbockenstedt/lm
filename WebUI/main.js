@@ -12189,7 +12189,9 @@ function _renderSetupTestFeedTile(content) {
                 <p class="text-[11px] text-slate-500 leading-snug">
                     Pulls from the source on an interval and replays it into this hub as synthetic spokes, prefixed so you can bulk-delete them later from <b>Spokes &amp; Agents</b>.
                     The replayed fleet joins this hub's <b>shared tenant</b>, so it is visible to every tenant rather than walled into one.
-                    The PSK below is that tenant's, on <b>this</b> hub — it auto-approves the synthetic spokes so their telemetry is accepted instead of sitting at "pending".
+                    Both tokens come from <b>one pair</b> issued on the SOURCE hub (Settings → API Tokens there). The access token expires after a few hours; with the refresh token the feed rotates it on its own instead of stopping overnight.
+                    No onboarding PSK to supply — this hub mints an ephemeral one when the feed starts and revokes it on stop.
+                    <br>The sync is <b>additive</b>: agents already installed here are untouched, and the production fleet appears alongside them.
                     <span id="tf-tenant-state" class="block mt-1"></span>
                 </p>
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -12198,12 +12200,12 @@ function _renderSetupTestFeedTile(content) {
                         <input type="text" id="tf-source-url" placeholder="https://lm-hub.example.com" class="${inputCls}">
                     </div>
                     <div class="space-y-1">
-                        <label class="${labelCls}">API token <span id="tf-token-set" class="normal-case font-normal text-slate-400"></span></label>
+                        <label class="${labelCls}">Access token (Bearer) <span id="tf-token-set" class="normal-case font-normal text-slate-400"></span></label>
                         <input type="password" id="tf-token" placeholder="paste to set / change" class="${inputCls}">
                     </div>
                     <div class="space-y-1">
-                        <label class="${labelCls}">Shared-tenant onboarding PSK <span id="tf-psk-set" class="normal-case font-normal text-slate-400"></span></label>
-                        <input type="password" id="tf-psk" placeholder="paste to set / change" class="${inputCls}">
+                        <label class="${labelCls}">Refresh token <span id="tf-refresh-set" class="normal-case font-normal text-slate-400"></span></label>
+                        <input type="password" id="tf-refresh" placeholder="paste to set / change" class="${inputCls}">
                     </div>
                     <div class="space-y-1">
                         <label class="${labelCls}">Spoke id prefix</label>
@@ -12258,8 +12260,8 @@ async function tfLoad() {
         // rather than rendering a fake masked value the operator might trust.
         const tok = document.getElementById('tf-token-set');
         if (tok) tok.textContent = c.receiver_token ? '· stored' : '· not set';
-        const psk = document.getElementById('tf-psk-set');
-        if (psk) psk.textContent = c.receiver_psk ? '· stored' : '· not set';
+        const rt = document.getElementById('tf-refresh-set');
+        if (rt) rt.textContent = c.receiver_refresh_token ? '· stored' : '· not set';
         const salt = document.getElementById('tf-salt-state');
         if (salt) salt.textContent = c.source_salt ? 'pseudonyms active' : 'minted on first publish';
         // The landing tenant is derived, not chosen. Say which one it is — and
@@ -12330,13 +12332,13 @@ async function tfSaveReceiver() {
         receiver_prefix: document.getElementById('tf-prefix')?.value?.trim() || 'feed-',
         receiver_interval: Number(document.getElementById('tf-interval')?.value) || 60,
         receiver_token: document.getElementById('tf-token')?.value?.trim() || '',
-        receiver_psk: document.getElementById('tf-psk')?.value?.trim() || '',
+        receiver_refresh_token: document.getElementById('tf-refresh')?.value?.trim() || '',
     };
     const ok = await _tfPost('/api/test-feed/config', body, 'Saved.');
     if (ok) {
         // Clear the secret inputs once stored — leaving a token sitting in a
         // form field is how it ends up in a screenshot.
-        ['tf-token', 'tf-psk'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
+        ['tf-token', 'tf-refresh'].forEach(id => { const e = document.getElementById(id); if (e) e.value = ''; });
         tfLoad();
     }
 }

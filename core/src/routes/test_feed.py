@@ -55,7 +55,12 @@ _DEFAULTS = {
     # walled into one. Asking the operator to pick a tenant was both an extra
     # step and the wrong default — a test hub wants the data everywhere.
     # Resolved at start time via access.refresh_shared_tenant (see _shared_tenant).
-    "receiver_psk": "",            # the SHARED tenant's onboarding PSK (auto-approve)
+    # No PSK field either. The PSK exists only to auto-approve the synthetic
+    # spokes on THIS hub — and this hub spawns them, so asking an operator to
+    # fetch a shared secret for the hub to authenticate to itself was ceremony.
+    # Start mints an ephemeral PSK, registers it on the shared tenant for the
+    # life of the feed, and revokes it on stop.
+    "receiver_refresh_token": "",  # refresh token from the SAME source-hub pair
     "receiver_prefix": "feed-",    # synthetic spoke id prefix (for cleanup)
     "receiver_interval": 60,       # seconds between source polls
 }
@@ -63,7 +68,10 @@ _DEFAULTS = {
 #: The running feeder child, if any. Module-level rather than hub state because
 #: a process does not survive a restart — on reboot the feed is simply stopped,
 #: which is the honest state rather than a stale "running" flag in config.
-_proc = {"p": None, "started": 0.0, "log": ""}
+#: ``psk``/``tenant`` record the ephemeral onboarding PSK this hub minted for
+#: the running feed, so stop can revoke it. A PSK that outlived its feed would
+#: be a standing auto-approve credential for the shared tenant.
+_proc = {"p": None, "started": 0.0, "log": "", "psk": "", "tenant": ""}
 
 
 def register(app, hub, ctx):
@@ -100,7 +108,7 @@ def register(app, hub, ctx):
         page's point of view, so an admin session that is merely reading the
         config page cannot walk away with the source hub's credential."""
         out = dict(c)
-        for k in ("receiver_token", "receiver_psk", "source_salt"):
+        for k in ("receiver_token", "receiver_refresh_token", "source_salt"):
             out[k] = bool(out.get(k))
         return out
 
@@ -195,14 +203,15 @@ def register(app, hub, ctx):
         # Secrets: an empty string means "leave what is stored alone" so the UI
         # can save the rest of the form without the operator re-typing them.
         # Clearing is explicit, via the separate clear flags below.
-        for k in ("receiver_token", "receiver_psk"):
+        for k in ("receiver_token", "receiver_refresh_token"):
             v = str(data.get(k) or "").strip()
             if v:
                 patch[k] = v
+        # The two halves of one token pair — clearing takes both, so a stale
+        # refresh token can never be left paired with a fresh access token.
         if data.get("clear_token"):
             patch["receiver_token"] = ""
-        if data.get("clear_psk"):
-            patch["receiver_psk"] = ""
+            patch["receiver_refresh_token"] = ""
         if "receiver_interval" in data:
             try:
                 patch["receiver_interval"] = max(15, int(data["receiver_interval"]))
@@ -240,8 +249,8 @@ def register(app, hub, ctx):
         if _running():
             raise HTTPException(status_code=409, detail="Feed is already running")
         c = _cfg()
-        missing = [k for k in ("receiver_source_url", "receiver_token",
-                               "receiver_psk") if not c.get(k)]
+        missing = [k for k in ("receiver_source_url", "receiver_token")
+                   if not c.get(k)]
         if missing:
             raise HTTPException(
                 status_code=400,
@@ -260,6 +269,20 @@ def register(app, hub, ctx):
         if not os.path.isfile(script):
             raise HTTPException(status_code=500, detail=f"feeder not found at {script}")
 
+        # Mint the onboarding PSK here instead of asking the operator for one.
+        # Its only job is to auto-approve the synthetic spokes on THIS hub, and
+        # this hub is what spawns them — a human fetching a shared secret so the
+        # hub can authenticate to itself bought nothing. Ephemeral and scoped to
+        # this run: registered on the shared tenant now, revoked by stop.
+        feed_psk = secrets.token_urlsafe(24)
+        try:
+            await hub.simulations_store.add_psk(tenant, feed_psk)
+        except Exception as e:  # noqa: BLE001
+            logger.error("[test-feed] could not register onboarding PSK: %s", e)
+            raise HTTPException(
+                status_code=500,
+                detail=f"could not register the feed's onboarding PSK: {e}")
+
         # The feeder replays into THIS hub over its normal spoke WebSocket. Using
         # the loopback leg rather than the public name keeps the traffic on-box
         # and sidesteps the TLS-name mismatch a self-connect would otherwise hit
@@ -271,9 +294,14 @@ def register(app, hub, ctx):
                 "--token", c["receiver_token"],
                 "--target", target,
                 "--tenant", tenant,
-                "--psk", c["receiver_psk"],
+                "--psk", feed_psk,
                 "--prefix", c.get("receiver_prefix") or "feed-",
                 "--interval", str(c.get("receiver_interval") or 60)]
+        if c.get("receiver_refresh_token"):
+            # Lets the feeder rotate its own access token. Without it a long
+            # feed dies when the 4h access token expires (api_tokens.issue_pair),
+            # which reads as "the feed randomly stopped overnight".
+            argv += ["--refresh-token", c["receiver_refresh_token"]]
 
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join(
@@ -290,18 +318,46 @@ def register(app, hub, ctx):
                 env=env, cwd=_repo_root(), text=True, start_new_session=True)
         except Exception as e:  # noqa: BLE001
             logger.error("[test-feed] spawn failed: %s", e)
+            # Don't leave the PSK registered when the child never started — it
+            # would sit on the shared tenant as a live auto-approve credential
+            # with nothing using it.
+            try:
+                await hub.simulations_store.remove_psk(tenant, feed_psk)
+            except Exception:  # noqa: BLE001
+                logger.warning("[test-feed] orphaned onboarding PSK on tenant %s", tenant)
             raise HTTPException(status_code=500, detail=f"could not start feeder: {e}")
 
-        _proc.update({"p": p, "started": time.time(), "log": ""})
+        _proc.update({"p": p, "started": time.time(), "log": "",
+                      "psk": feed_psk, "tenant": tenant})
         asyncio.create_task(_drain(p))
         _save({"receiver_enabled": True})
         return {"status": "ok", "pid": p.pid}
+
+    async def _revoke_feed_psk():
+        """Revoke the ephemeral onboarding PSK this hub minted for the feed.
+
+        Runs on every stop path, including the one where the child was already
+        dead, because the PSK is registered in hub state and outlives the
+        process. Leaving it behind would mean any spoke presenting it could
+        auto-approve itself into the shared tenant indefinitely."""
+        psk, tenant = _proc.get("psk"), _proc.get("tenant")
+        if not (psk and tenant):
+            return
+        try:
+            await hub.simulations_store.remove_psk(tenant, psk)
+        except Exception:  # noqa: BLE001
+            logger.warning("[test-feed] could not revoke onboarding PSK on tenant %s",
+                           tenant, exc_info=True)
+        finally:
+            _proc["psk"] = ""
+            _proc["tenant"] = ""
 
     @app.post("/api/test-feed/stop")
     async def stop_feed(request: Request):
         sess = _require_admin(request)
         p = _proc["p"]
         if not (p and p.poll() is None):
+            await _revoke_feed_psk()
             _save({"receiver_enabled": False})
             return {"status": "ok", "running": False}
         logger.warning("[test-feed] STOP by %s (pid=%s)", _who(sess), p.pid)
@@ -316,6 +372,7 @@ def register(app, hub, ctx):
                 os.killpg(os.getpgid(p.pid), signal.SIGKILL)
             except Exception:  # noqa: BLE001
                 pass
+        await _revoke_feed_psk()
         _save({"receiver_enabled": False})
         return {"status": "ok", "running": False}
 
