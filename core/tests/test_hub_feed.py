@@ -1,9 +1,11 @@
 """hub_feed.py — production→branch-hub replay feeder.
 
-The risky half of this script is not the replay, it is the scrub. Anything that
-slips through ``scrub_snapshot`` gets shipped from the production hub to a lab
-hub that is, by definition, less hardened. These tests pin the scrub, the
-same-hub refusal, and the sharding that decides how the target sees the fleet.
+The feed is VERBATIM by default: the point is to duplicate a production fleet
+so an issue reproduces against the identifiers actually seen in the field, and
+pseudonyms defeat that. Anonymising is an opt-in on the source
+(``pseudonymise=True``). These tests pin BOTH modes, plus the one rule that
+holds in either — secrets are never forwarded — and the same-hub refusal and
+sharding that decide how the target sees the fleet.
 
 Pure functions only — the replay half needs the lm core on disk and a live hub,
 which is why ``hub_feed`` defers that import into ``_load_feed_spoke``.
@@ -25,13 +27,13 @@ SALT = "test-salt"
 # Scrubbing
 # --------------------------------------------------------------------------
 
-def test_identifying_fields_are_replaced():
+def test_identifying_fields_are_replaced_when_anonymising():
     out = hub_feed.scrub_snapshot({
         "hostname": "mipbe-svcs01",
         "mac": "a4:bb:6d:11:22:33",
         "ip": "172.16.1.31",
         "serial": "CN12345678",
-    }, SALT)
+    }, SALT, pseudonymise=True)
     assert out["hostname"] != "mipbe-svcs01"
     assert out["mac"] != "a4:bb:6d:11:22:33"
     assert out["ip"] != "172.16.1.31"
@@ -41,15 +43,15 @@ def test_identifying_fields_are_replaced():
 def test_pseudonyms_are_stable_within_a_salt():
     """The hub dedups clients by hostname — a value that churned every poll
     would inflate the target's roster instead of mirroring production."""
-    a = hub_feed.scrub_snapshot({"hostname": "cs-svr-01"}, SALT)
-    b = hub_feed.scrub_snapshot({"hostname": "cs-svr-01"}, SALT)
+    a = hub_feed.scrub_snapshot({"hostname": "cs-svr-01"}, SALT, pseudonymise=True)
+    b = hub_feed.scrub_snapshot({"hostname": "cs-svr-01"}, SALT, pseudonymise=True)
     assert a == b
 
 
 def test_pseudonyms_differ_across_salts():
     """Two feeds must not be correlatable back to the same real fleet."""
-    a = hub_feed.scrub_snapshot({"hostname": "cs-svr-01"}, "salt-a")
-    b = hub_feed.scrub_snapshot({"hostname": "cs-svr-01"}, "salt-b")
+    a = hub_feed.scrub_snapshot({"hostname": "cs-svr-01"}, "salt-a", pseudonymise=True)
+    b = hub_feed.scrub_snapshot({"hostname": "cs-svr-01"}, "salt-b", pseudonymise=True)
     assert a != b
 
 
@@ -74,10 +76,10 @@ def test_secret_bearing_fields_are_dropped_not_pseudonymised():
     assert "hostname" in out
 
 
-def test_scrub_is_recursive_through_lists_and_nesting():
+def test_anonymising_is_recursive_through_lists_and_nesting():
     out = hub_feed.scrub_snapshot({
         "clients": [{"hostname": "a", "config": {"wsite": "denver", "mac": "aa:bb"}}],
-    }, SALT)
+    }, SALT, pseudonymise=True)
     c = out["clients"][0]
     assert c["hostname"] != "a"
     assert c["config"]["wsite"] != "denver"
@@ -94,14 +96,14 @@ def test_structure_is_preserved_exactly():
     assert all(c["online"] is True for c in out["clients"])
 
 
-def test_long_tail_key_names_are_caught():
+def test_long_tail_key_names_are_caught_when_anonymising():
     """Schema additions upstream must not silently start leaking."""
     out = hub_feed.scrub_snapshot({
         "primary_hostname": "real-box",
         "client_mac": "aa:bb:cc:dd:ee:ff",
         "mgmt_ip": "10.0.0.5",
         "user_email": "someone@example.com",
-    }, SALT)
+    }, SALT, pseudonymise=True)
     assert out["primary_hostname"] != "real-box"
     assert out["client_mac"] != "aa:bb:cc:dd:ee:ff"
     assert out["mgmt_ip"] != "10.0.0.5"
@@ -187,13 +189,15 @@ def test_build_payloads_emits_the_cs_telemetry_shape():
     assert body["vm_count"] == 1
 
 
-def test_build_payloads_scrubs_before_emitting():
-    """The scrub must happen on the way out, not as a later step someone can
-    forget to call."""
+def test_build_payloads_drops_secrets_before_emitting():
+    """The one rule that holds in BOTH modes, and it must happen on the way
+    out — not as a later step someone can forget to call."""
     payloads = hub_feed.build_payloads(
-        {"clients": [{"hostname": "mipbe-svcs01", "spoke_id": "s1"}]}, SALT, "feed-")
+        {"clients": [{"hostname": "mipbe-svcs01", "spoke_id": "s1",
+                      "password": "hunter2", "api_key": "sk-live"}]}, SALT, "feed-")
     blob = repr(payloads)
-    assert "mipbe-svcs01" not in blob
+    assert "hunter2" not in blob
+    assert "sk-live" not in blob
 
 
 def test_real_spoke_ids_do_not_survive_into_target_ids():
@@ -202,26 +206,81 @@ def test_real_spoke_ids_do_not_survive_into_target_ids():
     assert all("cs-svr-01" not in sid for sid in payloads)
 
 
-def test_spoke_attribution_inside_rows_is_scrubbed_too():
+def test_spoke_attribution_inside_rows_is_anonymised_too():
     """Regression: SimulationsService._meta stamps spoke_id/spoke_name/
     spoke_hostname onto EVERY client row. Pseudonymising only the synthetic
-    envelope id left the real fleet's spoke names in the payload body."""
-    payloads = hub_feed.build_payloads({"clients": [{
+    envelope id left the real fleet's spoke names in the payload body — so when
+    anonymising IS on, these must be covered too."""
+    scrubbed = hub_feed.scrub_snapshot({"clients": [{
         "spoke_id": "cs-svr-01",
         "spoke_name": "Denver Lab",
         "spoke_hostname": "cs-svr-01.lab.internal",
         "hostname": "realbox",
-    }]}, SALT, "feed-")
-    blob = repr(payloads)
+    }]}, SALT, pseudonymise=True)
+    blob = repr(scrubbed)
     for leaked in ("cs-svr-01", "Denver Lab", "cs-svr-01.lab.internal", "realbox"):
-        assert leaked not in blob, f"{leaked!r} reached the target payload"
+        assert leaked not in blob, f"{leaked!r} survived anonymisation"
 
 
-def test_proxmox_node_names_are_scrubbed():
-    payloads = hub_feed.build_payloads(
+def test_proxmox_node_names_are_anonymised():
+    scrubbed = hub_feed.scrub_snapshot(
         {"proxmox": [{"node": "pve-denver-01", "vmid": 90001, "spoke_id": "s1"}]},
-        SALT, "feed-")
-    assert "pve-denver-01" not in repr(payloads)
+        SALT, pseudonymise=True)
+    assert "pve-denver-01" not in repr(scrubbed)
+
+
+# --------------------------------------------------------------------------
+# Verbatim — the default
+# --------------------------------------------------------------------------
+
+def test_verbatim_is_the_default():
+    """The feature exists to duplicate a production fleet. A default that
+    rewrote identifiers would quietly defeat that for anyone who did not find
+    the toggle."""
+    out = hub_feed.scrub_snapshot({
+        "hostname": "mipbe-svcs01",
+        "mac": "a4:bb:6d:11:22:33",
+        "ip": "172.16.1.31",
+        "serial": "CN12345678",
+        "spoke_name": "Denver Lab",
+    }, SALT)
+    assert out["hostname"] == "mipbe-svcs01"
+    assert out["mac"] == "a4:bb:6d:11:22:33"
+    assert out["ip"] == "172.16.1.31"
+    assert out["serial"] == "CN12345678"
+    assert out["spoke_name"] == "Denver Lab"
+
+
+def test_secrets_are_dropped_even_verbatim():
+    """The one thing verbatim mode does NOT include. Faithful fleet data never
+    requires live credentials, and the receiving hub is less hardened."""
+    out = hub_feed.scrub_snapshot({
+        "hostname": "realbox",
+        "password": "hunter2",
+        "api_key": "sk-live-abc",
+        "hub_secret": "rotating-root",
+        "session_token": "eyJ...",
+        "private_key": "-----BEGIN...",
+    }, SALT)
+    assert out == {"hostname": "realbox"}
+
+
+def test_verbatim_preserves_structure_and_non_strings():
+    snap = {"clients": [{"hostname": f"h{i}", "vmid": 90000 + i, "online": True}
+                        for i in range(7)]}
+    out = hub_feed.scrub_snapshot(snap, SALT)
+    assert out == snap
+
+
+def test_build_payloads_is_verbatim_end_to_end():
+    """The receiver re-runs the scrub on the way in; with verbatim as the
+    default that must be a pass-through, not a second chance to rewrite."""
+    payloads = hub_feed.build_payloads(
+        {"clients": [{"hostname": "mipbe-svcs01", "spoke_id": "cs-svr-01",
+                      "ip": "172.16.1.31"}]}, SALT, "feed-")
+    body = next(iter(payloads.values()))
+    assert body["clients"][0]["hostname"] == "mipbe-svcs01"
+    assert body["clients"][0]["ip"] == "172.16.1.31"
 
 
 def test_booleans_alongside_scrubbed_keys_are_untouched():

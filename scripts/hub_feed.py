@@ -8,44 +8,48 @@ CONNECTION half — synthetic spokes driving the real ``BaseControlPlane`` — b
 invents its roster from ``random.choice``, so a branch hub gets plausible-shaped
 noise rather than the fleet you are actually trying to reproduce a bug against.
 
-WHAT THIS DOES. Pulls a live snapshot from a SOURCE hub's aggregate read API,
-anonymises it, and replays it into a TARGET hub as synthetic spoke telemetry
+WHAT THIS DOES. Pulls a live snapshot from a SOURCE hub's read-only feed API,
+filters it, and replays it into a TARGET hub as synthetic spoke telemetry
 using that same harness. The target sees a fleet with production's shape — spoke
 count, clients per spoke, platform mix, VM counts, simulation spread — without a
 single real lab box pointed at it, and re-polling on an interval keeps it live
 rather than a one-shot fixture.
 
-    prod hub ──GET /sim/api/aggregate/*──▶ hub_feed ──WSS CS_TELEMETRY──▶ qa hub
-                  (read-only)              (scrub)      (synthetic spokes)
+    prod hub ──GET /api/test-feed/snapshot──▶ hub_feed ──CS_TELEMETRY──▶ test hub
+                  (read-only, gated)          (reshape)    (synthetic spokes)
 
 SAFETY, because this straddles two hubs:
 
   * The source is touched with GET only. There is no code path here that writes
     to it — see ``_get_json``, the sole transport.
   * ``--target`` must NOT resolve to the same host:port as ``--source``. Feeding
-    a hub its own scrubbed data would corrupt production state with synthetic
+    a hub its own data back would corrupt production state with synthetic
     spokes. Checked in ``_assert_distinct`` and refused.
   * Every spoke id is prefixed (``--prefix``, default ``feed-``) so the target's
     synthetic entries are bulk-deletable from Setup → Spokes & Agents, exactly
     like loadtest's.
-  * Identifying fields are replaced before anything is sent (``scrub_snapshot``).
-    Hostnames, usernames, MACs, IPs, serials and tenant ids are mapped to stable
-    pseudonyms — stable so a client keeps one identity across polls (the hub
-    dedups on hostname), but with no route back to the real value.
+  * Secrets (passwords, tokens, keys) are dropped and never replayed — see
+    ``scrub_snapshot``. Identifiers are forwarded VERBATIM by default, since
+    the point is to reproduce a production issue against the real hostnames
+    and addresses; the source hub can opt into pseudonyms instead.
 
 USAGE:
 
     PYTHONPATH=/opt/lm/core/src python3 scripts/hub_feed.py \\
         --source https://lm-hub.westus3.cloudapp.azure.com \\
-        --source-user admin --source-pass - \\
-        --target wss://qa-hub.lab:443 \\
-        --psk <TARGET_TENANT_PSK> --tenant <TARGET_TENANT> \\
+        --token <ACCESS_TOKEN> --refresh-token <REFRESH_TOKEN> \\
+        --target wss://test-hub.lab:443 \\
+        --tenant <TARGET_TENANT> --psk <TARGET_TENANT_PSK> \\
         --interval 60
 
-``--source-pass -`` reads the password from stdin so it never lands in shell
-history or the process table. ``--dry-run`` prints the scrubbed snapshot and
-exits without connecting to the target — always worth one pass before pointing
-this at a hub.
+(Setup → Test Data Feed drives all of this from the UI, and mints the target
+PSK itself; the flags are for running the feeder by hand.)
+
+``--token`` (with ``--refresh-token``) is the preferred credential and skips the
+login entirely; ``--source-pass -`` reads a password from stdin so it never
+lands in shell history or the process table. ``--dry-run`` prints the snapshot
+it would replay and exits without connecting to the target — always worth one
+pass before pointing this at a hub.
 """
 import argparse
 import asyncio
@@ -67,10 +71,11 @@ for _p in ("/opt/lm", "/opt/lm/core/src", _repo, os.path.join(_repo, "core", "sr
     if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
-# The scrub/reshape logic is SHARED with the hub's own routes/test_feed.py —
+# The filter/reshape logic is SHARED with the hub's own routes/test_feed.py —
 # see core/src/test_feed_scrub.py. It lives there, not here, because the source
-# hub scrubs before serving a snapshot and this feeder scrubs again on the way
-# in; two copies would drift and the drift would be a data leak.
+# hub applies it before serving a snapshot and this feeder applies it again on
+# the way in; two copies would drift, and a drift in DROP_FIELDS would mean
+# secrets getting replayed.
 try:
     from test_feed_scrub import (  # noqa: F401
         IDENTIFYING_FIELDS, IDENTIFYING_SUBSTRINGS, DROP_FIELDS,
