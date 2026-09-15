@@ -84,6 +84,13 @@ IDENTIFYING_FIELDS = (
 IDENTIFYING_SUBSTRINGS = (
     "hostname", "mac", "_ip", "ip_", "serial", "ssid", "user", "email",
     "tenant", "site", "owner", "addr",
+    # ``spoke`` and ``node`` catch the attribution the aggregate API stamps onto
+    # every row (SimulationsService._meta adds spoke_id / spoke_name /
+    # spoke_hostname; proxmox rows carry node). Pseudonymising the synthetic
+    # SPOKE ID alone is not enough — these ride INSIDE the client dicts, so
+    # without this the real fleet's spoke names reach the target in the payload
+    # body even though the id on the envelope was scrubbed.
+    "spoke", "node",
 )
 
 #: Keys never forwarded at all — credentials and tokens have no business in a

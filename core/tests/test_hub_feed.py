@@ -200,3 +200,35 @@ def test_real_spoke_ids_do_not_survive_into_target_ids():
     payloads = hub_feed.build_payloads(
         {"clients": [{"spoke_id": "cs-svr-01"}]}, SALT, "feed-")
     assert all("cs-svr-01" not in sid for sid in payloads)
+
+
+def test_spoke_attribution_inside_rows_is_scrubbed_too():
+    """Regression: SimulationsService._meta stamps spoke_id/spoke_name/
+    spoke_hostname onto EVERY client row. Pseudonymising only the synthetic
+    envelope id left the real fleet's spoke names in the payload body."""
+    payloads = hub_feed.build_payloads({"clients": [{
+        "spoke_id": "cs-svr-01",
+        "spoke_name": "Denver Lab",
+        "spoke_hostname": "cs-svr-01.lab.internal",
+        "hostname": "realbox",
+    }]}, SALT, "feed-")
+    blob = repr(payloads)
+    for leaked in ("cs-svr-01", "Denver Lab", "cs-svr-01.lab.internal", "realbox"):
+        assert leaked not in blob, f"{leaked!r} reached the target payload"
+
+
+def test_proxmox_node_names_are_scrubbed():
+    payloads = hub_feed.build_payloads(
+        {"proxmox": [{"node": "pve-denver-01", "vmid": 90001, "spoke_id": "s1"}]},
+        SALT, "feed-")
+    assert "pve-denver-01" not in repr(payloads)
+
+
+def test_booleans_alongside_scrubbed_keys_are_untouched():
+    """spoke_online is a bool on the same rows — scrubbing must not coerce it."""
+    payloads = hub_feed.build_payloads(
+        {"clients": [{"spoke_id": "s1", "spoke_online": True, "online": False}]},
+        SALT, "feed-")
+    row = next(iter(payloads.values()))["clients"][0]
+    assert row["spoke_online"] is True
+    assert row["online"] is False
