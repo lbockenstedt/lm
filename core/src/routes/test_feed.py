@@ -273,6 +273,26 @@ def register(app, hub, ctx):
                 detail="Not configured: " + ", ".join(
                     m.replace("receiver_", "") for m in missing))
 
+        # Refuse to subscribe to ourselves. hub_feed's own _assert_distinct
+        # compares the source against the TARGET, and the target is now
+        # hardcoded loopback, so it can no longer catch an operator who pasted
+        # this hub's own public URL as the source. Left unguarded that is a
+        # compounding loop: our feed- spokes get published, pulled back, and
+        # re-prefixed on every poll.
+        own = str((hub.state.get_global_config() or {}).get("hub", {}).get("url") or "")
+        if own:
+            import urllib.parse as _up
+
+            def _host(u):
+                return (_up.urlparse(u if "//" in u else f"//{u}").hostname or "").lower()
+
+            if _host(own) and _host(own) == _host(c["receiver_source_url"]):
+                raise HTTPException(
+                    status_code=400,
+                    detail="The source URL is this hub. Subscribing to yourself "
+                           "replays your own feed spokes back into you, growing "
+                           "on every poll — point it at the production hub.")
+
         tenant = _shared_tenant()
         if not tenant:
             raise HTTPException(
@@ -299,12 +319,15 @@ def register(app, hub, ctx):
                 status_code=500,
                 detail=f"could not register the feed's onboarding PSK: {e}")
 
-        # The feeder replays into THIS hub over its normal spoke WebSocket. Using
-        # the loopback leg rather than the public name keeps the traffic on-box
-        # and sidesteps the TLS-name mismatch a self-connect would otherwise hit
-        # (same-box ws://127.0.0.1 is the documented shape — see the hub/spoke
-        # transport docs).
-        target = "ws://127.0.0.1:443"
+        # The feeder replays into THIS hub over its normal spoke WebSocket.
+        # Loopback rather than the public name, so the traffic stays on-box.
+        #
+        # It MUST be wss://, not ws://. The hub runs one uvicorn on :443 and
+        # serves TLS there whenever a cert is configured, so a plaintext connect
+        # gets an empty reply and the feeder would never attach. Confirmed
+        # against the live hub: 443 is the only listener, and a plain HTTP
+        # upgrade to it returns b''.
+        target = "wss://127.0.0.1:443"
         argv = [sys.executable, script,
                 "--source", c["receiver_source_url"],
                 "--token", c["receiver_token"],
@@ -322,6 +345,15 @@ def register(app, hub, ctx):
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join(
             [os.path.join(_repo_root(), "core", "src"), env.get("PYTHONPATH", "")])
+        # The child inherits this hub's environment, which on a TLS-verifying
+        # deployment carries LM_HUB_TLS_VERIFY=1. That would make the loopback
+        # leg fail hostname verification: the hub's cert is issued for its
+        # public name, not 127.0.0.1. Force verification off for THIS leg only
+        # — it never leaves the box, so there is no on-path position to defend
+        # against, and _client_ssl_ctx still encrypts.
+        env["LM_HUB_TLS_VERIFY"] = "0"
+        env.pop("LM_HUB_CA_CERT", None)
+        env.pop("LM_HUB_CA_BUNDLE", None)
 
         # AUDIT before spawning — the token is NOT logged, only its presence.
         logger.warning("[test-feed] START by %s → source=%s tenant=%s (shared) prefix=%s",
