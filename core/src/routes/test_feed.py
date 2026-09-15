@@ -60,6 +60,18 @@ _DEFAULTS = {
     "receiver_source_url": "",     # https://<source hub>
     "receiver_token": "",          # access token issued BY the source hub
     "receiver_refresh_token": "",  # refresh half of the SAME pair (auto-rotate)
+    # OPTIONAL tenant override. Blank → the shared tenant (see _shared_tenant).
+    #
+    # Why this exists: binding to the shared tenant makes the fleet visible in
+    # Spokes & Agents, but NOT in the Simulations views —
+    # SimulationsService._spokes_for_tenant matches tenant with strict equality
+    # and does not union the shared tenant the way the spoke registry does. So
+    # a shared-bound feed looks like "the feed is running but nothing appeared".
+    # Making that lookup union shared is arguably the real fix, but it shifts
+    # per-tenant client counts and sim-quota apportionment across the whole
+    # product — too much blast radius to carry on this feature. Naming a real
+    # tenant here sidesteps it entirely with no change to shared code.
+    "receiver_tenant": "",
     #
     # Two things deliberately ABSENT from this dict:
     #
@@ -210,7 +222,7 @@ def register(app, hub, ctx):
         for k in ("source_enabled", "receiver_enabled", "source_anonymise"):
             if k in data:
                 patch[k] = bool(data[k])
-        for k in ("receiver_source_url", "receiver_prefix"):
+        for k in ("receiver_source_url", "receiver_prefix", "receiver_tenant"):
             if k in data:
                 patch[k] = str(data[k] or "").strip()
         # Secrets: an empty string means "leave what is stored alone" so the UI
@@ -294,13 +306,13 @@ def register(app, hub, ctx):
                            "replays your own feed spokes back into you, growing "
                            "on every poll — point it at the production hub.")
 
-        tenant = _shared_tenant()
+        # An explicit tenant wins; otherwise fall back to the shared tenant.
+        tenant = (c.get("receiver_tenant") or "").strip() or _shared_tenant()
         if not tenant:
             raise HTTPException(
                 status_code=400,
-                detail="No shared tenant on this hub. The replayed fleet joins the "
-                       "shared tenant so every tenant can see it — mark one tenant "
-                       "'shared' in Setup → Tenants first.")
+                detail="No tenant to bind the replayed fleet to. Name one in "
+                       "Tenant below, or mark a tenant 'shared' in Setup → Tenants.")
 
         script = os.path.join(_repo_root(), "scripts", "hub_feed.py")
         if not os.path.isfile(script):
