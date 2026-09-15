@@ -378,6 +378,33 @@ def register(app, hub, ctx):
             logger.exception("tenant_unload_agent_role failed")
             raise HTTPException(status_code=500, detail=str(e))
 
+    @app.post("/tenant/agent/{spoke_id}/uninstall-role")
+    async def tenant_uninstall_agent_role(spoke_id: str, request: Request):
+        """Uninstall a deploy role from a spoke the caller owns.
+
+        Unlike unload-role (which only stops and disables the units, leaving the
+        node reporting the role as "installed (stopped)"), this purges the
+        packages, LM-authored sidecar units and config/state trees. Only
+        UNINSTALL_ROLE is relayed (no arbitrary-command surface). The purge can
+        take a while — packages plus an apt lock wait — so the timeout is
+        generous compared with unload's."""
+        hub = app.state.hub
+        _tenant_role_guard(request, spoke_id)
+        _agent_role_preflight(hub, spoke_id)
+        try:
+            data = await request.json()
+            role = data.get("role")
+            if not role:
+                raise HTTPException(status_code=400, detail="role is required")
+            result = await hub.request_response(spoke_id, "UNINSTALL_ROLE",
+                                                {"role": role}, timeout=1260.0)
+            return result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("tenant_uninstall_agent_role failed")
+            raise HTTPException(status_code=500, detail=str(e))
+
     @app.get("/tenant/agent/{spoke_id}/roles")
     async def tenant_list_agent_roles(spoke_id: str, request: Request):
         """List the roles currently loaded on a spoke the caller owns (relays

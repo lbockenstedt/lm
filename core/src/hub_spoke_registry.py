@@ -878,7 +878,8 @@ class SpokeRegistryMixin:
         logger.info("agent_roles: recorded role %r for agent %s", role, agent_id)
 
     def _forget_agent_role(self, agent_id: str, role: str) -> None:
-        """Drop ``role`` from an agent's assigned set (explicit ``UNLOAD_ROLE``).
+        """Drop ``role`` from an agent's assigned set (explicit ``UNLOAD_ROLE``
+        or ``UNINSTALL_ROLE``).
         The role is then no longer re-pushed on reconnect."""
         role = (role or "").strip()
         if not role:
@@ -904,12 +905,12 @@ class SpokeRegistryMixin:
         """Update the durable agent→role registry from a completed hub RPC.
 
         Called from ``request_response`` for every settled command; only
-        ``LOAD_ROLE`` / ``UNLOAD_ROLE`` do anything. A LOAD that reports SUCCESS
-        records the role for the target agent; an UNLOAD that didn't hard-ERROR
-        forgets it. Fully fail-open — role bookkeeping must never disturb the
-        command's own result."""
+        ``LOAD_ROLE`` / ``UNLOAD_ROLE`` / ``UNINSTALL_ROLE`` do anything. A LOAD
+        that reports SUCCESS records the role for the target agent; an UNLOAD or
+        UNINSTALL that didn't hard-ERROR forgets it. Fully fail-open — role
+        bookkeeping must never disturb the command's own result."""
         try:
-            if command_type not in ("LOAD_ROLE", "UNLOAD_ROLE"):
+            if command_type not in ("LOAD_ROLE", "UNLOAD_ROLE", "UNINSTALL_ROLE"):
                 return
             role = (data or {}).get("role")
             if not role:
@@ -924,7 +925,7 @@ class SpokeRegistryMixin:
             if command_type == "LOAD_ROLE":
                 if status == "SUCCESS":
                     self._record_agent_role(spoke_id, role)
-            else:  # UNLOAD_ROLE — forget unless it explicitly failed
+            else:  # UNLOAD_ROLE / UNINSTALL_ROLE — forget unless it explicitly failed
                 if status != "ERROR":
                     self._forget_agent_role(spoke_id, role)
         except Exception:  # noqa: BLE001
