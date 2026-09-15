@@ -62,6 +62,9 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
 _ADMIN_TOKEN_HEADER = "x-lm-admin-token"
 _ADMIN_TOKEN_ENV = "LM_ADMIN_OPS_TOKEN"
 
+# Sentinel so "tenant_id absent" is distinguishable from an explicit null/"".
+_UNSET = object()
+
 
 def _token_path(hub) -> str:
     return os.path.join(hub.state.data_dir, "admin_ops_token")
@@ -102,6 +105,34 @@ def _load_or_mint_token(hub) -> str:
     except Exception:  # noqa: BLE001
         logger.exception("admin_ops: could not persist token to %s — using in-memory only", path)
     return tok
+
+
+def apply_cs_mode_entry(entry, enabled, tenant_id=_UNSET):
+    """Merge a Client-Simulation-mode change into one ``agent_config`` entry.
+
+    Mirrors the merge the WebUI's ``POST /api/pxmx/agents/{id}/config`` performs
+    (``routes/pxmx.py``): ``enabled``/``tenant_id`` are overwritten, a non-empty
+    tenant sets ``tenant_pinned`` so ``_inherit_agent_tenant`` can't roll a
+    shared spoke's tenant back over the operator's choice, and every other key
+    the CS bridge stores (``usb_config``, ``protected_vmids``, …) is preserved.
+
+    Differs from the UI route in ONE deliberate way: the UI always submits a
+    tenant, so an absent tenant there means "clear it". An ops caller is
+    typically only flipping ``enabled`` on a host whose tenant is already
+    correct, so omitting ``tenant_id`` here means **keep the existing pin**
+    rather than silently unpinning it. Pass ``tenant_id=None`` (or "") to
+    explicitly clear.
+
+    Pure: returns a NEW entry dict and never mutates the input."""
+    new_entry = dict(entry or {})
+    cs_cfg = dict(new_entry.get("client_simulation") or {})
+    cs_cfg["enabled"] = bool(enabled)
+    if tenant_id is not _UNSET:
+        tenant_in = (str(tenant_id).strip() or None) if tenant_id is not None else None
+        cs_cfg["tenant_id"] = tenant_in
+        cs_cfg["tenant_pinned"] = bool(tenant_in)
+    new_entry["client_simulation"] = cs_cfg
+    return new_entry
 
 
 def _peer_is_loopback(request: Request) -> bool:
@@ -203,6 +234,123 @@ def register(app, hub, ctx):
         logger.warning("admin_ops: unload-role driven via loopback for spoke=%s role=%s",
                        spoke_id, role)
         return {"status": "ok", "target": spoke_id, "role": role, "result": result}
+
+    @app.post("/admin/ops/agent-roles")
+    async def admin_ops_agent_roles(request: Request):
+        """Show exactly what the WebUI's role views see for a generic agent.
+
+        The Agents tile and the Roles dialog both derive their badges from two
+        agent RPCs, and they historically disagreed — the tile read only the
+        hosted sub-spoke list while the dialog read the durable deploy-role
+        markers, so a node running Unbound and Kea rendered as "none (idle)".
+        Diagnosing that from the outside was guesswork: both RPCs ride
+        session-authenticated ``/api/agent/*`` routes, which a loopback operator
+        cannot call. This relays the same two READ-ONLY commands and returns
+        their raw payloads, so the agent's own answer can be compared against
+        what the UI draws.
+
+        Strictly read-only: only GET_AVAILABLE_ROLES and GET_DEPLOY_STATUS are
+        ever sent, so this adds no mutation surface. Body: {"spoke_id": ...}."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        spoke_id = (body or {}).get("spoke_id")
+        if not spoke_id:
+            raise HTTPException(status_code=400, detail="spoke_id is required")
+        if hub._primary_key(spoke_id) not in hub.active_connections:
+            raise HTTPException(status_code=503, detail=f"spoke '{spoke_id}' not connected")
+        out = {"status": "ok", "target": spoke_id}
+        for cmd, key in (("GET_AVAILABLE_ROLES", "roles"),
+                         ("GET_DEPLOY_STATUS", "deploy_status")):
+            try:
+                result = await hub.request_response(spoke_id, cmd, {}, timeout=30.0)
+                data = result.get("payload", {}).get("data", result) \
+                    if isinstance(result, dict) else result
+                out[key] = data
+            except Exception as e:  # one command failing must not hide the other
+                out[key] = {"error": str(e)}
+        # Mirror the two UI derivations so a disagreement is visible directly.
+        roles = out.get("roles") or {}
+        if isinstance(roles, dict):
+            out["ui_view"] = {
+                "hosted_active": [r.get("role") for r in (roles.get("active") or [])
+                                  if isinstance(r, dict)],
+                "installed_deploy_roles": roles.get("installed_deploy_roles"),
+                "active_deploy_roles": roles.get("active_deploy_roles"),
+            }
+        out["hub_recorded_roles"] = hub.agent_assigned_roles(spoke_id)
+        return out
+
+    @app.post("/admin/ops/set-cs-mode")
+    async def admin_ops_set_cs_mode(request: Request):
+        """Turn a pxmx node's **Client Simulation mode** on/off via loopback,
+        bypassing the WebUI's session-authenticated
+        ``POST /api/pxmx/agents/{agent_id}/config``.
+
+        Why this exists: per-agent ``client_simulation.enabled`` is the flag the
+        hub's CS bridge uses to decide whether to poll that host's command
+        inbox at all (``gateway/cs_bridge.py`` — with it off the cycle logs
+        ``SKIP not-enabled`` and NEVER relays). A hub state reset can empty
+        ``agent_config``, after which tenant inheritance re-creates entries that
+        carry only ``tenant_id`` — leaving every CS host silently undeliverable,
+        so VM start/stop/delete queue forever instead of failing. Recovering
+        that previously required a browser admin session; this gives the same
+        lever to an operator on the hub box.
+
+        Writes the SAME merged shape the WebUI route writes (see
+        ``apply_cs_mode_entry``) and reuses the SAME ``push_pxmx_agent_config``
+        delivery contract, so there is no new spoke-side surface and no second
+        definition of the config shape to drift.
+
+        Body: {"agent_id": ..., "enabled": true|false,
+               "tenant_id": "lrb"}   # optional — omit to keep the current pin
+        """
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        body = body or {}
+        agent_id = body.get("agent_id")
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="agent_id is required")
+        if "enabled" not in body:
+            raise HTTPException(status_code=400, detail="enabled is required")
+        enabled = bool(body.get("enabled"))
+        tenant_id = body["tenant_id"] if "tenant_id" in body else _UNSET
+
+        # Imported here (not at module import) to avoid a circular import:
+        # routes/pxmx.py imports from this package's siblings at load time.
+        from routes.pxmx import push_pxmx_agent_config, bust_pxmx_agents_cache
+
+        store = hub.state.system_state.setdefault("agent_config", {})
+        agent_pk = hub._agent_primary_key(agent_id)
+        before = dict(store.get(agent_pk, {}))
+        entry = apply_cs_mode_entry(before, enabled, tenant_id)
+        store[agent_pk] = entry
+        hub.state._mark_dirty()
+
+        cs_cfg = entry["client_simulation"]
+        try:
+            pushed, queued = await push_pxmx_agent_config(
+                hub, agent_id, {"client_simulation": cs_cfg})
+        except Exception as e:  # noqa: BLE001 — persisted already; report push failure
+            logger.exception("admin_ops: set-cs-mode push failed for %s", agent_id)
+            raise HTTPException(status_code=500, detail=f"persisted but push failed: {e}")
+        bust_pxmx_agents_cache()
+
+        before_cs = (before.get("client_simulation") or {})
+        logger.warning("admin_ops: set-cs-mode via loopback agent=%s enabled=%s->%s tenant=%s",
+                       agent_id, before_cs.get("enabled"), cs_cfg.get("enabled"),
+                       cs_cfg.get("tenant_id"))
+        return {"status": "ok", "agent_id": agent_id,
+                "before": {"enabled": before_cs.get("enabled"),
+                           "tenant_id": before_cs.get("tenant_id")},
+                "after": {"enabled": cs_cfg.get("enabled"),
+                          "tenant_id": cs_cfg.get("tenant_id")},
+                "pushed": pushed, "queued": queued}
 
     @app.post("/admin/ops/clear-deploy-status")
     async def admin_ops_clear_deploy_status(request: Request):
@@ -368,6 +516,60 @@ def register(app, hub, ctx):
             logger.exception("admin_ops: dhcp-ha-status failed")
             raise HTTPException(status_code=500, detail=str(e))
         return {"status": "ok", "result": unwrap_spoke(resp)}
+
+    @app.post("/admin/ops/dhcp-reservation")
+    async def admin_ops_dhcp_reservation(request: Request):
+        """Drive a reservation CRUD against a CHOSEN dhcp spoke and return
+        that spoke's raw verdict.
+
+        ``/api/dhcp/reservation`` maps a spoke-side ``status: "ERROR"`` onto a
+        bare HTTP 502 whose detail only ever reaches the browser, so an
+        operator debugging a failing reservation has nothing to go on. This
+        returns the spoke's untouched reply instead of translating it.
+
+        It also takes an explicit ``spoke_id``. Each dhcp spoke fronts its own
+        independent Kea (usually its own HA pair), and the WebUI's combined
+        view merges rows from all of them, so "which cluster did this actually
+        land on" is the first question worth answering. Body: ``{"spoke_id":
+        "<id>", "action": "add"|"update"|"delete", "ip": ..., "mac": ...,
+        "old_ip": ..., "hostname": ..., "subnet": ...}``. ``spoke_id``
+        defaults to the usual ``get_spoke_by_type("dhcp")`` pick."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        action = str((body or {}).get("action") or "add").strip().lower()
+        commands = {"add": "DHCP_ADD_RES", "update": "DHCP_UPDATE_RES",
+                    "delete": "DHCP_DEL_RES"}
+        if action not in commands:
+            raise HTTPException(status_code=400,
+                                detail=f"action must be one of {sorted(commands)}")
+        spoke_id = str((body or {}).get("spoke_id") or "").strip()
+        if spoke_id:
+            valid = set(hub.get_all_spokes_by_type("dhcp") or [])
+            if spoke_id not in valid:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{spoke_id}' is not a DHCP spoke; known: {sorted(valid)}")
+        else:
+            spoke_id = hub.get_spoke_by_type("dhcp")
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="no DHCP spoke connected")
+        payload = {k: v for k, v in (body or {}).items()
+                   if k in ("ip", "mac", "old_ip", "hostname", "subnet", "subnet_id")}
+        if not payload.get("ip"):
+            raise HTTPException(status_code=400, detail="ip is required")
+        logger.warning("admin_ops: dhcp-reservation %s ip=%s spoke=%s via loopback",
+                       action, payload.get("ip"), spoke_id)
+        try:
+            resp = await hub.request_response(spoke_id, commands[action],
+                                              payload, timeout=90.0)
+        except Exception as e:
+            logger.exception("admin_ops: dhcp-reservation failed")
+            raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "ok", "spoke_id": spoke_id, "action": action,
+                "sent": payload, "result": unwrap_spoke(resp)}
 
     @app.post("/admin/ops/restart-service")
     async def admin_ops_restart_service(request: Request):

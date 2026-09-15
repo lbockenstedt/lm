@@ -39,6 +39,33 @@ LISTENER_PORT_ROLES = {
     "statuspage": 443,
 }
 
+# DEPLOY roles are INSTALLS, not hosted sub-spokes. Loading one runs an external
+# installer on the agent host; the software it stands up (Unbound, Kea, NetBox,
+# slapd, ab) either runs as a plain system service or dials the hub under its
+# OWN spoke_id — never as the ``{agent}-{role}`` sub-spoke a hosted role creates.
+#
+# That distinction matters for role self-healing: ``_readopt_agent_roles`` decides
+# a role needs re-pushing when ``{agent}-{role}`` is not connected. For a deploy
+# role that sub-spoke NEVER exists, so the test is permanently true and the hub
+# re-ran the installer on every single agent reconnect (i.e. every reboot),
+# reinstalling Kea/Unbound that were already there.
+#
+# Mirrors ``_DEPLOY_ROLES`` in ``agent/src/agent_spoke.py``, which is the source
+# of truth for what a deploy role actually DOES (the install command). Only the
+# names live here — keep the two key sets in step when adding a deploy role.
+DEPLOY_ROLES = frozenset({
+    "ab",
+    "netbox-server",
+    "ldap-server",
+    "dns-server",
+    "dhcp-server",
+})
+
+
+def is_deploy_role(role):
+    """True when ``role`` is an installer-backed deploy role (see DEPLOY_ROLES)."""
+    return role in DEPLOY_ROLES
+
 
 def listener_conflict(existing_roles, candidate):
     """The role in ``existing_roles`` that would fight ``candidate`` for a port.

@@ -297,6 +297,14 @@ def register(app, hub, ctx):
             kw = {"timeout": timeout} if timeout else {}
             result = await hub.request_response(spoke_id, command, payload or {}, **kw)
             data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            # A spoke-side ERROR becomes a 502 whose detail only ever reached the
+            # browser, so an operator hitting a failing write left NOTHING in the
+            # hub log to diagnose from. Record which spoke rejected which command
+            # and why before the 502 is raised.
+            if isinstance(data, dict) and data.get("status") == "ERROR":
+                logger.warning("%s: spoke %s rejected %s: %s",
+                               log_name or command, spoke_id, command,
+                               data.get("message") or data.get("error") or "no message")
             return _spoke_payload_or_raise(data)
         except HTTPException:
             raise
@@ -2998,6 +3006,55 @@ def register(app, hub, ctx):
             resolved = hub.get_dhcp_spoke_for_shared()
         return spoke_or_503(resolved, "DHCP")
 
+    # Hub-side routing keys the merge fanout adds to each row. They must never
+    # be relayed on to a spoke, which knows nothing about them.
+    _DHCP_ROUTING_KEYS = ("spoke_id", "_spoke", "_tenant")
+
+    def _dhcp_write_body(body):
+        """The relayed payload with the hub's routing keys removed."""
+        if not isinstance(body, dict):
+            return body
+        return {k: v for k, v in body.items() if k not in _DHCP_ROUTING_KEYS}
+
+    def _dhcp_write_spoke(request: Request, tenant: str = None, body=None):
+        """The dhcp spoke a WRITE must land on.
+
+        The admin combined view merges leases/reservations from EVERY dhcp
+        spoke (``_dhcp_merge_fanout``, which tags each row with ``_spoke``).
+        Every dhcp spoke is a separate Kea — usually its own HA pair — so a
+        write derived from one of those rows has to go back to the spoke the
+        row came from. Resolving it with ``_dhcp_spoke_for_request`` instead
+        picks the first connected dhcp spoke, which silently writes the
+        reservation into a DIFFERENT cluster: the Kea actually holding the
+        client's lease never sees it, the row never shows up in the merged
+        Reservations list, and the original lease is never purged.
+
+        An explicit ``spoke_id`` (or ``_spoke``) in the body is honoured only
+        when it names a connected, approved dhcp spoke the caller may actually
+        reach, so the body can never be used to cross a tenant boundary.
+        Absent/unusable — the legacy resolver, unchanged."""
+        hub = app.state.hub
+        requested = str((body or {}).get("spoke_id")
+                        or (body or {}).get("_spoke") or "").strip()
+        if not requested:
+            return _dhcp_spoke_for_request(request, tenant)
+        connected = [s for s in (hub.get_all_spokes_by_type("dhcp") or [])
+                     if hub._primary_key(s) in hub.active_connections
+                     and hub.approved_modules.get(s, False)]
+        if requested not in connected:
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{requested}' is not a connected, approved DHCP spoke")
+        tid = _effective_tenant(request, tenant)
+        if tid:
+            spoke_tid = hub.state.get_spoke_tenant(requested) or ""
+            shared = access.shared_tenant_id() or ""
+            if spoke_tid and spoke_tid not in (tid, shared):
+                raise HTTPException(
+                    status_code=403,
+                    detail="that DHCP spoke belongs to another tenant")
+        return requested
+
     async def _discover_dhcp_workers(request: Request, tenant: str = None):
         """Build the tenant's Kea HA pair from active DHCP Server roles."""
         dhcp_spoke = _dhcp_spoke_for_request(request, tenant)
@@ -3263,15 +3320,34 @@ def register(app, hub, ctx):
                 data = _spoke_payload_or_raise(data)
             except Exception as e:  # noqa: BLE001 — one bad/offline spoke must not fail the merge
                 logger.debug("dhcp merge fanout: %s failed: %s", sid, e)
-                return []
+                return [], {"spoke": sid, "tenant": hub.state.get_spoke_tenant(sid) or "",
+                            "error": str(e) or e.__class__.__name__}
             recs = data.get(list_key) if isinstance(data, dict) else None
             if not isinstance(recs, list):
-                return []
+                return [], {"spoke": sid, "tenant": hub.state.get_spoke_tenant(sid) or "",
+                            "error": f"spoke returned no '{list_key}' list"}
             tid = hub.state.get_spoke_tenant(sid) or ""
-            return [{**r, "_tenant": tid} if isinstance(r, dict) else r for r in recs]
+            # ``_spoke`` is the routing key for the WRITE side: each dhcp spoke
+            # is its own Kea (usually its own HA pair), so a row from the merged
+            # view is only meaningful against the spoke it came from. Without
+            # this tag a "reserve this lease" write lands on whichever spoke
+            # _dhcp_spoke_for_request happens to pick — i.e. the wrong cluster.
+            return [{**r, "_tenant": tid, "_spoke": sid} if isinstance(r, dict) else r
+                    for r in recs], None
 
-        merged = [r for recs in await asyncio.gather(*[_one(s) for s in spokes]) for r in recs]
-        return {list_key: merged, "total": len(merged)}
+        # A failing spoke must not sink the merge — but it must not vanish
+        # either. Dropping it silently makes an unreachable Kea cluster look
+        # like "there are no reservations", which is indistinguishable from a
+        # genuinely empty Kea and sent an operator hunting a phantom data-loss
+        # bug. Report the casualties alongside the rows so the UI can say WHICH
+        # cluster is missing and why.
+        pairs = await asyncio.gather(*[_one(s) for s in spokes])
+        merged = [r for recs, _ in pairs for r in recs]
+        degraded = [d for _, d in pairs if d]
+        out = {list_key: merged, "total": len(merged)}
+        if degraded:
+            out["_degraded"] = degraded
+        return out
 
     async def _dhcp_list_or_merge(request: Request, tenant: str, cmd: str,
                                   payload: dict, list_key: str, log_name: str):
@@ -3314,13 +3390,15 @@ def register(app, hub, ctx):
         """Delete an active DHCP lease from Kea's lease database."""
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP lease")
-        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_DEL_LEASE", body, log_name="dhcp_delete_lease")
+        spoke = _dhcp_write_spoke(request, tenant, body)
+        return await _relay_spoke(spoke, "DHCP_DEL_LEASE", _dhcp_write_body(body), log_name="dhcp_delete_lease")
 
     @app.post("/api/dhcp/reservation")
     async def dhcp_add_reservation(request: Request, tenant: str = None):
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
-        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_ADD_RES", body, log_name="dhcp_add_reservation")
+        spoke = _dhcp_write_spoke(request, tenant, body)
+        return await _relay_spoke(spoke, "DHCP_ADD_RES", _dhcp_write_body(body), log_name="dhcp_add_reservation")
 
     @app.get("/api/dhcp/reservations")
     async def dhcp_list_reservations(request: Request, tenant: str = None):
@@ -3341,13 +3419,15 @@ def register(app, hub, ctx):
     async def dhcp_update_reservation(request: Request, tenant: str = None):
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
-        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_UPDATE_RES", body, log_name="dhcp_update_reservation")
+        spoke = _dhcp_write_spoke(request, tenant, body)
+        return await _relay_spoke(spoke, "DHCP_UPDATE_RES", _dhcp_write_body(body), log_name="dhcp_update_reservation")
 
     @app.delete("/api/dhcp/reservation")
     async def dhcp_delete_reservation(request: Request, tenant: str = None):
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
-        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_DEL_RES", body, log_name="dhcp_delete_reservation")
+        spoke = _dhcp_write_spoke(request, tenant, body)
+        return await _relay_spoke(spoke, "DHCP_DEL_RES", _dhcp_write_body(body), log_name="dhcp_delete_reservation")
 
     @app.get("/api/dhcp/status")
     async def dhcp_status(request: Request, tenant: str = None):

@@ -441,10 +441,52 @@ KEEP_BACKUPS=3
 SVC_USER="svc_lm"
 BASE_DIR="/opt/lm"
 # After `systemctl restart lm` the hub runs the unified :443 surface (wss with
-# a cert, plaintext 443 without). _status_200 (defined above) probes 443 wss,
-# 443 plain, and legacy 8000 so the watchdog detects the hub regardless of TLS
-# or a rolled-back pre-unified code path.
+# a cert, plaintext 443 without). _status_200 probes 443 wss, 443 plain, and
+# legacy 8000 so the watchdog detects the hub regardless of TLS or a
+# rolled-back pre-unified code path.
 RECOVERY_PY="$BASE_DIR/core/src/update_recovery.py"
+
+# ── Health probes ─────────────────────────────────────────────────────────
+# These MUST be defined here, inside the generated helper. install_all.sh
+# defines identical copies in its OWN shell scope, but this file is emitted
+# from a QUOTED heredoc (<<'HELPER') so nothing from the installer's scope
+# carries over. When these were missing, every `_status_200` call in the
+# deployed script died with "command not found" -> poll_health/poll_status
+# could never succeed -> every self-update was declared "failed to boot",
+# rolled back, and the rollback was declared failed too, marking a perfectly
+# healthy version bad. See test_update_restart_probe_parity.py, which pins
+# these to the installer's copies so the two cannot drift.
+# KEEP IN SYNC WITH the _status_200/_gated_401 definitions near the top of
+# install_all.sh.
+_status_200() {
+    local url code
+    for url in "https://localhost:443/status" "http://localhost:443/status" "http://localhost:8000/status"; do
+        code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 3 "$url" 2>/dev/null || echo 000)"
+        [ "$code" = "200" ] && return 0
+    done
+    return 1
+}
+
+_gated_401() {
+    local url code
+    for url in "https://localhost:443/api/__lm_health_probe__" "http://localhost:443/api/__lm_health_probe__"; do
+        code="$(curl -sk -o /dev/null -w '%{http_code}' --max-time 3 "$url" 2>/dev/null || echo 000)"
+        [ "$code" = "401" ] && return 0
+    done
+    return 1
+}
+
+# Fail LOUDLY rather than silently mis-reporting. A missing probe makes every
+# health check return non-zero, which this script would otherwise interpret as
+# "the hub did not come up" — rolling back good code and marking it bad. If the
+# probes are ever lost again, abort before touching the running deployment.
+for _fn in _status_200 _gated_401; do
+    if ! declare -F "$_fn" >/dev/null 2>&1; then
+        echo "lm-update-restart: FATAL — health probe $_fn is not defined; refusing to run" \
+             "(a probe-less run would roll back healthy code and mark it bad)" >&2
+        exit 2
+    fi
+done
 
 # Re-exec under a transient systemd unit outside lm's cgroup so this process
 # survives the `systemctl restart lm` it issues (otherwise the restart kills
@@ -1388,7 +1430,10 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 # with "sudo: unable to change to root gid: Operation not permitted" even
 # though /etc/sudoers.d/lm grants the NOPASSWD rule — sudo itself can't switch
 # to the root uid/gid without those capabilities available to inherit.
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_SETPCAP
+# CAP_AUDIT_WRITE belongs here too: without it sudo cannot emit its audit
+# record and dies in "error initializing audit plugin sudoers_audit" before it
+# ever evaluates the sudoers policy.
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_AUDIT_WRITE
 # ── Tier-0 root/LPE hardening (see docs/security-pentest.md §5I) ──
 # LM_DROP_FERNET_KEY_ENV=1 (above) makes the hub drop LM_FERNET_KEY from its own
 # /proc/<pid>/environ after load, so an SSL-port RCE / root reader can't slurp

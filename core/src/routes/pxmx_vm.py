@@ -1,4 +1,5 @@
 """Proxmox VM lifecycle routes: action, pools, ISOs, storages, create, clone."""
+import asyncio
 import re
 
 from api import (
@@ -39,6 +40,51 @@ def _next_spoke_number(prefix, vm_names, spoke_hostnames):
         n += 1
     return n
 
+
+
+def _vm_node_name(item):
+    """The Proxmox node hostname for a bulk/single VM item: the explicit
+    ``node`` field, else the middle segment of ``unique_id``
+    (``<cluster>/<node>/<vmid>``). Pure; module-level for unit tests."""
+    node = str((item or {}).get("node") or "").strip()
+    if node:
+        return node
+    uid = str((item or {}).get("unique_id") or "")
+    parts = uid.split("/")
+    return parts[1].strip() if len(parts) >= 3 else ""
+
+
+def resolve_vm_spoke(hub, item):
+    """The agent-hosting spoke that OWNS this VM, or None.
+
+    The Hypervisors VM list is MERGED across every agent-hosting spoke
+    (``_merge_pxmx_list_vms`` fans ``PXMX_LIST_VMS`` out to all of them), but VM
+    ACTIONS used to relay to the single ``get_hypervisor_spoke()``. With more
+    than one hypervisor/cs spoke connected, every action on a VM owned by one of
+    the OTHER spokes was sent to a spoke whose agents don't host it — the spoke
+    fell back to its first agent and the command failed (or, worse, targeted the
+    wrong cluster's vmid). Same class of bug as the DHCP cross-cluster write.
+
+    Resolution order: explicit ``agent_id`` → the VM's node hostname matched
+    against the hub's ``agent_info`` index (populated from every relayed agent
+    frame) → None so the caller falls back to ``get_hypervisor_spoke()``."""
+    aid = str((item or {}).get("agent_id") or "").strip()
+    if aid:
+        sid = hub.get_spoke_for_agent(aid, fallback_hypervisor=False)
+        if sid:
+            return sid
+    node = _vm_node_name(item).lower()
+    if not node:
+        return None
+    for pk, info in (getattr(hub, "agent_info", None) or {}).items():
+        if not isinstance(info, dict):
+            continue
+        names = {str(info.get("hostname") or "").strip().lower(),
+                 str(info.get("agent_id") or "").strip().lower(),
+                 str(pk).strip().lower()}
+        if node in names and info.get("spoke_id"):
+            return info["spoke_id"]
+    return None
 
 
 def register(app, hub, ctx):
@@ -162,7 +208,8 @@ def register(app, hub, ctx):
                 raise HTTPException(
                     status_code=403,
                     detail="This VM is protected from deletion. Remove the safeguard in Setup → Hypervisors to delete it.")
-        pxmx_spoke = spoke_or_503(hub.get_hypervisor_spoke(), "Hypervisor")
+        pxmx_spoke = spoke_or_503(
+            resolve_vm_spoke(hub, body) or hub.get_hypervisor_spoke(), "Hypervisor")
         node = str(body.get("node", "") or "")
         payload = {
             "unique_id": body.get("unique_id", ""),
@@ -327,21 +374,35 @@ def register(app, hub, ctx):
             payload_items.append(payload)
 
         if payload_items:
-            try:
-                resp = await hub.request_response(
-                    pxmx_spoke, "PXMX_VM_ACTION_BULK",
-                    {"action": action, "items": payload_items},
-                    timeout=max(60.0, 8.0 * len(payload_items)))
-                inner = resp.get("payload", {}).get("data", resp) if isinstance(resp, dict) else resp
-                rows = (inner or {}).get("results") if isinstance(inner, dict) else None
-                if rows is not None:
-                    results.extend(rows)
-                else:
+            # Group by the spoke that OWNS each VM (the VM list is merged across
+            # every agent-hosting spoke, so a batch can legitimately span them)
+            # and fan ONE PXMX_VM_ACTION_BULK per spoke, concurrently. Previously
+            # the whole batch went to get_hypervisor_spoke() and every VM owned by
+            # another spoke failed silently.
+            groups: dict = {}
+            for p in payload_items:
+                sid = resolve_vm_spoke(hub, p) or pxmx_spoke
+                groups.setdefault(sid, []).append(p)
+
+            async def _relay_group(sid, grp):
+                try:
+                    resp = await hub.request_response(
+                        sid, "PXMX_VM_ACTION_BULK",
+                        {"action": action, "items": grp},
+                        timeout=max(60.0, 8.0 * len(grp)))
+                    inner = resp.get("payload", {}).get("data", resp) if isinstance(resp, dict) else resp
+                    rows = (inner or {}).get("results") if isinstance(inner, dict) else None
+                    if rows is not None:
+                        return list(rows)
                     err = (inner or {}).get("message", "bulk relay failed") if isinstance(inner, dict) else "bulk relay failed"
-                    results.extend({"vmid": p.get("vmid"), "ok": False, "error": err} for p in payload_items)
-            except Exception as e:  # noqa: BLE001
-                logger.exception("pxmx_vm_action_bulk relay failed")
-                results.extend({"vmid": p.get("vmid"), "ok": False, "error": str(e)} for p in payload_items)
+                except Exception as e:  # noqa: BLE001
+                    logger.exception("pxmx_vm_action_bulk relay failed (spoke %s)", sid)
+                    err = str(e)
+                return [{"vmid": p.get("vmid"), "ok": False, "error": err} for p in grp]
+
+            for rows in await asyncio.gather(
+                    *[_relay_group(sid, grp) for sid, grp in groups.items()]):
+                results.extend(rows)
         # One VM-sync + one cache refresh for the whole batch (not per VM).
         _trigger_vm_sync_after_pxmx_edit(hub, request, body)
         _refresh_module_all_tenants(hub, "pxmx_vms")

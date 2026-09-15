@@ -648,6 +648,18 @@ def vm_reboot_cmd(vmid: Any, kind: str) -> str:
     return f"qm reset {vid}"
 
 
+def vm_destroy_cmd(vmid: Any, kind: str) -> str:
+    """Irreversible delete: ``qm``/``pct destroy <vmid> --purge``. ``--purge``
+    removes the disks AND the VM's backup-job/replication membership, not just
+    the config — mirroring the Agent's typed ``destroy`` handler (pve_cmds.py).
+    ``destroy`` FAILS on a running guest, so the caller must issue
+    :func:`vm_action_cmd` ``stop`` first (best-effort; a "not running" error on
+    an already-stopped guest is expected and ignored)."""
+    vid = int(vmid)
+    bin_ = "pct" if kind == "lxc" else "qm"
+    return f"{bin_} destroy {vid} --purge"
+
+
 def pvesm_status_cmd(storage: str) -> str:
     """``pvesm status --storage <storage>`` — backup-storage validation. The
     backup action fails fast with a clear message if the storage isn't

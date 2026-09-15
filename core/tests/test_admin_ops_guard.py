@@ -535,3 +535,90 @@ def test_dhcp_ha_status_enforces_loopback_and_token():
         with pytest.raises(HTTPException) as ei:
             asyncio.run(fn(_FakeRequest("10.0.0.5", tok)))
         assert ei.value.status_code == 403
+
+
+# ── dhcp-reservation: targets a CHOSEN Kea and surfaces its raw verdict ──────
+# /api/dhcp/reservation collapses a spoke-side ERROR into a bare 502, and it
+# picks the dhcp spoke itself — useless when several independent Kea clusters
+# are connected. This op takes an explicit spoke_id and returns the untouched
+# spoke reply.
+
+class _DhcpResHub(_RelayHub):
+    def __init__(self, data_dir, dhcp_spokes=("dhcp-a", "dhcp-b")):
+        super().__init__(data_dir, connected=dhcp_spokes)
+        self._dhcp = list(dhcp_spokes)
+
+    def get_all_spokes_by_type(self, t):
+        return list(self._dhcp) if t == "dhcp" else []
+
+    def get_spoke_by_type(self, t):
+        return self._dhcp[0] if t == "dhcp" and self._dhcp else None
+
+    async def request_response(self, sid, command, data, timeout=None):
+        self.relayed.append((sid, command, dict(data)))
+        return {"payload": {"data": {"status": "ERROR",
+                                     "message": "kea said no", "cluster": True}}}
+
+
+def _reg_dhcpres(tmp, **kw):
+    app = _FakeApp()
+    hub = _DhcpResHub(tmp, **kw)
+    admin_ops.register(app, hub, ctx=None)
+    tok = open(os.path.join(tmp, "admin_ops_token")).read().strip()
+    return app, hub, tok
+
+
+def test_dhcp_reservation_targets_the_requested_spoke():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_dhcpres(tmp)
+        fn = app.routes[("POST", "/admin/ops/dhcp-reservation")]
+        out = asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {
+            "spoke_id": "dhcp-b", "action": "add",
+            "ip": "172.17.1.199", "mac": "aa:bb:cc:dd:ee:ff",
+            "old_ip": "172.17.1.13"})))
+        assert out["spoke_id"] == "dhcp-b"
+        sid, cmd, data = hub.relayed[-1]
+        assert sid == "dhcp-b" and cmd == "DHCP_ADD_RES"
+        assert data["old_ip"] == "172.17.1.13"
+
+
+def test_dhcp_reservation_returns_spoke_error_instead_of_a_bare_502():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, _, tok = _reg_dhcpres(tmp)
+        fn = app.routes[("POST", "/admin/ops/dhcp-reservation")]
+        out = asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {
+            "spoke_id": "dhcp-a", "ip": "172.17.1.199", "mac": "aa:bb:cc:dd:ee:ff"})))
+        assert out["result"]["status"] == "ERROR"
+        assert out["result"]["message"] == "kea said no"
+
+
+def test_dhcp_reservation_rejects_a_non_dhcp_spoke():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_dhcpres(tmp)
+        fn = app.routes[("POST", "/admin/ops/dhcp-reservation")]
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {
+                "spoke_id": "nope", "ip": "1.2.3.4"})))
+        assert ei.value.status_code == 400
+        assert not hub.relayed
+
+
+def test_dhcp_reservation_rejects_unknown_action():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_dhcpres(tmp)
+        fn = app.routes[("POST", "/admin/ops/dhcp-reservation")]
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(fn(_BodyRequest("127.0.0.1", tok, {
+                "action": "drop-table", "ip": "1.2.3.4"})))
+        assert ei.value.status_code == 400
+        assert not hub.relayed
+
+
+def test_dhcp_reservation_enforces_loopback_and_token():
+    with tempfile.TemporaryDirectory() as tmp:
+        app, hub, tok = _reg_dhcpres(tmp)
+        fn = app.routes[("POST", "/admin/ops/dhcp-reservation")]
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(fn(_BodyRequest("10.0.0.5", tok, {"ip": "1.2.3.4"})))
+        assert ei.value.status_code == 403
+        assert not hub.relayed

@@ -69,7 +69,7 @@ from security.auth_manager import AuthManager, LDAPAuthProvider
 from security.threat_monitor import ThreatMonitor
 from security.probe_signatures import looks_like_probe as _edge_looks_like_probe
 from alert_engine import AlertEngine, run_alert_loop
-from role_listeners import LISTENER_PORT_ROLES, listener_conflict
+from role_listeners import LISTENER_PORT_ROLES, listener_conflict, is_deploy_role
 from security.frame_crypto import (ENCRYPTED_TYPES, ENC_MARKER,
                                    encryption_enabled, is_encrypted, wrap)
 from cryptography.exceptions import InvalidTag
@@ -3891,6 +3891,19 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                             "skipping role re-adoption this connect", agent_spoke_id)
                 return
             for role in roles:
+                # Deploy roles are INSTALLS, not hosted sub-spokes: the software
+                # they stand up runs as a system service (or dials in under its
+                # own spoke_id), so ``{agent}-{role}`` never connects and the
+                # liveness test below is permanently true. Re-pushing here re-ran
+                # the installer on EVERY reconnect — a reboot of an agent with
+                # dns-server/dhcp-server loaded reinstalled Unbound and Kea that
+                # were already installed and running. Self-healing an install is
+                # not this loop's job; the agent's own marker check owns that.
+                if is_deploy_role(role):
+                    logger.debug("readopt[%s]: skipping deploy role %s "
+                                 "(install, not a hosted sub-spoke)",
+                                 agent_spoke_id, role)
+                    continue
                 sub_pk = self._primary_key(f"{agent_spoke_id}-{role}")
                 if sub_pk in self.active_connections:
                     continue  # role sub-spoke already live — nothing to heal
