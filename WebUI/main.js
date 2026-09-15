@@ -17692,9 +17692,9 @@ async function showLoadRoleModal(spokeId) {
                     ${(!isServer || running) ? `<button onclick="unloadRole('${spokeId}','${id}')"
                         ${moduleLoaded ? 'disabled title="Unload the management module first"' : ''}
                         class="text-xs font-bold text-red-600 hover:text-red-700 disabled:text-slate-400 disabled:cursor-not-allowed">Unload</button>` : ''}
-                    ${(isServer && installed) ? `<button onclick="uninstallRole('${spokeId}','${id}')"
-                        ${moduleLoaded ? 'disabled title="Unload the management module first"' : ''}
-                        class="text-xs font-bold text-red-700 hover:text-red-800 underline disabled:text-slate-400 disabled:cursor-not-allowed disabled:no-underline">Uninstall</button>` : ''}
+                    ${(isServer && installed) ? `<button onclick="uninstallRole('${spokeId}','${id}',${moduleLoaded ? `'${id.replace(/-server$/, '')}'` : 'null'})"
+                        ${moduleLoaded ? 'title="Also unloads the management module, which is using this server"' : ''}
+                        class="text-xs font-bold text-red-700 hover:text-red-800 underline">Uninstall</button>` : ''}
                 </div>`;
             }).join('')}</div>`;
     }
@@ -17841,43 +17841,74 @@ async function loadRole(spokeId) {
     if (typeof loadMyDeviceSpokes === 'function' && document.getElementById('my-spokes-list')) loadMyDeviceSpokes();
 }
 
-async function uninstallRole(spokeId, role) {
+async function uninstallRole(spokeId, role, blockingModule) {
     const roleLabel = AGENT_ROLES[role]?.name || role;
-    // Deliberately blunt and type-to-confirm-free but explicit: this is
-    // destructive and, unlike Unload, cannot be undone by a restart.
+    // The agent refuses to purge a server while its management sub-spoke is
+    // still loaded (that would leave both in an undefined state). That guard
+    // used to surface as a greyed-out button with only a tooltip, which is a
+    // dead end: the operator can see the action but can never reach it. Offer
+    // the chain instead — unload the module first, then uninstall.
+    const moduleLabel = blockingModule
+        ? (AGENT_ROLES[blockingModule]?.name || blockingModule) : '';
+    const preamble = blockingModule
+        ? `"${roleLabel}" is still being managed by the "${moduleLabel}" role, which has to be `
+          + `unloaded first.\n\nUnload "${moduleLabel}" AND uninstall "${roleLabel}" from ${spokeId}? `
+        : `Uninstall "${roleLabel}" from ${spokeId}? `;
     if (!await showConfirmToast(
-        `Uninstall "${roleLabel}" from ${spokeId}? The service will be stopped and its ` +
+        preamble + `The service will be stopped and its ` +
         `packages, configuration and data will be PERMANENTLY REMOVED from the host. ` +
         `This cannot be undone — re-adding the role means a fresh deploy.`)) return;
     const modalOpen = !!document.getElementById('load-role-modal');
-    showToast(`Uninstalling "${roleLabel}" from ${spokeId} — this can take a few minutes…`, 'info');
+    const _admin = (typeof isAdmin === 'function') && isAdmin();
+    const _post = (path, body) => fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    const _refresh = () => {
+        if (currentView === 'setup') loadSpokesAndAgents();
+        if (typeof loadMyDeviceSpokes === 'function' && document.getElementById('my-spokes-list')) loadMyDeviceSpokes();
+        if (modalOpen) showLoadRoleModal(spokeId);
+    };
     try {
-        const _admin = (typeof isAdmin === 'function') && isAdmin();
-        // Same split as unloadRole: Global Admin uses the arbitrary-command
-        // relay, a tenant-admin the ownership-checked role-only route.
+        if (blockingModule) {
+            // Abort the whole operation if the unload fails — going ahead would
+            // only hit the agent-side guard and would have unloaded the module
+            // for nothing.
+            showToast(`Unloading "${moduleLabel}" from ${spokeId}...`, 'info');
+            const ures = _admin
+                ? await _post(`/api/agent/${encodeURIComponent(spokeId)}/command`,
+                    { command: 'UNLOAD_ROLE', data: { role: blockingModule } })
+                : await _post(`/tenant/agent/${encodeURIComponent(spokeId)}/unload-role`,
+                    { role: blockingModule });
+            const udata = await ures.json();
+            const upayload = udata.payload?.data || udata.payload || udata;
+            if (!(ures.ok && (udata.status === 'SUCCESS' || upayload?.status === 'SUCCESS'))) {
+                showToast(`Could not unload "${moduleLabel}", so "${roleLabel}" was left installed: `
+                    + (upayload?.message || udata.detail || udata.message || JSON.stringify(udata)), 'error');
+                _refresh();
+                return;
+            }
+        }
+        showToast(`Uninstalling "${roleLabel}" from ${spokeId} - this can take a few minutes...`, 'info');
+        // Global Admin uses the arbitrary-command relay; a tenant-admin uses the
+        // ownership-checked, role-only route.
         const res = _admin
-            ? await fetch(`/api/agent/${encodeURIComponent(spokeId)}/command`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ command: 'UNINSTALL_ROLE', data: { role } }),
-              })
-            : await fetch(`/tenant/agent/${encodeURIComponent(spokeId)}/uninstall-role`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ role }),
-              });
+            ? await _post(`/api/agent/${encodeURIComponent(spokeId)}/command`,
+                { command: 'UNINSTALL_ROLE', data: { role } })
+            : await _post(`/tenant/agent/${encodeURIComponent(spokeId)}/uninstall-role`,
+                { role });
         const data = await res.json();
         const payload = data.payload?.data || data.payload || data;
         if (res.ok && (data.status === 'SUCCESS' || payload?.status === 'SUCCESS')) {
             showToast(payload?.message || `"${roleLabel}" uninstalled from ${spokeId}`, 'success');
-            if (currentView === 'setup') loadSpokesAndAgents();
-            if (typeof loadMyDeviceSpokes === 'function' && document.getElementById('my-spokes-list')) loadMyDeviceSpokes();
-            if (modalOpen) showLoadRoleModal(spokeId);
+            _refresh();
         } else {
             const msg = res.status === 503
                 ? `${spokeId} is not connected — reconnect the agent to manage its roles.`
                 : (payload?.message || data.detail || data.message || JSON.stringify(data));
             showToast('Failed to uninstall role: ' + msg, 'error');
+            _refresh();
         }
     } catch (err) {
         showToast('Error uninstalling role: ' + err.message, 'error');
