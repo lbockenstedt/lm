@@ -121,6 +121,70 @@ def validate_nw_address(addr):
             detail=f"'{a}' is not a valid IPv4 address")
 
 
+def nw_scan_spoke_choices(hub, tenant_id, shared_tenant_id):
+    """The nw spokes a tenant may run a scan with: the ones BOUND to the tenant
+    ("own") plus the ones bound to the shared tenant ("shared").
+
+    This is the whole allowlist — a spoke bound to some OTHER tenant is never
+    offered and never resolved. Scanning through another tenant's agent probes
+    that tenant's network from that tenant's vantage point and attributes the
+    results here, which is the cross-tenant leak this list closes.
+
+    Returns UI-ready dicts (``scope`` is ``own``/``shared``) ordered own first,
+    then shared; connected entries ahead of disconnected ones within each scope
+    so the default pick is a usable agent. ``shared_tenant_id`` is passed in
+    (rather than read from ``access``) so this stays pure + unit-testable."""
+    md = hub.state.system_state.get("module_metadata", {}) or {}
+    names = hub.state.system_state.get("module_names", {}) or {}
+    out = []
+    for sid in (hub.get_all_spokes_by_type("nw") or []):
+        if not hub.approved_modules.get(hub._primary_key(sid), False):
+            continue
+        owner = (md.get(sid, {}) or {}).get("tenant_id") or ""
+        if tenant_id and owner == tenant_id:
+            scope = "own"
+        elif shared_tenant_id and owner == shared_tenant_id:
+            scope = "shared"
+        else:
+            continue
+        out.append({
+            "spoke_id": sid,
+            "name": names.get(sid, sid),
+            "tenant_id": owner,
+            "scope": scope,
+            "connected": hub._primary_key(sid) in hub.active_connections,
+        })
+    out.sort(key=lambda s: (s["scope"] != "own", not s["connected"], s["name"]))
+    return out
+
+
+def resolve_nw_scan_spoke(hub, tenant_id, requested_spoke_id, shared_tenant_id):
+    """The connected nw spoke a scan should run on, constrained to the tenant's
+    own + shared spokes (see ``nw_scan_spoke_choices``).
+
+    An explicit ``requested_spoke_id`` is honored only if it is in that
+    allowlist AND connected. A request naming a spoke outside the allowlist
+    (e.g. a stale global ``nw_scan.spoke_id`` inherited from the admin card that
+    points at another tenant's agent) is IGNORED and we fall through to the
+    tenant's own/shared preference — never used as-is. With no usable request,
+    prefer the tenant's OWN connected spoke, else a connected shared one.
+
+    There is deliberately no "any connected nw spoke" fallback: it silently ran
+    an Admin-tenant scan on whichever single nw agent happened to be online
+    (another tenant's), so the targets and results came from that tenant."""
+    live = [c for c in nw_scan_spoke_choices(hub, tenant_id, shared_tenant_id)
+            if c["connected"]]
+    if requested_spoke_id:
+        for c in live:
+            if c["spoke_id"] == requested_spoke_id:
+                return requested_spoke_id
+    for scope in ("own", "shared"):
+        for c in live:
+            if c["scope"] == scope:
+                return c["spoke_id"]
+    return ""
+
+
 def build_scan_target_pool(targets, subnets, cap):
     """Pure IPv4 host-IP pool builder for the network scanner: explicit host IPs
     (``targets``) + expanded CIDRs (``subnets``), deduped, IPv4-only, bounded to
@@ -912,27 +976,6 @@ def register(app, hub, ctx):
     # ── Network scan (fingerprint discovery) ────────────────────────────────
     _SCAN_OBJECT_TYPES = ("aos_switch", "cx_switch", "ex_switch", "gateway")
 
-    def _resolve_nw_scan_spoke(hub, sess, tenant_id, requested_spoke_id, *, allow_any=None):
-        """The connected nw spoke the scan should run on. Prefer an explicit
-        request spoke_id (when connected), else the tenant's nw spoke, else the
-        shared nw spoke, else (``allow_any`` — admins only) any connected nw
-        spoke. ``allow_any`` defaults to the session's admin status."""
-        if allow_any is None:
-            allow_any = _is_admin(sess)
-        def _up(sid):
-            return sid and hub._primary_key(sid) in hub.active_connections
-        if requested_spoke_id and _up(requested_spoke_id):
-            return requested_spoke_id
-        sid = (hub.get_nw_spoke_for_shared() if access.tenant_is_shared(tenant_id)
-               else hub.get_nw_spoke_for_tenant(tenant_id)) if tenant_id else None
-        if _up(sid):
-            return sid
-        if allow_any:
-            for s in (hub.get_all_spokes_by_type("nw") or []):
-                if _up(s) and hub.approved_modules.get(s, False):
-                    return s
-        return ""
-
     async def _aggregate_scan_targets(hub, tenant_id, sources, extra_subnets,
                                       extra_targets, cap):
         """Build the candidate host-IP list for a tenant scan.
@@ -1143,6 +1186,9 @@ def register(app, hub, ctx):
         return {
             "tenant_id": tid,
             "scan": _nw_scan_config(hub, tid),
+            # The nw agents this tenant may scan with (own + shared) — drives the
+            # Scan tab's agent picker.
+            "spokes": nw_scan_spoke_choices(hub, tid, access.shared_tenant_id()),
             "poll": {
                 "default_interval": eff["default_poll_interval"],
                 "jitter_frac": eff["poll_jitter_frac"],
@@ -1264,31 +1310,35 @@ def register(app, hub, ctx):
         candidate IPs, runs NW_SCAN on the spoke, then (unless dry-run) auto-adds
         the newly-identified manageable devices to the tenant fleet and re-pushes.
 
-        Credential scoping: admin → any chosen set; tenant-admin → only sets
-        visible to their session; system (``sess is None``) → only sets owned by
-        this tenant (or the shared tenant). ``allow_any_spoke`` mirrors that —
-        only a real admin may fall back to an unbound nw spoke."""
+        Credential scoping: the chosen sets are always narrowed to ones owned by
+        the scanned tenant (or the shared tenant), for every caller including a
+        full admin — a scan runs with THAT tenant's vault credentials, never
+        another tenant's. A tenant-admin is additionally limited to sets visible
+        to their session."""
         system = sess is None
-        allow_any = (not system) and _is_admin(sess)
-        spoke_id = _resolve_nw_scan_spoke(
-            hub, sess, tenant_id,
+        spoke_id = resolve_nw_scan_spoke(
+            hub, tenant_id,
             str(data.get("spoke_id") or saved.get("spoke_id") or "").strip(),
-            allow_any=allow_any)
+            access.shared_tenant_id())
         if not spoke_id:
             if system:
                 return {"status": "skipped", "reason": "no nw spoke connected",
                         "tenant": tenant_id, "added": [], "identified": []}
-            raise HTTPException(status_code=503, detail="Network Devices spoke not connected")
+            raise HTTPException(
+                status_code=503,
+                detail="No connected Network Devices agent for this tenant. "
+                       "Deploy the nw module in this tenant, or pick the shared "
+                       "agent, then retry.")
 
         # Assemble the candidate credential sets (from the request or saved
         # config), overlaying each set's vault secret just before the push.
         cred_ids = [str(x) for x in (data.get("credential_ids") or saved.get("credential_ids") or [])]
         all_sets = (hub.state.system_state.get("global_config", {}) or {}).get("nw_scan_credentials", []) or []
         chosen = [c for c in all_sets if isinstance(c, dict) and c.get("id") in set(cred_ids)]
-        if system:
-            shared_tid = access.shared_tenant_id()
-            chosen = [c for c in chosen if c.get("tenant_id", "") in (tenant_id, shared_tid)]
-        elif not _is_admin(sess):
+        shared_tid = access.shared_tenant_id()
+        # Tenant-owned (or shared) credentials only — for every caller.
+        chosen = [c for c in chosen if c.get("tenant_id", "") in (tenant_id, shared_tid)]
+        if not system and not _is_admin(sess):
             chosen = [c for c in chosen
                       if access.spoke_visible_to_session(sess, c.get("tenant_id", ""))]
         if not chosen:
