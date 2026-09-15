@@ -621,6 +621,46 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=str(e))
         return {"status": "ok", "result": unwrap_spoke(resp)}
 
+    @app.post("/admin/ops/dhcp-ha-discover")
+    async def admin_ops_dhcp_ha_discover(request: Request):
+        """Re-form the Kea HA pair from the two active DHCP Server roles.
+
+        Same enrollment the WebUI's discover button runs (shared
+        ``_dhcp_discover_locked``, so the two serialize against each other):
+        it enrolls the workers, mints the HA PKI/secrets, pushes LOAD_ROLE to
+        each node and commits. Exposed on loopback because re-forming a
+        cluster is precisely the recovery needed when the DHCP spoke has lost
+        its members — at which point the WebUI's own DHCP views are erroring
+        and the button is not reachable.
+
+        Requires EXACTLY two agents in the spoke's tenant with ``dhcp-server``
+        both installed and active; that guard lives in the shared discovery
+        path and is deliberately not relaxed here. Body: optional
+        ``{"spoke_id": "<dhcp spoke>"}``, else the usual type-based pick."""
+        _guard(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        spoke_id = str((body or {}).get("spoke_id") or "").strip()
+        if spoke_id:
+            valid = set(hub.get_all_spokes_by_type("dhcp") or [])
+            if spoke_id not in valid:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{spoke_id}' is not a DHCP spoke; known: {sorted(valid)}")
+        else:
+            spoke_id = hub.get_spoke_by_type("dhcp")
+        if not spoke_id:
+            raise HTTPException(status_code=503, detail="no DHCP spoke connected")
+        discover = getattr(app.state, "dhcp_discover_locked", None)
+        if discover is None:
+            raise HTTPException(status_code=503,
+                                detail="DHCP routes are not registered on this hub")
+        logger.warning("admin_ops: dhcp-ha-discover spoke=%s via loopback", spoke_id)
+        result = await discover(spoke_id)
+        return {"status": "ok", "spoke_id": spoke_id, "result": result}
+
     @app.post("/admin/ops/dhcp-reservation")
     async def admin_ops_dhcp_reservation(request: Request):
         """Drive a reservation CRUD against a CHOSEN dhcp spoke and return
