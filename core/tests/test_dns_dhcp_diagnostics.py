@@ -258,9 +258,13 @@ def test_dns_add_forwarder_rejects_invalid_or_duplicate_values(monkeypatch, tmp_
         "status": "SUCCESS",
         "forwarders": [{"zone": ".", "upstreams": ["8.8.8.8"]}],
     })
+    # The managed file is empty here, so Unbound is serving "." from config LM
+    # does not own — still refused, since we cannot merge into a foreign file.
+    # (An add against a zone LM DOES manage now merges; see
+    # dns/tests/test_unbound_forwarder_merge.py.)
     duplicate = mgr.add_forwarder(".", ["1.1.1.1"])
     assert duplicate["status"] == "ERROR"
-    assert "already exists" in duplicate["message"]
+    assert "does not manage" in duplicate["message"]
 
 
 def test_dns_add_forwarder_restores_previous_file_when_reload_fails(
