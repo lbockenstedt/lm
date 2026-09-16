@@ -1551,9 +1551,31 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         ``signing_secret`` is passed through to ``send_to_spoke`` and is used
         only for ``SPOKE_UPDATE_SESSION_KEY`` delivery (sign with the
         pre-rotation secret the spoke still holds).
+
+        A spoke that is mid self-update (``is_draining``) is about to
+        ``os._exit`` and relaunch, so it cannot answer a live query. Rather than
+        SEND one and burn the full timeout window — logging a "Timed out waiting
+        for spoke response" ERROR for every background sync loop / status poll
+        that happens to fire during the update (the "extra errors on Update"
+        flood) — short-circuit with an instant, timeout-shaped result carrying
+        an ``updating`` flag. The message text is kept byte-identical to a real
+        timeout so every existing consumer (``push_or_queue_to_spoke``'s queue
+        fallback, ``cs_bridge._is_timeout_message``'s retry) behaves exactly as
+        before, just without the 60s hang. The ``updating`` flag lets the WebUI
+        badge the node as updating instead of failed. The
+        ``SPOKE_UPDATE_SESSION_KEY`` delivery leg (``signing_secret`` set) MUST
+        still reach an alive-but-draining spoke, so it bypasses the guard.
+        Config pushes never reach here draining: ``_drain_aware_config_push`` /
+        ``push_if_live_or_queue`` queue to the durable mailbox first.
         """
         if timeout is None:
             timeout = self._default_request_timeout
+        if signing_secret is None and self.is_draining(spoke_id):
+            logger.debug("%s draining (updating) — skipped live %s query",
+                         spoke_id, command_type)
+            return {"status": "ERROR",
+                    "message": "Timed out waiting for spoke response",
+                    "updating": True, "draining": True}
         msg_id = str(uuid.uuid4())
         logger.debug(f"Request: {msg_id} -> {spoke_id} [{command_type}] data={_redact(command_type, data)}")
         msg = Message(

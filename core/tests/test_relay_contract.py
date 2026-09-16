@@ -14,7 +14,7 @@ TODO (integration): spin up ``create_app(hub)`` with a ``FakeHub`` whose
 import pytest
 from fastapi import HTTPException
 
-from api import _spoke_payload_or_raise
+from api import SPOKE_UPDATING_DETAIL, _spoke_payload_or_raise
 
 
 def test_success_payload_returned_unchanged():
@@ -55,3 +55,26 @@ def test_non_dict_passthrough():
 def test_dict_without_status_returned_as_is():
     d = {"records": []}
     assert _spoke_payload_or_raise(d) is d
+
+
+def test_updating_spoke_raises_503_with_friendly_detail():
+    """A target mid self-update (request_response short-circuits with
+    ``updating: True`` instead of burning the full timeout) is NOT a failure:
+    it must translate to 503 + the friendly 'update in progress' detail so the
+    browser shows an update notice, not a false 'Timed out' error."""
+    with pytest.raises(HTTPException) as exc:
+        _spoke_payload_or_raise({
+            "status": "ERROR",
+            "message": "Timed out waiting for spoke response",
+            "updating": True, "draining": True,
+        })
+    assert exc.value.status_code == 503
+    assert exc.value.detail == SPOKE_UPDATING_DETAIL
+
+
+def test_draining_flag_alone_also_raises_503():
+    with pytest.raises(HTTPException) as exc:
+        _spoke_payload_or_raise({"status": "ERROR", "draining": True,
+                                 "message": "Timed out waiting for spoke response"})
+    assert exc.value.status_code == 503
+    assert exc.value.detail == SPOKE_UPDATING_DETAIL
