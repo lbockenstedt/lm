@@ -3016,7 +3016,79 @@ def register(app, hub, ctx):
             return body
         return {k: v for k, v in body.items() if k not in _DHCP_ROUTING_KEYS}
 
-    def _dhcp_write_spoke(request: Request, tenant: str = None, body=None):
+    _DHCP_SUBNET_ID_KEYS = ("subnet_id", "subnet-id", "id")
+
+    def _dhcp_subnet_matches(subnet, want_id: str, want_ip: str) -> bool:
+        """Does this spoke-reported subnet record cover the write's target?"""
+        if not isinstance(subnet, dict):
+            return False
+        if want_id and any(str(subnet.get(k) or "").strip() == want_id
+                           for k in _DHCP_SUBNET_ID_KEYS):
+            return True
+        cidr = str(subnet.get("subnet") or "").strip()
+        if want_ip and cidr:
+            try:
+                return (ipaddress.ip_address(want_ip)
+                        in ipaddress.ip_network(cidr, strict=False))
+            except ValueError:
+                return False
+        return False
+
+    async def _dhcp_spoke_owning_target(request: Request, tenant: str = None, body=None):
+        """The dhcp spoke that actually serves the subnet a WRITE targets.
+
+        A write carrying no ``_spoke`` — a plain "Add Reservation", or a row
+        that came from a single-spoke (tenant-scoped) list rather than the
+        admin merged view — used to fall straight through to
+        ``_dhcp_spoke_for_request``, which for an admin with no tenant
+        selected returns the FIRST connected dhcp spoke. With 2+ dhcp spokes
+        that is a coin flip between separate Kea clusters: lose it and the
+        reservation is written into a cluster that never sees the client (or,
+        when the spoke it lands on hosts no Kea at all, the write dies with a
+        raw "Kea CA unreachable" 502 the operator cannot act on).
+
+        Don't guess — ask. Exactly one spoke owns the target subnet, so match
+        the body's ``subnet_id`` (or its IP, by CIDR containment) against each
+        spoke's own subnet list. Returns None whenever the answer is not
+        unambiguous, leaving the legacy resolver in charge."""
+        if not isinstance(body, dict):
+            return None
+        hub = app.state.hub
+        if _effective_tenant(request, tenant):
+            return None  # tenant-resolved routing is already unambiguous
+        spokes = [s for s in (hub.get_all_spokes_by_type("dhcp") or [])
+                  if s in hub.active_connections and hub.approved_modules.get(s, False)]
+        if len(spokes) < 2:
+            return None
+        want_id = str(body.get("subnet_id") or body.get("subnet-id") or "").strip()
+        want_ip = ""
+        for k in _RES_IP_KEYS + ("old_ip",):
+            want_ip = str(body.get(k) or "").strip()
+            if want_ip:
+                break
+        if not want_id and not want_ip:
+            return None
+
+        async def _owns(sid):
+            try:
+                result = await hub.request_response(sid, "DHCP_LIST_SUBNETS", {})
+                data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+                data = _spoke_payload_or_raise(data)
+            except Exception as e:  # noqa: BLE001 — an unreachable spoke simply owns nothing
+                logger.debug("dhcp write routing: %s subnet probe failed: %s", sid, e)
+                return False
+            subnets = (data.get("subnets") if isinstance(data, dict) else None) or []
+            return any(_dhcp_subnet_matches(s, want_id, want_ip) for s in subnets)
+
+        hits = await asyncio.gather(*[_owns(s) for s in spokes])
+        owners = [s for s, hit in zip(spokes, hits) if hit]
+        if len(owners) != 1:
+            logger.debug("dhcp write routing: %d spokes own subnet_id=%r ip=%r",
+                         len(owners), want_id, want_ip)
+            return None
+        return owners[0]
+
+    async def _dhcp_write_spoke(request: Request, tenant: str = None, body=None):
         """The dhcp spoke a WRITE must land on.
 
         The admin combined view merges leases/reservations from EVERY dhcp
@@ -3032,12 +3104,15 @@ def register(app, hub, ctx):
         An explicit ``spoke_id`` (or ``_spoke``) in the body is honoured only
         when it names a connected, approved dhcp spoke the caller may actually
         reach, so the body can never be used to cross a tenant boundary.
-        Absent/unusable — the legacy resolver, unchanged."""
+        Absent, the target subnet's owning spoke resolves it
+        (``_dhcp_spoke_owning_target``); only if that is ambiguous too does the
+        legacy first-connected-spoke resolver decide."""
         hub = app.state.hub
         requested = str((body or {}).get("spoke_id")
                         or (body or {}).get("_spoke") or "").strip()
         if not requested:
-            return _dhcp_spoke_for_request(request, tenant)
+            owner = await _dhcp_spoke_owning_target(request, tenant, body)
+            return owner or _dhcp_spoke_for_request(request, tenant)
         connected = [s for s in (hub.get_all_spokes_by_type("dhcp") or [])
                      if hub._primary_key(s) in hub.active_connections
                      and hub.approved_modules.get(s, False)]
@@ -3446,7 +3521,7 @@ def register(app, hub, ctx):
         """Delete an active DHCP lease from Kea's lease database."""
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP lease")
-        spoke = _dhcp_write_spoke(request, tenant, body)
+        spoke = await _dhcp_write_spoke(request, tenant, body)
         return await _relay_spoke(spoke, "DHCP_DEL_LEASE", _dhcp_write_body(body), log_name="dhcp_delete_lease")
 
     # ── Reservation → NetBox write-back ──────────────────────────────────────
@@ -3625,7 +3700,7 @@ def register(app, hub, ctx):
     async def dhcp_add_reservation(request: Request, tenant: str = None):
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
-        spoke = _dhcp_write_spoke(request, tenant, body)
+        spoke = await _dhcp_write_spoke(request, tenant, body)
         result = await _relay_spoke(spoke, "DHCP_ADD_RES", _dhcp_write_body(body), log_name="dhcp_add_reservation")
         return _with_writeback(result, await _reservation_netbox_writeback(body))
 
@@ -3648,7 +3723,7 @@ def register(app, hub, ctx):
     async def dhcp_update_reservation(request: Request, tenant: str = None):
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
-        spoke = _dhcp_write_spoke(request, tenant, body)
+        spoke = await _dhcp_write_spoke(request, tenant, body)
         result = await _relay_spoke(spoke, "DHCP_UPDATE_RES", _dhcp_write_body(body), log_name="dhcp_update_reservation")
         # A re-addressed reservation leaves a stale mac_address behind on the
         # OLD NetBox IP, which the next sync would faithfully turn back into a
@@ -3662,7 +3737,7 @@ def register(app, hub, ctx):
     async def dhcp_delete_reservation(request: Request, tenant: str = None):
         body = await request.json()
         await _constrain_shared_write(request, body, ["ip", "address", "ip-address", "ip_address"], "DHCP reservation")
-        spoke = _dhcp_write_spoke(request, tenant, body)
+        spoke = await _dhcp_write_spoke(request, tenant, body)
         result = await _relay_spoke(spoke, "DHCP_DEL_RES", _dhcp_write_body(body), log_name="dhcp_delete_reservation")
         # Without clearing the NetBox mac_address the next sync would simply
         # recreate the reservation the operator just deleted.
