@@ -174,6 +174,23 @@ def test_admin_no_tenant_selected_sees_every_spoke():
     assert set(hub.queried) == {"pxmx-lrb", "pxmx-ra"}
 
 
+def test_admin_default_tenant_does_not_accumulate_all_tenants():
+    """The reported ask: a Global Admin who picks the ADMIN (``default``) tenant
+    must NOT see every tenant's VMs accumulated. The endpoint returns an empty,
+    ``select_tenant``-flagged payload (the UI prompts to pick a tenant) and
+    queries NO spoke — so no cross-tenant firehose. This is distinct from the
+    unscoped admin call above (no ``?tenant=`` at all), which still sees the
+    fleet for programmatic callers."""
+    hub = _Hub()
+    c = _build(hub, admin=True, tenant=None)  # ctx resolves ?tenant= explicitly
+    r = c.get("/api/pxmx/vms?tenant=default")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["vms"] == []
+    assert body.get("select_tenant") is True
+    assert hub.queried == []  # not a single tenant's spoke was touched
+
+
 def test_non_admin_no_resolvable_tenant_is_refused_not_shown_everything():
     hub = _Hub()
     c = _build(hub, admin=False, tenant=None, sess={"user": {}})

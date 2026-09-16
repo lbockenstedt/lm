@@ -106,12 +106,17 @@ def test_tenant_param_excludes_unassigned_instances():
     assert "c-none" not in _ids(c.get("/setup/nw-scan-credentials?tenant=tenant-admin"))
 
 
-def test_tenant_default_is_treated_as_unscoped():
-    """'default' is the admin's global view, not a literal tenant name."""
+def test_tenant_default_shows_admin_own_plus_shared_not_all_tenants():
+    """'default' is the Global-Admin scope: the admin's OWN sets (unassigned /
+    'default'-tagged) + shared — NOT every tenant's. A Global Admin on the ADMIN
+    (default) tenant must not see, e.g., LRB's scan-credential sets; they select
+    that tenant to see them."""
     c, hub = _build()
     _seed(hub)
-    assert _ids(c.get("/setup/nw-scan-credentials?tenant=default")) == [
-        "c-admin", "c-lrb", "c-none", "c-shared"]
+    got = _ids(c.get("/setup/nw-scan-credentials?tenant=default"))
+    assert got == ["c-none", "c-shared"]
+    assert "c-lrb" not in got
+    assert "c-admin" not in got
 
 
 def test_tenant_with_no_credentials_gets_empty_list():
@@ -133,6 +138,16 @@ def test_non_admin_cannot_widen_scope_with_tenant_param():
     c, hub = _build(is_admin=False, own_tenants=["tenant-admin"])
     _seed(hub)
     assert _ids(c.get("/setup/nw-scan-credentials?tenant=tenant-lrb")) == ["c-shared"]
+
+
+def test_non_admin_tenant_default_keeps_own_visibility_scope():
+    """'default' is an admin-only scope. A non-admin who somehow passes it must
+    NOT have their own-tenant entries dropped (the admin-own {"", "default"}
+    scope would otherwise hide them) — their visibility filter still governs."""
+    c, hub = _build(is_admin=False, own_tenants=["tenant-admin"])
+    _seed(hub)
+    assert _ids(c.get("/setup/nw-scan-credentials?tenant=default")) == [
+        "c-admin", "c-shared"]
 
 
 def test_no_shared_tenant_configured_does_not_admit_unassigned(monkeypatch):
