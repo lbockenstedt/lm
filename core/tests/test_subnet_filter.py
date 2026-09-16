@@ -413,3 +413,88 @@ def test_filter_tenant_hypervisor_exempt_from_fail_close():
     out = asyncio.run(filter_tenant(hub, sessions, req, vms, "hypervisor", ["ips"],
                                 explicit_tenant="ghost"))
     assert out is vms             # hypervisor no-prefix → unchanged
+
+
+# ── Multi-tenant user switching tenants (server-side filter honors ?tenant=) ──
+#
+# A non-admin who belongs to several tenants (tenants=[A, B]; login derives the
+# session tenant_id from tenants[0]=A) must, when they SELECT tenant B in the UI
+# (?tenant=B), have B's data filtered by B's prefixes — not A's. The old
+# filter_session read ONLY the session-default tenant's prefixes, so switching
+# to B filtered B's items against A's subnets and showed nothing (the "DXP
+# tenant sees no IPAM prefixes" bug — the list endpoint already scopes the spoke
+# query to B, then this redundant server-side filter wrongly dropped every row).
+# A crafted ?tenant= for an UNOWNED tenant still falls back to the session
+# tenant, so it can never widen the filter to another tenant's data.
+
+class _PerTenantPrefixHub(_PrefixHub):
+    """IPAM spoke returning DIFFERENT prefixes per requested tenant slug."""
+    _BY_SLUG = {
+        "lrb": [{"prefix": "10.10.0.0/16"}],
+        "dxp": [{"prefix": "10.79.0.0/16"}, {"prefix": "10.79.254.0/24"}],
+    }
+
+    async def request_response(self, spoke_id, command, payload, **kwargs):
+        assert command == "NETBOX_GET_PREFIXES"
+        rows = self._BY_SLUG.get(payload.get("tenant"), [])
+        return {"payload": {"data": {"prefixes": rows}}}
+
+
+class _QSRequest(_FakeRequest):
+    """_FakeRequest that also exposes ?tenant= via .query_params."""
+    def __init__(self, cookie, tenant=None):
+        super().__init__(cookie)
+        self.query_params = {"tenant": tenant} if tenant else {}
+
+
+def _multi_tenant_session():
+    # tenants=[lrb, dxp]; login derives tenant_id from tenants[0]=lrb.
+    return {"user": {"tenants": ["lrb", "dxp"], "tenant_id": "lrb",
+                     "permissions": {"netbox": True}}, "expires": 2 ** 31}
+
+
+def _multi_hub():
+    return _PerTenantPrefixHub(FakeState(system_state={}, tenants={
+        "lrb": {"netbox_tenant_slug": "lrb"},
+        "dxp": {"netbox_tenant_slug": "dxp"},
+    }))
+
+
+def _dxp_prefix_rows():
+    # The list endpoint already tenant-scoped the spoke query to dxp, so the
+    # rows ARE dxp's — the redundant server-side filter must not drop them.
+    return {"prefixes": [
+        {"prefix": "10.79.0.0/16"},
+        {"prefix": "10.79.254.0/24"},
+    ]}
+
+
+def test_filter_session_honors_selected_tenant_for_multi_tenant_user():
+    """Multi-tenant user (session default lrb) selecting dxp (?tenant=dxp) sees
+    dxp's prefixes — filtered by dxp's subnets, not the session-default lrb."""
+    hub = _multi_hub()
+    sessions = {"u": _multi_tenant_session()}
+    req = _QSRequest("u", tenant="dxp")
+    out = asyncio.run(filter_session(hub, sessions, req, _dxp_prefix_rows(), "netbox", ["prefix"]))
+    got = [p["prefix"] for p in out["prefixes"]]
+    assert got == ["10.79.0.0/16", "10.79.254.0/24"]  # dxp rows kept
+
+
+def test_filter_session_default_tenant_when_no_selection():
+    """No ?tenant= → session-default tenant (lrb) prefixes; dxp rows are dropped
+    (the pre-switch view), proving the default path is unchanged."""
+    hub = _multi_hub()
+    sessions = {"u": _multi_tenant_session()}
+    req = _QSRequest("u")  # no ?tenant=
+    out = asyncio.run(filter_session(hub, sessions, req, _dxp_prefix_rows(), "netbox", ["prefix"]))
+    assert out["prefixes"] == []  # dxp rows don't match lrb's 10.10.0.0/16
+
+
+def test_filter_session_unowned_tenant_falls_back_to_session():
+    """A crafted ?tenant= for a tenant the user does NOT own falls back to the
+    session tenant (lrb) — no cross-tenant widening."""
+    hub = _multi_hub()
+    sessions = {"u": _multi_tenant_session()}
+    req = _QSRequest("u", tenant="ra")  # not in user's [lrb, dxp]
+    out = asyncio.run(filter_session(hub, sessions, req, _dxp_prefix_rows(), "netbox", ["prefix"]))
+    assert out["prefixes"] == []  # filtered by lrb (fallback), dxp rows dropped

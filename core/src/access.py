@@ -1315,6 +1315,24 @@ async def resolve_prefixes(hub, sess) -> list:
     return prefixes
 
 
+async def resolve_prefixes_for_session_tenant(hub, sess, tenant_id) -> list:
+    """Prefixes for ``tenant_id`` (an owned/selected tenant), cached PER TENANT
+    on the session so a multi-tenant user switching tenants in the UI doesn't
+    round-trip the NetBox spoke on every filtered request. Same 5-min TTL as
+    :func:`resolve_prefixes`; a separate ``prefixes_by_tid`` map so the two
+    caches never clobber each other. Empty for admins / unconfigured tenants.
+    """
+    if not sess or is_admin(sess) or not tenant_id:
+        return []
+    cache = sess.setdefault("prefixes_by_tid", {})
+    ent = cache.get(tenant_id)
+    if ent is not None and ent[1] > time.time() - _PREFIX_CACHE_TTL:
+        return ent[0] or []
+    prefixes = await fetch_tenant_prefixes(hub, tenant_id)
+    cache[tenant_id] = (prefixes, time.time())
+    return prefixes
+
+
 async def resolve_prefixes_for_tenant(hub, tenant_id) -> list:
     """Prefixes for an explicit tenant id (selected tenant), used by the
     tenant-aware NAC filters so admins / multi-tenant users scope by the tenant
@@ -1343,6 +1361,16 @@ async def filter_session(hub, sessions: dict, request: "Request", data, module: 
     fleet-wide set would be a cross-tenant bypass (the tenantless-bypass the
     ``?tenant=`` gate now also closes in :func:`check_tenant_access`). Such a
     user is unconfigured; admins still see everything.
+
+    Prefixes are resolved for the request's EFFECTIVE tenant, not blindly the
+    session-default (``tenants[0]``) one: a multi-tenant user who selects one of
+    their OWN tenants via ``?tenant=`` must have the selected tenant's data
+    filtered by THAT tenant's prefixes — otherwise switching tenant in the UI
+    filters the selected tenant's items against the wrong prefix set and shows
+    nothing (the IPAM/firewall "tenant sees empty after switching" symptom).
+    :func:`effective_tenant` falls back to the session tenant for an absent or
+    unowned selection, so a crafted ``?tenant=`` can never widen the filter —
+    the cross-tenant backstop is preserved.
     """
     sess = session_user(sessions, request)
     if not sess or is_admin(sess):
@@ -1351,7 +1379,14 @@ async def filter_session(hub, sessions: dict, request: "Request", data, module: 
         return data
     if not sess.get("user", {}).get("tenant_id"):
         return [] if isinstance(data, list) else ({} if isinstance(data, dict) else data)
-    prefixes = await resolve_prefixes(hub, sess)
+    try:
+        selected = request.query_params.get("tenant")
+    except Exception:
+        selected = None
+    tid = effective_tenant(sessions, request, selected)
+    if not tid:
+        return _empty_filter_result(data)
+    prefixes = await resolve_prefixes_for_session_tenant(hub, sess, tid)
     if not prefixes:
         return _empty_filter_result(data)
     return filter_items_by_prefixes(data, prefixes, ip_fields)
