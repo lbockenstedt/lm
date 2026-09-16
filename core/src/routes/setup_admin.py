@@ -4,6 +4,7 @@ from api import (
     HTTPException, Request, logger, os, re, set_log_level, time,
 )
 from update_pipeline import _version_behind
+from spoke_alert_sync import direct_module_ids as _direct_module_ids
 
 from . import frontmatter
 
@@ -176,13 +177,7 @@ async def _aggregate_diagnostics(hub):
         _raw = (_info or {}).get("agent_id")
         if _raw:
             relay_ids.add(_raw)
-    metadata = hub.state.system_state.get("module_metadata", {}) or {}
-    direct_module_ids = {
-        sid for sid, meta in metadata.items()
-        if isinstance(meta, dict)
-        and meta.get("install_uuid")
-        and not meta.get("parent_name")
-    }
+    direct_module_ids = _direct_module_ids(hub.state.system_state)
     if relay_ids:
         known = list(hub.state.system_state.get("known_modules", []))
         leaked = [
