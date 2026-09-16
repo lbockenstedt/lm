@@ -702,23 +702,30 @@ def register(app, hub, ctx):
         process (so a spoke that connects after credentials were set still gets
         them). Credentials are resolved PER SPOKE from the spoke's tenant scope,
         so a tenant's console logins only ever reach that tenant's console spoke.
-        Fire-and-forget + signed."""
+        Fire-and-forget + signed. Un-seeded spokes are seeded CONCURRENTLY:
+        each resolve pulls from the Credential Vault (a per-spoke network
+        round-trip), so a serial loop made the console page's seed step scale
+        linearly with the number of console agents."""
         seeded = getattr(hub, "_console_creds_seeded", None) or set()
-        for sid in spokes:
-            if sid in seeded:
-                continue
+        todo = [sid for sid in spokes if sid not in seeded]
+        if not todo:
+            return
+
+        async def _seed_one(sid):
             try:
                 tenant = hub.state.get_spoke_tenant(sid) or ""
             except Exception:  # noqa: BLE001
                 tenant = ""
             creds = await _console_load_credentials_resolved(hub, tenant)
             if not creds:
-                continue  # nothing to push yet — retry on the next seed trigger
+                return  # nothing to push yet — retry on the next seed trigger
             try:
                 await hub.send_to_spoke_command(sid, "CONSOLE_SET_CREDENTIALS", {"credentials": creds})
                 _console_mark_seeded(hub, sid)
             except Exception:  # noqa: BLE001
                 pass
+
+        await asyncio.gather(*(_seed_one(sid) for sid in todo))
 
     async def _console_push_llm_flag(hub, spokes, enabled):
         """Push the LLM-identify runtime gate to console spokes (fire-and-forget,
@@ -877,14 +884,24 @@ def register(app, hub, ctx):
         # fetch so the first-ever page load isn't blank, then it's cache-served
         # (and the background loop keeps it warm) from here on. 60s base window,
         # extended by the spoke's SPOKE_PROGRESS keepalives while it enumerates.
-        for sid in cold:
+        # Fetched CONCURRENTLY: these are independent per-spoke polls, so a serial
+        # loop made the first page load scale linearly with the number of console
+        # agents (a wedged one stacking its full 60s onto every other's wait).
+        async def _cold_fetch(sid):
             try:
                 r = await hub.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=60.0)
                 raw_ports = _console_unwrap(r).get("ports") or []
                 await hub.warm_set("console_ports", sid, raw_ports)
-                _emit_ports(sid, raw_ports, stale=False)
+                return sid, raw_ports, None
             except Exception as e:  # noqa: BLE001 - one dead console shouldn't blank the rest
-                errors[sid] = str(e)
+                return sid, None, str(e)
+
+        if cold:
+            for sid, raw_ports, err in await asyncio.gather(*(_cold_fetch(s) for s in cold)):
+                if err is not None:
+                    errors[sid] = err
+                else:
+                    _emit_ports(sid, raw_ports, stale=False)
 
         # Aging entries → refresh in the background (never blocks the response).
         # Deduped by the hub so repeated page loads don't stack polls.
