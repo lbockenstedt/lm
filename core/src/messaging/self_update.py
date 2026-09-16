@@ -40,6 +40,7 @@ behavior (restart, no rollback) — never fatal.
 import asyncio
 import contextlib
 import fcntl
+import json
 import logging
 import os
 import queue
@@ -263,6 +264,58 @@ class SelfUpdateMixin:
     # Shared lm/core propagation (/opt/lm) — host-wide locked so concurrent
     # components on one box don't race the shared .git index.
     # ------------------------------------------------------------------
+
+    # Window in which a core pull already done by a SIBLING component on this
+    # host counts as "this wave is converged" (see _core_already_converged).
+    CORE_CONVERGE_TTL_S = 60.0
+
+    def _core_converge_stamp_path(self, core_root: str) -> str:
+        """Companion file to the core-update lock recording the HEAD the last
+        successful core pull produced. Lives beside the lock so it shares the
+        lock's writability story."""
+        return os.path.join(core_root, ".lm-core-converged.json")
+
+    def _core_already_converged(self, core_root: str) -> bool:
+        """True when a sibling component on this host pulled the shared core
+        moments ago and it has not moved since.
+
+        A role-hosting agent runs N+1 control planes (the base agent plus one
+        RoleConnection per hosted role) in ONE process, all sharing /opt/lm.
+        A single hub-pushed update makes every one of them try to pull that
+        same checkout: they pile up on _core_update_lock (300s each), and the
+        resulting concurrent `git fetch` on one repo times out at 120s and
+        falls back to `reset --hard`. Observed on a 9-role node: the pile-up,
+        not the work, was the entire recovery cost.
+
+        Fails OPEN — a missing, unreadable, stale or HEAD-mismatched stamp
+        means "pull normally", so this can only ever skip a *redundant* fetch
+        within the same wave, never a genuine update. The TTL is deliberately
+        short (seconds-scale, while siblings react to one push) to bound the
+        window in which a commit landing mid-wave is deferred to the next
+        update or to the code-drift watchdog."""
+        try:
+            with open(self._core_converge_stamp_path(core_root), "r") as fh:
+                stamp = json.load(fh)
+            if time.time() - float(stamp.get("ts") or 0) > self.CORE_CONVERGE_TTL_S:
+                return False
+            head = self._run_git(["rev-parse", "HEAD"], cwd=core_root).stdout.strip()
+            return bool(head) and head == stamp.get("head")
+        except Exception:  # noqa: BLE001 — any doubt → pull normally
+            return False
+
+    def _mark_core_converged(self, core_root: str, head: str) -> None:
+        """Record the HEAD a successful core pull landed on. Best-effort: if we
+        cannot write the stamp, siblings simply pull as they do today."""
+        if not head:
+            return
+        try:
+            path = self._core_converge_stamp_path(core_root)
+            tmp = path + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump({"head": head, "ts": time.time()}, fh)
+            os.replace(tmp, path)
+        except Exception:  # noqa: BLE001
+            pass
 
     @contextlib.contextmanager
     def _core_update_lock(self, timeout: float = 300.0):
@@ -592,6 +645,15 @@ class SelfUpdateMixin:
                         if not got_lock:
                             logger.warning("update: could not acquire core "
                                            "lock; skipping core pull this cycle.")
+                        elif self._core_already_converged(core_root):
+                            # A sibling control plane in this same process (or
+                            # another component on this host) just pulled core
+                            # and it hasn't moved. Re-fetching here only adds
+                            # lock/fetch contention — see _core_already_converged.
+                            logger.info("update: shared core already converged by a "
+                                        "sibling on this host; skipping redundant "
+                                        "core pull.")
+                            core_root = None
                         else:
                             try:
                                 self._clear_stale_git_locks(core_root)
@@ -636,6 +698,10 @@ class SelfUpdateMixin:
                                         core_advanced = (core_to_commit != core_from_commit)
                                         core_changed = self._core_change_needs_restart(
                                             core_root, core_from_commit, core_to_commit)
+                                        # Publish the converged HEAD so siblings
+                                        # reacting to this same push skip their
+                                        # redundant fetch of this checkout.
+                                        self._mark_core_converged(core_root, core_to_commit)
                                 else:
                                     logger.warning("update: core fetch failed: %s",
                                                    (fetch_core.stderr or "").strip())
