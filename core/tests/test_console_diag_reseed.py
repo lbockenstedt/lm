@@ -12,6 +12,7 @@ FunctionDef nodes with ``ast`` and exec them in a namespace, injecting a fake
 ``_console_load_credentials`` so no Fernet/Key Vault is needed.
 """
 import ast
+import asyncio
 import os
 import types
 
@@ -28,6 +29,7 @@ def _load_seed_helpers(creds):
     src = open(_CONSOLE).read()
     tree = ast.parse(src)
     ns = {"getattr": getattr,
+          "asyncio": asyncio,
           "_console_load_credentials": lambda hub: creds,
           "logger": types.SimpleNamespace(warning=lambda *a, **k: None,
                                            info=lambda *a, **k: None)}

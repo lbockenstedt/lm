@@ -82,6 +82,30 @@ A deliberate, admin/`console_write`-gated write path, separate from the read-onl
   backup = display/download (versioned lm archive is a follow-up). Reboot-rollback + on-device verify are
   heuristic — verify on real hardware before relying on them.
 
+## Direct Port Access (DPA) — enabling it
+DPA exposes each serial port over a per-port **telnet** listener (auto-assigned from
+`console_dpa_base`=2200) so you can attach a terminal straight to the line (à la ser2net).
+The endpoint then shows as a `🔌 telnet <bind>:<port>` badge in the **Console** port list
+and in the `CONSOLE_LIST_PORTS` `dpa` field.
+
+**It is OFF by default** — telnet is unauthenticated/unencrypted, so the localhost bind
+(or an explicit source-IP allow-list when widened) is the guard. If you don't see a DPA
+badge on the Console page, DPA simply isn't enabled yet.
+
+Enable it when loading the console role: **Setup → Spokes & Agents → Load Role**, tick
+**console**, then **Enable Direct Port Access**. Keep the bind at `127.0.0.1` (reach it by
+SSH-tunnelling to the console host) unless you deliberately widen it, in which case set a
+comma-separated **source-IP allow-list**. This maps to the role config keys
+`console_dpa_enabled` / `console_dpa_bind` / `console_dpa_allow` (`console/src/console_spoke.py::_ensure_dpa_task`).
+
+- **The console role must not already be loaded** to pass this config — the Load Role modal
+  only lists roles that aren't loaded. To turn DPA on/off for an already-loaded console role,
+  **Unload** it first, then Load it again with the box ticked (or not).
+- **Applies at load only.** Like all interactive role config (netbox/ldap admin creds too),
+  it is not re-applied when the agent reboots or the hub re-adopts the role config-less, so
+  DPA reverts to off after an agent restart. *Follow-ups:* persist the role config for
+  re-push on reconnect, and a live on/off toggle on the Console page (`CONSOLE_SET_DPA`).
+
 ## How it works
 
 - **Port discovery.** `enumerate_ports()` (`console/src/serial_manager.py`) lists USB
@@ -116,8 +140,16 @@ A deliberate, admin/`console_write`-gated write path, separate from the read-onl
   banner, matches it against a built-in vendor profile (Cisco IOS, Aruba AOS-CX,
   ArubaOS gateway/controller — recognised by its `(hostname) #` prompt — HP
   ProCurve, Juniper, generic Linux — `console/src/fingerprint.py::PROFILES`), tries the
-  hub-managed encrypted credential list once each at a login prompt (never re-hammering),
-  and if it gets in, runs that profile's read-only identity commands (`show version`,
+  hub-managed encrypted credential list **followed by a short set of well-known
+  factory-default credentials** (`FACTORY_DEFAULT_CREDENTIALS`, gated by role config
+  `console_factory_default_creds`, default on) once each at a login prompt — never
+  re-hammering, but each credential is guaranteed to actually be presented even if the
+  device is slow to redraw or rate-limits after a failed attempt. On a **net-new device
+  that forces a password set/change** after a first login (`Enter new password:`,
+  `You must change your password`), the probe **declines by sending bare Enters to skip
+  it** — identify is read-only and never sets a password — so the device still drops to a
+  shell and can be profiled.
+  If it gets in, it runs that profile's read-only identity commands (`show version`,
   `show inventory`, `show system`, etc.) and regex-parses serial number, MAC, management
   IP, model, and hostname — the model + serial are bubbled up in the UI (port identity
   line + device card) so the box can be found in NetBox and physically in the rack.

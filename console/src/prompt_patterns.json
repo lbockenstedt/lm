@@ -12,7 +12,12 @@
     "out what the prompt is) — so adding the string here fixes it permanently.",
     "The 'hostname_prompt' family is different: each regex MUST capture the",
     "device hostname in group 1 (it is read to name the port), and the first",
-    "pattern that matches wins — list the most specific shapes first."
+    "pattern that matches wins — list the most specific shapes first.",
+    "The 'new_password_prompt' family matches a net-new device's forced password",
+    "SET/CHANGE prompt (e.g. 'Enter new password:'); the probe declines it with",
+    "bare Enters (identify is read-only and never sets a password). It is matched",
+    "on the LAST line and BEFORE 'password_prompt', so a credential is never typed",
+    "into a set-password field."
   ],
   "login_prompt": [
     "(?:[Ll]ogin|[Uu]ser(?:\\s?name)?)\\s*:\\s*$"
@@ -22,6 +27,13 @@
   ],
   "shell_prompt": [
     "\\S[>#$%]\\s*$"
+  ],
+  "new_password_prompt": [
+    "(?i:(?:enter|set|choose|create|type)\\s+(?:a\\s+)?new\\s+password)\\s*:?\\s*$",
+    "(?i:new\\s+password)\\s*:?\\s*$",
+    "(?i:(?:re-?type|retype|confirm|verify|re-?enter)\\s+(?:new\\s+)?password)\\s*:?\\s*$",
+    "(?i:(?:must\\s+|please\\s+)?change\\s+(?:the\\s+|your\\s+)?password)",
+    "(?i:password\\s+(?:change\\s+required|must\\s+be\\s+changed|has\\s+expired|expired))"
   ],
   "hostname_prompt": [
     "(?:^|\\r|\\n)[\\w.\\-]+@([\\w.\\-]+):[\\w.\\-/~]*[#$]\\s*$",
