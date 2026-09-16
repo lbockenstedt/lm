@@ -217,3 +217,11 @@ generation + auth); it plugs into the same `DpaManager.bridge` and is the
 recommended path for remote access. Code: `console/src/dpa.py` (`allocate_port`,
 `strip_telnet`, `DpaManager`), wired in `console/src/console_spoke.py`
 (`_ensure_dpa_task`, local-sink interception in `_on_serial_data`).
+
+**Enabling it (operator):** tick **Enable Direct Port Access** under the `console` role
+in **Setup → Spokes & Agents → Load Role** (config keys `console_dpa_enabled` /
+`console_dpa_bind` / `console_dpa_allow`). The role can't already be loaded to pass this
+config, so unload+reload to change it. The config applies at load only — it is not
+re-applied on an agent reboot or config-less hub re-adopt (a property of all interactive
+role config), so durable re-push of the role config and a live `CONSOLE_SET_DPA` toggle
+are the tracked follow-ups.
