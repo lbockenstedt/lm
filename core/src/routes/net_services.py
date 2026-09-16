@@ -313,12 +313,16 @@ def register(app, hub, ctx):
             return cluster
         keep = ("enabled", "mode", "state", "healthy", "config_converged",
                 "config_digests_missing", "member_count", "healthy_count",
+                # A pair mid-apply is NOT faulty. Without these a non-admin saw
+                # "degraded"/"needs attention" for every routine NetBox sync,
+                # because the fields that explain it were redacted away.
+                "updating", "updating_members", "serving", "serving_count",
                 "recommendations", "supported_modes", "reason")
         out = {k: v for k, v in cluster.items() if k in keep}
         out["members"] = [
             {k: v for k, v in m.items()
              if k in ("id", "display_name", "connected", "health", "ha_role",
-                      "ha_state", "ha_enabled")}
+                      "ha_state", "ha_enabled", "serving")}
             for m in (cluster.get("members") or []) if isinstance(m, dict)
         ]
         out["peers"] = []
