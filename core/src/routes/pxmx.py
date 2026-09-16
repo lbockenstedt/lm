@@ -1328,8 +1328,19 @@ def register(app, hub, ctx):
                     if gs:
                         return {"nodes": [], "spoke_connected": False}
         elif _is_admin(sess):
-            # Admin, no tenant selected ("All") → every node across every
-            # agent-hosting spoke (was: a single spoke, hiding sim-hosted hosts).
+            if tid == "default":
+                # ADMIN (default) tenant EXPLICITLY selected in the picker: do
+                # NOT accumulate every tenant's hosts into one firehose. A Global
+                # Admin selects a SPECIFIC tenant to see that tenant's hosts (the
+                # branch above); the default/ADMIN scope shows nothing on its own.
+                # Returned clean + flagged so the UI prompts "select a tenant"
+                # rather than an error or a misleading "no agents connected".
+                # (Was: every node across every spoke — the reported cross-tenant
+                # accumulation.) A truly unscoped admin call (tid is None — not
+                # the picker, which always sends ?tenant=) still sees the fleet.
+                return {"nodes": [], "spoke_connected": True, "select_tenant": True}
+            # No tenant scope AT ALL (tid is None) → every node across every
+            # agent-hosting spoke (programmatic/unscoped admin call).
             node_spokes = list(dict.fromkeys(
                 hub.get_all_spokes_by_type("hypervisor")
                 + hub.get_all_spokes_by_type("simulation")))
@@ -1587,7 +1598,16 @@ def register(app, hub, ctx):
             if gs and not gs_tid:
                 visible_spokes.add(gs)
         elif _is_admin(sess):
-            visible_spokes = None  # no restriction — admin, no tenant selected ("All")
+            if tid == "default":
+                # ADMIN (default) tenant EXPLICITLY selected: do NOT accumulate
+                # every tenant's VMs. A Global Admin selects a SPECIFIC tenant to
+                # see that tenant's VMs (the branch above); the default/ADMIN
+                # scope shows nothing on its own. Clean + flagged so the UI
+                # prompts "select a tenant". (Was: None = no restriction = every
+                # spoke — the reported accumulation.) A truly unscoped admin call
+                # (tid is None, not the picker) still sees the whole fleet.
+                return _with_tpl({"vms": [], "spoke_connected": True, "select_tenant": True})
+            visible_spokes = None  # no restriction — admin, no tenant scope at all (tid is None)
         else:
             raise HTTPException(status_code=403, detail="Select a tenant to view its hypervisor VMs")
 
