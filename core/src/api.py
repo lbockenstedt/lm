@@ -1155,6 +1155,13 @@ def _stop_cache_for_tenant(tenant_id: str):
     logger.info(f"[Cache] cleared for tenant '{tenant_id}' — no active sessions")
 
 
+# User-facing sentinel raised when a relay target is mid self-update. The WebUI
+# (_spokeErrorBanner) recognises this exact string and renders a neutral
+# "updating" notice instead of a red failure banner, so a routine update no
+# longer reads as a spoke failure. Keep the two copies in lockstep.
+SPOKE_UPDATING_DETAIL = "Update in progress — please wait"
+
+
 def _spoke_payload_or_raise(data):
     """Translate a spoke relay result into the API error contract.
 
@@ -1165,8 +1172,18 @@ def _spoke_payload_or_raise(data):
     as ``detail`` — the contract every other relay group already follows. A
     non-dict result (raw list / scalar) is returned as-is. Pure → unit-testable;
     the in-``create_app`` ``_relay_spoke`` closure calls this after unwrapping.
+
+    A target that is mid self-update (``request_response`` short-circuits with
+    ``updating: True`` rather than burning the full timeout — see
+    ``LabManagerHub.request_response``) is NOT a failure: the spoke is
+    restarting on new code and will answer again in seconds. Translate it to
+    503 (Service Unavailable — "retry shortly") carrying the friendly
+    ``SPOKE_UPDATING_DETAIL`` so the browser shows "update in progress", not a
+    false "Timed out waiting for spoke response" error.
     """
     if isinstance(data, dict) and data.get("status") == "ERROR":
+        if data.get("updating") or data.get("draining"):
+            raise HTTPException(status_code=503, detail=SPOKE_UPDATING_DETAIL)
         msg = data.get("message") or data.get("error") or "Spoke returned an error"
         raise HTTPException(status_code=502, detail=msg)
     return data
