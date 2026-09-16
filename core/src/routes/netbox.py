@@ -26,6 +26,36 @@ def register(app, hub, ctx):
                 logger.warning("DHCP sync after NetBox prefix edit failed: %s", exc)
         asyncio.create_task(_sync())
 
+    # The tenant cache stores each NetBox list module as the spoke's REPLY
+    # ENVELOPE -- {"status": "SUCCESS", "prefixes": [...]} -- not a bare list.
+    # _normalize_cached only unwraps a "data"/"payload" key, and these replies
+    # have neither, so the rows live one level down under a per-module key.
+    _NB_ROW_KEY = {
+        "netbox_prefixes": "prefixes",
+        "netbox_devices": "devices",
+        "netbox_ips": "ip_addresses",
+        "netbox_racks": "racks",
+    }
+
+    def _nb_rows(cached, module_key):
+        """The row list inside a cached NetBox list module, or None.
+
+        None means "shape not recognised" and the caller must FAIL CLOSED --
+        never guess. Returning a wrong list here would hand a non-admin a
+        cross-tenant mutation, which is the exact thing _verify_owns exists to
+        prevent.
+        """
+        if not isinstance(cached, dict):
+            return None
+        data = cached.get("data")
+        if isinstance(data, list):          # already-unwrapped shape
+            return data
+        if isinstance(data, dict):
+            rows = data.get(_NB_ROW_KEY.get(module_key))
+            if isinstance(rows, list):
+                return rows
+        return None
+
     async def _verify_owns(request, module_key, obj_id, id_field="id"):
         """Cross-tenant guard for NetBox path-ID mutation routes (DELETE/PUT).
 
@@ -48,12 +78,13 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=403, detail="No tenant context for this user")
         sid = str(obj_id)
 
-        def _in(items):
+        def _in(cached):
+            rows = _nb_rows(cached, module_key)
             return any(isinstance(it, dict) and str(it.get(id_field)) == sid
-                       for it in (items or []))
+                       for it in (rows or []))
 
         cached = _cache_entry(tid, module_key)
-        if cached and _in(cached.get("data")):
+        if _in(cached):
             return tid
         # Stale/empty cache → live-refresh the tenant's list and re-check.
         try:
@@ -62,7 +93,7 @@ def register(app, hub, ctx):
             logger.warning("netbox ownership refresh [%s][%s] %s failed: %s",
                            tid, module_key, sid, e)
         cached = _cache_entry(tid, module_key)
-        if cached and _in(cached.get("data")):
+        if _in(cached):
             return tid
         raise HTTPException(status_code=403,
                             detail="Object not found in your tenant (cross-tenant mutation denied)")
