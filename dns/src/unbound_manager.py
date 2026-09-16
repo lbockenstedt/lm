@@ -765,6 +765,36 @@ class UnboundManager:
                     current["upstreams"].append(match.group(1))
         return forwarders
 
+    @staticmethod
+    def _coalesce_forwarders(forwarders: list) -> list:
+        """One ``forward-zone`` block per zone name.
+
+        Unbound takes a zone's upstreams from a single block, and a repeated
+        name is dropped with only a ``duplicate forward zone ... ignored`` in
+        its own log. The writer used to render one block per list entry, so
+        repeated adds for the same zone (the UI defaults the zone field to
+        ".") piled up duplicate stanzas. Merging here also heals a file that
+        already drifted, on the next successful write."""
+        merged: dict = {}
+        for item in forwarders or []:
+            zone = str((item or {}).get("zone") or "").strip()
+            if not zone:
+                continue
+            bucket = merged.setdefault(zone, [])
+            for address in (item or {}).get("upstreams") or []:
+                if address not in bucket:
+                    bucket.append(address)
+        return [{"zone": zone, "upstreams": upstreams}
+                for zone, upstreams in merged.items()]
+
+    def _safe_zone(self, zone) -> str:
+        """``_normalize_forward_zone`` that returns "" instead of raising, for
+        zone names we did not write and cannot vouch for."""
+        try:
+            return self._normalize_forward_zone(zone)
+        except ValueError:
+            return ""
+
     def _write_forwarders(self, forwarders: list) -> dict:
         old = None
         if os.path.exists(self.forwarders_path):
@@ -772,7 +802,7 @@ class UnboundManager:
                 old = fh.read()
         tmp_path = self.forwarders_path + ".tmp"
         lines = ["# Managed by Lab Manager — do not edit manually\n"]
-        for item in forwarders:
+        for item in self._coalesce_forwarders(forwarders):
             lines.extend([
                 "forward-zone:\n",
                 f'    name: "{item["zone"]}"\n',
@@ -817,27 +847,53 @@ class UnboundManager:
         polls) confirms the zone is ACTUALLY active before reporting
         success — if Unbound silently dropped it, this now returns a clear
         ERROR instead of a false SUCCESS.
+        Adding to a zone LM already manages MERGES the new addresses in. It
+        used to fail outright with "forwarder zone X already exists", which
+        made the common case impossible: the UI's zone field defaults to ".",
+        so "add an upstream server" is almost always an add against the
+        already-present root zone.
         """
         try:
             zone = self._normalize_forward_zone(zone)
             upstreams = self._normalize_upstreams(upstreams)
         except ValueError as exc:
             return {"status": "ERROR", "message": str(exc), "changed": False}
-        live = self.list_forwarders()
-        if live.get("status") != "SUCCESS":
-            return {**live, "changed": False}
-        if any(self._normalize_forward_zone(item.get("zone")) == zone
-               for item in live.get("forwarders") or []):
-            return {"status": "ERROR",
-                    "message": f"forwarder zone {zone} already exists",
-                    "changed": False}
-        managed = self._managed_forwarders()
-        result = self._write_forwarders([*managed, {"zone": zone, "upstreams": upstreams}])
+        managed = self._coalesce_forwarders(self._managed_forwarders())
+        current = next((item for item in managed
+                        if self._safe_zone(item.get("zone")) == zone), None)
+        if current is None:
+            live = self.list_forwarders()
+            if live.get("status") != "SUCCESS":
+                return {**live, "changed": False}
+            if any(self._safe_zone(item.get("zone")) == zone
+                   for item in live.get("forwarders") or []):
+                return {"status": "ERROR", "changed": False,
+                        "message": f"forwarder zone {zone} is already served by "
+                                   "Unbound from configuration Lab Manager does "
+                                   "not manage"}
+            desired = [*managed, {"zone": zone, "upstreams": upstreams}]
+            final = upstreams
+        else:
+            known = list(current.get("upstreams") or [])
+            added = [a for a in upstreams if a not in known]
+            if not added:
+                return {"status": "SUCCESS", "changed": False, "zone": zone,
+                        "upstreams": known,
+                        "message": f"forwarder zone {zone} already forwards to "
+                                   + ", ".join(upstreams)}
+            final = known + added
+            if len(final) > 8:
+                return {"status": "ERROR", "changed": False, "zone": zone,
+                        "message": f"forwarder zone {zone} would exceed the "
+                                   "8-address limit"}
+            desired = [{**item, "upstreams": final} if item is current else item
+                       for item in managed]
+        result = self._write_forwarders(desired)
         if result.get("status") != "SUCCESS":
-            return {**result, "zone": zone, "upstreams": upstreams, "changed": False}
+            return {**result, "zone": zone, "upstreams": final, "changed": False}
         confirm = self.list_forwarders()
         applied = confirm.get("status") == "SUCCESS" and any(
-            self._normalize_forward_zone(item.get("zone")) == zone
+            self._safe_zone(item.get("zone")) == zone
             for item in confirm.get("forwarders") or [])
         if not applied:
             # Roll the file back to what it was before this call so a silently
@@ -845,7 +901,7 @@ class UnboundManager:
             self._write_forwarders(managed)
             return {
                 "status": "ERROR", "changed": False, "zone": zone,
-                "upstreams": upstreams,
+                "upstreams": final,
                 "message": (
                     f"Unbound reloaded but forwarder zone {zone} did not take "
                     f"effect — it is likely a duplicate of an existing "
@@ -855,7 +911,7 @@ class UnboundManager:
                     f"forward-zone, and the unbound journal for "
                     f"'duplicate forward zone ... ignored')"),
             }
-        return {**result, "zone": zone, "upstreams": upstreams, "changed": True}
+        return {**result, "zone": zone, "upstreams": final, "changed": True}
 
 
     def remove_forwarder(self, zone: str) -> dict:
