@@ -4,6 +4,7 @@ from api import (
     HTTPException, Request, _hub_msg, logger, time, _unwrap_spoke,
 )
 from access import tenant_is_shared as _tenant_is_shared, spoke_visible_to_session as _spoke_visible
+from spoke_alert_sync import direct_module_ids as _direct_module_ids
 
 # ── /setup/pending_spokes cache (stale-while-revalidate) ─────────────────────
 # The Spokes & Agents page polls /setup/pending_spokes on every load + every
@@ -103,12 +104,10 @@ async def _aggregate_spokes(hub):
         _relay_ids = hub._relayed_agent_ids()
     except Exception:
         _relay_ids = set()
-    _direct_ids = {
-        sid for sid, meta in module_metadata.items()
-        if isinstance(meta, dict)
-        and meta.get("install_uuid")
-        and not meta.get("parent_name")
-    }
+    try:
+        _direct_ids = _direct_module_ids(hub.state.system_state)
+    except Exception:
+        _direct_ids = set()
     for pk, ap in (hub.approved_modules or {}).items():
         if (ap and pk not in _covered
                 and (pk not in _relay_ids or pk in _direct_ids)):
@@ -181,6 +180,31 @@ async def _maybe_refresh_spokes(hub, force=False):
             return cached  # serve stale rather than blanking the tile
         finally:
             _SPOKES_CACHE["refreshing"] = False
+
+
+def _is_relayed_agent(sid, relay_ids, direct_ids):
+    """True when ``sid`` is a RELAYED node-agent: it reaches the hub through a
+    parent hypervisor spoke rather than holding its own WebSocket.
+
+    A device-mode agent also appears in ``relay_ids`` (it populates
+    ``agent_config``/``agent_info``), but it dials the hub directly and is a
+    real module spoke, so it must NOT be treated as relayed — otherwise a
+    genuine outage of one gets dismissed as "not a real outage".
+
+    Module-level + pure so it is unit-testable (mirrors
+    ``_is_stuck_never_keyed``)."""
+    return sid in relay_ids and sid not in direct_ids
+
+
+def _leaked_approved_agent_ids(approved, relay_ids, direct_ids):
+    """Approved ids that the leak self-heal would pop.
+
+    MUST stay identical to the predicate in
+    ``SpokeAlertMixin._selfheal_leaked_agents`` — this is the diagnostic that
+    reports on that self-heal, so any divergence makes it accuse a correctly
+    working self-heal of failing. It previously omitted ``direct_ids`` and so
+    reported every healthy device-mode agent, permanently."""
+    return (set(approved) & set(relay_ids)) - set(direct_ids)
 
 
 def _is_stuck_never_keyed(approved, connected, has_key, is_relayed_agent, seen):
@@ -1971,6 +1995,13 @@ def register(app, hub, ctx):
         now = time.time()
         approved = {s for s, a in (hub.approved_modules or {}).items() if a}
         relay_ids = _safe(hub._relayed_agent_ids, set())
+        # Device-mode agents dial the hub directly, so they are BOTH a module
+        # spoke (own WebSocket, must stay approved) and an agent_config/
+        # agent_info entry that _relayed_agent_ids() matches. The self-heal
+        # subtracts them; this view must use the SAME predicate or it reports
+        # every healthy device-mode agent as a self-heal failure forever.
+        direct_module_ids = _safe(
+            lambda: _direct_module_ids(hub.state.system_state), set())
         spoke_alerts = dict(getattr(hub, "_spoke_alerts", {}) or {})
         tier_map = dict(getattr(hub, "_spoke_alert_tier", {}) or {})
         absent = dict(getattr(hub, "_spoke_absent_since", {}) or {})
@@ -2020,7 +2051,7 @@ def register(app, hub, ctx):
                 "detail": a.get("detail", ""),
                 "duration_s": int(a.get("duration_s", 0) or 0),
                 "is_approved": sid in approved,
-                "is_relayed_agent": sid in relay_ids,
+                "is_relayed_agent": _is_relayed_agent(sid, relay_ids, direct_module_ids),
                 "heartbeat_bare": last_seen.get(sid),
                 "heartbeat_composite": composite.get(sid, []),
                 "is_connected": sid in connected,
@@ -2047,7 +2078,7 @@ def register(app, hub, ctx):
         _add("leaked_agent_approved", "warning",
              "Relayed node-agent id is still in approved_modules; the alert loop "
              "self-heal (_selfheal_leaked_agents) should have popped it.",
-             approved & relay_ids)
+             _leaked_approved_agent_ids(approved, relay_ids, direct_module_ids))
 
         _add("alert_without_approval", "warning",
              "Active alert for an id that is no longer approved — orphaned entry in "

@@ -54,6 +54,32 @@ _TIER_WARN = "warning"
 _TIER_ERROR = "error"
 
 
+def direct_module_ids(system_state: dict) -> set:
+    """Ids that are genuine directly-installed module spokes: they carry their
+    own ``install_uuid`` and are not parented to a hypervisor spoke.
+
+    A DEVICE-MODE agent dials the hub itself, so it is BOTH a module spoke (it
+    holds its own WebSocket and must stay approved to remain authorized) AND an
+    ``agent_config``/``agent_info`` entry — which means ``_relayed_agent_ids()``
+    matches it too. This set is what stops the leak self-heal from de-approving
+    a live spoke.
+
+    Every consumer of ``_relayed_agent_ids()`` MUST subtract this set, or it
+    will draw the opposite conclusion from identical inputs. Keeping it a plain
+    function over ``system_state`` (rather than only a hub method) is
+    deliberate: the route modules call it with ``hub.state.system_state`` and so
+    cannot drift from the self-heal, which is exactly how
+    ``/setup/alert-diagnostics`` came to report healthy device-mode agents as a
+    permanent "self-heal should have popped it" failure."""
+    metadata = (system_state or {}).get("module_metadata", {}) or {}
+    return {
+        sid for sid, meta in metadata.items()
+        if isinstance(meta, dict)
+        and meta.get("install_uuid")
+        and not meta.get("parent_name")
+    }
+
+
 class SpokeAlertMixin:
     """Forgiving out-of-contact alerting, decoupled from the recovery watchdog.
 
@@ -139,6 +165,11 @@ class SpokeAlertMixin:
         relay_ids |= set(getattr(self, "agent_info", {}).keys())
         return relay_ids
 
+    def _direct_module_ids(self) -> set:
+        """Ids that are genuine directly-installed module spokes. Thin wrapper
+        over :func:`direct_module_ids` — see it for why this set matters."""
+        return direct_module_ids(self.state.system_state)
+
     def _selfheal_leaked_agents(self, relay_ids: Optional[set] = None) -> set:
         """Pop any relayed node-agent ids that leaked into ``approved_modules``,
         clear their transient alert state, and drop them from persisted
@@ -151,13 +182,7 @@ class SpokeAlertMixin:
             relay_ids = self._relayed_agent_ids()
         if not relay_ids:
             return set()
-        metadata = self.state.system_state.get("module_metadata", {}) or {}
-        direct_module_ids = {
-            sid for sid, meta in metadata.items()
-            if isinstance(meta, dict)
-            and meta.get("install_uuid")
-            and not meta.get("parent_name")
-        }
+        direct_module_ids = self._direct_module_ids()
         leaked = {s for s, ap in self.approved_modules.items()
                   if ap and s in relay_ids and s not in direct_module_ids}
         if not leaked:
