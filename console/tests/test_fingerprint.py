@@ -741,6 +741,88 @@ def test_generic_login_recognizes_bare_user_prompt():
     assert res["diag"]["creds_tried"] >= 1  # it actually attempted a login
 
 
+def test_generic_login_tries_next_cred_after_slow_reprompt():
+    """A device slow to re-draw its login prompt after a FAILED attempt (needs an
+    extra CR to wake) must NOT cause the next credential to be silently skipped —
+    the valid credential later in the list still has to be tried. Regression for a
+    switch with a valid default cred that never got profiled because the loop
+    'spent' the credential without ever presenting it."""
+    class _SlowReprompt:
+        def __init__(self):
+            self.buf = bytearray(b"\r\ndev login: ")
+            self.state = "login"
+            self.wake = 0  # after a failed auth, needs an extra CR to redraw login
+        def read(self):
+            out = bytes(self.buf[:256]); del self.buf[:256]; return out
+        def write(self, b):
+            s = b.decode(errors="replace")
+            if self.state == "wake":
+                # Only a CR wakes it; the single recovery read shouldn't catch it
+                # until we've moved past the first (bad) credential.
+                self.wake += 1
+                if self.wake >= 1:
+                    self.state = "login"; self.buf += b"\r\ndev login: "
+                return
+            if self.state == "login" and s.strip():
+                self.user = s.strip(); self.state = "password"; self.buf += b"\r\nPassword: "
+            elif self.state == "password" and s.strip():
+                if getattr(self, "user", "") == "admin" and s.strip() == "admin":
+                    self.state = "done"; self.buf += b"\r\ndev# "
+                else:
+                    # Wrong cred: print the failure but DON'T redraw the prompt yet.
+                    self.state = "wake"; self.wake = 0; self.buf += b"\r\nLogin incorrect\r\n"
+    ch = _SlowReprompt()
+    creds = [{"username": "bad", "password": "bad"}, {"username": "admin", "password": "admin"}]
+    res = fp.run_identify(ch.read, ch.write, creds)
+    assert res["logged_in"] is True                 # the 2nd (valid) cred was tried
+    assert res["diag"]["creds_tried"] == 2
+
+
+def test_generic_login_skips_forced_password_change():
+    """A net-new device that forces a password SET/CHANGE right after a first
+    login with a default cred must be escaped by sending bare CRs (identify is
+    READ-ONLY — we must never SET a password), so the device drops to its shell
+    and can be identified."""
+    class _ForcedChange:
+        def __init__(self):
+            self.buf = bytearray(b"\r\nswitch login: ")
+            self.state = "login"
+            self.new_pw_inputs = []   # anything non-empty typed at the new-pw prompt
+        def read(self):
+            out = bytes(self.buf[:256]); del self.buf[:256]; return out
+        def write(self, b):
+            s = b.decode(errors="replace")
+            if self.state == "login" and s.strip():
+                self.state = "password"; self.buf += b"\r\nPassword: "
+            elif self.state == "password" and s.strip():
+                # Valid default login → device demands a new password.
+                self.state = "newpw"; self.buf += b"\r\nYou must change your password\r\nEnter new password: "
+            elif self.state == "newpw":
+                if s.strip():
+                    # Operator/agent typed a real password — record the violation.
+                    self.new_pw_inputs.append(s.strip())
+                    self.buf += b"\r\nEnter new password: "
+                else:
+                    # Bare CR skips the forced change → drop to the shell.
+                    self.state = "done"; self.buf += b"\r\nswitch> "
+    ch = _ForcedChange()
+    res = fp.run_identify(ch.read, ch.write, [{"username": "admin", "password": "admin"}])
+    assert res["logged_in"] is True
+    assert res["diag"].get("forced_password_skipped") is True
+    assert ch.new_pw_inputs == []   # never SET a password — identify stayed read-only
+
+
+def test_new_password_prompt_does_not_match_plain_login_password():
+    """The forced-change matcher must fire on set/change/new/confirm prompts but
+    NOT on the ordinary login 'Password:' prompt (else we'd skip a normal auth)."""
+    assert fp._NEW_PASSWORD_PROMPT.search("Enter new password: ")
+    assert fp._NEW_PASSWORD_PROMPT.search("Confirm new password: ")
+    assert fp._NEW_PASSWORD_PROMPT.search("You must change your password")
+    assert fp._NEW_PASSWORD_PROMPT.search("Password has expired")
+    assert not fp._NEW_PASSWORD_PROMPT.search("Password: ")
+    assert not fp._NEW_PASSWORD_PROMPT.search("dev login: ")
+
+
 class _RepeatChan:
     """Scripted serial whose command responses are REPEATABLE (a trigger can fire
     more than once) — needed when discovery and the profile command loop both
