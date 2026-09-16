@@ -116,8 +116,16 @@ A deliberate, admin/`console_write`-gated write path, separate from the read-onl
   banner, matches it against a built-in vendor profile (Cisco IOS, Aruba AOS-CX,
   ArubaOS gateway/controller — recognised by its `(hostname) #` prompt — HP
   ProCurve, Juniper, generic Linux — `console/src/fingerprint.py::PROFILES`), tries the
-  hub-managed encrypted credential list once each at a login prompt (never re-hammering),
-  and if it gets in, runs that profile's read-only identity commands (`show version`,
+  hub-managed encrypted credential list **followed by a short set of well-known
+  factory-default credentials** (`FACTORY_DEFAULT_CREDENTIALS`, gated by role config
+  `console_factory_default_creds`, default on) once each at a login prompt — never
+  re-hammering, but each credential is guaranteed to actually be presented even if the
+  device is slow to redraw or rate-limits after a failed attempt. On a **net-new device
+  that forces a password set/change** after a first login (`Enter new password:`,
+  `You must change your password`), the probe **declines by sending bare Enters to skip
+  it** — identify is read-only and never sets a password — so the device still drops to a
+  shell and can be profiled.
+  If it gets in, it runs that profile's read-only identity commands (`show version`,
   `show inventory`, `show system`, etc.) and regex-parses serial number, MAC, management
   IP, model, and hostname — the model + serial are bubbled up in the UI (port identity
   line + device card) so the box can be found in NetBox and physically in the rack.
