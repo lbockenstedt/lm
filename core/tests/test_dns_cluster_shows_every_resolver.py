@@ -44,7 +44,12 @@ def _dns_diagnostics():
 
 def _dns_statistics():
     src = _js()
-    return src.split("if (subMenu === 'Statistics') {", 1)[1].split(
+    # The DNS "Statistics" tab was renamed to "Overview" (now the first DNS tab);
+    # the query telemetry + cluster-stats rendering it tests lives under the
+    # Overview branch. Anchor on the unique Overview comment (there are several
+    # ``subMenu === 'Overview'`` blocks — nw/pxmx/dhcp — so the bare conditional
+    # is ambiguous), bounded by the DNS Diagnostics section that follows it.
+    return src.split("// \u2500\u2500 Overview: Unbound query telemetry", 1)[1].split(
         "// \u2500\u2500 Diagnostics:", 1)[0]
 
 

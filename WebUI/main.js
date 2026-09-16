@@ -18534,6 +18534,16 @@ async function loadNwData(category) {
     let items;
     try {
         const data = await r.json();
+        if (data && data.select_tenant) {
+            // ADMIN (default) tenant: the hub no longer accumulates every
+            // tenant's devices — pick a specific tenant to see its fleet.
+            container.innerHTML = `<div class="py-12 text-center space-y-3">
+                <svg class="w-10 h-10 mx-auto text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-3-4h.01M16 16h.01"/></svg>
+                <p class="text-slate-600 text-sm font-semibold">Select a tenant to view its network devices</p>
+                <p class="text-slate-400 text-xs max-w-md mx-auto">The ADMIN (default) view no longer aggregates every tenant's devices. Choose a specific tenant from the tenant picker to see that tenant's fleet.</p>
+            </div>`;
+            return;
+        }
         items = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
     } catch (err) {
         console.error(`[Network] Error in loadNwData:`, err);
@@ -23120,8 +23130,20 @@ function pxmxNodeDetailHtml(node, vms) {
             : '<p class="p-4 text-slate-400 italic text-sm">No VMs on this node.</p>');
 }
 
-async function loadPxmxData(subMenu) {
-    const container = document.getElementById('pxmx-content');
+// Hypervisor Overview/VMs, ADMIN (default) scope: the hub deliberately does
+// NOT accumulate every tenant's hosts under the built-in ADMIN tenant (it would
+// be a cross-tenant firehose). It returns an empty, `select_tenant`-flagged
+// payload instead; a Global Admin picks a specific tenant to see that tenant's
+// hypervisor stats. Rendered in place of the data table for that scope.
+function pxmxSelectTenantPromptHtml() {
+    return `<div class="py-12 text-center space-y-3">
+        <svg class="w-10 h-10 mx-auto text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0H5m14 0h2M5 21H3m4-14h.01M11 7h.01M7 11h.01M11 11h.01M7 15h.01M11 15h.01"/></svg>
+        <p class="text-slate-600 text-sm font-semibold">Select a tenant to view its hypervisor stats</p>
+        <p class="text-slate-400 text-xs max-w-md mx-auto">The ADMIN (default) view no longer aggregates every tenant's hosts. Choose a specific tenant from the tenant picker to see that tenant's hypervisors.</p>
+    </div>`;
+}
+
+async function loadPxmxData(subMenu) {    const container = document.getElementById('pxmx-content');
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
 
@@ -23158,6 +23180,10 @@ async function loadPxmxData(subMenu) {
 
             // --- 'Overview' landing: just the clickable nodes table -----------
             if (subMenu === 'Overview') {
+                if (nodesData.select_tenant || vmData.select_tenant) {
+                    container.innerHTML = pxmxSelectTenantPromptHtml();
+                    return;
+                }
                 if (nodes.length === 0 && vms.length === 0) {
                     container.innerHTML = `<div class="py-10 text-center space-y-3">
                         <p class="text-slate-400 italic text-sm">No Proxmox agents connected.</p>
@@ -23186,6 +23212,10 @@ async function loadPxmxData(subMenu) {
             const filter = window._pxmxNodeFilterPending ? window._pxmxNodeSel : null;
             window._pxmxNodeFilterPending = false;
 
+            if (vmData.select_tenant || nodesData.select_tenant) {
+                container.innerHTML = pxmxSelectTenantPromptHtml();
+                return;
+            }
             if (vms.length === 0 && nodes.length === 0) {
                 container.innerHTML = `<div class="py-10 text-center space-y-3">
                     <p class="text-slate-400 italic text-sm">No Proxmox agents connected.</p>
