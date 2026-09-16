@@ -409,6 +409,19 @@ _DEFAULT_PROMPT_PATTERNS: Dict[str, List[str]] = {
     "login_prompt": [r"(?:[Ll]ogin|[Uu]ser(?:\s?name)?)\s*:\s*$"],
     "password_prompt": [r"[Pp]assword\s*:\s*$"],
     "shell_prompt": [r"\S[>#$%]\s*$"],
+    # A NET-NEW device (esp. after a first login with a factory-default cred)
+    # often forces a password SET/CHANGE before it will drop to a shell —
+    # "Enter new password:", "Confirm new password:", "You must change your
+    # password", "password has expired". These also end in "password:", so this
+    # family is matched BEFORE password_prompt so we never type a credential into
+    # a set-password field (identify is read-only — see _skip_forced_password_change).
+    "new_password_prompt": [
+        r"(?i:(?:enter|set|choose|create|type)\s+(?:a\s+)?new\s+password)\s*:?\s*$",
+        r"(?i:new\s+password)\s*:?\s*$",
+        r"(?i:(?:re-?type|retype|confirm|verify|re-?enter)\s+(?:new\s+)?password)\s*:?\s*$",
+        r"(?i:(?:must\s+|please\s+)?change\s+(?:the\s+|your\s+)?password)",
+        r"(?i:password\s+(?:change\s+required|must\s+be\s+changed|has\s+expired|expired))",
+    ],
 }
 
 
@@ -443,6 +456,7 @@ _PROMPTS = load_prompt_patterns()
 _LOGIN_PROMPT = _PROMPTS["login_prompt"]
 _PASSWORD_PROMPT = _PROMPTS["password_prompt"]
 _SHELL_PROMPT = _PROMPTS["shell_prompt"]
+_NEW_PASSWORD_PROMPT = _PROMPTS["new_password_prompt"]
 
 
 def looks_like_prompt(text: str) -> bool:
@@ -483,6 +497,21 @@ def boot_fault(text: str) -> str:
 # into a detectable prompt without hammering (bounded attempt count).
 _LOGIN_NUDGES = 4          # extra CRs after the initial CRLF banner read
 _NUDGE_SECS = 1.2          # per-nudge read window
+
+# After a FAILED credential, a device may be slow to re-draw its login prompt or
+# deliberately rate-limit (a pause + fresh "login:"). Before spending the NEXT
+# credential we nudge (bounded) and wait for the prompt to actually reappear, so
+# a valid credential later in the list is never silently skipped just because the
+# prompt hadn't redrawn yet.
+_REPROMPT_NUDGES = 3       # CRs used to coax the login prompt back between creds
+_REPROMPT_SECS = 3.0       # read window per re-prompt nudge (covers rate-limit delay)
+
+# A net-new device often forces a password SET/CHANGE right after a first login
+# with a factory-default credential. Identify is READ-ONLY, so we must NOT set a
+# password — we decline by sending a few bare CRs (what an operator does to skip),
+# which drops the device to its shell or bounces it back to the login prompt.
+_NEW_PW_SKIP_CRS = 4       # bare CRs sent to escape a forced set/change-password flow
+_NEW_PW_SKIP_SECS = 2.0    # read window per skip CR
 
 # Universal, READ-ONLY discovery commands used to coax an identifying banner out
 # of a device sitting at a LIVE console that presented no login prompt and no
@@ -697,12 +726,24 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
             diag["password_prompt_seen"] = True
         if _SHELL_PROMPT.search(tail):
             diag["shell_prompt_seen"] = True
+        if _NEW_PASSWORD_PROMPT.search(tail):
+            diag["forced_password_prompt_seen"] = True
 
     prompts = [_LOGIN_PROMPT, _PASSWORD_PROMPT, _SHELL_PROMPT]
 
     def _has_prompt(tail: str) -> bool:
         return bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)
-                    or _SHELL_PROMPT.search(tail))
+                    or _SHELL_PROMPT.search(tail) or _NEW_PASSWORD_PROMPT.search(tail))
+
+    def _last_line(t: str) -> str:
+        # The current prompt is always the last non-empty line. new_password_prompt
+        # has unanchored alternatives ("change your password"), so match it on the
+        # last line only — otherwise a stale hint left earlier in the tail would
+        # make us think we're still at a set-password prompt after reaching a shell.
+        return t.replace("\r", "\n").rstrip("\n").rsplit("\n", 1)[-1]
+
+    def _at_new_pw(t: str) -> bool:
+        return bool(_NEW_PASSWORD_PROMPT.search(_last_line(t)))
 
     # Wake the line. A console device typically emits nothing until it receives a
     # keystroke, so send an initial CRLF (+ banner read to catch any streaming
@@ -720,32 +761,102 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
     diag["bytes"] = len(transcript)
     diag["any_output"] = bool(transcript.strip())
     tail = transcript[-200:]
-    at_login = bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail))
+    at_login = bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)
+                    or _at_new_pw(tail))
     if not at_login:
         # Already at a shell (no auth), or nothing recognizable on the line.
         return bool(_SHELL_PROMPT.search(tail)), None, transcript, diag
     if not credentials:
         return False, None, transcript, diag
-    for idx, cred in enumerate(credentials):
-        diag["creds_tried"] = idx + 1
+
+    def _shell_ready(t: str) -> bool:
+        return bool(_SHELL_PROMPT.search(t)
+                    and not (_LOGIN_PROMPT.search(t) or _PASSWORD_PROMPT.search(t)
+                             or _at_new_pw(t)))
+
+    def _skip_forced_password_change() -> str:
+        """A net-new device can force a password SET/CHANGE right after a first
+        login with a factory-default cred ("Enter new password:" / "Confirm new
+        password:" / "You must change your password"). Identify is READ-ONLY, so
+        we must NEVER set a password — decline by sending a few bare CRs (what an
+        operator does to skip), which drops the device to its shell or bounces it
+        back to the login prompt. Returns the extended transcript."""
+        nonlocal transcript
+        sent = 0
+        t = transcript[-200:]
+        while sent < _NEW_PW_SKIP_CRS and _at_new_pw(t) and not _SHELL_PROMPT.search(t):
+            sent += 1
+            write_fn(b"\r")
+            transcript += _read_until(
+                read_fn, [_SHELL_PROMPT, _LOGIN_PROMPT, _NEW_PASSWORD_PROMPT, _PASSWORD_PROMPT],
+                _NEW_PW_SKIP_SECS)
+            t = transcript[-200:]
+            _observe(t)
+        if sent:
+            diag["forced_password_skipped"] = True
+            diag["forced_password_crs"] = sent
+        return transcript
+
+    idx = 0
+    n = len(credentials)
+    while idx < n:
+        cred = credentials[idx]
         tail = transcript[-200:]
-        if _LOGIN_PROMPT.search(tail):
-            write_fn((cred.get("username", "") + "\r").encode())
-            transcript += _read_until(read_fn, [_PASSWORD_PROMPT, _SHELL_PROMPT, _LOGIN_PROMPT], step_secs)
+        # Ensure a login/password prompt is actually showing before we SPEND this
+        # credential. A device that rate-limits or is slow to re-draw after a
+        # failed attempt may not have re-shown its prompt yet; nudge (bounded) and
+        # wait so a valid credential later in the list is never silently skipped.
+        nudged = 0
+        while not (_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)
+                   or _at_new_pw(tail)):
+            if _shell_ready(tail):
+                # A prior attempt actually reached a shell (its own iteration read
+                # window closed before the prompt arrived) — credit that cred.
+                diag["bytes"] = len(transcript)
+                return True, (idx - 1 if idx > 0 else None), transcript, diag
+            if nudged >= _REPROMPT_NUDGES:
+                diag["bytes"] = len(transcript)   # prompt never came back — stop
+                return False, None, transcript, diag
+            nudged += 1
+            write_fn(b"\r")
+            transcript += _read_until(read_fn, [_LOGIN_PROMPT, _PASSWORD_PROMPT,
+                                                _NEW_PASSWORD_PROMPT, _SHELL_PROMPT], _REPROMPT_SECS)
             tail = transcript[-200:]
             _observe(tail)
-        if _PASSWORD_PROMPT.search(tail):
-            write_fn((cred.get("password", "") + "\r").encode())
-            transcript += _read_until(read_fn, [_SHELL_PROMPT, _LOGIN_PROMPT, _PASSWORD_PROMPT], step_secs)
+
+        diag["creds_tried"] = idx + 1
+        # Net-new device demanding a password SET/CHANGE (matched BEFORE the
+        # ordinary password prompt so we never type a credential into a
+        # set-password field): decline via CRs, then re-check for a shell.
+        if _at_new_pw(tail):
+            transcript = _skip_forced_password_change()
             tail = transcript[-200:]
-            _observe(tail)
-        if _SHELL_PROMPT.search(tail) and not (_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)):
+        else:
+            if _LOGIN_PROMPT.search(tail):
+                write_fn((cred.get("username", "") + "\r").encode())
+                transcript += _read_until(read_fn, [_NEW_PASSWORD_PROMPT, _PASSWORD_PROMPT,
+                                                    _SHELL_PROMPT, _LOGIN_PROMPT], step_secs)
+                tail = transcript[-200:]
+                _observe(tail)
+            # A forced set/change flow can appear right after the username (before
+            # any password) — skip it rather than typing the credential password.
+            if _at_new_pw(tail):
+                transcript = _skip_forced_password_change()
+                tail = transcript[-200:]
+            elif _PASSWORD_PROMPT.search(tail):
+                write_fn((cred.get("password", "") + "\r").encode())
+                transcript += _read_until(read_fn, [_SHELL_PROMPT, _NEW_PASSWORD_PROMPT,
+                                                    _LOGIN_PROMPT, _PASSWORD_PROMPT], step_secs)
+                tail = transcript[-200:]
+                _observe(tail)
+                # Forced change AFTER a successful auth (the common net-new case).
+                if _at_new_pw(tail):
+                    transcript = _skip_forced_password_change()
+                    tail = transcript[-200:]
+        if _shell_ready(tail):
             diag["bytes"] = len(transcript)
             return True, idx, transcript, diag
-        # Auth failed → the device re-shows a login prompt; nudge and let the loop
-        # try the next credential (attempt cap = len(credentials), no re-hammering).
-        write_fn(b"\r")
-        transcript += _read_until(read_fn, [_LOGIN_PROMPT, _PASSWORD_PROMPT, _SHELL_PROMPT], 2.0)
+        idx += 1
     diag["bytes"] = len(transcript)
     return False, None, transcript, diag
 
