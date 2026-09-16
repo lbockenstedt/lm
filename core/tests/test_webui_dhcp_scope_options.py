@@ -100,7 +100,7 @@ def test_dd_member_evidence_renders_full_dns_evidence_per_member():
     'dns' kind, not just a healthy/recommendations summary card.
     """
     source = _source()
-    fn = source.split("function _ddMemberEvidence(members, kind)", 1)[1]
+    fn = source.split("function _ddMemberEvidence(", 1)[1]
     fn = fn.split("\nfunction _tenantQS", 1)[0]
     assert "diag.configured_interfaces" in fn
     assert "diag.local_ipv4s" in fn
@@ -116,11 +116,16 @@ def test_dns_diagnostics_passes_dns_kind_to_member_evidence():
 
 def test_dhcp_ha_diagnostics_uses_summary_only_evidence_not_dns_kind():
     """Kea's diagnostics shape differs from Unbound's (leases/CA vs.
-    interfaces/probes) — DHCP HA member evidence intentionally keeps the old
-    summary-only rendering (no explicit 'dns' kind) unless/until DHCP gets
-    its own per-member evidence tiles."""
+    interfaces/probes) — DHCP HA member evidence intentionally keeps the
+    summary-only rendering unless/until DHCP gets its own per-member evidence
+    tiles. It now passes its own 'dhcp' kind (plus the cluster's updating
+    members, so a node mid-apply is badged "updating" rather than "needs
+    attention"), but it must never ask for the DNS tiles."""
     source = _source()
-    assert "_ddMemberEvidence(d.members)" in source
+    assert "_ddMemberEvidence(d.members, 'dhcp'" in source
+    assert "_ddMemberEvidence(d.members, 'dns'" in source, (
+        "DNS must still be the only caller asking for the DNS evidence tiles"
+    )
 
 
 def test_prefixes_table_renders_dhcp_indicator_column_and_badge():
