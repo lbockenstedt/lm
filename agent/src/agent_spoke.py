@@ -1520,6 +1520,9 @@ class GenericAgent(BaseSpoke):
                                    "not fully loaded"}
             conn = RoleConnection(role_name, base_id=self.spoke_id,
                                   hub_url=cp.hub_url, role_instance=inst)
+            # Back-reference so this role's SPOKE_UPDATE handler can reload just
+            # itself instead of os._exit(3)ing every role hosted in this process.
+            conn.agent_control_plane = cp
             task = asyncio.create_task(conn.run())
             self._roles[role_name] = {"instance": inst, "conn": conn, "task": task}
             self._persist_loaded_roles()
