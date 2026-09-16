@@ -24486,6 +24486,10 @@ function _ddClusterBadge(state) {
         healthy:   ['text-emerald-700', 'bg-emerald-50 border-emerald-200'],
         partial:   ['text-amber-700', 'bg-amber-50 border-amber-200'],
         degraded:  ['text-amber-700', 'bg-amber-50 border-amber-200'],
+        // Blue, not amber: a node re-reading a freshly-synced config is doing
+        // exactly what it should. Amber here made every routine NetBox sync
+        // look like a two-node outage.
+        updating:  ['text-sky-700', 'bg-sky-50 border-sky-200'],
         diverged:  ['text-red-700', 'bg-red-50 border-red-200'],
         down:      ['text-red-700', 'bg-red-50 border-red-200'],
         invalid:   ['text-red-700', 'bg-red-50 border-red-200'],
@@ -24497,7 +24501,7 @@ function _ddClusterBadge(state) {
 const _DD_MEMBER_TONE = {
     converged: 'text-emerald-600', healthy: 'text-emerald-600',
     drifted: 'text-amber-600', degraded: 'text-amber-600',
-    unknown: 'text-amber-600',
+    unknown: 'text-amber-600', updating: 'text-sky-600',
     unreachable: 'text-red-600',
 };
 
@@ -24620,12 +24624,29 @@ function _dhcpHaPanel(c) {
     const _nameById = {};
     members.forEach(m => { if (m && m.id) _nameById[m.id] = m.display_name || m.id; });
     const missingLabel = (c.config_digests_missing || []).map(id => _nameById[id] || id).join(', ');
+    // While a config-set is settling the digests legitimately differ for ~30s.
+    // Calling that "MISMATCHED" in red told the operator they had a two-node
+    // config split when they had a sync in flight.
+    const configLabel = c.config_converged
+        ? 'matched'
+        : ((c.config_digests_missing || []).length
+            ? `<b class="text-amber-600">UNKNOWN</b> (no report from ${escapeHtml(missingLabel)})`
+            : (c.updating
+                ? '<b class="text-sky-600">CONVERGING</b>'
+                : '<b class="text-red-600">MISMATCHED</b>'));
+    const syncLabel = c.updating
+        ? `${c.serving_count || 0}/${c.member_count || 0} serving · applying configuration`
+        : `${c.healthy_count || 0}/${c.member_count || 0} in sync`;
     return `
         <div class="bg-white border border-slate-200 rounded-lg overflow-hidden mb-4">
             <div class="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-3">
                 <div class="text-sm font-semibold text-slate-700">Kea HA pair ${_ddClusterBadge(c.state)}</div>
-                <div class="text-xs text-slate-400">${escapeHtml(c.mode || 'hot-standby')} · ${c.healthy_count || 0}/${c.member_count || 0} in sync · configuration ${c.config_converged ? 'matched' : ((c.config_digests_missing || []).length ? `<b class="text-amber-600">UNKNOWN</b> (no report from ${escapeHtml(missingLabel)})` : '<b class="text-red-600">MISMATCHED</b>')}</div>
+                <div class="text-xs text-slate-400">${escapeHtml(c.mode || 'hot-standby')} · ${syncLabel} · configuration ${configLabel}</div>
             </div>
+            ${c.updating ? `<div class="px-4 py-2 border-b border-slate-200 text-xs text-sky-800 bg-sky-50">
+                <b>Applying configuration.</b> Kea re-reads its config and re-synchronises the HA pair after a NetBox sync or a re-apply.
+                Each node takes itself out of service while it does so and returns on its own, normally within about 30 seconds. No action needed.
+            </div>` : ''}
             ${tableWrap(tableHead(['Node', 'Role', 'Health', 'HA state', 'Partner', 'Scopes', 'Config digest'].concat(admin ? [''] : [])) + `<tbody>${rows}</tbody>`)}
             ${partial ? `<div class="px-4 py-3 border-t border-slate-200 text-xs text-amber-700 bg-amber-50">
                 Last apply reported <b>${escapeHtml(apply.status)}</b> at stage <b>${escapeHtml(apply.stage || '?')}</b> — applied on ${escapeHtml((apply.applied || []).join(', ') || 'no node')}${(apply.rolled_back || []).length ? `, rolled back ${escapeHtml(apply.rolled_back.join(', '))}` : ''}.
@@ -24692,13 +24713,18 @@ async function removeDhcpHaMember(id) {
 }
 
 // Per-member evidence blocks (each worker's own diagnostics recommendations).
-function _ddMemberEvidence(members, kind) {
+// `updatingIds` are nodes the cluster reports as mid-apply: their local Kea is
+// deliberately out of service while it re-reads config, so "needs attention"
+// would be wrong for them.
+function _ddMemberEvidence(members, kind, updatingIds) {
     const entries = Object.entries(members || {});
     if (!entries.length) return '';
+    const upd = new Set(Array.isArray(updatingIds) ? updatingIds : []);
     const cards = entries.map(([id, diag]) => {
         const okBadge = diag && diag.status === 'SUCCESS'
             ? (diag.healthy ? '<span class="text-emerald-600 font-bold">healthy</span>'
-                            : '<span class="text-amber-600 font-bold">needs attention</span>')
+                : (upd.has(id) ? '<span class="text-sky-600 font-bold">updating</span>'
+                               : '<span class="text-amber-600 font-bold">needs attention</span>'))
             : '<span class="text-red-600 font-bold">unavailable</span>';
         const recs = (diag && diag.recommendations) || [];
         // display_name (added server-side for DNS, see _dns_member_display_name)
@@ -24715,6 +24741,16 @@ function _ddMemberEvidence(members, kind) {
             const sockets = diag.sockets || {};
             const listeners = Array.isArray(sockets.listeners) ? sockets.listeners : [];
             const probes = Array.isArray(diag.probes) ? diag.probes : [];
+            // The four PASS/FAIL tiles used to be rendered ONCE, from the
+            // "source" member only, below the cluster panel. On a 2-resolver
+            // cluster that meant the second node's service/config/listener
+            // verdicts were never shown -- and the first node's evidence was
+            // printed twice. They belong to a node, so render them per node.
+            const svc = diag.service || {};
+            const cfg = diag.config || {};
+            const tile = (label, pass, detailText) => _ddTile(
+                label, pass ? 'PASS' : 'FAIL', detailText || '',
+                pass ? 'text-emerald-600' : 'text-red-600');
             const probeRows = probes.map(p => `<tr class="border-b border-slate-100">
                 <td class="px-3 py-1.5 font-mono text-xs">${escapeHtml(p.server || '—')}:53</td>
                 <td class="px-3 py-1.5 font-bold text-xs ${p.responded ? 'text-emerald-600' : 'text-red-600'}">${p.responded ? 'Responded' : 'No response'}</td>
@@ -24722,6 +24758,12 @@ function _ddMemberEvidence(members, kind) {
                 <td class="px-3 py-1.5 text-xs">${p.latency_ms == null ? '—' : `${escapeHtml(String(p.latency_ms))} ms`}</td>
             </tr>`).join('');
             return `
+            <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-3">
+                ${tile('Unbound Service', !!svc.ok, svc.output || svc.error || 'inactive')}
+                ${tile('Configuration', !!cfg.ok, cfg.output || cfg.error || 'valid')}
+                ${tile('Port 53', !!sockets.has_port_53_listener, sockets.has_port_53_listener ? `${listeners.length} listener(s)` : (sockets.error || 'not listening'))}
+                ${tile('LAN Listener', !!sockets.has_lan_listener, sockets.has_lan_listener ? 'non-loopback address bound' : 'loopback only or absent')}
+            </div>
             <div class="grid sm:grid-cols-2 gap-3 mt-3 text-xs">
                 <div>
                     <div class="font-semibold text-slate-600 mb-1">Configured interfaces</div>
@@ -25202,6 +25244,21 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
             const g = d.global || {};
             const qt = d.query_types || {};
             const syncLine = await _ddSyncStatusLine('dns');
+            // Clustered stats are a SUM across resolvers. Say so, and say when
+            // one of them did not answer -- otherwise an under-reported total
+            // looks authoritative.
+            const statErrors = (d.member_errors && typeof d.member_errors === 'object')
+                ? Object.entries(d.member_errors) : [];
+            const sourceLine = d.cluster ? `<div class="text-xs text-slate-400 mb-3">Combined across ${d.members_reporting == null ? (d.member_count || 0) : d.members_reporting} of ${d.member_count || 0} resolver(s).</div>` : '';
+            const statErrorBanner = statErrors.length
+                ? `<div class="mb-3 p-3 rounded-md bg-amber-50 border border-amber-200 text-xs text-amber-800">
+                    <span class="font-semibold">${statErrors.length} resolver(s) did not report statistics</span>
+                    — the totals below exclude them:
+                    <ul class="list-disc pl-5 mt-1">
+                        ${statErrors.map(([mid, msg]) => `<li><span class="font-mono">${escapeHtml(mid)}</span>: ${escapeHtml(String(msg))}</li>`).join('')}
+                    </ul>
+                </div>`
+                : '';
             const tiles = [
                 _ddTile('Total Queries', (g.total_queries || 0).toLocaleString()),
                 _ddTile('Cache Hit Ratio', `${g.cache_hit_ratio || 0}%`, `${(g.cache_hits || 0).toLocaleString()} hits / ${(g.cache_misses || 0).toLocaleString()} miss`,
@@ -25217,6 +25274,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                     <span class="w-20 text-right text-xs font-mono text-slate-500">${c.toLocaleString()}</span>
                 </div>`).join('');
             container.innerHTML = `
+                ${sourceLine}${statErrorBanner}
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">${tiles}</div>
                 <div class="bg-white border border-slate-200 rounded-lg p-4 mb-4">
                     <div class="text-sm font-semibold text-slate-700 mb-2">Queries by Type</div>
@@ -25290,7 +25348,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 <div class="flex items-center justify-between gap-3 mb-4">
                     <div>
                         <div class="text-sm font-semibold ${good ? 'text-emerald-700' : 'text-red-700'}">${good ? (cluster ? 'DNS cluster healthy' : 'DNS listener healthy') : (cluster ? 'DNS cluster needs attention' : 'DNS listener needs attention')}</div>
-                        <div class="text-xs text-slate-400">${cluster ? `Cluster of ${cluster.member_count || 0} resolver(s); evidence below is from ${escapeHtml(d.diagnostics_source_name || d.diagnostics_source || 'no reachable member')}.` : 'Live checks run on the Unbound server.'}</div>
+                        <div class="text-xs text-slate-400">${cluster ? `Cluster of ${cluster.member_count || 0} resolver(s); each resolver's own checks and evidence are shown below.` : 'Live checks run on the Unbound server.'}</div>
                     </div>
                     <div class="flex items-center gap-2">
                         ${serviceClusterButton('dns', cluster)}
@@ -25299,16 +25357,18 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 </div>
                 ${clusterPanel}
                 ${memberEvidence}
+                ${cluster ? '' : `
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
                     ${check('Unbound Service', !!svc.ok, svc.output || svc.error || 'inactive')}
                     ${check('Configuration', !!cfg.ok, cfg.output || cfg.error || 'valid')}
                     ${check('Port 53', !!sockets.has_port_53_listener, sockets.has_port_53_listener ? `${listeners.length} listener(s)` : (sockets.error || 'not listening'))}
                     ${check('LAN Listener', !!sockets.has_lan_listener, sockets.has_lan_listener ? 'non-loopback address bound' : 'loopback only or absent')}
-                </div>
+                </div>`}
                 ${recommendations.length ? `<div class="mb-4 p-4 rounded-lg bg-amber-50 border border-amber-200">
                     <div class="text-sm font-semibold text-amber-800 mb-2">Recommended checks</div>
                     <ul class="list-disc pl-5 space-y-1 text-xs text-amber-800">${recommendations.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>
                 </div>` : ''}
+                ${cluster ? '' : `
                 <div class="grid lg:grid-cols-2 gap-4 mb-4">
                     <div class="bg-white border border-slate-200 rounded-lg p-4">
                         <div class="text-sm font-semibold text-slate-700 mb-2">Configured interfaces</div>
@@ -25326,7 +25386,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 <div class="bg-white border border-slate-200 rounded-lg overflow-hidden">
                     <div class="px-4 py-3 text-sm font-semibold text-slate-700 border-b border-slate-200">Local DNS query probes</div>
                     ${tw(th(['Target', 'Result', 'RCODE', 'Latency', 'Error']) + `<tbody>${probeRows}</tbody>`)}
-                </div>`;
+                </div>`}`;
             return;
         }
 
@@ -29166,7 +29226,11 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
         if (subMenu === 'Diagnostics') {
             const { ok, data: d, detail } = await _spokeFetch('/api/dhcp/diagnostics' + _tenantQS());
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DHCP diagnostics unavailable'); return; }
-            const good = !!d.healthy;
+            const updating = !!(d.updating || (d.cluster && d.cluster.updating));
+            // "Running" means answering clients. A node re-reading a freshly
+            // synced config is out of sync but the pair is still serving, so
+            // don't paint the whole page red for a routine NetBox sync.
+            const good = !!d.healthy || (updating && !!(d.serving || (d.cluster && d.cluster.serving)));
             const units = d.units || {};
             const dhcp4 = units['kea-dhcp4-server'] || {};
             const caUnit = units['kea-ctrl-agent'] || {};
@@ -29196,11 +29260,11 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
             // pair state, lease sync and config drift.
             const haCluster = d.cluster && d.cluster.enabled !== false ? d.cluster : null;
             const haPanel = _dhcpHaPanel(haCluster);
-            const nodeEvidence = haCluster ? _ddMemberEvidence(d.members) : '';
+            const nodeEvidence = haCluster ? _ddMemberEvidence(d.members, 'dhcp', haCluster.updating_members) : '';
             container.innerHTML = `
                 <div class="flex items-center justify-between gap-3 mb-4">
                     <div>
-                        <div class="text-sm font-semibold ${good ? 'text-emerald-700' : 'text-red-700'}">${good ? (haCluster ? 'Kea HA pair healthy' : 'Kea DHCP server healthy') : (haCluster ? 'Kea HA pair needs attention' : 'Kea DHCP server needs attention')}</div>
+                        <div class="text-sm font-semibold ${updating ? 'text-sky-700' : (good ? 'text-emerald-700' : 'text-red-700')}">${updating ? (haCluster ? 'Kea HA pair updating — applying configuration' : 'Kea DHCP server updating — applying configuration') : (good ? (haCluster ? 'Kea HA pair healthy' : 'Kea DHCP server healthy') : (haCluster ? 'Kea HA pair needs attention' : 'Kea DHCP server needs attention'))}</div>
                         <div class="text-xs text-slate-400">${haCluster ? `HA pair (${escapeHtml(haCluster.mode || 'hot-standby')}); evidence below is from ${escapeHtml(d.diagnostics_source_name || d.diagnostics_source || 'no reachable node')}.` : 'Live checks mirror the Sim DHCP (Kea) diagnostics: units, config, interfaces, listeners, control agent, and leases.'}</div>
                     </div>
                     <div class="flex items-center gap-2">
