@@ -418,7 +418,7 @@ const MODULE_CLASSES = {
 
 // Multi-product classes that render ONE unified primary view, surfacing the
 // other products as subtabs instead of as separate nav items. DNS is "all
-// things DNS": the Unbound `dns` view (Records/Statistics/Forwarders) plus an
+// things DNS": the Unbound `dns` view (Overview/Records/Forwarders) plus an
 // External DNS subtab (internet-facing providers like HE.NET). Such products
 // have no standalone view — they always live under the `dns` view. See setView().
 const CLASS_PRIMARY_VIEW = { 'DNS': 'dns' };
@@ -1626,7 +1626,7 @@ const VIEW_SUBMENUS = {
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management', 'Assistant'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
-    dns: ['Records', 'Statistics', 'Diagnostics', 'Forwarders', 'External DNS'],
+    dns: ['Overview', 'Records', 'Diagnostics', 'Forwarders', 'External DNS'],
     dhcp: ['Overview', 'Diagnostics', 'Subnets', 'Leases', 'Reservations'],
     nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'Other', 'Scan'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
@@ -3700,7 +3700,7 @@ async function setView(viewId) {
         }
 
         // Some multi-product classes render ONE unified view with the other
-        // products surfaced as subtabs (DNS = Unbound Records/Statistics/
+        // products surfaced as subtabs (DNS = Unbound Overview/Records/
         // Forwarders + an External DNS subtab). Such a class pins to its primary
         // view regardless of which product(s) are active — external providers
         // (henet, …) have no standalone view, and the class name is never a real view.
@@ -5149,7 +5149,7 @@ function initView(viewId, subView) {
             loadNetboxData(subView || 'Overview');
             break;
         case 'dns':
-            loadDNSData(subView || 'Records');
+            loadDNSData(subView || 'Overview');
             break;
         case 'dhcp':
             loadDHCPData(subView || 'Overview');
@@ -24414,7 +24414,26 @@ async function _spokeFetch(url, opts) {
 }
 
 // Amber error banner used by the DNS/DHCP list views on a spoke failure.
+// The exact detail string the hub raises (api._spoke_payload_or_raise →
+// SPOKE_UPDATING_DETAIL) when a relay target is mid self-update. Keep in
+// lockstep with the Python constant.
+const SPOKE_UPDATING_DETAIL = 'Update in progress — please wait';
+
+// True when a spoke relay failed only because the target is restarting on new
+// code (not a real fault). Callers use it to render a neutral notice and to
+// drop remediation hints that would be a false lead during an update.
+function _isSpokeUpdating(detail) {
+    return detail === SPOKE_UPDATING_DETAIL;
+}
+
+// Amber error banner used by the DNS/DHCP list views on a spoke failure. A
+// mid-update target is NOT a failure — the spoke is briefly restarting on new
+// code — so it renders as a neutral blue "update in progress" notice rather
+// than a red error, so a routine update no longer reads as a broken spoke.
 function _spokeErrorBanner(detail, fallback) {
+    if (_isSpokeUpdating(detail)) {
+        return `<p class="p-4 text-blue-600 text-sm font-medium">⏳ ${escapeHtml(SPOKE_UPDATING_DETAIL)} — this node is restarting on new code and will respond again shortly.</p>`;
+    }
     return `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${escapeHtml(detail || fallback)}</p>`;
 }
 
@@ -25179,7 +25198,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
     // onboarding a standalone spoke — the button offered a path that never
     // actually worked for this module.
     if (navActions) {
-        const addRecordBtn = ((subMenu === 'Records' || !subMenu) && (isAdmin() || isTenantAdmin()))
+        const addRecordBtn = ((subMenu === 'Records') && (isAdmin() || isTenantAdmin()))
             ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Record</button>`
             : '';
         const addForwarderBtn = (subMenu === 'Forwarders' && isAdmin())
@@ -25241,8 +25260,8 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                     window._dnsWorkerDiscovery = null;
                 });
         }
-        // ── Statistics: Unbound query telemetry (OPNsense-grade) ──────────
-        if (subMenu === 'Statistics') {
+        // ── Overview: Unbound query telemetry (OPNsense-grade) ────────────
+        if (subMenu === 'Overview') {
             const { ok, data: d, detail } = await _spokeFetch('/api/dns/stats' + _tenantQS());
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DNS spoke not connected'); return; }
             if (d.status && d.status !== 'SUCCESS') {
@@ -25439,7 +25458,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
         // ── Records (default) ─────────────────────────────────────────────
         const { ok, data: d, detail } = await _spokeFetch('/api/dns/records?tenant=' + encodeURIComponent(currentTenant));
         if (!ok) {
-            container.innerHTML = `${_spokeErrorBanner(detail, 'DNS spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Verify the Unbound configuration in Setup → DNS.</p>`;
+            container.innerHTML = `${_spokeErrorBanner(detail, 'DNS spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-400">Verify the Unbound configuration in Setup → DNS.</p>'}`;
             _clearTopNavActions();
             return;
         }
@@ -25605,7 +25624,7 @@ async function loadLEData(subMenu) {
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/le/certs?tenant=' + encodeURIComponent(currentTenant));
         if (!ok) {
-            container.innerHTML = `${_spokeErrorBanner(detail, 'Certificate (le) spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Install the le spoke (install_all.sh, or its install_le.sh) and approve it in Setup → Spokes &amp; Agents.</p>`;
+            container.innerHTML = `${_spokeErrorBanner(detail, 'Certificate (le) spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-400">Install the le spoke (install_all.sh, or its install_le.sh) and approve it in Setup → Spokes &amp; Agents.</p>'}`;
             return;
         }
         const body = inner(d);
@@ -28694,7 +28713,7 @@ async function loadHenet() {
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/records');
         if (!ok) {
-            container.innerHTML = backBar + actionBar + `${_spokeErrorBanner(detail, 'HE.NET spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Load the “HE.NET” role on an agent and store an HE DDNS key in the Credential Vault (secret type “HE.NET DDNS key”).</p>`;
+            container.innerHTML = backBar + actionBar + `${_spokeErrorBanner(detail, 'HE.NET spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-400">Load the “HE.NET” role on an agent and store an HE DDNS key in the Credential Vault (secret type “HE.NET DDNS key”).</p>'}`;
             return;
         }
         // A non-admin only ever gets their own tenant's records back (the
