@@ -1350,8 +1350,14 @@ def register(app, hub, ctx):
         all_sets = (hub.state.system_state.get("global_config", {}) or {}).get("nw_scan_credentials", []) or []
         chosen = [c for c in all_sets if isinstance(c, dict) and c.get("id") in set(cred_ids)]
         shared_tid = access.shared_tenant_id()
-        # Tenant-owned (or shared) credentials only — for every caller.
-        chosen = [c for c in chosen if c.get("tenant_id", "") in (tenant_id, shared_tid)]
+        # Tenant-owned (or shared) credentials only — for every caller. On the
+        # ADMIN (``default``) scope the admin's OWN sets are the unassigned /
+        # ``default``-tagged ones, matching what the scan tab lists for default,
+        # so a set the admin can see is a set the admin can actually scan with.
+        owned = {tenant_id, shared_tid}
+        if tenant_id == "default":
+            owned |= {"", "default"}
+        chosen = [c for c in chosen if c.get("tenant_id", "") in owned]
         if not system and not _is_admin(sess):
             chosen = [c for c in chosen
                       if access.spoke_visible_to_session(sess, c.get("tenant_id", ""))]
@@ -1727,12 +1733,24 @@ def register(app, hub, ctx):
             # caller that omits the param changes behavior. This is what lets a
             # tenant-scoped surface (e.g. the NW Scan tab) stop showing an ADMIN
             # every other tenant's entries just because admins bypass the
-            # visibility filter above. An unassigned instance (no tenant_id) is
-            # admin-only by the shared-tenant invariant, so it is excluded too.
+            # visibility filter above.
+            #
+            # ``default`` is the built-in Global-Admin scope (the tenant picker
+            # sends ``?tenant=default`` for an admin). It is NOT a firehose: a
+            # Global Admin on the ADMIN (``default``) tenant sees only their OWN
+            # instances — unassigned (no ``tenant_id``) or explicitly
+            # ``default``-tagged — plus shared ones, never every tenant's. To see
+            # another tenant's entries the admin selects THAT tenant. This is the
+            # same "ADMIN(default) must not accumulate across tenants" rule the
+            # dashboards follow; it's what stops the NW Scan tab listing, e.g.,
+            # another tenant's scan-credential sets under the ADMIN tenant.
+            # (A non-admin never legitimately selects ``default`` — currentTenant
+            # is their own tenant id — so leave their already visibility-filtered
+            # list untouched in that case.)
             req_tenant = str(request.query_params.get("tenant") or "").strip()
-            if req_tenant and req_tenant != "default":
+            if req_tenant and (req_tenant != "default" or _is_admin(sess)):
                 shared_tid = access.shared_tenant_id() or ""
-                scope = {req_tenant}
+                scope = {"", "default"} if req_tenant == "default" else {req_tenant}
                 if shared_tid:
                     scope.add(shared_tid)
                 instances = [i for i in instances
