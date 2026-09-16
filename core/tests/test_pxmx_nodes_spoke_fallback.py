@@ -164,6 +164,22 @@ def test_admin_no_tenant_uses_global_spoke():
     assert hub.relayed_to == "pxmx-global"
 
 
+def test_admin_default_tenant_does_not_accumulate_nodes():
+    """A Global Admin on the ADMIN (``default``) tenant must not see every
+    tenant's nodes accumulated. The Overview returns an empty,
+    ``select_tenant``-flagged payload and relays to NO spoke — the admin picks a
+    specific tenant to see its hosts. Distinct from the unscoped admin call
+    above (no ``?tenant=``), which still uses the global spoke."""
+    hub = _Hub(bound_spoke=None, global_spoke="pxmx-global")
+    c = _build(hub, admin=True, tenant=None)  # ctx resolves ?tenant= explicitly
+    r = c.get("/api/pxmx/nodes?tenant=default")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["nodes"] == []
+    assert body.get("select_tenant") is True
+    assert hub.relayed_to is None  # no spoke was queried
+
+
 def test_foreign_bound_global_spoke_does_not_leak_into_other_tenant():
     """CROSS-TENANT ISOLATION (reported leak): the global hypervisor spoke is
     BOUND to tenant 'lrb'. Tenant 'ra' has no hypervisor of its own, so the
