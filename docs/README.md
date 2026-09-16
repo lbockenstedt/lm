@@ -9,6 +9,8 @@ Feature reference for the Lab Manager system — so you can look up what each th
 
 The canonical doc set lives here in `lm/docs/`. Each separate repo also carries a `docs/` with its own feature page + the shared topology page (pointing back here for the full set).
 
+**Recent changes:** see [CHANGELOG.md](CHANGELOG.md) for a newest-first summary of user-facing changes.
+
 ## Installation — start here
 
 **One master installer drives everything.** `install_menu.sh` is the single
