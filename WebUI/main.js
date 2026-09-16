@@ -418,7 +418,7 @@ const MODULE_CLASSES = {
 
 // Multi-product classes that render ONE unified primary view, surfacing the
 // other products as subtabs instead of as separate nav items. DNS is "all
-// things DNS": the Unbound `dns` view (Records/Statistics/Forwarders) plus an
+// things DNS": the Unbound `dns` view (Overview/Records/Forwarders) plus an
 // External DNS subtab (internet-facing providers like HE.NET). Such products
 // have no standalone view — they always live under the `dns` view. See setView().
 const CLASS_PRIMARY_VIEW = { 'DNS': 'dns' };
@@ -1626,7 +1626,7 @@ const VIEW_SUBMENUS = {
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management', 'Assistant'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
-    dns: ['Records', 'Statistics', 'Diagnostics', 'Forwarders', 'External DNS'],
+    dns: ['Overview', 'Records', 'Diagnostics', 'Forwarders', 'External DNS'],
     dhcp: ['Overview', 'Diagnostics', 'Subnets', 'Leases', 'Reservations'],
     nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'Other', 'Scan'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
@@ -3700,7 +3700,7 @@ async function setView(viewId) {
         }
 
         // Some multi-product classes render ONE unified view with the other
-        // products surfaced as subtabs (DNS = Unbound Records/Statistics/
+        // products surfaced as subtabs (DNS = Unbound Overview/Records/
         // Forwarders + an External DNS subtab). Such a class pins to its primary
         // view regardless of which product(s) are active — external providers
         // (henet, …) have no standalone view, and the class name is never a real view.
@@ -5149,7 +5149,7 @@ function initView(viewId, subView) {
             loadNetboxData(subView || 'Overview');
             break;
         case 'dns':
-            loadDNSData(subView || 'Records');
+            loadDNSData(subView || 'Overview');
             break;
         case 'dhcp':
             loadDHCPData(subView || 'Overview');
@@ -25179,7 +25179,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
     // onboarding a standalone spoke — the button offered a path that never
     // actually worked for this module.
     if (navActions) {
-        const addRecordBtn = ((subMenu === 'Records' || !subMenu) && (isAdmin() || isTenantAdmin()))
+        const addRecordBtn = ((subMenu === 'Records') && (isAdmin() || isTenantAdmin()))
             ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Record</button>`
             : '';
         const addForwarderBtn = (subMenu === 'Forwarders' && isAdmin())
@@ -25241,8 +25241,8 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                     window._dnsWorkerDiscovery = null;
                 });
         }
-        // ── Statistics: Unbound query telemetry (OPNsense-grade) ──────────
-        if (subMenu === 'Statistics') {
+        // ── Overview: Unbound query telemetry (OPNsense-grade) ────────────
+        if (subMenu === 'Overview') {
             const { ok, data: d, detail } = await _spokeFetch('/api/dns/stats' + _tenantQS());
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DNS spoke not connected'); return; }
             if (d.status && d.status !== 'SUCCESS') {
