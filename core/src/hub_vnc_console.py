@@ -94,19 +94,29 @@ class HubVncConsoleMixin:
         """Poll CONSOLE_LIST_PORTS for the given (or all connected) console
         spokes and store each raw port list in the warm cache under
         ``("console_ports", sid)``. Best-effort: a wedged/offline spoke is
-        skipped so its last-known snapshot survives. Returns the refreshed sids."""
+        skipped so its last-known snapshot survives. Returns the refreshed sids.
+
+        Spokes are polled CONCURRENTLY: each poll is an independent per-spoke
+        round-trip with a generous timeout, so a serial sweep made one wedged
+        console host delay the warm-cache refresh of every other host behind it
+        (which in turn let their entries age into cold-start live polls on the
+        page). ``asyncio.gather`` bounds the whole sweep to the slowest spoke."""
         if timeout is None:
             timeout = self.CONSOLE_PORTS_REFRESH_TIMEOUT
         if sids is None:
             sids = self.get_all_spokes_by_type("console") or []
         refreshed: set = set()
-        for sid in sids:
+
+        async def _refresh_one(sid):
             try:
                 r = await self.request_response(sid, "CONSOLE_LIST_PORTS", {}, timeout=timeout)
                 await self.warm_set("console_ports", sid, self._console_unwrap_ports(r))
                 refreshed.add(sid)
             except Exception as exc:  # noqa: BLE001 - one dead console mustn't stall the sweep
                 logger.debug("console ports refresh: %s unreachable (%s)", sid, exc)
+
+        if sids:
+            await asyncio.gather(*(_refresh_one(sid) for sid in sids))
         return refreshed
 
     def schedule_console_ports_refresh(self, sids) -> None:
