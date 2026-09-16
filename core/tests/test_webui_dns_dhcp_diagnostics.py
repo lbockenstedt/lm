@@ -8,7 +8,7 @@ MAIN_JS = Path(__file__).resolve().parents[2] / "WebUI" / "main.js"
 
 def test_dns_and_dhcp_navigation_include_diagnostics():
     src = MAIN_JS.read_text(encoding="utf-8")
-    assert "dns: ['Records', 'Statistics', 'Diagnostics', 'Forwarders', 'External DNS']" in src
+    assert "dns: ['Overview', 'Records', 'Diagnostics', 'Forwarders', 'External DNS']" in src
     assert "dhcp: ['Overview', 'Diagnostics', 'Subnets', 'Leases', 'Reservations']" in src
 
 
