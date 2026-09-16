@@ -24741,6 +24741,16 @@ function _ddMemberEvidence(members, kind, updatingIds) {
             const sockets = diag.sockets || {};
             const listeners = Array.isArray(sockets.listeners) ? sockets.listeners : [];
             const probes = Array.isArray(diag.probes) ? diag.probes : [];
+            // The four PASS/FAIL tiles used to be rendered ONCE, from the
+            // "source" member only, below the cluster panel. On a 2-resolver
+            // cluster that meant the second node's service/config/listener
+            // verdicts were never shown -- and the first node's evidence was
+            // printed twice. They belong to a node, so render them per node.
+            const svc = diag.service || {};
+            const cfg = diag.config || {};
+            const tile = (label, pass, detailText) => _ddTile(
+                label, pass ? 'PASS' : 'FAIL', detailText || '',
+                pass ? 'text-emerald-600' : 'text-red-600');
             const probeRows = probes.map(p => `<tr class="border-b border-slate-100">
                 <td class="px-3 py-1.5 font-mono text-xs">${escapeHtml(p.server || '—')}:53</td>
                 <td class="px-3 py-1.5 font-bold text-xs ${p.responded ? 'text-emerald-600' : 'text-red-600'}">${p.responded ? 'Responded' : 'No response'}</td>
@@ -24748,6 +24758,12 @@ function _ddMemberEvidence(members, kind, updatingIds) {
                 <td class="px-3 py-1.5 text-xs">${p.latency_ms == null ? '—' : `${escapeHtml(String(p.latency_ms))} ms`}</td>
             </tr>`).join('');
             return `
+            <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mt-3">
+                ${tile('Unbound Service', !!svc.ok, svc.output || svc.error || 'inactive')}
+                ${tile('Configuration', !!cfg.ok, cfg.output || cfg.error || 'valid')}
+                ${tile('Port 53', !!sockets.has_port_53_listener, sockets.has_port_53_listener ? `${listeners.length} listener(s)` : (sockets.error || 'not listening'))}
+                ${tile('LAN Listener', !!sockets.has_lan_listener, sockets.has_lan_listener ? 'non-loopback address bound' : 'loopback only or absent')}
+            </div>
             <div class="grid sm:grid-cols-2 gap-3 mt-3 text-xs">
                 <div>
                     <div class="font-semibold text-slate-600 mb-1">Configured interfaces</div>
@@ -25228,6 +25244,21 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
             const g = d.global || {};
             const qt = d.query_types || {};
             const syncLine = await _ddSyncStatusLine('dns');
+            // Clustered stats are a SUM across resolvers. Say so, and say when
+            // one of them did not answer -- otherwise an under-reported total
+            // looks authoritative.
+            const statErrors = (d.member_errors && typeof d.member_errors === 'object')
+                ? Object.entries(d.member_errors) : [];
+            const sourceLine = d.cluster ? `<div class="text-xs text-slate-400 mb-3">Combined across ${d.members_reporting == null ? (d.member_count || 0) : d.members_reporting} of ${d.member_count || 0} resolver(s).</div>` : '';
+            const statErrorBanner = statErrors.length
+                ? `<div class="mb-3 p-3 rounded-md bg-amber-50 border border-amber-200 text-xs text-amber-800">
+                    <span class="font-semibold">${statErrors.length} resolver(s) did not report statistics</span>
+                    — the totals below exclude them:
+                    <ul class="list-disc pl-5 mt-1">
+                        ${statErrors.map(([mid, msg]) => `<li><span class="font-mono">${escapeHtml(mid)}</span>: ${escapeHtml(String(msg))}</li>`).join('')}
+                    </ul>
+                </div>`
+                : '';
             const tiles = [
                 _ddTile('Total Queries', (g.total_queries || 0).toLocaleString()),
                 _ddTile('Cache Hit Ratio', `${g.cache_hit_ratio || 0}%`, `${(g.cache_hits || 0).toLocaleString()} hits / ${(g.cache_misses || 0).toLocaleString()} miss`,
@@ -25243,6 +25274,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                     <span class="w-20 text-right text-xs font-mono text-slate-500">${c.toLocaleString()}</span>
                 </div>`).join('');
             container.innerHTML = `
+                ${sourceLine}${statErrorBanner}
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">${tiles}</div>
                 <div class="bg-white border border-slate-200 rounded-lg p-4 mb-4">
                     <div class="text-sm font-semibold text-slate-700 mb-2">Queries by Type</div>
@@ -25316,7 +25348,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 <div class="flex items-center justify-between gap-3 mb-4">
                     <div>
                         <div class="text-sm font-semibold ${good ? 'text-emerald-700' : 'text-red-700'}">${good ? (cluster ? 'DNS cluster healthy' : 'DNS listener healthy') : (cluster ? 'DNS cluster needs attention' : 'DNS listener needs attention')}</div>
-                        <div class="text-xs text-slate-400">${cluster ? `Cluster of ${cluster.member_count || 0} resolver(s); evidence below is from ${escapeHtml(d.diagnostics_source_name || d.diagnostics_source || 'no reachable member')}.` : 'Live checks run on the Unbound server.'}</div>
+                        <div class="text-xs text-slate-400">${cluster ? `Cluster of ${cluster.member_count || 0} resolver(s); each resolver's own checks and evidence are shown below.` : 'Live checks run on the Unbound server.'}</div>
                     </div>
                     <div class="flex items-center gap-2">
                         ${serviceClusterButton('dns', cluster)}
@@ -25325,16 +25357,18 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 </div>
                 ${clusterPanel}
                 ${memberEvidence}
+                ${cluster ? '' : `
                 <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
                     ${check('Unbound Service', !!svc.ok, svc.output || svc.error || 'inactive')}
                     ${check('Configuration', !!cfg.ok, cfg.output || cfg.error || 'valid')}
                     ${check('Port 53', !!sockets.has_port_53_listener, sockets.has_port_53_listener ? `${listeners.length} listener(s)` : (sockets.error || 'not listening'))}
                     ${check('LAN Listener', !!sockets.has_lan_listener, sockets.has_lan_listener ? 'non-loopback address bound' : 'loopback only or absent')}
-                </div>
+                </div>`}
                 ${recommendations.length ? `<div class="mb-4 p-4 rounded-lg bg-amber-50 border border-amber-200">
                     <div class="text-sm font-semibold text-amber-800 mb-2">Recommended checks</div>
                     <ul class="list-disc pl-5 space-y-1 text-xs text-amber-800">${recommendations.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>
                 </div>` : ''}
+                ${cluster ? '' : `
                 <div class="grid lg:grid-cols-2 gap-4 mb-4">
                     <div class="bg-white border border-slate-200 rounded-lg p-4">
                         <div class="text-sm font-semibold text-slate-700 mb-2">Configured interfaces</div>
@@ -25352,7 +25386,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 <div class="bg-white border border-slate-200 rounded-lg overflow-hidden">
                     <div class="px-4 py-3 text-sm font-semibold text-slate-700 border-b border-slate-200">Local DNS query probes</div>
                     ${tw(th(['Target', 'Result', 'RCODE', 'Latency', 'Error']) + `<tbody>${probeRows}</tbody>`)}
-                </div>`;
+                </div>`}`;
             return;
         }
 
