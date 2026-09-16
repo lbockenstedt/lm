@@ -16481,7 +16481,14 @@ function spokeStatusMessage(s) {
     switch (s.last_status) {
         case 'AUTH_FAILED':    return { text: 'Auth failed — secret rejected (retrying / falling back to zero-touch)', tone: 'text-amber-600' };
         case 'PENDING_SECRET':  return { text: 'Zero-touch connected — awaiting admin approval', tone: 'text-amber-600' };
-        case 'DISCONNECTED':    return { text: 'Disconnected (clean exit) — likely self-update restart that systemd did not revive', tone: 'text-red-600' };
+        case 'DISCONNECTED':    return s.parent_online
+            // A role sub-spoke has no systemd unit of its own — it is a
+            // connection inside the parent agent's process. If the parent is
+            // connected, systemd is demonstrably fine and the role is simply
+            // reloading (self-update restart, role re-seed), so blaming
+            // systemd here sent operators chasing a unit that doesn't exist.
+            ? { text: 'Role reloading — parent agent is online (role restarts with the agent process, no unit of its own)', tone: 'text-amber-600' }
+            : { text: 'Disconnected (clean exit) — likely self-update restart that systemd did not revive', tone: 'text-red-600' };
         case 'ERROR':           return { text: `Connection error: ${s.last_error || 'see hub logs'}`, tone: 'text-red-600' };
         case 'CONNECTED':       return { text: 'Briefly connected then dropped (see event log)', tone: 'text-amber-600' };
         // Spoke refused this Hub's identity proof (its stored hub_secrets —

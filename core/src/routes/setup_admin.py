@@ -268,6 +268,15 @@ async def _aggregate_diagnostics(hub):
         latest_version = hub.latest_version_for_module(module_type)
         version_behind = _version_behind(spoke_version, latest_version)
 
+        # Parent agent of a role sub-spoke, and whether it is connected right
+        # now. Both stay None/False for an ordinary top-level spoke. getattr:
+        # the diagnostics compute serves STALE on any exception, so an
+        # AttributeError here would silently blank the whole card.
+        parent_sid = (getattr(hub, "spoke_parent_map", None) or {}).get(
+            hub._primary_key(sid)) or None
+        parent_online = bool(
+            parent_sid and hub._primary_key(parent_sid) in hub.active_connections)
+
         diagnostics.append({
             "spoke_id": sid,
             "display_name": hub.state.get_module_name(sid),
@@ -299,6 +308,14 @@ async def _aggregate_diagnostics(hub):
             "last_error": telemetry.get("error"),
             "flapping": flapping,
             "recent_drops": flap_drops,
+            # Role sub-spokes of a generic agent ({base}-{role}) share ONE
+            # process with the base agent, so "this role is down" almost never
+            # means systemd failed to revive a unit — the role has no unit of
+            # its own. Ship the parent's live connection state so the UI can
+            # say "parent agent online, role reloading" instead of blaming
+            # systemd (see spokeStatusMessage in WebUI/main.js).
+            "parent_spoke_id": parent_sid,
+            "parent_online": parent_online,
             # The full events(50)+log_events(30) arrays are NOT sent in the LIST
             # payload (heavy: 80 objects × every spoke on every poll). Only the
             # total count for the "N events ▾" badge ships here; the WebUI lazily
