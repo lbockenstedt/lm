@@ -17730,6 +17730,17 @@ async function showLoadRoleModal(spokeId) {
                     </div>
                     <p class="text-[11px] text-slate-500">Entra credentials are injected from the hub OIDC config automatically. For a 2-node mirror, load this role on both hosts with matching base DN, server-id 1 &amp; 2, and each node's peer URL set to the OTHER node.</p>
                 </div>
+                <div id="console-dpa-cfg" class="hidden p-3 bg-slate-50 border border-slate-200 rounded-md space-y-2">
+                    <label class="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                        <input type="checkbox" id="crole-dpa-enabled" class="rounded border-slate-300" onchange="syncNetboxCreds()"> Enable Direct Port Access (telnet terminal server)
+                    </label>
+                    <p class="text-[11px] text-slate-500">Exposes each detected serial port over a per-port telnet listener (auto-assigned from 2200) so you can attach a terminal straight to the line. The endpoint then shows in the Console port list. <strong>Off by default</strong>; telnet is unauthenticated/unencrypted, so it binds localhost unless you widen it.</p>
+                    <div id="crole-dpa-detail" class="hidden grid grid-cols-2 gap-2">
+                        <input id="crole-dpa-bind" type="text" value="127.0.0.1" placeholder="bind address (127.0.0.1 = localhost only)" autocomplete="off" oninput="syncNetboxCreds()" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                        <input id="crole-dpa-allow" type="text" placeholder="source-IP allow-list, comma-separated (required if not localhost)" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                        <p id="crole-dpa-warn" class="hidden col-span-2 text-[11px] text-amber-700 font-semibold">⚠ Binding beyond 127.0.0.1 exposes an unauthenticated, unencrypted telnet console on the network. Set a source-IP allow-list, and prefer SSH-tunnelling to localhost instead.</p>
+                    </div>
+                </div>
                 <p id="role-desc" class="text-xs text-slate-500 italic min-h-[1.5rem]"></p>
                 <div id="role-note" class="p-3 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-800">
                     The agent installs required system packages (e.g. unbound, kea, certbot) and hosts the role as a new sub-spoke. This may take 30–60 seconds per role.
@@ -17831,6 +17842,18 @@ function syncNetboxCreds() {
     const lcb = document.querySelector('.role-check[value="ldap-server"]');
     const lcfg = document.getElementById('ldap-server-cfg');
     if (lcfg) lcfg.classList.toggle('hidden', !(lcb && lcb.checked));
+    // Console role → reveal the optional Direct Port Access (DPA) config, and
+    // reveal the bind/allow-list detail (with a network-exposure warning) only
+    // once DPA itself is enabled.
+    const ccb = document.querySelector('.role-check[value="console"]');
+    const ccfg = document.getElementById('console-dpa-cfg');
+    if (ccfg) ccfg.classList.toggle('hidden', !(ccb && ccb.checked));
+    const dpaOn = document.getElementById('crole-dpa-enabled');
+    const dpaDetail = document.getElementById('crole-dpa-detail');
+    if (dpaDetail) dpaDetail.classList.toggle('hidden', !(dpaOn && dpaOn.checked));
+    const dpaBind = document.getElementById('crole-dpa-bind');
+    const dpaWarn = document.getElementById('crole-dpa-warn');
+    if (dpaWarn) dpaWarn.classList.toggle('hidden', !(dpaBind && dpaBind.value.trim() && dpaBind.value.trim() !== '127.0.0.1'));
 }
 
 // Two roles that bind the same host port can't be selected together either.
@@ -17906,6 +17929,19 @@ async function loadRole(spokeId) {
         if (g('lsrv-peer')) ldapSrvCfg.peers = [g('lsrv-peer')];
     }
 
+    // console role: optional Direct Port Access (DPA). Off by default; only sent
+    // when the operator ticks it. Bind stays 127.0.0.1 unless widened, and a
+    // widened bind carries the source-IP allow-list.
+    let consoleCfg = null;
+    if (checked.includes('console') && document.getElementById('crole-dpa-enabled')?.checked) {
+        consoleCfg = { console_dpa_enabled: true };
+        const bind = document.getElementById('crole-dpa-bind')?.value.trim();
+        if (bind) consoleCfg.console_dpa_bind = bind;
+        const allow = (document.getElementById('crole-dpa-allow')?.value || '')
+            .split(',').map(s => s.trim()).filter(Boolean);
+        if (allow.length) consoleCfg.console_dpa_allow = allow;
+    }
+
     // One batched request — the backend loads the roles SEQUENTIALLY on the agent
     // (each is a git clone + package install, can't run concurrently) and returns
     // a per-role results[]. Replaces the old one-POST-per-role loop.
@@ -17913,6 +17949,7 @@ async function loadRole(spokeId) {
         const r = { role: roleId };
         if (roleId === 'netbox-server' && netboxCfg && Object.keys(netboxCfg).length) r.config = netboxCfg;
         if (roleId === 'ldap-server' && ldapSrvCfg) r.config = ldapSrvCfg;
+        if (roleId === 'console' && consoleCfg) r.config = consoleCfg;
         return r;
     });
     const results = [];
