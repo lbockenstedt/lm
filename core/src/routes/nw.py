@@ -491,6 +491,20 @@ def register(app, hub, ctx):
         hub = app.state.hub
         sess = _session_user(request)
         is_admin = _is_admin(sess)
+        # ADMIN (default) tenant EXPLICITLY selected in the picker (the WebUI
+        # always sends ?tenant=<currentTenant>, and 'default' is the built-in
+        # ADMIN scope): do NOT accumulate every tenant's devices into one
+        # fleet-wide firehose. A Global Admin selects a SPECIFIC tenant to see
+        # that tenant's devices; the default/ADMIN scope shows nothing on its
+        # own. Clean + flagged so the UI prompts "select a tenant". Device
+        # MANAGEMENT (add/edit/assign) lives on Setup → Network Devices
+        # (/setup/nw-devices), which stays fleet-wide, so this only affects the
+        # inventory/stats view. A truly unscoped admin call (tenant is None —
+        # not the picker) still returns the whole fleet for programmatic
+        # callers / the fleet cache warm path.
+        if is_admin and tenant == "default":
+            return {"status": "SUCCESS", "data": [], "select_tenant": True,
+                    "message": "Select a tenant to view its network devices"}
         # Tenant selector scoping: when the caller explicitly selects a SPECIFIC
         # tenant (the WebUI tenant picker sends ``?tenant=``; ``default`` is the
         # built-in global/"All tenants" scope, NOT a real tenant), scope the
