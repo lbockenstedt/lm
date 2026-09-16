@@ -31,6 +31,62 @@ def _deploy_status_for_role(progress: dict, role: str) -> dict:
     return single if single.get("role") == role else {}
 
 
+_DHCP_STATS_POOL_KEYS = ("total_addresses", "assigned_addresses",
+                         "declined_addresses")
+
+
+def _dhcp_stats_subnets(payload):
+    """The per-scope list out of a DHCP_STATS envelope, or None."""
+    if isinstance(payload, dict) and isinstance(payload.get("subnets"), list):
+        return payload["subnets"]
+    return None
+
+
+def _dhcp_rescope_stats(before, after):
+    """Make a tenant-filtered DHCP_STATS envelope self-consistent.
+
+    ``_filter_tenant`` only prunes the record list it finds (``subnets``), which
+    leaves two problems on the Overview tab:
+
+    * ``global`` still holds the pool totals for the WHOLE Kea instance, so a
+      tenant sees one scope listed under a fleet-wide "12,000 addresses"
+      utilization tile — both a cross-tenant disclosure and a nonsensical
+      reading. The address totals are just sums over the per-scope numbers
+      (dhcp_spoke ``_ha_stats``), so they re-derive exactly from the scopes the
+      caller is allowed to see.
+    * ``members`` carries each HA node's RAW reply, including that node's
+      complete, unfiltered ``subnets`` list — so every scope leaks straight
+      back out through a field the Overview never even reads. This matters most
+      on the fail-closed path (a tenant with no NetBox prefixes gets
+      ``subnets: []`` but an intact ``members``).
+
+    Only rewrites when filtering actually removed a scope, so an admin's
+    unfiltered view keeps the spoke's own numbers (which de-duplicate HA nodes
+    by averaging rather than naive summing) byte for byte.
+
+    Packet counters (``pkt4_*``) are server-level and cannot be attributed to a
+    scope, so they are left alone.
+
+    Module-level + pure so it is unit-testable with plain dicts."""
+    subs_before = _dhcp_stats_subnets(before)
+    subs_after = _dhcp_stats_subnets(after)
+    if not isinstance(after, dict) or subs_before is None or subs_after is None:
+        return after
+    if len(subs_after) == len(subs_before):
+        return after
+    out = dict(after)
+    out.pop("members", None)
+    totals = dict(out.get("global") or {})
+    for key in _DHCP_STATS_POOL_KEYS:
+        totals[key] = sum(int(s.get(key) or 0)
+                          for s in subs_after if isinstance(s, dict))
+    totals["utilization_pct"] = (
+        round(totals["assigned_addresses"] / totals["total_addresses"] * 100, 1)
+        if totals.get("total_addresses") else 0.0)
+    out["global"] = totals
+    return out
+
+
 def register(app, hub, ctx):
     """Register net_services routes on the Hub app."""
     _filter_session = ctx._filter_session
@@ -3907,9 +3963,23 @@ def register(app, hub, ctx):
     @app.get("/api/dhcp/stats")
     async def dhcp_stats(request: Request, tenant: str = None):
         """Kea DHCP4 statistics — global + per-subnet pool utilization and the
-        headline packet counters for the DHCP analytics panel."""
+        headline packet counters for the DHCP analytics panel.
+
+        Subnet-filtered per the caller's tenant exactly like /api/dhcp/subnets:
+        the per-scope ``subnet`` CIDR is matched against the tenant's NetBox
+        prefixes by overlap, so a non-admin (or an admin with a tenant selected
+        in the picker) only sees their own scopes. Admins with no tenant
+        selected see all. Without this the Overview tab rendered EVERY tenant's
+        scopes under "Scope Utilization" while the Subnets/Leases/Reservations
+        tabs beside it were correctly scoped.
+
+        ``_dhcp_rescope_stats`` then re-derives the pool tiles from the visible
+        scopes and drops the raw per-HA-node ``members`` replies, which embed a
+        second, unfiltered copy of every subnet."""
         logger.debug("relay GET /api/dhcp/stats")
-        return await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_STATS", log_name="dhcp_stats")
+        data = await _relay_spoke(_dhcp_spoke_for_request(request, tenant), "DHCP_STATS", log_name="dhcp_stats")
+        filtered = await _filter_tenant(request, data, "dhcp", ["subnet"], tenant)
+        return _dhcp_rescope_stats(data, filtered)
 
     @app.post("/api/dhcp/sync")
     async def dhcp_sync_from_netbox():
