@@ -18534,6 +18534,16 @@ async function loadNwData(category) {
     let items;
     try {
         const data = await r.json();
+        if (data && data.select_tenant) {
+            // ADMIN (default) tenant: the hub no longer accumulates every
+            // tenant's devices — pick a specific tenant to see its fleet.
+            container.innerHTML = `<div class="py-12 text-center space-y-3">
+                <svg class="w-10 h-10 mx-auto text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-3-4h.01M16 16h.01"/></svg>
+                <p class="text-slate-600 text-sm font-semibold">Select a tenant to view its network devices</p>
+                <p class="text-slate-400 text-xs max-w-md mx-auto">The ADMIN (default) view no longer aggregates every tenant's devices. Choose a specific tenant from the tenant picker to see that tenant's fleet.</p>
+            </div>`;
+            return;
+        }
         items = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
     } catch (err) {
         console.error(`[Network] Error in loadNwData:`, err);
