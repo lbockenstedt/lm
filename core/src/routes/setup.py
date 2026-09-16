@@ -207,6 +207,49 @@ def _leaked_approved_agent_ids(approved, relay_ids, direct_ids):
     return (set(approved) & set(relay_ids)) - set(direct_ids)
 
 
+def _dhcp_ha_member_count(status):
+    """Kea HA member count from a ``DHCP_HA_STATUS`` reply, or ``None``.
+
+    ``None`` means "could not tell" (the relay failed, or the spoke answered
+    something without a usable ``members``/``member_count``) and must never be
+    read as "no members" — a watchdog that fires on an unreachable spoke is a
+    watchdog operators learn to ignore. Only an explicit, well-formed count is
+    returned.
+
+    Module-level + pure so it is unit-testable (mirrors
+    ``_is_stuck_never_keyed``)."""
+    if not isinstance(status, dict):
+        return None
+    members = status.get("members")
+    if isinstance(members, list):
+        return sum(1 for m in members if isinstance(m, dict) and m.get("id"))
+    raw = status.get("member_count")
+    if isinstance(raw, bool):
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return None
+
+
+def _dhcp_spokes_without_cluster(status_by_spoke):
+    """The dhcp spokes that advertise the role but manage no Kea at all.
+
+    ``status_by_spoke`` maps spoke_id -> unwrapped ``DHCP_HA_STATUS`` reply (or
+    ``None`` when the relay failed). A spoke whose cluster is empty has no Kea
+    to answer for, so every DHCP read routed to it (diagnostics / stats /
+    status) reports the SERVICE as dead — see ``_dhcp_spoke_for_request`` in
+    ``routes/net_services.py``, where a tenantless admin falls through to
+    ``get_spoke_by_type("dhcp")`` and takes whichever dhcp spoke sits first in
+    ``spoke_module_types`` insertion order. One stray ``dhcp`` role on a host
+    that never had Kea installed is therefore enough to make a healthy HA pair
+    look completely down.
+
+    Module-level + pure so it is unit-testable."""
+    return {sid for sid, st in (status_by_spoke or {}).items()
+            if _dhcp_ha_member_count(st) == 0}
+
+
 def _is_stuck_never_keyed(approved, connected, has_key, is_relayed_agent, seen):
     """True when a registration is stuck in the "approve → never reports in"
     state: it is APPROVED yet has NEVER been seen, holds NO session key, is NOT
@@ -2017,6 +2060,30 @@ def register(app, hub, ctx):
         warn_s, error_s = _safe(hub._spoke_alert_thresholds, (300, 1800))
         cfg = _safe(hub._spoke_alert_cfg, {})
 
+        # ── DHCP role-capability probe ───────────────────────────────────────
+        # Live DHCP_HA_STATUS for every connected, approved dhcp spoke. Best
+        # effort and bounded: a spoke that fails to answer maps to None, which
+        # _dhcp_ha_member_count reads as "unknown" (never as "empty"), so an
+        # unreachable spoke cannot raise the finding below.
+        dhcp_spokes = sorted(
+            s for s in _safe(lambda: hub.get_all_spokes_by_type("dhcp") or [], [])
+            if hub._primary_key(s) in (getattr(hub, "active_connections", {}) or {})
+            and (hub.approved_modules or {}).get(s, False))
+        dhcp_ha = {}
+        if dhcp_spokes:
+            replies = await asyncio.gather(*[
+                hub.request_response(sid, "DHCP_HA_STATUS", {}, timeout=15.0)
+                for sid in dhcp_spokes], return_exceptions=True)
+            for sid, reply in zip(dhcp_spokes, replies):
+                if isinstance(reply, BaseException):
+                    logger.debug("[alert-diag] DHCP_HA_STATUS %s failed: %s", sid, reply)
+                    dhcp_ha[sid] = None
+                else:
+                    dhcp_ha[sid] = _unwrap_spoke(reply)
+        clusterless = _dhcp_spokes_without_cluster(dhcp_ha)
+        # The spoke a tenantless admin read actually lands on.
+        default_dhcp = _safe(lambda: hub.get_spoke_by_type("dhcp"), None)
+
         # Composite heartbeat keys, grouped by the agent-id tail the alert loop
         # FAILS to match (the bare id) — the direct evidence for a false positive.
         composite = {}
@@ -2105,6 +2172,23 @@ def register(app, hub, ctx):
              "alert.",
              {r["spoke_id"] for r in rows if r["is_connected"]})
 
+        _add("dhcp_spoke_without_cluster", "warning",
+             "DHCP spoke advertises the 'dhcp' role but manages no Kea cluster "
+             "(DHCP_HA_STATUS reported zero members). It has nothing to answer "
+             "for, so any DHCP read routed to it reports the whole DHCP service "
+             "as down. Either configure its HA pair or unload the stray 'dhcp' "
+             "role from that host.",
+             clusterless)
+
+        _add("dhcp_default_spoke_without_cluster", "error",
+             "The dhcp spoke that answers a tenantless admin read manages no Kea "
+             "cluster. _dhcp_spoke_for_request falls through to "
+             "get_spoke_by_type('dhcp'), which returns the FIRST dhcp spoke in "
+             "spoke_module_types insertion order — not the healthiest one — so "
+             "Diagnostics / Overview / Status are reporting on a host with no "
+             "Kea while a real HA pair is up. Not a DHCP outage.",
+             {default_dhcp} & clusterless if default_dhcp else set())
+
         return {
             "generated_ts": now,
             "config": {"enabled": bool(cfg.get("enabled", False)),
@@ -2122,6 +2206,13 @@ def register(app, hub, ctx):
             "findings": findings,
             "approved_ids": sorted(approved),
             "relay_ids": sorted(relay_ids),
+            # Evidence for the two dhcp_* findings: what each dhcp spoke
+            # reported, and which one the tenantless read path selects.
+            "dhcp_cluster": {
+                "default_spoke": default_dhcp,
+                "members": {sid: _dhcp_ha_member_count(st)
+                            for sid, st in dhcp_ha.items()},
+            },
         }
 
     # ── Network Devices → NetBox device-discovery sync (Setup → Sync) ──
