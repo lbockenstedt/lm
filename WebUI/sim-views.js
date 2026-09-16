@@ -4991,7 +4991,6 @@ function csRenderSimQuotaEditor() {
               : `<button onclick="csToggleIgnoreGlobalQuotas()" title="This tenant inherits the platform-wide Sim Quota defaults, merged with its own rows. Click to ignore them." class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Global Defaults: On</button>`}
             <button onclick="csSimQuotaAdd()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">+ Add Quota</button>
             <button onclick="csSimQuotaSave()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-1.5 rounded-md text-sm font-bold shadow-sm">Save Quotas</button>
-            <button onclick="csSimQuotaDeleteAll()" ${csSimQuotaRows.length ? '' : 'disabled'} title="Delete this tenant's ENTIRE Engine Config — every sim-quota row (Central + Mist) in one step. Requires confirmation; cannot be undone. (Use the per-row Remove to drop a single quota.)" class="bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-4 py-1.5 rounded-md text-sm font-bold shadow-sm ${csSimQuotaRows.length ? '' : 'opacity-50 cursor-not-allowed'}">Delete Engine Config</button>
           </div>
         </div>
         <p class="text-xs text-slate-500 mb-2">Link a monitored alert or insight (Central → Alerts/Insights → Monitor) to the simulation that produces it, then set how many online clients the engine keeps running that sim in the chosen site. The engine auto-selects from the online pool and self-heals when a runner dies. <span class="font-semibold">Re-home</span> lets it borrow runners from other sites (re-homing their <span class="font-mono">wsite</span>) when this site's pool can't fill the count. Sims + sites come from this tenant's <span class="font-semibold">Config Editor</span> (simulation.conf) and Central site mappings.</p>
@@ -5559,8 +5558,12 @@ window.csSimQuotaSave = async function () {
     const cleanRows = [];
     let wipeBlocked = false;
     try {
-        if (centralRows.length) {
-            const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
+        // Consult the stored config even when the editor holds no rows for this
+        // source: dropping a source's LAST row must still POST, or the deletion
+        // is never sent and the row reappears on the next load.
+        const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
+        const centralStored = Array.isArray(cfg.sim_quotas) ? cfg.sim_quotas.length : 0;
+        if (centralRows.length || centralStored) {
             const body = {
                 site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
                 monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
@@ -5568,19 +5571,25 @@ window.csSimQuotaSave = async function () {
                 sim_quotas: centralRows,
                 ignore_global_quotas: !!cfg.ignore_global_quotas,
             };
+            // Emptying a source's rows in the editor is a deliberate operator
+            // edit, not the stale-simulation.conf blast guard_sim_quota_wipe
+            // defends against — opt past the guard so the removal persists.
+            if (!centralRows.length) body.force_sim_quotas_clear = true;
             const r = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
             cleanRows.push(...(Array.isArray(r && r.sim_quotas) ? r.sim_quotas : centralRows));
             allErrs.push(...(Array.isArray(r && r.sim_quota_errors) ? r.sim_quota_errors : []));
             if (r && r.sim_quotas_wipe_blocked) wipeBlocked = true;
         }
-        if (mistRows.length) {
-            const mcfg = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`) || {};
+        const mcfg = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`) || {};
+        const mistStored = Array.isArray(mcfg.sim_quotas) ? mcfg.sim_quotas.length : 0;
+        if (mistRows.length || mistStored) {
             const body = {
                 site_mappings: (mcfg.site_mappings && typeof mcfg.site_mappings === 'object') ? mcfg.site_mappings : {},
                 monitored_checks: Array.isArray(mcfg.monitored_checks) ? mcfg.monitored_checks : [],
                 hardware_checks: Array.isArray(mcfg.hardware_checks) ? mcfg.hardware_checks : [],
                 sim_quotas: mistRows,
             };
+            if (!mistRows.length) body.force_sim_quotas_clear = true;
             const r = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`, { method: 'POST', body: JSON.stringify(body) });
             cleanRows.push(...(Array.isArray(r && r.sim_quotas) ? r.sim_quotas : mistRows));
             allErrs.push(...(Array.isArray(r && r.sim_quota_errors) ? r.sim_quota_errors : []));
@@ -5601,59 +5610,6 @@ window.csSimQuotaSave = async function () {
         else showToast('Sim quotas saved.', 'success');
     } catch (e) {
         console.error('csSimQuotaSave: save failed', e);
-        showToast(e.message, 'error');
-    }
-};
-
-// Whole-config bulk delete: clear this tenant's ENTIRE Engine Config — every
-// sim-quota row in one step — distinct from the per-row Remove (csSimQuotaDel)
-// and the platform-wide defaults editor. Quota rows are a UNION of two configs
-// (central_sites_config.sim_quotas + mist_sites_config.sim_quotas), so we clear
-// BOTH sources. Reuses the csSimQuotaSave GET-merge-POST path so each config's
-// site_mappings / monitored_checks / hardware_checks (and Central's
-// ignore_global_quotas) are preserved untouched. The empty sim_quotas send
-// carries force_sim_quotas_clear so the server's anti-blast wipe guard honors
-// this as a deliberate clear (it otherwise refuses a non-empty→empty save).
-window.csSimQuotaDeleteAll = async function () {
-    const rows = csSimQuotaSyncFromDom();
-    if (!rows.length) {
-        // No-op safely — nothing to delete, don't issue a pointless write.
-        showToast('No sim quotas to delete.', 'info');
-        return;
-    }
-    if (typeof confirm === 'function' &&
-        !confirm(`Delete the ENTIRE Engine Config — all ${rows.length} sim-quota row(s) `
-            + `(Central + Mist) for this tenant? This cannot be undone.`)) return;
-    try {
-        // Central: preserve siblings + ignore_global_quotas, clear the rows.
-        const cfg = await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`) || {};
-        await csFetch(`/${csTenant()}/central-sites-config?tenant_id=${csTenant()}`, {
-            method: 'POST', body: JSON.stringify({
-                site_mappings: (cfg.site_mappings && typeof cfg.site_mappings === 'object') ? cfg.site_mappings : {},
-                monitored_checks: Array.isArray(cfg.monitored_checks) ? cfg.monitored_checks : [],
-                hardware_checks: Array.isArray(cfg.hardware_checks) ? cfg.hardware_checks : [],
-                sim_quotas: [],
-                ignore_global_quotas: !!cfg.ignore_global_quotas,
-                force_sim_quotas_clear: true,
-            }),
-        });
-        // Mist: same clear on the other source (siblings preserved). Mist config
-        // carries no ignore_global_quotas — mirror csSimQuotaSave and omit it.
-        const mcfg = await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`) || {};
-        await csFetch(`/${csTenant()}/mist-sites-config?tenant_id=${csTenant()}`, {
-            method: 'POST', body: JSON.stringify({
-                site_mappings: (mcfg.site_mappings && typeof mcfg.site_mappings === 'object') ? mcfg.site_mappings : {},
-                monitored_checks: Array.isArray(mcfg.monitored_checks) ? mcfg.monitored_checks : [],
-                hardware_checks: Array.isArray(mcfg.hardware_checks) ? mcfg.hardware_checks : [],
-                sim_quotas: [],
-                force_sim_quotas_clear: true,
-            }),
-        });
-        csSimQuotaRows = [];
-        csRenderSimQuotaEditor();
-        showToast('Engine Config deleted — all sim quotas cleared.', 'success');
-    } catch (e) {
-        console.error('csSimQuotaDeleteAll: delete failed', e);
         showToast(e.message, 'error');
     }
 };
