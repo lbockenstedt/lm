@@ -717,6 +717,17 @@ class RoleConnection(AgentHostingControlPlane):
                                cwd=cwd, check=True)
             head_after = self._run_git(["rev-parse", "HEAD"], cwd).stdout.strip()
             if head_after != head_before:
+                # Prefer reloading THIS role only: a process restart here drops
+                # every other role hosted in this process (commonly 8 unrelated
+                # sub-spokes) for an update that touched one repo. Deferred onto
+                # its own task — _stop_role cancels the run task executing this
+                # handler — and falls back to os._exit(3) if the reload fails.
+                cp = getattr(self, "agent_control_plane", None)
+                if cp is not None and hasattr(cp, "_schedule_role_reload"):
+                    cp._schedule_role_reload(self.role_name, cwd)
+                    return {"status": "SUCCESS",
+                            "message": (f"Updated {cwd} from {repo_url}; reloading "
+                                        f"role '{self.role_name}' in place")}
                 if self._prepare_service_restart(reason="spoke-update"):
                     await self._flush_log_relay_async()
                     os._exit(3)
@@ -936,20 +947,131 @@ class AgentControlPlane(BaseControlPlane):
         # loaded role's sibling repo.
         await super().run()
 
+    def _role_repo_dirs(self) -> dict:
+        """``role name -> abspath`` of each loaded role's sibling repo."""
+        out = {}
+        agent = self.modules.get("agent")
+        for role in list(getattr(agent, "_roles", {}) or {}):
+            try:
+                clone = _ROLE_MAP[role][0].split("/")[0]
+                out[role] = os.path.abspath(str(self._lm_root() / clone))
+            except Exception:  # noqa: BLE001
+                pass
+        return out
+
     def _drift_watched_dirs(self) -> list:
         """Extend the base watch set (own repo + shared /opt/lm core) with each
         loaded role's sibling repo, so a role pulled-but-not-restarted also
         self-heals. The base watchdog (BaseControlPlane._code_drift_watchdog)
         calls this every cycle and baselines any repo that first appears here."""
         dirs = set(super()._drift_watched_dirs())
-        agent = self.modules.get("agent")
-        for role in list(getattr(agent, "_roles", {}) or {}):
-            try:
-                clone = _ROLE_MAP[role][0].split("/")[0]
-                dirs.add(str(self._lm_root() / clone))
-            except Exception:  # noqa: BLE001
-                pass
+        dirs.update(self._role_repo_dirs().values())
         return [d for d in dirs if os.path.isdir(os.path.join(str(d), ".git"))]
+
+    def _drift_role_for_dir(self, d: str):
+        """Classify ``d`` as one loaded role's sibling repo (reloadable in place)
+        or as process-critical code (whole-process restart).
+
+        Returns ``None`` — meaning "restart the process" — for anything in the
+        BASE watch set (this agent's own repo and the shared ``/opt/lm`` core),
+        because the running process imported that code and only a restart can
+        reload it. Also returns ``None`` when two loaded roles resolve to the
+        SAME repo: reloading one would have to purge modules the other is still
+        using, so the safe answer is the historical restart."""
+        key = os.path.abspath(str(d))
+        try:
+            base = {os.path.abspath(str(x)) for x in super()._drift_watched_dirs()}
+        except Exception:  # noqa: BLE001
+            return None
+        if key in base:
+            return None
+        owners = [r for r, p in self._role_repo_dirs().items() if p == key]
+        return owners[0] if len(owners) == 1 else None
+
+    def _purge_role_modules(self, repo_dir: str) -> None:
+        """Drop every cached module that was imported FROM ``repo_dir``.
+
+        ``_load_role_class`` always re-execs the role's entry file, but the
+        submodules that file imports (``from queries import ...``) stay in
+        ``sys.modules`` and would NOT be re-executed — an in-place reload would
+        otherwise splice a new entry module onto stale siblings. Scoped strictly
+        to files under this role's own repo, so core and other roles are never
+        touched."""
+        root = os.path.abspath(str(repo_dir)) + os.sep
+        for name, mod in list(sys.modules.items()):
+            try:
+                path = getattr(mod, "__file__", None)
+                if path and os.path.abspath(path).startswith(root):
+                    sys.modules.pop(name, None)
+            except Exception:  # noqa: BLE001
+                continue
+
+    async def _reload_role_for_drift(self, role: str, d: str) -> bool:
+        """Reload ONE role after its repo advanced, leaving every other role on
+        this process connected.
+
+        Stops the role's sub-spoke (closing its hub socket and releasing any
+        listener it held), purges its cached modules so the new code is actually
+        executed, then re-issues LOAD_ROLE. Returns ``False`` on any failure so
+        the watchdog falls back to the whole-process restart — a role must never
+        be left down, and stale code must never keep serving."""
+        agent = self.modules.get("agent")
+        if agent is None or role not in (getattr(agent, "_roles", {}) or {}):
+            return False
+        logger.info("code-drift: role '%s' repo %s advanced; reloading just that "
+                    "role (other roles stay up).", role, d)
+        try:
+            await agent._stop_role(role)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("code-drift: stopping role '%s' failed: %s", role, e)
+            return False
+        self._purge_role_modules(d)
+        try:
+            res = await agent.handle_command("LOAD_ROLE", {"role": role})
+        except Exception as e:  # noqa: BLE001
+            logger.error("code-drift: re-loading role '%s' raised: %s", role, e)
+            return False
+        if not (isinstance(res, dict) and res.get("status") == "SUCCESS"):
+            logger.error("code-drift: re-loading role '%s' failed: %s", role, res)
+            return False
+        # _stop_role removed the role from the durable LOADED_ROLES set; the
+        # successful LOAD_ROLE above re-persisted it (union), so a later restart
+        # still re-spawns it.
+        return True
+
+    def _schedule_role_reload(self, role: str, repo_dir: str, *, delay_s: float = 2.0):
+        """Reload ``role`` on a SEPARATE task, falling back to a process restart.
+
+        Used by the role's own SPOKE_UPDATE handler, which cannot reload itself
+        inline: ``_stop_role`` cancels the RoleConnection's run task, and that
+        task is the one executing the handler. Deferring also lets the handler's
+        reply flush to the hub before its socket is closed. If the targeted
+        reload fails for any reason we ``os._exit(3)`` exactly as before, so
+        freshly-pulled code never keeps running under the old class."""
+        async def _run():
+            await asyncio.sleep(delay_s)
+            ok = False
+            try:
+                ok = await self._reload_role_for_drift(role, repo_dir)
+            except Exception as e:  # noqa: BLE001
+                logger.error("Deferred reload of role '%s' raised: %s", role, e)
+            if not ok:
+                logger.warning("Targeted reload of role '%s' failed — exiting so "
+                               "systemd reloads current code.", role)
+                try:
+                    await self._flush_log_relay_async()
+                except Exception:  # noqa: BLE001
+                    pass
+                os._exit(3)
+
+        tasks = getattr(self, "_role_reload_tasks", None)
+        if tasks is None:
+            tasks = set()
+            self._role_reload_tasks = tasks
+        task = asyncio.create_task(_run())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        return task
 
 if __name__ == "__main__":
     import socket as _socket
