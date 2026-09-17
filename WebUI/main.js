@@ -1067,6 +1067,118 @@ function showStickyToast(message, type = 'info') {
     };
 }
 
+// Lightweight "we heard you" feedback toast fired the instant an actionable
+// control is clicked, BEFORE its (sometimes slow) handler runs. Purpose is
+// pure reassurance: a user reported clicking a button, seeing nothing happen
+// for a beat on a slow load, and clicking again — this gives immediate visual
+// acknowledgement that the click landed and the system is working.
+//
+// It is deliberately short-lived (LOADING_TOAST_MS) and de-duplicated: rapid
+// repeat clicks on the same thing refresh the one toast in place instead of
+// stacking a column of identical messages. Installed globally by
+// installClickFeedback(); individual controls opt OUT with [data-no-loading].
+let _lmLoadingToast = null;  // { el, label, timer } — only one at a time.
+function showLoadingToast(label) {
+    const text = `Loading ${label}…`;
+    // Same click, again (the exact "nothing happened so I clicked again"
+    // case): just restart the timer on the existing toast, don't stack.
+    if (_lmLoadingToast && _lmLoadingToast.label === label &&
+        document.body.contains(_lmLoadingToast.el)) {
+        clearTimeout(_lmLoadingToast.timer);
+        _lmLoadingToast.timer = setTimeout(_dismissLoadingToast,
+            window.LOADING_TOAST_MS || 1800);
+        return;
+    }
+    _dismissLoadingToast();  // a different action — replace, never accumulate.
+    const toast = document.createElement('div');
+    toast.className = 'lm-toast';
+    toast.style.cssText = `
+        display:flex;align-items:center;gap:.75rem;
+        background:#01A982;color:#fff;
+        padding:.75rem 1rem .75rem 1.25rem;border-radius:.5rem;font-size:.875rem;
+        box-shadow:0 4px 12px rgba(0,0,0,.2);opacity:0;
+        transition:opacity .2s ease;width:100%;box-sizing:border-box;`;
+    const spinner = document.createElement('span');
+    spinner.style.cssText = 'width:.9rem;height:.9rem;border:2px solid rgba(255,255,255,.4);' +
+        'border-top-color:#fff;border-radius:50%;flex:none;animation:lm-spin .8s linear infinite;';
+    if (!document.getElementById('lm-spin-kf')) {
+        const st = document.createElement('style');
+        st.id = 'lm-spin-kf';
+        st.textContent = '@keyframes lm-spin{to{transform:rotate(360deg)}}';
+        document.head.appendChild(st);
+    }
+    toast.appendChild(spinner);
+    const span = document.createElement('span');
+    span.style.cssText = 'flex:1;white-space:pre-line;';
+    span.textContent = text;
+    toast.appendChild(span);
+    _lmToastRegion().appendChild(toast);
+    requestAnimationFrame(() => { toast.style.opacity = '1'; });
+    const timer = setTimeout(_dismissLoadingToast, window.LOADING_TOAST_MS || 1800);
+    _lmLoadingToast = { el: toast, label, timer };
+}
+
+function _dismissLoadingToast() {
+    if (!_lmLoadingToast) return;
+    const { el, timer } = _lmLoadingToast;
+    clearTimeout(timer);
+    _lmLoadingToast = null;
+    if (!el || !document.body.contains(el)) return;
+    el.style.opacity = '0';
+    el.addEventListener('transitionend', () => el.remove());
+}
+
+// Derive a short human label for the clicked control: an explicit override
+// wins, then aria-label/title, then its own visible text (icon glyphs and
+// runaway length trimmed). Returns '' when there is nothing meaningful to say.
+function _loadingLabelFor(el) {
+    let label = el.getAttribute('data-loading-label')
+        || el.getAttribute('aria-label')
+        || el.getAttribute('title')
+        || (el.textContent || '');
+    // Collapse whitespace and drop lone icon/glyph characters (Font Awesome
+    // ligatures render as private-use glyphs; ×/✓/etc. carry no words).
+    label = label.replace(/\s+/g, ' ').trim();
+    label = label.replace(/[\u2000-\u3300\uE000-\uF8FF\uF000-\uFFFF]/g, '').trim();
+    if (label.length > 40) label = label.slice(0, 39).trim() + '…';
+    return label;
+}
+
+// A control we should NOT announce: dismissers, copy/reveal affordances,
+// toggles, in-toast buttons, anything the page explicitly opts out, and
+// disabled controls (their handler never runs).
+const _NO_LOADING_TEXT = /^(×|✕|✓|close|dismiss|cancel|copy|copied|show|hide|expand|collapse|previous|next|prev|▲|▼|◀|▶|‹|›|«|»)$/i;
+function _skipLoadingFeedback(el) {
+    if (el.closest('[data-no-loading]')) return true;
+    if (el.closest('#lm-toast-region')) return true;               // toast's own buttons
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return true;
+    if (el.getAttribute('role') === 'switch') return true;         // toggle switches
+    if (el.type === 'checkbox' || el.type === 'radio') return true;
+    const aria = (el.getAttribute('aria-label') || '').trim();
+    const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (_NO_LOADING_TEXT.test(aria) || _NO_LOADING_TEXT.test(txt)) return true;
+    return false;
+}
+
+// Global click-feedback: on ANY actionable control (buttons, nav items,
+// role=button), pop the short "Loading …" toast immediately. Runs in the
+// CAPTURE phase so it fires even when the real handler calls stopPropagation,
+// and before that handler's (possibly slow) work begins. Installed once.
+function installClickFeedback() {
+    if (window._lmClickFeedbackInstalled) return;
+    window._lmClickFeedbackInstalled = true;
+    document.addEventListener('click', (e) => {
+        if (window.LM_CLICK_FEEDBACK === false) return;   // runtime kill-switch
+        const el = e.target.closest(
+            'button, [role="button"], .nav-item, [data-loading-label]');
+        if (!el) return;
+        if (_skipLoadingFeedback(el)) return;
+        const label = _loadingLabelFor(el);
+        if (!label) return;
+        try { showLoadingToast(label); } catch (_) { /* never block the click */ }
+    }, true);
+}
+
 // Interactive confirm toast — a non-blocking replacement for window.confirm()
 // on destructive actions (e.g. delete spoke/agent). Renders a toast carrying
 // Cancel + Confirm buttons and returns a Promise<boolean>: true on Confirm,
@@ -32586,6 +32698,7 @@ async function _initApp() {
         loadAppearance();
         loadToastConfig();
         loadTenantPrefixes();  // background — prefixes used for filtering, not dashboard render
+        installClickFeedback();  // immediate "Loading …" ack on every button click
         setView('dashboard');
         _startCacheStatusPolling();
         pollManager.register(updateStatus, 10000);

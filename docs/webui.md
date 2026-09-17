@@ -39,6 +39,7 @@ Same as the hub: `https://<hub>` (443) or `http://<hub>:443` (no-cert). WS: `/ws
 - **No direct spoke access** — all data flows through hub REST routes (`/setup/*`, `/api/*`, `/admin/*`, `/auth/*`, `/sim/api/*`); the browser only opens WS to the hub for VNC + cs telemetry.
 - **Per-route API bindings** are dispatched in `main.js` `VIEW_LOADERS`; adding a hub route usually means wiring a loader here.
 - **In-app Help drawer** — the WebUI ships a Help drawer (the "?" button / inline ⓘ icons, `help.js`) that renders these canonical `lm/docs/*.md` files **verbatim** as tooltips/panels. The docs in `lm/docs/` ARE the in-app help content — so keep them accurate; a docs edit is a UI-copy edit.
+- **Click feedback** — `installClickFeedback()` wires a single capture-phase click listener that pops a short "Loading …" toast the instant any button / `role="button"` / `.nav-item` is clicked, before the (sometimes slow) handler runs, so a slow load can't read as an unresponsive click. It's de-duplicated (repeat clicks on the same control refresh one toast, never stack). Dismiss/copy/reveal/toggle affordances and disabled controls are skipped; opt any control out with `data-no-loading`, override its label with `data-loading-label`, or disable the feature at runtime with `window.LM_CLICK_FEEDBACK = false`.
 
 ## How it works
 
