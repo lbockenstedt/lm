@@ -88,6 +88,17 @@ except ImportError:  # pragma: no cover - bare checkout without core/src on path
         scrub_snapshot, shard_by_spoke, build_payloads)
 
 
+#: Printed on its own stdout line each time the feeder rotates its API token, so
+#: the parent hub can persist the NEW access+refresh pair back to config. Without
+#: this the hub keeps the ORIGINAL refresh token; the next hub restart re-presents
+#: an already-rotated refresh token, which api_tokens.refresh() flags as reuse and
+#: punishes by revoking the whole token family — the feed then dies for good after
+#: an update and every restart, until a human issues a fresh token. Must stay
+#: byte-for-byte identical to the constant of the same name in
+#: core/src/routes/test_feed.py, which parses these lines out of the child stream.
+TOKEN_ROTATION_SENTINEL = "##LM-TEST-FEED-TOKEN## "
+
+
 class SourceHub:
     """Read-only client for the source hub's aggregate API.
 
@@ -96,13 +107,17 @@ class SourceHub:
     production?" answerable by reading twenty lines rather than auditing every
     call site."""
 
-    def __init__(self, base_url, insecure=True, token="", refresh_token=""):
+    def __init__(self, base_url, insecure=True, token="", refresh_token="",
+                 emit_rotations=False):
         self.base = base_url.rstrip("/")
         self.token = (token or "").strip()
         # Access tokens are short-lived (4h — api_tokens.issue_pair). Without a
         # refresh token a long feed dies overnight and reads as "it randomly
         # stopped"; with one, _get_json rotates the pair on the first 401.
         self.refresh_token = (refresh_token or "").strip()
+        # When True, every successful rotation prints a TOKEN_ROTATION_SENTINEL
+        # line so the parent hub persists the new pair (see the constant's note).
+        self.emit_rotations = bool(emit_rotations)
         self.jar = http.cookiejar.CookieJar()
         ctx = ssl._create_unverified_context() if insecure else ssl.create_default_context()
         self.opener = urllib.request.build_opener(
@@ -158,6 +173,13 @@ class SourceHub:
         self.token = d.get("access_token") or self.token
         self.refresh_token = d.get("refresh_token") or ""
         print("  token refreshed")
+        if self.emit_rotations and self.token:
+            # Hand the fresh pair to the parent hub so it replaces the spent one
+            # in config. Its own line, flushed immediately, so the hub persists
+            # it before this process can exit or be killed mid-rotation.
+            sys.stdout.write(TOKEN_ROTATION_SENTINEL + json.dumps(
+                {"access": self.token, "refresh": self.refresh_token}) + "\n")
+            sys.stdout.flush()
         return True
 
     def _get_json(self, path):
@@ -368,25 +390,52 @@ def _load_feed_spoke():
     return FeedSpoke
 
 
+def _resolve_tenant(payload, tenant_map, default):
+    """The target tenant hint for one spoke. In preserve mode the payload
+    carries its SOURCE tenant; map it to a local tenant, defaulting to
+    ``default`` for an unmapped or unattributed spoke. Returns None when there
+    is no tenant at all, so the spoke onboards unbound rather than to ''."""
+    st = (payload or {}).get("tenant")
+    if st and tenant_map:
+        return tenant_map.get(str(st), default) or None
+    return default or None
+
+
 async def _run(args, source, salt):
     FeedSpoke = _load_feed_spoke()
     stats = {"sent": 0, "send_err": 0, "connects": 0, "conn_err": 0, "polls": 0}
     stop_evt = asyncio.Event()
 
+    tenant_map = getattr(args, "_tenant_map", None) or {}
+
+    def _tenant_for(payload):
+        return _resolve_tenant(payload, tenant_map, args.tenant)
+
+    def _clean(payload):
+        """Drop the routing-only ``tenant`` key so the replayed CS_TELEMETRY
+        matches production shape (tenant is metadata, not fleet data)."""
+        if isinstance(payload, dict) and "tenant" in payload:
+            payload = {k: v for k, v in payload.items() if k != "tenant"}
+        return payload
+
     payloads = build_payloads(source.snapshot(), salt, args.prefix)
     stats["polls"] += 1
     if not payloads:
         raise SystemExit("Source snapshot produced no spokes — nothing to feed.")
-    print(f"Feeding {len(payloads)} synthetic spoke(s) → {args.target}")
+    if tenant_map:
+        print(f"Feeding {len(payloads)} synthetic spoke(s) → {args.target} "
+              f"(preserving {len(set(tenant_map.values()))} tenant[s])")
+    else:
+        print(f"Feeding {len(payloads)} synthetic spoke(s) → {args.target}")
 
     spokes = {}
     tasks = []
     for sid, payload in payloads.items():
-        s = FeedSpoke(spoke_id=sid, payload=payload, stats=stats,
+        s = FeedSpoke(spoke_id=sid, payload=_clean(payload), stats=stats,
                       interval=args.telemetry_interval,
                       hub_url=args.target, hub_secret=args.secret or None,
                       onboarding_psk=args.psk or None,
-                      tenant_id_hint=args.tenant or None)
+                      tenant_id_hint=_tenant_for(payload))
         spokes[sid] = s
         tasks.append(asyncio.create_task(s.run_forever(stop_evt)))
         await asyncio.sleep(args.ramp / max(1, len(payloads)))
@@ -406,7 +455,7 @@ async def _run(args, source, salt):
                 stats["polls"] += 1
                 for sid, payload in fresh.items():
                     if sid in spokes:
-                        spokes[sid].set_payload(payload)
+                        spokes[sid].set_payload(_clean(payload))
                 print(f"  poll {stats['polls']}: refreshed {len(fresh)} spoke(s); "
                       f"sent={stats['sent']} conn_err={stats['conn_err']}")
             except Exception as e:  # noqa: BLE001
@@ -447,6 +496,10 @@ def main():
     ap.add_argument("--target", default="",
                     help="TARGET hub WS URL (wss://HOST:PORT) — the dev/qa/lrb hub")
     ap.add_argument("--tenant", default="", help="target tenant id hint")
+    ap.add_argument("--tenant-map", default="",
+                    help="JSON object {source_tenant: local_tenant} for preserve "
+                         "mode — each synthetic spoke is bound to the local tenant "
+                         "mapped from its source tenant, defaulting to --tenant.")
     ap.add_argument("--psk", default="", help="target tenant onboarding PSK (auto-approves)")
     ap.add_argument("--secret", default="", help="pre-provisioned target spoke secret")
     ap.add_argument("--prefix", default="feed-",
@@ -463,6 +516,11 @@ def main():
                     help="seconds to stagger all target connects over")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the scrubbed snapshot and exit; never touches the target")
+    ap.add_argument("--emit-token-rotations", action="store_true",
+                    help="print a TOKEN_ROTATION_SENTINEL line on every token "
+                         "rotation so a parent hub can persist the new pair. The "
+                         "hub sets this; a human running the feeder by hand should "
+                         "not (it would print tokens to the terminal).")
     args = ap.parse_args()
 
     if not args.dry_run and not args.target:
@@ -470,10 +528,20 @@ def main():
     if args.target:
         _assert_distinct(args.source, args.target)
 
+    args._tenant_map = {}
+    if args.tenant_map:
+        try:
+            m = json.loads(args.tenant_map)
+            if isinstance(m, dict):
+                args._tenant_map = {str(k): str(v) for k, v in m.items() if v}
+        except Exception as e:  # noqa: BLE001
+            ap.error(f"--tenant-map is not valid JSON: {e}")
+
     salt = args.salt or hashlib.sha256(os.urandom(32)).hexdigest()[:16]
 
     source = SourceHub(args.source, token=args.token,
-                       refresh_token=args.refresh_token)
+                       refresh_token=args.refresh_token,
+                       emit_rotations=args.emit_token_rotations)
     # A token authenticates on its own — only fall back to the interactive
     # username/password login when none was supplied. Logging in anyway would
     # prompt for a password in a context (the hub's child process) that has no

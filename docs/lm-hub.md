@@ -150,9 +150,11 @@ Publishing is **off by default**; deploying the code never turns a hub into a da
 
 Fill in the source URL and **both halves of one API-token pair** issued on the source hub (Settings → API Tokens there — it returns an access token and a refresh token together). The access token is short-lived; with the refresh token the feed rotates it on its own instead of stopping a few hours in. Clearing one clears both, so a stale refresh token is never left paired with a fresh access token.
 
-There is no onboarding PSK to supply. Its only job was to auto-approve the synthetic spokes on this hub — which is also what spawns them — so the hub now mints an ephemeral PSK at Start, registers it on the shared tenant, and revokes it at Stop.
-
 **Tenant** is optional. Left blank the fleet joins this hub's **shared tenant**, which makes it visible in Spokes & Agents to every tenant. Name a real tenant to have it appear in that tenant's **Simulations** views as well — `SimulationsService._spokes_for_tenant` matches tenant with strict equality and does not union the shared tenant, so a shared-bound feed shows up in the spoke list but not in Clients/Dashboard. (Making that lookup union shared is arguably the correct fix, but it shifts per-tenant client counts and sim-quota apportionment product-wide, so it is deliberately not bundled with this feature.) With neither a named tenant nor a shared one, Start refuses and says so — leaving the spokes unassigned is not an option, since unassigned is admin-only.
+
+**Preserve source tenants** (optional, "receive all tenants") replays each synthetic spoke into the **local tenant whose id matches its source tenant**, so a multi-tenant production fleet reproduces its tenant layout here instead of collapsing into one. The source stamps each spoke's tenant into the snapshot; at Start the receiver reads the snapshot, registers the ephemeral onboarding PSK on every local tenant a spoke will claim, and hands the feeder a source→local tenant map (`--tenant-map`). A source tenant with **no matching local tenant**, and any spoke the source did not attribute, falls back to the **Tenant** field above (or the shared tenant). It is only meaningful when the source publishes **verbatim** — an anonymised source pseudonymises the per-spoke tenant, so preserve degrades to the fallback. Tenant ids are expected to line up across the two hubs because they derive from the same NetBox lineage.
+
+There is no onboarding PSK to supply. Its only job was to auto-approve the synthetic spokes on this hub — which is also what spawns them — so the hub now mints an ephemeral PSK at Start, registers it on each target tenant, and revokes it (from all of them) at Stop.
 
 The sync is **additive**. The feeder only ever connects new spokes under its prefix; it never deletes, evicts or rewrites anything already registered. Agents genuinely installed on the test hub keep working and stay visible, and the production fleet shows up alongside them.
 
@@ -162,13 +164,15 @@ Then:
 - **Start feed** launches `scripts/hub_feed.py` as a child process that polls the source and replays into this hub over its loopback spoke WebSocket.
 - **Stop feed** terminates it. The synthetic spokes go offline but stay registered — they are prefixed (`feed-` by default) so you can bulk-delete them from Setup → Spokes & Agents.
 
-The feeder is a normal process, not a service: it does **not** survive a hub restart. After a reboot the feed simply reads as stopped, which is the honest state rather than a stale "running" flag.
+The feeder is a normal process, not a service, so it does not survive a hub restart on its own — but it no longer has to. When a hub self-updates or restarts, a startup hook **auto-resumes** any feed the operator had enabled (`receiver_enabled` in config), so a feed you turned on stays running across the reboots the hub does routinely. It only resumes a fully-configured feed; if the source URL or token was cleared it stays stopped and logs why.
+
+The feeder also **persists its own token rotations**. The source access token is short-lived (a few hours); the feeder rotates it against the refresh token and hands the new pair back to the hub, which saves it to config. Without this the next restart would re-present the already-spent refresh token — the source treats that reuse as theft and revokes the whole token family — which is why a feed used to die for good after an update until someone issued a fresh token. The rotated tokens never touch the UI panel or the hub log.
 
 ### Notes
 
 - Stored secrets are **write-only from the page's perspective** — the config endpoint returns whether a token/PSK is set, never its value, so reading the Setup page cannot leak the source hub's credential.
 - The feeder refuses to run when source and target resolve to the same host:port. Feeding a hub its own data would write synthetic spokes into real state.
-- The same thing is scriptable without the UI: `scripts/hub_feed.py --source … --token … --target … --dry-run`.
+- The same thing is scriptable without the UI: `scripts/hub_feed.py --source … --token … --target … --dry-run`. Preserve mode adds `--tenant-map '{"<source-tenant>":"<local-tenant>", …}'`, with `--tenant` as the fallback for unmapped spokes.
 
 ## Troubleshooting / common questions
 
@@ -178,7 +182,9 @@ The feeder is a normal process, not a service: it does **not** survive a hub res
 - **"The hub crashes on boot complaining about a Fernet key."** `LM_FERNET_KEY` is required and fail-closed by design. Generate one (`python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`) and set it — see `.env.example`.
 - **"The Test Data Feed says the source refused (403)."** Publishing is off on the source hub — turn on "Publish this hub's fleet as a test-data feed" there. A 401 instead means the API token was revoked or expired; issue a new one under Settings → API Tokens on the source.
 - **"The feed is running but no spokes appeared."** If they are missing from Spokes & Agents, the synthetic spokes connected but were not approved — check the feed's output panel for the child's own errors. Each synthetic spoke now reports the actual reason it cannot attach (bad PSK, auth reject, TLS, target down) on the first failure and once a minute thereafter, and prints `✓ <id>: attached to …` on its first successful connection; the same lines are mirrored to the hub log as `[test-feed:child] …` so they survive a hub restart (`grep test-feed /var/log/lm/hub.log`). If they are in Spokes & Agents but the **Simulations** views are empty, the feed is bound to the shared tenant: name a real tenant in the Tenant field and restart the feed.
-- **"The feed stopped by itself after a few hours."** The access token expired and no refresh token was configured. Save both halves of the pair — the feeder rotates them automatically.
+- **"Preserve source tenants is on but everything still landed in one tenant."** Either the source is publishing **anonymised** (which pseudonymises the per-spoke tenant, so there is nothing to match and preserve falls back), or the source tenant ids do not exist on this hub (unmatched tenants use the fallback). Confirm the source is verbatim and that the tenants exist locally with the same ids.
+- **"The feed stopped by itself after a few hours."** The access token expired and no refresh token was configured. Save both halves of the pair — the feeder rotates them automatically and now persists each rotation back to config, so the rotation survives a hub restart instead of leaving a spent refresh token that gets the whole token family revoked.
+- **"The feed didn't come back after a hub update/restart."** It should now: an enabled feed auto-resumes on startup. If it didn't, the config was not fully populated (source URL or token missing) — the hub logs `resume skipped: enabled but not fully configured`. Re-enter the source URL and token pair and Start once; subsequent restarts self-heal.
 - **"Start says there is no shared tenant."** The replayed fleet joins the shared tenant so every tenant can see it, and this hub has none flagged. Mark one in Setup → Tenants; exactly one tenant may carry the flag.
 - **"A spoke keeps rejecting the hub's identity (`mutual_auth_failed`)."** Usually a stale secret after a hub restart or key rotation — the spoke needs its session key refreshed/re-approved.
 
