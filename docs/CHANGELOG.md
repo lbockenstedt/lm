@@ -57,6 +57,13 @@ CI/tooling changes are omitted unless they change what an operator sees.
   keeps polling instead of exiting, so the feed goes live on its own the moment
   the source has data (a bounded `--duration` run still gives up when it lapses).
   See the "Test Data Feed" section of [lm-hub.md](lm-hub.md#test-data-feed).
+- **The feed now picks up spokes that appear after it started.** Previously the
+  feeder fixed its spoke set at the first poll, so a production spoke that began
+  reporting mid-run (e.g. a simulation that was idle at feed start) never showed
+  up on the target until an operator restarted the feed. Each re-poll now *adds*
+  any new source spokes, so the target keeps converging on the full source fleet
+  on its own. It stays **add-only**: a spoke that disappears from the source is
+  left running so its registration on the target is never orphaned.
 - **A feed now survives hub restarts.** An enabled feed auto-resumes when the hub
   self-updates or restarts (it used to silently stay stopped), and the feeder
   persists its own token rotations back to config — so an expired access token no

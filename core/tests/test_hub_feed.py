@@ -554,6 +554,79 @@ def test_empty_first_snapshot_waits_then_feeds_when_data_appears(monkeypatch):
     assert not snaps, "the feeder must keep polling past the empty snapshots"
 
 
+def test_new_spokes_appearing_mid_run_are_picked_up_on_repoll(monkeypatch):
+    """A spoke that shows up in production after the feed started must be added
+    on the next re-poll so the target keeps converging on the full source
+    fleet — no operator restart required."""
+    import asyncio
+
+    snaps = [
+        {"clients": [{"spoke_id": "s1", "hostname": "h1"}]},
+        {"clients": [{"spoke_id": "s1", "hostname": "h1"},
+                     {"spoke_id": "s2", "hostname": "h2"}]},
+    ]
+
+    class _Src:
+        def snapshot(self):
+            return snaps.pop(0) if snaps else snaps and snaps[-1] or {
+                "clients": [{"spoke_id": "s1", "hostname": "h1"},
+                            {"spoke_id": "s2", "hostname": "h2"}]}
+
+    started = {"ids": []}
+
+    class _Spoke:
+        def __init__(self, *a, **kw):
+            started["ids"].append(kw.get("spoke_id"))
+
+        def set_payload(self, _p):
+            pass
+
+        async def run_forever(self, stop_evt):
+            await stop_evt.wait()
+
+    monkeypatch.setattr(hub_feed, "_load_feed_spoke", lambda: _Spoke)
+    asyncio.run(hub_feed._run(_feed_args(duration=0.08), _Src(), SALT))
+    assert len(set(started["ids"])) == 2, (
+        "the second spoke must be started once it appears in the source, "
+        f"got {started['ids']}")
+
+
+def test_vanished_spokes_are_not_removed_on_repoll(monkeypatch):
+    """Add-only: a spoke that disappears from the source is left running so its
+    registration on the target is never orphaned. We assert no extra spokes are
+    spawned when the source shrinks."""
+    import asyncio
+
+    snaps = [
+        {"clients": [{"spoke_id": "s1", "hostname": "h1"},
+                     {"spoke_id": "s2", "hostname": "h2"}]},
+        {"clients": [{"spoke_id": "s1", "hostname": "h1"}]},
+    ]
+
+    class _Src:
+        def snapshot(self):
+            return snaps.pop(0) if snaps else {
+                "clients": [{"spoke_id": "s1", "hostname": "h1"}]}
+
+    started = {"ids": []}
+
+    class _Spoke:
+        def __init__(self, *a, **kw):
+            started["ids"].append(kw.get("spoke_id"))
+
+        def set_payload(self, _p):
+            pass
+
+        async def run_forever(self, stop_evt):
+            await stop_evt.wait()
+
+    monkeypatch.setattr(hub_feed, "_load_feed_spoke", lambda: _Spoke)
+    asyncio.run(hub_feed._run(_feed_args(duration=0.08), _Src(), SALT))
+    assert len(started["ids"]) == 2, (
+        "only the two original spokes should ever be started; shrinking the "
+        f"source must not spawn or churn anything, got {started['ids']}")
+
+
 def test_permanently_empty_source_gives_up_after_the_run_duration(monkeypatch):
     """A bounded run against a source that never gets data still terminates —
     the wait is capped by --duration so a one-shot job cannot hang forever."""

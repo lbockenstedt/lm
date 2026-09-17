@@ -156,7 +156,7 @@ Fill in the source URL and **both halves of one API-token pair** issued on the s
 
 There is no onboarding PSK to supply. Its only job was to auto-approve the synthetic spokes on this hub — which is also what spawns them — so the hub now mints an ephemeral PSK at Start, registers it on each target tenant, and revokes it (from all of them) at Stop.
 
-The sync is **additive**. The feeder only ever connects new spokes under its prefix; it never deletes, evicts or rewrites anything already registered. Agents genuinely installed on the test hub keep working and stay visible, and the production fleet shows up alongside them.
+The sync is **additive**. The feeder only ever connects new spokes under its prefix; it never deletes, evicts or rewrites anything already registered. Agents genuinely installed on the test hub keep working and stay visible, and the production fleet shows up alongside them. This also holds *over time*: each re-poll picks up any spoke that has **appeared in the source since the feed started** (e.g. a simulation that was idle when the feed came up and only later began reporting), so the target keeps converging on the full source fleet without an operator restart. Removal stays off the table on purpose — a spoke that drops out of the source is left running so its registration on the target is never orphaned.
 
 Then:
 
