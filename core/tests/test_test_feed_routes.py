@@ -63,8 +63,39 @@ def test_accepts_the_vms_key_as_well_as_proxmox_vms():
     assert len(out["proxmox"]) == 1
 
 
+def test_harvests_per_host_vms_and_usb_from_proxmox_hosts():
+    """The bulk of a real fleet's VMs/USB ride nested under proxmox_hosts, not
+    at the top of the frame. SimulationsService renders the per-host lists, so
+    the feed must harvest them too or the target sees an empty hypervisor."""
+    hub = _Hub({"cs-svr-01": {
+        "proxmox_hosts": [
+            {"hostname": "pve-a",
+             "proxmox_vms": [{"vmid": 100}, {"vmid": 101}],
+             "usb_devices": [{"id": "1-1"}]},
+            {"hostname": "pve-b",
+             "proxmox_vms": [{"vmid": 200}],
+             "usb_devices": []},
+        ]}})
+    out = _collect_fleet(hub)
+    assert len(out["proxmox"]) == 3
+    assert len(out["usb"]) == 1
+    # each VM/USB is attributed to its spoke and stamped with its host node
+    assert {v["spoke_id"] for v in out["proxmox"]} == {"cs-svr-01"}
+    assert {v["node"] for v in out["proxmox"]} == {"pve-a", "pve-b"}
+    assert out["usb"][0]["node"] == "pve-a"
+
+
+def test_top_level_vms_still_work_when_there_are_no_proxmox_hosts():
+    """A frame without proxmox_hosts falls back to the top-level lists, exactly
+    as SimulationsService does — no regression for single-host frames."""
+    out = _collect_fleet(_Hub({"s1": {"proxmox_vms": [{"vmid": 1}],
+                                      "usb_devices": [{"id": "u1"}]}}))
+    assert len(out["proxmox"]) == 1
+    assert len(out["usb"]) == 1
+
+
 def test_empty_cache_yields_empty_lists_not_an_error():
-    assert _collect_fleet(_Hub({})) == {"clients": [], "proxmox": []}
+    assert _collect_fleet(_Hub({})) == {"clients": [], "proxmox": [], "usb": []}
 
 
 def test_a_broken_hub_degrades_to_empty_rather_than_raising():
@@ -74,7 +105,7 @@ def test_a_broken_hub_degrades_to_empty_rather_than_raising():
         @property
         def simulations_cache(self):
             raise RuntimeError("state unavailable")
-    assert _collect_fleet(_Bad()) == {"clients": [], "proxmox": []}
+    assert _collect_fleet(_Bad()) == {"clients": [], "proxmox": [], "usb": []}
 
 
 def test_rows_are_copied_not_aliased():
