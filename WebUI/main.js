@@ -5375,7 +5375,13 @@ async function apiJson(url, options = {}) {
         throw new Error(detail ? `${res.status} ${detail}` : `${res.status} ${res.statusText}`);
     }
     const ct = res.headers.get('content-type') || '';
-    return ct.includes('application/json') ? res.json() : res.text();
+    const body = ct.includes('application/json') ? await res.json() : await res.text();
+    // A route that serializes Python None emits a body of the literal JSON
+    // token `null`. res.json() RESOLVES that to null rather than throwing, so
+    // it bypassed every try/catch and callers doing `const d = await apiJson();
+    // d.status` threw "null is not an object". Normalize to {} so the envelope
+    // contract every caller assumes still holds. Arrays/strings pass through.
+    return body === null ? {} : body;
 }
 // ──────────────────────────────────────────────────────────────────
 
@@ -24617,7 +24623,19 @@ async function releaseNetboxIP(ipId) {
 // 503 (spoke down) rendered as "No records found" instead of the real message.
 async function _spokeFetch(url, opts) {
     const r = await fetch(url, opts);
-    if (r.ok) return { ok: true, status: r.status, data: await r.json().catch(() => ({})), detail: null };
+    if (r.ok) {
+        // `.catch` only fires on a PARSE failure, but a body of the literal
+        // JSON token `null` parses perfectly well and yields null — so it slid
+        // through as {ok:true, data:null} and the first field access in every
+        // consumer threw "null is not an object (evaluating 'd.status')"
+        // instead of rendering the amber banner. Coerce any non-object success
+        // body to {} so callers keep the envelope contract they expect; the
+        // hub now also refuses to emit a null body (_spoke_payload_or_raise),
+        // this is the belt-and-braces half.
+        const body = await r.json().catch(() => null);
+        return { ok: true, status: r.status,
+                 data: (body && typeof body === 'object') ? body : {}, detail: null };
+    }
     const e = await r.json().catch(() => ({}));
     return { ok: false, status: r.status, data: null, detail: e.detail || e.message || r.statusText };
 }
