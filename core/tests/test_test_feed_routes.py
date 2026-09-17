@@ -312,7 +312,9 @@ def test_source_tenants_collects_distinct_ids(monkeypatch):
     }}
     monkeypatch.setattr(urllib.request, "urlopen",
                         lambda *a, **kw: _snapshot_resp(snap))
-    assert _source_tenants("https://src", "tok") == {"acme", "globex"}
+    ids, registry = _source_tenants("https://src", "tok")
+    assert ids == {"acme", "globex"}
+    assert registry == {}  # this source publishes no registry
 
 
 def test_source_tenants_empty_when_unattributed(monkeypatch):
@@ -323,7 +325,9 @@ def test_source_tenants_empty_when_unattributed(monkeypatch):
     snap = {"spokes": {"s1": {"clients": []}, "s2": {"clients": [], "tenant": ""}}}
     monkeypatch.setattr(urllib.request, "urlopen",
                         lambda *a, **kw: _snapshot_resp(snap))
-    assert _source_tenants("https://src", "tok") == set()
+    ids, registry = _source_tenants("https://src", "tok")
+    assert ids == set()
+    assert registry == {}
 
 
 def test_source_tenants_sends_bearer_token(monkeypatch):
@@ -337,6 +341,160 @@ def test_source_tenants_sends_bearer_token(monkeypatch):
     monkeypatch.setattr(urllib.request, "urlopen", _capture)
     _source_tenants("https://src", "tok-xyz")
     assert seen["auth"] == "Bearer tok-xyz"
+
+
+def test_source_tenants_returns_registry_including_spokeless(monkeypatch):
+    """The registry is the whole point: a tenant that owns NO spoke cannot be
+    inferred from the payloads, so before it was published such a tenant never
+    reached the receiver and was missing from its tenant picker."""
+    import urllib.request
+    snap = {
+        "spokes": {"s1": {"clients": [], "tenant": "acme"}},
+        "tenants": {
+            "acme": {"name": "ACME", "netbox_id": 2},
+            "quiet": {"name": "QUIET"},        # owns no spoke
+        },
+    }
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **kw: _snapshot_resp(snap))
+    ids, registry = _source_tenants("https://src", "tok")
+    assert ids == {"acme"}
+    assert set(registry) == {"acme", "quiet"}
+    assert registry["quiet"]["name"] == "QUIET"
+
+
+def test_source_tenants_ignores_malformed_registry(monkeypatch):
+    """A source that sends a non-dict ``tenants`` (or none at all) must not
+    break preserve mode — it degrades to the spoke-inferred ids."""
+    import urllib.request
+    snap = {"spokes": {"s1": {"clients": [], "tenant": "acme"}},
+            "tenants": ["not", "a", "dict"]}
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **kw: _snapshot_resp(snap))
+    ids, registry = _source_tenants("https://src", "tok")
+    assert ids == {"acme"}
+    assert registry == {}
+
+
+def test_tenant_registry_publishes_only_allowlisted_fields():
+    """The tenant record carries deployment wiring the feed has no business
+    publishing. The allowlist must drop anything not named in TENANT_FIELDS."""
+    from routes.test_feed import TENANT_FIELDS, _tenant_registry
+
+    class _State:
+        tenant_state = {"tenants": {
+            "acme": {
+                "name": "ACME", "netbox_id": 3, "active": True,
+                "ldap_base_dn": "dc=corp,dc=example",
+                "proxmox_tag": "acme-tag",
+                "quotas": {"vm": 9},
+            },
+            "bogus": "not-a-dict",
+        }}
+
+    class _Hub:
+        state = _State()
+
+    reg = _tenant_registry(_Hub())
+    assert set(reg) == {"acme"}          # the non-dict row is skipped
+    assert reg["acme"]["name"] == "ACME"
+    assert reg["acme"]["netbox_id"] == 3
+    for leaked in ("ldap_base_dn", "proxmox_tag", "quotas"):
+        assert leaked not in reg["acme"], f"{leaked} must not be published"
+    assert set(reg["acme"]).issubset(set(TENANT_FIELDS))
+
+
+def test_tenant_registry_survives_unreadable_state():
+    """Best-effort: an unreadable tenant registry publishes nothing rather than
+    failing the whole snapshot."""
+    from routes.test_feed import _tenant_registry
+
+    class _Boom:
+        @property
+        def tenant_state(self):
+            raise RuntimeError("sealed")
+
+    class _Hub:
+        state = _Boom()
+
+    assert _tenant_registry(_Hub()) == {}
+
+
+class _FakeState:
+    def __init__(self, tenants=None):
+        self.tenant_state = {"tenants": dict(tenants or {})}
+        self.saved = 0
+
+    def update_tenant(self, tid, data):
+        self.tenant_state["tenants"].setdefault(tid, {}).update(data)
+
+    async def save_state_now(self):
+        self.saved += 1
+
+
+class _FakeHub:
+    def __init__(self, tenants=None):
+        self.state = _FakeState(tenants)
+
+
+def _run(coro):
+    import asyncio
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def test_ensure_local_tenants_creates_missing_shells():
+    """Preserve can only map a source tenant onto a LOCAL tenant of the same
+    id, so the missing ones must be created or the fleet collapses into the
+    fallback."""
+    from routes.test_feed import _ensure_local_tenants
+    hub = _FakeHub({"default": {"name": "DEFAULT"}})
+    reg = {"ra": {"name": "RA", "netbox_id": 2}, "central": {"name": "CENTRAL"}}
+    created = _run(_ensure_local_tenants(hub, reg, {"default"}))
+    assert sorted(created) == ["central", "ra"]
+    tenants = hub.state.tenant_state["tenants"]
+    assert tenants["ra"]["name"] == "RA"
+    assert tenants["ra"]["netbox_id"] == 2
+    assert tenants["ra"]["active"] is True
+    assert hub.state.saved == 1  # persisted before the feeder starts
+
+
+def test_ensure_local_tenants_never_overwrites_existing():
+    """The feed replays a fleet; it does not get to reconfigure a tenant the
+    operator already set up on the receiver."""
+    from routes.test_feed import _ensure_local_tenants
+    hub = _FakeHub({"ra": {"name": "MY-OWN-RA", "quotas": {"vm": 5}}})
+    created = _run(_ensure_local_tenants(
+        hub, {"ra": {"name": "RA", "netbox_id": 2}}, {"ra"}))
+    assert created == []
+    assert hub.state.tenant_state["tenants"]["ra"] == {
+        "name": "MY-OWN-RA", "quotas": {"vm": 5}}
+    assert hub.state.saved == 0  # nothing changed, nothing persisted
+
+
+def test_ensure_local_tenants_does_not_inherit_shared_flag():
+    """Which tenant is shared decides where unmapped spokes land on THIS hub —
+    importing the source's flag could silently move the fallback."""
+    from routes.test_feed import _ensure_local_tenants
+    hub = _FakeHub()
+    _run(_ensure_local_tenants(
+        hub, {"shared": {"name": "SHARED", "shared": True}}, set()))
+    assert "shared" not in hub.state.tenant_state["tenants"]["shared"]
+
+
+def test_ensure_local_tenants_skips_blank_ids_and_survives_failures():
+    from routes.test_feed import _ensure_local_tenants
+
+    class _Halfbroken(_FakeState):
+        def update_tenant(self, tid, data):
+            if tid == "bad":
+                raise RuntimeError("nope")
+            super().update_tenant(tid, data)
+
+    hub = _FakeHub()
+    hub.state = _Halfbroken()
+    created = _run(_ensure_local_tenants(
+        hub, {"  ": {}, "bad": {}, "good": {"name": "GOOD"}}, set()))
+    assert created == ["good"]  # blank skipped, failure swallowed
 
 
 def test_there_is_no_operator_supplied_psk():
