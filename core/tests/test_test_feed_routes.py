@@ -471,14 +471,56 @@ def test_ensure_local_tenants_never_overwrites_existing():
     assert hub.state.saved == 0  # nothing changed, nothing persisted
 
 
-def test_ensure_local_tenants_does_not_inherit_shared_flag():
-    """Which tenant is shared decides where unmapped spokes land on THIS hub —
-    importing the source's flag could silently move the fallback."""
+def test_ensure_local_tenants_mirrors_the_shared_tenant():
+    """A shared tenant's spokes are visible to EVERY tenant, so which tenant
+    carries the flag is part of the fleet's shape. A receiver replaying
+    production must land it on the same tenant or the replica is visibly
+    wrong."""
     from routes.test_feed import _ensure_local_tenants
-    hub = _FakeHub()
+    hub = _FakeHub({"default": {"name": "DEFAULT", "shared": True}})
+    reg = {"default": {"name": "DEFAULT"},
+           "shared": {"name": "SHARED", "shared": True}}
+    _run(_ensure_local_tenants(hub, reg, {"default"}))
+    tenants = hub.state.tenant_state["tenants"]
+    # the source's shared tenant is created AND flagged ...
+    assert tenants["shared"]["shared"] is True
+    # ... and the single-shared invariant holds: nothing else keeps the flag.
+    assert tenants["default"]["shared"] is False
+    assert [t for t, c in tenants.items() if c.get("shared")] == ["shared"]
+
+
+def test_ensure_local_tenants_mirrors_shared_onto_existing_tenant():
+    """The flag is reconciled even when the tenant already exists locally —
+    otherwise a receiver that created the tenant first keeps the wrong one
+    shared forever."""
+    from routes.test_feed import _ensure_local_tenants
+    hub = _FakeHub({"default": {"name": "DEFAULT", "shared": True},
+                    "shared": {"name": "SHARED"}})
+    reg = {"shared": {"name": "SHARED", "shared": True}}
+    _run(_ensure_local_tenants(hub, reg, {"default", "shared"}))
+    tenants = hub.state.tenant_state["tenants"]
+    assert tenants["shared"]["shared"] is True
+    assert tenants["default"]["shared"] is False
+    assert hub.state.saved == 1  # a flag move is persisted even with no creates
+
+
+def test_ensure_local_tenants_leaves_shared_alone_when_source_has_none():
+    """An older or anonymised source publishes no shared tenant. The operator's
+    own choice must survive rather than being cleared."""
+    from routes.test_feed import _ensure_local_tenants
+    hub = _FakeHub({"default": {"name": "DEFAULT", "shared": True}})
+    _run(_ensure_local_tenants(hub, {"ra": {"name": "RA"}}, {"default"}))
+    assert hub.state.tenant_state["tenants"]["default"]["shared"] is True
+
+
+def test_ensure_local_tenants_still_protects_non_shared_fields():
+    """Only the shared flag is reconciled; name/quotas stay operator-owned."""
+    from routes.test_feed import _ensure_local_tenants
+    hub = _FakeHub({"ra": {"name": "MY-OWN-RA", "quotas": {"vm": 5}}})
     _run(_ensure_local_tenants(
-        hub, {"shared": {"name": "SHARED", "shared": True}}, set()))
-    assert "shared" not in hub.state.tenant_state["tenants"]["shared"]
+        hub, {"ra": {"name": "RA", "netbox_id": 2}}, {"ra"}))
+    assert hub.state.tenant_state["tenants"]["ra"] == {
+        "name": "MY-OWN-RA", "quotas": {"vm": 5}}
 
 
 def test_ensure_local_tenants_skips_blank_ids_and_survives_failures():
