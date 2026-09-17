@@ -356,7 +356,16 @@ def register(app, hub, ctx):
         try:
             kw = {"timeout": timeout} if timeout else {}
             result = await hub.request_response(spoke_id, command, payload or {}, **kw)
-            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            # Mirrors access.unwrap_spoke: an explicit ``data: null`` means NO
+            # payload, so fall back to the envelope. ``.get("data", result)``
+            # only defaults when the key is absent, so a spoke replying
+            # {"payload": {"data": null}} unwrapped to None and the route
+            # returned HTTP 200 + a literal `null` body.
+            data = result
+            if isinstance(result, dict):
+                _pl = result.get("payload")
+                if isinstance(_pl, dict) and _pl.get("data") is not None:
+                    data = _pl.get("data")
             # A spoke-side ERROR becomes a 502 whose detail only ever reached the
             # browser, so an operator hitting a failing write left NOTHING in the
             # hub log to diagnose from. Record which spoke rejected which command
