@@ -51,6 +51,14 @@ CI/tooling changes are omitted unless they change what an operator sees.
   [lm-hub.md](lm-hub.md).
 
 ### Test Data Feed
+- **The feed now carries the whole fleet's telemetry, not just top-level rows.**
+  A spoke's VMs and USB devices usually ride *nested per host* under the frame's
+  `proxmox_hosts` (the same lists the Simulations views render); the export only
+  read the top level, so a host-structured fleet reached the target with **zero
+  VMs and no USB devices**. The snapshot now harvests every host's VMs and USB
+  devices — attributed to their spoke and stamped with the host node — and stops
+  hard-coding the USB list empty, so the target mirrors the full fleet.
+  See the "Test Data Feed" section of [lm-hub.md](lm-hub.md#test-data-feed).
 - **A momentarily-empty source no longer kills the feed.** If the source has no
   spokes when the feed comes up — e.g. no simulations are producing telemetry
   yet, which a restart's auto-resume can easily race — the feeder now waits and
