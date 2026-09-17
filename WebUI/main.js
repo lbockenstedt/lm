@@ -20832,7 +20832,7 @@ async function refreshConsoleDiagnostics() {
     if (!body) return;
     let data = { diagnostics: [], errors: {} };
     try {
-        const res = await fetch('/api/console/diagnostics', { credentials: 'same-origin' });
+        const res = await fetch(`/api/console/diagnostics?tenant=${encodeURIComponent(currentTenant || 'default')}`, { credentials: 'same-origin' });
         if (res.ok) data = await res.json();
         else { body.innerHTML = `<div class="text-red-500">Failed to load (${res.status})</div>`; return; }
     } catch (e) { body.innerHTML = `<div class="text-red-500">${escapeHtml(e.message)}</div>`; return; }

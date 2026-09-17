@@ -1190,25 +1190,28 @@ def register(app, hub, ctx):
         or flap. Open to the console VIEW tier (Global Admin, tenant admin, or any
         ``console`` user); a non-admin sees only the diagnostics for the console
         ports it can see (tenant-scoped exactly like the ports list), while a
-        Global Admin sees the infra-wide report across every tenant."""
+        Global Admin sees the infra-wide report in the "All" view and a single
+        tenant's report when that tenant is selected in the picker."""
         sess = _session_user(request)
         if not (_is_admin(sess) or _has_console_access(sess)):
             raise HTTPException(status_code=403, detail="Console access required")
         admin = _is_admin(sess)
         hub = app.state.hub
         all_spokes = hub.get_all_spokes_by_type("console") or []
-        # Tenant scoping for non-admins: reuse the EXACT port-visibility logic so a
-        # tenant admin only ever sees its own tenant's console diagnostics (and
-        # shared-infra ports masked to it), never another tenant's or the
-        # admin-only unassigned holding state.
-        if admin:
+        # Tenant scoping follows the WebUI picker (``?tenant=<currentTenant>``;
+        # ``default``/empty/``all`` == the global "All" view). A Global Admin who
+        # picked a specific tenant sees ONLY that tenant's console diagnostics
+        # (dedicated agents + shared-infra ports masked to it), exactly like the
+        # ports list — never the whole fleet. Only the "All" view (or a role that
+        # can't scope) shows the infra-wide report. A non-admin is always scoped.
+        explicit = str(request.query_params.get("tenant") or "").strip()
+        tid = _resolve_tenant(request, explicit or None)
+        sel = tid if (tid and tid not in ("default", "all", "__all__")) else None
+        if admin and sel is None:
             spokes = all_spokes
             ded_visible = set(all_spokes)   # every spoke fully visible
             visible_keys = None             # None == no per-row filtering
         else:
-            explicit = str(request.query_params.get("tenant") or "").strip()
-            tid = _resolve_tenant(request, explicit or None)
-            sel = tid if (tid and tid != "default") else None
             vis = await _list_visible_console_ports(request)
             visible_keys = {(p.get("spoke_id"), p.get("port_id"))
                             for p in (vis.get("ports") or [])}
@@ -1276,8 +1279,12 @@ def register(app, hub, ctx):
         saved_creds, _seen_c, vault_present = [], set(), False
         try:
             import cred_vault as _cv
-            if admin:
+            if admin and sel is None:
                 _recs = await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, None)
+            elif admin:
+                # Scoped to the picked tenant: its bucket + the shared admin slot.
+                _buckets = list(dict.fromkeys([_cv.ADMIN_BUCKET, sel]))
+                _recs = await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, _buckets)
             else:
                 _reach = list((sess or {}).get("user", {}).get("tenants") or [])
                 _buckets = list(dict.fromkeys([_cv.ADMIN_BUCKET] + _reach))
