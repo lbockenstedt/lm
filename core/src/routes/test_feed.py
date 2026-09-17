@@ -452,29 +452,8 @@ def register(app, hub, ctx):
         # against the live hub: 443 is the only listener, and a plain HTTP
         # upgrade to it returns b''.
         target = "wss://127.0.0.1:443"
-        argv = [sys.executable, script,
-                "--source", c["receiver_source_url"],
-                "--token", c["receiver_token"],
-                "--target", target,
-                "--tenant", fallback,
-                "--psk", feed_psk,
-                "--prefix", c.get("receiver_prefix") or "feed-",
-                "--interval", str(c.get("receiver_interval") or 60)]
-        if preserve and tenant_map:
-            # Per-spoke tenant routing for the feeder: it reads each payload's
-            # source tenant and looks it up here, defaulting to --tenant.
-            argv += ["--tenant-map", json.dumps(tenant_map)]
-        if c.get("receiver_refresh_token"):
-            # Lets the feeder rotate its own access token. Without it a long
-            # feed dies when the 4h access token expires (api_tokens.issue_pair),
-            # which reads as "the feed randomly stopped overnight".
-            argv += ["--refresh-token", c["receiver_refresh_token"]]
-            # And tell it to hand the rotated pair back to us on stdout so we
-            # persist it (_drain). Otherwise the NEXT restart re-presents the
-            # spent refresh token, api_tokens flags reuse, and the whole token
-            # family is revoked — the feed then dies for good until a human
-            # issues a fresh token.
-            argv += ["--emit-token-rotations"]
+        argv = _build_feeder_argv(script, c, target, fallback, feed_psk,
+                                  preserve, tenant_map)
 
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join(
@@ -652,6 +631,43 @@ def register(app, hub, ctx):
 def _repo_root() -> str:
     """The lm checkout root (…/core/src/routes/test_feed.py → …)."""
     return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+
+
+def _build_feeder_argv(script, c, target, fallback, feed_psk, preserve, tenant_map):
+    """Assemble the ``hub_feed.py`` command line.
+
+    Secrets go as a single ``--flag=value`` token, never ``--flag``, ``value``.
+    api_tokens mints URL-safe-base64 tokens (and the feed PSK is random base64),
+    so a value can legitimately START WITH ``-``. Passed as two argv items,
+    argparse reads that leading ``-`` as the NEXT option and aborts with
+    "argument --refresh-token: expected one argument" — the child never starts,
+    so a hub restart silently kills the feed until a human re-mints a token that
+    happens not to start with ``-``. The ``=`` form binds the value to its flag
+    so any token (dash-leading or not) parses. Kept module-level so this contract
+    is unit-testable without spawning the feeder."""
+    argv = [sys.executable, script,
+            "--source", c["receiver_source_url"],
+            "--token=" + c["receiver_token"],
+            "--target", target,
+            "--tenant", fallback,
+            "--psk=" + feed_psk,
+            "--prefix", c.get("receiver_prefix") or "feed-",
+            "--interval", str(c.get("receiver_interval") or 60)]
+    if preserve and tenant_map:
+        # Per-spoke tenant routing for the feeder: it reads each payload's
+        # source tenant and looks it up here, defaulting to --tenant.
+        argv += ["--tenant-map", json.dumps(tenant_map)]
+    if c.get("receiver_refresh_token"):
+        # Lets the feeder rotate its own access token. Without it a long feed
+        # dies when the 4h access token expires (api_tokens.issue_pair), which
+        # reads as "the feed randomly stopped overnight".
+        argv += ["--refresh-token=" + c["receiver_refresh_token"]]
+        # And tell it to hand the rotated pair back to us on stdout so we persist
+        # it (_drain). Otherwise the NEXT restart re-presents the spent refresh
+        # token, api_tokens flags reuse, and the whole token family is revoked —
+        # the feed then dies for good until a human issues a fresh token.
+        argv += ["--emit-token-rotations"]
+    return argv
 
 
 def _collect_fleet(hub) -> dict:
