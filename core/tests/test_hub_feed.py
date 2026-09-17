@@ -172,6 +172,20 @@ def test_aggregate_endpoints_wrapped_in_an_envelope_are_unwrapped():
     assert "s1" in buckets
 
 
+def test_usb_devices_are_sharded_and_carried_through():
+    """USB devices are part of the telemetry frame too — they must reach the
+    target, grouped by the same spoke as their host's VMs, not be dropped."""
+    snap = {"proxmox": [{"vmid": 100, "spoke_id": "s1"}],
+            "usb": [{"id": "1-1", "spoke_id": "s1"},
+                    {"id": "2-1", "spoke_id": "s1"}]}
+    buckets = hub_feed.shard_by_spoke(snap)
+    assert len(buckets["s1"]["usb"]) == 2
+    payloads = hub_feed.build_payloads(snap, SALT, "feed-")
+    body = next(iter(payloads.values()))
+    assert body["usb_count"] == 2
+    assert len(body["usb_devices"]) == 2
+
+
 def test_build_payloads_prefixes_every_spoke_id():
     """The prefix is how these get bulk-deleted from the target afterwards."""
     payloads = hub_feed.build_payloads(
