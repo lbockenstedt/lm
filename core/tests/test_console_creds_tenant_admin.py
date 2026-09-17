@@ -41,7 +41,7 @@ async def _automation_list_by_type(hub, kind, buckets):
     want = {kind} if isinstance(kind, str) else set(kind)
     out = []
     if "console" in want:
-        for b in buckets:
+        for b in (buckets if buckets is not None else list(_BY_BUCKET.keys())):
             out.extend(_BY_BUCKET.get(b, []))
     return out
 
@@ -197,6 +197,35 @@ def test_tenant_admin_without_tenant_denied():
     c = _client("tenant_admin", ())
     r = c.get("/api/console/credentials")
     assert r.status_code == 403
+
+
+def test_global_admin_scoped_to_selected_tenant_sees_that_bucket():
+    # A Global Admin who picked tenant t1 in the WebUI (?tenant=t1) must see
+    # t1's own console logins — they live in t1's bucket, not __admin__ — with
+    # the shared global slot surfaced as a count, and a manageable view.
+    _reset_vault()
+    c = _client("admin", ("t1", "t2"))
+    r = c.get("/api/console/credentials?tenant=t1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["tenant"] == "t1"
+    assert body["can_manage"] is True
+    users = sorted(x["username"] for x in body["credentials"])
+    assert users == ["t1-user"]
+    assert body["shared_global_count"] == 1
+
+
+def test_global_admin_all_tenants_sees_every_bucket():
+    # With no tenant selected (or the "all" view), a Global Admin gets the
+    # fleet-wide inventory across ALL buckets — not just __admin__ — so console
+    # logins parked in tenant buckets are no longer invisible.
+    _reset_vault()
+    c = _client("admin", ("t1", "t2"))
+    for url in ("/api/console/credentials", "/api/console/credentials?tenant=all"):
+        r = c.get(url)
+        assert r.status_code == 200, url
+        users = sorted(x["username"] for x in r.json()["credentials"])
+        assert users == ["global-admin", "t1-user", "t2-user"], url
 
 
 def _reset_vault():
