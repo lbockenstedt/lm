@@ -263,6 +263,15 @@ def _load_feed_spoke():
             self._payload = payload
             self._stats = stats
             self._interval = max(5.0, float(interval))
+            # Throttled diagnostics: a synthetic spoke that cannot attach (bad
+            # PSK, auth reject, TLS, target down) used to bump a counter and
+            # retry in silence, leaving the operator a climbing conn_err with no
+            # reason. Surface the actual exception on the first failure and then
+            # at most once a minute per spoke so a persistent fault stays
+            # visible without flooding the captured log.
+            self._first_connect_logged = False
+            self._last_conn_err_log = 0.0
+            self._last_send_err_log = 0.0
             try:
                 import logging
                 logging.getLogger().removeHandler(self._log_relay_handler)
@@ -319,8 +328,13 @@ def _load_feed_spoke():
                     self._stats["sent"] += 1
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except Exception as e:  # noqa: BLE001
                     self._stats["send_err"] += 1
+                    now = time.time()
+                    if now - self._last_send_err_log >= 60:
+                        self._last_send_err_log = now
+                        print(f"  ! {self.spoke_id}: send failed: {e!r} — "
+                              f"reconnecting", file=sys.stderr)
                     return  # let the reconnect loop take over
                 await asyncio.sleep(self._interval)
 
@@ -334,9 +348,19 @@ def _load_feed_spoke():
                 try:
                     self._stats["connects"] += 1
                     await self._connect_and_serve()
+                    if not self._first_connect_logged:
+                        self._first_connect_logged = True
+                        print(f"  ✓ {self.spoke_id}: attached to {self.hub_url}")
                     delay = 1
-                except Exception:
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001
                     self._stats["conn_err"] += 1
+                    now = time.time()
+                    if now - self._last_conn_err_log >= 60:
+                        self._last_conn_err_log = now
+                        print(f"  ! {self.spoke_id}: cannot attach to "
+                              f"{self.hub_url}: {e!r}", file=sys.stderr)
                     delay = 5 if (time.time() - t0) >= 30 else min(delay * 2, 30)
                 if not stop_evt.is_set():
                     await asyncio.sleep(delay)
@@ -344,25 +368,52 @@ def _load_feed_spoke():
     return FeedSpoke
 
 
+def _resolve_tenant(payload, tenant_map, default):
+    """The target tenant hint for one spoke. In preserve mode the payload
+    carries its SOURCE tenant; map it to a local tenant, defaulting to
+    ``default`` for an unmapped or unattributed spoke. Returns None when there
+    is no tenant at all, so the spoke onboards unbound rather than to ''."""
+    st = (payload or {}).get("tenant")
+    if st and tenant_map:
+        return tenant_map.get(str(st), default) or None
+    return default or None
+
+
 async def _run(args, source, salt):
     FeedSpoke = _load_feed_spoke()
     stats = {"sent": 0, "send_err": 0, "connects": 0, "conn_err": 0, "polls": 0}
     stop_evt = asyncio.Event()
 
+    tenant_map = getattr(args, "_tenant_map", None) or {}
+
+    def _tenant_for(payload):
+        return _resolve_tenant(payload, tenant_map, args.tenant)
+
+    def _clean(payload):
+        """Drop the routing-only ``tenant`` key so the replayed CS_TELEMETRY
+        matches production shape (tenant is metadata, not fleet data)."""
+        if isinstance(payload, dict) and "tenant" in payload:
+            payload = {k: v for k, v in payload.items() if k != "tenant"}
+        return payload
+
     payloads = build_payloads(source.snapshot(), salt, args.prefix)
     stats["polls"] += 1
     if not payloads:
         raise SystemExit("Source snapshot produced no spokes — nothing to feed.")
-    print(f"Feeding {len(payloads)} synthetic spoke(s) → {args.target}")
+    if tenant_map:
+        print(f"Feeding {len(payloads)} synthetic spoke(s) → {args.target} "
+              f"(preserving {len(set(tenant_map.values()))} tenant[s])")
+    else:
+        print(f"Feeding {len(payloads)} synthetic spoke(s) → {args.target}")
 
     spokes = {}
     tasks = []
     for sid, payload in payloads.items():
-        s = FeedSpoke(spoke_id=sid, payload=payload, stats=stats,
+        s = FeedSpoke(spoke_id=sid, payload=_clean(payload), stats=stats,
                       interval=args.telemetry_interval,
                       hub_url=args.target, hub_secret=args.secret or None,
                       onboarding_psk=args.psk or None,
-                      tenant_id_hint=args.tenant or None)
+                      tenant_id_hint=_tenant_for(payload))
         spokes[sid] = s
         tasks.append(asyncio.create_task(s.run_forever(stop_evt)))
         await asyncio.sleep(args.ramp / max(1, len(payloads)))
@@ -382,7 +433,7 @@ async def _run(args, source, salt):
                 stats["polls"] += 1
                 for sid, payload in fresh.items():
                     if sid in spokes:
-                        spokes[sid].set_payload(payload)
+                        spokes[sid].set_payload(_clean(payload))
                 print(f"  poll {stats['polls']}: refreshed {len(fresh)} spoke(s); "
                       f"sent={stats['sent']} conn_err={stats['conn_err']}")
             except Exception as e:  # noqa: BLE001
@@ -423,6 +474,10 @@ def main():
     ap.add_argument("--target", default="",
                     help="TARGET hub WS URL (wss://HOST:PORT) — the dev/qa/lrb hub")
     ap.add_argument("--tenant", default="", help="target tenant id hint")
+    ap.add_argument("--tenant-map", default="",
+                    help="JSON object {source_tenant: local_tenant} for preserve "
+                         "mode — each synthetic spoke is bound to the local tenant "
+                         "mapped from its source tenant, defaulting to --tenant.")
     ap.add_argument("--psk", default="", help="target tenant onboarding PSK (auto-approves)")
     ap.add_argument("--secret", default="", help="pre-provisioned target spoke secret")
     ap.add_argument("--prefix", default="feed-",
@@ -445,6 +500,15 @@ def main():
         ap.error("--target is required unless --dry-run")
     if args.target:
         _assert_distinct(args.source, args.target)
+
+    args._tenant_map = {}
+    if args.tenant_map:
+        try:
+            m = json.loads(args.tenant_map)
+            if isinstance(m, dict):
+                args._tenant_map = {str(k): str(v) for k, v in m.items() if v}
+        except Exception as e:  # noqa: BLE001
+            ap.error(f"--tenant-map is not valid JSON: {e}")
 
     salt = args.salt or hashlib.sha256(os.urandom(32)).hexdigest()[:16]
 
