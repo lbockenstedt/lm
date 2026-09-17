@@ -314,6 +314,42 @@ def test_empty_install_uuid_records_hostname_only(tmp_path):
     assert state.system_state["module_metadata"]["noid-spoke"]["hostname"] == "host"
 
 
+def test_fresh_spoke_seeds_display_name_from_hostname(tmp_path):
+    """First contact seeds display_name from the DECLARED hostname, not the raw
+    id. Without this, update_module_metadata stamps display_name=module_id, so a
+    brand-new spoke — and, acutely, a replayed test-feed spoke whose id is its
+    SOURCE spoke_id — surfaces an opaque guid ("<tenant>-<UUID>") in the UI
+    instead of its real host name."""
+    state = _fresh_state(tmp_path)
+    hub = _ReconcileHub(state, _make_km())
+    reconcile(hub, "6a0a3f9d-source-id", "UUID-FEED", "agent-cs-spoke-simulation")
+    # Armed guid-primary → metadata is keyed by the guid and named for the host.
+    assert state.get_module_name("UUID-FEED") == "agent-cs-spoke-simulation"
+
+
+def test_fresh_seed_falls_back_to_id_when_no_hostname(tmp_path):
+    """No declared hostname → display_name still defaults to the connect id
+    (unchanged behaviour); the seed only applies when a hostname was actually
+    sent, so a spoke that declares nothing is unaffected by the fix."""
+    state = _fresh_state(tmp_path)
+    hub = _ReconcileHub(state, _make_km())
+    reconcile(hub, "spoke-nohost", "UUID-NH", "")
+    assert state.get_module_name("UUID-NH") == "spoke-nohost"
+
+
+def test_reconnect_does_not_override_operator_rename(tmp_path):
+    """The hostname seed fires only on a brand-new module. A later reconnect must
+    NOT clobber a name the operator set — the metadata entry already exists, so
+    the seed is skipped."""
+    state = _fresh_state(tmp_path)
+    hub = _ReconcileHub(state, _make_km())
+    reconcile(hub, "spoke-1", "UUID-1", "orig-host")
+    pk = hub._primary_key("spoke-1")
+    state.set_module_name(pk, "Friendly Name")     # operator rename
+    reconcile(hub, "spoke-1", "UUID-1", "orig-host")   # spoke reconnects
+    assert state.get_module_name(pk) == "Friendly Name"
+
+
 # ── Phase 2b: CC2 guard — migration gated on proof of the old id's secret ─────
 
 def _seed_approved_victim(state, km, hub):
