@@ -22,6 +22,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from routes.test_feed import _collect_fleet, _probe_source, _source_tenants, _DEFAULTS  # noqa: E402
+from routes.test_feed import TOKEN_ROTATION_SENTINEL as _ROUTE_SENTINEL  # noqa: E402
 
 
 class _Hub:
@@ -247,6 +248,15 @@ def test_both_halves_of_the_token_pair_are_configurable():
     feed dies overnight and reads as 'it randomly stopped'."""
     assert "receiver_token" in _DEFAULTS
     assert "receiver_refresh_token" in _DEFAULTS
+
+
+def test_rotation_sentinel_matches_the_feeder(monkeypatch):
+    """The feeder prints this exact prefix and the route parses it back out; if
+    the two constants drift, rotated tokens are never persisted and the feed
+    silently reverts to dying for good on the next restart."""
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
+    import hub_feed
+    assert _ROUTE_SENTINEL == hub_feed.TOKEN_ROTATION_SENTINEL
 
 
 def test_test_feed_redaction():
