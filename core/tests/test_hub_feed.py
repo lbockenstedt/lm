@@ -328,6 +328,57 @@ def test_expired_access_token_is_rotated_and_the_call_retried(monkeypatch):
     assert src.refresh_token == "r1", "the rotated refresh token must replace the spent one"
 
 
+def test_rotation_emits_the_token_sentinel_when_asked(monkeypatch, capsys):
+    """With --emit-token-rotations, a successful rotation prints one sentinel
+    line carrying the new pair so the parent hub can persist it. The parser on
+    the hub side keys off TOKEN_ROTATION_SENTINEL, so it must be present and the
+    JSON must round-trip."""
+    import json
+    import urllib.error
+    src = hub_feed.SourceHub("https://src", token="t0", refresh_token="r0",
+                             emit_rotations=True)
+    calls = {"get": 0}
+
+    def _open(req, *a, **kw):
+        url = req.full_url
+        if url.endswith("/auth/token/refresh"):
+            return _Resp(json.dumps({"access_token": "t1", "refresh_token": "r1"}).encode())
+        calls["get"] += 1
+        if calls["get"] == 1:
+            raise urllib.error.HTTPError(url, 401, "expired", {}, None)
+        return _Resp(json.dumps({"ok": True}).encode())
+
+    monkeypatch.setattr(src.opener, "open", _open)
+    src._get_json("/api/test-feed/snapshot")
+    lines = [l for l in capsys.readouterr().out.splitlines()
+             if l.startswith(hub_feed.TOKEN_ROTATION_SENTINEL)]
+    assert len(lines) == 1
+    pair = json.loads(lines[0][len(hub_feed.TOKEN_ROTATION_SENTINEL):])
+    assert pair == {"access": "t1", "refresh": "r1"}
+
+
+def test_rotation_is_silent_when_not_asked(monkeypatch, capsys):
+    """Default off: a human running the feeder by hand must never see tokens
+    printed to their terminal."""
+    import json
+    import urllib.error
+    src = _mk_source(monkeypatch)  # emit_rotations defaults False
+    calls = {"get": 0}
+
+    def _open(req, *a, **kw):
+        url = req.full_url
+        if url.endswith("/auth/token/refresh"):
+            return _Resp(json.dumps({"access_token": "t1", "refresh_token": "r1"}).encode())
+        calls["get"] += 1
+        if calls["get"] == 1:
+            raise urllib.error.HTTPError(url, 401, "expired", {}, None)
+        return _Resp(json.dumps({"ok": True}).encode())
+
+    monkeypatch.setattr(src.opener, "open", _open)
+    src._get_json("/api/test-feed/snapshot")
+    assert hub_feed.TOKEN_ROTATION_SENTINEL not in capsys.readouterr().out
+
+
 def test_a_spent_refresh_token_is_not_reused(monkeypatch):
     """Refresh tokens are single-use and reuse revokes the whole family — a
     retry that re-sent the spent token would lock the feed out for good."""

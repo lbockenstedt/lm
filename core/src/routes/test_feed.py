@@ -101,12 +101,22 @@ _DEFAULTS = {
 }
 
 #: The running feeder child, if any. Module-level rather than hub state because
-#: a process does not survive a restart — on reboot the feed is simply stopped,
-#: which is the honest state rather than a stale "running" flag in config.
-#: ``psk``/``tenant`` record the ephemeral onboarding PSK this hub minted for
+#: the live process handle cannot be a config value. The feed itself is no longer
+#: "simply stopped" on reboot: ``_resume_feed_on_startup`` re-launches it from the
+#: persisted ``receiver_enabled`` intent, so a hub restart/self-update no longer
+#: silently drops a feed the operator asked for.
+#: ``psk``/``tenants`` record the ephemeral onboarding PSK this hub minted for
 #: the running feed, so stop can revoke it. A PSK that outlived its feed would
 #: be a standing auto-approve credential for the shared tenant.
 _proc = {"p": None, "started": 0.0, "log": "", "psk": "", "tenants": []}
+
+#: One stdout line the feeder prints on every token rotation, carrying the new
+#: access+refresh pair so we can persist it (``_drain`` parses these out). Kept
+#: byte-for-byte identical to the constant in scripts/hub_feed.py. Persisting the
+#: rotated pair is what stops a hub restart from re-presenting an already-spent
+#: refresh token — api_tokens.refresh() treats that reuse as theft and revokes
+#: the whole family, which is why the feed used to die for good after an update.
+TOKEN_ROTATION_SENTINEL = "##LM-TEST-FEED-TOKEN## "
 
 
 def register(app, hub, ctx):
@@ -317,7 +327,17 @@ def register(app, hub, ctx):
         sess = _require_admin(request)
         if _running():
             raise HTTPException(status_code=409, detail="Feed is already running")
-        c = _cfg()
+        return await _do_start_feed(_cfg(), _who(sess))
+
+    async def _do_start_feed(c, actor):
+        """Spawn the feeder from an already-validated-by-caller config.
+
+        Shared by the operator-driven /start route and _resume_feed_on_startup,
+        so a hub restart re-launches a feed the operator had enabled — with no
+        HTTP request or admin session in hand. Callers own the _running() guard.
+        ``actor`` is only used for the audit line (a username, or a marker such
+        as "startup-resume").
+        """
         missing = [k for k in ("receiver_source_url", "receiver_token")
                    if not c.get(k)]
         if missing:
@@ -432,6 +452,12 @@ def register(app, hub, ctx):
             # feed dies when the 4h access token expires (api_tokens.issue_pair),
             # which reads as "the feed randomly stopped overnight".
             argv += ["--refresh-token", c["receiver_refresh_token"]]
+            # And tell it to hand the rotated pair back to us on stdout so we
+            # persist it (_drain). Otherwise the NEXT restart re-presents the
+            # spent refresh token, api_tokens flags reuse, and the whole token
+            # family is revoked — the feed then dies for good until a human
+            # issues a fresh token.
+            argv += ["--emit-token-rotations"]
 
         env = dict(os.environ)
         env["PYTHONPATH"] = os.pathsep.join(
@@ -449,7 +475,7 @@ def register(app, hub, ctx):
         # AUDIT before spawning — the token is NOT logged, only its presence.
         logger.warning("[test-feed] START by %s → source=%s tenant=%s prefix=%s "
                        "preserve=%s (%d tenant[s])",
-                       _who(sess), c["receiver_source_url"], fallback,
+                       actor, c["receiver_source_url"], fallback,
                        c.get("receiver_prefix"), preserve, len(psk_tenants))
         try:
             p = await asyncio.to_thread(
@@ -547,8 +573,24 @@ def register(app, hub, ctx):
                 line = await asyncio.to_thread(p.stdout.readline)
                 if not line:
                     break
-                _proc["log"] = (_proc["log"] + line)[-8000:]
                 txt = line.rstrip("\n")
+                # Token-rotation handoff. Intercept BEFORE the ring-append and
+                # the logger mirror below: this line carries live access+refresh
+                # tokens, and neither the UI ring nor hub.log/journald should
+                # ever see them. Persisting the pair is the whole point — it is
+                # what keeps the next restart from re-presenting a spent refresh
+                # token and getting the token family revoked.
+                if txt.startswith(TOKEN_ROTATION_SENTINEL):
+                    try:
+                        pair = json.loads(txt[len(TOKEN_ROTATION_SENTINEL):])
+                        _save({"receiver_token": pair.get("access") or "",
+                               "receiver_refresh_token": pair.get("refresh") or ""})
+                        logger.info("[test-feed] persisted rotated feed token pair")
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "[test-feed] could not persist rotated token: %s", e)
+                    continue
+                _proc["log"] = (_proc["log"] + line)[-8000:]
                 if txt:
                     # stderr lines from the feeder are prefixed "  ! " — surface
                     # those louder than routine poll/connect progress.
@@ -557,6 +599,37 @@ def register(app, hub, ctx):
                     lvl("[test-feed:child] %s", txt)
         except Exception:  # noqa: BLE001
             pass
+
+    async def _resume_feed_on_startup():
+        """Re-launch a feed the operator had enabled, after a hub restart.
+
+        The hub self-updates and restarts often; each restart kills the feeder
+        child but leaves ``receiver_enabled`` true in config, so the operator's
+        feed silently stayed dead until someone noticed and clicked Start again.
+        This mirrors _resume_caches_for_active_sessions (api.py) — the same
+        "the hub reboots without its loops" problem — and heals it automatically.
+
+        Best-effort and defensive: it must never break hub startup, so every
+        failure is logged and swallowed. It also never mints a token or touches
+        anything unless the config already says a feed was wanted.
+        """
+        try:
+            c = _cfg()
+            if not c.get("receiver_enabled"):
+                return
+            if not (c.get("receiver_source_url") and c.get("receiver_token")):
+                logger.warning("[test-feed] resume skipped: enabled but not "
+                               "fully configured (source/token missing)")
+                return
+            if _running():
+                return
+            logger.info("[test-feed] resuming feed after restart (source=%s)",
+                        c.get("receiver_source_url"))
+            await _do_start_feed(c, "startup-resume")
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[test-feed] auto-resume failed: %s", e)
+
+    app.router.on_startup.append(_resume_feed_on_startup)
 
 
 def _repo_root() -> str:
