@@ -840,11 +840,20 @@ def _refresh_module_all_tenants(hub, key: str):
         asyncio.create_task(_fetch_module(hub, tid, key))
 
 def _normalize_cached(result):
+    """Unwrap a cached spoke envelope to its data payload.
+
+    Like ``access.unwrap_spoke`` but additionally unwraps a bare ``data`` key
+    (cache entries are stored in either shape). An explicit ``null`` under
+    either key means NO payload and falls back to the envelope, so a cache hit
+    can never hand a None back to a route that will serialize it as a literal
+    JSON ``null`` body (see ``_spoke_payload_or_raise``)."""
     if not isinstance(result, dict):
         return result
     if "payload" in result and isinstance(result["payload"], dict):
-        return result["payload"].get("data", result)
-    if "data" in result:
+        data = result["payload"].get("data")
+        # `is not None`: an empty-but-real payload ({}, [], 0, False) is data.
+        return data if data is not None else result
+    if result.get("data") is not None:
         return result["data"]
     return result
 
@@ -1180,7 +1189,17 @@ def _spoke_payload_or_raise(data):
     503 (Service Unavailable — "retry shortly") carrying the friendly
     ``SPOKE_UPDATING_DETAIL`` so the browser shows "update in progress", not a
     false "Timed out waiting for spoke response" error.
+
+    A ``None`` result is a 502 rather than a 200 whose body is the literal JSON
+    ``null``. FastAPI happily serializes None, and on the browser side
+    ``r.json()`` PARSES that to null without raising — so a null slipped past
+    every ``.catch()`` guard and blew up on the consumer's first field access
+    ("null is not an object (evaluating 'd.status')") instead of rendering the
+    spoke-error banner. Nothing downstream can render a null envelope, so fail
+    it here at the single choke point every relay group already funnels through.
     """
+    if data is None:
+        raise HTTPException(status_code=502, detail="Spoke returned no data")
     if isinstance(data, dict) and data.get("status") == "ERROR":
         if data.get("updating") or data.get("draining"):
             raise HTTPException(status_code=503, detail=SPOKE_UPDATING_DETAIL)

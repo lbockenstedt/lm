@@ -135,11 +135,24 @@ def unwrap_spoke(result):
     (``return _unwrap_spoke(result)``) introduced by the 7bc70c6 doc pass; this
     is the correct implementation restored here. Re-exported into ``api`` as
     ``_unwrap_spoke`` so the ~26 existing call sites get the fix.
+
+    An envelope carrying an explicit ``data: null`` is treated as NO payload
+    (fall back to ``result``), not as a payload of None. ``.get("data", result)``
+    only falls back when the key is ABSENT, so a spoke answering
+    ``{"payload": {"data": null}}`` used to unwrap to None and propagate all the
+    way out as an HTTP 200 whose body was the literal ``null`` — which the WebUI
+    then dereferenced ("null is not an object"). Returning the envelope instead
+    keeps any ``status``/``message`` fields visible to
+    ``_spoke_payload_or_raise``.
     """
     if isinstance(result, dict):
         payload = result.get("payload")
         if isinstance(payload, dict):
-            return payload.get("data", result)
+            data = payload.get("data")
+            # `is not None` (not truthiness): a legitimately empty payload —
+            # {}, [], 0, False — is real data and must pass through.
+            if data is not None:
+                return data
     return result
 
 

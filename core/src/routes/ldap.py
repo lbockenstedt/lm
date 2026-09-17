@@ -184,7 +184,19 @@ def register(app, hub, ctx):
         if isinstance(result, dict) and str(result.get("status", "")).upper() == "ERROR":
             raise HTTPException(status_code=502,
                                 detail=result.get("message") or f"{cmd} failed on the LDAP server")
-        return result.get("data", result) if isinstance(result, dict) else result
+        return _ldap_unwrap(result)
+
+    def _ldap_unwrap(result):
+        """Envelope → inner ``data``, treating an explicit ``data: null`` as NO
+        payload (fall back to the envelope). ``.get("data", result)`` only
+        defaults on an ABSENT key, so a null unwrapped to None and the route
+        returned HTTP 200 with a literal JSON ``null`` body — which the WebUI
+        dereferenced ("null is not an object")."""
+        if isinstance(result, dict):
+            data = result.get("data")
+            # `is not None`: an empty-but-real payload ({}, []) is data.
+            return data if data is not None else result
+        return result
 
     async def _relay_list(cmd: str, slug: str, spoke_id: str):
         """Warm-cached LIST read (per tenant slug): serve last-known (stale) on
@@ -204,7 +216,7 @@ def register(app, hub, ctx):
             # hide the outage) — fall through to stale cache / raise.
             if isinstance(result, dict) and str(result.get("status", "")).upper() == "ERROR":
                 raise RuntimeError(result.get("message") or f"{cmd} failed on the LDAP server")
-            data = result.get("data", result) if isinstance(result, dict) else result
+            data = _ldap_unwrap(result)
             await hub.warm_set(key, slug, data)
             return data
         except HTTPException:
