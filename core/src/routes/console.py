@@ -334,9 +334,17 @@ def register(app, hub, ctx):
 
     # ── Console role: serial console access (/api/console/*, /ws/console-serial) ──
     def _console_unwrap(result):
-        """request_response envelope → the spoke's inner data dict."""
+        """request_response envelope → the spoke's inner data dict.
+
+        An explicit ``data: null`` is NO payload, so it yields {} like every
+        other non-dict result — ``.get("data", result)`` only defaults on an
+        ABSENT key, so a null used to leak out as a literal JSON ``null`` body
+        that the WebUI then dereferenced."""
         if isinstance(result, dict):
-            return result.get("payload", {}).get("data", result)
+            data = result.get("payload", {}).get("data")
+            if data is not None:
+                return data
+            return result
         return {}
 
     def _console_spoke_or_none(hub, body):
