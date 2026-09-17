@@ -328,6 +328,57 @@ def test_expired_access_token_is_rotated_and_the_call_retried(monkeypatch):
     assert src.refresh_token == "r1", "the rotated refresh token must replace the spent one"
 
 
+def test_rotation_emits_the_token_sentinel_when_asked(monkeypatch, capsys):
+    """With --emit-token-rotations, a successful rotation prints one sentinel
+    line carrying the new pair so the parent hub can persist it. The parser on
+    the hub side keys off TOKEN_ROTATION_SENTINEL, so it must be present and the
+    JSON must round-trip."""
+    import json
+    import urllib.error
+    src = hub_feed.SourceHub("https://src", token="t0", refresh_token="r0",
+                             emit_rotations=True)
+    calls = {"get": 0}
+
+    def _open(req, *a, **kw):
+        url = req.full_url
+        if url.endswith("/auth/token/refresh"):
+            return _Resp(json.dumps({"access_token": "t1", "refresh_token": "r1"}).encode())
+        calls["get"] += 1
+        if calls["get"] == 1:
+            raise urllib.error.HTTPError(url, 401, "expired", {}, None)
+        return _Resp(json.dumps({"ok": True}).encode())
+
+    monkeypatch.setattr(src.opener, "open", _open)
+    src._get_json("/api/test-feed/snapshot")
+    lines = [l for l in capsys.readouterr().out.splitlines()
+             if l.startswith(hub_feed.TOKEN_ROTATION_SENTINEL)]
+    assert len(lines) == 1
+    pair = json.loads(lines[0][len(hub_feed.TOKEN_ROTATION_SENTINEL):])
+    assert pair == {"access": "t1", "refresh": "r1"}
+
+
+def test_rotation_is_silent_when_not_asked(monkeypatch, capsys):
+    """Default off: a human running the feeder by hand must never see tokens
+    printed to their terminal."""
+    import json
+    import urllib.error
+    src = _mk_source(monkeypatch)  # emit_rotations defaults False
+    calls = {"get": 0}
+
+    def _open(req, *a, **kw):
+        url = req.full_url
+        if url.endswith("/auth/token/refresh"):
+            return _Resp(json.dumps({"access_token": "t1", "refresh_token": "r1"}).encode())
+        calls["get"] += 1
+        if calls["get"] == 1:
+            raise urllib.error.HTTPError(url, 401, "expired", {}, None)
+        return _Resp(json.dumps({"ok": True}).encode())
+
+    monkeypatch.setattr(src.opener, "open", _open)
+    src._get_json("/api/test-feed/snapshot")
+    assert hub_feed.TOKEN_ROTATION_SENTINEL not in capsys.readouterr().out
+
+
 def test_a_spent_refresh_token_is_not_reused(monkeypatch):
     """Refresh tokens are single-use and reuse revokes the whole family — a
     retry that re-sent the spent token would lock the feed out for good."""
@@ -380,3 +431,78 @@ def test_non_401_errors_are_not_retried(monkeypatch):
     with pytest.raises(urllib.error.HTTPError):
         src._get_json("/api/test-feed/snapshot")
     assert tried["refresh"] == 0
+
+
+# --------------------------------------------------------------------------
+# Preserve-mode tenant routing (_resolve_tenant)
+# --------------------------------------------------------------------------
+
+def test_preserve_maps_source_tenant_to_local():
+    """A spoke carrying its source tenant is routed to the mapped local tenant
+    so a multi-tenant fleet keeps its shape on the receiver."""
+    m = {"acme": "acme-local", "globex": "globex-local"}
+    assert hub_feed._resolve_tenant({"tenant": "acme"}, m, "fallback") == "acme-local"
+    assert hub_feed._resolve_tenant({"tenant": "globex"}, m, "fallback") == "globex-local"
+
+
+def test_preserve_unmapped_source_tenant_falls_back():
+    """A source tenant with no local match uses the fallback rather than
+    onboarding into a tenant the receiver never registered a PSK for."""
+    assert hub_feed._resolve_tenant({"tenant": "unknown"}, {"acme": "acme"},
+                                    "shared") == "shared"
+
+
+def test_preserve_unattributed_spoke_uses_fallback():
+    """A spoke with no source tenant (older/anonymised source) uses fallback."""
+    assert hub_feed._resolve_tenant({}, {"acme": "acme"}, "shared") == "shared"
+    assert hub_feed._resolve_tenant({"tenant": ""}, {"acme": "acme"}, "shared") == "shared"
+
+
+def test_without_a_map_every_spoke_uses_the_single_tenant():
+    """Non-preserve mode (empty map) ignores any per-spoke tenant and binds the
+    whole fleet to --tenant — the historical behaviour."""
+    assert hub_feed._resolve_tenant({"tenant": "acme"}, {}, "the-one") == "the-one"
+
+
+def test_no_tenant_at_all_onboards_unbound():
+    """No map and no default means bind nothing (None) rather than the empty
+    string, which would be a real, wrong tenant id."""
+    assert hub_feed._resolve_tenant({"tenant": "acme"}, {}, "") is None
+
+
+def test_tenant_map_arg_is_parsed_and_exposed(monkeypatch):
+    """--tenant-map arrives as a JSON string on argv; main() must parse it into
+    args._tenant_map as str→str with empty targets dropped."""
+    seen = {}
+
+    class _FakeSource:
+        def __init__(self, *a, **kw): pass
+        def login(self, *a, **kw): pass
+
+    def _fake_run(args, source, salt):
+        seen["map"] = getattr(args, "_tenant_map", None)
+
+    monkeypatch.setattr(hub_feed, "SourceHub", _FakeSource)
+    monkeypatch.setattr(hub_feed, "_run", _fake_run)
+    monkeypatch.setattr(hub_feed.asyncio, "run", lambda coro: None)
+    argv = ["hub_feed.py", "--source", "https://src", "--target", "wss://dst:443",
+            "--token", "t", "--tenant", "fb",
+            "--tenant-map", '{"acme": "acme-local", "skip": ""}']
+    monkeypatch.setattr(sys, "argv", argv)
+    hub_feed.main()
+    assert seen["map"] == {"acme": "acme-local"}
+
+
+def test_bad_tenant_map_is_rejected(monkeypatch):
+    """Invalid JSON in --tenant-map is an operator error, surfaced by argparse
+    (SystemExit) rather than silently ignored."""
+    class _FakeSource:
+        def __init__(self, *a, **kw): pass
+        def login(self, *a, **kw): pass
+
+    monkeypatch.setattr(hub_feed, "SourceHub", _FakeSource)
+    argv = ["hub_feed.py", "--source", "https://src", "--target", "wss://dst:443",
+            "--token", "t", "--tenant-map", "{not json"]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit):
+        hub_feed.main()

@@ -12267,7 +12267,13 @@ function _renderSetupTestFeedTile(content) {
                     </div>
                     <div class="space-y-1">
                         <label class="${labelCls}">Tenant <span class="normal-case font-normal text-slate-400">· blank = shared</span></label>
-                        <input type="text" id="tf-tenant" placeholder="leave blank for the shared tenant" class="${inputCls}" title="Name a real tenant to make the replayed fleet show in that tenant's Simulations views. Blank binds it to the shared tenant (visible in Spokes & Agents to every tenant).">
+                        <input type="text" id="tf-tenant" placeholder="leave blank for the shared tenant" class="${inputCls}" title="Name a real tenant to make the replayed fleet show in that tenant's Simulations views. Blank binds it to the shared tenant (visible in Spokes & Agents to every tenant). In 'preserve source tenants' mode this is only the fallback for spokes whose source tenant has no local match.">
+                    </div>
+                    <div class="space-y-1 md:col-span-2">
+                        <label class="flex items-center gap-2 text-xs text-slate-600 cursor-pointer" title="Replay each synthetic spoke into the LOCAL tenant matching its SOURCE tenant, so a multi-tenant production fleet keeps its tenant layout here instead of collapsing into one. A source tenant with no local match (and any unattributed spoke) falls back to the Tenant field above / the shared tenant. Only takes effect when the source is publishing verbatim (an anonymised source omits per-spoke tenant).">
+                            <input type="checkbox" id="tf-preserve" class="rounded border-slate-300">
+                            <span>Preserve source tenants <span class="text-slate-400 font-normal">— receive all tenants into their matching local tenants</span></span>
+                        </label>
                     </div>
                     <div class="space-y-1">
                         <label class="${labelCls}">Spoke id prefix</label>
@@ -12327,6 +12333,8 @@ async function tfLoad() {
         if (rt) rt.textContent = c.receiver_refresh_token ? '· stored' : '· not set';
         const anon = document.getElementById('tf-anonymise');
         if (anon) anon.checked = !!c.source_anonymise;
+        const pres = document.getElementById('tf-preserve');
+        if (pres) pres.checked = !!c.receiver_preserve_tenants;
         const saltRow = document.getElementById('tf-salt-row');
         if (saltRow) saltRow.classList.toggle('hidden', !c.source_anonymise);
         const salt = document.getElementById('tf-salt-state');
@@ -12349,7 +12357,16 @@ async function tfLoad() {
         // reason is not something the operator can guess from this page.
         const ten = document.getElementById('tf-tenant-state');
         if (ten) {
-            if (c.shared_tenant) {
+            if (c.receiver_preserve_tenants) {
+                const fb = c.receiver_tenant || (c.shared_tenant ? `shared "${c.shared_tenant}"` : null);
+                if (fb) {
+                    ten.className = 'block mt-1 text-[#01A982]';
+                    ten.textContent = `Preserving source tenants: each spoke lands in its matching local tenant; unmatched spokes fall back to ${fb}.`;
+                } else {
+                    ten.className = 'block mt-1 text-red-600 font-semibold';
+                    ten.textContent = 'Preserving source tenants, but there is no fallback — name a tenant above or mark one shared in Setup → Tenants for spokes with no local match.';
+                }
+            } else if (c.shared_tenant) {
                 ten.className = 'block mt-1 text-[#01A982]';
                 ten.textContent = c.receiver_tenant
                     ? `Fleet will land in tenant "${c.receiver_tenant}".`
@@ -12421,6 +12438,7 @@ async function tfSaveReceiver() {
         receiver_interval: Number(document.getElementById('tf-interval')?.value) || 60,
         receiver_token: document.getElementById('tf-token')?.value?.trim() || '',
         receiver_refresh_token: document.getElementById('tf-refresh')?.value?.trim() || '',
+        receiver_preserve_tenants: !!document.getElementById('tf-preserve')?.checked,
     };
     const ok = await _tfPost('/api/test-feed/config', body, 'Saved.');
     if (ok) {
