@@ -569,6 +569,41 @@ def register(app, hub, ctx):
             pass
         return creds
 
+    async def _console_creds_all_buckets(hub):
+        """Every console/login vault secret across ALL buckets, deduped — the
+        Global-Admin fleet-wide inventory.
+
+        A Global Admin viewing the Credential Library with NO tenant selected
+        manages every tenant's console logins, and those logins live in the
+        per-tenant buckets, not the ``__admin__`` slot — so scanning only
+        ``__admin__`` (what ``_console_creds_for_tenant(hub, None)`` does) shows
+        an empty list even when the fleet has many. Aggregate all buckets here,
+        matching the diagnostics banner which counts the same set. The per-spoke
+        SEED stays tenant-scoped via ``_console_creds_for_tenant`` — only this
+        Global-Admin *display* is fleet-wide."""
+        creds, seen = [], set()
+
+        def _add(items):
+            for c in items:
+                key = (c["username"], c["password"])
+                if key not in seen:
+                    seen.add(key)
+                    creds.append(c)
+
+        try:
+            import cred_vault as _cv
+            for rec in await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, None):
+                _add(_console_creds_from_cred_vault(rec.get("value")))
+            # Legacy single named list secret in the admin slot.
+            try:
+                _add(_console_creds_from_cred_vault(
+                    await _cv.automation_get(hub, _cv.ADMIN_BUCKET, _CONSOLE_VAULT_SECRET)))
+            except Exception:  # noqa: BLE001 — absent / unreadable
+                pass
+        except Exception:  # noqa: BLE001 — vault not configured
+            pass
+        return creds
+
     async def _console_load_credentials_resolved(hub, tenant=None):
         """Async credential resolution used by the (async) seed path. Prefers the
         central Credential Vault so console logins can be managed alongside every
@@ -619,7 +654,7 @@ def register(app, hub, ctx):
         reachable bucket) or the legacy ``__admin__``/``console-auto-credentials``
         list secret."""
         try:
-            return bool(await _console_creds_for_tenant(hub, None))
+            return bool(await _console_creds_all_buckets(hub))
         except Exception:  # noqa: BLE001
             return False
 
@@ -1390,13 +1425,26 @@ def register(app, hub, ctx):
         if not is_global and not is_ta:
             raise HTTPException(status_code=403, detail="admin only")
         hub = app.state.hub
+        # Resolve the tenant this view is scoped to. A tenant admin is always
+        # locked to (one of) their own tenants. A Global Admin follows the WebUI
+        # tenant picker: a specific tenant selected there arrives as ?tenant=<id>
+        # and scopes the view to THAT tenant's console logins — because those
+        # logins live in the per-tenant vault bucket, not the ``__admin__`` slot,
+        # so an admin browsing "tenant LRB" must read LRB's bucket. The "all
+        # tenants" pick (or none) falls through to the fleet-wide inventory below.
+        req_tenant = (request.query_params.get("tenant") or "").strip()
         if is_ta:
-            tenant = _effective_tenant(request, request.query_params.get("tenant"))
-            if not tenant:
+            scoped_tenant = _effective_tenant(request, req_tenant or None)
+            if not scoped_tenant:
                 raise HTTPException(status_code=403,
                                     detail="no tenant scope — select one of your tenants")
-            # Show ONLY the tenant's own vault-bucket logins (the ones a tenant
-            # admin actually manages). The inherited global ``__admin__`` logins
+        else:
+            scoped_tenant = (req_tenant
+                             if req_tenant not in ("", "all", "__all__") else None)
+        if scoped_tenant:
+            tenant = scoped_tenant
+            # Show ONLY the tenant's own vault-bucket logins (the ones actually
+            # managed for THIS tenant). The inherited global ``__admin__`` logins
             # are also pushed to this tenant's console spokes, but a tenant admin
             # may not enumerate that privileged bucket — surface them as an
             # aggregate count only (no usernames), matching the vault's reach
@@ -1416,7 +1464,11 @@ def register(app, hub, ctx):
                     "local_credentials": [], "tenant": tenant,
                     "shared_global_count": shared_global_count,
                     "vault_bucket": tenant, "vault_secret": _CONSOLE_VAULT_SECRET}
-        creds = await _console_load_credentials_resolved(hub)
+        # Global Admin, no specific tenant selected: the fleet-wide inventory of
+        # every tenant's console logins (all buckets), not just ``__admin__``.
+        creds = await _console_creds_all_buckets(hub)
+        if not creds:
+            creds = _console_load_credentials(hub)
         vault_backed = await _console_vault_secret_present(hub)
         vault_on = _vault_enabled(hub)
         local_present = _console_local_passwords_present(hub)
