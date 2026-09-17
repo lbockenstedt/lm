@@ -36,8 +36,18 @@ except Exception:  # pragma: no cover - absent until the role is installed
 
 logger = logging.getLogger("ConsoleSpoke")
 
-# 8N1 baud candidates, ordered by real-world frequency on console gear.
-DEFAULT_BAUD_CANDIDATES = [9600, 115200, 38400, 19200, 57600, 4800, 2400, 230400]
+# 8N1 baud candidates. 115200 then 9600 lead the sweep — between them they cover
+# almost all console gear (modern kit defaults to 115200; older/embedded to
+# 9600), so we always try those two FIRST and, per PRIORITY_BAUDS below, lock
+# onto either the moment it answers cleanly rather than drifting onto an exotic
+# rate that happened to score marginally higher. The rest follow in rough
+# frequency order for the uncommon device that uses neither.
+DEFAULT_BAUD_CANDIDATES = [115200, 9600, 38400, 19200, 57600, 4800, 2400, 230400]
+
+# The two rates we prefer to "fall back to": if either answers with a confident
+# (mostly-printable) reply, we stop the sweep and lock it instead of continuing
+# into the exotic rates — so detection reliably settles on 115200, else 9600.
+PRIORITY_BAUDS = (115200, 9600)
 
 # Prompt/banner signatures that boost a baud-detect score (the device is talking
 # sense at this rate, not emitting line noise).
@@ -176,6 +186,12 @@ def detect_baud(dev: str, candidates: Optional[List[int]] = None,
             if s > best["score"]:
                 best = {"baud": baud, "score": s, "sample": buf}
             if s >= 1.3:  # confidently good — stop sweeping
+                break
+            # A priority rate (115200 then 9600) that answers with a confident,
+            # mostly-printable reply is good enough to LOCK: stop here rather
+            # than sweeping on to an exotic rate that might edge it out on score.
+            # This is what makes detection reliably settle back on 115200/9600.
+            if baud in PRIORITY_BAUDS and s >= _BAUD_CONFIDENT_SCORE:
                 break
         except Exception as e:  # noqa: BLE001
             logger.debug("baud probe %s@%d failed: %s", dev, baud, e)

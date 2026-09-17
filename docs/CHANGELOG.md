@@ -51,6 +51,12 @@ CI/tooling changes are omitted unless they change what an operator sees.
   [lm-hub.md](lm-hub.md).
 
 ### Test Data Feed
+- **A feed now survives hub restarts.** An enabled feed auto-resumes when the hub
+  self-updates or restarts (it used to silently stay stopped), and the feeder
+  persists its own token rotations back to config — so an expired access token no
+  longer leaves a spent refresh token behind for the next restart to trip on and
+  get the whole token family revoked. See the "Test Data Feed" section of
+  [lm-hub.md](lm-hub.md#test-data-feed).
 - **New Setup → Test Data Feed panel (Global-Admin only).** One hub *publishes* a
   snapshot of its fleet; another *subscribes* and replays it as synthetic spokes,
   so a dev/qa hub carries a realistic fleet without duplicate hardware. Publishing

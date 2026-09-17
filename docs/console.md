@@ -119,11 +119,15 @@ comma-separated **source-IP allow-list**. This maps to the role config keys
   `/var/lib/lm/console/ports.json` (falling back to a repo-local state dir if that path
   isn't writable).
 - **Baud auto-detect.** `CONSOLE_DETECT_BAUD` (or the automatic identify pipeline) opens
-  the port at each candidate rate in turn (`9600, 115200, 38400, 19200, 57600, 4800,
+  the port at each candidate rate in turn (`115200, 9600, 38400, 19200, 57600, 4800,
   2400, 230400`), sends a CR/LF, and scores the reply by printable-ASCII ratio plus a
   bonus if it matches a known login/prompt/banner regex (`login:`, `Username:`,
-  `Cisco`, `Aruba`, a shell prompt, etc.). The best-scoring rate is locked in and saved
-  to the port's settings; a confidently-good match (score ≥ 1.3) stops the sweep early.
+  `Cisco`, `Aruba`, a shell prompt, etc.). **115200 and 9600 lead the sweep** — between
+  them they cover almost all console gear — and the moment either answers with a
+  confident (mostly-printable) reply the sweep locks it and stops, without drifting onto
+  an exotic rate that happened to score marginally higher. Only if both stay silent/garbled
+  does it fall through to the less-common rates. The chosen rate is saved to the port's
+  settings; a confidently-good match (score ≥ 1.3) also stops the sweep early.
 - **One-writer session relay.** Opening a terminal (`CONSOLE_OPEN`) attaches a browser
   session to a `PortChannel` — one real OS serial handle per physical port, shared by
   every attached session. A background reader thread reads the handle once and fans the
