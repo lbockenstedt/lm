@@ -418,7 +418,7 @@ const MODULE_CLASSES = {
 
 // Multi-product classes that render ONE unified primary view, surfacing the
 // other products as subtabs instead of as separate nav items. DNS is "all
-// things DNS": the Unbound `dns` view (Records/Statistics/Forwarders) plus an
+// things DNS": the Unbound `dns` view (Overview/Records/Forwarders) plus an
 // External DNS subtab (internet-facing providers like HE.NET). Such products
 // have no standalone view — they always live under the `dns` view. See setView().
 const CLASS_PRIMARY_VIEW = { 'DNS': 'dns' };
@@ -1626,7 +1626,7 @@ const VIEW_SUBMENUS = {
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management', 'Assistant'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
-    dns: ['Records', 'Statistics', 'Diagnostics', 'Forwarders', 'External DNS'],
+    dns: ['Overview', 'Records', 'Diagnostics', 'Forwarders', 'External DNS'],
     dhcp: ['Overview', 'Diagnostics', 'Subnets', 'Leases', 'Reservations'],
     nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'Other', 'Scan'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
@@ -3700,7 +3700,7 @@ async function setView(viewId) {
         }
 
         // Some multi-product classes render ONE unified view with the other
-        // products surfaced as subtabs (DNS = Unbound Records/Statistics/
+        // products surfaced as subtabs (DNS = Unbound Overview/Records/
         // Forwarders + an External DNS subtab). Such a class pins to its primary
         // view regardless of which product(s) are active — external providers
         // (henet, …) have no standalone view, and the class name is never a real view.
@@ -5149,7 +5149,7 @@ function initView(viewId, subView) {
             loadNetboxData(subView || 'Overview');
             break;
         case 'dns':
-            loadDNSData(subView || 'Records');
+            loadDNSData(subView || 'Overview');
             break;
         case 'dhcp':
             loadDHCPData(subView || 'Overview');
@@ -12224,11 +12224,11 @@ function _renderSetupTestFeedTile(content) {
                     Issue one under <b>Settings → API Tokens</b> and give it to the receiving hub; revoking it stops that feed immediately.
                 </p>
                 <label class="flex items-center gap-2 text-sm text-slate-700">
-                    <input type="checkbox" id="tf-source-enabled" class="w-4 h-4 text-green-600 rounded" onchange="tfSaveSource()">
+                    <input type="checkbox" id="tf-source-enabled" class="w-4 h-4 text-green-600 rounded" onchange="tfSaveSource()" title="Serve this hub's fleet snapshot to any client holding a valid API token. Toggling this saves immediately.">
                     Publish this hub's fleet as a test-data feed
                 </label>
                 <label class="flex items-center gap-2 text-sm text-slate-700">
-                    <input type="checkbox" id="tf-anonymise" class="w-4 h-4 text-green-600 rounded" onchange="tfSaveSource()">
+                    <input type="checkbox" id="tf-anonymise" class="w-4 h-4 text-green-600 rounded" onchange="tfSaveSource()" title="Replace hostnames, addresses, MACs and serials with stable pseudonyms before publishing. Off = verbatim copy. Passwords/tokens/keys are never included either way.">
                     Anonymise before publishing — replace hostnames, addresses, MACs and serials
                 </label>
                 <p id="tf-mode-state" class="text-[11px] leading-snug"></p>
@@ -12255,27 +12255,27 @@ function _renderSetupTestFeedTile(content) {
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div class="space-y-1">
                         <label class="${labelCls}">Source hub URL</label>
-                        <input type="text" id="tf-source-url" placeholder="https://lm-hub.example.com" class="${inputCls}">
+                        <input type="text" id="tf-source-url" placeholder="https://lm-hub.example.com" class="${inputCls}" title="Base URL of the SOURCE hub that is publishing the feed (the hub where you enabled 'Publish this hub's fleet').">
                     </div>
                     <div class="space-y-1">
                         <label class="${labelCls}">Access token (Bearer) <span id="tf-token-set" class="normal-case font-normal text-slate-400"></span></label>
-                        <input type="password" id="tf-token" placeholder="paste to set / change" class="${inputCls}">
+                        <input type="password" id="tf-token" placeholder="paste to set / change" class="${inputCls}" title="Bearer access token issued on the SOURCE hub (Settings → API Tokens there). Sent to authenticate each snapshot pull. Leave blank to keep the stored value.">
                     </div>
                     <div class="space-y-1">
                         <label class="${labelCls}">Refresh token <span id="tf-refresh-set" class="normal-case font-normal text-slate-400"></span></label>
-                        <input type="password" id="tf-refresh" placeholder="paste to set / change" class="${inputCls}">
+                        <input type="password" id="tf-refresh" placeholder="paste to set / change" class="${inputCls}" title="Refresh token from the same pair on the SOURCE hub. Lets the feed rotate the short-lived access token on its own instead of stopping when it expires. Leave blank to keep the stored value.">
                     </div>
                     <div class="space-y-1">
                         <label class="${labelCls}">Tenant <span class="normal-case font-normal text-slate-400">· blank = shared</span></label>
-                        <input type="text" id="tf-tenant" placeholder="leave blank for the shared tenant" class="${inputCls}">
+                        <input type="text" id="tf-tenant" placeholder="leave blank for the shared tenant" class="${inputCls}" title="Name a real tenant to make the replayed fleet show in that tenant's Simulations views. Blank binds it to the shared tenant (visible in Spokes & Agents to every tenant).">
                     </div>
                     <div class="space-y-1">
                         <label class="${labelCls}">Spoke id prefix</label>
-                        <input type="text" id="tf-prefix" value="feed-" class="${inputCls}">
+                        <input type="text" id="tf-prefix" value="feed-" class="${inputCls}" title="Prefix added to every synthetic spoke id so you can recognise and bulk-delete the replayed fleet later from Spokes & Agents.">
                     </div>
                     <div class="space-y-1">
                         <label class="${labelCls}">Poll interval (seconds)</label>
-                        <input type="number" id="tf-interval" min="15" step="5" value="60" class="${inputCls}">
+                        <input type="number" id="tf-interval" min="15" step="5" value="60" class="${inputCls}" title="How often (seconds, minimum 15) the receiver pulls a fresh snapshot from the source and re-applies it.">
                     </div>
                 </div>
                 <div class="flex flex-wrap items-center gap-2 pt-1">
@@ -17730,6 +17730,17 @@ async function showLoadRoleModal(spokeId) {
                     </div>
                     <p class="text-[11px] text-slate-500">Entra credentials are injected from the hub OIDC config automatically. For a 2-node mirror, load this role on both hosts with matching base DN, server-id 1 &amp; 2, and each node's peer URL set to the OTHER node.</p>
                 </div>
+                <div id="console-dpa-cfg" class="hidden p-3 bg-slate-50 border border-slate-200 rounded-md space-y-2">
+                    <label class="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                        <input type="checkbox" id="crole-dpa-enabled" class="rounded border-slate-300" onchange="syncNetboxCreds()" title="Turn on per-port telnet listeners for this console role. Off by default; when enabled the DPA endpoint appears in the Console port list."> Enable Direct Port Access (telnet terminal server)
+                    </label>
+                    <p class="text-[11px] text-slate-500">Exposes each detected serial port over a per-port telnet listener (auto-assigned from 2200) so you can attach a terminal straight to the line. The endpoint then shows in the Console port list. <strong>Off by default</strong>; telnet is unauthenticated/unencrypted, so it binds localhost unless you widen it.</p>
+                    <div id="crole-dpa-detail" class="hidden grid grid-cols-2 gap-2">
+                        <input id="crole-dpa-bind" type="text" value="127.0.0.1" placeholder="bind address (127.0.0.1 = localhost only)" autocomplete="off" oninput="syncNetboxCreds()" title="Address the telnet listeners bind to. Keep 127.0.0.1 (localhost) so the port is only reachable via an SSH tunnel; widen it only with an allow-list set." class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                        <input id="crole-dpa-allow" type="text" placeholder="source-IP allow-list, comma-separated (required if not localhost)" autocomplete="off" title="Comma-separated source IPs/CIDRs allowed to connect. Required when the bind address is not localhost, since telnet is unauthenticated." class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                        <p id="crole-dpa-warn" class="hidden col-span-2 text-[11px] text-amber-700 font-semibold">⚠ Binding beyond 127.0.0.1 exposes an unauthenticated, unencrypted telnet console on the network. Set a source-IP allow-list, and prefer SSH-tunnelling to localhost instead.</p>
+                    </div>
+                </div>
                 <p id="role-desc" class="text-xs text-slate-500 italic min-h-[1.5rem]"></p>
                 <div id="role-note" class="p-3 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-800">
                     The agent installs required system packages (e.g. unbound, kea, certbot) and hosts the role as a new sub-spoke. This may take 30–60 seconds per role.
@@ -17831,6 +17842,18 @@ function syncNetboxCreds() {
     const lcb = document.querySelector('.role-check[value="ldap-server"]');
     const lcfg = document.getElementById('ldap-server-cfg');
     if (lcfg) lcfg.classList.toggle('hidden', !(lcb && lcb.checked));
+    // Console role → reveal the optional Direct Port Access (DPA) config, and
+    // reveal the bind/allow-list detail (with a network-exposure warning) only
+    // once DPA itself is enabled.
+    const ccb = document.querySelector('.role-check[value="console"]');
+    const ccfg = document.getElementById('console-dpa-cfg');
+    if (ccfg) ccfg.classList.toggle('hidden', !(ccb && ccb.checked));
+    const dpaOn = document.getElementById('crole-dpa-enabled');
+    const dpaDetail = document.getElementById('crole-dpa-detail');
+    if (dpaDetail) dpaDetail.classList.toggle('hidden', !(dpaOn && dpaOn.checked));
+    const dpaBind = document.getElementById('crole-dpa-bind');
+    const dpaWarn = document.getElementById('crole-dpa-warn');
+    if (dpaWarn) dpaWarn.classList.toggle('hidden', !(dpaBind && dpaBind.value.trim() && dpaBind.value.trim() !== '127.0.0.1'));
 }
 
 // Two roles that bind the same host port can't be selected together either.
@@ -17906,6 +17929,19 @@ async function loadRole(spokeId) {
         if (g('lsrv-peer')) ldapSrvCfg.peers = [g('lsrv-peer')];
     }
 
+    // console role: optional Direct Port Access (DPA). Off by default; only sent
+    // when the operator ticks it. Bind stays 127.0.0.1 unless widened, and a
+    // widened bind carries the source-IP allow-list.
+    let consoleCfg = null;
+    if (checked.includes('console') && document.getElementById('crole-dpa-enabled')?.checked) {
+        consoleCfg = { console_dpa_enabled: true };
+        const bind = document.getElementById('crole-dpa-bind')?.value.trim();
+        if (bind) consoleCfg.console_dpa_bind = bind;
+        const allow = (document.getElementById('crole-dpa-allow')?.value || '')
+            .split(',').map(s => s.trim()).filter(Boolean);
+        if (allow.length) consoleCfg.console_dpa_allow = allow;
+    }
+
     // One batched request — the backend loads the roles SEQUENTIALLY on the agent
     // (each is a git clone + package install, can't run concurrently) and returns
     // a per-role results[]. Replaces the old one-POST-per-role loop.
@@ -17913,6 +17949,7 @@ async function loadRole(spokeId) {
         const r = { role: roleId };
         if (roleId === 'netbox-server' && netboxCfg && Object.keys(netboxCfg).length) r.config = netboxCfg;
         if (roleId === 'ldap-server' && ldapSrvCfg) r.config = ldapSrvCfg;
+        if (roleId === 'console' && consoleCfg) r.config = consoleCfg;
         return r;
     });
     const results = [];
@@ -18534,6 +18571,16 @@ async function loadNwData(category) {
     let items;
     try {
         const data = await r.json();
+        if (data && data.select_tenant) {
+            // ADMIN (default) tenant: the hub no longer accumulates every
+            // tenant's devices — pick a specific tenant to see its fleet.
+            container.innerHTML = `<div class="py-12 text-center space-y-3">
+                <svg class="w-10 h-10 mx-auto text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-3-4h.01M16 16h.01"/></svg>
+                <p class="text-slate-600 text-sm font-semibold">Select a tenant to view its network devices</p>
+                <p class="text-slate-400 text-xs max-w-md mx-auto">The ADMIN (default) view no longer aggregates every tenant's devices. Choose a specific tenant from the tenant picker to see that tenant's fleet.</p>
+            </div>`;
+            return;
+        }
         items = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : []);
     } catch (err) {
         console.error(`[Network] Error in loadNwData:`, err);
@@ -23120,8 +23167,20 @@ function pxmxNodeDetailHtml(node, vms) {
             : '<p class="p-4 text-slate-400 italic text-sm">No VMs on this node.</p>');
 }
 
-async function loadPxmxData(subMenu) {
-    const container = document.getElementById('pxmx-content');
+// Hypervisor Overview/VMs, ADMIN (default) scope: the hub deliberately does
+// NOT accumulate every tenant's hosts under the built-in ADMIN tenant (it would
+// be a cross-tenant firehose). It returns an empty, `select_tenant`-flagged
+// payload instead; a Global Admin picks a specific tenant to see that tenant's
+// hypervisor stats. Rendered in place of the data table for that scope.
+function pxmxSelectTenantPromptHtml() {
+    return `<div class="py-12 text-center space-y-3">
+        <svg class="w-10 h-10 mx-auto text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0H5m14 0h2M5 21H3m4-14h.01M11 7h.01M7 11h.01M11 11h.01M7 15h.01M11 15h.01"/></svg>
+        <p class="text-slate-600 text-sm font-semibold">Select a tenant to view its hypervisor stats</p>
+        <p class="text-slate-400 text-xs max-w-md mx-auto">The ADMIN (default) view no longer aggregates every tenant's hosts. Choose a specific tenant from the tenant picker to see that tenant's hypervisors.</p>
+    </div>`;
+}
+
+async function loadPxmxData(subMenu) {    const container = document.getElementById('pxmx-content');
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
 
@@ -23158,6 +23217,10 @@ async function loadPxmxData(subMenu) {
 
             // --- 'Overview' landing: just the clickable nodes table -----------
             if (subMenu === 'Overview') {
+                if (nodesData.select_tenant || vmData.select_tenant) {
+                    container.innerHTML = pxmxSelectTenantPromptHtml();
+                    return;
+                }
                 if (nodes.length === 0 && vms.length === 0) {
                     container.innerHTML = `<div class="py-10 text-center space-y-3">
                         <p class="text-slate-400 italic text-sm">No Proxmox agents connected.</p>
@@ -23186,6 +23249,10 @@ async function loadPxmxData(subMenu) {
             const filter = window._pxmxNodeFilterPending ? window._pxmxNodeSel : null;
             window._pxmxNodeFilterPending = false;
 
+            if (vmData.select_tenant || nodesData.select_tenant) {
+                container.innerHTML = pxmxSelectTenantPromptHtml();
+                return;
+            }
             if (vms.length === 0 && nodes.length === 0) {
                 container.innerHTML = `<div class="py-10 text-center space-y-3">
                     <p class="text-slate-400 italic text-sm">No Proxmox agents connected.</p>
@@ -24414,7 +24481,26 @@ async function _spokeFetch(url, opts) {
 }
 
 // Amber error banner used by the DNS/DHCP list views on a spoke failure.
+// The exact detail string the hub raises (api._spoke_payload_or_raise →
+// SPOKE_UPDATING_DETAIL) when a relay target is mid self-update. Keep in
+// lockstep with the Python constant.
+const SPOKE_UPDATING_DETAIL = 'Update in progress — please wait';
+
+// True when a spoke relay failed only because the target is restarting on new
+// code (not a real fault). Callers use it to render a neutral notice and to
+// drop remediation hints that would be a false lead during an update.
+function _isSpokeUpdating(detail) {
+    return detail === SPOKE_UPDATING_DETAIL;
+}
+
+// Amber error banner used by the DNS/DHCP list views on a spoke failure. A
+// mid-update target is NOT a failure — the spoke is briefly restarting on new
+// code — so it renders as a neutral blue "update in progress" notice rather
+// than a red error, so a routine update no longer reads as a broken spoke.
 function _spokeErrorBanner(detail, fallback) {
+    if (_isSpokeUpdating(detail)) {
+        return `<p class="p-4 text-blue-600 text-sm font-medium">⏳ ${escapeHtml(SPOKE_UPDATING_DETAIL)} — this node is restarting on new code and will respond again shortly.</p>`;
+    }
     return `<p class="p-4 text-amber-600 text-sm font-medium">Error: ${escapeHtml(detail || fallback)}</p>`;
 }
 
@@ -25179,7 +25265,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
     // onboarding a standalone spoke — the button offered a path that never
     // actually worked for this module.
     if (navActions) {
-        const addRecordBtn = ((subMenu === 'Records' || !subMenu) && (isAdmin() || isTenantAdmin()))
+        const addRecordBtn = ((subMenu === 'Records') && (isAdmin() || isTenantAdmin()))
             ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Record</button>`
             : '';
         const addForwarderBtn = (subMenu === 'Forwarders' && isAdmin())
@@ -25241,8 +25327,8 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                     window._dnsWorkerDiscovery = null;
                 });
         }
-        // ── Statistics: Unbound query telemetry (OPNsense-grade) ──────────
-        if (subMenu === 'Statistics') {
+        // ── Overview: Unbound query telemetry (OPNsense-grade) ────────────
+        if (subMenu === 'Overview') {
             const { ok, data: d, detail } = await _spokeFetch('/api/dns/stats' + _tenantQS());
             if (!ok) { container.innerHTML = _spokeErrorBanner(detail, 'DNS spoke not connected'); return; }
             if (d.status && d.status !== 'SUCCESS') {
@@ -25439,7 +25525,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
         // ── Records (default) ─────────────────────────────────────────────
         const { ok, data: d, detail } = await _spokeFetch('/api/dns/records?tenant=' + encodeURIComponent(currentTenant));
         if (!ok) {
-            container.innerHTML = `${_spokeErrorBanner(detail, 'DNS spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Verify the Unbound configuration in Setup → DNS.</p>`;
+            container.innerHTML = `${_spokeErrorBanner(detail, 'DNS spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-400">Verify the Unbound configuration in Setup → DNS.</p>'}`;
             _clearTopNavActions();
             return;
         }
@@ -25605,7 +25691,7 @@ async function loadLEData(subMenu) {
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/le/certs?tenant=' + encodeURIComponent(currentTenant));
         if (!ok) {
-            container.innerHTML = `${_spokeErrorBanner(detail, 'Certificate (le) spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Install the le spoke (install_all.sh, or its install_le.sh) and approve it in Setup → Spokes &amp; Agents.</p>`;
+            container.innerHTML = `${_spokeErrorBanner(detail, 'Certificate (le) spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-400">Install the le spoke (install_all.sh, or its install_le.sh) and approve it in Setup → Spokes &amp; Agents.</p>'}`;
             return;
         }
         const body = inner(d);
@@ -28694,7 +28780,7 @@ async function loadHenet() {
     try {
         const { ok, data: d, detail } = await _spokeFetch('/api/henet/records');
         if (!ok) {
-            container.innerHTML = backBar + actionBar + `${_spokeErrorBanner(detail, 'HE.NET spoke not connected')}<p class="px-4 pb-4 text-xs text-slate-400">Load the “HE.NET” role on an agent and store an HE DDNS key in the Credential Vault (secret type “HE.NET DDNS key”).</p>`;
+            container.innerHTML = backBar + actionBar + `${_spokeErrorBanner(detail, 'HE.NET spoke not connected')}${_isSpokeUpdating(detail) ? '' : '<p class="px-4 pb-4 text-xs text-slate-400">Load the “HE.NET” role on an agent and store an HE DDNS key in the Credential Vault (secret type “HE.NET DDNS key”).</p>'}`;
             return;
         }
         // A non-admin only ever gets their own tenant's records back (the

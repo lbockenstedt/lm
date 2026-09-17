@@ -32,6 +32,9 @@ class _Hub:
         self._request_timeouts_total = 0
         self._request_progress_hard_mult = hard_mult
         self.sent = []
+        # request_response now short-circuits a query to a spoke that is mid
+        # self-update; these tests exercise the live path, so never draining.
+        self.is_draining = lambda sid: False
         self.request_response = main.LabManagerHub.request_response.__get__(self)
         # request_response now updates the durable agent->role registry for
         # every settled command. Borrow the real hook: it early-returns for
