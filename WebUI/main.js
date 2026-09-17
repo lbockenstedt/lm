@@ -12224,11 +12224,11 @@ function _renderSetupTestFeedTile(content) {
                     Issue one under <b>Settings → API Tokens</b> and give it to the receiving hub; revoking it stops that feed immediately.
                 </p>
                 <label class="flex items-center gap-2 text-sm text-slate-700">
-                    <input type="checkbox" id="tf-source-enabled" class="w-4 h-4 text-green-600 rounded" onchange="tfSaveSource()">
+                    <input type="checkbox" id="tf-source-enabled" class="w-4 h-4 text-green-600 rounded" onchange="tfSaveSource()" title="Serve this hub's fleet snapshot to any client holding a valid API token. Toggling this saves immediately.">
                     Publish this hub's fleet as a test-data feed
                 </label>
                 <label class="flex items-center gap-2 text-sm text-slate-700">
-                    <input type="checkbox" id="tf-anonymise" class="w-4 h-4 text-green-600 rounded" onchange="tfSaveSource()">
+                    <input type="checkbox" id="tf-anonymise" class="w-4 h-4 text-green-600 rounded" onchange="tfSaveSource()" title="Replace hostnames, addresses, MACs and serials with stable pseudonyms before publishing. Off = verbatim copy. Passwords/tokens/keys are never included either way.">
                     Anonymise before publishing — replace hostnames, addresses, MACs and serials
                 </label>
                 <p id="tf-mode-state" class="text-[11px] leading-snug"></p>
@@ -12255,27 +12255,27 @@ function _renderSetupTestFeedTile(content) {
                 <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
                     <div class="space-y-1">
                         <label class="${labelCls}">Source hub URL</label>
-                        <input type="text" id="tf-source-url" placeholder="https://lm-hub.example.com" class="${inputCls}">
+                        <input type="text" id="tf-source-url" placeholder="https://lm-hub.example.com" class="${inputCls}" title="Base URL of the SOURCE hub that is publishing the feed (the hub where you enabled 'Publish this hub's fleet').">
                     </div>
                     <div class="space-y-1">
                         <label class="${labelCls}">Access token (Bearer) <span id="tf-token-set" class="normal-case font-normal text-slate-400"></span></label>
-                        <input type="password" id="tf-token" placeholder="paste to set / change" class="${inputCls}">
+                        <input type="password" id="tf-token" placeholder="paste to set / change" class="${inputCls}" title="Bearer access token issued on the SOURCE hub (Settings → API Tokens there). Sent to authenticate each snapshot pull. Leave blank to keep the stored value.">
                     </div>
                     <div class="space-y-1">
                         <label class="${labelCls}">Refresh token <span id="tf-refresh-set" class="normal-case font-normal text-slate-400"></span></label>
-                        <input type="password" id="tf-refresh" placeholder="paste to set / change" class="${inputCls}">
+                        <input type="password" id="tf-refresh" placeholder="paste to set / change" class="${inputCls}" title="Refresh token from the same pair on the SOURCE hub. Lets the feed rotate the short-lived access token on its own instead of stopping when it expires. Leave blank to keep the stored value.">
                     </div>
                     <div class="space-y-1">
                         <label class="${labelCls}">Tenant <span class="normal-case font-normal text-slate-400">· blank = shared</span></label>
-                        <input type="text" id="tf-tenant" placeholder="leave blank for the shared tenant" class="${inputCls}">
+                        <input type="text" id="tf-tenant" placeholder="leave blank for the shared tenant" class="${inputCls}" title="Name a real tenant to make the replayed fleet show in that tenant's Simulations views. Blank binds it to the shared tenant (visible in Spokes & Agents to every tenant).">
                     </div>
                     <div class="space-y-1">
                         <label class="${labelCls}">Spoke id prefix</label>
-                        <input type="text" id="tf-prefix" value="feed-" class="${inputCls}">
+                        <input type="text" id="tf-prefix" value="feed-" class="${inputCls}" title="Prefix added to every synthetic spoke id so you can recognise and bulk-delete the replayed fleet later from Spokes & Agents.">
                     </div>
                     <div class="space-y-1">
                         <label class="${labelCls}">Poll interval (seconds)</label>
-                        <input type="number" id="tf-interval" min="15" step="5" value="60" class="${inputCls}">
+                        <input type="number" id="tf-interval" min="15" step="5" value="60" class="${inputCls}" title="How often (seconds, minimum 15) the receiver pulls a fresh snapshot from the source and re-applies it.">
                     </div>
                 </div>
                 <div class="flex flex-wrap items-center gap-2 pt-1">
@@ -17732,12 +17732,12 @@ async function showLoadRoleModal(spokeId) {
                 </div>
                 <div id="console-dpa-cfg" class="hidden p-3 bg-slate-50 border border-slate-200 rounded-md space-y-2">
                     <label class="flex items-center gap-2 text-xs font-semibold text-slate-700">
-                        <input type="checkbox" id="crole-dpa-enabled" class="rounded border-slate-300" onchange="syncNetboxCreds()"> Enable Direct Port Access (telnet terminal server)
+                        <input type="checkbox" id="crole-dpa-enabled" class="rounded border-slate-300" onchange="syncNetboxCreds()" title="Turn on per-port telnet listeners for this console role. Off by default; when enabled the DPA endpoint appears in the Console port list."> Enable Direct Port Access (telnet terminal server)
                     </label>
                     <p class="text-[11px] text-slate-500">Exposes each detected serial port over a per-port telnet listener (auto-assigned from 2200) so you can attach a terminal straight to the line. The endpoint then shows in the Console port list. <strong>Off by default</strong>; telnet is unauthenticated/unencrypted, so it binds localhost unless you widen it.</p>
                     <div id="crole-dpa-detail" class="hidden grid grid-cols-2 gap-2">
-                        <input id="crole-dpa-bind" type="text" value="127.0.0.1" placeholder="bind address (127.0.0.1 = localhost only)" autocomplete="off" oninput="syncNetboxCreds()" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
-                        <input id="crole-dpa-allow" type="text" placeholder="source-IP allow-list, comma-separated (required if not localhost)" autocomplete="off" class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                        <input id="crole-dpa-bind" type="text" value="127.0.0.1" placeholder="bind address (127.0.0.1 = localhost only)" autocomplete="off" oninput="syncNetboxCreds()" title="Address the telnet listeners bind to. Keep 127.0.0.1 (localhost) so the port is only reachable via an SSH tunnel; widen it only with an allow-list set." class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
+                        <input id="crole-dpa-allow" type="text" placeholder="source-IP allow-list, comma-separated (required if not localhost)" autocomplete="off" title="Comma-separated source IPs/CIDRs allowed to connect. Required when the bind address is not localhost, since telnet is unauthenticated." class="w-full px-3 py-1.5 text-sm border border-slate-300 rounded-md focus:ring-1 focus:ring-green-500 focus:border-green-500">
                         <p id="crole-dpa-warn" class="hidden col-span-2 text-[11px] text-amber-700 font-semibold">⚠ Binding beyond 127.0.0.1 exposes an unauthenticated, unencrypted telnet console on the network. Set a source-IP allow-list, and prefer SSH-tunnelling to localhost instead.</p>
                     </div>
                 </div>
