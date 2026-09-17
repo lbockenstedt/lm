@@ -263,6 +263,15 @@ def _load_feed_spoke():
             self._payload = payload
             self._stats = stats
             self._interval = max(5.0, float(interval))
+            # Throttled diagnostics: a synthetic spoke that cannot attach (bad
+            # PSK, auth reject, TLS, target down) used to bump a counter and
+            # retry in silence, leaving the operator a climbing conn_err with no
+            # reason. Surface the actual exception on the first failure and then
+            # at most once a minute per spoke so a persistent fault stays
+            # visible without flooding the captured log.
+            self._first_connect_logged = False
+            self._last_conn_err_log = 0.0
+            self._last_send_err_log = 0.0
             try:
                 import logging
                 logging.getLogger().removeHandler(self._log_relay_handler)
@@ -319,8 +328,13 @@ def _load_feed_spoke():
                     self._stats["sent"] += 1
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except Exception as e:  # noqa: BLE001
                     self._stats["send_err"] += 1
+                    now = time.time()
+                    if now - self._last_send_err_log >= 60:
+                        self._last_send_err_log = now
+                        print(f"  ! {self.spoke_id}: send failed: {e!r} — "
+                              f"reconnecting", file=sys.stderr)
                     return  # let the reconnect loop take over
                 await asyncio.sleep(self._interval)
 
@@ -334,9 +348,19 @@ def _load_feed_spoke():
                 try:
                     self._stats["connects"] += 1
                     await self._connect_and_serve()
+                    if not self._first_connect_logged:
+                        self._first_connect_logged = True
+                        print(f"  ✓ {self.spoke_id}: attached to {self.hub_url}")
                     delay = 1
-                except Exception:
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001
                     self._stats["conn_err"] += 1
+                    now = time.time()
+                    if now - self._last_conn_err_log >= 60:
+                        self._last_conn_err_log = now
+                        print(f"  ! {self.spoke_id}: cannot attach to "
+                              f"{self.hub_url}: {e!r}", file=sys.stderr)
                     delay = 5 if (time.time() - t0) >= 30 else min(delay * 2, 30)
                 if not stop_evt.is_set():
                     await asyncio.sleep(delay)
