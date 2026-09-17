@@ -418,10 +418,31 @@ async def _run(args, source, salt):
             payload = {k: v for k, v in payload.items() if k != "tenant"}
         return payload
 
+    deadline = time.time() + args.duration if args.duration > 0 else None
     payloads = build_payloads(source.snapshot(), salt, args.prefix)
     stats["polls"] += 1
     if not payloads:
-        raise SystemExit("Source snapshot produced no spokes — nothing to feed.")
+        # The source has no spokes YET — e.g. no active simulations are
+        # producing telemetry at the moment the feed comes up. A hub restart
+        # resumes the feed the instant the process is back, which can easily
+        # beat the source having data. Historically this raised SystemExit, so
+        # the feeder died and the feed stayed silently dead until the NEXT
+        # restart. Instead, keep polling so the feed goes live on its own the
+        # moment the source produces data — no operator round-trip needed.
+        print("Source snapshot has no spokes yet — waiting for the source to "
+              f"produce data (re-polling every {int(args.interval)}s)…",
+              file=sys.stderr)
+        while not payloads:
+            if deadline and time.time() >= deadline:
+                raise SystemExit("Source snapshot stayed empty for the whole "
+                                 "run — nothing to feed.")
+            await asyncio.sleep(args.interval)
+            try:
+                payloads = build_payloads(source.snapshot(), salt, args.prefix)
+                stats["polls"] += 1
+            except Exception as e:  # noqa: BLE001
+                print(f"  ! poll while waiting for data failed: {e}",
+                      file=sys.stderr)
     if tenant_map:
         print(f"Feeding {len(payloads)} synthetic spoke(s) → {args.target} "
               f"(preserving {len(set(tenant_map.values()))} tenant[s])")
@@ -430,7 +451,10 @@ async def _run(args, source, salt):
 
     spokes = {}
     tasks = []
-    for sid, payload in payloads.items():
+
+    def _spawn(sid, payload):
+        """Create + start one synthetic spoke and register it. Shared by the
+        initial fan-out and the re-poll pickup of spokes that appear later."""
         s = FeedSpoke(spoke_id=sid, payload=_clean(payload), stats=stats,
                       interval=args.telemetry_interval,
                       hub_url=args.target, hub_secret=args.secret or None,
@@ -438,26 +462,35 @@ async def _run(args, source, salt):
                       tenant_id_hint=_tenant_for(payload))
         spokes[sid] = s
         tasks.append(asyncio.create_task(s.run_forever(stop_evt)))
+
+    for sid, payload in payloads.items():
+        _spawn(sid, payload)
         await asyncio.sleep(args.ramp / max(1, len(payloads)))
 
-    deadline = time.time() + args.duration if args.duration > 0 else None
     try:
         while not stop_evt.is_set():
             await asyncio.sleep(args.interval)
             if deadline and time.time() >= deadline:
                 break
-            # Re-poll: this is what keeps the target live. New spokes appearing
-            # in production mid-run are ignored for this process's lifetime —
-            # restarting picks them up, and churning the spoke set would leave
-            # orphaned registrations on the target.
+            # Re-poll: this is what keeps the target live. Spokes that appear in
+            # production after the feed started are ADDED so the target keeps
+            # converging on the full source fleet without an operator restart.
+            # We never remove: a spoke that vanishes from the source is left in
+            # place, because dropping it would orphan its registration on the
+            # target and churn the view.
             try:
                 fresh = build_payloads(source.snapshot(), salt, args.prefix)
                 stats["polls"] += 1
+                new_ids = [sid for sid in fresh if sid not in spokes]
                 for sid, payload in fresh.items():
                     if sid in spokes:
                         spokes[sid].set_payload(_clean(payload))
-                print(f"  poll {stats['polls']}: refreshed {len(fresh)} spoke(s); "
-                      f"sent={stats['sent']} conn_err={stats['conn_err']}")
+                for sid in new_ids:
+                    _spawn(sid, fresh[sid])
+                    await asyncio.sleep(args.ramp / max(1, len(new_ids)))
+                extra = f"; +{len(new_ids)} new" if new_ids else ""
+                print(f"  poll {stats['polls']}: refreshed {len(fresh)} spoke(s)"
+                      f"{extra}; sent={stats['sent']} conn_err={stats['conn_err']}")
             except Exception as e:  # noqa: BLE001
                 print(f"  ! re-poll failed: {e} — keeping the previous snapshot",
                       file=sys.stderr)
