@@ -51,6 +51,12 @@ CI/tooling changes are omitted unless they change what an operator sees.
   [lm-hub.md](lm-hub.md).
 
 ### Test Data Feed
+- **A momentarily-empty source no longer kills the feed.** If the source has no
+  spokes when the feed comes up — e.g. no simulations are producing telemetry
+  yet, which a restart's auto-resume can easily race — the feeder now waits and
+  keeps polling instead of exiting, so the feed goes live on its own the moment
+  the source has data (a bounded `--duration` run still gives up when it lapses).
+  See the "Test Data Feed" section of [lm-hub.md](lm-hub.md#test-data-feed).
 - **A feed now survives hub restarts.** An enabled feed auto-resumes when the hub
   self-updates or restarts (it used to silently stay stopped), and the feeder
   persists its own token rotations back to config — so an expired access token no

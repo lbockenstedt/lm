@@ -418,10 +418,31 @@ async def _run(args, source, salt):
             payload = {k: v for k, v in payload.items() if k != "tenant"}
         return payload
 
+    deadline = time.time() + args.duration if args.duration > 0 else None
     payloads = build_payloads(source.snapshot(), salt, args.prefix)
     stats["polls"] += 1
     if not payloads:
-        raise SystemExit("Source snapshot produced no spokes — nothing to feed.")
+        # The source has no spokes YET — e.g. no active simulations are
+        # producing telemetry at the moment the feed comes up. A hub restart
+        # resumes the feed the instant the process is back, which can easily
+        # beat the source having data. Historically this raised SystemExit, so
+        # the feeder died and the feed stayed silently dead until the NEXT
+        # restart. Instead, keep polling so the feed goes live on its own the
+        # moment the source produces data — no operator round-trip needed.
+        print("Source snapshot has no spokes yet — waiting for the source to "
+              f"produce data (re-polling every {int(args.interval)}s)…",
+              file=sys.stderr)
+        while not payloads:
+            if deadline and time.time() >= deadline:
+                raise SystemExit("Source snapshot stayed empty for the whole "
+                                 "run — nothing to feed.")
+            await asyncio.sleep(args.interval)
+            try:
+                payloads = build_payloads(source.snapshot(), salt, args.prefix)
+                stats["polls"] += 1
+            except Exception as e:  # noqa: BLE001
+                print(f"  ! poll while waiting for data failed: {e}",
+                      file=sys.stderr)
     if tenant_map:
         print(f"Feeding {len(payloads)} synthetic spoke(s) → {args.target} "
               f"(preserving {len(set(tenant_map.values()))} tenant[s])")
@@ -440,7 +461,6 @@ async def _run(args, source, salt):
         tasks.append(asyncio.create_task(s.run_forever(stop_evt)))
         await asyncio.sleep(args.ramp / max(1, len(payloads)))
 
-    deadline = time.time() + args.duration if args.duration > 0 else None
     try:
         while not stop_evt.is_set():
             await asyncio.sleep(args.interval)
