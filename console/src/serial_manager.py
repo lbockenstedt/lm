@@ -64,6 +64,16 @@ _PROMPT_HINTS = re.compile(
 # sweeping on the next cycle rather than sticking on a dead guess.
 _BAUD_CONFIDENT_SCORE = 0.8
 
+# How many times to press Enter at each candidate rate before giving up on it.
+#
+# Plenty of switch consoles stay silent until they have seen a few carriage
+# returns — the port is open and the rate is RIGHT, but one Enter draws nothing,
+# so a single-shot probe reads the line as dead and sweeps past the correct
+# rate. (It then usually settles on a wrong one, which is the "console does not
+# recognise the characters I type" symptom.) Nudging a few times per rate is
+# what makes 115200 and 9600 reliably answer on that gear.
+_BAUD_NUDGE_ATTEMPTS = 3
+
 _DEFAULT_SETTINGS = {"baud": 9600, "bytesize": 8, "parity": "N", "stopbits": 1, "flow": "none"}
 
 
@@ -164,24 +174,44 @@ def open_raw(dev: str, baud: int = 9600, timeout: float = 0.3):
 
 
 def detect_baud(dev: str, candidates: Optional[List[int]] = None,
-                read_secs: float = 1.5) -> Dict[str, Any]:
-    """Sweep candidate baud rates (8N1), press Enter, score the reply; return the
-    best. Blocking — callers run it via ``asyncio.to_thread``."""
+                read_secs: float = 1.5,
+                nudges: int = _BAUD_NUDGE_ATTEMPTS) -> Dict[str, Any]:
+    """Sweep candidate baud rates (8N1), press Enter a few times, score the reply;
+    return the best. Blocking — callers run it via ``asyncio.to_thread``.
+
+    Enter is pressed up to *nudges* times per rate because a lot of console gear
+    answers only after several carriage returns (see _BAUD_NUDGE_ATTEMPTS). The
+    per-rate time budget is still ``read_secs`` in total — it is SPLIT across the
+    nudges rather than multiplied by them — so a full sweep takes no longer than
+    it did with a single Enter, and the reply is accumulated across nudges so a
+    device that answers slowly is not missed either."""
     if serial is None:
         raise RuntimeError("pyserial not installed")
     candidates = candidates or DEFAULT_BAUD_CANDIDATES
     best = {"baud": None, "score": -1.0, "sample": b""}
     for baud in candidates:
         try:
+            tries = max(1, int(nudges or 1))
+            # Split, don't multiply: the whole point is more Enters, not a
+            # proportionally longer sweep across eight candidate rates.
+            per_try = max(0.25, float(read_secs) / tries)
             with serial.Serial(dev, baud, timeout=0.3) as ser:
                 ser.reset_input_buffer()
-                ser.write(b"\r\n")
-                deadline = time.monotonic() + read_secs
                 buf = b""
-                while time.monotonic() < deadline and len(buf) < 4096:
-                    chunk = ser.read(256)
-                    if chunk:
-                        buf += chunk
+                for _ in range(tries):
+                    ser.write(b"\r\n")
+                    try:
+                        ser.flush()  # push the CR out before we wait on a reply
+                    except Exception:  # noqa: BLE001 - not every backend has it
+                        pass
+                    deadline = time.monotonic() + per_try
+                    while time.monotonic() < deadline and len(buf) < 4096:
+                        chunk = ser.read(256)
+                        if chunk:
+                            buf += chunk
+                    # Already talking sense — stop nudging this rate.
+                    if len(buf) >= 4096 or score_sample(buf) >= _BAUD_CONFIDENT_SCORE:
+                        break
             s = score_sample(buf)
             if s > best["score"]:
                 best = {"baud": baud, "score": s, "sample": buf}
