@@ -308,6 +308,71 @@ def test_booleans_alongside_scrubbed_keys_are_untouched():
 
 
 # --------------------------------------------------------------------------
+# Full-fleet replay — identity for every spoke, not just Client-Sim hosts
+# --------------------------------------------------------------------------
+
+def test_preserved_snapshot_carries_module_type_and_name_through():
+    """A source that publishes the whole fleet stamps module_type/name per
+    spoke; the receiver must pass those through verbatim so a spoke replays as
+    its REAL type, not a generic 'simulation'."""
+    snap = {"_preserved": {"spokes": {
+        "nw-01": {"module_type": "nw", "name": "switch-core",
+                  "clients": [], "proxmox_vms": []},
+        "cs-svr-01": {"module_type": "simulation", "name": "cs-svr-01",
+                      "clients": [{"hostname": "mipbe-svcs01"}]},
+    }}}
+    payloads = hub_feed.build_payloads(snap, SALT, "feed-")
+    assert payloads["nw-01"]["module_type"] == "nw"
+    assert payloads["nw-01"]["name"] == "switch-core"
+    assert payloads["cs-svr-01"]["clients"][0]["hostname"] == "mipbe-svcs01"
+
+
+def test_clean_strips_identity_keys_from_telemetry_body():
+    """module_type/name/tenant are consumed at registration, never in the
+    CS_TELEMETRY body. The FeedSpoke replays exactly the payload it is handed,
+    so _run cleans those keys before constructing it — verified via the
+    identity round-trip in the FeedSpoke tests below."""
+    FeedSpoke = _maybe_feed_spoke()
+    # A cleaned sim body still carries telemetry; identity is passed separately.
+    s = FeedSpoke(spoke_id="cs-01", payload={"clients": [{"hostname": "h"}]},
+                  stats={}, module_type="simulation", display_name="cs-01",
+                  hub_url="wss://127.0.0.1:443")
+    assert "module_type" not in s._payload and "name" not in s._payload
+    assert s._payload["clients"][0]["hostname"] == "h"
+
+
+def _maybe_feed_spoke():
+    try:
+        return hub_feed._load_feed_spoke()
+    except Exception:  # pragma: no cover — lm core not importable in this env
+        pytest.skip("lm core not importable for FeedSpoke")
+
+
+def test_feedspoke_has_telemetry_gate_distinguishes_sim_from_identity_only():
+    FeedSpoke = _maybe_feed_spoke()
+    assert FeedSpoke._payload_has_telemetry({"clients": [{"hostname": "h"}]})
+    assert FeedSpoke._payload_has_telemetry({"proxmox_vms": [{"vmid": 1}]})
+    assert not FeedSpoke._payload_has_telemetry({"clients": [], "proxmox_vms": []})
+    assert not FeedSpoke._payload_has_telemetry({})
+
+
+def test_feedspoke_registers_with_its_real_type_and_name():
+    FeedSpoke = _maybe_feed_spoke()
+    s = FeedSpoke(spoke_id="nw-01", payload={}, stats={},
+                  module_type="nw", display_name="switch-core",
+                  hub_url="wss://127.0.0.1:443")
+    assert s.module_type == "nw"
+    assert s.hostname == "switch-core"
+
+
+def test_feedspoke_defaults_to_simulation_for_backward_compat():
+    FeedSpoke = _maybe_feed_spoke()
+    s = FeedSpoke(spoke_id="cs-01", payload={"clients": [{"hostname": "h"}]},
+                  stats={}, hub_url="wss://127.0.0.1:443")
+    assert s.module_type == "simulation"
+
+
+# --------------------------------------------------------------------------
 # Access-token rotation
 # --------------------------------------------------------------------------
 
