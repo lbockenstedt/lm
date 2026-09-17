@@ -247,6 +247,23 @@ def register(app, hub, ctx):
                     t = None
                 if t:
                     spokes[str(sid)]["tenant"] = t
+        # Full-fleet identity: add every connected spoke/agent (not just the
+        # Client-Sim hosts that have telemetry rows) so the receiver replays the
+        # WHOLE fleet with real types/names. Verbatim only — under anonymise the
+        # sharded ids are pseudonyms that get_module_name/tenant can't resolve,
+        # so we keep the shape-only (sim-host) behaviour there.
+        if not anonymise:
+            for sid, ident in _fleet_identity(hub).items():
+                rec = spokes.setdefault(str(sid), {
+                    "clients": [], "proxmox_vms": [], "usb_devices": [],
+                    "vm_count": 0, "usb_count": 0,
+                })
+                if ident.get("module_type"):
+                    rec["module_type"] = ident["module_type"]
+                if ident.get("name"):
+                    rec["name"] = ident["name"]
+                if ident.get("tenant") and "tenant" not in rec:
+                    rec["tenant"] = ident["tenant"]
         logger.info("[test-feed] served snapshot to %s: %d spoke(s)",
                     _who(sess), len(spokes))
         return {"spokes": spokes, "generated_at": time.time(),
@@ -683,6 +700,46 @@ def _collect_fleet(hub) -> dict:
     except Exception:  # noqa: BLE001 — an empty snapshot beats a 500
         logger.debug("[test-feed] fleet collection failed", exc_info=True)
     return {"clients": clients, "proxmox": vms, "usb": usb}
+
+
+def _fleet_identity(hub) -> dict:
+    """Every CURRENTLY-CONNECTED spoke → its identity (module_type, name,
+    tenant), keyed by spoke id.
+
+    ``_collect_fleet`` only knows the hosts that push Client-Sim telemetry (2
+    on a typical fleet), so a snapshot built from it alone replays just those.
+    This enumerates the whole live fleet from ``active_connections`` so the
+    receiver can replay EVERY spoke and agent as a connected spoke of its real
+    type — the test hub mirrors production, not only the sim hosts. Telemetry
+    still rides ``_collect_fleet``; this adds identity for the rest, which show
+    online via their heartbeat with empty deep pages."""
+    out = {}
+    try:
+        conn = list(getattr(hub, "active_connections", {}) or {})
+    except Exception:  # noqa: BLE001
+        return out
+    state = getattr(hub, "state", None)
+    types = getattr(hub, "spoke_module_types", {}) or {}
+    meta = {}
+    try:
+        meta = (state.system_state.get("module_metadata", {}) or {}) if state else {}
+    except Exception:  # noqa: BLE001
+        meta = {}
+    for sid in conn:
+        sid = str(sid)
+        mtype = types.get(sid) or (meta.get(sid, {}) or {}).get("module_type") or ""
+        try:
+            name = state.get_module_name(sid) if state else sid
+        except Exception:  # noqa: BLE001
+            name = sid
+        try:
+            tenant = state.get_spoke_tenant(sid) if state else ""
+        except Exception:  # noqa: BLE001
+            tenant = ""
+        out[sid] = {"module_type": mtype or "",
+                    "name": name or sid,
+                    "tenant": tenant or ""}
+    return out
 
 
 def _probe_source(base_url: str, token: str) -> dict:

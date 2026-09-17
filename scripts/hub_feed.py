@@ -279,10 +279,21 @@ def _load_feed_spoke():
         never write a real ``.env``, touch healthy-marker files, or act on
         SPOKE_UPDATE (which would git-pull /opt/lm and restart the host)."""
 
-        def __init__(self, spoke_id, payload, stats, interval=30.0, **kw):
+        def __init__(self, spoke_id, payload, stats, interval=30.0,
+                     module_type="simulation", display_name="", **kw):
             super().__init__(spoke_id=spoke_id, **kw)
-            self.module_type = "simulation"   # cs-like → exercises the telemetry path
+            # Replay each spoke as its REAL module type so the target shows the
+            # whole fleet, not a wall of "simulation". Client-Sim hosts keep the
+            # simulation type (→ exercises the telemetry path); everything else
+            # (nw, dns, agent, …) registers as itself and shows online via its
+            # heartbeat with empty deep pages.
+            self.module_type = module_type or "simulation"
+            if display_name:
+                # Seeds the target's display_name on register (state/manager),
+                # so the spoke shows its production name, not its raw id.
+                self.hostname = display_name
             self._payload = payload
+            self._has_telemetry = self._payload_has_telemetry(payload)
             self._stats = stats
             self._interval = max(5.0, float(interval))
             # Throttled diagnostics: a synthetic spoke that cannot attach (bad
@@ -304,6 +315,16 @@ def _load_feed_spoke():
             """Swap in a freshly polled snapshot — this is what makes the feed
             live rather than a fixture frozen at startup."""
             self._payload = payload
+            self._has_telemetry = self._payload_has_telemetry(payload)
+
+        @staticmethod
+        def _payload_has_telemetry(payload):
+            """True when this spoke has Client-Sim rows to replay. Identity-only
+            spokes (no clients/VMs) skip CS_TELEMETRY so they don't seed the
+            target's simulations_cache with a phantom zero-client host — the
+            heartbeat alone keeps them online with their real type/name."""
+            p = payload or {}
+            return bool(p.get("clients")) or bool(p.get("proxmox_vms")) or bool(p.get("vms"))
 
         # ── neutralise side-effects (mirrors loadtest_spokes.LoadSpoke) ──────
         def _ensure_install_uuid(self):
@@ -331,6 +352,12 @@ def _load_feed_spoke():
             return await super().handle_system_command(cmd_type, data)
 
         def _create_spoke_tasks(self, websocket):
+            if not self._has_telemetry:
+                # No Client-Sim telemetry to emit: the heartbeat thread (started
+                # in _connect_and_serve, independent of these tasks) keeps the
+                # spoke ONLINE with its real type/name. Sending empty telemetry
+                # would only pollute the target's simulations_cache.
+                return []
             return [asyncio.create_task(self._feed_loop(websocket))]
 
         async def _feed_loop(self, websocket):
@@ -412,10 +439,12 @@ async def _run(args, source, salt):
         return _resolve_tenant(payload, tenant_map, args.tenant)
 
     def _clean(payload):
-        """Drop the routing-only ``tenant`` key so the replayed CS_TELEMETRY
-        matches production shape (tenant is metadata, not fleet data)."""
-        if isinstance(payload, dict) and "tenant" in payload:
-            payload = {k: v for k, v in payload.items() if k != "tenant"}
+        """Drop the routing/identity-only keys so the replayed CS_TELEMETRY
+        matches production shape (tenant/module_type/name are metadata, not
+        fleet data — they're consumed at registration, not in telemetry)."""
+        drop = ("tenant", "module_type", "name")
+        if isinstance(payload, dict) and any(k in payload for k in drop):
+            payload = {k: v for k, v in payload.items() if k not in drop}
         return payload
 
     deadline = time.time() + args.duration if args.duration > 0 else None
@@ -457,6 +486,8 @@ async def _run(args, source, salt):
         initial fan-out and the re-poll pickup of spokes that appear later."""
         s = FeedSpoke(spoke_id=sid, payload=_clean(payload), stats=stats,
                       interval=args.telemetry_interval,
+                      module_type=(payload or {}).get("module_type") or "simulation",
+                      display_name=(payload or {}).get("name") or "",
                       hub_url=args.target, hub_secret=args.secret or None,
                       onboarding_psk=args.psk or None,
                       tenant_id_hint=_tenant_for(payload))
