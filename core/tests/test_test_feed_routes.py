@@ -117,6 +117,79 @@ def test_rows_are_copied_not_aliased():
 
 
 # --------------------------------------------------------------------------
+# _fleet_identity — whole-fleet identity for full-fleet replay
+# --------------------------------------------------------------------------
+
+from routes.test_feed import _fleet_identity  # noqa: E402
+
+
+class _State:
+    def __init__(self, names=None, tenants=None, meta=None):
+        self._names = names or {}
+        self._tenants = tenants or {}
+        self.system_state = {"module_metadata": meta or {}}
+
+    def get_module_name(self, sid):
+        return self._names.get(sid)
+
+    def get_spoke_tenant(self, sid):
+        return self._tenants.get(sid)
+
+
+class _FleetHub:
+    def __init__(self, conn, types=None, state=None, cache=None):
+        self.active_connections = {sid: object() for sid in conn}
+        self.spoke_module_types = types or {}
+        self.state = state or _State()
+        self.simulations_cache = cache or {}
+
+
+def test_fleet_identity_enumerates_every_connected_spoke():
+    """The whole point of full-fleet replay: identity for EVERY connected spoke,
+    not just the Client-Sim hosts that push telemetry."""
+    hub = _FleetHub(
+        conn=["nw-01", "dns-01", "cs-svr-01"],
+        types={"nw-01": "nw", "dns-01": "dns", "cs-svr-01": "simulation"},
+        state=_State(
+            names={"nw-01": "switch-core", "dns-01": "unbound-a",
+                   "cs-svr-01": "cs-svr-01"},
+            tenants={"nw-01": "t-red", "dns-01": "default"}),
+    )
+    out = _fleet_identity(hub)
+    assert set(out) == {"nw-01", "dns-01", "cs-svr-01"}
+    assert out["nw-01"]["module_type"] == "nw"
+    assert out["nw-01"]["name"] == "switch-core"
+    assert out["nw-01"]["tenant"] == "t-red"
+
+
+def test_fleet_identity_falls_back_to_metadata_for_module_type():
+    """A spoke absent from spoke_module_types (races on connect) still gets its
+    type from module_metadata rather than shipping blank."""
+    hub = _FleetHub(
+        conn=["ipam-01"],
+        types={},
+        state=_State(meta={"ipam-01": {"module_type": "ipam"}}),
+    )
+    assert _fleet_identity(hub)["ipam-01"]["module_type"] == "ipam"
+
+
+def test_fleet_identity_name_defaults_to_id_and_blanks_are_safe():
+    hub = _FleetHub(conn=["x1"], types={"x1": "nac"}, state=_State())
+    rec = _fleet_identity(hub)["x1"]
+    assert rec["name"] == "x1"
+    assert rec["module_type"] == "nac"
+    assert rec["tenant"] == ""
+
+
+def test_fleet_identity_degrades_to_empty_when_connections_unavailable():
+    class _Bad:
+        @property
+        def active_connections(self):
+            raise RuntimeError("no state")
+    assert _fleet_identity(_Bad()) == {}
+
+
+# --------------------------------------------------------------------------
 # _probe_source — operator-facing error mapping
 # --------------------------------------------------------------------------
 

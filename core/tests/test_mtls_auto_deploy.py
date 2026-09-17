@@ -364,6 +364,42 @@ def test_set_runtime_materials_partial_update_doesnt_clobber():
         mtls.set_runtime_materials(ca="", client_cert="", client_key="")
 
 
+# ── per-spoke readiness: client-only agents (ab) don't need a CA bundle ───────
+# Regression for the AppBuilder "AB · ab · missing materials" dot: ab is a
+# CLIENT-ONLY hub-side agent (hub_agent.py handles only SPOKE_SET_MTLS_CLIENT_CERT
+# and reports ca_present from LM_HUB_CA_CERT, unset by default). It authenticates
+# with a client cert+key but never holds a CA bundle, so requiring ca_present of
+# it pinned mtls_readiness at "missing materials" forever.
+import hub_cert_distribution as hcd  # noqa: E402
+
+
+def test_full_spoke_needs_all_three_materials():
+    assert hcd._spoke_mtls_ready("nw", True, True, True, True)
+    assert not hcd._spoke_mtls_ready("nw", True, False, True, True)   # no CA
+    assert not hcd._spoke_mtls_ready("nw", True, True, False, True)   # no cert
+    assert not hcd._spoke_mtls_ready("nw", True, True, True, False)   # no key
+
+
+def test_client_only_ab_is_ready_without_a_ca_bundle():
+    """The fix: ab is ready on client cert+key alone — the CA (hub-cert
+    verification) is optional and gated separately by LM_HUB_TLS_VERIFY."""
+    assert "ab" in hcd.CLIENT_ONLY_MTLS_TYPES
+    assert hcd._spoke_mtls_ready("ab", True, False, True, True)
+    assert hcd._spoke_mtls_ready("ab", True, True, True, True)
+
+
+def test_client_only_ab_still_needs_its_client_identity():
+    """CA is waived, but the client cert+key are what ab authenticates WITH —
+    those are never optional, else it truly could not attach under mTLS."""
+    assert not hcd._spoke_mtls_ready("ab", True, False, False, True)  # no cert
+    assert not hcd._spoke_mtls_ready("ab", True, False, True, False)  # no key
+
+
+def test_offline_is_never_ready_regardless_of_type():
+    assert not hcd._spoke_mtls_ready("ab", False, False, False, False)
+    assert not hcd._spoke_mtls_ready("nw", False, True, True, True)
+
+
 if __name__ == "__main__":
     import pytest
     sys.exit(pytest.main([__file__, "-v"]))
