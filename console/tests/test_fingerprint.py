@@ -211,6 +211,113 @@ def test_detect_vendor_juniper():
     assert fp.detect_vendor("Juniper Networks, Inc. srx340")["name"] == "juniper-junos"
 
 
+def test_detect_vendor_juniper_prelogin_shows_no_vendor_string():
+    # A login-locked SRX/EX prints only "<hostname> (ttyu0)" — no vendor name —
+    # and must not fall through to the `linux` profile's bare "login:" match.
+    assert fp.detect_vendor("\r\nsrx340 (ttyu0)\r\n\r\nlogin: ")["name"] == "juniper-junos"
+    assert fp.detect_vendor("\r\nAmnesiac (ttyu0)\r\n\r\nlogin: ")["name"] == "juniper-junos"
+    # A genuine Linux box is still a Linux box.
+    assert fp.detect_vendor("\r\nUbuntu 22.04.3 LTS host tty1\r\n"
+                            "\r\nhost login: ")["name"] == "linux"
+
+
+_SYSLOG_LINE = ("\r\nDec  9 10:22:01  srx340 sshd[1234]: "
+                "Connection closed by 10.1.1.5\r\n")
+
+
+def test_prompt_tail_sees_through_console_log_noise():
+    # Juniper (and any box with `system syslog console`) prints log lines that
+    # land AFTER the prompt, scrolling the live prompt up. The anchored prompt
+    # patterns only match at the end of the buffer, so the noise must be stripped
+    # or no credential is ever spent.
+    noisy = "\r\nsrx340 (ttyu0)\r\n\r\nlogin: " + _SYSLOG_LINE
+    assert not fp._LOGIN_PROMPT.search(noisy[-200:])           # what used to happen
+    assert fp._LOGIN_PROMPT.search(fp._prompt_tail(noisy))     # what happens now
+    # Quiet lines are unaffected, and noise alone must not invent a prompt.
+    assert fp._LOGIN_PROMPT.search(fp._prompt_tail("\r\nlogin: "))
+    assert not fp._LOGIN_PROMPT.search(fp._prompt_tail(_SYSLOG_LINE * 2))
+    # Kernel ring-buffer and Cisco facility messages count as noise too.
+    assert fp._LOGIN_PROMPT.search(fp._prompt_tail(
+        "\r\nlogin: \r\n[   12.345678] usb 1-1: new device\r\n"))
+    assert fp._PASSWORD_PROMPT.search(fp._prompt_tail(
+        "\r\nPassword:\r\n%LINK-3-UPDOWN: Interface ge-0/0/1, changed state\r\n"))
+
+
+class _ChattyLoginChan:
+    """A device that logs to its own console: every prompt it prints is followed
+    immediately by an asynchronous syslog line, so the prompt is never the last
+    thing on the wire. Accepts exactly one credential."""
+
+    def __init__(self, user, password):
+        self.user, self.password = user, password
+        self.buf = bytearray()
+        self.line = ""
+        self.stage = "login"
+        self.attempts = []
+        self._emit("\r\nsrx340 (ttyu0)\r\n\r\nlogin: ")
+
+    def _emit(self, text):
+        self.buf += (text + _SYSLOG_LINE).encode()
+
+    def read(self):
+        out = bytes(self.buf[:256])
+        del self.buf[:256]
+        return out
+
+    def write(self, b):
+        for ch in b.decode(errors="replace"):
+            if ch in "\r\n":
+                self._submit(self.line)
+                self.line = ""
+            else:
+                self.line += ch
+
+    def _submit(self, line):
+        if self.stage == "login":
+            if not line:                       # bare CR nudge → redraw the prompt
+                self._emit("\r\nlogin: ")
+                return
+            self._pending = line
+            self.stage = "password"
+            self._emit("\r\nPassword:")
+        elif self.stage == "password":
+            self.attempts.append(self._pending)
+            if self._pending == self.user and line == self.password:
+                self.stage = "shell"
+                self._emit("\r\n--- JUNOS 21.4R3-S4.9 built 2023-05-01\r\nroot@srx340> ")
+            else:
+                self.stage = "login"
+                self._emit("\r\nLogin incorrect\r\nlogin: ")
+        else:
+            self._emit("\r\nroot@srx340> ")
+
+
+def test_generic_login_spends_credential_on_console_logging_device():
+    # Regression: a chatty Juniper used to report "output seen but no
+    # recognizable login/password prompt" and never try a credential at all.
+    chan = _ChattyLoginChan("admin", "s3cret")
+    logged_in, idx, _transcript, diag = fp._generic_login(
+        chan.read, chan.write, [{"username": "admin", "password": "s3cret"}],
+        banner_secs=1.0)
+    assert chan.attempts == ["admin"], "the credential was never tried"
+    assert logged_in is True
+    assert idx == 0
+    assert diag["login_prompt_seen"] is True
+    assert diag["creds_tried"] == 1
+
+
+def test_run_identify_rejected_credential_is_still_attempted_when_chatty():
+    chan = _ChattyLoginChan("admin", "s3cret")
+    res = fp.run_identify(chan.read, chan.write,
+                          [{"username": "admin", "password": "wrong"}],
+                          banner_secs=1.0, cmd_secs=1.0)
+    assert chan.attempts == ["admin"]
+    assert res["logged_in"] is False
+    # The operator must be told the password failed, not that nothing was found.
+    assert "no recognizable login/password prompt" not in res["diag"]["reason"]
+
+
+
 def test_infer_device_type():
     assert fp.infer_device_type("SRX340", "Firewall/Router") == "Firewall"
     assert fp.infer_device_type("EX4300-48T", "Firewall/Router") == "Switch"

@@ -234,6 +234,26 @@ comma-separated **source-IP allow-list**. This maps to the role config keys
   credentials logged in (the probe stops after trying each once — it deliberately does
   not retry/hammer). A manual Identify surfaces the raw banner even if the profile match
   or login failed, which helps diagnose which step is failing.
+- **It says it can't log in, but no login is ever attempted on the line.** Check the
+  port's diagnostics `reason`. Two causes look identical from the UI:
+  - *"output seen but no recognizable login/password prompt"* — the device printed
+    something after its prompt so the prompt was no longer the last thing on the wire.
+    Gear that logs to its own console does this constantly (Juniper SRX/EX ship with
+    console logging on). The probe now strips trailing syslog/kernel/facility lines
+    before matching, so this should resolve itself; if a device uses a prompt string
+    we don't know, add it to `console/src/prompt_patterns.json` — no code change needed.
+  - *"login prompt seen but no stored credentials to try"* — the hub pushed an empty
+    credential list. A Credential Vault secret only reaches a console agent when it is
+    (a) typed `console` **or** `login`, (b) stored **automation-readable** (hub mode —
+    a pass-phrase-only secret is deliberately skipped, since the hub can't decrypt it
+    unattended), and (c) in the agent's **own tenant bucket or the `__admin__` slot**.
+    A login saved into a different tenant's bucket is never pushed to that agent. The
+    Console diagnostics banner reports the saved/seeded counts (counts only, never
+    values) so you can tell "not saved" from "saved but not seeded".
+- **A Juniper device is reported as a Linux server.** A login-locked SRX/EX prints only
+  `<hostname> (ttyu0)` — no vendor string — so it used to fall through to the generic
+  `login:` match. It is now recognized pre-login; the full model/serial still require a
+  successful login, so fix the credential first.
 - **Agent shows offline.** That's the underlying generic-agent host, not the console role
   specifically — see [generic-agent.md](generic-agent.md) troubleshooting for the base
   agent connection.
