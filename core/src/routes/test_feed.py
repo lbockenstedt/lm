@@ -230,9 +230,9 @@ def register(app, hub, ctx):
             spokes[str(sid)] = {
                 "clients": bucket["clients"],
                 "proxmox_vms": bucket["vms"],
-                "usb_devices": [],
+                "usb_devices": bucket["usb"],
                 "vm_count": len(bucket["vms"]),
-                "usb_count": 0,
+                "usb_count": len(bucket["usb"]),
             }
             # Stamp the spoke's source tenant so a receiver in "preserve" mode
             # can replay the fleet into the matching local tenant instead of
@@ -644,7 +644,7 @@ def _collect_fleet(hub) -> dict:
     through the HTTP aggregate endpoints — same data, no self-request, and no
     dependency on the caller's tenant scoping (this is a Global-Admin export of
     the whole hub, deliberately)."""
-    clients, vms = [], []
+    clients, vms, usb = [], [], []
     try:
         # Same store SimulationsService._cache() reads (service.py:86) — the
         # per-spoke CS_TELEMETRY frames, keyed by spoke id.
@@ -655,13 +655,34 @@ def _collect_fleet(hub) -> dict:
                 row = dict(c or {})
                 row.setdefault("spoke_id", sid)
                 clients.append(row)
-            for v in (data.get("proxmox_vms") or data.get("vms") or []):
-                row = dict(v or {})
-                row.setdefault("spoke_id", sid)
-                vms.append(row)
+            # VMs and USB devices live EITHER at the top of the frame OR, for a
+            # multi-host cs/pxmx spoke, nested per host under "proxmox_hosts".
+            # SimulationsService renders the per-host lists (service.py
+            # _running_sim_vms, the VM Server view use proxmox_hosts when
+            # present and fall back to the top level otherwise), so harvesting
+            # only the top level dropped every VM and USB device on a
+            # host-structured frame — which is the bulk of a real fleet. Mirror
+            # that exact precedence here so the feed carries all of it.
+            hosts = data.get("proxmox_hosts")
+            sources = hosts if isinstance(hosts, list) and hosts else [data]
+            for host in sources:
+                host = host or {}
+                node = host.get("hostname") or host.get("node")
+                for v in (host.get("proxmox_vms") or host.get("vms") or []):
+                    row = dict(v or {})
+                    row.setdefault("spoke_id", sid)
+                    if node:
+                        row.setdefault("node", node)
+                    vms.append(row)
+                for u in (host.get("usb_devices") or []):
+                    row = dict(u or {})
+                    row.setdefault("spoke_id", sid)
+                    if node:
+                        row.setdefault("node", node)
+                    usb.append(row)
     except Exception:  # noqa: BLE001 — an empty snapshot beats a 500
         logger.debug("[test-feed] fleet collection failed", exc_info=True)
-    return {"clients": clients, "proxmox": vms}
+    return {"clients": clients, "proxmox": vms, "usb": usb}
 
 
 def _probe_source(base_url: str, token: str) -> dict:
