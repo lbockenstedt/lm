@@ -713,6 +713,18 @@ function _taTenantQuery() {
     return `?tenant=${encodeURIComponent(currentTenant || 'default')}`;
 }
 
+function _consoleTenantQuery() {
+    // The Credential Library follows the tenant picker for BOTH roles. A tenant
+    // Admin is always scoped to an owned tenant (as with _taTenantQuery). A
+    // Global Admin who has a specific tenant selected must see THAT tenant's
+    // console logins — those live in the per-tenant vault bucket, not the shared
+    // __admin__ slot — so send the tenant explicitly. The "all tenants" pick
+    // (or none) sends nothing, so the hub returns the fleet-wide inventory.
+    const t = currentTenant || '';
+    if (!t || t === 'all' || t === '__all__') return '';
+    return `?tenant=${encodeURIComponent(t)}`;
+}
+
 function hasConsoleWrite() {
     const p = currentUser?.permissions || {};
     return isAdmin() || isTenantAdmin() || p.console_write === true;
@@ -20832,7 +20844,7 @@ async function refreshConsoleDiagnostics() {
     if (!body) return;
     let data = { diagnostics: [], errors: {} };
     try {
-        const res = await fetch('/api/console/diagnostics', { credentials: 'same-origin' });
+        const res = await fetch(`/api/console/diagnostics?tenant=${encodeURIComponent(currentTenant || 'default')}`, { credentials: 'same-origin' });
         if (res.ok) data = await res.json();
         else { body.innerHTML = `<div class="text-red-500">Failed to load (${res.status})</div>`; return; }
     } catch (e) { body.innerHTML = `<div class="text-red-500">${escapeHtml(e.message)}</div>`; return; }
@@ -21208,7 +21220,7 @@ async function openConsoleCredentialsModal() {
     let bucketHasPsk = false;
     let loadFailed = false;
     try {
-        const res = await fetch('/api/console/credentials' + _taTenantQuery(), { credentials: 'same-origin' });
+        const res = await fetch('/api/console/credentials' + _consoleTenantQuery(), { credentials: 'same-origin' });
         if (res.ok) {
             const j = await res.json();
             existing = j.credentials || [];
