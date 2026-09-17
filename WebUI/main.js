@@ -1750,8 +1750,8 @@ const VIEW_SUBMENUS = {
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management', 'Assistant'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
-    dns: ['Overview', 'Records', 'Diagnostics', 'Forwarders', 'External DNS'],
-    dhcp: ['Overview', 'Diagnostics', 'Subnets', 'Leases', 'Reservations'],
+    dns: ['Overview', 'Records', 'Forwarders', 'External DNS', 'Diagnostics'],
+    dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations', 'Diagnostics'],
     nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'Other', 'Scan'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
 };
