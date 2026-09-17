@@ -442,6 +442,76 @@ def test_detect_baud_not_confident_when_silent(monkeypatch):
     assert res["confident"] is False
 
 
+def test_default_candidates_try_115200_then_9600_first():
+    """The two rates that cover almost all console gear must lead the sweep, in
+    that order, so detection reaches them before any exotic rate."""
+    assert m.DEFAULT_BAUD_CANDIDATES[:2] == [115200, 9600]
+    assert m.PRIORITY_BAUDS == (115200, 9600)
+
+
+class _MapFakeSerial:
+    """Serial stand-in returning a per-baud reply from ``replies`` and recording
+    every rate that gets opened, so a test can assert the sweep stopped early."""
+    replies = {}
+    probed = []
+
+    class SerialException(Exception):
+        pass
+
+    class Serial:
+        def __init__(self, dev, baud, timeout=0.3):
+            self.baud = baud
+            _MapFakeSerial.probed.append(baud)
+            self._buf = _MapFakeSerial.replies.get(baud, b"")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def reset_input_buffer(self):
+            pass
+
+        def write(self, b):
+            pass
+
+        def read(self, n):
+            out, self._buf = self._buf[:n], self._buf[n:]
+            return out
+
+        def close(self):
+            pass
+
+
+def test_priority_rate_locks_over_a_higher_scoring_exotic_rate(monkeypatch):
+    """115200 answering with plain readable text (confident but no prompt bonus)
+    must LOCK even though a later exotic rate would score higher on a prompt
+    banner — we stop at the priority rate and never probe the exotic ones."""
+    _MapFakeSerial.probed = []
+    # 115200: printable, no prompt hint -> ~1.0 (confident, but below the 1.3
+    # hard-stop). 38400: a prompt banner -> ~1.5, which would win if reached.
+    _MapFakeSerial.replies = {115200: b"the quick brown fox jumps over\r\n",
+                              38400: b"Switch> \r\nlogin: "}
+    monkeypatch.setattr(m, "serial", _MapFakeSerial)
+    res = m.detect_baud("/dev/ttyUSB0")  # DEFAULT order: 115200, 9600, 38400, …
+    assert res["baud"] == 115200 and res["confident"] is True
+    assert 38400 not in _MapFakeSerial.probed, "exotic rate must never be reached"
+
+
+def test_falls_back_to_9600_when_115200_is_silent(monkeypatch):
+    """115200 silent, 9600 readable -> lock 9600 and stop before exotic rates:
+    'always go back to 115200 then 9600'."""
+    _MapFakeSerial.probed = []
+    _MapFakeSerial.replies = {9600: b"the quick brown fox jumps over\r\n",
+                              38400: b"Switch> \r\nlogin: "}
+    monkeypatch.setattr(m, "serial", _MapFakeSerial)
+    res = m.detect_baud("/dev/ttyUSB0")
+    assert res["baud"] == 9600 and res["confident"] is True
+    assert _MapFakeSerial.probed[:2] == [115200, 9600]
+    assert 38400 not in _MapFakeSerial.probed
+
+
 # ── Persistent circular capture (5 MiB per console device, disk-backed) ────────
 
 def test_safe_port_name_sanitizes():

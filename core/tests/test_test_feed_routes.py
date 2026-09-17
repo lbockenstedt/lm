@@ -21,7 +21,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from routes.test_feed import _collect_fleet, _probe_source, _DEFAULTS  # noqa: E402
+from routes.test_feed import _collect_fleet, _probe_source, _source_tenants, _DEFAULTS  # noqa: E402
+from routes.test_feed import TOKEN_ROTATION_SENTINEL as _ROUTE_SENTINEL  # noqa: E402
 
 
 class _Hub:
@@ -177,6 +178,63 @@ def test_tenant_defaults_to_shared_but_can_be_overridden():
     assert _DEFAULTS["receiver_tenant"] == ""
 
 
+def test_preserve_tenants_is_off_by_default():
+    """The historical behaviour — one tenant for the whole fleet — stays the
+    default; preserve is opt-in so an existing feed's placement never moves
+    under an operator on upgrade."""
+    assert _DEFAULTS["receiver_preserve_tenants"] is False
+
+
+# --------------------------------------------------------------------------
+# _source_tenants — preserve-mode tenant discovery
+# --------------------------------------------------------------------------
+
+def _snapshot_resp(payload):
+    import io
+    import json
+
+    class _Resp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    return _Resp(json.dumps(payload).encode())
+
+
+def test_source_tenants_collects_distinct_ids(monkeypatch):
+    import urllib.request
+    snap = {"spokes": {
+        "s1": {"clients": [], "tenant": "acme"},
+        "s2": {"clients": [], "tenant": "acme"},
+        "s3": {"clients": [], "tenant": "globex"},
+    }}
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **kw: _snapshot_resp(snap))
+    assert _source_tenants("https://src", "tok") == {"acme", "globex"}
+
+
+def test_source_tenants_empty_when_unattributed(monkeypatch):
+    """An older or anonymised source omits the per-spoke tenant. Preserve must
+    degrade to the fallback tenant, so the discovery set is simply empty rather
+    than an error."""
+    import urllib.request
+    snap = {"spokes": {"s1": {"clients": []}, "s2": {"clients": [], "tenant": ""}}}
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **kw: _snapshot_resp(snap))
+    assert _source_tenants("https://src", "tok") == set()
+
+
+def test_source_tenants_sends_bearer_token(monkeypatch):
+    import urllib.request
+    seen = {}
+
+    def _capture(req, *a, **kw):
+        seen["auth"] = req.get_header("Authorization")
+        return _snapshot_resp({"spokes": {}})
+
+    monkeypatch.setattr(urllib.request, "urlopen", _capture)
+    _source_tenants("https://src", "tok-xyz")
+    assert seen["auth"] == "Bearer tok-xyz"
+
+
 def test_there_is_no_operator_supplied_psk():
     """The onboarding PSK only auto-approves the synthetic spokes on THIS hub,
     which is also what spawns them. Start mints an ephemeral one and stop
@@ -190,6 +248,15 @@ def test_both_halves_of_the_token_pair_are_configurable():
     feed dies overnight and reads as 'it randomly stopped'."""
     assert "receiver_token" in _DEFAULTS
     assert "receiver_refresh_token" in _DEFAULTS
+
+
+def test_rotation_sentinel_matches_the_feeder(monkeypatch):
+    """The feeder prints this exact prefix and the route parses it back out; if
+    the two constants drift, rotated tokens are never persisted and the feed
+    silently reverts to dying for good on the next restart."""
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
+    import hub_feed
+    assert _ROUTE_SENTINEL == hub_feed.TOKEN_ROTATION_SENTINEL
 
 
 def test_test_feed_redaction():
