@@ -140,6 +140,8 @@ Both halves are configured from the same page (Setup → Test Data Feed, Global-
 
 Publishing is **off by default**; deploying the code never turns a hub into a data source. Once on, `GET /api/test-feed/snapshot` serves the fleet to any client holding a valid token.
 
+**What "the fleet" means.** The snapshot carries the source's Client-Sim telemetry — the same per-spoke frames the Simulations views render: every spoke's clients, its Proxmox VMs and its USB devices. VMs and USB devices are harvested from wherever they live in the frame, including the per-host lists nested under `proxmox_hosts` on a multi-host spoke (an earlier version only read the top level, so a host-structured fleet reached the target with no VMs and no USB devices). Each VM/USB row is attributed to its spoke and stamped with its host node so it lands in the right place on the target.
+
 **The copy is verbatim by default.** Real hostnames, addresses, MACs and serials are published as-is, because the point of the feed is to reproduce a production issue against the identifiers you actually see in the field — pseudonyms defeat that. The page says which mode is live, and enabling publishing while verbatim asks for confirmation naming what leaves the hub. Treat the API token as what it is: a read key to a full picture of your estate.
 
 **Passwords, tokens and keys are never included, in either mode.** That is not a toggle. Copying real hostnames to a test hub is a judgement you make about your own estate; copying live credentials onto a less-hardened box is a different category of exposure, and duplicating fleet data faithfully never requires it.

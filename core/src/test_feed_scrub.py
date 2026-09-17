@@ -144,7 +144,7 @@ def scrub_snapshot(obj, salt, pseudonymise=False):
 
 
 def shard_by_spoke(snapshot):
-    """Group the flat client/VM lists back into per-spoke buckets.
+    """Group the flat client/VM/USB lists back into per-spoke buckets.
 
     The aggregate endpoints return the tenant's fleet already merged across
     spokes (that is what "aggregate" means), but the target has to receive it as
@@ -158,18 +158,26 @@ def shard_by_spoke(snapshot):
     vms = snapshot.get("proxmox") or {}
     if isinstance(vms, dict):
         vms = vms.get("vms") or vms.get("proxmox_vms") or vms.get("data") or []
+    usb = snapshot.get("usb") or {}
+    if isinstance(usb, dict):
+        usb = usb.get("usb") or usb.get("usb_devices") or usb.get("data") or []
 
     buckets = {}
     for c in clients if isinstance(clients, list) else []:
         if not isinstance(c, dict):
             continue
         sid = c.get("spoke_id") or c.get("spoke") or c.get("source_spoke") or "unattributed"
-        buckets.setdefault(str(sid), {"clients": [], "vms": []})["clients"].append(c)
+        buckets.setdefault(str(sid), {"clients": [], "vms": [], "usb": []})["clients"].append(c)
     for v in vms if isinstance(vms, list) else []:
         if not isinstance(v, dict):
             continue
         sid = v.get("spoke_id") or v.get("spoke") or v.get("node") or "unattributed"
-        buckets.setdefault(str(sid), {"clients": [], "vms": []})["vms"].append(v)
+        buckets.setdefault(str(sid), {"clients": [], "vms": [], "usb": []})["vms"].append(v)
+    for u in usb if isinstance(usb, list) else []:
+        if not isinstance(u, dict):
+            continue
+        sid = u.get("spoke_id") or u.get("spoke") or u.get("node") or "unattributed"
+        buckets.setdefault(str(sid), {"clients": [], "vms": [], "usb": []})["usb"].append(u)
     return buckets
 
 
@@ -196,9 +204,9 @@ def build_payloads(snapshot, salt, prefix):
         payloads[sid] = {
             "clients": bucket["clients"],
             "proxmox_vms": bucket["vms"],
-            "usb_devices": [],
+            "usb_devices": bucket["usb"],
             "vm_count": len(bucket["vms"]),
-            "usb_count": 0,
+            "usb_count": len(bucket["usb"]),
         }
     return payloads
 
