@@ -718,3 +718,25 @@ def test_permanently_empty_source_gives_up_after_the_run_duration(monkeypatch):
     monkeypatch.setattr(hub_feed, "_load_feed_spoke", lambda: object)
     with pytest.raises(SystemExit):
         asyncio.run(hub_feed._run(_feed_args(duration=0.03), _Empty(), SALT))
+
+
+def test_feed_spoke_install_uuid_is_stable_per_spoke_id():
+    """The hub keys a module by its install_uuid (guid-primary). A random uuid
+    per run would mint a BRAND-NEW module on every feeder restart, so the target
+    fleet accretes a ghost copy of every spoke each time the feed bounces (the
+    accumulation behind hundreds of stale offline entries). The synthetic
+    spoke's uuid must therefore be DETERMINISTIC in its spoke_id: same id →
+    same uuid (restart re-attaches), different id → different uuid."""
+    try:
+        FeedSpoke = hub_feed._load_feed_spoke()
+    except SystemExit:
+        pytest.skip("lm core not importable off-box — replay half unavailable")
+
+    def _uuid_for(sid):
+        s = FeedSpoke.__new__(FeedSpoke)
+        s.spoke_id = sid
+        return s._ensure_install_uuid()
+
+    assert _uuid_for("spoke-A") == _uuid_for("spoke-A")   # stable across runs
+    assert _uuid_for("spoke-A") != _uuid_for("spoke-B")   # distinct per spoke
+    assert len(_uuid_for("spoke-A")) == 32                # uuid .hex form

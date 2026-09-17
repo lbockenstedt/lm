@@ -328,8 +328,16 @@ def _load_feed_spoke():
 
         # ── neutralise side-effects (mirrors loadtest_spokes.LoadSpoke) ──────
         def _ensure_install_uuid(self):
+            # STABLE per synthetic spoke. The hub keys a module by its
+            # install_uuid (guid-primary in hub_identity), so a fresh random uuid
+            # every run makes each feeder restart mint a BRAND-NEW module for the
+            # same spoke — the target fleet accretes a ghost copy of every spoke
+            # on every feed bounce (the accumulation that leaves hundreds of
+            # stale offline entries). Derive it deterministically from the stable
+            # spoke_id so a restart re-attaches to the SAME module instead.
             import uuid
-            return uuid.uuid4().hex
+            return uuid.uuid5(uuid.NAMESPACE_OID,
+                              f"lm-feed-install:{self.spoke_id}").hex
 
         def _persist_session_secret(self, new_secret):
             pass
