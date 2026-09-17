@@ -456,14 +456,22 @@ def register(app, hub, ctx):
 
     async def _drain(p):
         """Pump the child's output into a small ring so the UI can show why a
-        feed died. Bounded — an unbounded buffer on a long-running child is a
-        slow memory leak."""
+        feed died, and mirror each line to the hub logger so the same detail
+        survives a hub restart (the ring is in-memory only) and is greppable in
+        hub.log/journald alongside the source-side ``[test-feed]`` lines."""
         try:
             while True:
                 line = await asyncio.to_thread(p.stdout.readline)
                 if not line:
                     break
                 _proc["log"] = (_proc["log"] + line)[-8000:]
+                txt = line.rstrip("\n")
+                if txt:
+                    # stderr lines from the feeder are prefixed "  ! " — surface
+                    # those louder than routine poll/connect progress.
+                    lvl = logger.warning if txt.lstrip().startswith("!") \
+                        else logger.info
+                    lvl("[test-feed:child] %s", txt)
         except Exception:  # noqa: BLE001
             pass
 
