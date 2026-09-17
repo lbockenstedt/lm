@@ -32,6 +32,7 @@ Security posture:
   * Config changes and feed start/stop are audit-logged at WARNING.
 """
 import asyncio
+import json
 import os
 import secrets
 import signal
@@ -73,6 +74,16 @@ _DEFAULTS = {
     # tenant here sidesteps it entirely with no change to shared code.
     "receiver_tenant": "",
     #
+    # PRESERVE MODE. When True the receiver ignores ``receiver_tenant`` and
+    # replays each synthetic spoke into the LOCAL tenant that matches its
+    # SOURCE tenant (carried per-spoke in the snapshot), so a multi-tenant
+    # production fleet reproduces its tenant layout here instead of collapsing
+    # into one. A source tenant with no local match — and any spoke the source
+    # did not attribute — falls back to the shared tenant. Only meaningful
+    # verbatim: an anonymised source omits the per-spoke tenant, so preserve
+    # degrades to shared. See start_feed's preserve branch.
+    "receiver_preserve_tenants": False,
+    #
     # Two things deliberately ABSENT from this dict:
     #
     #   tenant — the synthetic spokes always join THIS hub's SHARED tenant, so
@@ -95,7 +106,7 @@ _DEFAULTS = {
 #: ``psk``/``tenant`` record the ephemeral onboarding PSK this hub minted for
 #: the running feed, so stop can revoke it. A PSK that outlived its feed would
 #: be a standing auto-approve credential for the shared tenant.
-_proc = {"p": None, "started": 0.0, "log": "", "psk": "", "tenant": ""}
+_proc = {"p": None, "started": 0.0, "log": "", "psk": "", "tenants": []}
 
 
 def register(app, hub, ctx):
@@ -161,6 +172,21 @@ def register(app, hub, ctx):
             logger.debug("[test-feed] shared-tenant lookup failed", exc_info=True)
             return None
 
+    def _local_tenant_ids() -> set:
+        """Every tenant id this hub knows, for preserve-mode mapping.
+
+        A source tenant is replayed into the local tenant of the SAME id when
+        one exists (the two hubs share a tenant registry lineage — NetBox ids
+        are stable across them); anything else falls back to shared. Always
+        includes the built-in ``default`` (ADMIN) scope, which is real even
+        when the tenant_state map has no explicit row for it."""
+        try:
+            ids = set((hub.state.tenant_state.get("tenants", {}) or {}).keys())
+        except Exception:  # noqa: BLE001
+            ids = set()
+        ids.add("default")
+        return ids
+
     # ── SOURCE side ─────────────────────────────────────────────────────────
 
     @app.get("/api/test-feed/snapshot")
@@ -198,6 +224,19 @@ def register(app, hub, ctx):
                 "vm_count": len(bucket["vms"]),
                 "usb_count": 0,
             }
+            # Stamp the spoke's source tenant so a receiver in "preserve" mode
+            # can replay the fleet into the matching local tenant instead of
+            # collapsing everything into one. Only meaningful verbatim: when
+            # anonymising, ``sid`` is a pseudonym that get_spoke_tenant won't
+            # resolve, so the tenant is simply omitted and the receiver falls
+            # back to shared — which is the honest behaviour there anyway.
+            if not anonymise:
+                try:
+                    t = hub.state.get_spoke_tenant(str(sid))
+                except Exception:  # noqa: BLE001
+                    t = None
+                if t:
+                    spokes[str(sid)]["tenant"] = t
         logger.info("[test-feed] served snapshot to %s: %d spoke(s)",
                     _who(sess), len(spokes))
         return {"spokes": spokes, "generated_at": time.time(),
@@ -219,7 +258,8 @@ def register(app, hub, ctx):
         sess = _require_admin(request)
         data = await request.json()
         patch = {}
-        for k in ("source_enabled", "receiver_enabled", "source_anonymise"):
+        for k in ("source_enabled", "receiver_enabled", "source_anonymise",
+                  "receiver_preserve_tenants"):
             if k in data:
                 patch[k] = bool(data[k])
         for k in ("receiver_source_url", "receiver_prefix", "receiver_tenant"):
@@ -306,13 +346,37 @@ def register(app, hub, ctx):
                            "replays your own feed spokes back into you, growing "
                            "on every poll — point it at the production hub.")
 
-        # An explicit tenant wins; otherwise fall back to the shared tenant.
-        tenant = (c.get("receiver_tenant") or "").strip() or _shared_tenant()
-        if not tenant:
+        # Tenant binding. Two modes:
+        #   fixed    — the whole replayed fleet lands in ONE tenant: the named
+        #              ``receiver_tenant`` if set, else the shared tenant.
+        #   preserve — each synthetic spoke lands in the LOCAL tenant matching
+        #              its SOURCE tenant, so a multi-tenant fleet keeps its
+        #              shape. Unmatched/unattributed spokes use ``fallback``.
+        preserve = bool(c.get("receiver_preserve_tenants"))
+        fallback = (c.get("receiver_tenant") or "").strip() or _shared_tenant()
+        if not fallback:
             raise HTTPException(
                 status_code=400,
                 detail="No tenant to bind the replayed fleet to. Name one in "
                        "Tenant below, or mark a tenant 'shared' in Setup → Tenants.")
+
+        # source tenant id -> local tenant id (preserve only); the PSK must be
+        # registered on every local tenant a synthetic spoke will claim.
+        tenant_map = {}
+        psk_tenants = {fallback}
+        if preserve:
+            try:
+                src_tenants = await asyncio.to_thread(
+                    _source_tenants, c["receiver_source_url"], c["receiver_token"])
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"could not read the source snapshot to map tenants: {e}")
+            local_ids = _local_tenant_ids()
+            for st in src_tenants:
+                local = st if st in local_ids else fallback
+                tenant_map[st] = local
+                psk_tenants.add(local)
 
         script = os.path.join(_repo_root(), "scripts", "hub_feed.py")
         if not os.path.isfile(script):
@@ -322,11 +386,21 @@ def register(app, hub, ctx):
         # Its only job is to auto-approve the synthetic spokes on THIS hub, and
         # this hub is what spawns them — a human fetching a shared secret so the
         # hub can authenticate to itself bought nothing. Ephemeral and scoped to
-        # this run: registered on the shared tenant now, revoked by stop.
+        # this run: registered on every target tenant now, revoked by stop. In
+        # preserve mode that is one PSK spanning several tenants — the same
+        # secret is fine because it is single-use per run and revoked together.
         feed_psk = secrets.token_urlsafe(24)
+        registered = []
         try:
-            await hub.simulations_store.add_psk(tenant, feed_psk)
+            for t in sorted(psk_tenants):
+                await hub.simulations_store.add_psk(t, feed_psk)
+                registered.append(t)
         except Exception as e:  # noqa: BLE001
+            for t in registered:
+                try:
+                    await hub.simulations_store.remove_psk(t, feed_psk)
+                except Exception:  # noqa: BLE001
+                    logger.warning("[test-feed] orphaned onboarding PSK on tenant %s", t)
             logger.error("[test-feed] could not register onboarding PSK: %s", e)
             raise HTTPException(
                 status_code=500,
@@ -345,10 +419,14 @@ def register(app, hub, ctx):
                 "--source", c["receiver_source_url"],
                 "--token", c["receiver_token"],
                 "--target", target,
-                "--tenant", tenant,
+                "--tenant", fallback,
                 "--psk", feed_psk,
                 "--prefix", c.get("receiver_prefix") or "feed-",
                 "--interval", str(c.get("receiver_interval") or 60)]
+        if preserve and tenant_map:
+            # Per-spoke tenant routing for the feeder: it reads each payload's
+            # source tenant and looks it up here, defaulting to --tenant.
+            argv += ["--tenant-map", json.dumps(tenant_map)]
         if c.get("receiver_refresh_token"):
             # Lets the feeder rotate its own access token. Without it a long
             # feed dies when the 4h access token expires (api_tokens.issue_pair),
@@ -369,9 +447,10 @@ def register(app, hub, ctx):
         env.pop("LM_HUB_CA_BUNDLE", None)
 
         # AUDIT before spawning — the token is NOT logged, only its presence.
-        logger.warning("[test-feed] START by %s → source=%s tenant=%s (shared) prefix=%s",
-                       _who(sess), c["receiver_source_url"], tenant,
-                       c.get("receiver_prefix"))
+        logger.warning("[test-feed] START by %s → source=%s tenant=%s prefix=%s "
+                       "preserve=%s (%d tenant[s])",
+                       _who(sess), c["receiver_source_url"], fallback,
+                       c.get("receiver_prefix"), preserve, len(psk_tenants))
         try:
             p = await asyncio.to_thread(
                 subprocess.Popen, argv,
@@ -380,16 +459,17 @@ def register(app, hub, ctx):
         except Exception as e:  # noqa: BLE001
             logger.error("[test-feed] spawn failed: %s", e)
             # Don't leave the PSK registered when the child never started — it
-            # would sit on the shared tenant as a live auto-approve credential
+            # would sit on each target tenant as a live auto-approve credential
             # with nothing using it.
-            try:
-                await hub.simulations_store.remove_psk(tenant, feed_psk)
-            except Exception:  # noqa: BLE001
-                logger.warning("[test-feed] orphaned onboarding PSK on tenant %s", tenant)
+            for t in registered:
+                try:
+                    await hub.simulations_store.remove_psk(t, feed_psk)
+                except Exception:  # noqa: BLE001
+                    logger.warning("[test-feed] orphaned onboarding PSK on tenant %s", t)
             raise HTTPException(status_code=500, detail=f"could not start feeder: {e}")
 
         _proc.update({"p": p, "started": time.time(), "log": "",
-                      "psk": feed_psk, "tenant": tenant})
+                      "psk": feed_psk, "tenants": list(registered)})
         asyncio.create_task(_drain(p))
         _save({"receiver_enabled": True})
         return {"status": "ok", "pid": p.pid}
@@ -400,18 +480,21 @@ def register(app, hub, ctx):
         Runs on every stop path, including the one where the child was already
         dead, because the PSK is registered in hub state and outlives the
         process. Leaving it behind would mean any spoke presenting it could
-        auto-approve itself into the shared tenant indefinitely."""
-        psk, tenant = _proc.get("psk"), _proc.get("tenant")
-        if not (psk and tenant):
-            return
-        try:
-            await hub.simulations_store.remove_psk(tenant, psk)
-        except Exception:  # noqa: BLE001
-            logger.warning("[test-feed] could not revoke onboarding PSK on tenant %s",
-                           tenant, exc_info=True)
-        finally:
+        auto-approve itself into a target tenant indefinitely. In preserve mode
+        the same PSK spans several tenants — revoke it from each."""
+        psk, tenants = _proc.get("psk"), _proc.get("tenants") or []
+        if not (psk and tenants):
             _proc["psk"] = ""
-            _proc["tenant"] = ""
+            _proc["tenants"] = []
+            return
+        for tenant in list(tenants):
+            try:
+                await hub.simulations_store.remove_psk(tenant, psk)
+            except Exception:  # noqa: BLE001
+                logger.warning("[test-feed] could not revoke onboarding PSK on tenant %s",
+                               tenant, exc_info=True)
+        _proc["psk"] = ""
+        _proc["tenants"] = []
 
     @app.post("/api/test-feed/stop")
     async def stop_feed(request: Request):
@@ -536,3 +619,29 @@ def _probe_source(base_url: str, token: str) -> dict:
     return {"ok": True, "spoke_count": len(spokes),
             "client_count": (data or {}).get("client_count", 0),
             "sample_clients": (sample.get("clients") or [])[:3]}
+
+
+def _source_tenants(base_url: str, token: str) -> set:
+    """Distinct source-tenant ids present in the source snapshot.
+
+    Used by preserve mode to decide which local tenants the onboarding PSK must
+    be registered on before the feeder replays. Blocking — the caller runs it
+    through asyncio.to_thread. A snapshot with no per-spoke tenant (an older or
+    anonymised source) yields the empty set, so preserve degrades to the
+    fallback tenant with no error."""
+    import ssl
+    import urllib.error
+    import urllib.request
+
+    url = base_url.rstrip("/") + "/api/test-feed/snapshot"
+    req = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {token}"}, method="GET")
+    ctx = ssl._create_unverified_context()
+    with urllib.request.urlopen(req, timeout=20, context=ctx) as r:
+        data = json.loads(r.read().decode())
+    tenants = set()
+    for body in ((data or {}).get("spokes") or {}).values():
+        t = (body or {}).get("tenant")
+        if t:
+            tenants.add(str(t))
+    return tenants

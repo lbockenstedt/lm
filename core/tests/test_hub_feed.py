@@ -380,3 +380,78 @@ def test_non_401_errors_are_not_retried(monkeypatch):
     with pytest.raises(urllib.error.HTTPError):
         src._get_json("/api/test-feed/snapshot")
     assert tried["refresh"] == 0
+
+
+# --------------------------------------------------------------------------
+# Preserve-mode tenant routing (_resolve_tenant)
+# --------------------------------------------------------------------------
+
+def test_preserve_maps_source_tenant_to_local():
+    """A spoke carrying its source tenant is routed to the mapped local tenant
+    so a multi-tenant fleet keeps its shape on the receiver."""
+    m = {"acme": "acme-local", "globex": "globex-local"}
+    assert hub_feed._resolve_tenant({"tenant": "acme"}, m, "fallback") == "acme-local"
+    assert hub_feed._resolve_tenant({"tenant": "globex"}, m, "fallback") == "globex-local"
+
+
+def test_preserve_unmapped_source_tenant_falls_back():
+    """A source tenant with no local match uses the fallback rather than
+    onboarding into a tenant the receiver never registered a PSK for."""
+    assert hub_feed._resolve_tenant({"tenant": "unknown"}, {"acme": "acme"},
+                                    "shared") == "shared"
+
+
+def test_preserve_unattributed_spoke_uses_fallback():
+    """A spoke with no source tenant (older/anonymised source) uses fallback."""
+    assert hub_feed._resolve_tenant({}, {"acme": "acme"}, "shared") == "shared"
+    assert hub_feed._resolve_tenant({"tenant": ""}, {"acme": "acme"}, "shared") == "shared"
+
+
+def test_without_a_map_every_spoke_uses_the_single_tenant():
+    """Non-preserve mode (empty map) ignores any per-spoke tenant and binds the
+    whole fleet to --tenant — the historical behaviour."""
+    assert hub_feed._resolve_tenant({"tenant": "acme"}, {}, "the-one") == "the-one"
+
+
+def test_no_tenant_at_all_onboards_unbound():
+    """No map and no default means bind nothing (None) rather than the empty
+    string, which would be a real, wrong tenant id."""
+    assert hub_feed._resolve_tenant({"tenant": "acme"}, {}, "") is None
+
+
+def test_tenant_map_arg_is_parsed_and_exposed(monkeypatch):
+    """--tenant-map arrives as a JSON string on argv; main() must parse it into
+    args._tenant_map as str→str with empty targets dropped."""
+    seen = {}
+
+    class _FakeSource:
+        def __init__(self, *a, **kw): pass
+        def login(self, *a, **kw): pass
+
+    def _fake_run(args, source, salt):
+        seen["map"] = getattr(args, "_tenant_map", None)
+
+    monkeypatch.setattr(hub_feed, "SourceHub", _FakeSource)
+    monkeypatch.setattr(hub_feed, "_run", _fake_run)
+    monkeypatch.setattr(hub_feed.asyncio, "run", lambda coro: None)
+    argv = ["hub_feed.py", "--source", "https://src", "--target", "wss://dst:443",
+            "--token", "t", "--tenant", "fb",
+            "--tenant-map", '{"acme": "acme-local", "skip": ""}']
+    monkeypatch.setattr(sys, "argv", argv)
+    hub_feed.main()
+    assert seen["map"] == {"acme": "acme-local"}
+
+
+def test_bad_tenant_map_is_rejected(monkeypatch):
+    """Invalid JSON in --tenant-map is an operator error, surfaced by argparse
+    (SystemExit) rather than silently ignored."""
+    class _FakeSource:
+        def __init__(self, *a, **kw): pass
+        def login(self, *a, **kw): pass
+
+    monkeypatch.setattr(hub_feed, "SourceHub", _FakeSource)
+    argv = ["hub_feed.py", "--source", "https://src", "--target", "wss://dst:443",
+            "--token", "t", "--tenant-map", "{not json"]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit):
+        hub_feed.main()
