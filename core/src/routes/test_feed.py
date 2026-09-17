@@ -400,6 +400,35 @@ def register(app, hub, ctx):
         #              its SOURCE tenant, so a multi-tenant fleet keeps its
         #              shape. Unmatched/unattributed spokes use ``fallback``.
         preserve = bool(c.get("receiver_preserve_tenants"))
+
+        # Mirror the source's tenant registry FIRST, before anything reads the
+        # local tenant list. Preserve mode can only map a source tenant onto a
+        # LOCAL tenant of the same id, so without this every unmatched tenant
+        # collapses into the fallback — the whole replayed fleet lands in one
+        # tenant, which is exactly what preserve exists to avoid. It also makes
+        # tenants that own no spokes (or whose spokes are all offline) appear in
+        # the receiver's tenant picker, which lists local tenant records and
+        # would otherwise never learn they exist.
+        #
+        # Ordering matters: ``fallback`` below resolves the shared tenant, and
+        # the mirror may MOVE which tenant that is. Doing this first means a run
+        # binds against the shape it just applied instead of the previous one
+        # (otherwise the move only takes effect on the NEXT start), and it lets
+        # the feed bootstrap a receiver that has no shared tenant at all yet —
+        # which would otherwise fail the "nothing to bind to" check below.
+        src_tenants, src_registry = set(), {}
+        if preserve:
+            try:
+                src_tenants, src_registry = await asyncio.to_thread(
+                    _source_tenants, c["receiver_source_url"], c["receiver_token"])
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"could not read the source snapshot to map tenants: {e}")
+            await _ensure_local_tenants(
+                hub, src_registry or {t: {} for t in src_tenants},
+                _local_tenant_ids())
+
         fallback = (c.get("receiver_tenant") or "").strip() or _shared_tenant()
         if not fallback:
             raise HTTPException(
@@ -412,24 +441,6 @@ def register(app, hub, ctx):
         tenant_map = {}
         psk_tenants = {fallback}
         if preserve:
-            try:
-                src_tenants, src_registry = await asyncio.to_thread(
-                    _source_tenants, c["receiver_source_url"], c["receiver_token"])
-            except Exception as e:  # noqa: BLE001
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"could not read the source snapshot to map tenants: {e}")
-            # Recreate the source's tenant SHELLS before mapping. Preserve mode
-            # can only map a source tenant onto a LOCAL tenant of the same id,
-            # so without this every unmatched tenant collapses into the fallback
-            # — the whole replayed fleet lands in one tenant, which is exactly
-            # what preserve exists to avoid. It also makes tenants that own no
-            # spokes (or whose spokes are all offline) show up in the receiver's
-            # tenant picker, which lists local tenant records and would
-            # otherwise never learn they exist.
-            await _ensure_local_tenants(
-                hub, src_registry or {t: {} for t in src_tenants},
-                _local_tenant_ids())
             local_ids = _local_tenant_ids()
             for st in src_tenants:
                 local = st if st in local_ids else fallback
@@ -839,25 +850,33 @@ def _tenant_registry(hub) -> dict:
 
 
 async def _ensure_local_tenants(hub, registry: dict, existing: set) -> list:
-    """Create a local shell for every source tenant that has no local twin.
+    """Mirror the source's tenant registry onto this hub.
 
-    Only ever CREATES. A tenant the operator already configured on this hub
-    keeps its own name, quotas and wiring untouched — the feed replays a
-    fleet, it does not get to reconfigure the receiver's existing tenants.
+    Creates a local shell for every source tenant that has no local twin, and
+    reconciles which tenant is SHARED.
 
-    ``shared`` is deliberately NOT inherited: which tenant is shared is a
-    property of THIS hub (it is where unmapped spokes land, via
-    _shared_tenant), so importing the source's shared flag could silently
-    move the fallback. The operator flags one locally.
+    Creation only ever ADDS. A tenant the operator already configured here keeps
+    its own name, quotas and wiring — the feed replays a fleet, it does not get
+    to reconfigure the receiver's existing tenants.
 
-    Best-effort — a tenant that cannot be created is logged and skipped
-    rather than failing the whole feed start; its spokes just fall back.
-    Returns the ids created, for the audit line."""
+    ``shared`` is the deliberate exception, and is reconciled even on tenants
+    that already exist. It is not a per-tenant preference like a quota: it is
+    part of the FLEET'S SHAPE (a shared tenant's spokes are visible to every
+    tenant), so a receiver replaying production must put it on the same tenant
+    or the replica is visibly wrong. Applied through the same single-shared
+    invariant the Setup → Tenants editor enforces: flagging the source's shared
+    tenant clears the flag on every other local tenant, so exactly one survives.
+
+    Best-effort — a tenant that cannot be created is logged and skipped rather
+    than failing the whole feed start; its spokes just fall back. Returns the
+    ids created, for the audit line."""
     created = []
     for tid, row in (registry or {}).items():
         clean = str(tid or "").strip()
         if not clean or clean in existing:
             continue
+        # 'shared' is applied below, under the single-shared invariant, rather
+        # than seeded here — seeding it directly could leave two flagged.
         seed = {k: v for k, v in (row or {}).items()
                 if k in TENANT_FIELDS and k != "shared"}
         seed.setdefault("name", clean.upper())
@@ -870,18 +889,77 @@ async def _ensure_local_tenants(hub, registry: dict, existing: set) -> list:
         except Exception:  # noqa: BLE001
             logger.warning("[test-feed] could not create local tenant %s",
                            clean, exc_info=True)
-    if created:
-        # Durable before the feeder starts: the synthetic spokes bind to
-        # these ids within seconds, and a crash in between would leave
-        # spokes pointing at tenants that no longer exist on disk.
+
+    moved = _mirror_shared_tenant(hub, registry)
+
+    if created or moved:
+        # Durable before the feeder starts: the synthetic spokes bind to these
+        # ids within seconds, and a crash in between would leave spokes
+        # pointing at tenants that no longer exist on disk.
         try:
             await hub.state.save_state_now()
         except Exception:  # noqa: BLE001
             logger.warning("[test-feed] tenant shells not persisted",
                            exc_info=True)
+    if created:
         logger.info("[test-feed] created %d local tenant shell(s) from the "
                     "source: %s", len(created), ", ".join(sorted(created)))
     return created
+
+
+def _mirror_shared_tenant(hub, registry: dict) -> bool:
+    """Put the SHARED flag on the same tenant the source has it on.
+
+    Enforces the single-shared invariant (see /setup/tenant): the source's
+    shared tenant is flagged and every OTHER local tenant is cleared, so the
+    receiver never ends up with two — which would make the effective shared
+    tenant depend on dict insertion order.
+
+    No-ops when the source publishes no shared tenant (an older source, an
+    anonymised one, or a fleet that genuinely has none) so the operator's own
+    choice is left alone. Returns True when something changed."""
+    src_shared = next((str(tid) for tid, row in (registry or {}).items()
+                       if isinstance(row, dict) and row.get("shared")), None)
+    if not src_shared:
+        return False
+    try:
+        tenants = (getattr(hub.state, "tenant_state", None) or {}).get("tenants") or {}
+    except Exception:  # noqa: BLE001
+        logger.debug("[test-feed] shared mirror: tenant state unreadable",
+                     exc_info=True)
+        return False
+    if src_shared not in tenants:
+        return False
+
+    changed = False
+    try:
+        for tid, cfg in list(tenants.items()):
+            if not isinstance(cfg, dict):
+                continue
+            want = (str(tid) == src_shared)
+            if bool(cfg.get("shared")) != want:
+                hub.state.update_tenant(str(tid), {"shared": want})
+                changed = True
+    except Exception:  # noqa: BLE001
+        logger.warning("[test-feed] could not mirror the shared tenant",
+                       exc_info=True)
+        return False
+
+    if changed:
+        # Refresh the cached id so the visibility gate is correct immediately —
+        # the feeder starts binding spokes within seconds.
+        try:
+            try:
+                from access import refresh_shared_tenant
+            except ImportError:  # test/bare-package path
+                from core.src.access import refresh_shared_tenant  # type: ignore
+            refresh_shared_tenant(hub)
+        except Exception:  # noqa: BLE001
+            logger.debug("[test-feed] shared-tenant cache refresh failed",
+                         exc_info=True)
+        logger.info("[test-feed] shared tenant mirrored from the source: %s",
+                    src_shared)
+    return changed
 
 
 def _source_tenants(base_url: str, token: str):
