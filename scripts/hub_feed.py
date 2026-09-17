@@ -543,7 +543,11 @@ def _read_password(arg):
     return arg
 
 
-def main():
+def build_parser():
+    """The feeder's argument parser. Extracted from ``main`` so callers (and the
+    test suite) can validate that a hub-built argv actually parses — in
+    particular that dash-leading URL-safe-base64 tokens survive as ``--flag=value``
+    rather than being misread as options."""
     ap = argparse.ArgumentParser(
         description="Replay production fleet data into a dev/qa/lrb hub.")
     ap.add_argument("--source", required=True,
@@ -585,6 +589,11 @@ def main():
                          "rotation so a parent hub can persist the new pair. The "
                          "hub sets this; a human running the feeder by hand should "
                          "not (it would print tokens to the terminal).")
+    return ap
+
+
+def main():
+    ap = build_parser()
     args = ap.parse_args()
 
     if not args.dry_run and not args.target:
