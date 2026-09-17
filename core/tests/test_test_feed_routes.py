@@ -382,3 +382,60 @@ def test_test_feed_redaction():
     assert "secret-refresh" not in repr(red)
     # Non-secret config still round-trips so the form can be populated.
     assert red["receiver_source_url"] == "https://src"
+
+
+# --------------------------------------------------------------------------
+# _build_feeder_argv — dash-leading tokens must survive argparse
+# --------------------------------------------------------------------------
+#
+# Regression: api_tokens mints URL-safe-base64 tokens, which can start with "-".
+# When the feeder argv passed such a token as two items ("--refresh-token",
+# "-p9G3..."), argparse read the leading "-" as the next option and aborted with
+# "argument --refresh-token: expected one argument". The child never started, so
+# a hub restart silently killed the whole Test Data Feed until a human happened
+# to re-mint a token that did not start with "-". These pin the "--flag=value"
+# contract by parsing the built argv with the feeder's REAL parser.
+
+from routes.test_feed import _build_feeder_argv  # noqa: E402
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
+import hub_feed  # noqa: E402
+
+
+def _argv_for(**cfg):
+    c = {"receiver_source_url": "https://src.example",
+         "receiver_token": "-ACCESSdashlead",
+         "receiver_refresh_token": "-p9G3-refreshdashlead",
+         "receiver_prefix": "feed-", "receiver_interval": 60}
+    c.update(cfg)
+    return _build_feeder_argv("hub_feed.py", c, "wss://127.0.0.1:443", "default",
+                              "-PSKdashlead", preserve=False, tenant_map={})
+
+
+def test_feeder_argv_binds_dash_leading_secrets_to_their_flag():
+    argv = _argv_for()
+    # The three secrets ride "--flag=value" single items, never a bare value that
+    # argparse could mistake for the next option.
+    assert "--token=-ACCESSdashlead" in argv
+    assert "--psk=-PSKdashlead" in argv
+    assert "--refresh-token=-p9G3-refreshdashlead" in argv
+    # And no secret leaks as its own positional (the old, broken shape).
+    assert "-ACCESSdashlead" not in argv
+    assert "-p9G3-refreshdashlead" not in argv
+    assert "-PSKdashlead" not in argv
+
+
+def test_feeder_argv_parses_with_the_real_feeder_parser():
+    # The exact failure mode: feed the built argv (sans python+script) to the
+    # feeder's own parser. Before the fix this raised SystemExit(2).
+    argv = _argv_for()
+    args = hub_feed.build_parser().parse_args(argv[2:])
+    assert args.token == "-ACCESSdashlead"
+    assert args.refresh_token == "-p9G3-refreshdashlead"
+    assert args.psk == "-PSKdashlead"
+
+
+def test_feeder_argv_omits_refresh_token_when_absent():
+    argv = _argv_for(receiver_refresh_token="")
+    assert not any(a.startswith("--refresh-token") for a in argv)
+    assert "--emit-token-rotations" not in argv
