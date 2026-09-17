@@ -264,10 +264,20 @@ def register(app, hub, ctx):
                     rec["name"] = ident["name"]
                 if ident.get("tenant") and "tenant" not in rec:
                     rec["tenant"] = ident["tenant"]
-        logger.info("[test-feed] served snapshot to %s: %d spoke(s)",
-                    _who(sess), len(spokes))
+        # The tenant REGISTRY, not just the tenants inferable from spokes. A
+        # tenant whose spokes are all offline — or that has none yet — is still
+        # part of the fleet's shape, and the receiver cannot discover it from
+        # the payloads: its tenant picker lists LOCAL tenant records, so an
+        # un-replayed tenant is simply missing from the dropdown, and preserve
+        # mode silently folds its spokes into the fallback if one ever appears.
+        # Verbatim only: under anonymise the tenant names/slugs are identifying
+        # and the sharded ids are pseudonyms, so the receiver keeps its own.
+        tenants = _tenant_registry(hub) if not anonymise else {}
+        logger.info("[test-feed] served snapshot to %s: %d spoke(s), %d tenant(s)",
+                    _who(sess), len(spokes), len(tenants))
         return {"spokes": spokes, "generated_at": time.time(),
                 "spoke_count": len(spokes),
+                "tenants": tenants,
                 "client_count": sum(len(s["clients"]) for s in spokes.values())}
 
     # ── config (both sides) ─────────────────────────────────────────────────
@@ -403,12 +413,23 @@ def register(app, hub, ctx):
         psk_tenants = {fallback}
         if preserve:
             try:
-                src_tenants = await asyncio.to_thread(
+                src_tenants, src_registry = await asyncio.to_thread(
                     _source_tenants, c["receiver_source_url"], c["receiver_token"])
             except Exception as e:  # noqa: BLE001
                 raise HTTPException(
                     status_code=502,
                     detail=f"could not read the source snapshot to map tenants: {e}")
+            # Recreate the source's tenant SHELLS before mapping. Preserve mode
+            # can only map a source tenant onto a LOCAL tenant of the same id,
+            # so without this every unmatched tenant collapses into the fallback
+            # — the whole replayed fleet lands in one tenant, which is exactly
+            # what preserve exists to avoid. It also makes tenants that own no
+            # spokes (or whose spokes are all offline) show up in the receiver's
+            # tenant picker, which lists local tenant records and would
+            # otherwise never learn they exist.
+            await _ensure_local_tenants(
+                hub, src_registry or {t: {} for t in src_tenants},
+                _local_tenant_ids())
             local_ids = _local_tenant_ids()
             for st in src_tenants:
                 local = st if st in local_ids else fallback
@@ -788,14 +809,96 @@ def _probe_source(base_url: str, token: str) -> dict:
             "sample_clients": (sample.get("clients") or [])[:3]}
 
 
-def _source_tenants(base_url: str, token: str) -> set:
-    """Distinct source-tenant ids present in the source snapshot.
+#: Tenant-registry fields the source publishes. A tenant record also carries
+#: deployment wiring (ldap_base_dn, proxmox_tag) and per-tenant quotas; the feed
+#: only needs enough to recreate the tenant SHELL on the receiver — its id, how
+#: it is labelled in the UI, and its NetBox mapping. This is an ALLOWLIST rather
+#: than a blacklist so a field added to a tenant record later is never published
+#: by accident.
+TENANT_FIELDS = ("name", "description", "active", "shared",
+                 "netbox_tenant_slug", "netbox_id")
 
-    Used by preserve mode to decide which local tenants the onboarding PSK must
-    be registered on before the feeder replays. Blocking — the caller runs it
-    through asyncio.to_thread. A snapshot with no per-spoke tenant (an older or
-    anonymised source) yields the empty set, so preserve degrades to the
-    fallback tenant with no error."""
+
+def _tenant_registry(hub) -> dict:
+    """This hub's tenant registry reduced to the feed-safe fields, keyed by id.
+
+    Best-effort: a hub whose tenant state is unreadable publishes no registry
+    rather than failing the whole snapshot — the receiver then degrades to the
+    tenants it can infer from the spokes, which is the old behaviour."""
+    try:
+        tenants = (getattr(hub.state, "tenant_state", None) or {}).get("tenants") or {}
+    except Exception:  # noqa: BLE001
+        logger.debug("[test-feed] tenant registry unavailable", exc_info=True)
+        return {}
+    out = {}
+    for tid, row in tenants.items():
+        if not isinstance(row, dict):
+            continue
+        out[str(tid)] = {k: row[k] for k in TENANT_FIELDS if k in row}
+    return out
+
+
+async def _ensure_local_tenants(hub, registry: dict, existing: set) -> list:
+    """Create a local shell for every source tenant that has no local twin.
+
+    Only ever CREATES. A tenant the operator already configured on this hub
+    keeps its own name, quotas and wiring untouched — the feed replays a
+    fleet, it does not get to reconfigure the receiver's existing tenants.
+
+    ``shared`` is deliberately NOT inherited: which tenant is shared is a
+    property of THIS hub (it is where unmapped spokes land, via
+    _shared_tenant), so importing the source's shared flag could silently
+    move the fallback. The operator flags one locally.
+
+    Best-effort — a tenant that cannot be created is logged and skipped
+    rather than failing the whole feed start; its spokes just fall back.
+    Returns the ids created, for the audit line."""
+    created = []
+    for tid, row in (registry or {}).items():
+        clean = str(tid or "").strip()
+        if not clean or clean in existing:
+            continue
+        seed = {k: v for k, v in (row or {}).items()
+                if k in TENANT_FIELDS and k != "shared"}
+        seed.setdefault("name", clean.upper())
+        seed.setdefault("active", True)
+        seed["description"] = (seed.get("description")
+                               or "Created by the Test Data Feed.")
+        try:
+            hub.state.update_tenant(clean, seed)
+            created.append(clean)
+        except Exception:  # noqa: BLE001
+            logger.warning("[test-feed] could not create local tenant %s",
+                           clean, exc_info=True)
+    if created:
+        # Durable before the feeder starts: the synthetic spokes bind to
+        # these ids within seconds, and a crash in between would leave
+        # spokes pointing at tenants that no longer exist on disk.
+        try:
+            await hub.state.save_state_now()
+        except Exception:  # noqa: BLE001
+            logger.warning("[test-feed] tenant shells not persisted",
+                           exc_info=True)
+        logger.info("[test-feed] created %d local tenant shell(s) from the "
+                    "source: %s", len(created), ", ".join(sorted(created)))
+    return created
+
+
+def _source_tenants(base_url: str, token: str):
+    """Source tenants for preserve mode, as ``(ids, registry)``.
+
+    ``ids`` is every distinct tenant that actually OWNS a spoke in the snapshot
+    — the PSK must be registered on each one's local twin before the feeder
+    replays. ``registry`` is the source's full tenant list keyed by id, which
+    also covers tenants that own NO spokes; ``ids`` structurally cannot see
+    those, so before it existed such a tenant never reached the receiver at all
+    (its picker lists local tenant records, not feed payloads).
+
+    Degrades on both axes: a source predating the registry omits it, and a
+    snapshot with no per-spoke tenant (an older or anonymised source) yields an
+    empty set — preserve then falls back to the fallback tenant with no error.
+
+    Blocking — the caller runs it through asyncio.to_thread."""
     import ssl
     import urllib.error
     import urllib.request
@@ -811,4 +914,7 @@ def _source_tenants(base_url: str, token: str) -> set:
         t = (body or {}).get("tenant")
         if t:
             tenants.add(str(t))
-    return tenants
+    raw_reg = (data or {}).get("tenants")
+    registry = ({str(k): (v or {}) for k, v in raw_reg.items()}
+                if isinstance(raw_reg, dict) else {})
+    return tenants, registry
