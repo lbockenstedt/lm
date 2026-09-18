@@ -442,6 +442,125 @@ def test_detect_baud_not_confident_when_silent(monkeypatch):
     assert res["confident"] is False
 
 
+# ── multi-Enter nudging ──────────────────────────────────────────────────────
+# Reported from the field: some switches need Enter pressed several times before
+# they emit anything. With a single Enter per rate the CORRECT rate looked dead,
+# the sweep moved on, and detection settled on a wrong one — which is what the
+# "console does not recognise the characters I type" reports look like.
+class _NudgeFakeSerial:
+    """Serial stand-in that answers only after ``needed`` Enters, and only at
+    ``good_baud``."""
+    good_baud = 115200
+    needed = 3
+    opens = 0
+    writes_at_good = 0
+
+    class SerialException(Exception):
+        pass
+
+    class Serial:
+        def __init__(self, dev, baud, timeout=0.3):
+            self.baud = baud
+            self._buf = b""
+            self._enters = 0
+            _NudgeFakeSerial.opens += 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def reset_input_buffer(self):
+            pass
+
+        def flush(self):
+            pass
+
+        def write(self, b):
+            if self.baud != _NudgeFakeSerial.good_baud:
+                return
+            _NudgeFakeSerial.writes_at_good += 1
+            self._enters += 1
+            if self._enters >= _NudgeFakeSerial.needed:
+                self._buf += b"Switch> \r\nlogin: "
+
+        def read(self, n):
+            out, self._buf = self._buf[:n], self._buf[n:]
+            return out
+
+        def close(self):
+            pass
+
+
+def _reset_nudge_fake(good_baud=115200, needed=3):
+    _NudgeFakeSerial.good_baud = good_baud
+    _NudgeFakeSerial.needed = needed
+    _NudgeFakeSerial.opens = 0
+    _NudgeFakeSerial.writes_at_good = 0
+
+
+def test_detect_baud_presses_enter_more_than_once(monkeypatch):
+    """The core of the fix: a device silent until the 3rd Enter is still found."""
+    _reset_nudge_fake(good_baud=115200, needed=3)
+    monkeypatch.setattr(m, "serial", _NudgeFakeSerial)
+    res = m.detect_baud("/dev/ttyUSB0", [115200, 9600], read_secs=0.3)
+    assert res["baud"] == 115200
+    assert res["confident"] is True
+    assert _NudgeFakeSerial.writes_at_good >= 3
+
+
+def test_detect_baud_single_enter_would_have_missed_it(monkeypatch):
+    """Pins WHY this matters: with nudges=1 the same device is missed, so the
+    test above is proving the nudging and not something incidental."""
+    _reset_nudge_fake(good_baud=115200, needed=3)
+    monkeypatch.setattr(m, "serial", _NudgeFakeSerial)
+    res = m.detect_baud("/dev/ttyUSB0", [115200, 9600], read_secs=0.3, nudges=1)
+    assert res["confident"] is False
+
+
+def test_detect_baud_stops_nudging_once_the_line_answers(monkeypatch):
+    """A talkative device must not eat the whole nudge budget — the first Enter
+    answers, so we stop rather than spending three on every port."""
+    _reset_nudge_fake(good_baud=115200, needed=1)
+    monkeypatch.setattr(m, "serial", _NudgeFakeSerial)
+    res = m.detect_baud("/dev/ttyUSB0", [115200], read_secs=0.3)
+    assert res["confident"] is True
+    assert _NudgeFakeSerial.writes_at_good == 1
+
+
+def test_detect_baud_falls_through_to_9600_when_115200_stays_silent(monkeypatch):
+    """The order the operator asked for: 115200 first (nudged), then 9600."""
+    _reset_nudge_fake(good_baud=9600, needed=3)
+    monkeypatch.setattr(m, "serial", _NudgeFakeSerial)
+    res = m.detect_baud("/dev/ttyUSB0", read_secs=0.3)
+    assert res["baud"] == 9600
+    assert res["confident"] is True
+
+
+def test_detect_baud_keeps_trying_the_remaining_rates(monkeypatch):
+    """Neither priority rate answers -> the sweep continues into the others
+    rather than stopping at 9600."""
+    _reset_nudge_fake(good_baud=38400, needed=2)
+    monkeypatch.setattr(m, "serial", _NudgeFakeSerial)
+    res = m.detect_baud("/dev/ttyUSB0", read_secs=0.3)
+    assert res["baud"] == 38400
+    assert res["confident"] is True
+
+
+def test_detect_baud_sweep_budget_is_split_not_multiplied(monkeypatch):
+    """Nudging must not make the sweep N times longer: a fully silent 8-rate
+    sweep still costs about read_secs per rate, not read_secs * nudges."""
+    _reset_nudge_fake(good_baud=None, needed=99)  # nothing ever answers
+    monkeypatch.setattr(m, "serial", _NudgeFakeSerial)
+    started = _time.monotonic()
+    res = m.detect_baud("/dev/ttyUSB0", [115200, 9600], read_secs=0.6, nudges=3)
+    elapsed = _time.monotonic() - started
+    assert res["confident"] is False
+    # 2 rates x 0.6s budget = ~1.2s; x3 (the bug we are avoiding) would be ~3.6s.
+    assert elapsed < 2.4, "per-rate budget was multiplied by the nudge count"
+
+
 def test_default_candidates_try_115200_then_9600_first():
     """The two rates that cover almost all console gear must lead the sweep, in
     that order, so detection reaches them before any exotic rate."""
