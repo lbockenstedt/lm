@@ -443,48 +443,56 @@ def register(app, hub, ctx):
         return out
 
     def _console_load_credentials(hub):
-        """Decrypt/resolve the global auto-identify credential list ([] if
-        unset/undecryptable). Sourced from Key Vault when a reference is
-        configured (:func:`_console_credentials_ref`), else the Fernet-encrypted
-        blob in hub state."""
+        """Resolve the global auto-identify credential list ([] when unset).
+
+        Sourced ONLY from the Key Vault reference in
+        :func:`_console_credentials_ref`. The hub no longer keeps console
+        passwords in its own state — see
+        :func:`_console_purge_legacy_credentials`."""
         ref = _console_credentials_ref(hub)
-        if ref:
-            creds = _console_creds_from_vault(hub, ref)
-            if creds is None:
-                logger.warning("console: credential ref %r configured but could "
-                               "not be resolved from the vault", ref)
-                return []
-            return creds
-        blob = hub.state.system_state.get("console_credentials_enc")
-        if not blob:
+        if not ref:
             return []
-        try:
-            from security.encryption import hub_encryption
-            return json.loads(hub_encryption.decrypt(blob.encode()))
-        except Exception:  # noqa: BLE001
-            logger.warning("console: could not decrypt stored credentials")
+        creds = _console_creds_from_vault(hub, ref)
+        if creds is None:
+            logger.warning("console: credential ref %r configured but could "
+                           "not be resolved from the vault", ref)
             return []
+        return creds
 
-    def _console_save_credentials(hub, creds):
-        from security.encryption import hub_encryption
-        hub.state.system_state["console_credentials_enc"] = \
-            hub_encryption.encrypt(json.dumps(creds)).decode()
-        hub.state._mark_dirty()
+    def _console_purge_legacy_credentials(hub):
+        """Drop the retired hub-local console password blob
+        (``console_credentials_enc``) from hub state, once, and say so.
 
-    def _console_load_local_credentials(hub):
-        """The LOCAL Fernet-encrypted console credential list (hub state only),
-        ignoring any Key Vault ref. These legacy passwords are what an operator
-        may DELETE to clean up once the Credential Vault is in use — deletion is
-        the one mutation still allowed on this store (creation is disabled)."""
-        blob = hub.state.system_state.get("console_credentials_enc")
-        if not blob:
-            return []
+        Console logins live in the Credential Vault — which works on EVERY
+        deployment, falling back to its own encrypted ``blobs`` map when no
+        cloud vault is configured (``cred_vault._vault_available``) — so this
+        second, module-private password store had no remaining purpose.
+
+        It was also actively harmful: the blob is Fernet-encrypted with the
+        hub key, so any install whose key was replaced (re-install, restore,
+        rotation without ``LM_FERNET_KEY_PREVIOUS``) is left holding an
+        ORPHAN it can never read. Every resolve then logged "could not
+        decrypt stored credentials" and returned [], which looked like the
+        cause of an empty credential list while hiding the real one. Deleting
+        it costs nothing: an unreadable blob has no recoverable content.
+
+        Never raises: this also runs on the seed path, and credential hygiene
+        must not be able to break credential delivery."""
         try:
-            from security.encryption import hub_encryption
-            return json.loads(hub_encryption.decrypt(blob.encode()))
-        except Exception:  # noqa: BLE001
-            logger.warning("console: could not decrypt stored credentials")
-            return []
+            state = hub.state.system_state
+            if "console_credentials_enc" not in state:
+                return False
+            state.pop("console_credentials_enc", None)
+        except Exception:  # noqa: BLE001 — no/odd state object (early boot)
+            return False
+        try:
+            hub.state._mark_dirty()
+        except Exception:  # noqa: BLE001 — never block a request on persistence
+            pass
+        logger.info("console: removed the retired hub-local credential blob "
+                    "(console_credentials_enc); console logins are managed in "
+                    "the Credential Vault")
+        return True
 
     # Name of the Credential Vault secret (in the Global Admin slot, __admin__)
     # that holds the console auto-identify login list as a hub-mode
@@ -517,7 +525,7 @@ def register(app, hub, ctx):
                         "password": str(d.get("password", ""))})
         return out
 
-    async def _console_creds_for_tenant(hub, tenant):
+    async def _console_creds_for_tenant(hub, tenant, stats=None):
         """Aggregate console auto-login credentials from the Credential Vault for
         a console spoke bound to ``tenant``. Secrets typed ``console`` OR ``login``
         count (see ``_CONSOLE_CRED_TYPES``) — an ordinary username+password login
@@ -528,8 +536,19 @@ def register(app, hub, ctx):
         slot — so a tenant's console password is never pushed to another tenant's
         console spoke. The legacy global ``console-auto-credentials`` list secret
         (``__admin__``) is still honoured for backward-compat. De-duped by
-        (username, password)."""
+        (username, password).
+
+        ``stats`` — when a dict is passed it is filled with ``buckets``,
+        ``candidates`` (vault secrets of an accepted type that were readable)
+        and ``unusable`` (those that carried no username/password pair, e.g. an
+        API-key-shaped ``login`` holding client_id/client_secret). The seed path
+        uses it to explain WHY a console spoke got no logins instead of
+        retrying silently forever."""
         creds, seen = [], set()
+        if stats is not None:
+            stats.setdefault("buckets", [])
+            stats.setdefault("candidates", 0)
+            stats.setdefault("unusable", 0)
 
         def _add(items):
             for c in items:
@@ -543,8 +562,15 @@ def register(app, hub, ctx):
             buckets = [_cv.ADMIN_BUCKET]
             if tenant and tenant not in buckets:
                 buckets.append(tenant)
+            if stats is not None:
+                stats["buckets"] = list(buckets)
             for rec in await _cv.automation_list_by_type(hub, _CONSOLE_CRED_TYPES, buckets):
-                _add(_console_creds_from_cred_vault(rec.get("value")))
+                got = _console_creds_from_cred_vault(rec.get("value"))
+                if stats is not None:
+                    stats["candidates"] += 1
+                    if not got:
+                        stats["unusable"] += 1
+                _add(got)
             # Legacy single named list secret in the admin slot.
             try:
                 val = await _cv.automation_get(hub, _cv.ADMIN_BUCKET, _CONSOLE_VAULT_SECRET)
@@ -612,17 +638,19 @@ def register(app, hub, ctx):
             pass
         return creds
 
-    async def _console_load_credentials_resolved(hub, tenant=None):
-        """Async credential resolution used by the (async) seed path. Prefers the
-        central Credential Vault so console logins can be managed alongside every
-        other secret; falls back to the legacy ref / hub-state loader when no
-        vault console secret applies. Purely additive — never worse than today.
+    async def _console_load_credentials_resolved(hub, tenant=None, stats=None):
+        """Async credential resolution used by the (async) seed path. Console
+        logins come from the central Credential Vault, so they are managed
+        alongside every other secret; the Key Vault *reference* list
+        (:func:`_console_load_credentials`) remains as a fallback for installs
+        configured that way.
 
         ``tenant`` scopes the vault lookup to that tenant's bucket + ``__admin__``
         (the per-spoke seed passes the spoke's tenant); ``None`` aggregates every
-        reachable console/login secret (used by diagnostics/reporting)."""
+        reachable console/login secret (used by diagnostics/reporting).
+        ``stats`` is forwarded to :func:`_console_creds_for_tenant`."""
         try:
-            creds = await _console_creds_for_tenant(hub, tenant)
+            creds = await _console_creds_for_tenant(hub, tenant, stats=stats)
             if creds:
                 return creds
         except Exception:  # noqa: BLE001 — not configured / absent / unreadable
@@ -666,12 +694,6 @@ def register(app, hub, ctx):
         except Exception:  # noqa: BLE001
             return False
 
-    def _console_local_passwords_present(hub):
-        """True when legacy LOCAL console passwords still exist on the hub
-        (Fernet-encrypted ``console_credentials_enc``) — the thing the migrate
-        warning nudges the operator to move into the vault."""
-        return bool(hub.state.system_state.get("console_credentials_enc"))
-
     async def _console_hub_git_head():
         """Short git HEAD of the hub's own checkout, for the diagnostics debug
         block (tells an operator whether the HUB — where the console seed /
@@ -694,51 +716,46 @@ def register(app, hub, ctx):
             hub._console_creds_seeded = s
         s.add(sid)
 
-    async def _console_write_credentials_no_vault(hub, body, sess):
-        """Full create/update/delete of the hub-local console credential list —
-        the supported path when NO Credential Vault is configured.
+    def _console_warn_no_credentials(hub, sid, tenant, stats):
+        """Explain — once per spoke — that a console spoke has NO auto-login
+        credentials, and where to add them.
 
-        Without a vault there is nowhere else for console logins to live, so
-        blocking this would leave the operator unable to use auto-identify at
-        all. The list is still never stored in the clear: it round-trips through
-        :func:`_console_save_credentials`, which Fernet-encrypts it into
-        ``console_credentials_enc``.
+        The seed retries on every trigger, so this must not log on every pass;
+        the spoke id is remembered until a seed succeeds
+        (:func:`_console_clear_no_credentials`). The message names the buckets
+        actually searched and, when the vault DID hold candidate secrets that
+        carried no username/password pair, says so — that is the difference
+        between "you never added a console login" and "the login you added is
+        the wrong shape" (e.g. an API-key secret typed ``login`` holding
+        client_id/client_secret), which otherwise looks identical from the UI."""
+        warned = getattr(hub, "_console_creds_warned", None)
+        if warned is None:
+            warned = set()
+            hub._console_creds_warned = warned
+        if sid in warned:
+            return
+        warned.add(sid)
+        buckets = ", ".join(stats.get("buckets") or []) or "(vault unavailable)"
+        cand = stats.get("candidates") or 0
+        unusable = stats.get("unusable") or 0
+        if cand and unusable == cand:
+            why = (f"{cand} candidate secret(s) were found in [{buckets}] but none "
+                   f"contained a username/password pair — check their fields")
+        elif cand:
+            why = f"{cand} candidate secret(s) in [{buckets}] yielded no usable login"
+        else:
+            why = (f"no console/login secret exists in [{buckets}] — add one in "
+                   f"Credential Library (automation-readable)")
+        logger.warning("console: spoke %s (tenant %r) has NO auto-login "
+                       "credentials; device profiling and auto-identify will "
+                       "fail to log in — %s", sid, tenant or "(none)", why)
 
-        A blank password KEEPS the currently-stored one for that username — the
-        GET masks passwords, so the WebUI submits blanks for untouched rows and
-        a naive replace would wipe them. Key-Vault-backed lists are read-only
-        here and rejected, same as before."""
-        # Vault-backed lists are managed in Key Vault (least-privilege: the hub
-        # only reads them) — editing here would be silently lost, so reject it.
-        if _console_creds_keyvault_backed(hub):
-            raise HTTPException(
-                status_code=409,
-                detail="console credentials are managed in Key Vault (read-only here)")
-        stored = {c.get("username"): c.get("password")
-                  for c in _console_load_local_credentials(hub)}
-        creds = []
-        for c in (body.get("credentials") or []):
-            if not isinstance(c, dict):
-                continue
-            u = str(c.get("username", "")).strip()
-            if not u:
-                continue
-            p = str(c.get("password", ""))
-            if not p and u in stored:
-                p = stored[u]  # sentinel-merge: blank means "keep the stored one"
-            creds.append({"username": u, "password": p})
-        _console_save_credentials(hub, creds)
-        hub._console_creds_seeded = set()  # force re-seed with the new list
-        for sid in (hub.get_all_spokes_by_type("console") or []):
-            try:
-                await hub.send_to_spoke_command(sid, "CONSOLE_SET_CREDENTIALS",
-                                                {"credentials": creds})
-                _console_mark_seeded(hub, sid)
-            except Exception:  # noqa: BLE001
-                pass
-        logger.info("console: %d local credential(s) saved by %s (no vault configured)",
-                    len(creds), (sess.get("user", {}) or {}).get("username", "?"))
-        return {"status": "ok", "count": len(creds)}
+    def _console_clear_no_credentials(hub, sid):
+        """Forget the no-credentials warning for ``sid`` once it is seeded, so a
+        later regression is reported again instead of being suppressed."""
+        warned = getattr(hub, "_console_creds_warned", None)
+        if warned:
+            warned.discard(sid)
 
     async def _console_seed_credentials(hub, spokes):
         """Push the credential list to any console spoke not yet seeded this
@@ -753,18 +770,28 @@ def register(app, hub, ctx):
         todo = [sid for sid in spokes if sid not in seeded]
         if not todo:
             return
+        _console_purge_legacy_credentials(hub)
 
         async def _seed_one(sid):
             try:
                 tenant = hub.state.get_spoke_tenant(sid) or ""
             except Exception:  # noqa: BLE001
                 tenant = ""
-            creds = await _console_load_credentials_resolved(hub, tenant)
+            stats = {}
+            creds = await _console_load_credentials_resolved(hub, tenant, stats=stats)
             if not creds:
-                return  # nothing to push yet — retry on the next seed trigger
+                # Nothing to push yet — retry on the next seed trigger. Say so
+                # ONCE per spoke: a console spoke with no logins cannot
+                # auto-identify or log in during profiling, and previously this
+                # returned in silence (or, worse, surfaced as an unrelated
+                # "could not decrypt stored credentials" line from the retired
+                # hub-local store) leaving the operator nothing to act on.
+                _console_warn_no_credentials(hub, sid, tenant, stats)
+                return
             try:
                 await hub.send_to_spoke_command(sid, "CONSOLE_SET_CREDENTIALS", {"credentials": creds})
                 _console_mark_seeded(hub, sid)
+                _console_clear_no_credentials(hub, sid)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1369,8 +1396,6 @@ def register(app, hub, ctx):
             cred_source = "credential vault" + (" + legacy" if legacy_present else "")
         elif _console_creds_keyvault_backed(hub):
             cred_source = "keyvault:" + _console_credentials_ref(hub)
-        elif hub.state.system_state.get("console_credentials_enc"):
-            cred_source = "hub-state (encrypted)"
         else:
             cred_source = "none"
         debug = {
@@ -1479,110 +1504,44 @@ def register(app, hub, ctx):
             creds = _console_load_credentials(hub)
         vault_backed = await _console_vault_secret_present(hub)
         vault_on = _vault_enabled(hub)
-        local_present = _console_local_passwords_present(hub)
-        # Warn (never auto-migrate/drop) when the vault is enabled but local
-        # passwords still linger — nudge the operator to move them by hand.
-        warning = ""
-        if vault_on and local_present and not vault_backed:
-            warning = ("The credential vault is enabled but local console passwords "
-                       "still exist on the hub. Migrate them into the Credential Vault "
-                       "(Global Admin slot → 'console-auto-credentials') manually; they "
-                       "are otherwise ignored and won't be updatable here.")
-        # With NO vault configured there is nowhere else to keep console logins,
-        # so the hub-local (Fernet-encrypted) store is the supported path and the
-        # editor stays open. Key-Vault-backed lists remain read-only regardless.
+        # The retired hub-local password blob is dropped on sight (see
+        # _console_purge_legacy_credentials) — there is no second, module-private
+        # console password store any more, so these stay constant. The keys are
+        # kept because the WebUI still reads them; it renders the legacy section
+        # only when `local_credentials` is non-empty, so it simply disappears.
+        _console_purge_legacy_credentials(hub)
+        # Console logins are edited in the Credential Library
+        # (POST /api/console/credentials/set), never here.
         kv_backed = _console_creds_keyvault_backed(hub)
-        editable = (not vault_on) and (not kv_backed)
         return {"credentials": [{"username": c.get("username", ""),
                                  "has_password": bool(c.get("password"))} for c in creds],
                 "source": ("cred_vault" if vault_backed
                            else "keyvault" if kv_backed else "hub"),
-                "read_only": not editable, "creation_disabled": not editable,
-                "vault_enabled": vault_on, "local_passwords_present": local_present,
-                "migrate_warning": warning,
-                "local_credentials": [{"username": c.get("username", ""),
-                                       "has_password": bool(c.get("password"))}
-                                      for c in _console_load_local_credentials(hub)],
+                "read_only": True, "creation_disabled": True,
+                "vault_enabled": vault_on, "local_passwords_present": False,
+                "migrate_warning": "",
+                "local_credentials": [],
                 "vault_bucket": _cv_admin_bucket(), "vault_secret": _CONSOLE_VAULT_SECRET}
 
     @app.post("/api/console/credentials")
     async def console_post_credentials(request: Request):
-        """Manage the global auto-identify console credential list. Admin only.
+        """Retired. Admin only.
 
-        Behaviour depends on whether a Credential Vault is configured:
-
-        * **Vault ON** — delete-only. Console logins belong in the vault (Global
-          Admin slot ``__admin__`` → secret ``console-auto-credentials``,
-          automation-readable) and the seed loop pulls them unattended, so
-          CREATING or CHANGING a password here is rejected 409. An operator MAY
-          still REMOVE legacy LOCAL passwords to clean them up (the agreed
-          "delete but not add" rule): the submitted ``credentials`` list must be
-          a subset of the existing local usernames with NO passwords supplied.
-          Submitting an empty list clears all local passwords.
-        * **Vault OFF** — full create/update/delete. With no vault configured
-          there is nowhere else to store console logins, so the hub-local store
-          is the supported path. It is Fernet-encrypted at rest
-          (``console_credentials_enc``), never plaintext. A blank password keeps
-          the currently-stored one for that username (the GET never returns
-          passwords, so the UI submits blanks to keep them).
-
-        Either way, Key-Vault-backed lists are read-only here (managed in the
-        vault) and are never touched."""
+        This endpoint used to manage a second, module-private console password
+        store on the hub (the Fernet blob ``console_credentials_enc``): full
+        create/update/delete when no Credential Vault was configured, and
+        delete-only once one was. That store is gone — console logins live in
+        the Credential Vault on every deployment, so there is nothing here left
+        to write. Always 409 with a pointer to the supported endpoint rather
+        than accepting a write the hub would silently drop."""
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
-        hub = app.state.hub
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        if not _vault_enabled(hub):
-            return await _console_write_credentials_no_vault(hub, body, sess)
-        existing = _console_load_local_credentials(hub)
-        existing_users = {c.get("username") for c in existing}
-        keep_users = set()
-        for c in (body.get("credentials") or []):
-            if not isinstance(c, dict):
-                continue
-            u = str(c.get("username", "")).strip()
-            if not u:
-                continue
-            if u not in existing_users:
-                raise HTTPException(status_code=409, detail=(
-                    "Creating passwords in the Console module is disabled. Store "
-                    "console logins in the Credential Vault (Global Admin slot → "
-                    "'console-auto-credentials'). You may only DELETE existing "
-                    "local credentials here."))
-            if str(c.get("password", "")):
-                raise HTTPException(status_code=409, detail=(
-                    "Changing console passwords here is disabled. Store console "
-                    "logins in the Credential Vault. You may only DELETE existing "
-                    "local credentials here."))
-            keep_users.add(u)
-        new_local = [c for c in existing if c.get("username") in keep_users]
-        removed = len(existing) - len(new_local)
-        if removed == 0:
-            # Nothing to delete — reject rather than silently no-op so the caller
-            # knows this endpoint only performs deletions now.
-            raise HTTPException(status_code=409, detail=(
-                "No local credentials to delete. Creating console passwords is "
-                "disabled — manage them in the Credential Vault."))
-        _console_save_credentials(hub, new_local)
-        hub._console_creds_seeded = set()  # force re-seed with the reduced list
-        # Push the effective (resolved) credential list so removals take effect on
-        # the spokes immediately (vault-backed creds still win if a vault secret
-        # exists; otherwise the reduced local list — possibly empty — is pushed).
-        resolved = await _console_load_credentials_resolved(hub)
-        for sid in (hub.get_all_spokes_by_type("console") or []):
-            try:
-                await hub.send_to_spoke_command(sid, "CONSOLE_SET_CREDENTIALS",
-                                                {"credentials": resolved})
-                _console_mark_seeded(hub, sid)
-            except Exception:  # noqa: BLE001
-                pass
-        logger.info("console: %d local credential(s) deleted by %s",
-                    removed, (sess.get("user", {}) or {}).get("username", "?"))
-        return {"status": "ok", "removed": removed, "remaining": len(new_local)}
+        _console_purge_legacy_credentials(app.state.hub)
+        raise HTTPException(status_code=409, detail=(
+            "The hub no longer stores console passwords locally. Manage console "
+            "auto-identify logins in the Credential Library (they are read from "
+            "the Credential Vault); this endpoint is retired."))
 
     @app.post("/api/console/credentials/to-vault")
     async def console_creds_to_vault(request: Request):
