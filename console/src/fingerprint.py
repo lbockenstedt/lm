@@ -140,7 +140,15 @@ PROFILES: List[Dict[str, Any]] = [
     },
     {
         "name": "juniper-junos",
-        "match": re.compile(r"JUNOS|Junos:|Juniper Networks|juniper", re.I),
+        # JUNOS runs on FreeBSD, and a device sitting at a bare login prompt
+        # prints no vendor string at all — only "<hostname> (ttyu0)" (or
+        # "Amnesiac (ttyu0)" when it has no configured hostname yet). Without
+        # those markers a login-locked SRX/EX falls through to the `linux`
+        # profile, whose match is a bare "login:", and the port is reported as a
+        # Linux server. Keep them ahead of that catch-all.
+        "match": re.compile(
+            r"JUNOS|Junos:|Juniper Networks|juniper|"
+            r"Amnesiac\s*\(tty|\(ttyu\d+\)", re.I),
         "family": "Firewall/Router",
         "prompt": re.compile(r"[\w.\-]+[>#%]\s*$"),
         "login_prompt": re.compile(r"login:\s*$"),
@@ -458,12 +466,49 @@ _PASSWORD_PROMPT = _PROMPTS["password_prompt"]
 _SHELL_PROMPT = _PROMPTS["shell_prompt"]
 _NEW_PASSWORD_PROMPT = _PROMPTS["new_password_prompt"]
 
+# Lines a device emits ASYNCHRONOUSLY on the console, unrelated to the prompt:
+# syslog records, kernel ring-buffer messages and Cisco-style facility messages.
+# Juniper (SRX/EX) logs to the console out of the box, so one of these commonly
+# lands right after "login:" — see _prompt_tail.
+_ASYNC_NOISE = re.compile(
+    r"^(?:"
+    r"[A-Z][a-z]{2}\s+\d{1,2}\s+\d{1,2}:\d{2}:\d{2}"   # syslog "Dec  9 10:22:01"
+    r"|\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}"          # ISO-8601 timestamp
+    r"|\[\s*\d+\.\d+\]"                                  # kernel "[   12.345678]"
+    r"|%[A-Z][A-Z0-9_\-]*:"                              # Cisco "%LINK-3-UPDOWN:"
+    r"|<\d{1,3}>"                                        # syslog priority "<30>"
+    r")")
+
+
+def _prompt_tail(text: str) -> str:
+    """The tail a prompt matcher should run against, with trailing asynchronous
+    log noise removed.
+
+    Every prompt pattern is anchored (``...\\s*$``) so it only matches the LIVE
+    prompt at the end of the buffer. A device that logs to its console can print
+    a syslog/kernel line immediately after ``login:``, which scrolls the prompt
+    up and makes the anchored pattern miss — the probe then concludes there is no
+    recognizable prompt and never spends a credential, so no login is ever
+    attempted. Juniper SRX/EX do this by default, and a chatty box re-logs after
+    every nudge, so retrying alone does not help.
+
+    Dropping the trailing noise lines exposes the still-current prompt underneath.
+    Blank trailing lines are dropped too, which the anchored ``\\s*$`` already
+    tolerated, so behaviour is unchanged on quiet lines.
+    """
+    tail = (text or "")[-400:]
+    lines = re.split(r"\r\n|\r|\n", tail)
+    while len(lines) > 1 and (not lines[-1].strip()
+                              or _ASYNC_NOISE.match(lines[-1].lstrip())):
+        lines.pop()
+    return "\n".join(lines)
+
 
 def looks_like_prompt(text: str) -> bool:
     """True if the tail of ``text`` shows a login / password / shell / CLI prompt
     — i.e. the device has finished booting and is ready to talk. Used by the boot
     watcher to decide a boot cycle reached a usable prompt (vs. hung mid-boot)."""
-    tail = sanitize_console_text(text or "")[-400:]
+    tail = _prompt_tail(sanitize_console_text(text or ""))
     return bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)
                 or _SHELL_PROMPT.search(tail) or prompt_hostname(text))
 
@@ -752,15 +797,15 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
     # device instead of sitting forever on a silent line.
     write_fn(b"\r\n")
     transcript = _read_until(read_fn, prompts, banner_secs)
-    _observe(transcript[-200:])
-    while diag["nudges"] < _LOGIN_NUDGES and not _has_prompt(transcript[-200:]):
+    _observe(_prompt_tail(transcript))
+    while diag["nudges"] < _LOGIN_NUDGES and not _has_prompt(_prompt_tail(transcript)):
         diag["nudges"] += 1
         write_fn(b"\r")
         transcript += _read_until(read_fn, prompts, _NUDGE_SECS)
-        _observe(transcript[-200:])
+        _observe(_prompt_tail(transcript))
     diag["bytes"] = len(transcript)
     diag["any_output"] = bool(transcript.strip())
-    tail = transcript[-200:]
+    tail = _prompt_tail(transcript)
     at_login = bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)
                     or _at_new_pw(tail))
     if not at_login:
@@ -783,14 +828,14 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
         back to the login prompt. Returns the extended transcript."""
         nonlocal transcript
         sent = 0
-        t = transcript[-200:]
+        t = _prompt_tail(transcript)
         while sent < _NEW_PW_SKIP_CRS and _at_new_pw(t) and not _SHELL_PROMPT.search(t):
             sent += 1
             write_fn(b"\r")
             transcript += _read_until(
                 read_fn, [_SHELL_PROMPT, _LOGIN_PROMPT, _NEW_PASSWORD_PROMPT, _PASSWORD_PROMPT],
                 _NEW_PW_SKIP_SECS)
-            t = transcript[-200:]
+            t = _prompt_tail(transcript)
             _observe(t)
         if sent:
             diag["forced_password_skipped"] = True
@@ -801,7 +846,7 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
     n = len(credentials)
     while idx < n:
         cred = credentials[idx]
-        tail = transcript[-200:]
+        tail = _prompt_tail(transcript)
         # Ensure a login/password prompt is actually showing before we SPEND this
         # credential. A device that rate-limits or is slow to re-draw after a
         # failed attempt may not have re-shown its prompt yet; nudge (bounded) and
@@ -821,7 +866,7 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
             write_fn(b"\r")
             transcript += _read_until(read_fn, [_LOGIN_PROMPT, _PASSWORD_PROMPT,
                                                 _NEW_PASSWORD_PROMPT, _SHELL_PROMPT], _REPROMPT_SECS)
-            tail = transcript[-200:]
+            tail = _prompt_tail(transcript)
             _observe(tail)
 
         diag["creds_tried"] = idx + 1
@@ -830,29 +875,29 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
         # set-password field): decline via CRs, then re-check for a shell.
         if _at_new_pw(tail):
             transcript = _skip_forced_password_change()
-            tail = transcript[-200:]
+            tail = _prompt_tail(transcript)
         else:
             if _LOGIN_PROMPT.search(tail):
                 write_fn((cred.get("username", "") + "\r").encode())
                 transcript += _read_until(read_fn, [_NEW_PASSWORD_PROMPT, _PASSWORD_PROMPT,
                                                     _SHELL_PROMPT, _LOGIN_PROMPT], step_secs)
-                tail = transcript[-200:]
+                tail = _prompt_tail(transcript)
                 _observe(tail)
             # A forced set/change flow can appear right after the username (before
             # any password) — skip it rather than typing the credential password.
             if _at_new_pw(tail):
                 transcript = _skip_forced_password_change()
-                tail = transcript[-200:]
+                tail = _prompt_tail(transcript)
             elif _PASSWORD_PROMPT.search(tail):
                 write_fn((cred.get("password", "") + "\r").encode())
                 transcript += _read_until(read_fn, [_SHELL_PROMPT, _NEW_PASSWORD_PROMPT,
                                                     _LOGIN_PROMPT, _PASSWORD_PROMPT], step_secs)
-                tail = transcript[-200:]
+                tail = _prompt_tail(transcript)
                 _observe(tail)
                 # Forced change AFTER a successful auth (the common net-new case).
                 if _at_new_pw(tail):
                     transcript = _skip_forced_password_change()
-                    tail = transcript[-200:]
+                    tail = _prompt_tail(transcript)
         if _shell_ready(tail):
             diag["bytes"] = len(transcript)
             return True, idx, transcript, diag
@@ -883,7 +928,7 @@ def _logout(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
         except Exception:  # noqa: BLE001
             break
         out = _read_until(read_fn, [_LOGIN_PROMPT, _PASSWORD_PROMPT], cmd_secs)
-        tail = out[-200:]
+        tail = _prompt_tail(out)
         if _LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail):
             return True
     return False
@@ -926,7 +971,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
 
     # 2. Detect the vendor from everything seen (pre- and post-login).
     profile = detect_vendor(transcript)
-    tail = transcript[-200:]
+    tail = _prompt_tail(transcript)
     at_login_prompt = bool(_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail))
 
     # 2b. Direct-console gear shows no banner until prodded and may never present
@@ -963,7 +1008,7 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         result["identity"]["type"] = profile["family"]
 
     # If a login prompt is still showing (couldn't authenticate), stop here.
-    tail = transcript[-200:]
+    tail = _prompt_tail(transcript)
     if not result["logged_in"] and (_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)):
         return _finalize(result, profile)
 
@@ -1049,7 +1094,7 @@ def run_commands(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     result["logged_in"] = logged_in
     result["credential_index"] = cred_idx
     result["diag"] = _login_diag(diag, transcript, credentials)
-    tail = transcript[-200:]
+    tail = _prompt_tail(transcript)
     if not logged_in and (_LOGIN_PROMPT.search(tail) or _PASSWORD_PROMPT.search(tail)):
         return result  # never authenticated — don't send commands into a login prompt
     outputs: Dict[str, str] = {}
@@ -1075,14 +1120,14 @@ def login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
         return bool(profile["prompt"].search(t) and not (
             profile["login_prompt"].search(t) or profile["password_prompt"].search(t)))
 
-    tail = _read_until(read_fn, [profile["login_prompt"], profile["password_prompt"],
-                                 profile["prompt"]], sample_secs)[-200:]
+    tail = _prompt_tail(_read_until(read_fn, [profile["login_prompt"], profile["password_prompt"],
+                                              profile["prompt"]], sample_secs))
     if at_exec(tail):
         return True, None
     if not (profile["login_prompt"].search(tail) or profile["password_prompt"].search(tail)):
         write_fn(b"\r")
-        tail = _read_until(read_fn, [profile["login_prompt"], profile["password_prompt"],
-                                     profile["prompt"]], sample_secs)[-200:]
+        tail = _prompt_tail(_read_until(read_fn, [profile["login_prompt"], profile["password_prompt"],
+                                                  profile["prompt"]], sample_secs))
         if at_exec(tail):
             return True, None
     for idx, cred in enumerate(credentials or []):
@@ -1091,10 +1136,10 @@ def login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
         else:
             write_fn((cred.get("username", "") + "\r").encode())
             out = _read_until(read_fn, [profile["password_prompt"], profile["prompt"]], 3.0)
-            if profile["password_prompt"].search(out[-200:]):
+            if profile["password_prompt"].search(_prompt_tail(out)):
                 write_fn((cred.get("password", "") + "\r").encode())
-        tail = _read_until(read_fn, [profile["prompt"], profile["login_prompt"],
-                                     profile["password_prompt"]], 4.0)[-200:]
+        tail = _prompt_tail(_read_until(read_fn, [profile["prompt"], profile["login_prompt"],
+                                                 profile["password_prompt"]], 4.0))
         if at_exec(tail):
             return True, idx
     return False, None
