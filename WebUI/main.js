@@ -1750,8 +1750,8 @@ const VIEW_SUBMENUS = {
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management', 'Assistant'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
-    dns: ['Overview', 'Records', 'Diagnostics', 'Forwarders', 'External DNS'],
-    dhcp: ['Overview', 'Diagnostics', 'Subnets', 'Leases', 'Reservations'],
+    dns: ['Overview', 'Records', 'Forwarders', 'External DNS', 'Diagnostics'],
+    dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations', 'Diagnostics'],
     nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'Other', 'Scan'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
 };
@@ -4562,7 +4562,7 @@ async function editReport(id) {
     modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
     inner.querySelector('.rpt-close').addEventListener('click', () => modal.remove());
     inner.querySelector('.rpt-cancel').addEventListener('click', () => modal.remove());
-    document.body.appendChild(modal);
+    _mountModal(modal);
     _rptWhen();
     document.getElementById('rpt-save').addEventListener('click', () => saveReport(existing ? existing.id : ''));
 }
@@ -15473,7 +15473,7 @@ async function openAgentConfigModal(agentId, currentLabel) {
             </div>
         </div>
     `;
-    document.body.appendChild(modal);
+    _mountModal(modal);
 }
 
 async function saveAgentConfig(agentId) {
@@ -15575,7 +15575,7 @@ async function openAgentAssignModal(agentId, currentTenantId) {
             </div>
         </div>
     `;
-    document.body.appendChild(modal);
+    _mountModal(modal);
 }
 
 async function saveAgentTenant(agentId) {
@@ -15652,7 +15652,7 @@ async function openSpokeAssignModal(spokeId, currentTenantId, noun = 'Spoke') {
             </div>
         </div>
     `;
-    document.body.appendChild(modal);
+    _mountModal(modal);
 }
 
 async function saveSpokeAssign(spokeId) {
@@ -15816,7 +15816,7 @@ async function openSpokeMetadataModal(spokeId, currentName, approved) {
             </div>
         </div>
     `;
-    document.body.appendChild(modal);
+    _mountModal(modal);
 }
 
 async function saveSpokeMetadata(spokeId) {
@@ -16197,7 +16197,7 @@ async function showGroupModal(groupId) {
                 <button onclick="saveGroup()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">${groupId ? 'Save' : 'Create'} Group</button>
             </div>
         </div>`;
-    document.body.appendChild(modal);
+    _mountModal(modal);
 }
 
 function closeGroupModal() {
@@ -16803,6 +16803,58 @@ function openModal(id, bodyHtml, opts = {}) {
     document.body.appendChild(modal);
     return modal;
 }
+
+// Mount a hand-built modal, replacing any previous copy with the same id.
+//
+// openModal() above has always dropped a same-id node before appending, but the
+// openers that build their own element skipped that -- and the ones that AWAIT
+// their data before appending are re-entrant, because nothing stops a second
+// click while the first fetch is still outstanding. Clicking "Credentials" on
+// the Console page twice therefore stacked two live copies of the dialog, and
+// because they shared one id every close button (getElementById(..).remove())
+// only ever removed the first, so the stack had to be dismissed one layer at a
+// time.
+function _mountModal(modal) {
+    if (modal.id) document.getElementById(modal.id)?.remove();
+    document.body.appendChild(modal);
+    return modal;
+}
+
+// Collapse repeat invocations of an async opener while its first call is still
+// in flight.
+//
+// _mountModal alone keeps the screen to one dialog, but the duplicate work
+// still happens: the later response replaces a dialog the user may already be
+// typing into, discarding the input. Keyed on the ARGUMENTS so suppression is
+// limited to re-clicking the same button -- picking a different row (editUser(7)
+// after editUser(3)) is a different key and still opens.
+function _singleFlight(fn) {
+    const pending = new Map();
+    return function (...args) {
+        let key;
+        try { key = JSON.stringify(args); } catch (e) { key = String(args); }
+        if (pending.has(key)) return pending.get(key);
+        const out = fn.apply(this, args);
+        // Only a thenable has a window during which a second click can land; a
+        // synchronous opener is finished before the next event can be handled.
+        if (out && typeof out.then === 'function') {
+            pending.set(key, out);
+            const clear = () => pending.delete(key);
+            out.then(clear, clear);
+        }
+        return out;
+    };
+}
+
+// Every opener that appends only AFTER an await. Inline onclick= resolves these
+// off the global object, so rebinding the property is enough to cover the
+// handlers in markup. Declarations hoist, so all of them already exist here.
+['editReport', 'openAgentConfigModal', 'openAgentAssignModal', 'openSpokeAssignModal',
+ 'openSpokeMetadataModal', 'showGroupModal', 'openConsoleCaptureModal',
+ 'openConsoleCredentialsModal', 'openConsolePortTenantModal', 'showPxmxInstallModal',
+ 'showDnsCredentialsModal', 'showAddUserModal', 'editUser'].forEach(name => {
+    if (typeof window[name] === 'function') window[name] = _singleFlight(window[name]);
+});
 
 // ── Self-service spoke onboarding ("Add Server") ────────────────────────────
 // A tenant-admin (who has no access to the Global-Admin-only Setup → Spokes
@@ -20826,7 +20878,7 @@ async function openConsoleCaptureModal(spokeId, portId) {
         <div class="px-4 py-2 bg-[#2d2d2d] text-right"><button class="js-capture-refresh text-[11px] px-3 py-1.5 rounded border border-slate-500 text-slate-200 hover:bg-slate-700">↻ Refresh</button></div>
       </div>`;
     modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
-    document.body.appendChild(modal);
+    _mountModal(modal);
     modal.querySelector('.js-capture-refresh').setAttribute(
         'onclick', `openConsoleCaptureModal('${escJsAttr(spokeId)}','${escJsAttr(portId)}')`);
 }
@@ -21290,7 +21342,7 @@ async function openConsoleCredentialsModal() {
               ${localSection}
               <div class="pt-3 flex justify-end"><button onclick="this.closest('#console-creds-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Close</button></div>
             </div></div>`;
-        document.body.appendChild(modal);
+        _mountModal(modal);
         return;
     }
     const rowFor = (u) => `<div class="flex gap-2 console-cred-row">
@@ -21320,7 +21372,7 @@ async function openConsoleCredentialsModal() {
             <button onclick="saveConsoleVaultCredentials('${escJsAttr(tenantScope)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Save</button>
           </div>
         </div></div>`;
-    document.body.appendChild(modal);
+    _mountModal(modal);
 }
 
 // Save the tenant's console SCAN credentials into the Credential Vault (tenant
@@ -22403,7 +22455,7 @@ async function openConsolePortTenantModal(spokeId, portId, currentTenantId) {
             <button onclick="saveConsolePortTenant('${spokeId.replace(/'/g, "\\'")}','${portId.replace(/'/g, "\\'")}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Assign</button>
           </div>
         </div></div>`;
-    document.body.appendChild(modal);
+    _mountModal(modal);
 }
 
 async function saveConsolePortTenant(spokeId, portId) {
@@ -23476,7 +23528,7 @@ async function showPxmxInstallModal() {
                 <button onclick="document.getElementById('pxmx-install-modal').remove()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Done</button>
             </div>
         </div>`;
-    document.body.appendChild(modal);
+    _mountModal(modal);
 }
 
 // ─── NetBox IPAM / DCIM ──────────────────────────────────────────────────────
@@ -27542,7 +27594,7 @@ async function showDnsCredentialsModal() {
           ${form}
         </div>
       </div>`;
-    document.body.appendChild(modal);
+    _mountModal(modal);
     modal.dataset.vaultOn = vaultOn ? '1' : '';
     if (!vaultOn) dnsCredRenderFields();
     await dnsCredReloadList();
@@ -30853,7 +30905,7 @@ async function showAddUserModal() {
             </div>
         </div>
     `;
-    document.body.appendChild(modal);
+    _mountModal(modal);
     if (document.getElementById('new-user-groups')) {
         _populateUserGroupChecklist('new-user-groups', []);
     }
@@ -31035,7 +31087,7 @@ async function editUser(userId) {
                 </div>
             </div>
         `;
-        document.body.appendChild(modal);
+        _mountModal(modal);
     } catch (err) {
         showToast('Error opening edit modal: ' + err.message, 'error');
     }

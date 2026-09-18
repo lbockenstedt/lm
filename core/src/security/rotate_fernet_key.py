@@ -51,12 +51,19 @@ singleton (that requires ``LM_FERNET_KEY``); the singleton is built lazily insid
 """
 
 import argparse
+import json
 import os
 import shutil
 import sys
 from typing import List, Optional, Tuple
 
 from cryptography.fernet import Fernet
+
+# Mirrors cred_vault's constants. Duplicated (not imported) so this stays a
+# standalone tool that runs with the hub stopped and no hub imports on the path.
+_MODE_HUB = "hub"
+_STORE_KV = "kv"
+_STORE_LOCAL = "local"
 
 
 def _resolve_old_key(env_file: Optional[str]) -> str:
@@ -132,6 +139,71 @@ def _iter_state_files(state_dir: str) -> List[str]:
         if os.path.isfile(p) and not name.endswith(".bak") and not name.endswith(".pre-rotate.bak"):
             out.append(p)
     return out
+
+
+def _rewrap_cred_vault(plaintext: str, decryptor, new_fernet):
+    """Re-wrap the INNER credential tokens in ``global_config.cred_vault``.
+
+    Credential Vault secrets are DOUBLE-encrypted: each secret's payload is
+    Fernet-encrypted with the hub key in its own right, and that ciphertext is
+    then either stored in the cloud vault (``store='kv'``) or parked in the
+    ``blobs`` map inside hub state (``store='local'``). Re-encrypting
+    ``system.json`` as a whole only replaces the OUTER layer — every inner token
+    stays under the OLD key. Rotation therefore used to leave the entire
+    Credential Vault behind, surviving only on the ``LM_FERNET_KEY_PREVIOUS``
+    fallback; the day that fallback is cleared, every credential becomes
+    permanently undecryptable ("could not decrypt secret").
+
+    ``store='local'`` tokens live right here in the document, so re-wrap them.
+    ``store='kv'`` tokens live in Azure/OCI and are out of reach of this
+    offline tool — they are COUNTED and reported so the caller can warn that
+    the previous key must be retained until they are re-saved.
+
+    ``mode='psk'`` secrets are encrypted with a pass-phrase-derived key, not the
+    hub key, so rotation does not affect them and they are skipped.
+
+    Returns ``(plaintext_out, rewrapped, kv_backed, failed)``.
+    """
+    try:
+        doc = json.loads(plaintext)
+    except Exception:  # noqa: BLE001 - not JSON → not a state doc we own
+        return plaintext, 0, 0, 0
+    if not isinstance(doc, dict):
+        return plaintext, 0, 0, 0
+    cv = (doc.get("global_config") or {}).get("cred_vault")
+    if not isinstance(cv, dict):
+        return plaintext, 0, 0, 0
+    secrets = cv.get("secrets") or {}
+    blobs = cv.get("blobs")
+    if not isinstance(blobs, dict):
+        blobs = {}
+    rewrapped = kv_backed = failed = 0
+    for bucket, entries in secrets.items():
+        if not isinstance(entries, dict):
+            continue
+        for name, sm in entries.items():
+            if not isinstance(sm, dict) or sm.get("mode") != _MODE_HUB:
+                continue  # psk-mode: keyed by pass-phrase, untouched by rotation
+            # Pre-existing records without an explicit marker were vault-only.
+            if (sm.get("store") or _STORE_KV) != _STORE_LOCAL:
+                kv_backed += 1
+                continue
+            kv_name = sm.get("kv_name")
+            token = blobs.get(kv_name)
+            if not token:
+                continue
+            try:
+                inner = decryptor(token.encode("ascii"))
+                blobs[kv_name] = new_fernet.encrypt(inner.encode()).decode("ascii")
+                rewrapped += 1
+            except Exception:  # noqa: BLE001
+                failed += 1
+                print(f"  ! could not re-wrap credential {bucket}/{name} — it is "
+                      f"already undecryptable under the old key; leaving as-is.")
+    if rewrapped:
+        cv["blobs"] = blobs
+        return json.dumps(doc), rewrapped, kv_backed, failed
+    return plaintext, rewrapped, kv_backed, failed
 
 
 def _key_vault_source(env_file: Optional[str]) -> Optional[str]:
@@ -235,6 +307,35 @@ def rotate(state_dir: str, env_file: Optional[str], apply_env: bool, dry_run: bo
             continue
         plan.append((path, plaintext))
         rotated += 1
+
+    # Re-wrap the Credential Vault's inner tokens (see _rewrap_cred_vault).
+    cv_rewrapped = cv_kv = cv_failed = 0
+    for i, (path, plaintext) in enumerate(plan):
+        new_text, n_ok, n_kv, n_bad = _rewrap_cred_vault(plaintext, decryptor, new_fernet)
+        cv_rewrapped += n_ok
+        cv_kv += n_kv
+        cv_failed += n_bad
+        if new_text is not plaintext:
+            plan[i] = (path, new_text)
+    if cv_rewrapped or cv_kv or cv_failed:
+        print(f"credential vault: re-wrapped {cv_rewrapped} hub-mode secret(s) "
+              f"stored in hub state; {cv_kv} live in the cloud vault; "
+              f"{cv_failed} already undecryptable.")
+    if cv_kv:
+        print(
+            "\n  *** WARNING: {n} Credential Vault secret(s) are stored in the "
+            "CLOUD VAULT.\n"
+            "      Their ciphertext is encrypted with the hub key but lives "
+            "outside this\n"
+            "      host, so this offline tool cannot re-wrap them. They will "
+            "keep working\n"
+            "      ONLY via the LM_FERNET_KEY_PREVIOUS fallback this rotation "
+            "writes.\n"
+            "      DO NOT remove LM_FERNET_KEY_PREVIOUS until every one of them "
+            "has been\n"
+            "      re-saved under the new key — clearing it makes them "
+            "permanently\n"
+            "      undecryptable.\n".format(n=cv_kv))
 
     if dry_run:
         print(f"[dry-run] would re-encrypt {rotated} file(s) under a new key; "
