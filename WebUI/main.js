@@ -25044,7 +25044,7 @@ async function applyDhcpHaConfig() {
 // collapsed "source" line listing which client IP(s) made those queries.
 function _ddQueryNameRows(names) {
     if (!names.length) {
-        return '<p class="text-slate-400 italic text-sm">No per-name query data yet (Unbound query logging may take a moment to start collecting after first enabled).</p>';
+        return '<p class="text-slate-400 italic text-sm">No DNS queries recorded yet. This may mean:<br>• Unbound DNS is not running<br>• Query logging is not enabled<br>• No DNS queries have been made recently.</p>';
     }
     return `<div class="max-h-80 overflow-y-auto divide-y divide-slate-100">${names.map(q => {
         const sources = q.sources || [];
