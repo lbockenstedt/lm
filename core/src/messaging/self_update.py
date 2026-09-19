@@ -73,13 +73,45 @@ class SelfUpdateMixin:
         # stalled remote could hang any of them forever without a deadline.
         # Pull/fetch get 120s; lightweight config/rev-parse gets 60s.
         timeout = 120 if args and args[0] in ("pull", "fetch", "rebase") else 60
-        try:
-            return subprocess.run(["git"] + args, cwd=cwd, text=True,
-                                  capture_output=True, check=False, timeout=timeout)
-        except subprocess.TimeoutExpired as e:
-            logger.warning("git %s timed out after %ss in %s", args[0] if args else "?",
-                           timeout, cwd)
-            return subprocess.CompletedProcess(args, 124, "", str(e))
+
+        def _once() -> subprocess.CompletedProcess:
+            try:
+                return subprocess.run(["git"] + args, cwd=cwd, text=True,
+                                      capture_output=True, check=False, timeout=timeout)
+            except subprocess.TimeoutExpired as e:
+                logger.warning("git %s timed out after %ss in %s", args[0] if args else "?",
+                               timeout, cwd)
+                return subprocess.CompletedProcess(args, 124, "", str(e))
+
+        res = _once()
+        # Self-heal the "another git process seems to be running" wedge. The
+        # step-1 sweep only clears locks older than max_age_s, so a lock dropped
+        # by a git that crashed MOMENTS ago survives it and then fails this
+        # command (and, worse, the `git reset --hard` recovery that follows a
+        # failed pull, which runs with check=True -> "update failed (git command
+        # exit code 1)"). Reaching here proves no git of OURS holds the lock:
+        # our update path is strictly sequential and this very command just
+        # exited. So clear unconditionally (max_age_s=0) and retry ONCE.
+        if res.returncode != 0 and self._looks_like_git_lock_error(res.stdout, res.stderr):
+            if self._clear_stale_git_locks(cwd, max_age_s=0.0):
+                logger.warning("self-update: git %s hit a leftover lock in %s — "
+                               "cleared it and retrying once",
+                               args[0] if args else "?", cwd)
+                res = _once()
+        return res
+
+    @staticmethod
+    def _looks_like_git_lock_error(*blobs) -> bool:
+        """True when git's output is the leftover-``*.lock`` wedge rather than a
+        genuine conflict, e.g. "cannot lock ref 'HEAD': Unable to create
+        '.git/HEAD.lock': File exists" or "Another git process seems to be
+        running in this repository"."""
+        blob = " ".join(b or "" for b in blobs).lower()
+        if "another git process seems to be running" in blob:
+            return True
+        return ".lock" in blob and ("cannot lock ref" in blob
+                                    or "unable to create" in blob
+                                    or "file exists" in blob)
 
     def _clear_stale_git_locks(self, cwd: str, max_age_s: float = 90.0) -> int:
         """Remove STALE git lock files left by a git process that crashed
@@ -763,8 +795,14 @@ class SelfUpdateMixin:
                 logger.warning(f"git pull --rebase failed (rc={pull.returncode}); resetting hard to origin")
                 branch = self._run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd).stdout.strip() or "main"
                 subprocess.run(["git", "rebase", "--abort"], cwd=cwd, check=False, timeout=60)
-                subprocess.run(["git", "reset", "--hard", f"origin/{branch}"], cwd=cwd, check=True,
-                               timeout=60, capture_output=True, text=True)
+                # Via _run_git so a leftover *.lock gets cleared + retried —
+                # otherwise this recovery dies on the very lock that killed the
+                # pull, and the repo stays wedged on stale code forever.
+                rst = self._run_git(["reset", "--hard", f"origin/{branch}"], cwd=cwd)
+                if rst.returncode != 0:
+                    raise subprocess.CalledProcessError(
+                        rst.returncode, ["git", "reset", "--hard", f"origin/{branch}"],
+                        output=rst.stdout, stderr=rst.stderr)
 
             head_after = self._run_git(["rev-parse", "HEAD"], cwd=cwd).stdout.strip()
 

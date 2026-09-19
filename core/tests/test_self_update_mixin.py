@@ -209,6 +209,82 @@ def test_clear_noop_without_git_dir(tmp_path):
     assert n == 0
 
 
+# ── reactive lock self-heal in _run_git (issue #452) ─────────────────────────
+# The step-1 sweep only clears locks older than max_age_s, so a lock left by a
+# git that crashed MOMENTS earlier survives it, wedges `git pull --rebase`, and
+# then ALSO wedges the `git reset --hard` recovery — surfacing as the opaque
+# "update failed (git command exit code 1)".
+import subprocess as _sp  # noqa: E402
+
+import messaging.self_update as _su  # noqa: E402
+
+_ISSUE_452_STDERR = (
+    "error: update_ref failed for ref 'HEAD': cannot lock ref 'HEAD': Unable to "
+    "create '/opt/lm/.git/HEAD.lock': File exists.\n\nAnother git process seems "
+    "to be running in this repository, e.g. an editor opened by 'git commit'.\n"
+    "Autostash exists; creating a new stash entry.\n"
+)
+
+
+def test_lock_error_detected_from_real_issue_452_output():
+    assert _Repo("/x")._looks_like_git_lock_error("", _ISSUE_452_STDERR)
+
+
+def test_lock_error_not_confused_with_a_real_conflict():
+    # A genuine rebase conflict must NOT trigger lock removal + retry.
+    conflict = ("CONFLICT (content): Merge conflict in src/app.py\n"
+                "error: could not apply 1234abc... some commit\n")
+    assert not _Repo("/x")._looks_like_git_lock_error("", conflict)
+    assert not _Repo("/x")._looks_like_git_lock_error("", "fatal: could not resolve host")
+
+
+def _fake_run_sequence(monkeypatch, results):
+    """Patch subprocess.run in the mixin's module to pop from ``results``."""
+    calls = []
+
+    def _fake(cmd, **kw):
+        calls.append(list(cmd))
+        rc, out, err = results.pop(0)
+        return _sp.CompletedProcess(cmd, rc, out, err)
+
+    monkeypatch.setattr(_su.subprocess, "run", _fake)
+    return calls
+
+
+def test_run_git_clears_lock_and_retries_once(tmp_path, monkeypatch):
+    gd = _make_git(tmp_path)
+    lk = gd / "HEAD.lock"
+    lk.write_text("")  # FRESH — the age-based sweep deliberately leaves it
+
+    calls = _fake_run_sequence(monkeypatch, [
+        (1, "", _ISSUE_452_STDERR),   # first pull dies on the lock
+        (0, "Updated.", ""),          # retry succeeds once the lock is gone
+    ])
+    res = _Repo(str(tmp_path))._run_git(["pull", "--rebase"], cwd=str(tmp_path))
+
+    assert res.returncode == 0
+    assert not lk.exists(), "the offending lock must be force-cleared"
+    assert len(calls) == 2, "exactly one retry"
+
+
+def test_run_git_does_not_retry_on_non_lock_failure(tmp_path, monkeypatch):
+    _make_git(tmp_path)
+    calls = _fake_run_sequence(monkeypatch, [(128, "", "fatal: could not resolve host")])
+    res = _Repo(str(tmp_path))._run_git(["fetch", "origin"], cwd=str(tmp_path))
+    assert res.returncode == 128
+    assert len(calls) == 1
+
+
+def test_run_git_retries_at_most_once_when_lock_persists(tmp_path, monkeypatch):
+    # No lock file on disk to remove → nothing was cleared → do NOT retry
+    # (prevents hammering git when the lock is held by a live process).
+    _make_git(tmp_path)
+    calls = _fake_run_sequence(monkeypatch, [(1, "", _ISSUE_452_STDERR)])
+    res = _Repo(str(tmp_path))._run_git(["pull", "--rebase"], cwd=str(tmp_path))
+    assert res.returncode == 1
+    assert len(calls) == 1
+
+
 # --- _core_update_lock permission fallback (netbox [Errno 13] on the lock FILE) -
 import messaging.self_update as _su  # noqa: E402
 

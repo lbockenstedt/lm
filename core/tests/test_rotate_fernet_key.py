@@ -137,3 +137,91 @@ def test_rotate_reads_old_key_from_env_file_when_env_unset(tmp_path, monkeypatch
     assert skipped == 0
     assert json.loads(Fernet(new_key.encode()).decrypt((state / "system.json").read_bytes())) == enc
     assert f"LM_FERNET_KEY={new_key}" in env.read_text().splitlines()
+
+# ── Credential Vault inner-token re-wrap ─────────────────────────────────────
+# Vault secrets are DOUBLE-encrypted: the payload is Fernet-encrypted with the
+# hub key in its own right, and THAT ciphertext is then stored either in the
+# cloud vault or in the `blobs` map inside system.json. Re-encrypting
+# system.json only replaces the outer layer, so rotation used to leave every
+# inner token under the OLD key — alive only via LM_FERNET_KEY_PREVIOUS. When
+# that fallback was later cleared, the whole vault became undecryptable.
+
+def _sysdoc(secrets, blobs):
+    return {"global_config": {"cred_vault": {"buckets": {},
+                                             "secrets": secrets,
+                                             "blobs": blobs}}}
+
+
+def _rotate_sysdoc(tmp_path, monkeypatch, doc):
+    old_key = Fernet.generate_key().decode()
+    monkeypatch.setenv("LM_FERNET_KEY", old_key)
+    state = tmp_path / "state"
+    state.mkdir()
+    env = tmp_path / ".env"
+    env.write_text(f"LM_FERNET_KEY={old_key}\n")
+    (state / "system.json").write_bytes(_encrypt(old_key, doc))
+    _, _, new_key = rotate(str(state), str(env), apply_env=True, dry_run=False)
+    out = json.loads(Fernet(new_key.encode()).decrypt((state / "system.json").read_bytes()))
+    return old_key, new_key, out, env
+
+
+def test_rotate_rewraps_local_cred_vault_secret(tmp_path, monkeypatch):
+    old_key = Fernet.generate_key().decode()
+    monkeypatch.setenv("LM_FERNET_KEY", old_key)
+    payload = {"username": "root", "password": "s3cret"}
+    inner = Fernet(old_key.encode()).encrypt(json.dumps(payload).encode()).decode()
+    doc = _sysdoc({"lrb": {"Console": {"mode": "hub", "store": "local",
+                                       "kv_name": "kv1", "type": "login"}}},
+                  {"kv1": inner})
+
+    state = tmp_path / "state"
+    state.mkdir()
+    env = tmp_path / ".env"
+    env.write_text(f"LM_FERNET_KEY={old_key}\n")
+    (state / "system.json").write_bytes(_encrypt(old_key, doc))
+    _, _, new_key = rotate(str(state), str(env), apply_env=True, dry_run=False)
+
+    out = json.loads(Fernet(new_key.encode()).decrypt((state / "system.json").read_bytes()))
+    tok = out["global_config"]["cred_vault"]["blobs"]["kv1"]
+    # The INNER token now decrypts under the NEW key with the payload intact...
+    assert json.loads(Fernet(new_key.encode()).decrypt(tok.encode())) == payload
+    # ...and is genuinely re-wrapped, not merely carried over.
+    with pytest.raises(Exception):
+        Fernet(old_key.encode()).decrypt(tok.encode())
+
+
+def test_rotate_leaves_psk_mode_secret_alone(tmp_path, monkeypatch):
+    # psk-mode payloads are keyed by a pass-phrase, not the hub key — rotation
+    # must not touch them (and must not report them as failures).
+    old_key = Fernet.generate_key().decode()
+    monkeypatch.setenv("LM_FERNET_KEY", old_key)
+    psk_token = Fernet(Fernet.generate_key()).encrypt(b'{"k":"v"}').decode()
+    doc = _sysdoc({"dxp": {"Cluster Key": {"mode": "psk", "store": "local",
+                                           "kv_name": "kvp"}}},
+                  {"kvp": psk_token})
+
+    state = tmp_path / "state"
+    state.mkdir()
+    env = tmp_path / ".env"
+    env.write_text(f"LM_FERNET_KEY={old_key}\n")
+    (state / "system.json").write_bytes(_encrypt(old_key, doc))
+    _, _, new_key = rotate(str(state), str(env), apply_env=True, dry_run=False)
+
+    out = json.loads(Fernet(new_key.encode()).decrypt((state / "system.json").read_bytes()))
+    assert out["global_config"]["cred_vault"]["blobs"]["kvp"] == psk_token
+
+
+def test_rotate_warns_about_cloud_vault_backed_secrets(tmp_path, monkeypatch, capsys):
+    # These live outside this host, so the offline tool cannot re-wrap them.
+    # It must say so loudly and keep LM_FERNET_KEY_PREVIOUS as the lifeline —
+    # this is exactly the case that silently broke a production vault.
+    doc = _sysdoc({"ra": {"default admin": {"mode": "hub", "store": "kv",
+                                            "kv_name": "kvx"}},
+                   "lrb": {"HE.NET": {"mode": "hub", "kv_name": "kvy"}}},  # no marker => kv
+                  {})
+    old_key, new_key, _out, env = _rotate_sysdoc(tmp_path, monkeypatch, doc)
+
+    msg = capsys.readouterr().out
+    assert "2 live in the cloud vault" in msg
+    assert "DO NOT remove LM_FERNET_KEY_PREVIOUS" in msg
+    assert f"LM_FERNET_KEY_PREVIOUS={old_key}" in env.read_text()
