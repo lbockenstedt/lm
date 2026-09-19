@@ -25042,8 +25042,8 @@ async function applyDhcpHaConfig() {
 // www.dwx.com — 42 queries" — from the /api/dns/stats `query_names` list
 // (already sorted/filtered server-side; this just formats it), plus a
 // collapsed "source" line listing which client IP(s) made those queries.
-function _ddQueryNameRows(names) {
-    if (!names.length) {
+function _ddQueryNameRows(names, searchActive = false) {
+    if (!names.length && !searchActive) {
         return '<p class="text-slate-400 italic text-sm">No DNS queries recorded yet. This may mean:<br>• Unbound DNS is not running<br>• Query logging is not enabled<br>• No DNS queries have been made recently.</p>';
     }
     return `<div class="max-h-80 overflow-y-auto divide-y divide-slate-100">${names.map(q => {
@@ -25221,7 +25221,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                                    class="text-xs border border-slate-300 rounded-md px-2 py-1 w-56 focus:outline-none focus:ring-1 focus:ring-blue-400" />
                         </div>
                     </div>
-                    <div id="dns-query-name-list">${_ddQueryNameRows(d.query_names || [])}</div>
+                    <div id="dns-query-name-list">${_ddQueryNameRows(d.query_names || [], false)}</div>
                 </div>
                 ${syncLine}`;
             const searchInput = document.getElementById('dns-query-name-search');
@@ -25238,7 +25238,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                         if (hostInput && hostInput.value) params.push('host=' + encodeURIComponent(hostInput.value));
                         const qs = params.length ? (_tenantQS() ? '&' : '?') + params.join('&') : '';
                         const { ok: ok2, data: d2 } = await _spokeFetch('/api/dns/stats' + _tenantQS() + qs);
-                        if (ok2 && d2) list.innerHTML = _ddQueryNameRows(d2.query_names || []);
+                        if (ok2 && d2) list.innerHTML = _ddQueryNameRows(d2.query_names || [], params.length > 0);
                     }, 250);
                 };
                 if (searchInput) searchInput.addEventListener('input', runSearch);
