@@ -860,7 +860,7 @@ function _lmToastRegion() {
     if (!el) {
         el = document.createElement('div');
         el.id = 'lm-toast-region';
-        el.style.cssText = 'position:fixed;top:1.5rem;right:1.5rem;z-index:9999;' +
+        el.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:9999;' +
             'display:flex;flex-direction:column;gap:.5rem;max-width:22rem;';
         document.body.appendChild(el);
     }
