@@ -772,13 +772,49 @@ function handleSessionExpired() {
     document.getElementById('login-username')?.focus();
     refreshOidcButton();
 }
-window.fetch = async function lmFetch(input, init) {
-    const res = await _lmOrigFetch(input, init);
-    if (res && res.status === 401 && currentUser && !_lmIsAuthSubmitEndpoint(input)) {
-        handleSessionExpired();
-        throw new Error('Session expired');
+let _lmActiveFetchCount = 0;
+const _lmActiveFetchListeners = new Set();
+function _lmNotifyFetchState() {
+    for (const fn of _lmActiveFetchListeners) {
+        try { fn(_lmActiveFetchCount); } catch (_) {}
     }
-    return res;
+}
+function _lmOnFetchCountChange(fn) {
+    _lmActiveFetchListeners.add(fn);
+    return () => _lmActiveFetchListeners.delete(fn);
+}
+
+window.fetch = async function lmFetch(input, init) {
+    let isBg = false;
+    try {
+        if (init && init._background) isBg = true;
+        const u = typeof input === 'string' ? input : (input && input.url) || '';
+        if (u.indexOf('/api/notifications/poll') !== -1 ||
+            u.indexOf('/api/events/poll') !== -1 ||
+            u.indexOf('/api/le/inflight') !== -1 ||
+            u.indexOf('/api/health') !== -1) {
+            isBg = true;
+        }
+    } catch (_) {}
+
+    if (!isBg) {
+        _lmActiveFetchCount++;
+        _lmNotifyFetchState();
+    }
+
+    try {
+        const res = await _lmOrigFetch(input, init);
+        if (res && res.status === 401 && currentUser && !_lmIsAuthSubmitEndpoint(input)) {
+            handleSessionExpired();
+            throw new Error('Session expired');
+        }
+        return res;
+    } finally {
+        if (!isBg) {
+            _lmActiveFetchCount = Math.max(0, _lmActiveFetchCount - 1);
+            _lmNotifyFetchState();
+        }
+    }
 };
 
 // ── pollManager — visibility-aware recurring timers ─────────────────────────
@@ -1100,19 +1136,16 @@ function _lmLoadingToastRegion() {
     return el;
 }
 
-let _lmLoadingToast = null;  // { el, label, timer } — only one at a time.
+let _lmLoadingToast = null;
 function showLoadingToast(label) {
     const text = `Loading ${label}…`;
-    // Same click, again (the exact "nothing happened so I clicked again"
-    // case): just restart the timer on the existing toast, don't stack.
     if (_lmLoadingToast && _lmLoadingToast.label === label &&
         document.body.contains(_lmLoadingToast.el)) {
         clearTimeout(_lmLoadingToast.timer);
-        _lmLoadingToast.timer = setTimeout(_dismissLoadingToast,
-            window.LOADING_TOAST_MS || 1800);
+        _lmLoadingToast.timer = setTimeout(_dismissLoadingToast, 15000);
         return;
     }
-    _dismissLoadingToast();  // a different action — replace, never accumulate.
+    _dismissLoadingToast();
     const toast = document.createElement('div');
     toast.className = 'lm-toast';
     toast.style.cssText = `
@@ -1137,19 +1170,57 @@ function showLoadingToast(label) {
     toast.appendChild(span);
     _lmLoadingToastRegion().appendChild(toast);
     requestAnimationFrame(() => { toast.style.opacity = '1'; });
-    const timer = setTimeout(_dismissLoadingToast, window.LOADING_TOAST_MS || 1800);
-    _lmLoadingToast = { el: toast, label, timer };
+
+    const openTime = Date.now();
+    let listenerUnsub = null;
+    let fallbackTimer = null;
+    let safetyTimer = null;
+    let graceTimer = null;
+
+    const attemptDismiss = () => {
+        if (_lmActiveFetchCount === 0) {
+            const elapsed = Date.now() - openTime;
+            const delay = Math.max(0, 400 - elapsed);
+            if (!graceTimer) {
+                graceTimer = setTimeout(() => {
+                    if (_lmActiveFetchCount === 0) _dismissLoadingToast();
+                    graceTimer = null;
+                }, Math.max(delay, 200));
+            }
+        } else if (graceTimer) {
+            clearTimeout(graceTimer);
+            graceTimer = null;
+        }
+    };
+
+    listenerUnsub = _lmOnFetchCountChange(attemptDismiss);
+    fallbackTimer = setTimeout(attemptDismiss, 800);
+    safetyTimer = setTimeout(_dismissLoadingToast, 15000);
+
+    _lmLoadingToast = {
+        el: toast,
+        label,
+        timer: safetyTimer,
+        cleanup: () => {
+            if (listenerUnsub) listenerUnsub();
+            if (fallbackTimer) clearTimeout(fallbackTimer);
+            if (safetyTimer) clearTimeout(safetyTimer);
+            if (graceTimer) clearTimeout(graceTimer);
+        }
+    };
 }
 
 function _dismissLoadingToast() {
     if (!_lmLoadingToast) return;
-    const { el, timer } = _lmLoadingToast;
-    clearTimeout(timer);
+    const { el, cleanup } = _lmLoadingToast;
+    if (cleanup) cleanup();
     _lmLoadingToast = null;
     if (!el || !document.body.contains(el)) return;
     el.style.opacity = '0';
     el.addEventListener('transitionend', () => el.remove());
 }
+window.dismissLoadingToast = _dismissLoadingToast;
+window.showLoadingToast = showLoadingToast;
 
 // Derive a short human label for the clicked control: an explicit override
 // wins, then aria-label/title, then its own visible text (icon glyphs and
@@ -3954,7 +4025,16 @@ async function setSubView(subMenu) {
     // with no entry (mydevices, credvault, ...) intentionally no-op, matching
     // the previous fall-through behavior of the if/else chain.
     const loader = VIEW_LOADERS[currentView];
-    if (loader) loader(subMenu);
+    if (loader) {
+        const res = loader(subMenu);
+        if (res && typeof res.finally === 'function') {
+            res.finally(() => {
+                if (typeof _lmActiveFetchCount !== 'undefined' && _lmActiveFetchCount === 0) {
+                    setTimeout(window.dismissLoadingToast, 200);
+                }
+            });
+        }
+    }
 }
 
 function renderTopNav(viewId) {
