@@ -1,3 +1,8 @@
+"""Unbound DNS daemon manager.
+
+Twin of lbockenstedt/dns (src/unbound_manager.py). Synchronized with PR #56
+for multi-line forwarder block parsing, atomic merge/rollback, and diagnostics.
+"""
 import subprocess
 import logging
 import os
