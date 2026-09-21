@@ -1,5 +1,6 @@
 import pytest
 import asyncio
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 from api import Request, FastAPI
 
@@ -94,7 +95,7 @@ async def test_get_device_detail_console_correlation(monkeypatch):
 
 def test_webui_main_js_no_bypass():
     import os
-    with open("/Users/lbockenstedt/vscode/lm/WebUI/main.js", "r") as f:
+    with open(Path(__file__).resolve().parents[2] / "WebUI" / "main.js", "r") as f:
         content = f.read()
     
     # Assert it DOES NOT contain the old bypass logic
@@ -103,7 +104,7 @@ def test_webui_main_js_no_bypass():
 
 def test_webui_main_js_forwards_serial():
     import os
-    with open("/Users/lbockenstedt/vscode/lm/WebUI/main.js", "r") as f:
+    with open(Path(__file__).resolve().parents[2] / "WebUI" / "main.js", "r") as f:
         content = f.read()
     
     assert "params.set('serial', item.serial);" in content

@@ -437,7 +437,7 @@ async def automation_list_by_type(hub, sec_type,
             if sm.get("type") not in want_types or sm.get("mode") != _MODE_HUB:
                 continue
             val = _cache_get(_cache_key(bucket, name, sm.get("updated_at", "")))
-            if val is not None:
+            if val is not None and name != CANARY_SECRET:
                 out.append({"bucket": bucket, "name": name, "value": val})
             else:
                 to_fetch.append((bucket, name, sm))

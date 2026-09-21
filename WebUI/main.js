@@ -1204,7 +1204,7 @@ function showLoadingToast(label) {
         cleanup: () => {
             if (listenerUnsub) listenerUnsub();
             if (fallbackTimer) clearTimeout(fallbackTimer);
-            if (safetyTimer) clearTimeout(safetyTimer);
+            if (_lmLoadingToast && _lmLoadingToast.timer) clearTimeout(_lmLoadingToast.timer);
             if (graceTimer) clearTimeout(graceTimer);
         }
     };
@@ -23548,7 +23548,8 @@ async function renderPxmxDiagnostics(container) {
         unknown: 0,
     };
 
-    const hasAttention = (summary.critical || 0) > 0 || (summary.warning || 0) > 0;
+    const nodesHaveIssues = nodes.some(n => !n.diagnostics || n.status === 'ERROR' || n.error);
+    const hasAttention = (summary.critical || 0) > 0 || (summary.warning || 0) > 0 || nodesHaveIssues;
     const overallStatusBadge = hasAttention
         ? '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-800 border border-red-200">Attention needed</span>'
         : '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-800 border border-green-200">All drives healthy</span>';
@@ -23662,11 +23663,14 @@ async function renderPxmxDiagnostics(container) {
         const clusterName = n.cluster || '';
         const drives = Array.isArray(n.drives) ? n.drives : [];
 
+        const diagUnavailable = !n.diagnostics || n.status === 'ERROR';
         let badgesHtml = '';
         if (n.agent_version) {
             badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">Agent v${escapeHtml(n.agent_version)}</span> `;
         }
-        if (n.diagnostics && n.diagnostics.smartctl_installed) {
+        if (diagUnavailable) {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">smartctl: Unknown</span> `;
+        } else if (n.diagnostics.smartctl_installed) {
             badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">smartctl: Installed</span> `;
         } else {
             badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 border border-red-200">smartctl: Missing</span> `;
@@ -23692,14 +23696,21 @@ async function renderPxmxDiagnostics(container) {
         }
 
         let alertHtml = '';
-        if (!n.diagnostics || !n.diagnostics.smartctl_installed || n.status === 'ERROR' || n.error) {
+        if (diagUnavailable) {
+            alertHtml = `
+            <div class="m-4 p-3 bg-slate-100 border border-slate-200 rounded-md text-xs text-slate-800">
+                <div class="font-bold flex items-center gap-1 mb-1">
+                    <span>ℹ️ Diagnostics Unavailable</span>
+                </div>
+                ${n.error ? `<p class="mb-1 text-red-700 font-mono text-[11px]">Error: ${escapeHtml(n.error)}</p>` : '<p class="mb-1">Diagnostics not yet reported for this node.</p>'}
+            </div>`;
+        } else if (!n.diagnostics.smartctl_installed) {
             alertHtml = `
             <div class="m-4 p-3 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-800">
                 <div class="font-bold flex items-center gap-1 mb-1">
                     <span>⚠️ Software Prerequisites Incomplete</span>
                 </div>
-                ${n.error ? `<p class="mb-1 text-red-700 font-mono text-[11px]">Error: ${escapeHtml(n.error)}</p>` : ''}
-                ${(!n.diagnostics || !n.diagnostics.smartctl_installed) ? `<p>smartctl is not installed on this node. To collect drive wear and health telemetry, run on the hypervisor host:</p><code class="block mt-1 p-1 bg-white border border-amber-300 rounded font-mono text-[11px] text-slate-800 select-all">apt-get update && apt-get install -y smartmontools</code>` : ''}
+                <p>smartctl is not installed on this node. To collect drive wear and health telemetry, run on the hypervisor host:</p><code class="block mt-1 p-1 bg-white border border-amber-300 rounded font-mono text-[11px] text-slate-800 select-all">apt-get update && apt-get install -y smartmontools</code>
             </div>`;
         }
 

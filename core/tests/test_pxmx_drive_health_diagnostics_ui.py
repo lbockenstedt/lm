@@ -1,5 +1,6 @@
 import pytest
 import os
+from pathlib import Path
 
 @pytest.mark.asyncio
 async def test_get_pxmx_drive_health_diagnostics():
@@ -103,7 +104,7 @@ async def test_get_pxmx_drive_health_diagnostics():
     assert n["diagnostics"]["ssacli_installed"] is False
 
 def test_main_js_content():
-    js_path = "/Users/lbockenstedt/vscode/lm/WebUI/main.js"
+    js_path = Path(__file__).resolve().parents[2] / "WebUI" / "main.js"
     with open(js_path, "r") as f:
         content = f.read()
     
