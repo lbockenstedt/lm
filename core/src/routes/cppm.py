@@ -334,7 +334,7 @@ def register(app, hub, ctx):
         return m.lower().replace(":", "").replace("-", "").replace(".", "") if m else ""
 
     @app.get("/api/device-detail")
-    async def get_device_detail(request: Request, q: str = None, mac: str = None, ip: str = None, hostname: str = None):
+    async def get_device_detail(request: Request, q: str = None, mac: str = None, ip: str = None, hostname: str = None, serial: str = None, port_id: str = None, device: str = None):
         """Fan-out device lookup across all modules by MAC, IP, or hostname.
 
         Queries every connected spoke type (CPPM endpoints/sessions, NetBox IPs,
@@ -362,8 +362,11 @@ def register(app, hub, ctx):
         mac = (mac or "").strip() or None
         ip = (ip or "").strip() or None
         hostname = (hostname or "").strip() or None
+        serial = (serial or "").strip() or None
+        port_id = (port_id or "").strip() or None
+        device = (device or "").strip() or None
 
-        if q and not (mac or ip or hostname):
+        if q and not (mac or ip or hostname or serial):
             q = q.strip()
             if _re.match(r'^([0-9a-fA-F]{2}[:\-]){5}[0-9a-fA-F]{2}$', q):
                 mac = q
@@ -398,7 +401,7 @@ def register(app, hub, ctx):
         spoke_ldap = hub.get_spoke_by_type("directory")
 
         tasks: dict = {}
-        search_q = mac or ip or hostname or ""
+        search_q = serial or mac or ip or hostname or ""
 
         if spoke_nac:
             if mac:
@@ -421,7 +424,7 @@ def register(app, hub, ctx):
         gathered = await _asyncio.gather(*tasks.values())
         data = dict(zip(tasks.keys(), gathered))
 
-        identity = {"mac": mac, "ip": ip, "hostname": hostname}
+        identity = {"mac": mac, "ip": ip, "hostname": hostname, "serial": serial}
 
         # Process DHCP — find lease by MAC or IP
         dhcp_result = None
@@ -467,13 +470,25 @@ def register(app, hub, ctx):
                 cdata = await lister(request)
                 h = (identity.get("hostname") or "").strip().lower()
                 cip = (identity.get("ip") or "").strip()
+                cser = (identity.get("serial") or "").strip().lower()
+                cdev = (device or "").strip().lower()
+                cpid = (port_id or "").strip().lower()
                 for p in (cdata.get("ports") or []):
                     probe = p.get("probe") or {}
                     pident = probe.get("identity") or {}
                     phost = str(pident.get("hostname") or "").strip().lower()
                     palias = str(p.get("alias") or "").strip().lower()
                     pip = str(pident.get("ip") or "").strip()
-                    if (h and (h == phost or h == palias)) or (cip and cip == pip):
+                    pser = str(pident.get("serial") or probe.get("serial") or "").strip().lower()
+                    pdev = str(p.get("device") or "").strip().lower()
+                    ppid = str(p.get("port_id") or "").strip().lower()
+                    if (
+                        (h and (h == phost or h == palias))
+                        or (cip and cip == pip)
+                        or (cser and cser == pser)
+                        or (cdev and cdev == pdev)
+                        or (cpid and cpid == ppid)
+                    ):
                         console_results.append(console_port_result(p))
         except Exception as e:
             logger.warning(f"device-detail: console leg failed: {e}")

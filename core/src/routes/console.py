@@ -68,6 +68,8 @@ def console_port_search_blob(p: dict) -> str:
         p.get("alias"), ident.get("hostname"), ident.get("ip"),
         ident.get("vendor") or probe.get("vendor"), ident.get("model"),
         p.get("device"), p.get("port_id"), p.get("agent_name"),
+        ident.get("serial") or probe.get("serial"),
+        ident.get("mac") or probe.get("mac"),
     ]
     return " ".join(str(x) for x in parts if x).lower()
 
@@ -97,6 +99,9 @@ def console_port_result(p: dict) -> dict:
         "baud": (p.get("settings") or {}).get("baud"),
         "vendor": ident.get("vendor") or probe.get("vendor") or None,
         "model": ident.get("model") or None,
+        "serial": ident.get("serial") or probe.get("serial") or None,
+        "device_type": ident.get("model") or probe.get("model") or None,
+        "mac": ident.get("mac") or probe.get("mac") or None,
         "in_use": bool(p.get("in_use")),
         "dpa": p.get("dpa"),
     }
