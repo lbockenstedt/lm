@@ -33558,14 +33558,6 @@ function openSearchResult(item) {
     const dd  = document.getElementById('search-results');
     if (inp) inp.value = '';
     if (dd)  { dd.classList.add('hidden'); dd.innerHTML = ''; }
-    // A console hit already carries its connect coordinates — open the serial
-    // terminal straight away instead of the (admin-only) device dashboard.
-    if (item.source === 'console' && item.spoke_id && item.port_id) {
-        if (typeof openConsoleTerminal === 'function') {
-            openConsoleTerminal(item.spoke_id, item.port_id);
-            return;
-        }
-    }
     // A credential-vault hit → open the Credential Vault at that bucket (the
     // secret VALUE is never in the search payload; reveal still needs the
     // bucket pass-phrase there).
@@ -33621,8 +33613,11 @@ async function showDeviceDashboard(item) {
     document.body.appendChild(modal);
 
     const params = new URLSearchParams();
-    if (item.mac)  params.set('mac', item.mac);
-    if (item.ip)   params.set('ip', item.ip);
+    if (item.mac)     params.set('mac', item.mac);
+    if (item.ip)      params.set('ip', item.ip);
+    if (item.serial)  params.set('serial', item.serial);
+    if (item.port_id) params.set('port_id', item.port_id);
+    if (item.device)  params.set('device', item.device);
     const nameAsHostname = !item.mac && !item.ip && item.name;
     if (nameAsHostname) params.set('hostname', item.name);
 
@@ -33630,7 +33625,7 @@ async function showDeviceDashboard(item) {
         const d = await apiJson(`/api/device-detail?${params}`);
 
         const id = d.identity || {};
-        const identParts = [id.mac, id.ip, id.hostname].filter(Boolean);
+        const identParts = [id.hostname, id.serial ? `SN: ${id.serial}` : null, id.ip, id.mac].filter(Boolean);
         document.getElementById('dd-identity').textContent = identParts.join('  ·  ') || item.name || '—';
 
         const badge = (label, cls) => `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${cls}">${label}</span>`;
@@ -33675,12 +33670,25 @@ async function showDeviceDashboard(item) {
 
         // NetBox
         const nb = d.netbox || [];
-        cards.push(card('NetBox', nb.length ? 'bg-green-50 text-green-700' : 'bg-slate-50 text-slate-400',
-            nb.length ? nb.slice(0, 5).map(n => `
-                <div class="text-xs py-1 border-b border-slate-50 last:border-0">
-                    <span class="font-medium text-slate-700">${n.name || n.ip || '—'}</span>
-                    <span class="text-slate-400 ml-2">${n.type || ''} ${n.ip ? '· ' + n.ip : ''}</span>
-                </div>`).join('') : empty));
+        cards.push(card('NetBox Inventory', nb.length ? 'bg-green-50 text-green-700' : 'bg-slate-50 text-slate-400',
+            nb.length ? nb.slice(0, 5).map(n => {
+                const meta = [
+                    n.device_type ? `Type: ${n.device_type}` : (n.type && n.type !== 'device' ? n.type : ''),
+                    n.serial ? `Serial: ${n.serial}` : '',
+                    n.role ? `Role: ${n.role}` : '',
+                    n.site ? `Site: ${n.site}` : '',
+                    n.rack ? `Rack: ${n.rack}` : '',
+                    n.ip ? `IP: ${n.ip}` : '',
+                ].filter(Boolean).join(' · ');
+                return `
+                <div class="py-1.5 border-b border-slate-50 last:border-0">
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs font-semibold text-slate-700">${escapeHtml(n.name || n.ip || '—')}</span>
+                        ${n.status ? `<span class="px-1.5 py-0.5 rounded text-[9px] uppercase font-bold ${n.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}">${escapeHtml(n.status)}</span>` : ''}
+                    </div>
+                    ${meta ? `<div class="text-[10px] text-slate-500 font-mono mt-0.5">${escapeHtml(meta)}</div>` : ''}
+                </div>`;
+            }).join('') : empty));
 
         // Proxmox
         const px = d.proxmox || [];
@@ -33737,7 +33745,10 @@ async function showDeviceDashboard(item) {
 
         // Console: serial-console port(s) mapped to this device, each with a
         // direct connect button (opens the serial terminal for the line).
-        const con = d.console || [];
+        let con = d.console || [];
+        if (con.length === 0 && item.source === 'console') {
+            con = [item];
+        }
         cards.push(card('Console', con.length ? 'bg-[#01A982]/10 text-[#01A982]' : 'bg-slate-50 text-slate-400',
             con.length ? con.map(c => {
                 const meta = [c.device, c.baud ? c.baud + 'bps' : '', c.model || c.vendor || '', c.agent_name || '']
