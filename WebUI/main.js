@@ -23681,6 +23681,15 @@ async function renderPxmxDiagnostics(container) {
                 badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">ssacli: Missing</span> `;
             }
         }
+        if (n.diagnostics && n.diagnostics.controller_type === 'direct_attached') {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-100 text-sky-800 border border-sky-200">Direct-Attached</span> `;
+        }
+        if (n.diagnostics && n.diagnostics.controller_type === 'mixed') {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">RAID + Direct/NVMe</span> `;
+        }
+        if (n.diagnostics && n.diagnostics.nvme_tools_installed) {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-teal-100 text-teal-800 border border-teal-200">nvme-cli: Installed</span> `;
+        }
 
         let alertHtml = '';
         if (!n.diagnostics || !n.diagnostics.smartctl_installed || n.status === 'ERROR' || n.error) {
@@ -23701,14 +23710,18 @@ async function renderPxmxDiagnostics(container) {
             const wear = drive.wear_level;
             const status = drive.health_status || (drive.success ? 'healthy' : 'unknown');
 
+            const iface = (drive.interface || '').toUpperCase();
+            const ifaceBadge = iface ? `<span class="ml-1.5 px-1.5 py-0.5 rounded text-[9px] font-bold ${iface === 'NVME' ? 'bg-purple-100 text-purple-700' : (iface === 'SAS' ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-600')}">${escapeHtml(iface)}</span>` : '';
+            const tempHtml = drive.temperature ? `<span class="ml-1 text-[10px] font-mono text-slate-500 font-normal">(${escapeHtml(drive.temperature)}°C)</span>` : '';
+
             return `
                 <tr class="border-b border-slate-100 hover:bg-slate-50 transition-colors">
                     <td class="px-4 py-2.5 font-medium text-slate-800">${escapeHtml(nodeName)}</td>
-                    <td class="px-4 py-2.5 font-mono text-xs text-slate-600">${escapeHtml(devPath)}</td>
+                    <td class="px-4 py-2.5 font-mono text-xs text-slate-600">${escapeHtml(devPath)}${ifaceBadge}</td>
                     <td class="px-4 py-2.5 text-xs text-slate-800">${escapeHtml(vendorModel)}</td>
                     <td class="px-4 py-2.5 font-mono text-xs text-slate-500">${escapeHtml(serial)}</td>
                     <td class="px-4 py-2.5">${getWearBar(wear)}</td>
-                    <td class="px-4 py-2.5">${getHealthBadge(status)}</td>
+                    <td class="px-4 py-2.5">${getHealthBadge(status)}${tempHtml}</td>
                 </tr>`;
         }).join('');
 

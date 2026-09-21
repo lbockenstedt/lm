@@ -114,3 +114,6 @@ def test_main_js_content():
     assert "ssacli: Missing" in content
     assert "Software Prerequisites Incomplete" in content
     assert "apt-get update && apt-get install -y smartmontools" in content
+    assert "Direct-Attached" in content
+    assert "nvme-cli: Installed" in content
+    assert "drive.interface" in content
