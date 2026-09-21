@@ -33543,8 +33543,11 @@ function handleSearch(value) {
             const d = r.ok ? await r.json() : null;
             if (!d) { dropdown.innerHTML = '<p class="text-xs text-red-400 px-2 py-1">Search failed</p>'; return; }
 
+            const legNames = { NETBOX_SEARCH: 'NetBox', SEARCH_VMS: 'VMs', SEARCH_SESSIONS: 'NAC sessions', SEARCH_USERS: 'Directory', SEARCH_DHCP: 'DHCP' };
+            const degradedNote = (Array.isArray(d.degraded) && d.degraded.length)
+                ? `<p class="text-[10px] text-amber-600 px-2 pt-1 border-t border-slate-100">Some sources did not answer: ${d.degraded.map(c => legNames[c] || c).join(', ')}</p>` : '';
             if (d.total === 0) {
-                dropdown.innerHTML = '<p class="text-xs text-slate-400 italic px-2 py-1">No results</p>';
+                dropdown.innerHTML = '<p class="text-xs text-slate-400 italic px-2 py-1">No results</p>' + degradedNote;
                 return;
             }
 
@@ -33611,7 +33614,7 @@ function handleSearch(value) {
             }).join('');
 
             const more = d.total > 12 ? `<p class="text-[10px] text-slate-400 px-2 pt-1 border-t border-slate-100">${d.total - 12} more — narrow your search</p>` : '';
-            dropdown.innerHTML = rows + more;
+            dropdown.innerHTML = rows + more + degradedNote;
         } catch (err) {
             dropdown.innerHTML = `<p class="text-xs text-red-400 px-2 py-1">Error: ${err.message}</p>`;
         }
