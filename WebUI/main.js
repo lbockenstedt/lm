@@ -772,13 +772,49 @@ function handleSessionExpired() {
     document.getElementById('login-username')?.focus();
     refreshOidcButton();
 }
-window.fetch = async function lmFetch(input, init) {
-    const res = await _lmOrigFetch(input, init);
-    if (res && res.status === 401 && currentUser && !_lmIsAuthSubmitEndpoint(input)) {
-        handleSessionExpired();
-        throw new Error('Session expired');
+let _lmActiveFetchCount = 0;
+const _lmActiveFetchListeners = new Set();
+function _lmNotifyFetchState() {
+    for (const fn of _lmActiveFetchListeners) {
+        try { fn(_lmActiveFetchCount); } catch (_) {}
     }
-    return res;
+}
+function _lmOnFetchCountChange(fn) {
+    _lmActiveFetchListeners.add(fn);
+    return () => _lmActiveFetchListeners.delete(fn);
+}
+
+window.fetch = async function lmFetch(input, init) {
+    let isBg = false;
+    try {
+        if (init && init._background) isBg = true;
+        const u = typeof input === 'string' ? input : (input && input.url) || '';
+        if (u.indexOf('/api/notifications/poll') !== -1 ||
+            u.indexOf('/api/events/poll') !== -1 ||
+            u.indexOf('/api/le/inflight') !== -1 ||
+            u.indexOf('/api/health') !== -1) {
+            isBg = true;
+        }
+    } catch (_) {}
+
+    if (!isBg) {
+        _lmActiveFetchCount++;
+        _lmNotifyFetchState();
+    }
+
+    try {
+        const res = await _lmOrigFetch(input, init);
+        if (res && res.status === 401 && currentUser && !_lmIsAuthSubmitEndpoint(input)) {
+            handleSessionExpired();
+            throw new Error('Session expired');
+        }
+        return res;
+    } finally {
+        if (!isBg) {
+            _lmActiveFetchCount = Math.max(0, _lmActiveFetchCount - 1);
+            _lmNotifyFetchState();
+        }
+    }
 };
 
 // ── pollManager — visibility-aware recurring timers ─────────────────────────
@@ -1100,19 +1136,16 @@ function _lmLoadingToastRegion() {
     return el;
 }
 
-let _lmLoadingToast = null;  // { el, label, timer } — only one at a time.
+let _lmLoadingToast = null;
 function showLoadingToast(label) {
     const text = `Loading ${label}…`;
-    // Same click, again (the exact "nothing happened so I clicked again"
-    // case): just restart the timer on the existing toast, don't stack.
     if (_lmLoadingToast && _lmLoadingToast.label === label &&
         document.body.contains(_lmLoadingToast.el)) {
         clearTimeout(_lmLoadingToast.timer);
-        _lmLoadingToast.timer = setTimeout(_dismissLoadingToast,
-            window.LOADING_TOAST_MS || 1800);
+        _lmLoadingToast.timer = setTimeout(_dismissLoadingToast, 15000);
         return;
     }
-    _dismissLoadingToast();  // a different action — replace, never accumulate.
+    _dismissLoadingToast();
     const toast = document.createElement('div');
     toast.className = 'lm-toast';
     toast.style.cssText = `
@@ -1137,19 +1170,57 @@ function showLoadingToast(label) {
     toast.appendChild(span);
     _lmLoadingToastRegion().appendChild(toast);
     requestAnimationFrame(() => { toast.style.opacity = '1'; });
-    const timer = setTimeout(_dismissLoadingToast, window.LOADING_TOAST_MS || 1800);
-    _lmLoadingToast = { el: toast, label, timer };
+
+    const openTime = Date.now();
+    let listenerUnsub = null;
+    let fallbackTimer = null;
+    let safetyTimer = null;
+    let graceTimer = null;
+
+    const attemptDismiss = () => {
+        if (_lmActiveFetchCount === 0) {
+            const elapsed = Date.now() - openTime;
+            const delay = Math.max(0, 400 - elapsed);
+            if (!graceTimer) {
+                graceTimer = setTimeout(() => {
+                    if (_lmActiveFetchCount === 0) _dismissLoadingToast();
+                    graceTimer = null;
+                }, Math.max(delay, 200));
+            }
+        } else if (graceTimer) {
+            clearTimeout(graceTimer);
+            graceTimer = null;
+        }
+    };
+
+    listenerUnsub = _lmOnFetchCountChange(attemptDismiss);
+    fallbackTimer = setTimeout(attemptDismiss, 800);
+    safetyTimer = setTimeout(_dismissLoadingToast, 15000);
+
+    _lmLoadingToast = {
+        el: toast,
+        label,
+        timer: safetyTimer,
+        cleanup: () => {
+            if (listenerUnsub) listenerUnsub();
+            if (fallbackTimer) clearTimeout(fallbackTimer);
+            if (_lmLoadingToast && _lmLoadingToast.timer) clearTimeout(_lmLoadingToast.timer);
+            if (graceTimer) clearTimeout(graceTimer);
+        }
+    };
 }
 
 function _dismissLoadingToast() {
     if (!_lmLoadingToast) return;
-    const { el, timer } = _lmLoadingToast;
-    clearTimeout(timer);
+    const { el, cleanup } = _lmLoadingToast;
+    if (cleanup) cleanup();
     _lmLoadingToast = null;
     if (!el || !document.body.contains(el)) return;
     el.style.opacity = '0';
     el.addEventListener('transitionend', () => el.remove());
 }
+window.dismissLoadingToast = _dismissLoadingToast;
+window.showLoadingToast = showLoadingToast;
 
 // Derive a short human label for the clicked control: an explicit override
 // wins, then aria-label/title, then its own visible text (icon glyphs and
@@ -3954,7 +4025,16 @@ async function setSubView(subMenu) {
     // with no entry (mydevices, credvault, ...) intentionally no-op, matching
     // the previous fall-through behavior of the if/else chain.
     const loader = VIEW_LOADERS[currentView];
-    if (loader) loader(subMenu);
+    if (loader) {
+        const res = loader(subMenu);
+        if (res && typeof res.finally === 'function') {
+            res.finally(() => {
+                if (typeof _lmActiveFetchCount !== 'undefined' && _lmActiveFetchCount === 0) {
+                    setTimeout(window.dismissLoadingToast, 200);
+                }
+            });
+        }
+    }
 }
 
 function renderTopNav(viewId) {
@@ -23468,7 +23548,8 @@ async function renderPxmxDiagnostics(container) {
         unknown: 0,
     };
 
-    const hasAttention = (summary.critical || 0) > 0 || (summary.warning || 0) > 0;
+    const nodesHaveIssues = nodes.some(n => !n.diagnostics || n.status === 'ERROR' || n.error);
+    const hasAttention = (summary.critical || 0) > 0 || (summary.warning || 0) > 0 || nodesHaveIssues;
     const overallStatusBadge = hasAttention
         ? '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-800 border border-red-200">Attention needed</span>'
         : '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-800 border border-green-200">All drives healthy</span>';
@@ -23524,7 +23605,7 @@ async function renderPxmxDiagnostics(container) {
     }
 
     const totalDrives = (summary.total_drives || 0) || nodes.reduce((acc, n) => acc + ((n.drives || []).length), 0);
-    if (totalDrives === 0) {
+    if (totalDrives === 0 && nodes.length === 0) {
         container.innerHTML = `
             <div class="p-4">
                 ${headerHtml}
@@ -23577,12 +23658,61 @@ async function renderPxmxDiagnostics(container) {
     }
 
     let tablesHtml = '';
-    for (const node of nodes) {
-        const nodeName = node.node || 'Unknown';
-        const clusterName = node.cluster || '';
-        const drives = Array.isArray(node.drives) ? node.drives : [];
+    for (const n of nodes) {
+        const nodeName = n.node || 'Unknown';
+        const clusterName = n.cluster || '';
+        const drives = Array.isArray(n.drives) ? n.drives : [];
 
-        if (drives.length === 0) continue;
+        const diagUnavailable = !n.diagnostics || n.status === 'ERROR';
+        let badgesHtml = '';
+        if (n.agent_version) {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">Agent v${escapeHtml(n.agent_version)}</span> `;
+        }
+        if (diagUnavailable) {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">smartctl: Unknown</span> `;
+        } else if (n.diagnostics.smartctl_installed) {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">smartctl: Installed</span> `;
+        } else {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 border border-red-200">smartctl: Missing</span> `;
+        }
+        if (n.diagnostics && n.diagnostics.is_hpe) {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-800 border border-purple-200">HPE Server</span> `;
+        }
+        if (n.diagnostics && n.diagnostics.has_raid) {
+            if (n.diagnostics.ssacli_installed) {
+                badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">ssacli: Installed</span> `;
+            } else {
+                badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">ssacli: Missing</span> `;
+            }
+        }
+        if (n.diagnostics && n.diagnostics.controller_type === 'direct_attached') {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-100 text-sky-800 border border-sky-200">Direct-Attached</span> `;
+        }
+        if (n.diagnostics && n.diagnostics.controller_type === 'mixed') {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">RAID + Direct/NVMe</span> `;
+        }
+        if (n.diagnostics && n.diagnostics.nvme_tools_installed) {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-teal-100 text-teal-800 border border-teal-200">nvme-cli: Installed</span> `;
+        }
+
+        let alertHtml = '';
+        if (diagUnavailable) {
+            alertHtml = `
+            <div class="m-4 p-3 bg-slate-100 border border-slate-200 rounded-md text-xs text-slate-800">
+                <div class="font-bold flex items-center gap-1 mb-1">
+                    <span>ℹ️ Diagnostics Unavailable</span>
+                </div>
+                ${n.error ? `<p class="mb-1 text-red-700 font-mono text-[11px]">Error: ${escapeHtml(n.error)}</p>` : '<p class="mb-1">Diagnostics not yet reported for this node.</p>'}
+            </div>`;
+        } else if (!n.diagnostics.smartctl_installed) {
+            alertHtml = `
+            <div class="m-4 p-3 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-800">
+                <div class="font-bold flex items-center gap-1 mb-1">
+                    <span>⚠️ Software Prerequisites Incomplete</span>
+                </div>
+                <p>smartctl is not installed on this node. To collect drive wear and health telemetry, run on the hypervisor host:</p><code class="block mt-1 p-1 bg-white border border-amber-300 rounded font-mono text-[11px] text-slate-800 select-all">apt-get update && apt-get install -y smartmontools</code>
+            </div>`;
+        }
 
         const rows = drives.map(drive => {
             const devPath = drive.block_device || drive.scsi_path || '—';
@@ -23591,16 +23721,27 @@ async function renderPxmxDiagnostics(container) {
             const wear = drive.wear_level;
             const status = drive.health_status || (drive.success ? 'healthy' : 'unknown');
 
+            const iface = (drive.interface || '').toUpperCase();
+            const ifaceBadge = iface ? `<span class="ml-1.5 px-1.5 py-0.5 rounded text-[9px] font-bold ${iface === 'NVME' ? 'bg-purple-100 text-purple-700' : (iface === 'SAS' ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-600')}">${escapeHtml(iface)}</span>` : '';
+            const tempHtml = drive.temperature ? `<span class="ml-1 text-[10px] font-mono text-slate-500 font-normal">(${escapeHtml(drive.temperature)}°C)</span>` : '';
+
             return `
                 <tr class="border-b border-slate-100 hover:bg-slate-50 transition-colors">
                     <td class="px-4 py-2.5 font-medium text-slate-800">${escapeHtml(nodeName)}</td>
-                    <td class="px-4 py-2.5 font-mono text-xs text-slate-600">${escapeHtml(devPath)}</td>
+                    <td class="px-4 py-2.5 font-mono text-xs text-slate-600">${escapeHtml(devPath)}${ifaceBadge}</td>
                     <td class="px-4 py-2.5 text-xs text-slate-800">${escapeHtml(vendorModel)}</td>
                     <td class="px-4 py-2.5 font-mono text-xs text-slate-500">${escapeHtml(serial)}</td>
                     <td class="px-4 py-2.5">${getWearBar(wear)}</td>
-                    <td class="px-4 py-2.5">${getHealthBadge(status)}</td>
+                    <td class="px-4 py-2.5">${getHealthBadge(status)}${tempHtml}</td>
                 </tr>`;
         }).join('');
+
+        let tableContent = '';
+        if (drives.length > 0) {
+            tableContent = tableWrap(tableHead(cols) + `<tbody>${rows}</tbody>`);
+        } else if (!alertHtml) {
+            tableContent = `<div class="px-4 py-4 text-center text-xs text-slate-500">No drives reported.</div>`;
+        }
 
         tablesHtml += `
             <div class="mb-6 bg-white rounded-lg border border-slate-200 overflow-hidden shadow-sm">
@@ -23609,10 +23750,14 @@ async function renderPxmxDiagnostics(container) {
                         <span class="text-xs font-bold uppercase tracking-wider text-slate-500">Node:</span>
                         <span class="text-sm font-semibold text-slate-800">${escapeHtml(nodeName)}</span>
                         ${clusterName ? `<span class="text-xs px-2 py-0.5 rounded bg-slate-200 text-slate-700 font-mono">${escapeHtml(clusterName)}</span>` : ''}
+                        <div class="ml-2 flex items-center gap-1 flex-wrap">
+                            ${badgesHtml}
+                        </div>
                     </div>
                     <span class="text-xs text-slate-500">${drives.length} drive${drives.length === 1 ? '' : 's'}</span>
                 </div>
-                ${tableWrap(tableHead(cols) + `<tbody>${rows}</tbody>`)}
+                ${alertHtml}
+                ${tableContent}
             </div>`;
     }
 
@@ -33478,14 +33623,6 @@ function openSearchResult(item) {
     const dd  = document.getElementById('search-results');
     if (inp) inp.value = '';
     if (dd)  { dd.classList.add('hidden'); dd.innerHTML = ''; }
-    // A console hit already carries its connect coordinates — open the serial
-    // terminal straight away instead of the (admin-only) device dashboard.
-    if (item.source === 'console' && item.spoke_id && item.port_id) {
-        if (typeof openConsoleTerminal === 'function') {
-            openConsoleTerminal(item.spoke_id, item.port_id);
-            return;
-        }
-    }
     // A credential-vault hit → open the Credential Vault at that bucket (the
     // secret VALUE is never in the search payload; reveal still needs the
     // bucket pass-phrase there).
@@ -33541,8 +33678,11 @@ async function showDeviceDashboard(item) {
     document.body.appendChild(modal);
 
     const params = new URLSearchParams();
-    if (item.mac)  params.set('mac', item.mac);
-    if (item.ip)   params.set('ip', item.ip);
+    if (item.mac)     params.set('mac', item.mac);
+    if (item.ip)      params.set('ip', item.ip);
+    if (item.serial)  params.set('serial', item.serial);
+    if (item.port_id) params.set('port_id', item.port_id);
+    if (item.device)  params.set('device', item.device);
     const nameAsHostname = !item.mac && !item.ip && item.name;
     if (nameAsHostname) params.set('hostname', item.name);
 
@@ -33550,7 +33690,7 @@ async function showDeviceDashboard(item) {
         const d = await apiJson(`/api/device-detail?${params}`);
 
         const id = d.identity || {};
-        const identParts = [id.mac, id.ip, id.hostname].filter(Boolean);
+        const identParts = [id.hostname, id.serial ? `SN: ${id.serial}` : null, id.ip, id.mac].filter(Boolean);
         document.getElementById('dd-identity').textContent = identParts.join('  ·  ') || item.name || '—';
 
         const badge = (label, cls) => `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${cls}">${label}</span>`;
@@ -33595,12 +33735,25 @@ async function showDeviceDashboard(item) {
 
         // NetBox
         const nb = d.netbox || [];
-        cards.push(card('NetBox', nb.length ? 'bg-green-50 text-green-700' : 'bg-slate-50 text-slate-400',
-            nb.length ? nb.slice(0, 5).map(n => `
-                <div class="text-xs py-1 border-b border-slate-50 last:border-0">
-                    <span class="font-medium text-slate-700">${n.name || n.ip || '—'}</span>
-                    <span class="text-slate-400 ml-2">${n.type || ''} ${n.ip ? '· ' + n.ip : ''}</span>
-                </div>`).join('') : empty));
+        cards.push(card('NetBox Inventory', nb.length ? 'bg-green-50 text-green-700' : 'bg-slate-50 text-slate-400',
+            nb.length ? nb.slice(0, 5).map(n => {
+                const meta = [
+                    n.device_type ? `Type: ${n.device_type}` : (n.type && n.type !== 'device' ? n.type : ''),
+                    n.serial ? `Serial: ${n.serial}` : '',
+                    n.role ? `Role: ${n.role}` : '',
+                    n.site ? `Site: ${n.site}` : '',
+                    n.rack ? `Rack: ${n.rack}` : '',
+                    n.ip ? `IP: ${n.ip}` : '',
+                ].filter(Boolean).join(' · ');
+                return `
+                <div class="py-1.5 border-b border-slate-50 last:border-0">
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs font-semibold text-slate-700">${escapeHtml(n.name || n.ip || '—')}</span>
+                        ${n.status ? `<span class="px-1.5 py-0.5 rounded text-[9px] uppercase font-bold ${n.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}">${escapeHtml(n.status)}</span>` : ''}
+                    </div>
+                    ${meta ? `<div class="text-[10px] text-slate-500 font-mono mt-0.5">${escapeHtml(meta)}</div>` : ''}
+                </div>`;
+            }).join('') : empty));
 
         // Proxmox
         const px = d.proxmox || [];
@@ -33657,7 +33810,10 @@ async function showDeviceDashboard(item) {
 
         // Console: serial-console port(s) mapped to this device, each with a
         // direct connect button (opens the serial terminal for the line).
-        const con = d.console || [];
+        let con = d.console || [];
+        if (con.length === 0 && item.source === 'console') {
+            con = [item];
+        }
         cards.push(card('Console', con.length ? 'bg-[#01A982]/10 text-[#01A982]' : 'bg-slate-50 text-slate-400',
             con.length ? con.map(c => {
                 const meta = [c.device, c.baud ? c.baud + 'bps' : '', c.model || c.vendor || '', c.agent_name || '']

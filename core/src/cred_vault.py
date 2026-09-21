@@ -52,16 +52,41 @@ import logging
 import secrets
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+
+import httpx
+import asyncio
 
 import cloud_vault as _cv
 from security.encryption import hub_encryption
 from security import sentinel
 
 logger = logging.getLogger("CredVault")
+
+_AUTOMATION_CACHE: Dict[Tuple[str, str, str], Tuple[float, Any]] = {}
+_AUTOMATION_CACHE_TTL: float = 60.0  # seconds
+
+def _cache_key(bucket: str, name: str, updated_at: str) -> Tuple[str, str, str]:
+    return (bucket, name, str(updated_at or ""))
+
+def _cache_get(key: Tuple[str, str, str]) -> Optional[Any]:
+    entry = _AUTOMATION_CACHE.get(key)
+    if entry is not None and (time.time() - entry[0]) < _AUTOMATION_CACHE_TTL:
+        return entry[1]
+    if entry is not None:
+        _AUTOMATION_CACHE.pop(key, None)
+    return None
+
+def _cache_set(key: Tuple[str, str, str], value: Any) -> None:
+    _AUTOMATION_CACHE[key] = (time.time(), value)
+
+def _cache_invalidate(bucket: str, name: Optional[str] = None) -> None:
+    to_del = [k for k in _AUTOMATION_CACHE if k[0] == bucket and (name is None or k[1] == name)]
+    for k in to_del:
+        _AUTOMATION_CACHE.pop(k, None)
 
 ADMIN_BUCKET = "__admin__"          # the non-tenant "Global Admin slot"
 _KV_PREFIX = "cred-"                # opaque cloud-vault secret-name prefix
@@ -167,10 +192,10 @@ async def _store_put(hub, kv_name: str, token: str, store: str) -> None:
         await _cv.set_secret(hub, kv_name, token)
 
 
-async def _store_get(hub, kv_name: str, store: str) -> Optional[str]:
+async def _store_get(hub, kv_name: str, store: str, http: Optional[httpx.AsyncClient] = None) -> Optional[str]:
     if store == _STORE_LOCAL:
         return _meta(hub)["blobs"].get(kv_name)
-    return await _cv.get_secret(hub, kv_name)
+    return await _cv.get_secret(hub, kv_name, http=http)
 
 
 async def _store_del(hub, kv_name: str, store: str) -> None:
@@ -327,16 +352,17 @@ async def put_secret(hub, bucket: str, name: str, value: Dict[str, Any], *,
         "last_accessed_at": existing.get("last_accessed_at") if existing else None,
     }
     _save(hub)
+    _cache_invalidate(bucket, name)
     return {"bucket": bucket, "name": name, "mode": mode, "store": store}
 
 
-async def _fetch_and_decrypt(hub, bucket: str, name: str, *, psk: Optional[str]) -> Dict[str, Any]:
+async def _fetch_and_decrypt(hub, bucket: str, name: str, *, psk: Optional[str], http: Optional[httpx.AsyncClient] = None) -> Dict[str, Any]:
     if name == CANARY_SECRET:
         sentinel.guard("vault.canary", detail=f"{bucket}/{name} (honeytoken read)")
     sm = _meta(hub)["secrets"].get(bucket, {}).get(name)
     if not sm:
         raise CredVaultError(f"secret '{name}' not found")
-    token = await _store_get(hub, sm["kv_name"], _secret_store(sm))
+    token = await _store_get(hub, sm["kv_name"], _secret_store(sm), http=http)
     if token is None:
         raise CredVaultError(f"secret '{name}' is missing from the vault")
     try:
@@ -403,17 +429,31 @@ async def automation_list_by_type(hub, sec_type,
                    detail=f"type={','.join(sorted(want_types))}")
     want = set(buckets) if buckets is not None else None
     out: List[Dict[str, Any]] = []
+    to_fetch = []
     for bucket, secrets in (_meta(hub)["secrets"] or {}).items():
         if want is not None and bucket not in want:
             continue
         for name, sm in (secrets or {}).items():
             if sm.get("type") not in want_types or sm.get("mode") != _MODE_HUB:
                 continue
-            try:
-                value = await _fetch_and_decrypt(hub, bucket, name, psk=None)
-            except Exception:  # noqa: BLE001 — skip unreadable/corrupt records
-                continue
-            out.append({"bucket": bucket, "name": name, "value": value})
+            val = _cache_get(_cache_key(bucket, name, sm.get("updated_at", "")))
+            if val is not None and name != CANARY_SECRET:
+                out.append({"bucket": bucket, "name": name, "value": val})
+            else:
+                to_fetch.append((bucket, name, sm))
+    
+    if to_fetch:
+        async with httpx.AsyncClient(timeout=20.0) as shared_http:
+            tasks = [
+                _fetch_and_decrypt(hub, b, n, psk=None, http=shared_http)
+                for b, n, sm in to_fetch
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for (b, n, sm), res in zip(to_fetch, results):
+                if isinstance(res, Exception):
+                    continue
+                _cache_set(_cache_key(b, n, sm.get("updated_at", "")), res)
+                out.append({"bucket": b, "name": n, "value": res})
     return out
 
 
@@ -426,3 +466,4 @@ async def delete_secret(hub, bucket: str, name: str, *, psk: str, actor: str = "
     await _store_del(hub, sm["kv_name"], _secret_store(sm))
     del cv["secrets"][bucket][name]
     _save(hub)
+    _cache_invalidate(bucket, name)
