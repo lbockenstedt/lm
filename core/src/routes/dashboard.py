@@ -4,7 +4,7 @@ import time
 from api import (
     HTTPException, Request, _unwrap_spoke, access, filter_items_by_prefixes, get_tenant_scoping, logger,
 )
-from search_index import search_scope_key, search_result_matches
+from search_index import search_scope_key, search_result_matches, is_ip_query, cold_live_legs
 
 # GREEN/YELLOW/RED age bands for a relayed agent, matching HeartbeatManager.get_status
 # (and routes/pxmx.py:107-127) so one agent can't read "online" on the Spokes &
@@ -541,7 +541,7 @@ def register(app, hub, ctx):
             (spoke_firewall,   "SEARCH_DHCP"),
         ]
 
-        is_ip = bool(re.match(r'^[\\d:.]+(/\\d+)?$', raw_q))
+        is_ip = is_ip_query(raw_q)
 
         def _envelope(results, cached, warming=False):
             env = {
@@ -613,49 +613,13 @@ def register(app, hub, ctx):
         except Exception as e:
             logger.warning(f"search: cred-vault leg failed: {e}")
 
-        # ── Memory-first ────────────────────────────────────────────────────
-        # Match the query against every warm, spoke-scoped index leg (+ the
-        # local console list) with NO network. If ANYTHING matches, return it
-        # immediately and warm the remaining/stale legs in the background — the
-        # operator never waits on a live NetBox / LDAP / hypervisor / DHCP
-        # round-trip unless memory yields nothing at all. (Requested UX: show
-        # what is in memory now; only pay the live fan-out when there is no
-        # in-memory hit.)
-        if idx_on:
-            hub.search_register_scope(
-                scope_key, resolved=resolved, is_admin=is_admin,
-                nb_slug=nb_slug, proxmox_tag=proxmox_tag)
-            mem = []
-            any_cold = False
-            for _spoke, cmd in _legs:
-                items = hub.search_index_leg_items(cmd, scope_key)
-                if items is None:
-                    any_cold = True
-                else:
-                    mem.extend(r for r in items if search_result_matches(r, needle))
-            if mem or console_hits or credvault_hits:
-                # Found in memory → serve now; collect the rest in the
-                # background so the next query for this scope is instant too.
-                hub.search_kick_warm(scope_key)
-                return _envelope(mem + console_hits + credvault_hits, True, warming=any_cold)
-            # Nothing in memory → warm for next time, then fall through to the
-            # blocking live fan-out below.
-            hub.search_kick_warm(scope_key)
-
-        # ── Live fan-out (blocking): index disabled or no in-memory hit. Pay
-        #    the (uncached, ~30s) NetBox prefix fetch + the 5-spoke fan-out
-        #    here; the background warm above makes the next such query instant.
-        prefixes = []
-        if nb_slug:
-            try:
-                prefixes = await _resolve_prefixes_for_tenant(hub, resolved) or []
-            except Exception as e:
-                logger.warning(f"search: prefix fetch for '{resolved}' failed: {e}")
+        # Shared by the memory-first cold-leg top-up and the live fan-out; the
+        # live path fills "prefixes" after its (slow) NetBox prefix fetch.
         payload = {
             "q": q_search,
             "tenant": nb_slug,           # netbox + cppm + ldap OU slug
             "proxmox_tag": proxmox_tag,  # pxmx/kvm tag_filter
-            "prefixes": prefixes,        # opnsense DHCP filter
+            "prefixes": [],              # opnsense DHCP filter (live path only)
             "is_admin": is_admin,
         }
 
@@ -674,6 +638,64 @@ def register(app, hub, ctx):
                 return d.get("results", []) if isinstance(d, dict) else []
             except Exception as e:
                 return [{"source": cmd, "type": "error", "name": str(e)}]
+
+        # ── Memory-first ────────────────────────────────────────────────────
+        # Match the query against every warm, spoke-scoped index leg (+ the
+        # local console list) with NO network. If ANYTHING matches, return it
+        # immediately and warm the remaining/stale legs in the background — the
+        # operator never waits on a live NetBox / LDAP / hypervisor / DHCP
+        # round-trip unless memory yields nothing at all. (Requested UX: show
+        # what is in memory now; only pay the live fan-out when there is no
+        # in-memory hit.)
+        if idx_on:
+            hub.search_register_scope(
+                scope_key, resolved=resolved, is_admin=is_admin,
+                nb_slug=nb_slug, proxmox_tag=proxmox_tag)
+            mem = []
+            warm = {}
+            any_cold = False
+            for _spoke, cmd in _legs:
+                items = hub.search_index_leg_items(cmd, scope_key)
+                warm[cmd] = items
+                if items is None:
+                    any_cold = True
+                else:
+                    mem.extend(r for r in items if search_result_matches(r, needle))
+            if mem or console_hits or credvault_hits:
+                # Found in memory → serve now; collect the rest in the
+                # background so the next query for this scope is instant too.
+                hub.search_kick_warm(scope_key)
+                # NetBox is never warm (empty-query populate returns nothing), so
+                # a memory hit on another leg must not hide it: query the cold
+                # legs live (same scoped _call/payload), bounded so memory stays
+                # fast.
+                cold = cold_live_legs(_legs, warm)
+                if cold:
+                    try:
+                        res = await _asyncio.wait_for(
+                            _asyncio.gather(*[_call(s, c) for s, c in cold]),
+                            timeout=8.0)
+                        for sub in res:
+                            mem.extend(r for r in sub if r.get("type") != "error")
+                    except _asyncio.TimeoutError:
+                        logger.warning("search: cold-leg live top-up timed out; memory results only")
+                    except Exception as e:
+                        logger.warning(f"search: cold-leg live top-up failed: {e}")
+                return _envelope(mem + console_hits + credvault_hits, True, warming=any_cold)
+            # Nothing in memory → warm for next time, then fall through to the
+            # blocking live fan-out below.
+            hub.search_kick_warm(scope_key)
+
+        # ── Live fan-out (blocking): index disabled or no in-memory hit. Pay
+        #    the (uncached, ~30s) NetBox prefix fetch + the 5-spoke fan-out
+        #    here; the background warm above makes the next such query instant.
+        prefixes = []
+        if nb_slug:
+            try:
+                prefixes = await _resolve_prefixes_for_tenant(hub, resolved) or []
+            except Exception as e:
+                logger.warning(f"search: prefix fetch for '{resolved}' failed: {e}")
+        payload["prefixes"] = prefixes  # opnsense DHCP filter
 
         all_results = await _asyncio.gather(*[_call(s, c) for s, c in _legs])
         merged = [item for sublist in all_results for item in sublist]

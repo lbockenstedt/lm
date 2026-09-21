@@ -35,6 +35,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -53,6 +54,9 @@ SEARCH_LEGS: List[Tuple[str, str]] = [
 PREFIX_SCOPED_CMD = "SEARCH_DHCP"
 
 _MAX_BLOB_FIELD = 256  # ignore oversized/opaque values when building match blob
+_MAX_BLOB_LIST = 50    # max list/tuple members folded into the match blob
+_IP_QUERY_RE = re.compile(r"[0-9.:]+(?:/[0-9]{1,3})?")
+_IPV6_QUERY_RE = re.compile(r"[0-9a-fA-F:]+(?:/[0-9]{1,3})?")
 
 
 # ── pure helpers (unit-testable, no hub/network) ───────────────────────────────
@@ -73,19 +77,53 @@ def search_scope_key(nb_slug: str, proxmox_tag: str, is_admin: bool) -> str:
 
 
 def search_result_blob(item: Dict[str, Any]) -> str:
-    """Lower-cased, space-joined blob of an item's scalar fields — the haystack
-    a query needle is tested against (mirrors ``console_port_search_blob``)."""
+    """Lower-cased, space-joined blob of an item's scalar fields (plus the scalar
+    members of list/tuple fields, first 50) — the haystack a query needle is
+    tested against (mirrors ``console_port_search_blob``)."""
     if not isinstance(item, dict):
         return str(item).lower()
     parts: List[str] = []
-    for v in item.values():
+
+    def _add(v: Any) -> None:
         if v is None or isinstance(v, bool):
-            continue
+            return
         if isinstance(v, (str, int, float)):
             s = str(v)
             if s and len(s) <= _MAX_BLOB_FIELD:
                 parts.append(s)
+
+    for v in item.values():
+        if isinstance(v, (list, tuple)):
+            for m in v[:_MAX_BLOB_LIST]:
+                _add(m)
+        else:
+            _add(v)
     return " ".join(parts).lower()
+
+
+def is_ip_query(q: str) -> bool:
+    """True when ``q`` looks like a (partial) IPv4/IPv6 address or CIDR: only
+    digits/dots/colons with an optional /mask, and at least one of ``.:/`` so a
+    bare number such as a site code is not treated as an IP."""
+    s = (q or "").strip()
+    if _IP_QUERY_RE.fullmatch(s) and any(c in s for c in ".:/"):
+        return True
+    # IPv6 needs hex letters. Require "::" (compressed) or the full 8-group form so a
+    # colon-separated MAC (5 colons, no "::") is never taken for an address.
+    addr = s.split("/")[0]
+    return bool(_IPV6_QUERY_RE.fullmatch(s)) and ("::" in addr or addr.count(":") == 7)
+
+
+def cold_live_legs(
+    legs: List[Tuple[Optional[str], str]],
+    warm_items_by_cmd: Dict[str, Optional[List[Dict[str, Any]]]],
+) -> List[Tuple[Optional[str], str]]:
+    """Legs that must still be queried live after a memory hit: spoke present,
+    not the prefix-scoped DHCP leg (slow prefix fetch), and no warm cache."""
+    return [
+        (spoke, cmd) for spoke, cmd in legs
+        if spoke and cmd != PREFIX_SCOPED_CMD and warm_items_by_cmd.get(cmd) is None
+    ]
 
 
 def search_result_matches(item: Dict[str, Any], needle: str) -> bool:
