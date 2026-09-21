@@ -46,6 +46,7 @@ PSK verifier) in the Fernet-encrypted hub state — never a plaintext value.
 from __future__ import annotations
 
 import base64
+import copy
 import hmac
 import json
 import logging
@@ -73,9 +74,12 @@ def _cache_key(bucket: str, name: str, updated_at: str) -> Tuple[str, str, str]:
     return (bucket, name, str(updated_at or ""))
 
 def _cache_get(key: Tuple[str, str, str]) -> Optional[Any]:
+    """Return a copy of the cached value, never the stored object itself —
+    callers may freely mutate what they get back without poisoning the shared
+    60s-TTL cache entry for every other reader in that window."""
     entry = _AUTOMATION_CACHE.get(key)
     if entry is not None and (time.time() - entry[0]) < _AUTOMATION_CACHE_TTL:
-        return entry[1]
+        return copy.deepcopy(entry[1])
     if entry is not None:
         _AUTOMATION_CACHE.pop(key, None)
     return None
