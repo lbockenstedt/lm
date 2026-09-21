@@ -1142,7 +1142,7 @@ function showLoadingToast(label) {
     if (_lmLoadingToast && _lmLoadingToast.label === label &&
         document.body.contains(_lmLoadingToast.el)) {
         clearTimeout(_lmLoadingToast.timer);
-        _lmLoadingToast.timer = setTimeout(_dismissLoadingToast, 15000);
+        _lmLoadingToast.timer = setTimeout(_dismissLoadingToast, window.LOADING_TOAST_MS || 15000);
         return;
     }
     _dismissLoadingToast();
@@ -1195,7 +1195,7 @@ function showLoadingToast(label) {
 
     listenerUnsub = _lmOnFetchCountChange(attemptDismiss);
     fallbackTimer = setTimeout(attemptDismiss, 800);
-    safetyTimer = setTimeout(_dismissLoadingToast, 15000);
+    safetyTimer = setTimeout(_dismissLoadingToast, window.LOADING_TOAST_MS || 15000);
 
     _lmLoadingToast = {
         el: toast,

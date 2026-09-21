@@ -26,7 +26,7 @@ def test_fetch_intercepts_and_updates_count():
 
 def test_show_loading_toast_dynamic_dismissal():
     content = WEBUI_JS.read_text(encoding="utf-8")
-    assert "safetyTimer = setTimeout(_dismissLoadingToast, 15000);" in content
+    assert "safetyTimer = setTimeout(_dismissLoadingToast, window.LOADING_TOAST_MS || 15000);" in content
     assert "fallbackTimer = setTimeout(attemptDismiss, 800);" in content
     assert "listenerUnsub = _lmOnFetchCountChange(attemptDismiss);" in content
 
@@ -39,7 +39,7 @@ def test_exports_window_methods():
 
 def test_js_syntax_valid():
     if shutil.which("node"):
-        res = subprocess.run(["node", "-c", str(WEBUI_JS)], capture_output=True, text=True)
+        res = subprocess.run(["node", "--check", str(WEBUI_JS)], capture_output=True, text=True)
         assert res.returncode == 0, f"Node syntax error: {res.stderr}"
     elif os.path.exists(JSC):
         res = subprocess.run([JSC, "-e", f"checkSyntax({repr(str(WEBUI_JS))})"], capture_output=True, text=True)

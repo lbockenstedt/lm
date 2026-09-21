@@ -1605,8 +1605,9 @@ def register(app, hub, ctx):
                             "cluster": n.get("cluster") or data.get("cluster") or "",
                             "drives": drives,
                             "summary": summary,
-                            "status": n.get("status", data.get("status", "SUCCESS")),
-                            "error": n.get("message") if n.get("status") == "ERROR" else error_msg,
+                            "status": n.get("status", "UNKNOWN"),
+                            "error": n.get("message") if n.get("status") == "ERROR" else None,
+                            "envelope_error": error_msg,
                             "agent_version": n.get("agent_version", agent_version),
                             "diagnostics": n.get("diagnostics") or diagnostics,
                         })
@@ -1622,8 +1623,9 @@ def register(app, hub, ctx):
                         "cluster": data.get("cluster") or "",
                         "drives": drives,
                         "summary": summary,
-                        "status": data.get("status", "SUCCESS"),
-                        "error": error_msg,
+                        "status": data.get("status", "UNKNOWN"),
+                        "error": data.get("message") if data.get("status") == "ERROR" else None,
+                        "envelope_error": None,
                         "agent_version": agent_version,
                         "diagnostics": diagnostics,
                     })
