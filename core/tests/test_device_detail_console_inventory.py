@@ -93,14 +93,15 @@ async def test_get_device_detail_console_correlation(monkeypatch):
     assert len(res["console"]) == 1
     assert res["console"][0]["serial"] == "SN12345"
 
-def test_webui_main_js_no_bypass():
+def test_webui_main_js_console_fastpath_is_admin_gated():
     import os
     with open(Path(__file__).resolve().parents[2] / "WebUI" / "main.js", "r") as f:
         content = f.read()
-    
-    # Assert it DOES NOT contain the old bypass logic
-    assert "if (item.source === 'console' && item.spoke_id && item.port_id)" not in content
-    assert "openConsoleTerminal(item.spoke_id, item.port_id);" not in content
+
+    # Non-admins can't use /api/device-detail, so the terminal fast-path must exist but be admin-gated
+    assert "item.source === 'console' && item.spoke_id && item.port_id && !isAdmin()" in content
+    assert "if (item.source === 'console' && item.spoke_id && item.port_id) {" not in content
+    assert "openConsoleTerminal(item.spoke_id, item.port_id);" in content
 
 def test_webui_main_js_forwards_serial():
     import os
