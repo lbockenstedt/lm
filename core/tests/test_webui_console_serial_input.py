@@ -57,6 +57,19 @@ class _MockSerial:
             self._lock = threading.Lock()
             _MockSerial.Serial.instances.append(self)
 
+        @property
+        def in_waiting(self):
+            with self._lock:
+                return len(self._feed)
+
+        def reset_input_buffer(self):
+            with self._lock:
+                self._feed.clear()
+
+        def reset_output_buffer(self):
+            with self._lock:
+                self.written.clear()
+
         def feed(self, data: bytes):
             with self._lock:
                 self._feed += data
