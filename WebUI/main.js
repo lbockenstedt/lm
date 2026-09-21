@@ -1089,6 +1089,17 @@ function showStickyToast(message, type = 'info') {
 // repeat clicks on the same thing refresh the one toast in place instead of
 // stacking a column of identical messages. Installed globally by
 // installClickFeedback(); individual controls opt OUT with [data-no-loading].
+function _lmLoadingToastRegion() {
+    let el = document.getElementById('lm-loading-toast-region');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'lm-loading-toast-region';
+        el.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:10000;pointer-events:none;display:flex;flex-direction:column;align-items:center;';
+        document.body.appendChild(el);
+    }
+    return el;
+}
+
 let _lmLoadingToast = null;  // { el, label, timer } — only one at a time.
 function showLoadingToast(label) {
     const text = `Loading ${label}…`;
@@ -1109,7 +1120,7 @@ function showLoadingToast(label) {
         background:#01A982;color:#fff;
         padding:.75rem 1rem .75rem 1.25rem;border-radius:.5rem;font-size:.875rem;
         box-shadow:0 4px 12px rgba(0,0,0,.2);opacity:0;
-        transition:opacity .2s ease;width:100%;box-sizing:border-box;`;
+        transition:opacity .2s ease;width:100%;max-width:24rem;min-width:18rem;box-sizing:border-box;pointer-events:auto;`;
     const spinner = document.createElement('span');
     spinner.style.cssText = 'width:.9rem;height:.9rem;border:2px solid rgba(255,255,255,.4);' +
         'border-top-color:#fff;border-radius:50%;flex:none;animation:lm-spin .8s linear infinite;';
@@ -1124,7 +1135,7 @@ function showLoadingToast(label) {
     span.style.cssText = 'flex:1;white-space:pre-line;';
     span.textContent = text;
     toast.appendChild(span);
-    _lmToastRegion().appendChild(toast);
+    _lmLoadingToastRegion().appendChild(toast);
     requestAnimationFrame(() => { toast.style.opacity = '1'; });
     const timer = setTimeout(_dismissLoadingToast, window.LOADING_TOAST_MS || 1800);
     _lmLoadingToast = { el: toast, label, timer };
@@ -21896,6 +21907,7 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     // an xterm opened into a display:none container measures 0×0 and renders blank.
     serialActivateConsole(key);
     const term = new Terminal({ cursorBlink: true, fontSize: 13, scrollback: 5000,
+                                convertEol: true,
                                 theme: { background: '#1e1e1e' } });
     entry.term = term;
     // Grow the terminal grid to fill its body (no dead space below/right).
@@ -21939,7 +21951,20 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     // Keystrokes always target the CURRENT socket (entry.ws), which reconnect
     // swaps out — so this handler is registered once and survives reconnects
     // (re-registering per socket would leak handlers bound to dead sockets).
-    term.onData(d => { if (!entry.ro && entry.ws && entry.ws.readyState === 1) entry.ws.send(d); });
+    let _lastRoToast = 0;
+    term.onData(d => {
+        if (entry.ro) {
+            const now = Date.now();
+            if (now - _lastRoToast > 3000) {
+                _lastRoToast = now;
+                if (typeof showToast === 'function') {
+                    showToast('Console is in read-only mode — click "Take Over" above to send input', 'warning');
+                }
+            }
+            return;
+        }
+        if (entry.ws && entry.ws.readyState === 1) entry.ws.send(d);
+    });
     serialAttachWs(entry, session);
     serialRenderConsoleList();
     serialSyncSerialHeader();

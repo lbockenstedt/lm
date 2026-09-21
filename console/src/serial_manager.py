@@ -496,6 +496,7 @@ class PortChannel:
             rtscts=(settings.get("flow") == "rtscts"),
             xonxoff=(settings.get("flow") == "xonxoff"),
             timeout=0.2,
+            write_timeout=2.0,
         )
 
     def start(self) -> None:
