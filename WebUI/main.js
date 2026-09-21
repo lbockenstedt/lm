@@ -23604,7 +23604,7 @@ async function renderPxmxDiagnostics(container) {
     }
 
     const totalDrives = (summary.total_drives || 0) || nodes.reduce((acc, n) => acc + ((n.drives || []).length), 0);
-    if (totalDrives === 0) {
+    if (totalDrives === 0 && nodes.length === 0) {
         container.innerHTML = `
             <div class="p-4">
                 ${headerHtml}
@@ -23657,12 +23657,42 @@ async function renderPxmxDiagnostics(container) {
     }
 
     let tablesHtml = '';
-    for (const node of nodes) {
-        const nodeName = node.node || 'Unknown';
-        const clusterName = node.cluster || '';
-        const drives = Array.isArray(node.drives) ? node.drives : [];
+    for (const n of nodes) {
+        const nodeName = n.node || 'Unknown';
+        const clusterName = n.cluster || '';
+        const drives = Array.isArray(n.drives) ? n.drives : [];
 
-        if (drives.length === 0) continue;
+        let badgesHtml = '';
+        if (n.agent_version) {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">Agent v${escapeHtml(n.agent_version)}</span> `;
+        }
+        if (n.diagnostics && n.diagnostics.smartctl_installed) {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">smartctl: Installed</span> `;
+        } else {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 border border-red-200">smartctl: Missing</span> `;
+        }
+        if (n.diagnostics && n.diagnostics.is_hpe) {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-800 border border-purple-200">HPE Server</span> `;
+        }
+        if (n.diagnostics && n.diagnostics.has_raid) {
+            if (n.diagnostics.ssacli_installed) {
+                badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">ssacli: Installed</span> `;
+            } else {
+                badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">ssacli: Missing</span> `;
+            }
+        }
+
+        let alertHtml = '';
+        if (!n.diagnostics || !n.diagnostics.smartctl_installed || n.status === 'ERROR' || n.error) {
+            alertHtml = `
+            <div class="m-4 p-3 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-800">
+                <div class="font-bold flex items-center gap-1 mb-1">
+                    <span>⚠️ Software Prerequisites Incomplete</span>
+                </div>
+                ${n.error ? `<p class="mb-1 text-red-700 font-mono text-[11px]">Error: ${escapeHtml(n.error)}</p>` : ''}
+                ${(!n.diagnostics || !n.diagnostics.smartctl_installed) ? `<p>smartctl is not installed on this node. To collect drive wear and health telemetry, run on the hypervisor host:</p><code class="block mt-1 p-1 bg-white border border-amber-300 rounded font-mono text-[11px] text-slate-800 select-all">apt-get update && apt-get install -y smartmontools</code>` : ''}
+            </div>`;
+        }
 
         const rows = drives.map(drive => {
             const devPath = drive.block_device || drive.scsi_path || '—';
@@ -23682,6 +23712,13 @@ async function renderPxmxDiagnostics(container) {
                 </tr>`;
         }).join('');
 
+        let tableContent = '';
+        if (drives.length > 0) {
+            tableContent = tableWrap(tableHead(cols) + `<tbody>${rows}</tbody>`);
+        } else if (!alertHtml) {
+            tableContent = `<div class="px-4 py-4 text-center text-xs text-slate-500">No drives reported.</div>`;
+        }
+
         tablesHtml += `
             <div class="mb-6 bg-white rounded-lg border border-slate-200 overflow-hidden shadow-sm">
                 <div class="bg-slate-50 px-4 py-2.5 border-b border-slate-200 flex items-center justify-between">
@@ -23689,10 +23726,14 @@ async function renderPxmxDiagnostics(container) {
                         <span class="text-xs font-bold uppercase tracking-wider text-slate-500">Node:</span>
                         <span class="text-sm font-semibold text-slate-800">${escapeHtml(nodeName)}</span>
                         ${clusterName ? `<span class="text-xs px-2 py-0.5 rounded bg-slate-200 text-slate-700 font-mono">${escapeHtml(clusterName)}</span>` : ''}
+                        <div class="ml-2 flex items-center gap-1 flex-wrap">
+                            ${badgesHtml}
+                        </div>
                     </div>
                     <span class="text-xs text-slate-500">${drives.length} drive${drives.length === 1 ? '' : 's'}</span>
                 </div>
-                ${tableWrap(tableHead(cols) + `<tbody>${rows}</tbody>`)}
+                ${alertHtml}
+                ${tableContent}
             </div>`;
     }
 
