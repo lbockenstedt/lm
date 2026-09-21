@@ -21907,6 +21907,7 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     // an xterm opened into a display:none container measures 0×0 and renders blank.
     serialActivateConsole(key);
     const term = new Terminal({ cursorBlink: true, fontSize: 13, scrollback: 5000,
+                                convertEol: true,
                                 theme: { background: '#1e1e1e' } });
     entry.term = term;
     // Grow the terminal grid to fill its body (no dead space below/right).
@@ -21950,7 +21951,20 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     // Keystrokes always target the CURRENT socket (entry.ws), which reconnect
     // swaps out — so this handler is registered once and survives reconnects
     // (re-registering per socket would leak handlers bound to dead sockets).
-    term.onData(d => { if (!entry.ro && entry.ws && entry.ws.readyState === 1) entry.ws.send(d); });
+    let _lastRoToast = 0;
+    term.onData(d => {
+        if (entry.ro) {
+            const now = Date.now();
+            if (now - _lastRoToast > 3000) {
+                _lastRoToast = now;
+                if (typeof showToast === 'function') {
+                    showToast('Console is in read-only mode — click "Take Over" above to send input', 'warning');
+                }
+            }
+            return;
+        }
+        if (entry.ws && entry.ws.readyState === 1) entry.ws.send(d);
+    });
     serialAttachWs(entry, session);
     serialRenderConsoleList();
     serialSyncSerialHeader();
