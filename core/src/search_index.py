@@ -126,6 +126,40 @@ def cold_live_legs(
     ]
 
 
+async def topup_cold_legs(cold, call, timeout=8.0):
+    """Query each cold leg live, concurrently, each with its OWN timeout.
+    `cold` is a list of (spoke, cmd); `call(spoke, cmd)` is an async callable returning a list of rows.
+    Returns (rows, degraded): rows = every row from every leg that answered, INCLUDING the
+    {"type": "error"} rows `call` synthesizes (a broken leg must stay visible, not look like "no matches");
+    degraded = list of cmds that timed out, raised, or answered with an error row (in `cold` order,
+    no duplicates)."""
+    if not cold:
+        return [], []
+
+    async def _one(spoke, cmd):
+        try:
+            rows = await asyncio.wait_for(call(spoke, cmd), timeout)
+        except asyncio.TimeoutError:
+            logger.warning("search: cold leg %s timed out after %ss", cmd, timeout)
+            return cmd, [], True
+        except Exception as e:
+            logger.warning("search: cold leg %s failed: %s", cmd, e)
+            return cmd, [], True
+        if not isinstance(rows, list):
+            rows = []
+        bad = any(isinstance(r, dict) and r.get("type") == "error" for r in rows)
+        return cmd, rows, bad
+
+    results = await asyncio.gather(*[_one(s, c) for s, c in cold])
+    rows_out: List[Dict[str, Any]] = []
+    degraded: List[str] = []
+    for cmd, rows, bad in results:
+        rows_out.extend(rows)
+        if bad and cmd not in degraded:
+            degraded.append(cmd)
+    return rows_out, degraded
+
+
 def search_result_matches(item: Dict[str, Any], needle: str) -> bool:
     """True when the (already lower-cased, non-empty) ``needle`` is a substring
     of the item's identifier blob."""

@@ -4,7 +4,7 @@ import time
 from api import (
     HTTPException, Request, _unwrap_spoke, access, filter_items_by_prefixes, get_tenant_scoping, logger,
 )
-from search_index import search_scope_key, search_result_matches, is_ip_query, cold_live_legs
+from search_index import search_scope_key, search_result_matches, is_ip_query, cold_live_legs, topup_cold_legs
 
 # GREEN/YELLOW/RED age bands for a relayed agent, matching HeartbeatManager.get_status
 # (and routes/pxmx.py:107-127) so one agent can't read "online" on the Spokes &
@@ -668,20 +668,19 @@ def register(app, hub, ctx):
                 # NetBox is never warm (empty-query populate returns nothing), so
                 # a memory hit on another leg must not hide it: query the cold
                 # legs live (same scoped _call/payload), bounded so memory stays
-                # fast.
+                # fast. Error rows are kept on purpose: a failing leg must not look
+                # like a leg with zero matches.
                 cold = cold_live_legs(_legs, warm)
+                degraded = []
                 if cold:
-                    try:
-                        res = await _asyncio.wait_for(
-                            _asyncio.gather(*[_call(s, c) for s, c in cold]),
-                            timeout=8.0)
-                        for sub in res:
-                            mem.extend(r for r in sub if r.get("type") != "error")
-                    except _asyncio.TimeoutError:
-                        logger.warning("search: cold-leg live top-up timed out; memory results only")
-                    except Exception as e:
-                        logger.warning(f"search: cold-leg live top-up failed: {e}")
-                return _envelope(mem + console_hits + credvault_hits, True, warming=any_cold)
+                    live_rows, degraded = await topup_cold_legs(cold, _call, timeout=8.0)
+                    mem.extend(live_rows)
+                env = _envelope(mem + console_hits + credvault_hits, True, warming=any_cold)
+                if cold:
+                    env["live_legs"] = [c for _, c in cold]  # legs answered live on top of the memory hit
+                if degraded:
+                    env["degraded"] = degraded  # legs that timed out / failed: results may be partial
+                return env
             # Nothing in memory → warm for next time, then fall through to the
             # blocking live fan-out below.
             hub.search_kick_warm(scope_key)
