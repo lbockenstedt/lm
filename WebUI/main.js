@@ -1756,7 +1756,7 @@ const VIEW_SUBMENUS = {
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-console', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs', 'logs-features'],
     setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'OS Updates', 'Test Data Feed'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
-    pxmx: ['Overview', 'Virtual Machines', 'Settings'],
+    pxmx: ['Overview', 'Virtual Machines', 'Diagnostics', 'Settings'],
     ldap: ['Users', 'Groups'],
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management', 'Assistant'],
@@ -23405,6 +23405,225 @@ function pxmxSelectTenantPromptHtml() {
     </div>`;
 }
 
+async function renderPxmxDiagnostics(container) {
+    container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading drive diagnostics…</p>';
+
+    let res;
+    try {
+        res = await fetch(`/api/pxmx/drive-health?tenant=${encodeURIComponent(currentTenant || 'default')}`);
+    } catch (err) {
+        container.innerHTML = `
+            <div class="p-6">
+                <div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg flex items-center justify-between">
+                    <div>
+                        <span class="font-bold">Failed to load Drive Diagnostics:</span> ${escapeHtml(err.message || String(err))}
+                    </div>
+                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-red-300 text-red-700 hover:bg-red-50 font-medium">↻ Retry</button>
+                </div>
+            </div>`;
+        return;
+    }
+
+    if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+            const errData = await res.json();
+            if (errData && errData.detail) msg = errData.detail;
+        } catch (_) {}
+        container.innerHTML = `
+            <div class="p-6">
+                <div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg flex items-center justify-between">
+                    <div>
+                        <span class="font-bold">Failed to load Drive Diagnostics:</span> ${escapeHtml(msg)}
+                    </div>
+                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-red-300 text-red-700 hover:bg-red-50 font-medium">↻ Retry</button>
+                </div>
+            </div>`;
+        return;
+    }
+
+    let data;
+    try {
+        data = await res.json();
+    } catch (err) {
+        container.innerHTML = `
+            <div class="p-6">
+                <div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg flex items-center justify-between">
+                    <div>
+                        <span class="font-bold">Failed to parse drive diagnostics response:</span> ${escapeHtml(err.message || String(err))}
+                    </div>
+                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-red-300 text-red-700 hover:bg-red-50 font-medium">↻ Retry</button>
+                </div>
+            </div>`;
+        return;
+    }
+
+    const spokeConnected = data.spoke_connected !== false;
+    const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+    const summary = data.summary || {
+        total_drives: 0,
+        healthy: 0,
+        warning: 0,
+        critical: 0,
+        unknown: 0,
+    };
+
+    const hasAttention = (summary.critical || 0) > 0 || (summary.warning || 0) > 0;
+    const overallStatusBadge = hasAttention
+        ? '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-800 border border-red-200">Attention needed</span>'
+        : '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-800 border border-green-200">All drives healthy</span>';
+
+    const headerHtml = `
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+            <div>
+                <div class="flex items-center gap-3">
+                    <h2 class="text-xl font-bold text-slate-900">Drive Health & Diagnostics</h2>
+                    ${overallStatusBadge}
+                </div>
+                <p class="text-xs text-slate-500 mt-1">Storage device telemetry and SSD wear level diagnostics across hypervisor nodes</p>
+            </div>
+            <div>
+                <button onclick="loadPxmxData('Diagnostics')" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all">
+                    ↻ Run Diagnostics / Refresh
+                </button>
+            </div>
+        </div>`;
+
+    const summaryCardsHtml = `
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+            <div class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
+                <div class="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Drives</div>
+                <div class="text-2xl font-bold text-slate-800 mt-1">${summary.total_drives || 0}</div>
+            </div>
+            <div class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
+                <div class="text-xs font-medium text-emerald-600 uppercase tracking-wider">Healthy</div>
+                <div class="text-2xl font-bold text-emerald-700 mt-1">${summary.healthy || 0}</div>
+            </div>
+            <div class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
+                <div class="text-xs font-medium text-amber-600 uppercase tracking-wider">Warning (wear >= 80%)</div>
+                <div class="text-2xl font-bold text-amber-700 mt-1">${summary.warning || 0}</div>
+            </div>
+            <div class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
+                <div class="text-xs font-medium text-red-600 uppercase tracking-wider">Critical (wear >= 90%)</div>
+                <div class="text-2xl font-bold text-red-700 mt-1">${summary.critical || 0}</div>
+            </div>
+        </div>`;
+
+    if (!spokeConnected) {
+        container.innerHTML = `
+            <div class="p-4">
+                ${headerHtml}
+                ${summaryCardsHtml}
+                <div class="bg-amber-50 border border-amber-200 rounded-lg p-6 text-center">
+                    <div class="text-amber-800 font-semibold mb-1">No Hypervisor Spoke Connected</div>
+                    <p class="text-xs text-amber-700 mb-4">No connected hypervisor spoke was found for the current tenant. Connect a Proxmox spoke to view drive diagnostics.</p>
+                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 font-medium">↻ Retry Connection</button>
+                </div>
+            </div>`;
+        return;
+    }
+
+    const totalDrives = (summary.total_drives || 0) || nodes.reduce((acc, n) => acc + ((n.drives || []).length), 0);
+    if (totalDrives === 0) {
+        container.innerHTML = `
+            <div class="p-4">
+                ${headerHtml}
+                ${summaryCardsHtml}
+                <div class="bg-white border border-slate-200 rounded-lg p-8 text-center text-slate-500 shadow-sm">
+                    <div class="text-sm font-semibold text-slate-700 mb-1">No Storage Drives Detected</div>
+                    <p class="text-xs text-slate-400">The hypervisor nodes did not report any storage drives, or smartctl diagnostics are not yet available.</p>
+                </div>
+            </div>`;
+        return;
+    }
+
+    const cols = ['Node', 'Device Path', 'Vendor & Model', 'Serial Number', 'Wear Level', 'Health Status'];
+
+    function getHealthBadge(status) {
+        const s = String(status || 'unknown').toLowerCase();
+        let cls = 'bg-slate-100 text-slate-700';
+        if (s === 'healthy' || s === 'ok' || s === 'good') {
+            cls = 'bg-green-100 text-green-800';
+        } else if (s === 'warning' || s === 'warn') {
+            cls = 'bg-amber-100 text-amber-800';
+        } else if (s === 'critical' || s === 'crit' || s === 'error' || s === 'failed') {
+            cls = 'bg-red-100 text-red-800';
+        }
+        return `<span class="px-2 py-0.5 rounded-full text-xs font-medium uppercase ${cls}">${escapeHtml(status || 'unknown')}</span>`;
+    }
+
+    function getWearBar(wear) {
+        if (wear == null || wear === '') {
+            return '<span class="text-slate-400 text-xs">—</span>';
+        }
+        const num = Number(wear);
+        if (isNaN(num)) {
+            return `<span class="text-slate-500 text-xs">${escapeHtml(String(wear))}</span>`;
+        }
+        const pct = Math.min(Math.max(num, 0), 100);
+        let barColor = 'bg-[#01A982]';
+        if (pct >= 90) {
+            barColor = 'bg-red-600';
+        } else if (pct >= 80) {
+            barColor = 'bg-amber-500';
+        }
+        return `
+            <div class="flex items-center gap-2">
+                <div class="w-24 bg-slate-200 rounded-full h-2 overflow-hidden">
+                    <div class="h-2 rounded-full ${barColor}" style="width: ${pct}%"></div>
+                </div>
+                <span class="text-xs font-mono font-medium text-slate-700">${pct}%</span>
+            </div>`;
+    }
+
+    let tablesHtml = '';
+    for (const node of nodes) {
+        const nodeName = node.node || 'Unknown';
+        const clusterName = node.cluster || '';
+        const drives = Array.isArray(node.drives) ? node.drives : [];
+
+        if (drives.length === 0) continue;
+
+        const rows = drives.map(drive => {
+            const devPath = drive.block_device || drive.scsi_path || '—';
+            const vendorModel = `${drive.vendor || ''} ${drive.model || ''}`.trim() || '—';
+            const serial = drive.serial || '—';
+            const wear = drive.wear_level;
+            const status = drive.health_status || (drive.success ? 'healthy' : 'unknown');
+
+            return `
+                <tr class="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                    <td class="px-4 py-2.5 font-medium text-slate-800">${escapeHtml(nodeName)}</td>
+                    <td class="px-4 py-2.5 font-mono text-xs text-slate-600">${escapeHtml(devPath)}</td>
+                    <td class="px-4 py-2.5 text-xs text-slate-800">${escapeHtml(vendorModel)}</td>
+                    <td class="px-4 py-2.5 font-mono text-xs text-slate-500">${escapeHtml(serial)}</td>
+                    <td class="px-4 py-2.5">${getWearBar(wear)}</td>
+                    <td class="px-4 py-2.5">${getHealthBadge(status)}</td>
+                </tr>`;
+        }).join('');
+
+        tablesHtml += `
+            <div class="mb-6 bg-white rounded-lg border border-slate-200 overflow-hidden shadow-sm">
+                <div class="bg-slate-50 px-4 py-2.5 border-b border-slate-200 flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs font-bold uppercase tracking-wider text-slate-500">Node:</span>
+                        <span class="text-sm font-semibold text-slate-800">${escapeHtml(nodeName)}</span>
+                        ${clusterName ? `<span class="text-xs px-2 py-0.5 rounded bg-slate-200 text-slate-700 font-mono">${escapeHtml(clusterName)}</span>` : ''}
+                    </div>
+                    <span class="text-xs text-slate-500">${drives.length} drive${drives.length === 1 ? '' : 's'}</span>
+                </div>
+                ${tableWrap(tableHead(cols) + `<tbody>${rows}</tbody>`)}
+            </div>`;
+    }
+
+    container.innerHTML = `
+        <div class="p-4">
+            ${headerHtml}
+            ${summaryCardsHtml}
+            ${tablesHtml}
+        </div>`;
+}
+
 async function loadPxmxData(subMenu) {    const container = document.getElementById('pxmx-content');
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
@@ -23414,6 +23633,10 @@ async function loadPxmxData(subMenu) {    const container = document.getElementB
     try {
         if (subMenu === 'Settings') {
             await renderPxmxSettings(container);
+            return;
+        }
+        if (subMenu === 'Diagnostics') {
+            await renderPxmxDiagnostics(container);
             return;
         }
         if (subMenu === 'Overview' || subMenu === 'Virtual Machines') {
