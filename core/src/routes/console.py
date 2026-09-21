@@ -68,6 +68,8 @@ def console_port_search_blob(p: dict) -> str:
         p.get("alias"), ident.get("hostname"), ident.get("ip"),
         ident.get("vendor") or probe.get("vendor"), ident.get("model"),
         p.get("device"), p.get("port_id"), p.get("agent_name"),
+        ident.get("serial") or probe.get("serial"),
+        ident.get("mac") or probe.get("mac"),
     ]
     return " ".join(str(x) for x in parts if x).lower()
 
@@ -97,6 +99,9 @@ def console_port_result(p: dict) -> dict:
         "baud": (p.get("settings") or {}).get("baud"),
         "vendor": ident.get("vendor") or probe.get("vendor") or None,
         "model": ident.get("model") or None,
+        "serial": ident.get("serial") or probe.get("serial") or None,
+        "device_type": ident.get("model") or probe.get("model") or None,
+        "mac": ident.get("mac") or probe.get("mac") or None,
         "in_use": bool(p.get("in_use")),
         "dpa": p.get("dpa"),
     }
@@ -1482,11 +1487,15 @@ def register(app, hub, ctx):
             # may not enumerate that privileged bucket — surface them as an
             # aggregate count only (no usernames), matching the vault's reach
             # model (tenant-admin → own bucket; __admin__ is Global-Admin-only).
-            own = await _console_creds_in_bucket(hub, tenant)
-            resolved = await _console_creds_for_tenant(hub, tenant)
+            import asyncio
+            import cred_vault as _cv
+            own, admin_creds = await asyncio.gather(
+                _console_creds_in_bucket(hub, tenant),
+                _console_creds_in_bucket(hub, _cv.ADMIN_BUCKET),
+            )
             own_keys = {(c.get("username", ""), c.get("password", "")) for c in own}
             shared_global_count = sum(
-                1 for c in resolved
+                1 for c in admin_creds
                 if (c.get("username", ""), c.get("password", "")) not in own_keys)
             return {"credentials": [{"username": c.get("username", ""),
                                      "has_password": bool(c.get("password"))} for c in own],

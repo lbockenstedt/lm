@@ -1583,10 +1583,12 @@ def register(app, hub, ctx):
                 data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
                 if not isinstance(data, dict):
                     continue
-                if data.get("status") == "ERROR" and not data.get("drives") and not data.get("nodes"):
-                    continue
 
                 spoke_connected = True
+
+                diagnostics = data.get("diagnostics") or {}
+                agent_version = data.get("agent_version")
+                error_msg = data.get("message") if data.get("status") == "ERROR" else None
 
                 if isinstance(data.get("nodes"), list):
                     for n in data["nodes"]:
@@ -1603,6 +1605,10 @@ def register(app, hub, ctx):
                             "cluster": n.get("cluster") or data.get("cluster") or "",
                             "drives": drives,
                             "summary": summary,
+                            "status": n.get("status", data.get("status", "SUCCESS")),
+                            "error": n.get("message") if n.get("status") == "ERROR" else error_msg,
+                            "agent_version": n.get("agent_version", agent_version),
+                            "diagnostics": n.get("diagnostics") or diagnostics,
                         })
                 else:
                     n_name = data.get("node") or target_node or "default"
@@ -1616,6 +1622,10 @@ def register(app, hub, ctx):
                         "cluster": data.get("cluster") or "",
                         "drives": drives,
                         "summary": summary,
+                        "status": data.get("status", "SUCCESS"),
+                        "error": error_msg,
+                        "agent_version": agent_version,
+                        "diagnostics": diagnostics,
                     })
 
         total_summary = {
