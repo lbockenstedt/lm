@@ -33623,6 +33623,15 @@ function openSearchResult(item) {
     const dd  = document.getElementById('search-results');
     if (inp) inp.value = '';
     if (dd)  { dd.classList.add('hidden'); dd.innerHTML = ''; }
+    // /api/device-detail is admin-only, so non-admins cannot use the device dashboard.
+    // A console hit already carries its connect coordinates: open the terminal directly
+    // for them; admins keep the richer inventory dashboard.
+    if (item.source === 'console' && item.spoke_id && item.port_id && !isAdmin()) {
+        if (typeof openConsoleTerminal === 'function') {
+            openConsoleTerminal(item.spoke_id, item.port_id);
+            return;
+        }
+    }
     // A credential-vault hit → open the Credential Vault at that bucket (the
     // secret VALUE is never in the search payload; reveal still needs the
     // bucket pass-phrase there).
