@@ -9,6 +9,7 @@ there is no free-form command path here, and every command is a read-only
 ``show``/``display``/``cat``. Pure helpers (:func:`detect_vendor`,
 :func:`parse_identity`) import without pyserial so they are unit-testable.
 """
+import ipaddress
 import json
 import logging
 import os
@@ -28,6 +29,23 @@ _ANSI_OSC = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")      # OSC ... BEL/
 _ANSI_CSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")               # CSI ... final
 _ANSI_MISC = re.compile(r"\x1b[()#][0-9A-Za-z]|\x1b[=>78McDEHF]")  # charset/misc
 _CTRL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")     # keep \t \n \r
+
+
+
+def is_valid_device_ip(ip: str) -> bool:
+    try:
+        addr = ipaddress.IPv4Address(ip)
+    except ValueError:
+        return False
+    if addr.is_unspecified or addr.is_loopback or addr.is_multicast or addr == ipaddress.IPv4Address('255.255.255.255'):
+        return False
+    val = int(addr)
+    if val >= 0xE0000000:
+        return False
+    inv = (~val) & 0xFFFFFFFF
+    if (inv + 1) & inv == 0:
+        return False
+    return True
 
 
 def sanitize_console_text(text: str) -> str:
@@ -134,6 +152,7 @@ PROFILES: List[Dict[str, Any]] = [
             {"cmd": "show modules", "fields": {
                 "model": re.compile(r"Chassis\s*:?\s*(.+?)\s*(?:\(|Serial|$)", re.I | re.M),
             }},
+            {"cmd": "show ip", "fields": {"ip": re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")}},
         ],
         "config": {"enter": "configure", "exit": "exit", "save": "write memory",
                    "show_running": "show running-config"},
@@ -164,6 +183,7 @@ PROFILES: List[Dict[str, Any]] = [
             {"cmd": "show chassis hardware", "fields": {
                 "serial": re.compile(r"^Chassis\s+(\S+)", re.I | re.M),
             }},
+            {"cmd": "show interfaces terse", "fields": {"ip": re.compile(r"\binet\s+(\d{1,3}(?:\.\d{1,3}){3})")}},
         ],
         "config": {"enter": "configure", "exit": "exit", "save": "commit",
                    "show_running": "show configuration"},
@@ -199,6 +219,7 @@ PROFILES: List[Dict[str, Any]] = [
                 # Fallback model if 'show version' didn't carry it: "SC Model# : A7010".
                 "model": re.compile(r"(?:SC |Card )?Model#\s*:?\s*([\w\-]+)", re.I),
             }},
+            {"cmd": "show ip interface brief", "fields": {"ip": re.compile(r"(?:vlan|mgmt|loopback)\s+\S*\s*(\d{1,3}(?:\.\d{1,3}){3})", re.I)}},
         ],
         "config": {"enter": "configure terminal", "exit": "exit", "save": "write memory",
                    "show_running": "show running-config"},
@@ -289,12 +310,13 @@ def _extract_profile_fields(profile: Dict[str, Any], text: str) -> Dict[str, str
         for key, rx in (spec.get("fields") or {}).items():
             if key in found:
                 continue
-            m = rx.search(text or "")
-            if not m:
-                continue
-            val = ((m.group(1) if m.lastindex else None) or m.group(0) or "").strip()
-            if val:
-                found[key] = val
+            for m in rx.finditer(text or ""):
+                val = ((m.group(1) if m.lastindex else None) or m.group(0) or "").strip()
+                if val:
+                    if key == "ip" and not is_valid_device_ip(val):
+                        continue
+                    found[key] = val
+                    break
     if found.get("mac"):
         found["mac"] = normalize_mac(found["mac"]) or found["mac"]
     return found
@@ -311,15 +333,16 @@ def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str]) -> Dict[str
         for key, rx in fields.items():
             if key in identity:
                 continue
-            m = rx.search(text)
-            if not m:
-                continue
-            # Use the first capturing group, but tolerate alternation branches
-            # where group 1 didn't participate (returns None) — fall back to the
-            # whole match so a valid hit is never dropped (or worse, crashes).
-            val = ((m.group(1) if m.lastindex else None) or m.group(0) or "").strip()
-            if val:
-                identity[key] = val
+            for m in rx.finditer(text):
+                # Use the first capturing group, but tolerate alternation branches
+                # where group 1 didn't participate (returns None) — fall back to the
+                # whole match so a valid hit is never dropped (or worse, crashes).
+                val = ((m.group(1) if m.lastindex else None) or m.group(0) or "").strip()
+                if val:
+                    if key == "ip" and not is_valid_device_ip(val):
+                        continue
+                    identity[key] = val
+                    break
     if identity.get("mac"):
         identity["mac"] = normalize_mac(identity["mac"]) or identity["mac"]
     return identity
@@ -687,6 +710,12 @@ def passive_identify(text: str) -> Dict[str, Any]:
         mm = _GENERIC_MAC.search(text)
         if mm:
             identity["mac"] = mm.group(1)
+    if not identity.get("ip"):
+        for m in re.finditer(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", text):
+            cand = m.group(1)
+            if is_valid_device_ip(cand):
+                identity["ip"] = cand
+                break
     if identity.get("mac"):
         identity["mac"] = normalize_mac(identity["mac"]) or identity["mac"]
     return {"vendor": vendor, "identity": identity}

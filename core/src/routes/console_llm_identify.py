@@ -107,7 +107,7 @@ _SYS_EXTRACT = (
     "and the outputs of the read-only commands below, identify the device. Respond "
     "with ONLY a single JSON object and no other text: {\"identified\": bool, "
     "\"vendor\": \"...\", \"model\": \"...\", \"os\": \"...\", \"type\": \"...\", "
-    "\"serial\": \"...\", \"hostname\": \"...\", \"confidence\": 0.0-1.0}. \"model\" "
+    "\"serial\": \"...\", \"hostname\": \"...\", \"ip\": \"...\", \"confidence\": 0.0-1.0}. \"model\" "
     "is the specific product (e.g. \"Aruba CX 6300M\", \"Juniper SRX340\"); \"type\" "
     "is the role: one of Switch, Router, Firewall, Access Point, Gateway, Server, "
     "Load Balancer, or Other. Use null for unknown fields."
@@ -123,7 +123,7 @@ _SYS_CREDS = (
     "propose destructive actions or commentary."
 )
 
-_IDENTITY_FIELDS = ("model", "os", "type", "serial", "hostname", "confidence")
+_IDENTITY_FIELDS = ("model", "os", "type", "serial", "hostname", "ip", "confidence")
 
 
 def hub_llm_identify_enabled(hub=None) -> bool:
