@@ -11171,6 +11171,15 @@ async function _csUsbClearCmd(host, action, doneMsg, allSpokes) {
         if (allSpokes) body.all_spokes = true;
         const r = await csFetch(`/${csTenant()}/proxmx/command?tenant_id=${csTenant()}`, {
             method: 'POST', body: JSON.stringify(body) });
+        if (r && r.queued_to_spokes > 0) {
+            // Some spokes were unreachable: the clear is queued and applies when
+            // they reconnect. Say so instead of claiming it is live everywhere.
+            const nQ = r.queued_to_spokes, nLive = r.pushed_to_spokes || 0;
+            const bad = (r.errors || []).concat(r.refusals || []);
+            showToast(`${doneMsg}. Cleared live on ${nLive}/${r.spokes_total} spoke(s); queued for ${nQ} unreachable spoke(s) (applies when they reconnect): ${(r.queued || []).join(', ')}`
+                + (bad.length ? ` — failed: ${bad.join('; ')}` : ''), 'warning');
+            return;
+        }
         if (r && Array.isArray(r.errors) && (r.errors.length || (r.refusals || []).length)) {
             // Partial fan-out: name the spokes that did NOT clear rather than
             // reporting a blanket success.
