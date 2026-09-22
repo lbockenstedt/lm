@@ -446,6 +446,31 @@ def register(app, hub, ctx):
             + doc_ctx
         )
 
+    async def _final_answer(hub, agent, messages, system):
+        """Run the ONE synthesis turn that produces the user-visible answer.
+
+        Tools are disabled and the turn is tagged role="final" so AppBuilder
+        routes it to the strongest model rather than the fast cheap one used
+        for tool-picking. Returns "" on any failure so callers can fall back
+        to whatever text they already have.
+        """
+        try:
+            res = await hub.request_response(
+                agent, "HELP_ASK",
+                {"messages": messages + [{"role": "user", "content": (
+                    "Using the simulation source code, documentation, and data "
+                    "gathered above, write your final response to my question now. "
+                    "Explain your recommendation clearly and quote relevant lines "
+                    "or parameters.")}],
+                 "tools": None, "system": system, "role": "final"},
+                timeout=90.0)
+            data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
+            if isinstance(data, dict) and data.get("status") == "SUCCESS":
+                return (data.get("assistant") or {}).get("content") or ""
+        except Exception as e:
+            logger.warning("sim_assistant _final_answer synthesis failed: %s", e)
+        return ""
+
     @app.get("/api/sim-assistant/available")
     async def sim_assistant_available():
         """Whether the simulation build assistant is usable (ab connected)."""
@@ -507,7 +532,11 @@ def register(app, hub, ctx):
             tool_calls = assistant.get("tool_calls") or []
             text = assistant.get("content") or ""
             if not tool_calls:
-                answer = text
+                if len(turn_messages) > len(messages):
+                    synth = await _final_answer(hub, agent, turn_messages, system)
+                    answer = synth if synth.strip() else text
+                else:
+                    answer = text
                 break
             turn_messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})
             for tc in tool_calls:
@@ -535,6 +564,8 @@ def register(app, hub, ctx):
                 if isinstance(data, dict) and data.get("status") == "SUCCESS":
                     assistant = data.get("assistant") or {}
                     answer = assistant.get("content") or ""
+                elif isinstance(data, dict) and data.get("message"):
+                    answer = f"Simulation assistant error: {data['message']}"
             except Exception as e:  # noqa: BLE001
                 logger.warning("sim_assistant forced synthesis turn failed: %s", e)
 

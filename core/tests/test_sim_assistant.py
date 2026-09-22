@@ -39,7 +39,7 @@ class _FakeHub:
         if self.fail:
             raise RuntimeError("relay unreachable")
         assert cmd == "HELP_ASK"
-        reply = self.replies.pop(0) if self.replies else "OK"
+        reply = self.replies.pop(0) if self.replies else ""
         if isinstance(reply, dict):
             assistant = {"content": reply.get("content", ""),
                         "tool_calls": reply.get("tool_calls") or []}
@@ -494,16 +494,19 @@ def test_chat_passes_tool_role_on_intermediate_rounds(monkeypatch):
             {"id": "1", "function": {
                 "name": "read_sim_source",
                 "arguments": '{"sim_name": "dns_fail", "platform": "linux"}'}}]},
-        "Here's a dns_fail variant...",
+        "Intermediate draft",
+        "Here's a dns_fail variant based on the real dns_fail source...",
     ])
     c = _build(hub)
     r = c.post("/api/sim-assistant/chat", json={"messages": [
         {"role": "user", "content": "hello"}]})
     assert r.status_code == 200
-    assert len(hub.all_requests) == 2
+    assert len(hub.all_requests) == 3
     assert hub.all_requests[0][2].get("role") == "tool"
     assert hub.all_requests[1][2].get("role") == "tool"
-    assert "Here's a dns_fail variant..." in r.json()["answer"]
+    assert hub.all_requests[2][2].get("role") == "final"
+    assert hub.all_requests[2][2].get("tools") is None
+    assert "dns_fail variant" in r.json()["answer"]
 
 
 def test_chat_passes_final_role_on_exhausted_budget(monkeypatch):
