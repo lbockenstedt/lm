@@ -1051,6 +1051,31 @@ def test_parse_identity_hp_procurve_ip_ignores_default_gateway():
     assert identity.get("ip") == "172.16.1.90"
     assert identity.get("ip") != "172.16.1.1"
 
+_PROCURVE_SHOW_IP_DHCP = (
+    "  Internet (IPv4) Service\n\n  IPv4 Routing    : Disabled\n\n"
+    "  Default Gateway : 172.16.1.1\n  Default TTL     : 64\n  Arp Age         : 20\n\n"
+    "                       |                                            Proxy ARP\n"
+    "  VLAN                 | IP Config  IP Address      Subnet Mask     Std Local\n"
+    "  -------------------- + ---------- --------------- --------------- --- -----\n"
+    "  DEFAULT_VLAN         | DHCP/Bootp 172.16.1.57     255.255.255.0   No  No\n"
+)
+
+def test_parse_identity_hp_procurve_ip_dhcp_bootp():
+    from fingerprint import PROFILES, parse_identity
+    prof = next(p for p in PROFILES if p["name"] == "hp-procurve")
+    identity = parse_identity(prof, {"show ip": _PROCURVE_SHOW_IP_DHCP})
+    assert identity.get("ip") == "172.16.1.57"
+    assert identity.get("ip") != "172.16.1.1"
+
+def test_passive_identify_hp_procurve_dhcp_bootp_not_gateway():
+    from fingerprint import passive_identify
+    text = ("HP J9776A 2530-24G Switch\r\n"
+            "HP-2530-24G# show ip\r\n" + _PROCURVE_SHOW_IP_DHCP + "HP-2530-24G# ")
+    result = passive_identify(text)
+    assert result["vendor"] == "hp-procurve"
+    assert result["identity"].get("ip") == "172.16.1.57"
+    assert result["identity"].get("ip") != "172.16.1.1"
+
 def test_parse_identity_juniper_junos_ip():
     from fingerprint import PROFILES, parse_identity
     prof = next(p for p in PROFILES if p["name"] == "juniper-junos")
