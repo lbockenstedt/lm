@@ -507,19 +507,6 @@ def register(app, hub, ctx):
             tool_calls = assistant.get("tool_calls") or []
             text = assistant.get("content") or ""
             if not tool_calls:
-                if len(turn_messages) > len(messages):
-                    try:
-                        res = await hub.request_response(
-                            agent, "HELP_ASK",
-                            {"messages": turn_messages, "tools": None, "system": system, "role": "final"},
-                            timeout=90.0)
-                        data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
-                        if isinstance(data, dict) and data.get("status") == "SUCCESS":
-                            synth = (data.get("assistant") or {}).get("content") or ""
-                            if synth.strip():
-                                text = synth
-                    except Exception as e:  # noqa: BLE001
-                        logger.warning("sim_assistant final-synthesis turn failed: %s", e)
                 answer = text
                 break
             turn_messages.append({"role": "assistant", "content": text, "tool_calls": tool_calls})

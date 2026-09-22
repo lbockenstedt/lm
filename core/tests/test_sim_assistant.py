@@ -494,15 +494,16 @@ def test_chat_passes_tool_role_on_intermediate_rounds(monkeypatch):
             {"id": "1", "function": {
                 "name": "read_sim_source",
                 "arguments": '{"sim_name": "dns_fail", "platform": "linux"}'}}]},
-        "Intermediate text",
         "Here's a dns_fail variant...",
     ])
     c = _build(hub)
     r = c.post("/api/sim-assistant/chat", json={"messages": [
         {"role": "user", "content": "hello"}]})
     assert r.status_code == 200
+    assert len(hub.all_requests) == 2
     assert hub.all_requests[0][2].get("role") == "tool"
-    assert hub.last_request[2].get("role") == "final"
+    assert hub.all_requests[1][2].get("role") == "tool"
+    assert "Here's a dns_fail variant..." in r.json()["answer"]
 
 
 def test_chat_passes_final_role_on_exhausted_budget(monkeypatch):
