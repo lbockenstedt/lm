@@ -16,7 +16,7 @@ from routes.github_source import _headers, _token  # noqa: F401 -- same env-var 
 logger = logging.getLogger(__name__)
 
 API = "https://api.github.com"
-_HTTP_TIMEOUT = 20.0
+_HTTP_TIMEOUT = 5.0
 
 _PR_EXCLUDE_BRANCH_PREFIXES = ("promote/", "backmerge/")
 _PR_EXCLUDE_TITLE_PREFIXES = ("promote:", "backmerge:")
@@ -38,7 +38,7 @@ _WHATS_NEW_REPOS = ("lbockenstedt/lm",)
 # changes on a human timescale; a warm cache keeps popover opens offline).
 _WHATS_NEW_REPO_CACHE_TTL = 3600.0
 _WHATS_NEW_NEGATIVE_CACHE_TTL = 30.0
-_CACHE: Dict[Tuple[str, str], Tuple[float, list]] = {}
+_CACHE: Dict[Tuple[str, str, int], Tuple[float, list, float]] = {}
 _CACHE_LOCK = threading.Lock()
 
 
@@ -186,22 +186,24 @@ async def _fetch_pages(owner: str, repo: str, within_days: int, *, client=None) 
 async def fetch_recent_merged_prs(owner: str, repo: str, within_days: int = 14, *,
                                   client=None) -> list:
     """Recently-merged PRs for ``owner/repo``, mapped to the shape
-    ``merged_prs_to_items`` expects. TTL-cached per ``(owner, repo)`` so the
+    ``merged_prs_to_items`` expects. TTL-cached per ``(owner, repo, within_days)`` so the
     popover does not hit GitHub on every open. Fail-soft: ANY error (network,
     non-200, bad JSON, a malformed item) logs a WARNING and returns ``[]`` for
     the whole call - this source must never break the "What's New" popover, it
     can only shrink it.
     """
-    cache_key = (owner, repo)
+    cache_key = (owner, repo, within_days)
     with _CACHE_LOCK:
         cached = _CACHE.get(cache_key)
-    if cached and (time.time() - cached[0]) < _WHATS_NEW_REPO_CACHE_TTL:
+    if cached and (time.time() - cached[0]) < cached[2]:
         return cached[1]
     try:
         items = await _fetch_pages(owner, repo, within_days, client=client)
     except Exception as e:  # noqa: BLE001 -- fail-soft: degrade, never raise
         logger.warning("whats-new: %s/%s PR fetch failed: %s", owner, repo, e)
+        with _CACHE_LOCK:
+            _CACHE[cache_key] = (time.time(), [], _WHATS_NEW_NEGATIVE_CACHE_TTL)
         return []
     with _CACHE_LOCK:
-        _CACHE[cache_key] = (time.time(), items)
+        _CACHE[cache_key] = (time.time(), items, _WHATS_NEW_REPO_CACHE_TTL)
     return items
