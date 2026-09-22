@@ -494,11 +494,28 @@ def test_chat_passes_tool_role_on_intermediate_rounds(monkeypatch):
             {"id": "1", "function": {
                 "name": "read_sim_source",
                 "arguments": '{"sim_name": "dns_fail", "platform": "linux"}'}}]},
+        "Intermediate text",
         "Here's a dns_fail variant...",
     ])
     c = _build(hub)
     r = c.post("/api/sim-assistant/chat", json={"messages": [
         {"role": "user", "content": "hello"}]})
     assert r.status_code == 200
-    assert hub.last_request[2].get("role") == "tool"
+    assert hub.all_requests[0][2].get("role") == "tool"
+    assert hub.last_request[2].get("role") == "final"
+
+
+def test_chat_passes_final_role_on_exhausted_budget(monkeypatch):
+    async def fake_get(path):
+        return _FakeGithubResp(200, {"content": _b64("# loop")})
+    monkeypatch.setattr(sim_assistant_module, "_github_get_contents", fake_get)
+
+    tool_reply = {"content": "", "tool_calls": [
+        {"id": "1", "function": {"name": "list_available_sims", "arguments": "{}"}}]}
+    hub = _FakeHub(replies=[tool_reply, tool_reply, tool_reply, tool_reply, tool_reply, "Exhausted final summary"])
+    c = _build(hub)
+    r = c.post("/api/sim-assistant/chat", json={"messages": [{"role": "user", "content": "search deep"}]})
+    assert r.status_code == 200
+    assert hub.last_request[2].get("role") == "final"
+    assert "Exhausted final summary" in r.json()["answer"]
 
