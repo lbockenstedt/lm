@@ -464,7 +464,26 @@ def register(app, hub, ctx):
             return []
         return creds
 
-    def _console_purge_legacy_credentials(hub):
+    def _console_load_legacy_blob_credentials(hub):
+        """Decrypt+parse the retired hub-local ``console_credentials_enc``
+        blob into ``[{username,password}]`` (``[]`` when absent, empty, or
+        undecryptable). Shared by the purge guard and by the ``to-vault``
+        migration endpoint, which is the only way an operator can actually
+        move this blob's contents into the Credential Vault — it predates
+        the vault and is never written there by anything else."""
+        try:
+            state = hub.state.system_state
+            blob = state.get("console_credentials_enc")
+            if not blob:
+                return []
+            from security.encryption import hub_encryption
+            parsed = json.loads(hub_encryption.decrypt(blob.encode()))
+        except Exception:  # noqa: BLE001 — no state / undecryptable / malformed
+            return []
+        return [{"username": str(c.get("username", "")), "password": str(c.get("password", ""))}
+                for c in (parsed or []) if isinstance(c, dict) and c.get("username")]
+
+    async def _console_purge_legacy_credentials(hub):
         """Drop the retired hub-local console password blob
         (``console_credentials_enc``) from hub state, once, and say so —
         UNLESS it still decrypts to a usable credential list that has no
@@ -490,35 +509,34 @@ def register(app, hub, ctx):
         that class deleting still costs nothing, an unreadable blob has no
         recoverable content, so purge proceeds exactly as before.
 
+        "Already migrated" is checked against the ACTUAL Credential Vault
+        (``_console_creds_all_buckets``, i.e. real ``cred_vault`` buckets),
+        never :func:`_console_load_credentials` (which only resolves an
+        external Key Vault *reference* and is unrelated to what ``to-vault``
+        writes) — and it is a content match (every blob credential's
+        username+password pair must already be present in the vault), not
+        mere non-emptiness, so an unrelated credential already sitting in the
+        vault can no longer cause this blob's own logins to be discarded.
+
         Never raises: this also runs on the seed path, and credential hygiene
         must not be able to break credential delivery."""
         try:
             state = hub.state.system_state
             if "console_credentials_enc" not in state:
                 return False
-            blob = state.get("console_credentials_enc")
         except Exception:  # noqa: BLE001 — no/odd state object (early boot)
             return False
 
-        # Only skip the purge when the blob still decrypts to something a
-        # human would miss AND the vault does not already have an equivalent
-        # — an install that already migrated (or never had real creds) gets
-        # the orphan cleaned up as before.
-        try:
-            recoverable = bool(blob)
-            if recoverable:
-                from security.encryption import hub_encryption
-                parsed = json.loads(hub_encryption.decrypt(blob.encode()))
-                recoverable = bool(parsed) and any(
-                    isinstance(c, dict) and c.get("username") for c in parsed)
-        except Exception:  # noqa: BLE001 — undecryptable/malformed -> orphan
-            recoverable = False
-        if recoverable:
+        blob_creds = _console_load_legacy_blob_credentials(hub)
+        if blob_creds:
             try:
-                already_in_vault = bool(_console_load_credentials(hub))
+                vault_creds = await _console_creds_all_buckets(hub)
             except Exception:  # noqa: BLE001 — vault read failed; be cautious
-                already_in_vault = False
-            if not already_in_vault:
+                vault_creds = []
+            vault_keys = {(c.get("username", ""), c.get("password", "")) for c in vault_creds}
+            blob_keys = {(c["username"], c["password"]) for c in blob_creds}
+            migrated = blob_keys.issubset(vault_keys)
+            if not migrated:
                 logger.warning(
                     "console: the legacy hub-local credential store still "
                     "holds a readable, unmigrated console login list — NOT "
@@ -816,7 +834,7 @@ def register(app, hub, ctx):
         todo = [sid for sid in spokes if sid not in seeded]
         if not todo:
             return
-        _console_purge_legacy_credentials(hub)
+        await _console_purge_legacy_credentials(hub)
 
         async def _seed_one(sid):
             try:
@@ -1559,7 +1577,7 @@ def register(app, hub, ctx):
         # console password store any more, so these stay constant. The keys are
         # kept because the WebUI still reads them; it renders the legacy section
         # only when `local_credentials` is non-empty, so it simply disappears.
-        _console_purge_legacy_credentials(hub)
+        await _console_purge_legacy_credentials(hub)
         # Console logins are edited in the Credential Library
         # (POST /api/console/credentials/set), never here.
         kv_backed = _console_creds_keyvault_backed(hub)
@@ -1587,7 +1605,7 @@ def register(app, hub, ctx):
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
-        _console_purge_legacy_credentials(app.state.hub)
+        await _console_purge_legacy_credentials(app.state.hub)
         raise HTTPException(status_code=409, detail=(
             "The hub no longer stores console passwords locally. Manage console "
             "auto-identify logins in the Credential Library (they are read from "
@@ -1598,7 +1616,16 @@ def register(app, hub, ctx):
         """Migrate the current auto-identify credential list into the Credential
         Vault (Global Admin slot ``__admin__``, automation-readable) so it's
         managed alongside every other secret and pulled unattended by the seed
-        loop. Requires the admin-slot pass-phrase. Admin only."""
+        loop. Requires the admin-slot pass-phrase. Admin only.
+
+        Source is the Key Vault *reference* list
+        (:func:`_console_load_credentials`) when configured, falling back to
+        the retired hub-local blob (``console_credentials_enc``) when that's
+        empty — this is the only path that can migrate an install still
+        holding creds solely in that blob, which is exactly the population
+        :func:`_console_purge_legacy_credentials` refuses to purge until a
+        migration happens; without this fallback that guard's own advice
+        ("run this endpoint first") was unusable for those installs."""
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
@@ -1608,7 +1635,7 @@ def register(app, hub, ctx):
         except Exception:
             body = {}
         psk = str((body or {}).get("psk") or "")
-        creds = _console_load_credentials(hub)
+        creds = _console_load_credentials(hub) or _console_load_legacy_blob_credentials(hub)
         if not creds:
             raise HTTPException(status_code=400, detail="no console credentials to migrate")
         import cred_vault as _cv
