@@ -5,6 +5,9 @@ from api import (
 )
 from update_pipeline import _version_behind
 from spoke_alert_sync import direct_module_ids as _direct_module_ids
+from whats_new_prs import (
+    _WHATS_NEW_REPOS, fetch_recent_merged_prs, merged_prs_to_items,
+)
 
 from . import frontmatter
 
@@ -51,6 +54,24 @@ def _committed_features(reports: list, *, now: float = None,
         })
     items.sort(key=lambda x: x.get("fixed_at") or 0, reverse=True)
     return items[:_WHATS_NEW_LIMIT]
+
+
+def _dedupe_and_cap(items: list, limit: int = _WHATS_NEW_LIMIT) -> list:
+    """Merge step for the "What's New" popover's two sources. Drops a later item
+    whose summary (whitespace/case normalized) duplicates an earlier one -
+    callers pass the bug-store items first so a curated summary wins over a
+    PR-derived one describing the same change - then sorts newest-first by
+    ``fixed_at`` and caps at ``limit``. Pure; does not touch ``_committed_features``."""
+    seen = set()
+    deduped = []
+    for it in items:
+        key = " ".join(str(it.get("summary") or "").lower().split())
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(it)
+    deduped.sort(key=lambda x: x.get("fixed_at") or 0, reverse=True)
+    return deduped[:limit]
 
 # ── /setup/diagnostics cache (stale-while-revalidate) ───────────────────────
 # The Diagnostics card + the Spokes & Agents page poll /setup/diagnostics on
@@ -1102,18 +1123,52 @@ def register(app, hub, ctx):
     async def whats_new():
         """List recently merged bug fixes + features for the "What's New" popover.
 
-        Surfaces bug-store reports ab has built & closed — its MARK_BUG_FIXED
-        cascade flips the report to status=="fixed" with a fixed_at epoch + the
-        closed issue_url — of type bug or feature, merged within the last 2
-        weeks (see _committed_features). Each item carries a ``type`` so the UI
-        can badge "Bug fix" vs "Feature". Readable by ANY authenticated user:
-        the /api/ prefix is session-gated but not admin-only (unlike
-        /setup/bug-reports, which is global-admin gated). Newest-first by
-        fixed_at (falls back to ts), capped at 15, summary required.
-        _list_bug_reports is an in-memory read, so no to_thread.
+        Merges TWO independent sources:
+        1. bug-store reports ab has built & closed — its MARK_BUG_FIXED cascade
+           flips the report to status=="fixed" with a fixed_at epoch + the closed
+           issue_url — of type bug or feature (see _committed_features). This is
+           the only source that existed before; it's empty for a PR that was
+           merged directly and never went through the WebUI "File a Bug" flow.
+        2. this hub's own recently-merged GitHub pull requests (whats_new_prs),
+           classified from the PR's HEAD BRANCH NAME (feat/feature/perf -> feature,
+           fix/hotfix/bugfix -> bug; an unrecognised prefix is skipped, not
+           guessed). ``promote/*`` and ``backmerge/*`` branches (and matching
+           title prefixes) are excluded as release-flow noise — the real PR they
+           carry already appears on its own.
+
+        The two lists are merged, deduped by normalized summary (a bug-store
+        item wins over a PR-sourced duplicate), sorted newest-first by
+        fixed_at, and capped at 15 (_dedupe_and_cap). Each item carries a
+        ``type`` so the UI can badge "Bug fix" vs "Feature". Readable by ANY
+        authenticated user: the /api/ prefix is session-gated but not
+        admin-only (unlike /setup/bug-reports, which is global-admin gated).
+        _list_bug_reports is an in-memory read, so no to_thread; the PR fetch
+        is wrapped so a GitHub outage never turns this into a 500 — it just
+        falls back to the bug-store-only result.
         """
         hub = app.state.hub
-        return {"features": _committed_features(hub._list_bug_reports())}
+        bug_items = _committed_features(hub._list_bug_reports())
+        pr_items = []
+        try:
+            gc = hub.state.system_state.get("global_config", {}) or {}
+            repos = gc.get("whats_new_repos") or list(_WHATS_NEW_REPOS)
+            slugs = [(o, n) for o, _, n in (str(r or "").partition("/") for r in repos) if o and n]
+            if slugs:
+                fetched = await asyncio.gather(
+                    *(fetch_recent_merged_prs(o, n, within_days=_WHATS_NEW_DAYS) for o, n in slugs),
+                    return_exceptions=True,
+                )
+                prs = []
+                for result in fetched:
+                    if isinstance(result, Exception):
+                        logger.warning("whats-new: PR fetch failed: %s", result)
+                        continue
+                    prs.extend(result)
+                pr_items = merged_prs_to_items(prs, within_days=_WHATS_NEW_DAYS)
+        except Exception as e:  # noqa: BLE001 — PR source must never break the popover
+            logger.warning("whats-new: PR source failed: %s", e)
+            pr_items = []
+        return {"features": _dedupe_and_cap(bug_items + pr_items)}
 
     # Bug Reports log view (admin-only, like the rest of /setup/): lists filed
     # reports and serves the full artifacts (console/HTML/screenshot) for an
