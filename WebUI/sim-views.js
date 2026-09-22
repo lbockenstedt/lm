@@ -11193,6 +11193,16 @@ async function _csUsbClearCmd(host, action, doneMsg, allSpokes) {
             return;
         }
 
+        if (r.ok === false || r.error) {
+            showToast(`${doneMsg} failed: ${r.error || r.message || 'request failed'}`, 'error');
+            return;
+        }
+
+        if (typeof csPushToast === 'function') {
+            csPushToast(r, doneMsg);
+            return;
+        }
+
         showToast(doneMsg, 'success');
     } catch (e) {
         console.error(`_csUsbClearCmd: ${action} failed`, e);
