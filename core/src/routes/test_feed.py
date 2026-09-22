@@ -932,6 +932,7 @@ def _mirror_shared_tenant(hub, registry: dict) -> bool:
         return False
 
     changed = False
+    failed = False
     for tid, cfg in list(tenants.items()):
         if not isinstance(cfg, dict):
             continue
@@ -948,6 +949,7 @@ def _mirror_shared_tenant(hub, registry: dict) -> bool:
                 # and no save_state_now() to make the partial write durable.
                 # Keep going: report whatever succeeded so the caller still
                 # persists and refreshes from the real (partial) state.
+                failed = True
                 logger.warning("[test-feed] could not mirror shared flag "
                                "onto tenant %s", tid, exc_info=True)
 
@@ -963,8 +965,18 @@ def _mirror_shared_tenant(hub, registry: dict) -> bool:
         except Exception:  # noqa: BLE001
             logger.debug("[test-feed] shared-tenant cache refresh failed",
                          exc_info=True)
-        logger.info("[test-feed] shared tenant mirrored from the source: %s",
-                    src_shared)
+        if failed:
+            # At least one write in this pass raised, so "mirrored" may be a
+            # lie -- e.g. the write that would have SET src_shared failed
+            # while others' clears succeeded, leaving the fleet with ZERO
+            # shared tenants even though changed is True. Don't claim success
+            # at INFO; the per-tenant WARNING above already named the tenant.
+            logger.warning("[test-feed] shared tenant mirror from the source "
+                           "(%s) is INCOMPLETE -- see the per-tenant warning(s) "
+                           "above", src_shared)
+        else:
+            logger.info("[test-feed] shared tenant mirrored from the source: %s",
+                        src_shared)
     return changed
 
 

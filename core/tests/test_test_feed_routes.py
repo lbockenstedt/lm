@@ -530,7 +530,13 @@ def test_mirror_shared_tenant_keeps_partial_progress_on_a_mid_loop_failure():
     hub = _FakeHub()
     hub.state = _FlakyState({
         "a": {"name": "A", "shared": True},
-        "b": {"name": "B"},
+        # "b" starts shared=True (not the source's pick) so reconciling it to
+        # False is a REQUIRED write, not a no-op: without this the old
+        # (bugged) code passed too, because "b" already matched its wanted
+        # state and update_tenant("b", ...) — the one rigged to raise — was
+        # never actually called, so the mid-loop failure this test claims to
+        # exercise never fired (reviewer panel finding on lm#1005).
+        "b": {"name": "B", "shared": True},
         "c": {"name": "C"},
     })
     registry = {"c": {"name": "C", "shared": True}}
@@ -539,8 +545,42 @@ def test_mirror_shared_tenant_keeps_partial_progress_on_a_mid_loop_failure():
     # "a" and "c" both succeeded despite "b" raising mid-loop ...
     assert tenants["a"]["shared"] is False
     assert tenants["c"]["shared"] is True
+    # ... "b" is left at its pre-failure value (the write that would have
+    # cleared it raised) ...
+    assert tenants["b"]["shared"] is True
     # ... so the caller must be told something DID change, not lied to.
     assert changed is True
+
+
+def test_mirror_shared_tenant_logs_incomplete_not_mirrored_on_partial_failure(caplog):
+    """Log-fidelity nit from the lm#1005 reviewer panel: if the write that
+    would SET the new shared tenant is the one that fails (others' clears
+    succeed), the fleet ends up with ZERO shared tenants even though
+    changed=True — the old unconditional 'mirrored from the source' INFO log
+    was a false success claim in exactly that case."""
+    import logging
+    from routes.test_feed import _mirror_shared_tenant
+
+    class _FlakyState(_FakeState):
+        def update_tenant(self, tid, data):
+            if tid == "c":  # the tenant that would become shared
+                raise RuntimeError("disk full")
+            super().update_tenant(tid, data)
+
+    hub = _FakeHub()
+    hub.state = _FlakyState({
+        "a": {"name": "A", "shared": True},
+        "c": {"name": "C"},
+    })
+    registry = {"c": {"name": "C", "shared": True}}
+    with caplog.at_level(logging.INFO):
+        changed = _mirror_shared_tenant(hub, registry)
+    assert changed is True  # "a" was cleared -- something did change
+    assert not hub.state.tenant_state["tenants"]["c"].get("shared")
+    assert not any("mirrored from the source" in r.message
+                   and r.levelno == logging.INFO for r in caplog.records)
+    assert any("INCOMPLETE" in r.message for r in caplog.records)
+
 
 
 def test_ensure_local_tenants_still_protects_non_shared_fields():
