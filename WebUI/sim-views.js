@@ -13083,8 +13083,9 @@ function _csAssistantBubble(role, text) {
     const isUser = role === 'user';
     const bg = isUser ? 'bg-[#01A982] text-white' : 'bg-white border border-slate-200 text-slate-800';
     const align = isUser ? 'justify-end' : 'justify-start';
-    const body = window.renderHelpMarkdown ? window.renderHelpMarkdown(text) :
+    let body = window.renderHelpMarkdown ? window.renderHelpMarkdown(text) :
         '<p>' + csEscape(text) + '</p>';
+    body = body.replace(/<pre><code/g, '<pre class="bg-slate-800 text-slate-100 p-3 rounded-lg overflow-x-auto text-xs my-2"><code');
     return `<div class="flex ${align} mb-3">
         <div class="max-w-[75%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${bg} shadow-sm">
             <div class="cs-assistant-msg">${body}</div>
@@ -13097,13 +13098,28 @@ function _csAssistantScrollToBottom() {
     if (log) log.scrollTop = log.scrollHeight;
 }
 
+function csAssistantSetInput(text) {
+    const input = csEl('cs-assistant-input');
+    if (input) {
+        input.value = text;
+        input.focus();
+    }
+}
+window.csAssistantSetInput = csAssistantSetInput;
+
 function _csAssistantRenderLog() {
     const log = csEl('cs-assistant-log');
     if (!log) return;
     if (!window._csAssistantMessages.length) {
-        log.innerHTML = '<p class="text-sm text-slate-400 text-center mt-8">' +
+        log.innerHTML = '<p class="text-sm text-slate-400 text-center mt-8 mb-6">' +
             'Tell me what you want to build — e.g. "I want a simulation that runs this ' +
-            'script" and paste it in. I\'ll ask if I need more.</p>';
+            'script" and paste it in. I\'ll ask if I need more.</p>' +
+            '<div class="flex flex-wrap gap-2 justify-center max-w-lg mx-auto">' +
+            '<button onclick="csAssistantSetInput(\'I want to create a new simulation based on dns_fail with custom burst rate and interval.\')" class="px-3 py-1.5 text-xs rounded-full border border-slate-200 bg-white text-slate-600 hover:border-[#01A982] hover:text-[#01A982] shadow-sm transition-colors">Clone dns_fail (custom burst/rate)</button>' +
+            '<button onclick="csAssistantSetInput(\'I want to create a steady high-bandwidth TCP traffic simulation using iperf.\')" class="px-3 py-1.5 text-xs rounded-full border border-slate-200 bg-white text-slate-600 hover:border-[#01A982] hover:text-[#01A982] shadow-sm transition-colors">High-Throughput Iperf</button>' +
+            '<button onclick="csAssistantSetInput(\'I want to create an alert simulation that causes client DHCP exhaustion.\')" class="px-3 py-1.5 text-xs rounded-full border border-slate-200 bg-white text-slate-600 hover:border-[#01A982] hover:text-[#01A982] shadow-sm transition-colors">DHCP Starvation Sim</button>' +
+            '<button onclick="csAssistantSetInput(\'I want a web browsing simulation that requests external HTTPS sites with randomized pauses.\')" class="px-3 py-1.5 text-xs rounded-full border border-slate-200 bg-white text-slate-600 hover:border-[#01A982] hover:text-[#01A982] shadow-sm transition-colors">Web HTTPS Latency</button>' +
+            '</div>';
         return;
     }
     log.innerHTML = window._csAssistantMessages.map(m => _csAssistantBubble(m.role, m.content)).join('');
@@ -13165,7 +13181,7 @@ async function csAssistantSubmitFeatureRequest() {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 explanation, severity: 'medium', type: 'feature',
-                context: { currentView: 'Simulations', source: 'sim-assistant' },
+                context: { currentView: 'Simulations', source: 'sim-assistant', module: 'simulation' },
             }),
         });
         const data = await res.json();

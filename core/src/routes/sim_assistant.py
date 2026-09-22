@@ -94,11 +94,16 @@ async def _github_get_contents(path):
     A thin, directly-monkeypatchable seam for tests — no local client/token
     plumbing to fake."""
     import httpx
+    import os
+    headers = {"Accept": "application/vnd.github+json"}
+    token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN") or os.getenv("LM_HELP_SOURCE_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     async with httpx.AsyncClient(timeout=15.0) as client:
         return await client.get(
             f"{_GITHUB_API}/repos/{_CS_REPO_OWNER}/{_CS_REPO_NAME}/contents/{path}",
             params={"ref": _CS_REPO_BRANCH},
-            headers={"Accept": "application/vnd.github+json"})
+            headers=headers)
 
 
 async def _tool_list_available_sims(_args):
@@ -489,7 +494,7 @@ def register(app, hub, ctx):
             try:
                 res = await hub.request_response(
                     agent, "HELP_ASK",
-                    {"messages": turn_messages, "tools": _SIM_TOOLS, "system": system},
+                    {"messages": turn_messages, "tools": _SIM_TOOLS, "system": system, "role": "tool"},
                     timeout=90.0)
             except Exception as e:  # noqa: BLE001
                 logger.warning("sim_assistant chat relay failed: %s", e)
@@ -517,6 +522,21 @@ def register(app, hub, ctx):
                 turn_messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                       "name": name, "content": json.dumps(out)[:12000]})
         else:
+            # 5 rounds exhausted
+            try:
+                final_req = {
+                    "messages": turn_messages + [{"role": "user", "content": "Please synthesize and summarize your findings into a final response now."}],
+                    "tools": None,
+                    "system": system,
+                    "role": "final"
+                }
+                res = await hub.request_response(agent, "HELP_ASK", final_req, timeout=90.0)
+                data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else {}
+                assistant = data.get("assistant") or {}
+                answer = assistant.get("content") or ""
+            except Exception:
+                pass
+
             answer = answer or ("I wasn't able to finish looking up the existing sim source "
                                 "in time — try asking again, or narrow down which sim you mean.")
 
