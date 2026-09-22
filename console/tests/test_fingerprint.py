@@ -1099,3 +1099,91 @@ def test_passive_identify_extracts_valid_ip():
     text = "Some random text with a subnet mask 255.255.255.0 and then a valid IP 10.1.2.3"
     result = passive_identify(text)
     assert result["identity"].get("ip") == "10.1.2.3"
+
+
+# ── ambiguous_fields: 2+ distinct valid candidates → flag the field, don't guess ──
+_PROCURVE_SHOW_IP_TWO_VLANS = (
+    "  Internet (IPv4) Service\n\n  IPv4 Routing    : Disabled\n\n"
+    "  Default Gateway : 10.1.1.1\n  Default TTL     : 64\n  Arp Age         : 20\n\n"
+    "                       |                                            Proxy ARP\n"
+    "  VLAN                 | IP Config  IP Address      Subnet Mask     Std Local\n"
+    "  -------------------- + ---------- --------------- --------------- --- -----\n"
+    "  DEFAULT_VLAN         | Manual     10.1.1.20       255.255.255.0   No  No\n"
+    "  MGMT                 | Manual     172.16.50.20    255.255.255.0   No  No\n"
+)
+
+
+def _procurve():
+    return next(p for p in fp.PROFILES if p["name"] == "hp-procurve")
+
+
+def test_parse_identity_hp_procurve_two_vlans_flags_ip_ambiguous():
+    amb = []
+    ident = fp.parse_identity(_procurve(), {"show ip": _PROCURVE_SHOW_IP_TWO_VLANS}, amb)
+    assert ident.get("ip") == "10.1.1.20"  # stored value is still the first valid match
+    assert amb == ["ip"]
+
+
+def test_passive_identify_hp_procurve_two_vlans_ambiguous_fields():
+    text = ("HP J9776A 2530-24G Switch\r\n"
+            "HP-2530-24G# show ip\r\n" + _PROCURVE_SHOW_IP_TWO_VLANS + "HP-2530-24G# ")
+    res = fp.passive_identify(text)
+    assert res["vendor"] == "hp-procurve"
+    assert res["identity"].get("ip") == "10.1.1.20"
+    assert "ip" in res["ambiguous_fields"]
+    assert "ambiguous_fields" not in res["identity"]  # sibling key, not an identity field
+
+
+def test_run_identify_hp_procurve_two_vlans_ambiguous_fields():
+    chan = _FakeChan("\r\nHP J9776A 2530-24G Switch\r\nHP-2530-24G# ", [
+        ("no page", "\r\nHP-2530-24G# "),
+        ("show system\r", "\r\n System Name : HP-2530-24G\r\n Serial Number : CN12345\r\nHP-2530-24G# "),
+        ("show system-information", "\r\nInvalid input: show\r\nHP-2530-24G# "),
+        ("show modules", "\r\n Chassis: 2530-24G Switch(J9776A)\r\nHP-2530-24G# "),
+        ("show ip", _PROCURVE_SHOW_IP_TWO_VLANS.replace("\n", "\r\n") + "HP-2530-24G# "),
+    ])
+    res = fp.run_identify(chan.read, chan.write, [], cmd_secs=1.0)
+    assert res["vendor"] == "hp-procurve"
+    assert res["identity"].get("ip") == "10.1.1.20"
+    assert res["identity"].get("hostname") == "HP-2530-24G"
+    assert res["ambiguous_fields"] == ["ip"]  # hostname/serial/model unambiguous
+    assert "ambiguous_fields" not in res["identity"]
+
+
+def test_ambiguity_ignores_invalid_ip_candidates():
+    # A rejected junk second address (999.1.1.1) never counts as a candidate.
+    text = (_PROCURVE_SHOW_IP_DHCP
+            + "  JUNK_VLAN            | Manual     999.1.1.1       255.255.255.0   No  No\n")
+    amb = []
+    ident = fp.parse_identity(_procurve(), {"show ip": text}, amb)
+    assert ident.get("ip") == "172.16.1.57"
+    assert amb == []
+
+
+def test_ambiguity_same_value_repeated_is_not_ambiguous():
+    amb = []
+    fp.parse_identity(_procurve(), {"show ip": _PROCURVE_SHOW_IP_DHCP * 2}, amb)
+    assert amb == []
+
+
+def test_single_vlan_procurve_not_ambiguous():
+    amb = []
+    fp.parse_identity(_procurve(), {"show ip": _PROCURVE_SHOW_IP_DHCP}, amb)
+    assert amb == []
+    text = ("HP J9776A 2530-24G Switch\r\n"
+            "HP-2530-24G# show ip\r\n" + _PROCURVE_SHOW_IP_DHCP + "HP-2530-24G# ")
+    assert "ambiguous_fields" not in fp.passive_identify(text)
+
+
+def test_existing_single_device_identifies_report_no_ambiguity():
+    # Regression: the pre-existing single-address run_identify fixtures stay unflagged.
+    banner = "\r\nCisco IOS Software, Version 15.2(4)E\r\nSwitch#"
+    chan = _FakeChan(banner, [
+        ("terminal length 0", "\r\nSwitch#"),
+        ("show version", "\r\nProcessor board ID FTX9XYZ\r\n"
+                         "Base ethernet MAC Address : 0011.2233.4455\r\nSwitch#"),
+        ("show ip interface brief", "\r\nVlan1  10.0.0.5  YES  up  up\r\nSwitch#"),
+    ])
+    res = fp.run_identify(chan.read, chan.write, [])
+    assert res["identity"]["ip"] == "10.0.0.5"
+    assert "ambiguous_fields" not in res

@@ -155,8 +155,8 @@ PROFILES: List[Dict[str, Any]] = [
             # Anchor on the VLAN row's IP Config column (Manual, or DHCP —
             # printed as "DHCP/Bootp" on ProCurve/AOS-S) so the Default
             # Gateway line is never picked. [ \t]+ keeps the match on one row.
-            # With several addressed VLANs the first one listed wins — a
-            # deliberate, accepted limitation for now.
+            # With several addressed VLANs the first one listed is stored, but
+            # "ip" is reported in ambiguous_fields so the hub asks the LLM.
             {"cmd": "show ip", "fields": {"ip": re.compile(
                 r"(?:Manual|DHCP(?:/Bootp)?)[ \t]+(?:(?:True|False)[ \t]+)?"
                 r"(\d{1,3}(?:\.\d{1,3}){3})\b", re.I)}},
@@ -299,7 +299,33 @@ def infer_device_type(model: Optional[str], family_default: Optional[str]) -> st
     return family_default or ""
 
 
-def _extract_profile_fields(profile: Dict[str, Any], text: str) -> Dict[str, str]:
+def _field_value(m: "re.Match") -> str:
+    # Use the first capturing group, but tolerate alternation branches where
+    # group 1 didn't participate (returns None) — fall back to the whole match
+    # so a valid hit is never dropped (or worse, crashes).
+    return ((m.group(1) if m.lastindex else None) or m.group(0) or "").strip()
+
+
+def _valid_candidates(key: str, rx: "re.Pattern", text: str) -> List[str]:
+    """Every distinct valid value ``rx`` yields for field ``key`` in ``text``, in
+    order of appearance. An ``ip`` candidate must pass ``is_valid_device_ip`` (so
+    masks / junk like 999.1.1.1 never count); MACs compare normalized so one
+    address printed in two formats isn't mistaken for two."""
+    out: List[str] = []
+    seen = set()
+    for m in rx.finditer(text or ""):
+        val = _field_value(m)
+        if not val or (key == "ip" and not is_valid_device_ip(val)):
+            continue
+        norm = (normalize_mac(val) or val) if key == "mac" else val
+        if norm not in seen:
+            seen.add(norm)
+            out.append(val)
+    return out
+
+
+def _extract_profile_fields(profile: Dict[str, Any], text: str,
+                            ambiguous: Optional[List[str]] = None) -> Dict[str, str]:
     """Apply a matched vendor profile's identity-field regexes across an arbitrary
     text blob (a full identify transcript or a passive capture), returning the
     fields found. The profile's regexes anchor on specific, low-ambiguity strings
@@ -309,7 +335,13 @@ def _extract_profile_fields(profile: Dict[str, Any], text: str) -> Dict[str, str
     an ArubaOS-Switch that answers ``show system`` during banner discovery but
     rejects the profile's exact ``show system-information`` command. Skips the
     ``linux`` profile, whose bare ``^(\\S+)$`` field regexes would match garbage
-    across arbitrary scrollback. MAC is normalized when present."""
+    across arbitrary scrollback. MAC is normalized when present.
+
+    The first valid match per field is still the stored value. If ``ambiguous``
+    (a list) is passed, the name of every field that had 2+ distinct valid
+    candidates in ``text`` is appended to it — e.g. ``ip`` on a switch with
+    several addressed VLANs — so the caller can ask the LLM instead of trusting
+    the arbitrary first hit."""
     found: Dict[str, str] = {}
     if not profile or profile.get("name") == "linux":
         return found
@@ -317,22 +349,23 @@ def _extract_profile_fields(profile: Dict[str, Any], text: str) -> Dict[str, str
         for key, rx in (spec.get("fields") or {}).items():
             if key in found:
                 continue
-            for m in rx.finditer(text or ""):
-                val = ((m.group(1) if m.lastindex else None) or m.group(0) or "").strip()
-                if val:
-                    if key == "ip" and not is_valid_device_ip(val):
-                        continue
-                    found[key] = val
-                    break
+            cands = _valid_candidates(key, rx, text)
+            if cands:
+                found[key] = cands[0]
+                if len(cands) > 1 and ambiguous is not None and key not in ambiguous:
+                    ambiguous.append(key)
     if found.get("mac"):
         found["mac"] = normalize_mac(found["mac"]) or found["mac"]
     return found
 
 
-def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str]) -> Dict[str, str]:
+def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str],
+                   ambiguous: Optional[List[str]] = None) -> Dict[str, str]:
     """Apply a profile's per-command field regexes to captured command output.
     ``outputs`` maps command → its captured text. First non-empty match wins per
-    field; MAC is normalized."""
+    field; MAC is normalized. If ``ambiguous`` (a list) is passed, fields whose
+    winning command output held 2+ distinct valid candidates are appended to it
+    (see ``_extract_profile_fields``)."""
     identity: Dict[str, str] = {}
     for spec in profile.get("commands", []):
         fields = spec.get("fields") or {}
@@ -340,16 +373,11 @@ def parse_identity(profile: Dict[str, Any], outputs: Dict[str, str]) -> Dict[str
         for key, rx in fields.items():
             if key in identity:
                 continue
-            for m in rx.finditer(text):
-                # Use the first capturing group, but tolerate alternation branches
-                # where group 1 didn't participate (returns None) — fall back to the
-                # whole match so a valid hit is never dropped (or worse, crashes).
-                val = ((m.group(1) if m.lastindex else None) or m.group(0) or "").strip()
-                if val:
-                    if key == "ip" and not is_valid_device_ip(val):
-                        continue
-                    identity[key] = val
-                    break
+            cands = _valid_candidates(key, rx, text)
+            if cands:
+                identity[key] = cands[0]
+                if len(cands) > 1 and ambiguous is not None and key not in ambiguous:
+                    ambiguous.append(key)
     if identity.get("mac"):
         identity["mac"] = normalize_mac(identity["mac"]) or identity["mac"]
     return identity
@@ -693,10 +721,13 @@ def passive_identify(text: str) -> Dict[str, Any]:
     profile (avoids cross-vendor false positives); otherwise a light generic pass
     picks up a hostname prompt / MAC so the port stops showing "unknown".
 
-    Returns ``{"vendor": <name|None>, "identity": {...}}`` (identity may be {})."""
+    Returns ``{"vendor": <name|None>, "identity": {...}}`` (identity may be {}),
+    plus ``"ambiguous_fields": [...]`` ONLY when some profile field had 2+
+    distinct valid candidates (the key is omitted when nothing is ambiguous)."""
     text = text or ""
     prof = detect_vendor(text)
     identity: Dict[str, str] = {}
+    ambiguous: List[str] = []
     vendor = prof["name"] if prof else None
     # Full field extraction only for the LABELED network-vendor profiles (their
     # regexes anchor on strings like "Processor board ID" / "Serial Number" /
@@ -705,7 +736,7 @@ def passive_identify(text: str) -> Dict[str, Any]:
     # to specific command outputs — matching those across arbitrary scrollback
     # yields garbage, so linux/unknown fall to the generic prompt pass below.
     if prof and prof["name"] != "linux":
-        identity.update(_extract_profile_fields(prof, text))
+        identity.update(_extract_profile_fields(prof, text, ambiguous))
     if prof and prof.get("family") and prof["name"] != "linux":
         identity["type"] = infer_device_type(identity.get("model"), prof["family"])
     if not identity.get("hostname"):
@@ -725,7 +756,10 @@ def passive_identify(text: str) -> Dict[str, Any]:
                 break
     if identity.get("mac"):
         identity["mac"] = normalize_mac(identity["mac"]) or identity["mac"]
-    return {"vendor": vendor, "identity": identity}
+    res: Dict[str, Any] = {"vendor": vendor, "identity": identity}
+    if ambiguous:
+        res["ambiguous_fields"] = ambiguous
+    return res
 
 
 def _read_until(read_fn: Callable[[], bytes], patterns: List[re.Pattern],
@@ -978,7 +1012,10 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     ``read_fn()`` returns available bytes (non-blocking-ish); ``write_fn(bytes)``
     writes. ``credentials`` is an ordered list of ``{username,password}`` tried
     once each at a login prompt (attempt cap = len(credentials); no re-hammering).
-    Returns ``{banner, vendor, logged_in, credential_index, identity, outputs}``.
+    Returns ``{banner, vendor, logged_in, credential_index, identity, outputs}``,
+    plus ``ambiguous_fields`` (list of identity field names with 2+ distinct
+    valid candidates, e.g. ``["ip"]``) ONLY when non-empty — omitted otherwise,
+    same as ``passive_identify``. The hub asks the LLM to resolve those fields.
     Read-only: only the matched profile's commands are sent.
     """
     result: Dict[str, Any] = {"banner": "", "vendor": None, "logged_in": False,
@@ -1055,14 +1092,22 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         write_fn((cmd + "\r").encode())
         outputs[cmd] = _read_command_output(read_fn, write_fn, [profile["prompt"]], cmd_secs)
     result["outputs"] = outputs
-    result["identity"] = parse_identity(profile, outputs)
+    ambiguous: List[str] = []
+    result["identity"] = parse_identity(profile, outputs, ambiguous)
     # Backfill any fields the dedicated identity commands didn't yield from the
     # FULL transcript: a device may answer an equivalent discovery command (e.g.
     # an ArubaOS-Switch that returns "System Name : …" for the banner-discovery
     # ``show system`` while rejecting the profile's ``show system-information``),
     # so the data is already captured — just not in this command's own output.
-    for key, val in _extract_profile_fields(profile, transcript).items():
-        result["identity"].setdefault(key, val)
+    # Transcript ambiguity only counts for fields actually taken from it.
+    backfill_ambiguous: List[str] = []
+    for key, val in _extract_profile_fields(profile, transcript, backfill_ambiguous).items():
+        if key not in result["identity"]:
+            result["identity"][key] = val
+            if key in backfill_ambiguous and key not in ambiguous:
+                ambiguous.append(key)
+    if ambiguous:
+        result["ambiguous_fields"] = ambiguous
     if profile.get("family"):
         # Concrete role from the model (e.g. Juniper SRX → Firewall), else the
         # profile's default family.
