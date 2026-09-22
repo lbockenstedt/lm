@@ -21637,7 +21637,6 @@ function serialEnsureConsoleDock() {
                     <strong class="text-sm text-slate-200">Serial Consoles</strong>
                     <div class="flex items-center gap-2">
                         <button id="serial-console-refresh" title="Refresh the list of available consoles" class="text-slate-400 hover:text-sky-400 text-sm leading-none">⟳</button>
-                        <button id="serial-console-closeall" title="Close all open consoles" class="text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
                     </div>
                 </div>
                 <input id="serial-console-search" type="text" placeholder="Search consoles…"
@@ -21659,6 +21658,7 @@ function serialEnsureConsoleDock() {
                 <button id="serial-console-takeover" title="Take over write control from the other user" class="px-2 py-0.5 text-xs rounded border border-amber-500 text-amber-400 hover:bg-amber-900/40 hidden">Take Over</button>
                 <button id="serial-console-reconnect" title="Reconnect this console — resumes on the same terminal, keeping its scrollback" class="px-2 py-0.5 text-xs rounded border border-green-500 text-green-400 hover:bg-green-900/40 hidden">⟳ Reconnect</button>
                 <span id="serial-console-status" class="ml-auto text-xs text-amber-400"></span>
+                <button id="serial-console-closeall" title="Close all open consoles" class="text-slate-400 hover:text-red-400 text-lg leading-none">&times;</button>
             </div>
             <div id="serial-console-bodies" class="relative flex-1 min-h-0 flex bg-[#1e1e1e] overflow-hidden"></div>
             <div id="serial-broadcast-bar" class="hidden shrink-0 flex items-center gap-2 px-3 py-1.5 bg-[#2d2d2d] border-t border-slate-700">
