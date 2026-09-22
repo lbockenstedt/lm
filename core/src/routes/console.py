@@ -466,20 +466,29 @@ def register(app, hub, ctx):
 
     def _console_purge_legacy_credentials(hub):
         """Drop the retired hub-local console password blob
-        (``console_credentials_enc``) from hub state, once, and say so.
+        (``console_credentials_enc``) from hub state, once, and say so —
+        UNLESS it still decrypts to a usable credential list that has no
+        equivalent in the Credential Vault yet, in which case it is left in
+        place (with a loud warning) so the operator has a chance to migrate
+        it via ``POST /api/console/credentials/to-vault`` first.
 
         Console logins live in the Credential Vault — which works on EVERY
         deployment, falling back to its own encrypted ``blobs`` map when no
         cloud vault is configured (``cred_vault._vault_available``) — so this
-        second, module-private password store had no remaining purpose.
+        second, module-private password store had no remaining purpose once
+        migrated. But an install that never migrated has, until now, had this
+        blob as its ONLY copy of its console auto-login passwords: purging it
+        unconditionally — as the previous version of this function did, from
+        a plain GET — silently destroyed the only readable copy the first
+        time the console credentials page loaded, with no way to recover them
+        (the retired POST returns 409). That is unrecoverable data loss, not
+        hygiene.
 
-        It was also actively harmful: the blob is Fernet-encrypted with the
-        hub key, so any install whose key was replaced (re-install, restore,
-        rotation without ``LM_FERNET_KEY_PREVIOUS``) is left holding an
-        ORPHAN it can never read. Every resolve then logged "could not
-        decrypt stored credentials" and returned [], which looked like the
-        cause of an empty credential list while hiding the real one. Deleting
-        it costs nothing: an unreadable blob has no recoverable content.
+        The blob being Fernet-encrypted with the hub key does mean any install
+        whose key was replaced (re-install, restore, rotation without
+        ``LM_FERNET_KEY_PREVIOUS``) holds an ORPHAN it can never read — for
+        that class deleting still costs nothing, an unreadable blob has no
+        recoverable content, so purge proceeds exactly as before.
 
         Never raises: this also runs on the seed path, and credential hygiene
         must not be able to break credential delivery."""
@@ -487,8 +496,40 @@ def register(app, hub, ctx):
             state = hub.state.system_state
             if "console_credentials_enc" not in state:
                 return False
-            state.pop("console_credentials_enc", None)
+            blob = state.get("console_credentials_enc")
         except Exception:  # noqa: BLE001 — no/odd state object (early boot)
+            return False
+
+        # Only skip the purge when the blob still decrypts to something a
+        # human would miss AND the vault does not already have an equivalent
+        # — an install that already migrated (or never had real creds) gets
+        # the orphan cleaned up as before.
+        try:
+            recoverable = bool(blob)
+            if recoverable:
+                from security.encryption import hub_encryption
+                parsed = json.loads(hub_encryption.decrypt(blob.encode()))
+                recoverable = bool(parsed) and any(
+                    isinstance(c, dict) and c.get("username") for c in parsed)
+        except Exception:  # noqa: BLE001 — undecryptable/malformed -> orphan
+            recoverable = False
+        if recoverable:
+            try:
+                already_in_vault = bool(_console_load_credentials(hub))
+            except Exception:  # noqa: BLE001 — vault read failed; be cautious
+                already_in_vault = False
+            if not already_in_vault:
+                logger.warning(
+                    "console: the legacy hub-local credential store still "
+                    "holds a readable, unmigrated console login list — NOT "
+                    "purging it. Run POST /api/console/credentials/to-vault "
+                    "to move it into the Credential Vault, after which it "
+                    "will be dropped automatically.")
+                return False
+
+        try:
+            state.pop("console_credentials_enc", None)
+        except Exception:  # noqa: BLE001
             return False
         try:
             hub.state._mark_dirty()

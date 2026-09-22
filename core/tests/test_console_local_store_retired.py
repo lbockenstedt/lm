@@ -31,6 +31,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from routes import console as console_routes  # noqa: E402
 
+# Populated per-test to control what security.credential_store.resolve_secret_text
+# returns for a given console_credentials_ref (see the fake module below).
+_VAULT_SECRET_TEXT = {}
+
 
 @pytest.fixture(autouse=True)
 def _fake_modules(monkeypatch):
@@ -66,6 +70,16 @@ def _fake_modules(monkeypatch):
     fake_cv.automation_get = _automation_get
     fake_cv._vault_available = lambda hub: True
     monkeypatch.setitem(sys.modules, "cred_vault", fake_cv)
+
+    # security.credential_store backs _console_creds_from_vault (the
+    # console_credentials_ref path, distinct from cred_vault's per-tenant
+    # secrets above). Tests opt in by setting global_config
+    # ["console_credentials_ref"] and monkeypatching _VAULT_SECRET_TEXT.
+    fake_store = types.ModuleType("security.credential_store")
+    fake_store.get_credential_provider = lambda gc: None
+    fake_store.resolve_secret_text = lambda ref, provider: _VAULT_SECRET_TEXT.get(ref)
+    monkeypatch.setitem(sys.modules, "security.credential_store", fake_store)
+    _VAULT_SECRET_TEXT.clear()
 
 
 class _State:
@@ -133,9 +147,26 @@ def test_get_never_reports_local_credentials():
     assert body["read_only"] is True
 
 
-def test_get_purges_the_legacy_blob():
+def test_get_does_not_purge_a_readable_unmigrated_blob():
+    """The data-loss fix: a blob that still decrypts to real credentials, on
+    a hub with nothing yet in the vault, is NOT destroyed by a plain GET —
+    only an unrecoverable orphan is dropped unconditionally (see
+    test_get_purges_an_unreadable_orphan below)."""
     c, hub = _client([{"username": "admin", "password": "x"}])
     assert not _purged(hub)          # precondition: the orphan is there
+    c.get("/api/console/credentials")
+    assert not _purged(hub)          # still there — nothing to migrate to yet
+
+
+def test_get_purges_the_legacy_blob_once_the_vault_has_it():
+    """Once the vault already has an equivalent credential (migration done,
+    or never needed), the blob is a pure duplicate and is cleaned up."""
+    _VAULT_SECRET_TEXT["console-creds"] = json.dumps(
+        [{"username": "admin", "password": "x"}])
+
+    c, hub = _client([{"username": "admin", "password": "x"}])
+    hub.state.system_state["global_config"]["console_credentials_ref"] = "console-creds"
+    assert not _purged(hub)
     c.get("/api/console/credentials")
     assert _purged(hub)
 
@@ -189,8 +220,19 @@ def test_post_never_writes_a_password_anywhere():
     assert "s3cret" not in json.dumps(hub.state.system_state)
 
 
-def test_post_purges_the_legacy_blob():
+def test_post_does_not_purge_a_readable_unmigrated_blob():
+    """Mirrors the GET-side data-loss fix: POST also must not destroy a
+    readable, unmigrated blob it has nowhere to move the data to."""
     c, hub = _client([{"username": "admin", "password": "x"}])
+    c.post("/api/console/credentials", json={"credentials": []})
+    assert not _purged(hub)
+
+
+def test_post_purges_the_legacy_blob_once_the_vault_has_it():
+    _VAULT_SECRET_TEXT["console-creds"] = json.dumps(
+        [{"username": "admin", "password": "x"}])
+    c, hub = _client([{"username": "admin", "password": "x"}])
+    hub.state.system_state["global_config"]["console_credentials_ref"] = "console-creds"
     c.post("/api/console/credentials", json={"credentials": []})
     assert _purged(hub)
 
