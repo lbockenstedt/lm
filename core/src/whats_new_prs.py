@@ -37,6 +37,7 @@ _WHATS_NEW_REPOS = ("lbockenstedt/lm",)
 # 1h: matches github_source.py's CACHE_TTL_SECONDS reasoning (source activity
 # changes on a human timescale; a warm cache keeps popover opens offline).
 _WHATS_NEW_REPO_CACHE_TTL = 3600.0
+_WHATS_NEW_NEGATIVE_CACHE_TTL = 30.0
 _CACHE: Dict[Tuple[str, str], Tuple[float, list]] = {}
 _CACHE_LOCK = threading.Lock()
 
@@ -131,23 +132,36 @@ async def _fetch_pages(owner: str, repo: str, within_days: int, *, client=None) 
             # already filters to merged-only and excludes the promote/backmerge
             # carriers, so an unfiltered `state=closed` listing is exactly as
             # precise and far more robust.
-            resp = await client.get(
-                f"{API}/repos/{owner}/{repo}/pulls",
-                params={"state": "closed", "sort": "updated",
-                        "direction": "desc", "per_page": 50, "page": page},
-                headers=_headers())
+            try:
+                resp = await client.get(
+                    f"{API}/repos/{owner}/{repo}/pulls",
+                    params={"state": "closed", "sort": "updated",
+                            "direction": "desc", "per_page": 50, "page": page},
+                    headers=_headers())
+            except Exception as e:
+                logger.warning("whats-new: %s/%s pulls fetch failed on page %s: %s",
+                               owner, repo, page, e)
+                if page == 1:
+                    raise
+                break
             if resp.status_code != 200:
                 logger.warning("whats-new: %s/%s pulls fetch returned HTTP %s",
                                owner, repo, resp.status_code)
-                return []
-            batch = resp.json()
+                if page == 1:
+                    raise RuntimeError(f"HTTP {resp.status_code}")
+                break
+            try:
+                batch = resp.json()
+            except Exception as e:
+                logger.warning("whats-new: %s/%s invalid JSON on page %s: %s",
+                               owner, repo, page, e)
+                if page == 1:
+                    raise
+                break
             if not batch:
                 break
-            all_old = True
             for pr in batch:
                 merged_at = _parse_iso(pr.get("merged_at")) if pr.get("merged_at") else None
-                if merged_at is not None and merged_at >= cutoff:
-                    all_old = False
                 out.append({
                     "number": pr.get("number"),
                     "title": pr.get("title") or "",
@@ -155,7 +169,13 @@ async def _fetch_pages(owner: str, repo: str, within_days: int, *, client=None) 
                     "merged_at": merged_at,
                     "head_ref": (pr.get("head") or {}).get("ref"),
                 })
-            if all_old or len(batch) < 50:
+            ts_list = [
+                (_parse_iso(p.get("updated_at") or p.get("merged_at")) or 0)
+                for p in batch
+                if (p.get("updated_at") or p.get("merged_at"))
+            ]
+            page_older_than_cutoff = bool(ts_list) and all(ts < cutoff for ts in ts_list)
+            if page_older_than_cutoff or len(batch) < 50:
                 break
         return out
     finally:
@@ -181,7 +201,7 @@ async def fetch_recent_merged_prs(owner: str, repo: str, within_days: int = 14, 
         items = await _fetch_pages(owner, repo, within_days, client=client)
     except Exception as e:  # noqa: BLE001 -- fail-soft: degrade, never raise
         logger.warning("whats-new: %s/%s PR fetch failed: %s", owner, repo, e)
-        items = []
+        return []
     with _CACHE_LOCK:
         _CACHE[cache_key] = (time.time(), items)
     return items

@@ -222,6 +222,92 @@ def test_fetch_cache_expires_after_ttl():
     assert second[0]["number"] == 11
 
 
+def test_fetch_error_does_not_poison_cache_for_long_ttl():
+    now = time.time()
+    error_client = FakeClient(get_responses=[FakeResp(500, {"message": "internal error"})])
+    items1 = asyncio.run(wn.fetch_recent_merged_prs("o", "err-repo", within_days=14, client=error_client))
+    assert items1 == []
+    assert ("o", "err-repo") not in wn._CACHE
+
+    working_client = FakeClient(get_responses=[FakeResp(200, [_pr(100, "feat: recovered", "feat/rec", now - 3600)])])
+    items2 = asyncio.run(wn.fetch_recent_merged_prs("o", "err-repo", within_days=14, client=working_client))
+    assert len(items2) == 1
+    assert items2[0]["number"] == 100
+
+    wn._CACHE.clear()
+    rate_client = FakeClient(get_responses=[FakeResp(403, {"message": "rate limit"})])
+    items3 = asyncio.run(wn.fetch_recent_merged_prs("o", "rate-repo", within_days=14, client=rate_client))
+    assert items3 == []
+    assert ("o", "rate-repo") not in wn._CACHE
+
+    working_client2 = FakeClient(get_responses=[FakeResp(200, [_pr(101, "fix: recovered", "fix/rec", now - 3600)])])
+    items4 = asyncio.run(wn.fetch_recent_merged_prs("o", "rate-repo", within_days=14, client=working_client2))
+    assert len(items4) == 1
+    assert items4[0]["number"] == 101
+
+
+def test_fetch_pages_continues_past_page_of_closed_unmerged_prs():
+    now = time.time()
+    page1 = [
+        {
+            "number": 1000 + i,
+            "title": f"chore: unmerged {i}",
+            "html_url": f"http://x/{1000 + i}",
+            "merged_at": None,
+            "updated_at": _iso(now - 100 - i),
+            "head": {"ref": "chore/unmerged"},
+        }
+        for i in range(50)
+    ]
+    page2 = [
+        {
+            "number": 42,
+            "title": "feat: merged on page 2",
+            "html_url": "http://x/42",
+            "merged_at": _iso(now - 3600),
+            "updated_at": _iso(now - 3600),
+            "head": {"ref": "feat/page2"},
+        }
+    ]
+    client = FakeClient(get_responses=[FakeResp(200, page1), FakeResp(200, page2)])
+    items = asyncio.run(wn._fetch_pages("o", "two-page-repo", within_days=14, client=client))
+    assert len(client.get_calls) == 2
+    assert len(items) == 51
+    merged = [p for p in items if p["number"] == 42]
+    assert len(merged) == 1
+    assert merged[0]["merged_at"] is not None
+
+
+def test_fetch_pages_preserves_partial_results_on_page2_error():
+    now = time.time()
+    page1 = [
+        {
+            "number": 1,
+            "title": "feat: merged on page 1",
+            "html_url": "http://x/1",
+            "merged_at": _iso(now - 3600),
+            "updated_at": _iso(now - 3600),
+            "head": {"ref": "feat/page1"},
+        }
+    ] + [
+        {
+            "number": 100 + i,
+            "title": f"fix: other {i}",
+            "html_url": f"http://x/{100 + i}",
+            "merged_at": None,
+            "updated_at": _iso(now - 3600),
+            "head": {"ref": "fix/other"},
+        }
+        for i in range(49)
+    ]
+    client = FakeClient(get_responses=[FakeResp(200, page1), FakeResp(403, {"message": "rate limit"})])
+    items = asyncio.run(wn._fetch_pages("o", "partial-repo", within_days=14, client=client))
+    assert len(client.get_calls) == 2
+    assert len(items) == 50
+    assert items[0]["number"] == 1
+    assert items[0]["merged_at"] is not None
+
+
 # ── merge/dedupe (setup_admin._dedupe_and_cap) ───────────────────────────────
 # No pure helper lives in this module for the merge step — it's factored as a
 # small pure function in routes/setup_admin.py (shared by the whats_new() route
