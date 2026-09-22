@@ -11166,20 +11166,21 @@ window.csClearCommands = async function () {
 // cleared ONE host and left the rest quarantined while the toast still read as a
 // success.
 async function _csUsbClearCmd(host, action, doneMsg, allSpokes) {
+    const _toast = (msg, type) => { if (typeof showToast === 'function') showToast(msg, type); };
     try {
         const body = { action, target: host || 'proxmox', type: action, args: {} };
         if (allSpokes) body.all_spokes = true;
         const r = await csFetch(`/${csTenant()}/proxmx/command?tenant_id=${csTenant()}`, {
             method: 'POST', body: JSON.stringify(body) });
         if (!r) {
-            if (typeof showToast === 'function') showToast('Clear failed: no response received from server', 'error');
+            _toast('Clear failed: no response received from server', 'error');
             return;
         }
 
         const bad = (r.errors || []).concat(r.refusals || []);
         const nLive = r.pushed_to_spokes || 0;
         const queuedNames = Array.isArray(r.queued) ? r.queued : [];
-        const isQueued = (r.queued_to_spokes > 0) || (r.queued === true);
+        const isQueued = (r.queued_to_spokes > 0) || (r.queued === true) || (queuedNames.length > 0);
         const nQ = r.queued_to_spokes || queuedNames.length || (isQueued ? 1 : 0);
         const qDetail = queuedNames.length ? `: ${queuedNames.join(', ')}` : '';
         const queuePart = isQueued ? `; queued for ${nQ} unreachable spoke(s)${qDetail}` : '';
@@ -11188,28 +11189,29 @@ async function _csUsbClearCmd(host, action, doneMsg, allSpokes) {
             const countPart = (r.spokes_total != null)
                 ? `Cleared ${nLive}/${r.spokes_total} spoke(s)${queuePart} — failed: `
                 : `Cleared ${nLive} spoke(s)${queuePart} — failed: `;
-            showToast(`${doneMsg}. ${countPart}${bad.join('; ')}`, 'error');
+            _toast(`${doneMsg}. ${countPart}${bad.join('; ')}`, 'error');
             return;
         }
 
         if (isQueued) {
             const countPart = (r.spokes_total != null) ? `live on ${nLive}/${r.spokes_total} spoke(s)` : `live on ${nLive} spoke(s)`;
-            showToast(`${doneMsg}. Cleared ${countPart}; queued for ${nQ} unreachable spoke(s) (applies when they reconnect)${qDetail}`, 'warning');
+            _toast(`${doneMsg}. Cleared ${countPart}; queued for ${nQ} unreachable spoke(s) (applies when they reconnect)${qDetail}`, 'warning');
             return;
         }
 
-        if (allSpokes && nLive === 0 && (r.spokes_total || 0) > 0) {
-            showToast(`${doneMsg}. No spokes were reachable (0/${r.spokes_total} cleared).`, 'warning');
+        if (nLive === 0 && (r.spokes_total != null ? r.spokes_total > 0 : allSpokes)) {
+            const denom = r.spokes_total != null ? `0/${r.spokes_total}` : '0';
+            _toast(`${doneMsg}. No spokes were reachable (${denom} cleared).`, 'warning');
             return;
         }
 
         const countText = (r.spokes_total != null)
             ? ` Cleared live on ${nLive}/${r.spokes_total} spoke(s).`
             : (r.pushed_to_spokes != null ? ` Pushed to ${nLive} spoke(s).` : '');
-        showToast(`${doneMsg}.${countText}`, 'success');
+        _toast(`${doneMsg}.${countText}`, 'success');
     } catch (e) {
         console.error(`_csUsbClearCmd: ${action} failed`, e);
-        if (typeof showToast === 'function') showToast(`Clear failed: ${e.message || e}`, 'error');
+        _toast(`Clear failed: ${e.message || e}`, 'error');
     }
 }
 // Purge the missing-dongle HISTORY (presence roster + boot baseline) on every
