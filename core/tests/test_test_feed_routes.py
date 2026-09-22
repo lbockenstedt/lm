@@ -513,6 +513,36 @@ def test_ensure_local_tenants_leaves_shared_alone_when_source_has_none():
     assert hub.state.tenant_state["tenants"]["default"]["shared"] is True
 
 
+def test_mirror_shared_tenant_keeps_partial_progress_on_a_mid_loop_failure():
+    """lm#952: one tenant write raising used to abort the WHOLE reconciliation
+    and report changed=False, even though earlier writes in the same loop had
+    already landed — leaving the single-shared invariant broken (some tenants
+    flipped, some not) with the caller believing nothing happened, so it
+    skipped both save_state_now() and the shared-tenant cache refresh."""
+    from routes.test_feed import _mirror_shared_tenant
+
+    class _FlakyState(_FakeState):
+        def update_tenant(self, tid, data):
+            if tid == "b":
+                raise RuntimeError("disk full")
+            super().update_tenant(tid, data)
+
+    hub = _FakeHub()
+    hub.state = _FlakyState({
+        "a": {"name": "A", "shared": True},
+        "b": {"name": "B"},
+        "c": {"name": "C"},
+    })
+    registry = {"c": {"name": "C", "shared": True}}
+    changed = _mirror_shared_tenant(hub, registry)
+    tenants = hub.state.tenant_state["tenants"]
+    # "a" and "c" both succeeded despite "b" raising mid-loop ...
+    assert tenants["a"]["shared"] is False
+    assert tenants["c"]["shared"] is True
+    # ... so the caller must be told something DID change, not lied to.
+    assert changed is True
+
+
 def test_ensure_local_tenants_still_protects_non_shared_fields():
     """Only the shared flag is reconciled; name/quotas stay operator-owned."""
     from routes.test_feed import _ensure_local_tenants
