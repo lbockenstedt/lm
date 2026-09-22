@@ -159,7 +159,7 @@ PROFILES: List[Dict[str, Any]] = [
             # deliberate, accepted limitation for now.
             {"cmd": "show ip", "fields": {"ip": re.compile(
                 r"(?:Manual|DHCP(?:/Bootp)?)[ \t]+(?:(?:True|False)[ \t]+)?"
-                r"(\d{1,3}(?:\.\d{1,3}){3})\b", re.I)}},}
+                r"(\d{1,3}(?:\.\d{1,3}){3})\b", re.I)}},
         ],
         "config": {"enter": "configure", "exit": "exit", "save": "write memory",
                    "show_running": "show running-config"},
