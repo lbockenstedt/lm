@@ -7364,6 +7364,18 @@ window.osuApply = async function () {
     } catch (e) { showToast('Apply failed: ' + (e.message || e), 'error'); }
 };
 
+// Deploy to a single node ("kind:id" key) instead of the whole fleet.
+window.osuApplyOne = async function (key, label) {
+    if (!confirm(`Approve and deploy OS updates to ${label}?\n\n` +
+                 `• apt dist-upgrade (security + regular + dependency changes)\n` +
+                 `• nothing is rebooted automatically — you'll get a badge instead`)) return;
+    try {
+        const r = await apiJson('/api/os-updates/apply', { method: 'POST', body: JSON.stringify({ nodes: [key] }) });
+        showToast(`Deploying to ${label}…`, 'success');
+        _osuStartPoll();
+    } catch (e) { showToast('Apply failed: ' + (e.message || e), 'error'); }
+};
+
 function _osuStartPoll() {
     if (_osuPoll) clearInterval(_osuPoll);
     // A dist-upgrade takes minutes; poll the snapshot so the roll's progress is
@@ -7421,10 +7433,15 @@ function _osuRender(d) {
             ? `<div class="text-[11px] text-slate-500 mt-1">${escapeHtml(n.reason)}</div>`
             : (n.count ? `<details class="mt-1"><summary class="cursor-pointer text-[11px] text-slate-400">${n.count} package(s)${n.security_count ? ` · ${n.security_count} security` : ''}</summary><div class="text-[11px] mt-1 leading-relaxed">${pkgs}${more}</div></details>` : '');
         const msg = item && item.message ? `<div class="text-[11px] text-red-600 mt-1">${escapeHtml(item.message)}</div>` : '';
+        const running = !!(run && run.status === 'running');
+        const canDeployOne = !n.unmanaged && !n.unreachable && n.checked !== false && !!n.count;
+        const deployBtn = canDeployOne
+            ? `<button onclick="osuApplyOne('${key.replace(/'/g, "\\'")}', '${escapeHtml(n.label).replace(/'/g, "\\'")}')" ${running ? 'disabled' : ''} class="text-[10px] font-bold text-white bg-green-600 hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed rounded-full px-2.5 py-0.5">Deploy</button>`
+            : '';
         return `<div class="border border-slate-200 rounded-md p-3 mb-2">
             <div class="flex flex-wrap items-center justify-between gap-2">
               <span class="text-xs font-bold text-slate-600">${escapeHtml(n.label)} <span class="font-normal text-slate-400">${escapeHtml(n.kind)}${n.flavor ? ' · ' + escapeHtml(n.flavor) : ''}</span></span>
-              <span class="flex flex-wrap items-center gap-2 justify-end">${reboot}${state}</span>
+              <span class="flex flex-wrap items-center gap-2 justify-end">${reboot}${state}${deployBtn}</span>
             </div>${detail}${msg}</div>`;
     }).join('');
     const when = d.checked_at ? new Date(d.checked_at * 1000).toLocaleString() : 'never';
