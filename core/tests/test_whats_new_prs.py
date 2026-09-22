@@ -207,6 +207,10 @@ def test_fetch_caches_within_ttl():
     assert len(client.get_calls) == 1  # second call served from cache, no second GET
 
 
+def test_http_timeout_is_five_seconds():
+    assert wn._HTTP_TIMEOUT == 5.0
+
+
 def test_fetch_cache_expires_after_ttl():
     now = time.time()
     client = FakeClient(get_responses=[
@@ -215,8 +219,8 @@ def test_fetch_cache_expires_after_ttl():
     ])
     asyncio.run(wn.fetch_recent_merged_prs("o", "expiring-repo", within_days=14, client=client))
     # Simulate TTL expiry by backdating the cache entry directly rather than sleeping.
-    ts, items = wn._CACHE[("o", "expiring-repo")]
-    wn._CACHE[("o", "expiring-repo")] = (ts - wn._WHATS_NEW_REPO_CACHE_TTL - 1, items)
+    ts, items, ttl = wn._CACHE[("o", "expiring-repo", 14)]
+    wn._CACHE[("o", "expiring-repo", 14)] = (ts - wn._WHATS_NEW_REPO_CACHE_TTL - 1, items, ttl)
     second = asyncio.run(wn.fetch_recent_merged_prs("o", "expiring-repo", within_days=14, client=client))
     assert len(client.get_calls) == 2
     assert second[0]["number"] == 11
@@ -227,8 +231,12 @@ def test_fetch_error_does_not_poison_cache_for_long_ttl():
     error_client = FakeClient(get_responses=[FakeResp(500, {"message": "internal error"})])
     items1 = asyncio.run(wn.fetch_recent_merged_prs("o", "err-repo", within_days=14, client=error_client))
     assert items1 == []
-    assert ("o", "err-repo") not in wn._CACHE
+    entry = wn._CACHE.get(("o", "err-repo", 14))
+    assert entry is not None
+    assert entry[2] == wn._WHATS_NEW_NEGATIVE_CACHE_TTL
 
+    ts, items, ttl = entry
+    wn._CACHE[("o", "err-repo", 14)] = (ts - wn._WHATS_NEW_NEGATIVE_CACHE_TTL - 1, items, ttl)
     working_client = FakeClient(get_responses=[FakeResp(200, [_pr(100, "feat: recovered", "feat/rec", now - 3600)])])
     items2 = asyncio.run(wn.fetch_recent_merged_prs("o", "err-repo", within_days=14, client=working_client))
     assert len(items2) == 1
@@ -238,12 +246,58 @@ def test_fetch_error_does_not_poison_cache_for_long_ttl():
     rate_client = FakeClient(get_responses=[FakeResp(403, {"message": "rate limit"})])
     items3 = asyncio.run(wn.fetch_recent_merged_prs("o", "rate-repo", within_days=14, client=rate_client))
     assert items3 == []
-    assert ("o", "rate-repo") not in wn._CACHE
+    entry2 = wn._CACHE.get(("o", "rate-repo", 14))
+    assert entry2 is not None
+    assert entry2[2] == wn._WHATS_NEW_NEGATIVE_CACHE_TTL
 
+    ts2, items2_cached, ttl2 = entry2
+    wn._CACHE[("o", "rate-repo", 14)] = (ts2 - wn._WHATS_NEW_NEGATIVE_CACHE_TTL - 1, items2_cached, ttl2)
     working_client2 = FakeClient(get_responses=[FakeResp(200, [_pr(101, "fix: recovered", "fix/rec", now - 3600)])])
     items4 = asyncio.run(wn.fetch_recent_merged_prs("o", "rate-repo", within_days=14, client=working_client2))
     assert len(items4) == 1
     assert items4[0]["number"] == 101
+
+
+def test_negative_cache_expires_after_short_ttl():
+    now = time.time()
+    error_client = FakeClient(get_responses=[FakeResp(500, {"message": "server error"})])
+    items1 = asyncio.run(wn.fetch_recent_merged_prs("o", "neg-repo", within_days=14, client=error_client))
+    assert items1 == []
+
+    # Entry is cached with short negative TTL (30s), not repo TTL (3600s)
+    cache_entry = wn._CACHE.get(("o", "neg-repo", 14))
+    assert cache_entry is not None
+    ts, cached_items, ttl = cache_entry
+    assert cached_items == []
+    assert ttl == wn._WHATS_NEW_NEGATIVE_CACHE_TTL
+    assert ttl == 30.0
+
+    # Within negative TTL: returns cached [] without calling client
+    items_cached = asyncio.run(wn.fetch_recent_merged_prs("o", "neg-repo", within_days=14, client=FakeClient()))
+    assert items_cached == []
+
+    # After expiry: re-fetches and recovers
+    wn._CACHE[("o", "neg-repo", 14)] = (ts - wn._WHATS_NEW_NEGATIVE_CACHE_TTL - 1, cached_items, ttl)
+    working_client = FakeClient(get_responses=[FakeResp(200, [_pr(200, "feat: recovered", "feat/rec", now - 3600)])])
+    items2 = asyncio.run(wn.fetch_recent_merged_prs("o", "neg-repo", within_days=14, client=working_client))
+    assert len(items2) == 1
+    assert items2[0]["number"] == 200
+    assert len(working_client.get_calls) == 1
+
+
+def test_cache_key_includes_within_days():
+    now = time.time()
+    client14 = FakeClient(get_responses=[FakeResp(200, [_pr(14, "feat: 14d", "feat/14", now - 3600)])])
+    client30 = FakeClient(get_responses=[FakeResp(200, [_pr(30, "feat: 30d", "feat/30", now - 3600)])])
+
+    items14 = asyncio.run(wn.fetch_recent_merged_prs("o", "window-repo", within_days=14, client=client14))
+    items30 = asyncio.run(wn.fetch_recent_merged_prs("o", "window-repo", within_days=30, client=client30))
+
+    assert len(items14) == 1 and items14[0]["number"] == 14
+    assert len(items30) == 1 and items30[0]["number"] == 30
+    assert ("o", "window-repo", 14) in wn._CACHE
+    assert ("o", "window-repo", 30) in wn._CACHE
+    assert wn._CACHE[("o", "window-repo", 14)] != wn._CACHE[("o", "window-repo", 30)]
 
 
 def test_fetch_pages_continues_past_page_of_closed_unmerged_prs():
