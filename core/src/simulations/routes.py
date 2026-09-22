@@ -37,6 +37,11 @@ from urllib.parse import urlsplit
 
 logger = logging.getLogger("SimRoutes")
 
+# Fleet-wide actions safe to queue for delivery on spoke reconnect (idempotent,
+# self-repairing). Anything else — notably the destructive clear_usb_history —
+# must be live or fail.
+_QUEUEABLE_FLEET_ACTIONS = frozenset({"clear_usb_quarantine", "clear_usb_exclusions"})
+
 # Pure helpers + the short-TTL caches live in helpers.py; imported back so
 # behavior is unchanged (the route handlers mutate the cache dicts in place
 # via these references). main.py also imports _normalize_usb_vidpids/
@@ -4061,28 +4066,56 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
                 spoke_ids = [sid] if sid else []
             if not spoke_ids:
                 raise HTTPException(status_code=503, detail="No spoke connected")
-            pushed, errors, refusals = 0, [], []
-            for sid in spoke_ids:
+            # Clearing the quarantine / exclusion list is idempotent and
+            # self-repairing, so an unreachable spoke is QUEUED (delivered on
+            # reconnect) rather than losing the operator's intent to a 502.
+            # Destructive actions (clear_usb_history) are never queued: a
+            # delayed purge could land after a hardware change it predates.
+            queueable = action in _QUEUEABLE_FLEET_ACTIONS
+
+            def _label(sid):
+                fn = getattr(hub, "_spoke_label", None)
                 try:
-                    r = await hub.request_response(sid, "CS_QUEUE_COMMAND", payload, timeout=5.0)
+                    return str(fn(sid)) if callable(fn) else str(sid)
+                except Exception:  # noqa: BLE001 — a label must never break the fan-out
+                    return str(sid)
+
+            async def _one(sid):
+                label = _label(sid)
+                try:
+                    if queueable:
+                        r = await hub.push_or_queue_to_spoke(
+                            sid, "CS_QUEUE_COMMAND", payload, timeout=5.0)
+                        if isinstance(r, dict) and r.get("queued"):
+                            return "queued", label
+                        r = r.get("result") if isinstance(r, dict) else r
+                    else:
+                        r = await hub.request_response(sid, "CS_QUEUE_COMMAND", payload, timeout=5.0)
                 except Exception as exc:  # noqa: BLE001 — one spoke must not abort the fan-out
-                    errors.append(f"{sid}: {exc}")
-                    continue
+                    return "error", f"{label}: {exc}"
                 d = r.get("payload", {}).get("data", r) if isinstance(r, dict) else r
                 if isinstance(d, dict) and d.get("status") == "ERROR":
-                    refusals.append(f"{sid}: {d.get('message', 'refused')}")
-                    continue
-                pushed += 1
+                    return "refusal", f"{label}: {d.get('message', 'refused')}"
+                return "pushed", label
+
+            # Concurrent: N unresponsive spokes cost one timeout, not N.
+            outcomes = await asyncio.gather(*(_one(sid) for sid in spoke_ids),
+                                            return_exceptions=False)
+            pushed = sum(1 for k, _ in outcomes if k == "pushed")
+            queued = [t for k, t in outcomes if k == "queued"]
+            errors = [t for k, t in outcomes if k == "error"]
+            refusals = [t for k, t in outcomes if k == "refusal"]
             # Partial success is reported, not raised: clearing 3 of 4 spokes is
             # a materially different outcome from clearing none, and the operator
             # needs to know WHICH failed.
-            if not pushed:
+            if not (pushed or queued):
                 raise HTTPException(
                     status_code=502,
                     detail="; ".join(errors + refusals) or "no spoke accepted the command")
             return {"status": "SUCCESS", "pushed_to_spokes": pushed,
+                    "queued_to_spokes": len(queued),
                     "spokes_total": len(spoke_ids),
-                    "errors": errors, "refusals": refusals}
+                    "errors": errors, "refusals": refusals, "queued": queued}
 
         sid = hub.get_client_sim_spoke(tenant_id) if hasattr(hub, "get_client_sim_spoke") else None
         if not sid:
