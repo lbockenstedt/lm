@@ -36,8 +36,18 @@ except Exception:  # pragma: no cover - absent until the role is installed
 
 logger = logging.getLogger("ConsoleSpoke")
 
-# 8N1 baud candidates, ordered by real-world frequency on console gear.
-DEFAULT_BAUD_CANDIDATES = [9600, 115200, 38400, 19200, 57600, 4800, 2400, 230400]
+# 8N1 baud candidates. 115200 then 9600 lead the sweep — between them they cover
+# almost all console gear (modern kit defaults to 115200; older/embedded to
+# 9600), so we always try those two FIRST and, per PRIORITY_BAUDS below, lock
+# onto either the moment it answers cleanly rather than drifting onto an exotic
+# rate that happened to score marginally higher. The rest follow in rough
+# frequency order for the uncommon device that uses neither.
+DEFAULT_BAUD_CANDIDATES = [115200, 9600, 38400, 19200, 57600, 4800, 2400, 230400]
+
+# The two rates we prefer to "fall back to": if either answers with a confident
+# (mostly-printable) reply, we stop the sweep and lock it instead of continuing
+# into the exotic rates — so detection reliably settles on 115200, else 9600.
+PRIORITY_BAUDS = (115200, 9600)
 
 # Prompt/banner signatures that boost a baud-detect score (the device is talking
 # sense at this rate, not emitting line noise).
@@ -53,6 +63,16 @@ _PROMPT_HINTS = re.compile(
 # framing noise). Below this we treat the port as "still unknown" and keep
 # sweeping on the next cycle rather than sticking on a dead guess.
 _BAUD_CONFIDENT_SCORE = 0.8
+
+# How many times to press Enter at each candidate rate before giving up on it.
+#
+# Plenty of switch consoles stay silent until they have seen a few carriage
+# returns — the port is open and the rate is RIGHT, but one Enter draws nothing,
+# so a single-shot probe reads the line as dead and sweeps past the correct
+# rate. (It then usually settles on a wrong one, which is the "console does not
+# recognise the characters I type" symptom.) Nudging a few times per rate is
+# what makes 115200 and 9600 reliably answer on that gear.
+_BAUD_NUDGE_ATTEMPTS = 3
 
 _DEFAULT_SETTINGS = {"baud": 9600, "bytesize": 8, "parity": "N", "stopbits": 1, "flow": "none"}
 
@@ -154,28 +174,54 @@ def open_raw(dev: str, baud: int = 9600, timeout: float = 0.3):
 
 
 def detect_baud(dev: str, candidates: Optional[List[int]] = None,
-                read_secs: float = 1.5) -> Dict[str, Any]:
-    """Sweep candidate baud rates (8N1), press Enter, score the reply; return the
-    best. Blocking — callers run it via ``asyncio.to_thread``."""
+                read_secs: float = 1.5,
+                nudges: int = _BAUD_NUDGE_ATTEMPTS) -> Dict[str, Any]:
+    """Sweep candidate baud rates (8N1), press Enter a few times, score the reply;
+    return the best. Blocking — callers run it via ``asyncio.to_thread``.
+
+    Enter is pressed up to *nudges* times per rate because a lot of console gear
+    answers only after several carriage returns (see _BAUD_NUDGE_ATTEMPTS). The
+    per-rate time budget is still ``read_secs`` in total — it is SPLIT across the
+    nudges rather than multiplied by them — so a full sweep takes no longer than
+    it did with a single Enter, and the reply is accumulated across nudges so a
+    device that answers slowly is not missed either."""
     if serial is None:
         raise RuntimeError("pyserial not installed")
     candidates = candidates or DEFAULT_BAUD_CANDIDATES
     best = {"baud": None, "score": -1.0, "sample": b""}
     for baud in candidates:
         try:
+            tries = max(1, int(nudges or 1))
+            # Split, don't multiply: the whole point is more Enters, not a
+            # proportionally longer sweep across eight candidate rates.
+            per_try = max(0.25, float(read_secs) / tries)
             with serial.Serial(dev, baud, timeout=0.3) as ser:
                 ser.reset_input_buffer()
-                ser.write(b"\r\n")
-                deadline = time.monotonic() + read_secs
                 buf = b""
-                while time.monotonic() < deadline and len(buf) < 4096:
-                    chunk = ser.read(256)
-                    if chunk:
-                        buf += chunk
+                for _ in range(tries):
+                    ser.write(b"\r\n")
+                    try:
+                        ser.flush()  # push the CR out before we wait on a reply
+                    except Exception:  # noqa: BLE001 - not every backend has it
+                        pass
+                    deadline = time.monotonic() + per_try
+                    while time.monotonic() < deadline and len(buf) < 4096:
+                        chunk = ser.read(256)
+                        if chunk:
+                            buf += chunk
+                    # Already talking sense — stop nudging this rate.
+                    if len(buf) >= 4096 or score_sample(buf) >= _BAUD_CONFIDENT_SCORE:
+                        break
             s = score_sample(buf)
             if s > best["score"]:
                 best = {"baud": baud, "score": s, "sample": buf}
             if s >= 1.3:  # confidently good — stop sweeping
+                break
+            # A priority rate (115200 then 9600) that answers with a confident,
+            # mostly-printable reply is good enough to LOCK: stop here rather
+            # than sweeping on to an exotic rate that might edge it out on score.
+            # This is what makes detection reliably settle back on 115200/9600.
+            if baud in PRIORITY_BAUDS and s >= _BAUD_CONFIDENT_SCORE:
                 break
         except Exception as e:  # noqa: BLE001
             logger.debug("baud probe %s@%d failed: %s", dev, baud, e)
@@ -450,6 +496,7 @@ class PortChannel:
             rtscts=(settings.get("flow") == "rtscts"),
             xonxoff=(settings.get("flow") == "xonxoff"),
             timeout=0.2,
+            write_timeout=2.0,
         )
 
     def start(self) -> None:

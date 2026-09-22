@@ -8966,7 +8966,9 @@ async function csRenderVmServer() {
     csAutoProvLivePanel();
     csFleetRecloneProgress();
     csRefreshStatusTick();   // template-refresh status chip (polls refresh_status)
-    if (_canRefresh) csRenderMyTemplates();   // visible "My Templates" list for tenant-admins
+    if (_canRefresh && (typeof window.csRenderMyTemplates === 'function' || typeof csRenderMyTemplates === 'function')) {
+        (window.csRenderMyTemplates || csRenderMyTemplates)();
+    }
 }
 
 // ── Fleet Reclone / Auto-Provisioning live progress panels ───────────────────
@@ -9500,7 +9502,7 @@ async function csRenderMyTemplates() {
       <div class="hpe-card rounded-lg overflow-hidden border border-slate-200">
         <div class="flex items-center justify-between px-4 py-2 bg-slate-50 border-b border-slate-200">
           <h3 class="text-sm font-bold text-[#263040]">My Templates <span class="text-slate-400 font-normal">(${templates.length})</span></h3>
-          <button onclick="csRenderMyTemplates()" class="px-2 py-1 rounded text-[11px] font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200" title="Reload the list of templates backed up to the hub for your tenant.">↻ Refresh</button>
+          <button onclick="window.csRenderMyTemplates ? window.csRenderMyTemplates() : csRenderMyTemplates()" class="px-2 py-1 rounded text-[11px] font-bold bg-slate-100 hover:bg-slate-200 text-slate-600 border border-slate-200" title="Reload the list of templates backed up to the hub for your tenant.">↻ Refresh</button>
         </div>
         <div class="overflow-x-auto"><table class="w-full text-sm">
           <thead class="bg-white text-xs text-slate-500 uppercase"><tr>
@@ -9516,6 +9518,7 @@ async function csRenderMyTemplates() {
         </table></div>
       </div>`;
 }
+window.csRenderMyTemplates = csRenderMyTemplates;
 
 // ── "⬆ Back up to Hub" for a template VM (tenant-admin / admin) ──────────────
 // Mirrors main.js pxmxBackupToHub, but posts to the NEW tenant-gated
@@ -11168,6 +11171,15 @@ async function _csUsbClearCmd(host, action, doneMsg, allSpokes) {
         if (allSpokes) body.all_spokes = true;
         const r = await csFetch(`/${csTenant()}/proxmx/command?tenant_id=${csTenant()}`, {
             method: 'POST', body: JSON.stringify(body) });
+        if (r && r.queued_to_spokes > 0) {
+            // Some spokes were unreachable: the clear is queued and applies when
+            // they reconnect. Say so instead of claiming it is live everywhere.
+            const nQ = r.queued_to_spokes, nLive = r.pushed_to_spokes || 0;
+            const bad = (r.errors || []).concat(r.refusals || []);
+            showToast(`${doneMsg}. Cleared live on ${nLive}/${r.spokes_total} spoke(s); queued for ${nQ} unreachable spoke(s) (applies when they reconnect): ${(r.queued || []).join(', ')}`
+                + (bad.length ? ` — failed: ${bad.join('; ')}` : ''), 'warning');
+            return;
+        }
         if (r && Array.isArray(r.errors) && (r.errors.length || (r.refusals || []).length)) {
             // Partial fan-out: name the spokes that did NOT clear rather than
             // reporting a blanket success.

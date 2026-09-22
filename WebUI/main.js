@@ -713,6 +713,18 @@ function _taTenantQuery() {
     return `?tenant=${encodeURIComponent(currentTenant || 'default')}`;
 }
 
+function _consoleTenantQuery() {
+    // The Credential Library follows the tenant picker for BOTH roles. A tenant
+    // Admin is always scoped to an owned tenant (as with _taTenantQuery). A
+    // Global Admin who has a specific tenant selected must see THAT tenant's
+    // console logins — those live in the per-tenant vault bucket, not the shared
+    // __admin__ slot — so send the tenant explicitly. The "all tenants" pick
+    // (or none) sends nothing, so the hub returns the fleet-wide inventory.
+    const t = currentTenant || '';
+    if (!t || t === 'all' || t === '__all__') return '';
+    return `?tenant=${encodeURIComponent(t)}`;
+}
+
 function hasConsoleWrite() {
     const p = currentUser?.permissions || {};
     return isAdmin() || isTenantAdmin() || p.console_write === true;
@@ -760,13 +772,49 @@ function handleSessionExpired() {
     document.getElementById('login-username')?.focus();
     refreshOidcButton();
 }
-window.fetch = async function lmFetch(input, init) {
-    const res = await _lmOrigFetch(input, init);
-    if (res && res.status === 401 && currentUser && !_lmIsAuthSubmitEndpoint(input)) {
-        handleSessionExpired();
-        throw new Error('Session expired');
+let _lmActiveFetchCount = 0;
+const _lmActiveFetchListeners = new Set();
+function _lmNotifyFetchState() {
+    for (const fn of _lmActiveFetchListeners) {
+        try { fn(_lmActiveFetchCount); } catch (_) {}
     }
-    return res;
+}
+function _lmOnFetchCountChange(fn) {
+    _lmActiveFetchListeners.add(fn);
+    return () => _lmActiveFetchListeners.delete(fn);
+}
+
+window.fetch = async function lmFetch(input, init) {
+    let isBg = false;
+    try {
+        if (init && init._background) isBg = true;
+        const u = typeof input === 'string' ? input : (input && input.url) || '';
+        if (u.indexOf('/api/notifications/poll') !== -1 ||
+            u.indexOf('/api/events/poll') !== -1 ||
+            u.indexOf('/api/le/inflight') !== -1 ||
+            u.indexOf('/api/health') !== -1) {
+            isBg = true;
+        }
+    } catch (_) {}
+
+    if (!isBg) {
+        _lmActiveFetchCount++;
+        _lmNotifyFetchState();
+    }
+
+    try {
+        const res = await _lmOrigFetch(input, init);
+        if (res && res.status === 401 && currentUser && !_lmIsAuthSubmitEndpoint(input)) {
+            handleSessionExpired();
+            throw new Error('Session expired');
+        }
+        return res;
+    } finally {
+        if (!isBg) {
+            _lmActiveFetchCount = Math.max(0, _lmActiveFetchCount - 1);
+            _lmNotifyFetchState();
+        }
+    }
 };
 
 // ── pollManager — visibility-aware recurring timers ─────────────────────────
@@ -1065,6 +1113,164 @@ function showStickyToast(message, type = 'info') {
             toast.addEventListener('transitionend', () => toast.remove());
         },
     };
+}
+
+// Lightweight "we heard you" feedback toast fired the instant an actionable
+// control is clicked, BEFORE its (sometimes slow) handler runs. Purpose is
+// pure reassurance: a user reported clicking a button, seeing nothing happen
+// for a beat on a slow load, and clicking again — this gives immediate visual
+// acknowledgement that the click landed and the system is working.
+//
+// It is deliberately short-lived (LOADING_TOAST_MS) and de-duplicated: rapid
+// repeat clicks on the same thing refresh the one toast in place instead of
+// stacking a column of identical messages. Installed globally by
+// installClickFeedback(); individual controls opt OUT with [data-no-loading].
+function _lmLoadingToastRegion() {
+    let el = document.getElementById('lm-loading-toast-region');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'lm-loading-toast-region';
+        el.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:10000;pointer-events:none;display:flex;flex-direction:column;align-items:center;';
+        document.body.appendChild(el);
+    }
+    return el;
+}
+
+let _lmLoadingToast = null;
+function showLoadingToast(label) {
+    const text = `Loading ${label}…`;
+    if (_lmLoadingToast && _lmLoadingToast.label === label &&
+        document.body.contains(_lmLoadingToast.el)) {
+        clearTimeout(_lmLoadingToast.timer);
+        _lmLoadingToast.timer = setTimeout(_dismissLoadingToast, window.LOADING_TOAST_MS || 15000);
+        return;
+    }
+    _dismissLoadingToast();
+    const toast = document.createElement('div');
+    toast.className = 'lm-toast';
+    toast.style.cssText = `
+        display:flex;align-items:center;gap:.75rem;
+        background:#01A982;color:#fff;
+        padding:.75rem 1rem .75rem 1.25rem;border-radius:.5rem;font-size:.875rem;
+        box-shadow:0 4px 12px rgba(0,0,0,.2);opacity:0;
+        transition:opacity .2s ease;width:100%;max-width:24rem;min-width:18rem;box-sizing:border-box;pointer-events:auto;`;
+    const spinner = document.createElement('span');
+    spinner.style.cssText = 'width:.9rem;height:.9rem;border:2px solid rgba(255,255,255,.4);' +
+        'border-top-color:#fff;border-radius:50%;flex:none;animation:lm-spin .8s linear infinite;';
+    if (!document.getElementById('lm-spin-kf')) {
+        const st = document.createElement('style');
+        st.id = 'lm-spin-kf';
+        st.textContent = '@keyframes lm-spin{to{transform:rotate(360deg)}}';
+        document.head.appendChild(st);
+    }
+    toast.appendChild(spinner);
+    const span = document.createElement('span');
+    span.style.cssText = 'flex:1;white-space:pre-line;';
+    span.textContent = text;
+    toast.appendChild(span);
+    _lmLoadingToastRegion().appendChild(toast);
+    requestAnimationFrame(() => { toast.style.opacity = '1'; });
+
+    const openTime = Date.now();
+    let listenerUnsub = null;
+    let fallbackTimer = null;
+    let safetyTimer = null;
+    let graceTimer = null;
+
+    const attemptDismiss = () => {
+        if (_lmActiveFetchCount === 0) {
+            const elapsed = Date.now() - openTime;
+            const delay = Math.max(0, 400 - elapsed);
+            if (!graceTimer) {
+                graceTimer = setTimeout(() => {
+                    if (_lmActiveFetchCount === 0) _dismissLoadingToast();
+                    graceTimer = null;
+                }, Math.max(delay, 200));
+            }
+        } else if (graceTimer) {
+            clearTimeout(graceTimer);
+            graceTimer = null;
+        }
+    };
+
+    listenerUnsub = _lmOnFetchCountChange(attemptDismiss);
+    fallbackTimer = setTimeout(attemptDismiss, 800);
+    safetyTimer = setTimeout(_dismissLoadingToast, window.LOADING_TOAST_MS || 15000);
+
+    _lmLoadingToast = {
+        el: toast,
+        label,
+        timer: safetyTimer,
+        cleanup: () => {
+            if (listenerUnsub) listenerUnsub();
+            if (fallbackTimer) clearTimeout(fallbackTimer);
+            if (_lmLoadingToast && _lmLoadingToast.timer) clearTimeout(_lmLoadingToast.timer);
+            if (graceTimer) clearTimeout(graceTimer);
+        }
+    };
+}
+
+function _dismissLoadingToast() {
+    if (!_lmLoadingToast) return;
+    const { el, cleanup } = _lmLoadingToast;
+    if (cleanup) cleanup();
+    _lmLoadingToast = null;
+    if (!el || !document.body.contains(el)) return;
+    el.style.opacity = '0';
+    el.addEventListener('transitionend', () => el.remove());
+}
+window.dismissLoadingToast = _dismissLoadingToast;
+window.showLoadingToast = showLoadingToast;
+
+// Derive a short human label for the clicked control: an explicit override
+// wins, then aria-label/title, then its own visible text (icon glyphs and
+// runaway length trimmed). Returns '' when there is nothing meaningful to say.
+function _loadingLabelFor(el) {
+    let label = el.getAttribute('data-loading-label')
+        || el.getAttribute('aria-label')
+        || el.getAttribute('title')
+        || (el.textContent || '');
+    // Collapse whitespace and drop lone icon/glyph characters (Font Awesome
+    // ligatures render as private-use glyphs; ×/✓/etc. carry no words).
+    label = label.replace(/\s+/g, ' ').trim();
+    label = label.replace(/[\u2000-\u3300\uE000-\uF8FF\uF000-\uFFFF]/g, '').trim();
+    if (label.length > 40) label = label.slice(0, 39).trim() + '…';
+    return label;
+}
+
+// A control we should NOT announce: dismissers, copy/reveal affordances,
+// toggles, in-toast buttons, anything the page explicitly opts out, and
+// disabled controls (their handler never runs).
+const _NO_LOADING_TEXT = /^(×|✕|✓|close|dismiss|cancel|copy|copied|show|hide|expand|collapse|previous|next|prev|▲|▼|◀|▶|‹|›|«|»)$/i;
+function _skipLoadingFeedback(el) {
+    if (el.closest('[data-no-loading]')) return true;
+    if (el.closest('#lm-toast-region')) return true;               // toast's own buttons
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') return true;
+    if (el.getAttribute('role') === 'switch') return true;         // toggle switches
+    if (el.type === 'checkbox' || el.type === 'radio') return true;
+    const aria = (el.getAttribute('aria-label') || '').trim();
+    const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (_NO_LOADING_TEXT.test(aria) || _NO_LOADING_TEXT.test(txt)) return true;
+    return false;
+}
+
+// Global click-feedback: on ANY actionable control (buttons, nav items,
+// role=button), pop the short "Loading …" toast immediately. Runs in the
+// CAPTURE phase so it fires even when the real handler calls stopPropagation,
+// and before that handler's (possibly slow) work begins. Installed once.
+function installClickFeedback() {
+    if (window._lmClickFeedbackInstalled) return;
+    window._lmClickFeedbackInstalled = true;
+    document.addEventListener('click', (e) => {
+        if (window.LM_CLICK_FEEDBACK === false) return;   // runtime kill-switch
+        const el = e.target.closest(
+            'button, [role="button"], .nav-item, [data-loading-label]');
+        if (!el) return;
+        if (_skipLoadingFeedback(el)) return;
+        const label = _loadingLabelFor(el);
+        if (!label) return;
+        try { showLoadingToast(label); } catch (_) { /* never block the click */ }
+    }, true);
 }
 
 // Interactive confirm toast — a non-blocking replacement for window.confirm()
@@ -1621,13 +1827,13 @@ const VIEW_SUBMENUS = {
     logs:     ['logs-hub', 'logs-pxmx', 'logs-opn', 'logs-netbox', 'logs-cppm', 'logs-cs', 'logs-console', 'logs-agents', 'logs-recovery', 'logs-errors', 'logs-bugs', 'logs-features'],
     setup: ['Spokes & Agents', 'Module Management', 'Directory (LDAP)', 'Simulations', 'Remote Console', 'OS Updates', 'Test Data Feed'],
     opnsense: ['Firewall Rules', 'NAT Policies', 'DNS Records', 'Aliases', 'DHCP Leases', 'Interfaces'],
-    pxmx: ['Overview', 'Virtual Machines', 'Settings'],
+    pxmx: ['Overview', 'Virtual Machines', 'Diagnostics', 'Settings'],
     ldap: ['Users', 'Groups'],
     cppm: ['NAC Status', 'Access Tracker', 'My Devices', 'Unknown Devices'],
     cs: ['Dashboard', 'Clients', 'Central', 'Central On-Prem', 'Mist', 'VM Server', 'Config', 'Setup', 'Spoke Management', 'Assistant'],
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
-    dns: ['Overview', 'Records', 'Diagnostics', 'Forwarders', 'External DNS'],
-    dhcp: ['Overview', 'Diagnostics', 'Subnets', 'Leases', 'Reservations'],
+    dns: ['Overview', 'Records', 'Forwarders', 'External DNS', 'Diagnostics'],
+    dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations', 'Diagnostics'],
     nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'Other', 'Scan'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
 };
@@ -3819,7 +4025,16 @@ async function setSubView(subMenu) {
     // with no entry (mydevices, credvault, ...) intentionally no-op, matching
     // the previous fall-through behavior of the if/else chain.
     const loader = VIEW_LOADERS[currentView];
-    if (loader) loader(subMenu);
+    if (loader) {
+        const res = loader(subMenu);
+        if (res && typeof res.finally === 'function') {
+            res.finally(() => {
+                if (typeof _lmActiveFetchCount !== 'undefined' && _lmActiveFetchCount === 0) {
+                    setTimeout(window.dismissLoadingToast, 200);
+                }
+            });
+        }
+    }
 }
 
 function renderTopNav(viewId) {
@@ -4438,7 +4653,7 @@ async function editReport(id) {
     modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
     inner.querySelector('.rpt-close').addEventListener('click', () => modal.remove());
     inner.querySelector('.rpt-cancel').addEventListener('click', () => modal.remove());
-    document.body.appendChild(modal);
+    _mountModal(modal);
     _rptWhen();
     document.getElementById('rpt-save').addEventListener('click', () => saveReport(existing ? existing.id : ''));
 }
@@ -5251,7 +5466,13 @@ async function apiJson(url, options = {}) {
         throw new Error(detail ? `${res.status} ${detail}` : `${res.status} ${res.statusText}`);
     }
     const ct = res.headers.get('content-type') || '';
-    return ct.includes('application/json') ? res.json() : res.text();
+    const body = ct.includes('application/json') ? await res.json() : await res.text();
+    // A route that serializes Python None emits a body of the literal JSON
+    // token `null`. res.json() RESOLVES that to null rather than throwing, so
+    // it bypassed every try/catch and callers doing `const d = await apiJson();
+    // d.status` threw "null is not an object". Normalize to {} so the envelope
+    // contract every caller assumes still holds. Arrays/strings pass through.
+    return body === null ? {} : body;
 }
 // ──────────────────────────────────────────────────────────────────
 
@@ -15343,7 +15564,7 @@ async function openAgentConfigModal(agentId, currentLabel) {
             </div>
         </div>
     `;
-    document.body.appendChild(modal);
+    _mountModal(modal);
 }
 
 async function saveAgentConfig(agentId) {
@@ -15445,7 +15666,7 @@ async function openAgentAssignModal(agentId, currentTenantId) {
             </div>
         </div>
     `;
-    document.body.appendChild(modal);
+    _mountModal(modal);
 }
 
 async function saveAgentTenant(agentId) {
@@ -15522,7 +15743,7 @@ async function openSpokeAssignModal(spokeId, currentTenantId, noun = 'Spoke') {
             </div>
         </div>
     `;
-    document.body.appendChild(modal);
+    _mountModal(modal);
 }
 
 async function saveSpokeAssign(spokeId) {
@@ -15686,7 +15907,7 @@ async function openSpokeMetadataModal(spokeId, currentName, approved) {
             </div>
         </div>
     `;
-    document.body.appendChild(modal);
+    _mountModal(modal);
 }
 
 async function saveSpokeMetadata(spokeId) {
@@ -16067,7 +16288,7 @@ async function showGroupModal(groupId) {
                 <button onclick="saveGroup()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">${groupId ? 'Save' : 'Create'} Group</button>
             </div>
         </div>`;
-    document.body.appendChild(modal);
+    _mountModal(modal);
 }
 
 function closeGroupModal() {
@@ -16673,6 +16894,58 @@ function openModal(id, bodyHtml, opts = {}) {
     document.body.appendChild(modal);
     return modal;
 }
+
+// Mount a hand-built modal, replacing any previous copy with the same id.
+//
+// openModal() above has always dropped a same-id node before appending, but the
+// openers that build their own element skipped that -- and the ones that AWAIT
+// their data before appending are re-entrant, because nothing stops a second
+// click while the first fetch is still outstanding. Clicking "Credentials" on
+// the Console page twice therefore stacked two live copies of the dialog, and
+// because they shared one id every close button (getElementById(..).remove())
+// only ever removed the first, so the stack had to be dismissed one layer at a
+// time.
+function _mountModal(modal) {
+    if (modal.id) document.getElementById(modal.id)?.remove();
+    document.body.appendChild(modal);
+    return modal;
+}
+
+// Collapse repeat invocations of an async opener while its first call is still
+// in flight.
+//
+// _mountModal alone keeps the screen to one dialog, but the duplicate work
+// still happens: the later response replaces a dialog the user may already be
+// typing into, discarding the input. Keyed on the ARGUMENTS so suppression is
+// limited to re-clicking the same button -- picking a different row (editUser(7)
+// after editUser(3)) is a different key and still opens.
+function _singleFlight(fn) {
+    const pending = new Map();
+    return function (...args) {
+        let key;
+        try { key = JSON.stringify(args); } catch (e) { key = String(args); }
+        if (pending.has(key)) return pending.get(key);
+        const out = fn.apply(this, args);
+        // Only a thenable has a window during which a second click can land; a
+        // synchronous opener is finished before the next event can be handled.
+        if (out && typeof out.then === 'function') {
+            pending.set(key, out);
+            const clear = () => pending.delete(key);
+            out.then(clear, clear);
+        }
+        return out;
+    };
+}
+
+// Every opener that appends only AFTER an await. Inline onclick= resolves these
+// off the global object, so rebinding the property is enough to cover the
+// handlers in markup. Declarations hoist, so all of them already exist here.
+['editReport', 'openAgentConfigModal', 'openAgentAssignModal', 'openSpokeAssignModal',
+ 'openSpokeMetadataModal', 'showGroupModal', 'openConsoleCaptureModal',
+ 'openConsoleCredentialsModal', 'openConsolePortTenantModal', 'showPxmxInstallModal',
+ 'showDnsCredentialsModal', 'showAddUserModal', 'editUser'].forEach(name => {
+    if (typeof window[name] === 'function') window[name] = _singleFlight(window[name]);
+});
 
 // ── Self-service spoke onboarding ("Add Server") ────────────────────────────
 // A tenant-admin (who has no access to the Global-Admin-only Setup → Spokes
@@ -20696,7 +20969,7 @@ async function openConsoleCaptureModal(spokeId, portId) {
         <div class="px-4 py-2 bg-[#2d2d2d] text-right"><button class="js-capture-refresh text-[11px] px-3 py-1.5 rounded border border-slate-500 text-slate-200 hover:bg-slate-700">↻ Refresh</button></div>
       </div>`;
     modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove(); });
-    document.body.appendChild(modal);
+    _mountModal(modal);
     modal.querySelector('.js-capture-refresh').setAttribute(
         'onclick', `openConsoleCaptureModal('${escJsAttr(spokeId)}','${escJsAttr(portId)}')`);
 }
@@ -20720,7 +20993,7 @@ async function refreshConsoleDiagnostics() {
     if (!body) return;
     let data = { diagnostics: [], errors: {} };
     try {
-        const res = await fetch('/api/console/diagnostics', { credentials: 'same-origin' });
+        const res = await fetch(`/api/console/diagnostics?tenant=${encodeURIComponent(currentTenant || 'default')}`, { credentials: 'same-origin' });
         if (res.ok) data = await res.json();
         else { body.innerHTML = `<div class="text-red-500">Failed to load (${res.status})</div>`; return; }
     } catch (e) { body.innerHTML = `<div class="text-red-500">${escapeHtml(e.message)}</div>`; return; }
@@ -21096,7 +21369,7 @@ async function openConsoleCredentialsModal() {
     let bucketHasPsk = false;
     let loadFailed = false;
     try {
-        const res = await fetch('/api/console/credentials' + _taTenantQuery(), { credentials: 'same-origin' });
+        const res = await fetch('/api/console/credentials' + _consoleTenantQuery(), { credentials: 'same-origin' });
         if (res.ok) {
             const j = await res.json();
             existing = j.credentials || [];
@@ -21160,7 +21433,7 @@ async function openConsoleCredentialsModal() {
               ${localSection}
               <div class="pt-3 flex justify-end"><button onclick="this.closest('#console-creds-modal').remove()" class="px-4 py-2 text-sm text-slate-600">Close</button></div>
             </div></div>`;
-        document.body.appendChild(modal);
+        _mountModal(modal);
         return;
     }
     const rowFor = (u) => `<div class="flex gap-2 console-cred-row">
@@ -21190,7 +21463,7 @@ async function openConsoleCredentialsModal() {
             <button onclick="saveConsoleVaultCredentials('${escJsAttr(tenantScope)}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Save</button>
           </div>
         </div></div>`;
-    document.body.appendChild(modal);
+    _mountModal(modal);
 }
 
 // Save the tenant's console SCAN credentials into the Credential Vault (tenant
@@ -21714,6 +21987,7 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     // an xterm opened into a display:none container measures 0×0 and renders blank.
     serialActivateConsole(key);
     const term = new Terminal({ cursorBlink: true, fontSize: 13, scrollback: 5000,
+                                convertEol: true,
                                 theme: { background: '#1e1e1e' } });
     entry.term = term;
     // Grow the terminal grid to fill its body (no dead space below/right).
@@ -21757,7 +22031,20 @@ function serialAddConsoleTab(spokeId, portId, session, Terminal, knownLabel) {
     // Keystrokes always target the CURRENT socket (entry.ws), which reconnect
     // swaps out — so this handler is registered once and survives reconnects
     // (re-registering per socket would leak handlers bound to dead sockets).
-    term.onData(d => { if (!entry.ro && entry.ws && entry.ws.readyState === 1) entry.ws.send(d); });
+    let _lastRoToast = 0;
+    term.onData(d => {
+        if (entry.ro) {
+            const now = Date.now();
+            if (now - _lastRoToast > 3000) {
+                _lastRoToast = now;
+                if (typeof showToast === 'function') {
+                    showToast('Console is in read-only mode — click "Take Over" above to send input', 'warning');
+                }
+            }
+            return;
+        }
+        if (entry.ws && entry.ws.readyState === 1) entry.ws.send(d);
+    });
     serialAttachWs(entry, session);
     serialRenderConsoleList();
     serialSyncSerialHeader();
@@ -22273,7 +22560,7 @@ async function openConsolePortTenantModal(spokeId, portId, currentTenantId) {
             <button onclick="saveConsolePortTenant('${spokeId.replace(/'/g, "\\'")}','${portId.replace(/'/g, "\\'")}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Assign</button>
           </div>
         </div></div>`;
-    document.body.appendChild(modal);
+    _mountModal(modal);
 }
 
 async function saveConsolePortTenant(spokeId, portId) {
@@ -23198,6 +23485,290 @@ function pxmxSelectTenantPromptHtml() {
     </div>`;
 }
 
+async function renderPxmxDiagnostics(container) {
+    container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading drive diagnostics…</p>';
+
+    let res;
+    try {
+        res = await fetch(`/api/pxmx/drive-health?tenant=${encodeURIComponent(currentTenant || 'default')}`);
+    } catch (err) {
+        container.innerHTML = `
+            <div class="p-6">
+                <div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg flex items-center justify-between">
+                    <div>
+                        <span class="font-bold">Failed to load Drive Diagnostics:</span> ${escapeHtml(err.message || String(err))}
+                    </div>
+                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-red-300 text-red-700 hover:bg-red-50 font-medium">↻ Retry</button>
+                </div>
+            </div>`;
+        return;
+    }
+
+    if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try {
+            const errData = await res.json();
+            if (errData && errData.detail) msg = errData.detail;
+        } catch (_) {}
+        container.innerHTML = `
+            <div class="p-6">
+                <div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg flex items-center justify-between">
+                    <div>
+                        <span class="font-bold">Failed to load Drive Diagnostics:</span> ${escapeHtml(msg)}
+                    </div>
+                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-red-300 text-red-700 hover:bg-red-50 font-medium">↻ Retry</button>
+                </div>
+            </div>`;
+        return;
+    }
+
+    let data;
+    try {
+        data = await res.json();
+    } catch (err) {
+        container.innerHTML = `
+            <div class="p-6">
+                <div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg flex items-center justify-between">
+                    <div>
+                        <span class="font-bold">Failed to parse drive diagnostics response:</span> ${escapeHtml(err.message || String(err))}
+                    </div>
+                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-red-300 text-red-700 hover:bg-red-50 font-medium">↻ Retry</button>
+                </div>
+            </div>`;
+        return;
+    }
+
+    const spokeConnected = data.spoke_connected !== false;
+    const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+    const summary = data.summary || {
+        total_drives: 0,
+        healthy: 0,
+        warning: 0,
+        critical: 0,
+        unknown: 0,
+    };
+
+    const nodesHaveIssues = nodes.some(n => !n.diagnostics || n.status === 'ERROR' || n.error);
+    const hasAttention = (summary.critical || 0) > 0 || (summary.warning || 0) > 0 || nodesHaveIssues;
+    const overallStatusBadge = hasAttention
+        ? '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-800 border border-red-200">Attention needed</span>'
+        : '<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-green-100 text-green-800 border border-green-200">All drives healthy</span>';
+
+    const headerHtml = `
+        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+            <div>
+                <div class="flex items-center gap-3">
+                    <h2 class="text-xl font-bold text-slate-900">Drive Health & Diagnostics</h2>
+                    ${overallStatusBadge}
+                </div>
+                <p class="text-xs text-slate-500 mt-1">Storage device telemetry and SSD wear level diagnostics across hypervisor nodes</p>
+            </div>
+            <div>
+                <button onclick="loadPxmxData('Diagnostics')" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all">
+                    ↻ Run Diagnostics / Refresh
+                </button>
+            </div>
+        </div>`;
+
+    const summaryCardsHtml = `
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
+            <div class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
+                <div class="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Drives</div>
+                <div class="text-2xl font-bold text-slate-800 mt-1">${summary.total_drives || 0}</div>
+            </div>
+            <div class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
+                <div class="text-xs font-medium text-emerald-600 uppercase tracking-wider">Healthy</div>
+                <div class="text-2xl font-bold text-emerald-700 mt-1">${summary.healthy || 0}</div>
+            </div>
+            <div class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
+                <div class="text-xs font-medium text-amber-600 uppercase tracking-wider">Warning (wear >= 80%)</div>
+                <div class="text-2xl font-bold text-amber-700 mt-1">${summary.warning || 0}</div>
+            </div>
+            <div class="bg-white p-4 rounded-lg border border-slate-200 shadow-sm">
+                <div class="text-xs font-medium text-red-600 uppercase tracking-wider">Critical (wear >= 90%)</div>
+                <div class="text-2xl font-bold text-red-700 mt-1">${summary.critical || 0}</div>
+            </div>
+        </div>`;
+
+    if (!spokeConnected) {
+        container.innerHTML = `
+            <div class="p-4">
+                ${headerHtml}
+                ${summaryCardsHtml}
+                <div class="bg-amber-50 border border-amber-200 rounded-lg p-6 text-center">
+                    <div class="text-amber-800 font-semibold mb-1">No Hypervisor Spoke Connected</div>
+                    <p class="text-xs text-amber-700 mb-4">No connected hypervisor spoke was found for the current tenant. Connect a Proxmox spoke to view drive diagnostics.</p>
+                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 font-medium">↻ Retry Connection</button>
+                </div>
+            </div>`;
+        return;
+    }
+
+    const totalDrives = (summary.total_drives || 0) || nodes.reduce((acc, n) => acc + ((n.drives || []).length), 0);
+    if (totalDrives === 0 && nodes.length === 0) {
+        container.innerHTML = `
+            <div class="p-4">
+                ${headerHtml}
+                ${summaryCardsHtml}
+                <div class="bg-white border border-slate-200 rounded-lg p-8 text-center text-slate-500 shadow-sm">
+                    <div class="text-sm font-semibold text-slate-700 mb-1">No Storage Drives Detected</div>
+                    <p class="text-xs text-slate-400">The hypervisor nodes did not report any storage drives, or smartctl diagnostics are not yet available.</p>
+                </div>
+            </div>`;
+        return;
+    }
+
+    const cols = ['Node', 'Device Path', 'Vendor & Model', 'Serial Number', 'Wear Level', 'Health Status'];
+
+    function getHealthBadge(status) {
+        const s = String(status || 'unknown').toLowerCase();
+        let cls = 'bg-slate-100 text-slate-700';
+        if (s === 'healthy' || s === 'ok' || s === 'good') {
+            cls = 'bg-green-100 text-green-800';
+        } else if (s === 'warning' || s === 'warn') {
+            cls = 'bg-amber-100 text-amber-800';
+        } else if (s === 'critical' || s === 'crit' || s === 'error' || s === 'failed') {
+            cls = 'bg-red-100 text-red-800';
+        }
+        return `<span class="px-2 py-0.5 rounded-full text-xs font-medium uppercase ${cls}">${escapeHtml(status || 'unknown')}</span>`;
+    }
+
+    function getWearBar(wear) {
+        if (wear == null || wear === '') {
+            return '<span class="text-slate-400 text-xs">—</span>';
+        }
+        const num = Number(wear);
+        if (isNaN(num)) {
+            return `<span class="text-slate-500 text-xs">${escapeHtml(String(wear))}</span>`;
+        }
+        const pct = Math.min(Math.max(num, 0), 100);
+        let barColor = 'bg-[#01A982]';
+        if (pct >= 90) {
+            barColor = 'bg-red-600';
+        } else if (pct >= 80) {
+            barColor = 'bg-amber-500';
+        }
+        return `
+            <div class="flex items-center gap-2">
+                <div class="w-24 bg-slate-200 rounded-full h-2 overflow-hidden">
+                    <div class="h-2 rounded-full ${barColor}" style="width: ${pct}%"></div>
+                </div>
+                <span class="text-xs font-mono font-medium text-slate-700">${pct}%</span>
+            </div>`;
+    }
+
+    let tablesHtml = '';
+    for (const n of nodes) {
+        const nodeName = n.node || 'Unknown';
+        const clusterName = n.cluster || '';
+        const drives = Array.isArray(n.drives) ? n.drives : [];
+
+        const diagUnavailable = !n.diagnostics || n.status === 'ERROR';
+        let badgesHtml = '';
+        if (n.agent_version) {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">Agent v${escapeHtml(n.agent_version)}</span> `;
+        }
+        if (diagUnavailable) {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-600 border border-slate-200">smartctl: Unknown</span> `;
+        } else if (n.diagnostics.smartctl_installed) {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">smartctl: Installed</span> `;
+        } else {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-red-100 text-red-800 border border-red-200">smartctl: Missing</span> `;
+        }
+        if (n.diagnostics && n.diagnostics.is_hpe) {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-purple-100 text-purple-800 border border-purple-200">HPE Server</span> `;
+        }
+        if (n.diagnostics && n.diagnostics.has_raid) {
+            if (n.diagnostics.ssacli_installed) {
+                badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">ssacli: Installed</span> `;
+            } else {
+                badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-800 border border-amber-200">ssacli: Missing</span> `;
+            }
+        }
+        if (n.diagnostics && n.diagnostics.controller_type === 'direct_attached') {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-sky-100 text-sky-800 border border-sky-200">Direct-Attached</span> `;
+        }
+        if (n.diagnostics && n.diagnostics.controller_type === 'mixed') {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-indigo-100 text-indigo-800 border border-indigo-200">RAID + Direct/NVMe</span> `;
+        }
+        if (n.diagnostics && n.diagnostics.nvme_tools_installed) {
+            badgesHtml += `<span class="px-2 py-0.5 rounded text-[10px] font-bold bg-teal-100 text-teal-800 border border-teal-200">nvme-cli: Installed</span> `;
+        }
+
+        let alertHtml = '';
+        if (diagUnavailable) {
+            alertHtml = `
+            <div class="m-4 p-3 bg-slate-100 border border-slate-200 rounded-md text-xs text-slate-800">
+                <div class="font-bold flex items-center gap-1 mb-1">
+                    <span>ℹ️ Diagnostics Unavailable</span>
+                </div>
+                ${n.error ? `<p class="mb-1 text-red-700 font-mono text-[11px]">Error: ${escapeHtml(n.error)}</p>` : '<p class="mb-1">Diagnostics not yet reported for this node.</p>'}
+            </div>`;
+        } else if (!n.diagnostics.smartctl_installed) {
+            alertHtml = `
+            <div class="m-4 p-3 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-800">
+                <div class="font-bold flex items-center gap-1 mb-1">
+                    <span>⚠️ Software Prerequisites Incomplete</span>
+                </div>
+                <p>smartctl is not installed on this node. To collect drive wear and health telemetry, run on the hypervisor host:</p><code class="block mt-1 p-1 bg-white border border-amber-300 rounded font-mono text-[11px] text-slate-800 select-all">apt-get update && apt-get install -y smartmontools</code>
+            </div>`;
+        }
+
+        const rows = drives.map(drive => {
+            const devPath = drive.block_device || drive.scsi_path || '—';
+            const vendorModel = `${drive.vendor || ''} ${drive.model || ''}`.trim() || '—';
+            const serial = drive.serial || '—';
+            const wear = drive.wear_level;
+            const status = drive.health_status || (drive.success ? 'healthy' : 'unknown');
+
+            const iface = (drive.interface || '').toUpperCase();
+            const ifaceBadge = iface ? `<span class="ml-1.5 px-1.5 py-0.5 rounded text-[9px] font-bold ${iface === 'NVME' ? 'bg-purple-100 text-purple-700' : (iface === 'SAS' ? 'bg-blue-100 text-blue-700' : 'bg-slate-100 text-slate-600')}">${escapeHtml(iface)}</span>` : '';
+            const tempHtml = drive.temperature ? `<span class="ml-1 text-[10px] font-mono text-slate-500 font-normal">(${escapeHtml(drive.temperature)}°C)</span>` : '';
+
+            return `
+                <tr class="border-b border-slate-100 hover:bg-slate-50 transition-colors">
+                    <td class="px-4 py-2.5 font-medium text-slate-800">${escapeHtml(nodeName)}</td>
+                    <td class="px-4 py-2.5 font-mono text-xs text-slate-600">${escapeHtml(devPath)}${ifaceBadge}</td>
+                    <td class="px-4 py-2.5 text-xs text-slate-800">${escapeHtml(vendorModel)}</td>
+                    <td class="px-4 py-2.5 font-mono text-xs text-slate-500">${escapeHtml(serial)}</td>
+                    <td class="px-4 py-2.5">${getWearBar(wear)}</td>
+                    <td class="px-4 py-2.5">${getHealthBadge(status)}${tempHtml}</td>
+                </tr>`;
+        }).join('');
+
+        let tableContent = '';
+        if (drives.length > 0) {
+            tableContent = tableWrap(tableHead(cols) + `<tbody>${rows}</tbody>`);
+        } else if (!alertHtml) {
+            tableContent = `<div class="px-4 py-4 text-center text-xs text-slate-500">No drives reported.</div>`;
+        }
+
+        tablesHtml += `
+            <div class="mb-6 bg-white rounded-lg border border-slate-200 overflow-hidden shadow-sm">
+                <div class="bg-slate-50 px-4 py-2.5 border-b border-slate-200 flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <span class="text-xs font-bold uppercase tracking-wider text-slate-500">Node:</span>
+                        <span class="text-sm font-semibold text-slate-800">${escapeHtml(nodeName)}</span>
+                        ${clusterName ? `<span class="text-xs px-2 py-0.5 rounded bg-slate-200 text-slate-700 font-mono">${escapeHtml(clusterName)}</span>` : ''}
+                        <div class="ml-2 flex items-center gap-1 flex-wrap">
+                            ${badgesHtml}
+                        </div>
+                    </div>
+                    <span class="text-xs text-slate-500">${drives.length} drive${drives.length === 1 ? '' : 's'}</span>
+                </div>
+                ${alertHtml}
+                ${tableContent}
+            </div>`;
+    }
+
+    container.innerHTML = `
+        <div class="p-4">
+            ${headerHtml}
+            ${summaryCardsHtml}
+            ${tablesHtml}
+        </div>`;
+}
+
 async function loadPxmxData(subMenu) {    const container = document.getElementById('pxmx-content');
     if (!container) return;
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading…</p>';
@@ -23207,6 +23778,10 @@ async function loadPxmxData(subMenu) {    const container = document.getElementB
     try {
         if (subMenu === 'Settings') {
             await renderPxmxSettings(container);
+            return;
+        }
+        if (subMenu === 'Diagnostics') {
+            await renderPxmxDiagnostics(container);
             return;
         }
         if (subMenu === 'Overview' || subMenu === 'Virtual Machines') {
@@ -23346,7 +23921,7 @@ async function showPxmxInstallModal() {
                 <button onclick="document.getElementById('pxmx-install-modal').remove()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Done</button>
             </div>
         </div>`;
-    document.body.appendChild(modal);
+    _mountModal(modal);
 }
 
 // ─── NetBox IPAM / DCIM ──────────────────────────────────────────────────────
@@ -24493,7 +25068,19 @@ async function releaseNetboxIP(ipId) {
 // 503 (spoke down) rendered as "No records found" instead of the real message.
 async function _spokeFetch(url, opts) {
     const r = await fetch(url, opts);
-    if (r.ok) return { ok: true, status: r.status, data: await r.json().catch(() => ({})), detail: null };
+    if (r.ok) {
+        // `.catch` only fires on a PARSE failure, but a body of the literal
+        // JSON token `null` parses perfectly well and yields null — so it slid
+        // through as {ok:true, data:null} and the first field access in every
+        // consumer threw "null is not an object (evaluating 'd.status')"
+        // instead of rendering the amber banner. Coerce any non-object success
+        // body to {} so callers keep the envelope contract they expect; the
+        // hub now also refuses to emit a null body (_spoke_payload_or_raise),
+        // this is the belt-and-braces half.
+        const body = await r.json().catch(() => null);
+        return { ok: true, status: r.status,
+                 data: (body && typeof body === 'object') ? body : {}, detail: null };
+    }
     const e = await r.json().catch(() => ({}));
     return { ok: false, status: r.status, data: null, detail: e.detail || e.message || r.statusText };
 }
@@ -25206,9 +25793,9 @@ async function applyDhcpHaConfig() {
 // www.dwx.com — 42 queries" — from the /api/dns/stats `query_names` list
 // (already sorted/filtered server-side; this just formats it), plus a
 // collapsed "source" line listing which client IP(s) made those queries.
-function _ddQueryNameRows(names) {
-    if (!names.length) {
-        return '<p class="text-slate-400 italic text-sm">No per-name query data yet (Unbound query logging may take a moment to start collecting after first enabled).</p>';
+function _ddQueryNameRows(names, searchActive = false) {
+    if (!names.length && !searchActive) {
+        return '<p class="text-slate-400 italic text-sm">No DNS queries recorded yet. This may mean:<br>• Unbound DNS is not running<br>• Query logging is not enabled<br>• No DNS queries have been made recently.</p>';
     }
     return `<div class="max-h-80 overflow-y-auto divide-y divide-slate-100">${names.map(q => {
         const sources = q.sources || [];
@@ -25401,7 +25988,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                                    class="text-xs border border-slate-300 rounded-md px-2 py-1 w-56 focus:outline-none focus:ring-1 focus:ring-blue-400" />
                         </div>
                     </div>
-                    <div id="dns-query-name-list">${_ddQueryNameRows(d.query_names || [])}</div>
+                    <div id="dns-query-name-list">${_ddQueryNameRows(d.query_names || [], false)}</div>
                 </div>
                 ${syncLine}`;
             const searchInput = document.getElementById('dns-query-name-search');
@@ -25418,7 +26005,7 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                         if (hostInput && hostInput.value) params.push('host=' + encodeURIComponent(hostInput.value));
                         const qs = params.length ? (_tenantQS() ? '&' : '?') + params.join('&') : '';
                         const { ok: ok2, data: d2 } = await _spokeFetch('/api/dns/stats' + _tenantQS() + qs);
-                        if (ok2 && d2) list.innerHTML = _ddQueryNameRows(d2.query_names || []);
+                        if (ok2 && d2) list.innerHTML = _ddQueryNameRows(d2.query_names || [], params.length > 0);
                     }, 250);
                 };
                 if (searchInput) searchInput.addEventListener('input', runSearch);
@@ -27400,7 +27987,7 @@ async function showDnsCredentialsModal() {
           ${form}
         </div>
       </div>`;
-    document.body.appendChild(modal);
+    _mountModal(modal);
     modal.dataset.vaultOn = vaultOn ? '1' : '';
     if (!vaultOn) dnsCredRenderFields();
     await dnsCredReloadList();
@@ -30711,7 +31298,7 @@ async function showAddUserModal() {
             </div>
         </div>
     `;
-    document.body.appendChild(modal);
+    _mountModal(modal);
     if (document.getElementById('new-user-groups')) {
         _populateUserGroupChecklist('new-user-groups', []);
     }
@@ -30893,7 +31480,7 @@ async function editUser(userId) {
                 </div>
             </div>
         `;
-        document.body.appendChild(modal);
+        _mountModal(modal);
     } catch (err) {
         showToast('Error opening edit modal: ' + err.message, 'error');
     }
@@ -32586,6 +33173,7 @@ async function _initApp() {
         loadAppearance();
         loadToastConfig();
         loadTenantPrefixes();  // background — prefixes used for filtering, not dashboard render
+        installClickFeedback();  // immediate "Loading …" ack on every button click
         setView('dashboard');
         _startCacheStatusPolling();
         pollManager.register(updateStatus, 10000);
@@ -32955,8 +33543,11 @@ function handleSearch(value) {
             const d = r.ok ? await r.json() : null;
             if (!d) { dropdown.innerHTML = '<p class="text-xs text-red-400 px-2 py-1">Search failed</p>'; return; }
 
+            const legNames = { NETBOX_SEARCH: 'NetBox', SEARCH_VMS: 'VMs', SEARCH_SESSIONS: 'NAC sessions', SEARCH_USERS: 'Directory', SEARCH_DHCP: 'DHCP' };
+            const degradedNote = (Array.isArray(d.degraded) && d.degraded.length)
+                ? `<p class="text-[10px] text-amber-600 px-2 pt-1 border-t border-slate-100">Some sources did not answer: ${d.degraded.map(c => legNames[c] || c).join(', ')}</p>` : '';
             if (d.total === 0) {
-                dropdown.innerHTML = '<p class="text-xs text-slate-400 italic px-2 py-1">No results</p>';
+                dropdown.innerHTML = '<p class="text-xs text-slate-400 italic px-2 py-1">No results</p>' + degradedNote;
                 return;
             }
 
@@ -33023,7 +33614,7 @@ function handleSearch(value) {
             }).join('');
 
             const more = d.total > 12 ? `<p class="text-[10px] text-slate-400 px-2 pt-1 border-t border-slate-100">${d.total - 12} more — narrow your search</p>` : '';
-            dropdown.innerHTML = rows + more;
+            dropdown.innerHTML = rows + more + degradedNote;
         } catch (err) {
             dropdown.innerHTML = `<p class="text-xs text-red-400 px-2 py-1">Error: ${err.message}</p>`;
         }
@@ -33035,9 +33626,10 @@ function openSearchResult(item) {
     const dd  = document.getElementById('search-results');
     if (inp) inp.value = '';
     if (dd)  { dd.classList.add('hidden'); dd.innerHTML = ''; }
-    // A console hit already carries its connect coordinates — open the serial
-    // terminal straight away instead of the (admin-only) device dashboard.
-    if (item.source === 'console' && item.spoke_id && item.port_id) {
+    // /api/device-detail is admin-only, so non-admins cannot use the device dashboard.
+    // A console hit already carries its connect coordinates: open the terminal directly
+    // for them; admins keep the richer inventory dashboard.
+    if (item.source === 'console' && item.spoke_id && item.port_id && !isAdmin()) {
         if (typeof openConsoleTerminal === 'function') {
             openConsoleTerminal(item.spoke_id, item.port_id);
             return;
@@ -33098,8 +33690,11 @@ async function showDeviceDashboard(item) {
     document.body.appendChild(modal);
 
     const params = new URLSearchParams();
-    if (item.mac)  params.set('mac', item.mac);
-    if (item.ip)   params.set('ip', item.ip);
+    if (item.mac)     params.set('mac', item.mac);
+    if (item.ip)      params.set('ip', item.ip);
+    if (item.serial)  params.set('serial', item.serial);
+    if (item.port_id) params.set('port_id', item.port_id);
+    if (item.device)  params.set('device', item.device);
     const nameAsHostname = !item.mac && !item.ip && item.name;
     if (nameAsHostname) params.set('hostname', item.name);
 
@@ -33107,7 +33702,7 @@ async function showDeviceDashboard(item) {
         const d = await apiJson(`/api/device-detail?${params}`);
 
         const id = d.identity || {};
-        const identParts = [id.mac, id.ip, id.hostname].filter(Boolean);
+        const identParts = [id.hostname, id.serial ? `SN: ${id.serial}` : null, id.ip, id.mac].filter(Boolean);
         document.getElementById('dd-identity').textContent = identParts.join('  ·  ') || item.name || '—';
 
         const badge = (label, cls) => `<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${cls}">${label}</span>`;
@@ -33152,12 +33747,25 @@ async function showDeviceDashboard(item) {
 
         // NetBox
         const nb = d.netbox || [];
-        cards.push(card('NetBox', nb.length ? 'bg-green-50 text-green-700' : 'bg-slate-50 text-slate-400',
-            nb.length ? nb.slice(0, 5).map(n => `
-                <div class="text-xs py-1 border-b border-slate-50 last:border-0">
-                    <span class="font-medium text-slate-700">${n.name || n.ip || '—'}</span>
-                    <span class="text-slate-400 ml-2">${n.type || ''} ${n.ip ? '· ' + n.ip : ''}</span>
-                </div>`).join('') : empty));
+        cards.push(card('NetBox Inventory', nb.length ? 'bg-green-50 text-green-700' : 'bg-slate-50 text-slate-400',
+            nb.length ? nb.slice(0, 5).map(n => {
+                const meta = [
+                    n.device_type ? `Type: ${n.device_type}` : (n.type && n.type !== 'device' ? n.type : ''),
+                    n.serial ? `Serial: ${n.serial}` : '',
+                    n.role ? `Role: ${n.role}` : '',
+                    n.site ? `Site: ${n.site}` : '',
+                    n.rack ? `Rack: ${n.rack}` : '',
+                    n.ip ? `IP: ${n.ip}` : '',
+                ].filter(Boolean).join(' · ');
+                return `
+                <div class="py-1.5 border-b border-slate-50 last:border-0">
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs font-semibold text-slate-700">${escapeHtml(n.name || n.ip || '—')}</span>
+                        ${n.status ? `<span class="px-1.5 py-0.5 rounded text-[9px] uppercase font-bold ${n.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}">${escapeHtml(n.status)}</span>` : ''}
+                    </div>
+                    ${meta ? `<div class="text-[10px] text-slate-500 font-mono mt-0.5">${escapeHtml(meta)}</div>` : ''}
+                </div>`;
+            }).join('') : empty));
 
         // Proxmox
         const px = d.proxmox || [];
@@ -33214,7 +33822,10 @@ async function showDeviceDashboard(item) {
 
         // Console: serial-console port(s) mapped to this device, each with a
         // direct connect button (opens the serial terminal for the line).
-        const con = d.console || [];
+        let con = d.console || [];
+        if (con.length === 0 && item.source === 'console') {
+            con = [item];
+        }
         cards.push(card('Console', con.length ? 'bg-[#01A982]/10 text-[#01A982]' : 'bg-slate-50 text-slate-400',
             con.length ? con.map(c => {
                 const meta = [c.device, c.baud ? c.baud + 'bps' : '', c.model || c.vendor || '', c.agent_name || '']

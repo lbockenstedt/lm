@@ -1493,6 +1493,161 @@ def register(app, hub, ctx):
                 return merged
             raise HTTPException(status_code=500, detail=str(e))
 
+    def _normalize_drive_summary(raw_summary: dict, drives: list) -> dict:
+        if isinstance(raw_summary, dict) and any(
+            raw_summary.get(k) is not None for k in ("healthy", "healthy_drives", "total_drives")
+        ):
+            return {
+                "total_drives": int(raw_summary.get("total_drives") or len(drives)),
+                "healthy": int(raw_summary.get("healthy", raw_summary.get("healthy_drives", 0)) or 0),
+                "warning": int(raw_summary.get("warning", raw_summary.get("warning_drives", 0)) or 0),
+                "critical": int(raw_summary.get("critical", raw_summary.get("critical_drives", 0)) or 0),
+                "unknown": int(raw_summary.get("unknown", raw_summary.get("unknown_drives", 0)) or 0),
+            }
+        s = {"total_drives": len(drives), "healthy": 0, "warning": 0, "critical": 0, "unknown": 0}
+        for d in drives:
+            st = str(d.get("health_status") or "").lower()
+            wear = d.get("wear_level")
+            if st in ("healthy", "ok", "good"):
+                s["healthy"] += 1
+            elif st in ("warning", "warn"):
+                s["warning"] += 1
+            elif st in ("critical", "crit", "error", "failed"):
+                s["critical"] += 1
+            elif isinstance(wear, (int, float)):
+                if wear >= 90:
+                    s["critical"] += 1
+                elif wear >= 80:
+                    s["warning"] += 1
+                else:
+                    s["healthy"] += 1
+            else:
+                s["unknown"] += 1
+        return s
+
+    @app.get("/api/pxmx/drive-health")
+    async def get_pxmx_drive_health(request: Request, tenant: str = None, node: str = None):
+        """Retrieve drive health and SSD wear diagnostics across hypervisor nodes."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not sess:
+            raise HTTPException(status_code=401, detail="Authentication required")
+
+        tid = _resolve_tenant(request, tenant)
+        if tid and tid != "default":
+            spokes = hub.get_hypervisor_spokes_for_tenant(tid)
+        else:
+            spokes = [hub.get_hypervisor_spoke()] if hub.get_hypervisor_spoke() else []
+
+        if not spokes:
+            return {
+                "nodes": [],
+                "spoke_connected": False,
+                "summary": {
+                    "total_drives": 0,
+                    "healthy": 0,
+                    "warning": 0,
+                    "critical": 0,
+                    "unknown": 0,
+                },
+            }
+
+        target_nodes = [node.strip()] if node and node.strip() else []
+        if not target_nodes:
+            try:
+                nodes_res = await get_pxmx_nodes(request, tenant=tenant)
+                if isinstance(nodes_res, dict):
+                    for n in (nodes_res.get("nodes") or []):
+                        if isinstance(n, dict):
+                            n_name = n.get("node")
+                            if n_name and str(n.get("status") or "").lower() != "offline" and n_name not in target_nodes:
+                                target_nodes.append(str(n_name))
+            except Exception as e:
+                logger.debug("get_pxmx_drive_health visible nodes resolution: %s", e)
+        if not target_nodes:
+            target_nodes = [""]
+
+        aggregated_nodes = []
+        seen_nodes = set()
+        spoke_connected = False
+
+        for sid in spokes:
+            for target_node in target_nodes:
+                payload = {"node": target_node}
+                try:
+                    res = await hub.request_response(sid, "PXMX_DRIVE_HEALTH", payload, timeout=30.0)
+                except Exception as e:
+                    logger.debug("PXMX_DRIVE_HEALTH failed for spoke %s node %s: %s", sid, target_node, e)
+                    continue
+
+                data = res.get("payload", {}).get("data", res) if isinstance(res, dict) else res
+                if not isinstance(data, dict):
+                    continue
+
+                spoke_connected = True
+
+                diagnostics = data.get("diagnostics") or {}
+                agent_version = data.get("agent_version")
+                error_msg = data.get("message") if data.get("status") == "ERROR" else None
+
+                if isinstance(data.get("nodes"), list):
+                    for n in data["nodes"]:
+                        if not isinstance(n, dict):
+                            continue
+                        n_name = n.get("node") or target_node or "default"
+                        if n_name in seen_nodes:
+                            continue
+                        seen_nodes.add(n_name)
+                        drives = n.get("drives") or []
+                        summary = _normalize_drive_summary(n.get("summary"), drives)
+                        aggregated_nodes.append({
+                            "node": n_name,
+                            "cluster": n.get("cluster") or data.get("cluster") or "",
+                            "drives": drives,
+                            "summary": summary,
+                            "status": n.get("status", "UNKNOWN"),
+                            "error": n.get("message") if n.get("status") == "ERROR" else None,
+                            "envelope_error": error_msg,
+                            "agent_version": n.get("agent_version", agent_version),
+                            "diagnostics": n.get("diagnostics") or diagnostics,
+                        })
+                else:
+                    n_name = data.get("node") or target_node or "default"
+                    if n_name in seen_nodes:
+                        continue
+                    seen_nodes.add(n_name)
+                    drives = data.get("drives") or []
+                    summary = _normalize_drive_summary(data.get("summary"), drives)
+                    aggregated_nodes.append({
+                        "node": n_name,
+                        "cluster": data.get("cluster") or "",
+                        "drives": drives,
+                        "summary": summary,
+                        "status": data.get("status", "UNKNOWN"),
+                        "error": data.get("message") if data.get("status") == "ERROR" else None,
+                        "envelope_error": None,
+                        "agent_version": agent_version,
+                        "diagnostics": diagnostics,
+                    })
+
+        total_summary = {
+            "total_drives": 0,
+            "healthy": 0,
+            "warning": 0,
+            "critical": 0,
+            "unknown": 0,
+        }
+        for n in aggregated_nodes:
+            ns = n.get("summary") or {}
+            for k in ("total_drives", "healthy", "warning", "critical", "unknown"):
+                total_summary[k] += int(ns.get(k, 0) or 0)
+
+        return {
+            "nodes": aggregated_nodes,
+            "summary": total_summary,
+            "spoke_connected": spoke_connected,
+        }
+
     # ── pxmx / Proxmox: VMs + agent commands (/api/pxmx/*) ───────────────────
     @app.get("/api/pxmx/vms")
     async def get_pxmx_vms(request: Request, agent_id: str = None, tenant: str = None):

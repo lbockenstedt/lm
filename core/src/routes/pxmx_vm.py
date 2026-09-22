@@ -262,7 +262,11 @@ def register(app, hub, ctx):
             payload["snapshot_name"] = f"{prefix}-{int(_time.time())}"
         try:
             result = await hub.request_response(pxmx_spoke, "PXMX_VM_ACTION", payload, timeout=60.0)
-            data = result.get("payload", {}).get("data", result) if isinstance(result, dict) else result
+            # unwrap_spoke (not the inline `.get("data", result)`, which only
+            # defaults on an ABSENT key): a spoke replying `data: null` used to
+            # unwrap to None and this route returned HTTP 200 with a literal
+            # JSON `null` body, which the WebUI then dereferenced.
+            data = access.unwrap_spoke(result)
             # Best-effort: a VM lifecycle change (start/stop/restart/snapshot)
             # may change the NetBox VM-record view (status at minimum), so re-sync
             # the acting tenant's VMs to NetBox when the VM sync is enabled.

@@ -20,7 +20,9 @@ import pytest
 
 _CONSOLE = os.path.join(os.path.dirname(__file__), "..", "src", "routes", "console.py")
 _WANTED = {"_console_seed_credentials", "_console_mark_seeded",
-           "_console_load_credentials_resolved", "_console_creds_from_cred_vault"}
+           "_console_load_credentials_resolved", "_console_creds_from_cred_vault",
+           "_console_purge_legacy_credentials", "_console_warn_no_credentials",
+           "_console_clear_no_credentials"}
 
 
 def _load_seed_helpers(creds):
@@ -106,3 +108,26 @@ def test_diagnostics_endpoint_returns_debug_block():
     names = {n.name for n in ast.walk(tree)
              if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     assert "_console_hub_git_head" in names
+
+
+def test_diagnostics_admin_fleetwide_gated_on_no_tenant_selected():
+    """A Global Admin who picked a tenant must be scoped to it, not shown the
+    whole fleet. The fleet-wide shortcut (``spokes = all_spokes``, no per-row
+    filtering) must therefore be guarded by BOTH ``admin`` AND ``sel`` being
+    empty — never a bare ``if admin:`` that ignores the selected tenant."""
+    src = open(_CONSOLE).read()
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "console_diagnostics")
+    fleet_if = None
+    for node in ast.walk(fn):
+        if isinstance(node, ast.If):
+            body_dump = ast.dump(ast.Module(body=node.body, type_ignores=[]))
+            if "visible_keys" in body_dump and "all_spokes" in body_dump \
+                    and "Constant(value=None)" in body_dump:
+                fleet_if = node
+                break
+    assert fleet_if is not None, "fleet-wide diagnostics branch not found"
+    test_dump = ast.dump(fleet_if.test)
+    assert "'admin'" in test_dump and "'sel'" in test_dump, \
+        "fleet-wide branch must be gated on admin AND no tenant selected"

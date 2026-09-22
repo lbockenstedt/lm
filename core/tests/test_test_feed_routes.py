@@ -22,6 +22,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from routes.test_feed import _collect_fleet, _probe_source, _source_tenants, _DEFAULTS  # noqa: E402
+from routes.test_feed import TOKEN_ROTATION_SENTINEL as _ROUTE_SENTINEL  # noqa: E402
 
 
 class _Hub:
@@ -62,8 +63,39 @@ def test_accepts_the_vms_key_as_well_as_proxmox_vms():
     assert len(out["proxmox"]) == 1
 
 
+def test_harvests_per_host_vms_and_usb_from_proxmox_hosts():
+    """The bulk of a real fleet's VMs/USB ride nested under proxmox_hosts, not
+    at the top of the frame. SimulationsService renders the per-host lists, so
+    the feed must harvest them too or the target sees an empty hypervisor."""
+    hub = _Hub({"cs-svr-01": {
+        "proxmox_hosts": [
+            {"hostname": "pve-a",
+             "proxmox_vms": [{"vmid": 100}, {"vmid": 101}],
+             "usb_devices": [{"id": "1-1"}]},
+            {"hostname": "pve-b",
+             "proxmox_vms": [{"vmid": 200}],
+             "usb_devices": []},
+        ]}})
+    out = _collect_fleet(hub)
+    assert len(out["proxmox"]) == 3
+    assert len(out["usb"]) == 1
+    # each VM/USB is attributed to its spoke and stamped with its host node
+    assert {v["spoke_id"] for v in out["proxmox"]} == {"cs-svr-01"}
+    assert {v["node"] for v in out["proxmox"]} == {"pve-a", "pve-b"}
+    assert out["usb"][0]["node"] == "pve-a"
+
+
+def test_top_level_vms_still_work_when_there_are_no_proxmox_hosts():
+    """A frame without proxmox_hosts falls back to the top-level lists, exactly
+    as SimulationsService does — no regression for single-host frames."""
+    out = _collect_fleet(_Hub({"s1": {"proxmox_vms": [{"vmid": 1}],
+                                      "usb_devices": [{"id": "u1"}]}}))
+    assert len(out["proxmox"]) == 1
+    assert len(out["usb"]) == 1
+
+
 def test_empty_cache_yields_empty_lists_not_an_error():
-    assert _collect_fleet(_Hub({})) == {"clients": [], "proxmox": []}
+    assert _collect_fleet(_Hub({})) == {"clients": [], "proxmox": [], "usb": []}
 
 
 def test_a_broken_hub_degrades_to_empty_rather_than_raising():
@@ -73,7 +105,7 @@ def test_a_broken_hub_degrades_to_empty_rather_than_raising():
         @property
         def simulations_cache(self):
             raise RuntimeError("state unavailable")
-    assert _collect_fleet(_Bad()) == {"clients": [], "proxmox": []}
+    assert _collect_fleet(_Bad()) == {"clients": [], "proxmox": [], "usb": []}
 
 
 def test_rows_are_copied_not_aliased():
@@ -82,6 +114,79 @@ def test_rows_are_copied_not_aliased():
     cache = {"s1": {"clients": [{"hostname": "a"}]}}
     _collect_fleet(_Hub(cache))
     assert "spoke_id" not in cache["s1"]["clients"][0]
+
+
+# --------------------------------------------------------------------------
+# _fleet_identity — whole-fleet identity for full-fleet replay
+# --------------------------------------------------------------------------
+
+from routes.test_feed import _fleet_identity  # noqa: E402
+
+
+class _State:
+    def __init__(self, names=None, tenants=None, meta=None):
+        self._names = names or {}
+        self._tenants = tenants or {}
+        self.system_state = {"module_metadata": meta or {}}
+
+    def get_module_name(self, sid):
+        return self._names.get(sid)
+
+    def get_spoke_tenant(self, sid):
+        return self._tenants.get(sid)
+
+
+class _FleetHub:
+    def __init__(self, conn, types=None, state=None, cache=None):
+        self.active_connections = {sid: object() for sid in conn}
+        self.spoke_module_types = types or {}
+        self.state = state or _State()
+        self.simulations_cache = cache or {}
+
+
+def test_fleet_identity_enumerates_every_connected_spoke():
+    """The whole point of full-fleet replay: identity for EVERY connected spoke,
+    not just the Client-Sim hosts that push telemetry."""
+    hub = _FleetHub(
+        conn=["nw-01", "dns-01", "cs-svr-01"],
+        types={"nw-01": "nw", "dns-01": "dns", "cs-svr-01": "simulation"},
+        state=_State(
+            names={"nw-01": "switch-core", "dns-01": "unbound-a",
+                   "cs-svr-01": "cs-svr-01"},
+            tenants={"nw-01": "t-red", "dns-01": "default"}),
+    )
+    out = _fleet_identity(hub)
+    assert set(out) == {"nw-01", "dns-01", "cs-svr-01"}
+    assert out["nw-01"]["module_type"] == "nw"
+    assert out["nw-01"]["name"] == "switch-core"
+    assert out["nw-01"]["tenant"] == "t-red"
+
+
+def test_fleet_identity_falls_back_to_metadata_for_module_type():
+    """A spoke absent from spoke_module_types (races on connect) still gets its
+    type from module_metadata rather than shipping blank."""
+    hub = _FleetHub(
+        conn=["ipam-01"],
+        types={},
+        state=_State(meta={"ipam-01": {"module_type": "ipam"}}),
+    )
+    assert _fleet_identity(hub)["ipam-01"]["module_type"] == "ipam"
+
+
+def test_fleet_identity_name_defaults_to_id_and_blanks_are_safe():
+    hub = _FleetHub(conn=["x1"], types={"x1": "nac"}, state=_State())
+    rec = _fleet_identity(hub)["x1"]
+    assert rec["name"] == "x1"
+    assert rec["module_type"] == "nac"
+    assert rec["tenant"] == ""
+
+
+def test_fleet_identity_degrades_to_empty_when_connections_unavailable():
+    class _Bad:
+        @property
+        def active_connections(self):
+            raise RuntimeError("no state")
+    assert _fleet_identity(_Bad()) == {}
 
 
 # --------------------------------------------------------------------------
@@ -207,7 +312,9 @@ def test_source_tenants_collects_distinct_ids(monkeypatch):
     }}
     monkeypatch.setattr(urllib.request, "urlopen",
                         lambda *a, **kw: _snapshot_resp(snap))
-    assert _source_tenants("https://src", "tok") == {"acme", "globex"}
+    ids, registry = _source_tenants("https://src", "tok")
+    assert ids == {"acme", "globex"}
+    assert registry == {}  # this source publishes no registry
 
 
 def test_source_tenants_empty_when_unattributed(monkeypatch):
@@ -218,7 +325,9 @@ def test_source_tenants_empty_when_unattributed(monkeypatch):
     snap = {"spokes": {"s1": {"clients": []}, "s2": {"clients": [], "tenant": ""}}}
     monkeypatch.setattr(urllib.request, "urlopen",
                         lambda *a, **kw: _snapshot_resp(snap))
-    assert _source_tenants("https://src", "tok") == set()
+    ids, registry = _source_tenants("https://src", "tok")
+    assert ids == set()
+    assert registry == {}
 
 
 def test_source_tenants_sends_bearer_token(monkeypatch):
@@ -234,6 +343,202 @@ def test_source_tenants_sends_bearer_token(monkeypatch):
     assert seen["auth"] == "Bearer tok-xyz"
 
 
+def test_source_tenants_returns_registry_including_spokeless(monkeypatch):
+    """The registry is the whole point: a tenant that owns NO spoke cannot be
+    inferred from the payloads, so before it was published such a tenant never
+    reached the receiver and was missing from its tenant picker."""
+    import urllib.request
+    snap = {
+        "spokes": {"s1": {"clients": [], "tenant": "acme"}},
+        "tenants": {
+            "acme": {"name": "ACME", "netbox_id": 2},
+            "quiet": {"name": "QUIET"},        # owns no spoke
+        },
+    }
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **kw: _snapshot_resp(snap))
+    ids, registry = _source_tenants("https://src", "tok")
+    assert ids == {"acme"}
+    assert set(registry) == {"acme", "quiet"}
+    assert registry["quiet"]["name"] == "QUIET"
+
+
+def test_source_tenants_ignores_malformed_registry(monkeypatch):
+    """A source that sends a non-dict ``tenants`` (or none at all) must not
+    break preserve mode — it degrades to the spoke-inferred ids."""
+    import urllib.request
+    snap = {"spokes": {"s1": {"clients": [], "tenant": "acme"}},
+            "tenants": ["not", "a", "dict"]}
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **kw: _snapshot_resp(snap))
+    ids, registry = _source_tenants("https://src", "tok")
+    assert ids == {"acme"}
+    assert registry == {}
+
+
+def test_tenant_registry_publishes_only_allowlisted_fields():
+    """The tenant record carries deployment wiring the feed has no business
+    publishing. The allowlist must drop anything not named in TENANT_FIELDS."""
+    from routes.test_feed import TENANT_FIELDS, _tenant_registry
+
+    class _State:
+        tenant_state = {"tenants": {
+            "acme": {
+                "name": "ACME", "netbox_id": 3, "active": True,
+                "ldap_base_dn": "dc=corp,dc=example",
+                "proxmox_tag": "acme-tag",
+                "quotas": {"vm": 9},
+            },
+            "bogus": "not-a-dict",
+        }}
+
+    class _Hub:
+        state = _State()
+
+    reg = _tenant_registry(_Hub())
+    assert set(reg) == {"acme"}          # the non-dict row is skipped
+    assert reg["acme"]["name"] == "ACME"
+    assert reg["acme"]["netbox_id"] == 3
+    for leaked in ("ldap_base_dn", "proxmox_tag", "quotas"):
+        assert leaked not in reg["acme"], f"{leaked} must not be published"
+    assert set(reg["acme"]).issubset(set(TENANT_FIELDS))
+
+
+def test_tenant_registry_survives_unreadable_state():
+    """Best-effort: an unreadable tenant registry publishes nothing rather than
+    failing the whole snapshot."""
+    from routes.test_feed import _tenant_registry
+
+    class _Boom:
+        @property
+        def tenant_state(self):
+            raise RuntimeError("sealed")
+
+    class _Hub:
+        state = _Boom()
+
+    assert _tenant_registry(_Hub()) == {}
+
+
+class _FakeState:
+    def __init__(self, tenants=None):
+        self.tenant_state = {"tenants": dict(tenants or {})}
+        self.saved = 0
+
+    def update_tenant(self, tid, data):
+        self.tenant_state["tenants"].setdefault(tid, {}).update(data)
+
+    async def save_state_now(self):
+        self.saved += 1
+
+
+class _FakeHub:
+    def __init__(self, tenants=None):
+        self.state = _FakeState(tenants)
+
+
+def _run(coro):
+    import asyncio
+    return asyncio.new_event_loop().run_until_complete(coro)
+
+
+def test_ensure_local_tenants_creates_missing_shells():
+    """Preserve can only map a source tenant onto a LOCAL tenant of the same
+    id, so the missing ones must be created or the fleet collapses into the
+    fallback."""
+    from routes.test_feed import _ensure_local_tenants
+    hub = _FakeHub({"default": {"name": "DEFAULT"}})
+    reg = {"ra": {"name": "RA", "netbox_id": 2}, "central": {"name": "CENTRAL"}}
+    created = _run(_ensure_local_tenants(hub, reg, {"default"}))
+    assert sorted(created) == ["central", "ra"]
+    tenants = hub.state.tenant_state["tenants"]
+    assert tenants["ra"]["name"] == "RA"
+    assert tenants["ra"]["netbox_id"] == 2
+    assert tenants["ra"]["active"] is True
+    assert hub.state.saved == 1  # persisted before the feeder starts
+
+
+def test_ensure_local_tenants_never_overwrites_existing():
+    """The feed replays a fleet; it does not get to reconfigure a tenant the
+    operator already set up on the receiver."""
+    from routes.test_feed import _ensure_local_tenants
+    hub = _FakeHub({"ra": {"name": "MY-OWN-RA", "quotas": {"vm": 5}}})
+    created = _run(_ensure_local_tenants(
+        hub, {"ra": {"name": "RA", "netbox_id": 2}}, {"ra"}))
+    assert created == []
+    assert hub.state.tenant_state["tenants"]["ra"] == {
+        "name": "MY-OWN-RA", "quotas": {"vm": 5}}
+    assert hub.state.saved == 0  # nothing changed, nothing persisted
+
+
+def test_ensure_local_tenants_mirrors_the_shared_tenant():
+    """A shared tenant's spokes are visible to EVERY tenant, so which tenant
+    carries the flag is part of the fleet's shape. A receiver replaying
+    production must land it on the same tenant or the replica is visibly
+    wrong."""
+    from routes.test_feed import _ensure_local_tenants
+    hub = _FakeHub({"default": {"name": "DEFAULT", "shared": True}})
+    reg = {"default": {"name": "DEFAULT"},
+           "shared": {"name": "SHARED", "shared": True}}
+    _run(_ensure_local_tenants(hub, reg, {"default"}))
+    tenants = hub.state.tenant_state["tenants"]
+    # the source's shared tenant is created AND flagged ...
+    assert tenants["shared"]["shared"] is True
+    # ... and the single-shared invariant holds: nothing else keeps the flag.
+    assert tenants["default"]["shared"] is False
+    assert [t for t, c in tenants.items() if c.get("shared")] == ["shared"]
+
+
+def test_ensure_local_tenants_mirrors_shared_onto_existing_tenant():
+    """The flag is reconciled even when the tenant already exists locally —
+    otherwise a receiver that created the tenant first keeps the wrong one
+    shared forever."""
+    from routes.test_feed import _ensure_local_tenants
+    hub = _FakeHub({"default": {"name": "DEFAULT", "shared": True},
+                    "shared": {"name": "SHARED"}})
+    reg = {"shared": {"name": "SHARED", "shared": True}}
+    _run(_ensure_local_tenants(hub, reg, {"default", "shared"}))
+    tenants = hub.state.tenant_state["tenants"]
+    assert tenants["shared"]["shared"] is True
+    assert tenants["default"]["shared"] is False
+    assert hub.state.saved == 1  # a flag move is persisted even with no creates
+
+
+def test_ensure_local_tenants_leaves_shared_alone_when_source_has_none():
+    """An older or anonymised source publishes no shared tenant. The operator's
+    own choice must survive rather than being cleared."""
+    from routes.test_feed import _ensure_local_tenants
+    hub = _FakeHub({"default": {"name": "DEFAULT", "shared": True}})
+    _run(_ensure_local_tenants(hub, {"ra": {"name": "RA"}}, {"default"}))
+    assert hub.state.tenant_state["tenants"]["default"]["shared"] is True
+
+
+def test_ensure_local_tenants_still_protects_non_shared_fields():
+    """Only the shared flag is reconciled; name/quotas stay operator-owned."""
+    from routes.test_feed import _ensure_local_tenants
+    hub = _FakeHub({"ra": {"name": "MY-OWN-RA", "quotas": {"vm": 5}}})
+    _run(_ensure_local_tenants(
+        hub, {"ra": {"name": "RA", "netbox_id": 2}}, {"ra"}))
+    assert hub.state.tenant_state["tenants"]["ra"] == {
+        "name": "MY-OWN-RA", "quotas": {"vm": 5}}
+
+
+def test_ensure_local_tenants_skips_blank_ids_and_survives_failures():
+    from routes.test_feed import _ensure_local_tenants
+
+    class _Halfbroken(_FakeState):
+        def update_tenant(self, tid, data):
+            if tid == "bad":
+                raise RuntimeError("nope")
+            super().update_tenant(tid, data)
+
+    hub = _FakeHub()
+    hub.state = _Halfbroken()
+    created = _run(_ensure_local_tenants(
+        hub, {"  ": {}, "bad": {}, "good": {"name": "GOOD"}}, set()))
+    assert created == ["good"]  # blank skipped, failure swallowed
+
+
 def test_there_is_no_operator_supplied_psk():
     """The onboarding PSK only auto-approves the synthetic spokes on THIS hub,
     which is also what spawns them. Start mints an ephemeral one and stop
@@ -247,6 +552,15 @@ def test_both_halves_of_the_token_pair_are_configurable():
     feed dies overnight and reads as 'it randomly stopped'."""
     assert "receiver_token" in _DEFAULTS
     assert "receiver_refresh_token" in _DEFAULTS
+
+
+def test_rotation_sentinel_matches_the_feeder(monkeypatch):
+    """The feeder prints this exact prefix and the route parses it back out; if
+    the two constants drift, rotated tokens are never persisted and the feed
+    silently reverts to dying for good on the next restart."""
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
+    import hub_feed
+    assert _ROUTE_SENTINEL == hub_feed.TOKEN_ROTATION_SENTINEL
 
 
 def test_test_feed_redaction():
@@ -268,3 +582,60 @@ def test_test_feed_redaction():
     assert "secret-refresh" not in repr(red)
     # Non-secret config still round-trips so the form can be populated.
     assert red["receiver_source_url"] == "https://src"
+
+
+# --------------------------------------------------------------------------
+# _build_feeder_argv — dash-leading tokens must survive argparse
+# --------------------------------------------------------------------------
+#
+# Regression: api_tokens mints URL-safe-base64 tokens, which can start with "-".
+# When the feeder argv passed such a token as two items ("--refresh-token",
+# "-p9G3..."), argparse read the leading "-" as the next option and aborted with
+# "argument --refresh-token: expected one argument". The child never started, so
+# a hub restart silently killed the whole Test Data Feed until a human happened
+# to re-mint a token that did not start with "-". These pin the "--flag=value"
+# contract by parsing the built argv with the feeder's REAL parser.
+
+from routes.test_feed import _build_feeder_argv  # noqa: E402
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
+import hub_feed  # noqa: E402
+
+
+def _argv_for(**cfg):
+    c = {"receiver_source_url": "https://src.example",
+         "receiver_token": "-ACCESSdashlead",
+         "receiver_refresh_token": "-p9G3-refreshdashlead",
+         "receiver_prefix": "feed-", "receiver_interval": 60}
+    c.update(cfg)
+    return _build_feeder_argv("hub_feed.py", c, "wss://127.0.0.1:443", "default",
+                              "-PSKdashlead", preserve=False, tenant_map={})
+
+
+def test_feeder_argv_binds_dash_leading_secrets_to_their_flag():
+    argv = _argv_for()
+    # The three secrets ride "--flag=value" single items, never a bare value that
+    # argparse could mistake for the next option.
+    assert "--token=-ACCESSdashlead" in argv
+    assert "--psk=-PSKdashlead" in argv
+    assert "--refresh-token=-p9G3-refreshdashlead" in argv
+    # And no secret leaks as its own positional (the old, broken shape).
+    assert "-ACCESSdashlead" not in argv
+    assert "-p9G3-refreshdashlead" not in argv
+    assert "-PSKdashlead" not in argv
+
+
+def test_feeder_argv_parses_with_the_real_feeder_parser():
+    # The exact failure mode: feed the built argv (sans python+script) to the
+    # feeder's own parser. Before the fix this raised SystemExit(2).
+    argv = _argv_for()
+    args = hub_feed.build_parser().parse_args(argv[2:])
+    assert args.token == "-ACCESSdashlead"
+    assert args.refresh_token == "-p9G3-refreshdashlead"
+    assert args.psk == "-PSKdashlead"
+
+
+def test_feeder_argv_omits_refresh_token_when_absent():
+    argv = _argv_for(receiver_refresh_token="")
+    assert not any(a.startswith("--refresh-token") for a in argv)
+    assert "--emit-token-rotations" not in argv

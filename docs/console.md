@@ -119,11 +119,15 @@ comma-separated **source-IP allow-list**. This maps to the role config keys
   `/var/lib/lm/console/ports.json` (falling back to a repo-local state dir if that path
   isn't writable).
 - **Baud auto-detect.** `CONSOLE_DETECT_BAUD` (or the automatic identify pipeline) opens
-  the port at each candidate rate in turn (`9600, 115200, 38400, 19200, 57600, 4800,
+  the port at each candidate rate in turn (`115200, 9600, 38400, 19200, 57600, 4800,
   2400, 230400`), sends a CR/LF, and scores the reply by printable-ASCII ratio plus a
   bonus if it matches a known login/prompt/banner regex (`login:`, `Username:`,
-  `Cisco`, `Aruba`, a shell prompt, etc.). The best-scoring rate is locked in and saved
-  to the port's settings; a confidently-good match (score ≥ 1.3) stops the sweep early.
+  `Cisco`, `Aruba`, a shell prompt, etc.). **115200 and 9600 lead the sweep** — between
+  them they cover almost all console gear — and the moment either answers with a
+  confident (mostly-printable) reply the sweep locks it and stops, without drifting onto
+  an exotic rate that happened to score marginally higher. Only if both stay silent/garbled
+  does it fall through to the less-common rates. The chosen rate is saved to the port's
+  settings; a confidently-good match (score ≥ 1.3) also stops the sweep early.
 - **One-writer session relay.** Opening a terminal (`CONSOLE_OPEN`) attaches a browser
   session to a `PortChannel` — one real OS serial handle per physical port, shared by
   every attached session. A background reader thread reads the handle once and fans the
@@ -230,6 +234,26 @@ comma-separated **source-IP allow-list**. This maps to the role config keys
   credentials logged in (the probe stops after trying each once — it deliberately does
   not retry/hammer). A manual Identify surfaces the raw banner even if the profile match
   or login failed, which helps diagnose which step is failing.
+- **It says it can't log in, but no login is ever attempted on the line.** Check the
+  port's diagnostics `reason`. Two causes look identical from the UI:
+  - *"output seen but no recognizable login/password prompt"* — the device printed
+    something after its prompt so the prompt was no longer the last thing on the wire.
+    Gear that logs to its own console does this constantly (Juniper SRX/EX ship with
+    console logging on). The probe now strips trailing syslog/kernel/facility lines
+    before matching, so this should resolve itself; if a device uses a prompt string
+    we don't know, add it to `console/src/prompt_patterns.json` — no code change needed.
+  - *"login prompt seen but no stored credentials to try"* — the hub pushed an empty
+    credential list. A Credential Vault secret only reaches a console agent when it is
+    (a) typed `console` **or** `login`, (b) stored **automation-readable** (hub mode —
+    a pass-phrase-only secret is deliberately skipped, since the hub can't decrypt it
+    unattended), and (c) in the agent's **own tenant bucket or the `__admin__` slot**.
+    A login saved into a different tenant's bucket is never pushed to that agent. The
+    Console diagnostics banner reports the saved/seeded counts (counts only, never
+    values) so you can tell "not saved" from "saved but not seeded".
+- **A Juniper device is reported as a Linux server.** A login-locked SRX/EX prints only
+  `<hostname> (ttyu0)` — no vendor string — so it used to fall through to the generic
+  `login:` match. It is now recognized pre-login; the full model/serial still require a
+  successful login, so fix the credential first.
 - **Agent shows offline.** That's the underlying generic-agent host, not the console role
   specifically — see [generic-agent.md](generic-agent.md) troubleshooting for the base
   agent connection.

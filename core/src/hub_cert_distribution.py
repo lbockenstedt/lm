@@ -43,6 +43,33 @@ cert_log = logging.getLogger("le.distribution")
 # inside the helper) so the caller's response can return first.
 _LM_SELF_RESTART = "/usr/local/bin/lm-self-restart"
 
+# Module types that are CLIENT-ONLY mTLS peers: they authenticate TO the hub
+# with a client cert+key but, unlike a full module spoke, never receive the
+# hub's CA-bundle fan-out (SPOKE_SET_MTLS_MATERIALS). AppBuilder ("ab") is the
+# canonical case — hub_agent.py only handles SPOKE_SET_MTLS_CLIENT_CERT and
+# reports ca_present purely from LM_HUB_CA_CERT (unset by default, verify-off
+# fleet convention). Demanding ca_present of such an agent is a false negative
+# that permanently pins mTLS readiness at "missing materials" even though the
+# agent is fully mTLS-authenticating. For these types, ready = online + client
+# cert + key; the CA (hub-cert verification) is optional and gated separately
+# by LM_HUB_TLS_VERIFY, so its absence can never orphan the agent.
+CLIENT_ONLY_MTLS_TYPES = frozenset({"ab"})
+
+
+def _spoke_mtls_ready(module_type, online, ca_present, client_cert_present,
+                      client_key_present) -> bool:
+    """Whether one connected primary spoke is mTLS-ready.
+
+    A full module spoke needs all three materials (CA + client cert + key). A
+    CLIENT-ONLY agent (see CLIENT_ONLY_MTLS_TYPES) is ready on client cert + key
+    alone — it never holds a CA bundle by design, so requiring one would block
+    fleet readiness forever without adding any real safety."""
+    if not (online and client_cert_present and client_key_present):
+        return False
+    if module_type in CLIENT_ONLY_MTLS_TYPES:
+        return True
+    return bool(ca_present)
+
 
 def _diagnose_self_restart_failure(detail: str) -> str:
     """Turn a raw ``sudo``/helper failure into a message that names the actual
@@ -834,7 +861,7 @@ class HubCertDistributionMixin:
             ca = bool(mstat.get("ca_present")) if online else False
             cc = bool(mstat.get("client_cert_present")) if online else False
             ck = bool(mstat.get("client_key_present")) if online else False
-            spoke_ready = online and ca and cc and ck
+            spoke_ready = _spoke_mtls_ready(mt, online, ca, cc, ck)
             spokes_ready = spokes_ready and spoke_ready
             _dn = _names.get(sid, sid)
             _name = _dn if (_dn and _dn != sid) else \

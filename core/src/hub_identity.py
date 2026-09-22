@@ -569,10 +569,21 @@ class HubIdentityMixin:
 
         # Persist current hostname + install_uuid so the next reconnect can diff.
         # install_uuid is recorded only when new_id actually owns it.
-        self.state.update_module_metadata(new_pk, {
+        _persist = {
             "hostname": hostname or "",
             "install_uuid": (install_uuid or "") if owns_uuid else "",
-        })
+        }
+        # First contact: seed the display name from the box's DECLARED hostname
+        # rather than letting update_module_metadata default it to the raw id.
+        # A brand-new entry otherwise gets display_name=module_id, surfacing an
+        # opaque guid in the UI — and for a replayed test-feed spoke that id is
+        # its SOURCE spoke_id, so the fleet shows "<tenant>-<UUID>" instead of the
+        # real host name the feeder sent as hostname. Only on a genuinely new
+        # module and only when a hostname was declared; a later operator rename
+        # is never overridden (the entry then already exists, so this is skipped).
+        if hostname and new_pk not in self.state.system_state.get("module_metadata", {}):
+            _persist["display_name"] = hostname
+        self.state.update_module_metadata(new_pk, _persist)
 
         # Lazy guid-primary arm: relocate this spoke's hub-side state from its
         # connect-id (the operator-chosen name) to its stable install_uuid, so

@@ -51,6 +51,33 @@ CI/tooling changes are omitted unless they change what an operator sees.
   [lm-hub.md](lm-hub.md).
 
 ### Test Data Feed
+- **The feed now carries the whole fleet's telemetry, not just top-level rows.**
+  A spoke's VMs and USB devices usually ride *nested per host* under the frame's
+  `proxmox_hosts` (the same lists the Simulations views render); the export only
+  read the top level, so a host-structured fleet reached the target with **zero
+  VMs and no USB devices**. The snapshot now harvests every host's VMs and USB
+  devices — attributed to their spoke and stamped with the host node — and stops
+  hard-coding the USB list empty, so the target mirrors the full fleet.
+  See the "Test Data Feed" section of [lm-hub.md](lm-hub.md#test-data-feed).
+- **A momentarily-empty source no longer kills the feed.** If the source has no
+  spokes when the feed comes up — e.g. no simulations are producing telemetry
+  yet, which a restart's auto-resume can easily race — the feeder now waits and
+  keeps polling instead of exiting, so the feed goes live on its own the moment
+  the source has data (a bounded `--duration` run still gives up when it lapses).
+  See the "Test Data Feed" section of [lm-hub.md](lm-hub.md#test-data-feed).
+- **The feed now picks up spokes that appear after it started.** Previously the
+  feeder fixed its spoke set at the first poll, so a production spoke that began
+  reporting mid-run (e.g. a simulation that was idle at feed start) never showed
+  up on the target until an operator restarted the feed. Each re-poll now *adds*
+  any new source spokes, so the target keeps converging on the full source fleet
+  on its own. It stays **add-only**: a spoke that disappears from the source is
+  left running so its registration on the target is never orphaned.
+- **A feed now survives hub restarts.** An enabled feed auto-resumes when the hub
+  self-updates or restarts (it used to silently stay stopped), and the feeder
+  persists its own token rotations back to config — so an expired access token no
+  longer leaves a spent refresh token behind for the next restart to trip on and
+  get the whole token family revoked. See the "Test Data Feed" section of
+  [lm-hub.md](lm-hub.md#test-data-feed).
 - **New Setup → Test Data Feed panel (Global-Admin only).** One hub *publishes* a
   snapshot of its fleet; another *subscribes* and replays it as synthetic spokes,
   so a dev/qa hub carries a realistic fleet without duplicate hardware. Publishing

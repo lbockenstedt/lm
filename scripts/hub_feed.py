@@ -88,6 +88,17 @@ except ImportError:  # pragma: no cover - bare checkout without core/src on path
         scrub_snapshot, shard_by_spoke, build_payloads)
 
 
+#: Printed on its own stdout line each time the feeder rotates its API token, so
+#: the parent hub can persist the NEW access+refresh pair back to config. Without
+#: this the hub keeps the ORIGINAL refresh token; the next hub restart re-presents
+#: an already-rotated refresh token, which api_tokens.refresh() flags as reuse and
+#: punishes by revoking the whole token family — the feed then dies for good after
+#: an update and every restart, until a human issues a fresh token. Must stay
+#: byte-for-byte identical to the constant of the same name in
+#: core/src/routes/test_feed.py, which parses these lines out of the child stream.
+TOKEN_ROTATION_SENTINEL = "##LM-TEST-FEED-TOKEN## "
+
+
 class SourceHub:
     """Read-only client for the source hub's aggregate API.
 
@@ -96,13 +107,17 @@ class SourceHub:
     production?" answerable by reading twenty lines rather than auditing every
     call site."""
 
-    def __init__(self, base_url, insecure=True, token="", refresh_token=""):
+    def __init__(self, base_url, insecure=True, token="", refresh_token="",
+                 emit_rotations=False):
         self.base = base_url.rstrip("/")
         self.token = (token or "").strip()
         # Access tokens are short-lived (4h — api_tokens.issue_pair). Without a
         # refresh token a long feed dies overnight and reads as "it randomly
         # stopped"; with one, _get_json rotates the pair on the first 401.
         self.refresh_token = (refresh_token or "").strip()
+        # When True, every successful rotation prints a TOKEN_ROTATION_SENTINEL
+        # line so the parent hub persists the new pair (see the constant's note).
+        self.emit_rotations = bool(emit_rotations)
         self.jar = http.cookiejar.CookieJar()
         ctx = ssl._create_unverified_context() if insecure else ssl.create_default_context()
         self.opener = urllib.request.build_opener(
@@ -158,6 +173,13 @@ class SourceHub:
         self.token = d.get("access_token") or self.token
         self.refresh_token = d.get("refresh_token") or ""
         print("  token refreshed")
+        if self.emit_rotations and self.token:
+            # Hand the fresh pair to the parent hub so it replaces the spent one
+            # in config. Its own line, flushed immediately, so the hub persists
+            # it before this process can exit or be killed mid-rotation.
+            sys.stdout.write(TOKEN_ROTATION_SENTINEL + json.dumps(
+                {"access": self.token, "refresh": self.refresh_token}) + "\n")
+            sys.stdout.flush()
         return True
 
     def _get_json(self, path):
@@ -257,10 +279,21 @@ def _load_feed_spoke():
         never write a real ``.env``, touch healthy-marker files, or act on
         SPOKE_UPDATE (which would git-pull /opt/lm and restart the host)."""
 
-        def __init__(self, spoke_id, payload, stats, interval=30.0, **kw):
+        def __init__(self, spoke_id, payload, stats, interval=30.0,
+                     module_type="simulation", display_name="", **kw):
             super().__init__(spoke_id=spoke_id, **kw)
-            self.module_type = "simulation"   # cs-like → exercises the telemetry path
+            # Replay each spoke as its REAL module type so the target shows the
+            # whole fleet, not a wall of "simulation". Client-Sim hosts keep the
+            # simulation type (→ exercises the telemetry path); everything else
+            # (nw, dns, agent, …) registers as itself and shows online via its
+            # heartbeat with empty deep pages.
+            self.module_type = module_type or "simulation"
+            if display_name:
+                # Seeds the target's display_name on register (state/manager),
+                # so the spoke shows its production name, not its raw id.
+                self.hostname = display_name
             self._payload = payload
+            self._has_telemetry = self._payload_has_telemetry(payload)
             self._stats = stats
             self._interval = max(5.0, float(interval))
             # Throttled diagnostics: a synthetic spoke that cannot attach (bad
@@ -282,11 +315,29 @@ def _load_feed_spoke():
             """Swap in a freshly polled snapshot — this is what makes the feed
             live rather than a fixture frozen at startup."""
             self._payload = payload
+            self._has_telemetry = self._payload_has_telemetry(payload)
+
+        @staticmethod
+        def _payload_has_telemetry(payload):
+            """True when this spoke has Client-Sim rows to replay. Identity-only
+            spokes (no clients/VMs) skip CS_TELEMETRY so they don't seed the
+            target's simulations_cache with a phantom zero-client host — the
+            heartbeat alone keeps them online with their real type/name."""
+            p = payload or {}
+            return bool(p.get("clients")) or bool(p.get("proxmox_vms")) or bool(p.get("vms"))
 
         # ── neutralise side-effects (mirrors loadtest_spokes.LoadSpoke) ──────
         def _ensure_install_uuid(self):
+            # STABLE per synthetic spoke. The hub keys a module by its
+            # install_uuid (guid-primary in hub_identity), so a fresh random uuid
+            # every run makes each feeder restart mint a BRAND-NEW module for the
+            # same spoke — the target fleet accretes a ghost copy of every spoke
+            # on every feed bounce (the accumulation that leaves hundreds of
+            # stale offline entries). Derive it deterministically from the stable
+            # spoke_id so a restart re-attaches to the SAME module instead.
             import uuid
-            return uuid.uuid4().hex
+            return uuid.uuid5(uuid.NAMESPACE_OID,
+                              f"lm-feed-install:{self.spoke_id}").hex
 
         def _persist_session_secret(self, new_secret):
             pass
@@ -309,6 +360,12 @@ def _load_feed_spoke():
             return await super().handle_system_command(cmd_type, data)
 
         def _create_spoke_tasks(self, websocket):
+            if not self._has_telemetry:
+                # No Client-Sim telemetry to emit: the heartbeat thread (started
+                # in _connect_and_serve, independent of these tasks) keeps the
+                # spoke ONLINE with its real type/name. Sending empty telemetry
+                # would only pollute the target's simulations_cache.
+                return []
             return [asyncio.create_task(self._feed_loop(websocket))]
 
         async def _feed_loop(self, websocket):
@@ -390,16 +447,39 @@ async def _run(args, source, salt):
         return _resolve_tenant(payload, tenant_map, args.tenant)
 
     def _clean(payload):
-        """Drop the routing-only ``tenant`` key so the replayed CS_TELEMETRY
-        matches production shape (tenant is metadata, not fleet data)."""
-        if isinstance(payload, dict) and "tenant" in payload:
-            payload = {k: v for k, v in payload.items() if k != "tenant"}
+        """Drop the routing/identity-only keys so the replayed CS_TELEMETRY
+        matches production shape (tenant/module_type/name are metadata, not
+        fleet data — they're consumed at registration, not in telemetry)."""
+        drop = ("tenant", "module_type", "name")
+        if isinstance(payload, dict) and any(k in payload for k in drop):
+            payload = {k: v for k, v in payload.items() if k not in drop}
         return payload
 
+    deadline = time.time() + args.duration if args.duration > 0 else None
     payloads = build_payloads(source.snapshot(), salt, args.prefix)
     stats["polls"] += 1
     if not payloads:
-        raise SystemExit("Source snapshot produced no spokes — nothing to feed.")
+        # The source has no spokes YET — e.g. no active simulations are
+        # producing telemetry at the moment the feed comes up. A hub restart
+        # resumes the feed the instant the process is back, which can easily
+        # beat the source having data. Historically this raised SystemExit, so
+        # the feeder died and the feed stayed silently dead until the NEXT
+        # restart. Instead, keep polling so the feed goes live on its own the
+        # moment the source produces data — no operator round-trip needed.
+        print("Source snapshot has no spokes yet — waiting for the source to "
+              f"produce data (re-polling every {int(args.interval)}s)…",
+              file=sys.stderr)
+        while not payloads:
+            if deadline and time.time() >= deadline:
+                raise SystemExit("Source snapshot stayed empty for the whole "
+                                 "run — nothing to feed.")
+            await asyncio.sleep(args.interval)
+            try:
+                payloads = build_payloads(source.snapshot(), salt, args.prefix)
+                stats["polls"] += 1
+            except Exception as e:  # noqa: BLE001
+                print(f"  ! poll while waiting for data failed: {e}",
+                      file=sys.stderr)
     if tenant_map:
         print(f"Feeding {len(payloads)} synthetic spoke(s) → {args.target} "
               f"(preserving {len(set(tenant_map.values()))} tenant[s])")
@@ -408,34 +488,48 @@ async def _run(args, source, salt):
 
     spokes = {}
     tasks = []
-    for sid, payload in payloads.items():
+
+    def _spawn(sid, payload):
+        """Create + start one synthetic spoke and register it. Shared by the
+        initial fan-out and the re-poll pickup of spokes that appear later."""
         s = FeedSpoke(spoke_id=sid, payload=_clean(payload), stats=stats,
                       interval=args.telemetry_interval,
+                      module_type=(payload or {}).get("module_type") or "simulation",
+                      display_name=(payload or {}).get("name") or "",
                       hub_url=args.target, hub_secret=args.secret or None,
                       onboarding_psk=args.psk or None,
                       tenant_id_hint=_tenant_for(payload))
         spokes[sid] = s
         tasks.append(asyncio.create_task(s.run_forever(stop_evt)))
+
+    for sid, payload in payloads.items():
+        _spawn(sid, payload)
         await asyncio.sleep(args.ramp / max(1, len(payloads)))
 
-    deadline = time.time() + args.duration if args.duration > 0 else None
     try:
         while not stop_evt.is_set():
             await asyncio.sleep(args.interval)
             if deadline and time.time() >= deadline:
                 break
-            # Re-poll: this is what keeps the target live. New spokes appearing
-            # in production mid-run are ignored for this process's lifetime —
-            # restarting picks them up, and churning the spoke set would leave
-            # orphaned registrations on the target.
+            # Re-poll: this is what keeps the target live. Spokes that appear in
+            # production after the feed started are ADDED so the target keeps
+            # converging on the full source fleet without an operator restart.
+            # We never remove: a spoke that vanishes from the source is left in
+            # place, because dropping it would orphan its registration on the
+            # target and churn the view.
             try:
                 fresh = build_payloads(source.snapshot(), salt, args.prefix)
                 stats["polls"] += 1
+                new_ids = [sid for sid in fresh if sid not in spokes]
                 for sid, payload in fresh.items():
                     if sid in spokes:
                         spokes[sid].set_payload(_clean(payload))
-                print(f"  poll {stats['polls']}: refreshed {len(fresh)} spoke(s); "
-                      f"sent={stats['sent']} conn_err={stats['conn_err']}")
+                for sid in new_ids:
+                    _spawn(sid, fresh[sid])
+                    await asyncio.sleep(args.ramp / max(1, len(new_ids)))
+                extra = f"; +{len(new_ids)} new" if new_ids else ""
+                print(f"  poll {stats['polls']}: refreshed {len(fresh)} spoke(s)"
+                      f"{extra}; sent={stats['sent']} conn_err={stats['conn_err']}")
             except Exception as e:  # noqa: BLE001
                 print(f"  ! re-poll failed: {e} — keeping the previous snapshot",
                       file=sys.stderr)
@@ -457,7 +551,11 @@ def _read_password(arg):
     return arg
 
 
-def main():
+def build_parser():
+    """The feeder's argument parser. Extracted from ``main`` so callers (and the
+    test suite) can validate that a hub-built argv actually parses — in
+    particular that dash-leading URL-safe-base64 tokens survive as ``--flag=value``
+    rather than being misread as options."""
     ap = argparse.ArgumentParser(
         description="Replay production fleet data into a dev/qa/lrb hub.")
     ap.add_argument("--source", required=True,
@@ -494,6 +592,16 @@ def main():
                     help="seconds to stagger all target connects over")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the scrubbed snapshot and exit; never touches the target")
+    ap.add_argument("--emit-token-rotations", action="store_true",
+                    help="print a TOKEN_ROTATION_SENTINEL line on every token "
+                         "rotation so a parent hub can persist the new pair. The "
+                         "hub sets this; a human running the feeder by hand should "
+                         "not (it would print tokens to the terminal).")
+    return ap
+
+
+def main():
+    ap = build_parser()
     args = ap.parse_args()
 
     if not args.dry_run and not args.target:
@@ -513,7 +621,8 @@ def main():
     salt = args.salt or hashlib.sha256(os.urandom(32)).hexdigest()[:16]
 
     source = SourceHub(args.source, token=args.token,
-                       refresh_token=args.refresh_token)
+                       refresh_token=args.refresh_token,
+                       emit_rotations=args.emit_token_rotations)
     # A token authenticates on its own — only fall back to the interactive
     # username/password login when none was supplied. Logging in anyway would
     # prompt for a password in a context (the hub's child process) that has no

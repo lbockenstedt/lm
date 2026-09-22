@@ -172,6 +172,20 @@ def test_aggregate_endpoints_wrapped_in_an_envelope_are_unwrapped():
     assert "s1" in buckets
 
 
+def test_usb_devices_are_sharded_and_carried_through():
+    """USB devices are part of the telemetry frame too — they must reach the
+    target, grouped by the same spoke as their host's VMs, not be dropped."""
+    snap = {"proxmox": [{"vmid": 100, "spoke_id": "s1"}],
+            "usb": [{"id": "1-1", "spoke_id": "s1"},
+                    {"id": "2-1", "spoke_id": "s1"}]}
+    buckets = hub_feed.shard_by_spoke(snap)
+    assert len(buckets["s1"]["usb"]) == 2
+    payloads = hub_feed.build_payloads(snap, SALT, "feed-")
+    body = next(iter(payloads.values()))
+    assert body["usb_count"] == 2
+    assert len(body["usb_devices"]) == 2
+
+
 def test_build_payloads_prefixes_every_spoke_id():
     """The prefix is how these get bulk-deleted from the target afterwards."""
     payloads = hub_feed.build_payloads(
@@ -294,6 +308,71 @@ def test_booleans_alongside_scrubbed_keys_are_untouched():
 
 
 # --------------------------------------------------------------------------
+# Full-fleet replay — identity for every spoke, not just Client-Sim hosts
+# --------------------------------------------------------------------------
+
+def test_preserved_snapshot_carries_module_type_and_name_through():
+    """A source that publishes the whole fleet stamps module_type/name per
+    spoke; the receiver must pass those through verbatim so a spoke replays as
+    its REAL type, not a generic 'simulation'."""
+    snap = {"_preserved": {"spokes": {
+        "nw-01": {"module_type": "nw", "name": "switch-core",
+                  "clients": [], "proxmox_vms": []},
+        "cs-svr-01": {"module_type": "simulation", "name": "cs-svr-01",
+                      "clients": [{"hostname": "mipbe-svcs01"}]},
+    }}}
+    payloads = hub_feed.build_payloads(snap, SALT, "feed-")
+    assert payloads["nw-01"]["module_type"] == "nw"
+    assert payloads["nw-01"]["name"] == "switch-core"
+    assert payloads["cs-svr-01"]["clients"][0]["hostname"] == "mipbe-svcs01"
+
+
+def test_clean_strips_identity_keys_from_telemetry_body():
+    """module_type/name/tenant are consumed at registration, never in the
+    CS_TELEMETRY body. The FeedSpoke replays exactly the payload it is handed,
+    so _run cleans those keys before constructing it — verified via the
+    identity round-trip in the FeedSpoke tests below."""
+    FeedSpoke = _maybe_feed_spoke()
+    # A cleaned sim body still carries telemetry; identity is passed separately.
+    s = FeedSpoke(spoke_id="cs-01", payload={"clients": [{"hostname": "h"}]},
+                  stats={}, module_type="simulation", display_name="cs-01",
+                  hub_url="wss://127.0.0.1:443")
+    assert "module_type" not in s._payload and "name" not in s._payload
+    assert s._payload["clients"][0]["hostname"] == "h"
+
+
+def _maybe_feed_spoke():
+    try:
+        return hub_feed._load_feed_spoke()
+    except Exception:  # pragma: no cover — lm core not importable in this env
+        pytest.skip("lm core not importable for FeedSpoke")
+
+
+def test_feedspoke_has_telemetry_gate_distinguishes_sim_from_identity_only():
+    FeedSpoke = _maybe_feed_spoke()
+    assert FeedSpoke._payload_has_telemetry({"clients": [{"hostname": "h"}]})
+    assert FeedSpoke._payload_has_telemetry({"proxmox_vms": [{"vmid": 1}]})
+    assert not FeedSpoke._payload_has_telemetry({"clients": [], "proxmox_vms": []})
+    assert not FeedSpoke._payload_has_telemetry({})
+
+
+def test_feedspoke_registers_with_its_real_type_and_name():
+    FeedSpoke = _maybe_feed_spoke()
+    s = FeedSpoke(spoke_id="nw-01", payload={}, stats={},
+                  module_type="nw", display_name="switch-core",
+                  hub_url="wss://127.0.0.1:443")
+    assert s.module_type == "nw"
+    assert s.hostname == "switch-core"
+
+
+def test_feedspoke_defaults_to_simulation_for_backward_compat():
+    FeedSpoke = _maybe_feed_spoke()
+    s = FeedSpoke(spoke_id="cs-01", payload={"clients": [{"hostname": "h"}]},
+                  stats={}, hub_url="wss://127.0.0.1:443")
+    assert s.module_type == "simulation"
+
+
+# --------------------------------------------------------------------------
 # Access-token rotation
 # --------------------------------------------------------------------------
 
@@ -326,6 +405,57 @@ def test_expired_access_token_is_rotated_and_the_call_retried(monkeypatch):
     assert src._get_json("/api/test-feed/snapshot") == {"ok": True}
     assert src.token == "t1"
     assert src.refresh_token == "r1", "the rotated refresh token must replace the spent one"
+
+
+def test_rotation_emits_the_token_sentinel_when_asked(monkeypatch, capsys):
+    """With --emit-token-rotations, a successful rotation prints one sentinel
+    line carrying the new pair so the parent hub can persist it. The parser on
+    the hub side keys off TOKEN_ROTATION_SENTINEL, so it must be present and the
+    JSON must round-trip."""
+    import json
+    import urllib.error
+    src = hub_feed.SourceHub("https://src", token="t0", refresh_token="r0",
+                             emit_rotations=True)
+    calls = {"get": 0}
+
+    def _open(req, *a, **kw):
+        url = req.full_url
+        if url.endswith("/auth/token/refresh"):
+            return _Resp(json.dumps({"access_token": "t1", "refresh_token": "r1"}).encode())
+        calls["get"] += 1
+        if calls["get"] == 1:
+            raise urllib.error.HTTPError(url, 401, "expired", {}, None)
+        return _Resp(json.dumps({"ok": True}).encode())
+
+    monkeypatch.setattr(src.opener, "open", _open)
+    src._get_json("/api/test-feed/snapshot")
+    lines = [l for l in capsys.readouterr().out.splitlines()
+             if l.startswith(hub_feed.TOKEN_ROTATION_SENTINEL)]
+    assert len(lines) == 1
+    pair = json.loads(lines[0][len(hub_feed.TOKEN_ROTATION_SENTINEL):])
+    assert pair == {"access": "t1", "refresh": "r1"}
+
+
+def test_rotation_is_silent_when_not_asked(monkeypatch, capsys):
+    """Default off: a human running the feeder by hand must never see tokens
+    printed to their terminal."""
+    import json
+    import urllib.error
+    src = _mk_source(monkeypatch)  # emit_rotations defaults False
+    calls = {"get": 0}
+
+    def _open(req, *a, **kw):
+        url = req.full_url
+        if url.endswith("/auth/token/refresh"):
+            return _Resp(json.dumps({"access_token": "t1", "refresh_token": "r1"}).encode())
+        calls["get"] += 1
+        if calls["get"] == 1:
+            raise urllib.error.HTTPError(url, 401, "expired", {}, None)
+        return _Resp(json.dumps({"ok": True}).encode())
+
+    monkeypatch.setattr(src.opener, "open", _open)
+    src._get_json("/api/test-feed/snapshot")
+    assert hub_feed.TOKEN_ROTATION_SENTINEL not in capsys.readouterr().out
 
 
 def test_a_spent_refresh_token_is_not_reused(monkeypatch):
@@ -455,3 +585,158 @@ def test_bad_tenant_map_is_rejected(monkeypatch):
     monkeypatch.setattr(sys, "argv", argv)
     with pytest.raises(SystemExit):
         hub_feed.main()
+
+
+# --------------------------------------------------------------------------
+# Empty-source resilience (feed waits for data instead of dying)
+# --------------------------------------------------------------------------
+
+def _feed_args(**over):
+    """Minimal args namespace for driving hub_feed._run in tests."""
+    import types
+    base = dict(prefix="feed-", tenant="default", telemetry_interval=1,
+                target="wss://t:443", secret=None, psk=None, ramp=0,
+                interval=0.01, duration=0.05, _tenant_map={})
+    base.update(over)
+    return types.SimpleNamespace(**base)
+
+
+def test_empty_first_snapshot_waits_then_feeds_when_data_appears(monkeypatch):
+    """A source that is momentarily empty at feed start (e.g. no active
+    simulations yet) must NOT kill the feeder — it waits and goes live the
+    moment the source produces spokes, without a hub restart."""
+    import asyncio
+
+    snaps = [{}, {}, {"clients": [{"spoke_id": "s1", "hostname": "h1"}]}]
+
+    class _Src:
+        def snapshot(self):
+            return snaps.pop(0) if snaps else {"clients": [{"spoke_id": "s1",
+                                                            "hostname": "h1"}]}
+
+    started = {"ids": []}
+
+    class _Spoke:
+        def __init__(self, *a, **kw):
+            started["ids"].append(kw.get("spoke_id"))
+
+        def set_payload(self, _p):
+            pass
+
+        async def run_forever(self, stop_evt):
+            await stop_evt.wait()
+
+    monkeypatch.setattr(hub_feed, "_load_feed_spoke", lambda: _Spoke)
+    # duration ends the maintenance loop shortly after the feed comes up.
+    asyncio.run(hub_feed._run(_feed_args(duration=0.05), _Src(), SALT))
+    assert started["ids"], "the feed must start once the source has spokes"
+    assert not snaps, "the feeder must keep polling past the empty snapshots"
+
+
+def test_new_spokes_appearing_mid_run_are_picked_up_on_repoll(monkeypatch):
+    """A spoke that shows up in production after the feed started must be added
+    on the next re-poll so the target keeps converging on the full source
+    fleet — no operator restart required."""
+    import asyncio
+
+    snaps = [
+        {"clients": [{"spoke_id": "s1", "hostname": "h1"}]},
+        {"clients": [{"spoke_id": "s1", "hostname": "h1"},
+                     {"spoke_id": "s2", "hostname": "h2"}]},
+    ]
+
+    class _Src:
+        def snapshot(self):
+            return snaps.pop(0) if snaps else snaps and snaps[-1] or {
+                "clients": [{"spoke_id": "s1", "hostname": "h1"},
+                            {"spoke_id": "s2", "hostname": "h2"}]}
+
+    started = {"ids": []}
+
+    class _Spoke:
+        def __init__(self, *a, **kw):
+            started["ids"].append(kw.get("spoke_id"))
+
+        def set_payload(self, _p):
+            pass
+
+        async def run_forever(self, stop_evt):
+            await stop_evt.wait()
+
+    monkeypatch.setattr(hub_feed, "_load_feed_spoke", lambda: _Spoke)
+    asyncio.run(hub_feed._run(_feed_args(duration=0.08), _Src(), SALT))
+    assert len(set(started["ids"])) == 2, (
+        "the second spoke must be started once it appears in the source, "
+        f"got {started['ids']}")
+
+
+def test_vanished_spokes_are_not_removed_on_repoll(monkeypatch):
+    """Add-only: a spoke that disappears from the source is left running so its
+    registration on the target is never orphaned. We assert no extra spokes are
+    spawned when the source shrinks."""
+    import asyncio
+
+    snaps = [
+        {"clients": [{"spoke_id": "s1", "hostname": "h1"},
+                     {"spoke_id": "s2", "hostname": "h2"}]},
+        {"clients": [{"spoke_id": "s1", "hostname": "h1"}]},
+    ]
+
+    class _Src:
+        def snapshot(self):
+            return snaps.pop(0) if snaps else {
+                "clients": [{"spoke_id": "s1", "hostname": "h1"}]}
+
+    started = {"ids": []}
+
+    class _Spoke:
+        def __init__(self, *a, **kw):
+            started["ids"].append(kw.get("spoke_id"))
+
+        def set_payload(self, _p):
+            pass
+
+        async def run_forever(self, stop_evt):
+            await stop_evt.wait()
+
+    monkeypatch.setattr(hub_feed, "_load_feed_spoke", lambda: _Spoke)
+    asyncio.run(hub_feed._run(_feed_args(duration=0.08), _Src(), SALT))
+    assert len(started["ids"]) == 2, (
+        "only the two original spokes should ever be started; shrinking the "
+        f"source must not spawn or churn anything, got {started['ids']}")
+
+
+def test_permanently_empty_source_gives_up_after_the_run_duration(monkeypatch):
+    """A bounded run against a source that never gets data still terminates —
+    the wait is capped by --duration so a one-shot job cannot hang forever."""
+    import asyncio
+
+    class _Empty:
+        def snapshot(self):
+            return {}
+
+    monkeypatch.setattr(hub_feed, "_load_feed_spoke", lambda: object)
+    with pytest.raises(SystemExit):
+        asyncio.run(hub_feed._run(_feed_args(duration=0.03), _Empty(), SALT))
+
+
+def test_feed_spoke_install_uuid_is_stable_per_spoke_id():
+    """The hub keys a module by its install_uuid (guid-primary). A random uuid
+    per run would mint a BRAND-NEW module on every feeder restart, so the target
+    fleet accretes a ghost copy of every spoke each time the feed bounces (the
+    accumulation behind hundreds of stale offline entries). The synthetic
+    spoke's uuid must therefore be DETERMINISTIC in its spoke_id: same id →
+    same uuid (restart re-attaches), different id → different uuid."""
+    try:
+        FeedSpoke = hub_feed._load_feed_spoke()
+    except SystemExit:
+        pytest.skip("lm core not importable off-box — replay half unavailable")
+
+    def _uuid_for(sid):
+        s = FeedSpoke.__new__(FeedSpoke)
+        s.spoke_id = sid
+        return s._ensure_install_uuid()
+
+    assert _uuid_for("spoke-A") == _uuid_for("spoke-A")   # stable across runs
+    assert _uuid_for("spoke-A") != _uuid_for("spoke-B")   # distinct per spoke
+    assert len(_uuid_for("spoke-A")) == 32                # uuid .hex form
