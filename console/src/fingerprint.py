@@ -152,7 +152,7 @@ PROFILES: List[Dict[str, Any]] = [
             {"cmd": "show modules", "fields": {
                 "model": re.compile(r"Chassis\s*:?\s*(.+?)\s*(?:\(|Serial|$)", re.I | re.M),
             }},
-            {"cmd": "show ip", "fields": {"ip": re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")}},
+            {"cmd": "show ip", "fields": {"ip": re.compile(r"\b(?:Manual|DHCP)\s+(?:(?:True|False)\s+)?(\d{1,3}(?:\.\d{1,3}){3})\b", re.I)}},
         ],
         "config": {"enter": "configure", "exit": "exit", "save": "write memory",
                    "show_running": "show running-config"},

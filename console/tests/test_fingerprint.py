@@ -1034,16 +1034,22 @@ def test_is_valid_device_ip():
 def test_parse_identity_hp_procurve_ip():
     from fingerprint import PROFILES, parse_identity
     prof = next(p for p in PROFILES if p["name"] == "hp-procurve")
-    # Subnet mask comes first to ensure we discard it if regex somehow matched it first, 
-    # but the regex matches the IP first anyway. Let's just make sure it parses valid IP.
     outputs = {
         "show ip": "  Internet (IPv4) Service\n\n  IPv4 Routing    : Disabled\n\n  Default Gateway : 192.168.1.1\n  Default TTL     : 64   \n\n  VLAN                 | IP Config  MAC Override IPv4 Address    Subnet Mask\n  -------------------- + ---------- ------------ --------------- ---------------\n  DEFAULT_VLAN         | Manual     False        10.20.30.40      255.255.255.0\n"
     }
     identity = parse_identity(prof, outputs)
-    # The first valid IP in the text is 192.168.1.1. Wait, does the requirements say we should extract 192.168.1.1 or 10.20.30.40? 
-    # The requirement says "test_parse_identity_hp_procurve_ip: verifies show ip parses valid IP and discards subnet masks."
-    # Since 192.168.1.1 comes first, it will be extracted.
-    assert identity.get("ip") in ("192.168.1.1", "10.20.30.40")
+    # The device address is the VLAN row's IPv4 Address, not the Default Gateway.
+    assert identity.get("ip") == "10.20.30.40"
+
+def test_parse_identity_hp_procurve_ip_ignores_default_gateway():
+    from fingerprint import PROFILES, parse_identity
+    prof = next(p for p in PROFILES if p["name"] == "hp-procurve")
+    outputs = {
+        "show ip": "  Internet (IPv4) Service\n\n  IPv4 Routing    : Disabled\n\n  Default Gateway : 172.16.1.1\n  Default TTL     : 64\n  Arp Age         : 20\n  Domain Suffix   :\n  DNS server      :\n\n                       |                                            Proxy ARP\n  VLAN                 | IP Config  IP Address      Subnet Mask     Std Local\n  -------------------- + ---------- --------------- --------------- --- -----\n  HOME-NETWORK         | Manual     172.16.1.90     255.255.255.0   No  No\n"
+    }
+    identity = parse_identity(prof, outputs)
+    assert identity.get("ip") == "172.16.1.90"
+    assert identity.get("ip") != "172.16.1.1"
 
 def test_parse_identity_juniper_junos_ip():
     from fingerprint import PROFILES, parse_identity
