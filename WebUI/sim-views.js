@@ -11171,25 +11171,33 @@ async function _csUsbClearCmd(host, action, doneMsg, allSpokes) {
         if (allSpokes) body.all_spokes = true;
         const r = await csFetch(`/${csTenant()}/proxmx/command?tenant_id=${csTenant()}`, {
             method: 'POST', body: JSON.stringify(body) });
-        if (r && r.queued_to_spokes > 0) {
-            // Some spokes were unreachable: the clear is queued and applies when
-            // they reconnect. Say so instead of claiming it is live everywhere.
-            const nQ = r.queued_to_spokes, nLive = r.pushed_to_spokes || 0;
-            const bad = (r.errors || []).concat(r.refusals || []);
-            showToast(`${doneMsg}. Cleared live on ${nLive}/${r.spokes_total} spoke(s); queued for ${nQ} unreachable spoke(s) (applies when they reconnect): ${(r.queued || []).join(', ')}`
-                + (bad.length ? ` — failed: ${bad.join('; ')}` : ''), 'warning');
+        if (!r) return;
+
+        const bad = (r.errors || []).concat(r.refusals || []);
+        const nLive = r.pushed_to_spokes || 0;
+        const nTotal = r.spokes_total != null ? r.spokes_total : (allSpokes ? 0 : 1);
+        const queuedNames = Array.isArray(r.queued) ? r.queued : [];
+        const isQueued = (r.queued_to_spokes > 0) || (r.queued === true);
+        const nQ = r.queued_to_spokes || queuedNames.length || (isQueued ? 1 : 0);
+
+        if (bad.length > 0) {
+            const queuePart = isQueued ? `; queued for ${nQ} unreachable spoke(s)` : '';
+            const countPart = allSpokes ? `Cleared ${nLive}/${nTotal} spoke(s)${queuePart} — failed: ` : 'Failed: ';
+            showToast(`${doneMsg}. ${countPart}${bad.join('; ')}`, 'error');
             return;
         }
-        if (r && Array.isArray(r.errors) && (r.errors.length || (r.refusals || []).length)) {
-            // Partial fan-out: name the spokes that did NOT clear rather than
-            // reporting a blanket success.
-            const bad = r.errors.concat(r.refusals || []).join('; ');
-            showToast(`${doneMsg}. Cleared ${r.pushed_to_spokes}/${r.spokes_total} spoke(s) — failed: ${bad}`, 'error');
+
+        if (isQueued) {
+            const qDetail = queuedNames.length ? `: ${queuedNames.join(', ')}` : '';
+            showToast(`${doneMsg}. Cleared live on ${nLive}/${nTotal} spoke(s); queued for ${nQ} unreachable spoke(s) (applies when they reconnect)${qDetail}`, 'warning');
             return;
         }
-        if (typeof csPushToast === 'function') csPushToast(r, doneMsg);
-        else if (typeof showToast === 'function') showToast(doneMsg, 'success');
-    } catch (e) { console.error(action + ' failed', e); if (typeof showToast === 'function') showToast(action + ' failed: ' + (e.message || e), 'error'); }
+
+        showToast(doneMsg, 'success');
+    } catch (e) {
+        console.error(`_csUsbClearCmd: ${action} failed`, e);
+        if (typeof showToast === 'function') showToast(`Clear failed: ${e.message || e}`, 'error');
+    }
 }
 // Purge the missing-dongle HISTORY (presence roster + boot baseline) on every
 // spoke. For after a deliberate hardware change — dongles moved, ports rewired,
