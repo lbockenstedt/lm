@@ -39,6 +39,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
 import sys
 import psutil
@@ -341,6 +342,70 @@ def _log_source_label(hub, sid: str) -> str:
     if name and name != sid:
         return f"{name} ({sid[:8]})"
     return sid
+
+
+
+_SENTINEL_UUID_RE = re.compile(
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+_SENTINEL_VOLATILE = (
+    # Full datestamp first: the bare-clock rule below would otherwise consume
+    # only the time half and leave the date behind, which is exactly the bug
+    # that made every sweep look "new".
+    (re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[,.]\d+)?"
+                 r"(?:Z|[+-]\d{2}:?\d{2})?"), "<TS>"),
+    (re.compile(r"\d{2}:\d{2}:\d{2}(?:[,.]\d+)?"), "<TS>"),
+    (re.compile(r"\breq=[0-9a-f]{6,}", re.IGNORECASE), "req=<ID>"),
+    (re.compile(r"\b\d+(?:\.\d+)?\s*(?:ms|s)\b"), "<DUR>"),
+    (re.compile(r"\b0x[0-9a-f]+\b", re.IGNORECASE), "<ADDR>"),
+    (re.compile(r"(?<![0-9a-fA-F-])\d{4,}(?![0-9a-fA-F-])"), "<N>"),
+)
+
+
+def _sentinel_normalize_line(line):
+    """Strip the volatile tokens out of one log line so that two occurrences of
+    the same underlying condition normalize to byte-identical text.
+
+    This exists because the sentinel's "is this new?" gate hashed raw ERROR
+    lines, and every such line is prefixed with its own timestamp. A condition
+    that recurred every sweep therefore hashed differently every sweep, the gate
+    never suppressed it, and the sentinel re-escalated it forever -- one
+    unregistered device produced 50 duplicate issues in 8 days.
+
+    UUIDs are deliberately NOT normalized: a fault on a different device is a
+    genuinely different fault and must keep its own fingerprint. They are
+    swapped out for unique NUL-delimited placeholders only so the numeric rules
+    below cannot chew into them, then restored verbatim.
+    """
+    line = (line or "").strip()
+    if not line:
+        return ""
+    uuids = _SENTINEL_UUID_RE.findall(line)
+    for i, u in enumerate(uuids):
+        line = line.replace(u, "\x00U%d\x00" % i, 1)
+    for rx, repl in _SENTINEL_VOLATILE:
+        line = rx.sub(repl, line)
+    line = re.sub(r"\s+", " ", line).strip()
+    for i, u in enumerate(uuids):
+        line = line.replace("\x00U%d\x00" % i, u, 1)
+    return line
+
+
+def _sentinel_fingerprint(errs):
+    """Stable sha256 over the DISTINCT normalized error lines, sorted.
+
+    Set-and-sort rather than the raw ordered tail: interleaving, or the same
+    handful of errors simply repeating a different number of times within the
+    window, must not read as a new condition. Returns "" when nothing survives
+    normalization, which callers treat as "no errors".
+    """
+    norm = set()
+    for line in errs or ():
+        n = _sentinel_normalize_line(line)
+        if n:
+            norm.add(n)
+    if not norm:
+        return ""
+    return hashlib.sha256("\n".join(sorted(norm)).encode("utf-8", "ignore")).hexdigest()
 
 
 class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, VmSyncMixin, FwDiscoverySyncMixin, NwDiscoverySyncMixin, TruenasDiscoverySyncMixin, NwCacheMixin, TruenasCacheMixin, LeCacheMixin, WarmCacheMixin, DnsDhcpSyncMixin, HenetSyncMixin, RealtimeIpamNacSyncMixin, SearchIndexMixin, StalenessSweepMixin, SelfBackupMixin, KeyVaultSchedulerMixin, SpokeAlertMixin, FleetHealthAlertMixin, InstanceRelocateMixin, RepoSyncMixin, HubVncConsoleMixin, HubCertDistributionMixin, HubIdentityMixin, HubBugStoreMixin, SpokeRegistryMixin, StatusPageMixin):
@@ -8625,6 +8690,12 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
         import time as _t
         if not hasattr(self, "_log_sentinel_sig"):
             self._log_sentinel_sig = {}
+        # fingerprint -> monotonic time of the last escalation for that condition.
+        # The sig gate above only remembers the IMMEDIATELY preceding sweep, so an
+        # intermittent fault that alternates present/absent slips through it every
+        # other sweep. This ledger is what actually stops duplicate issues.
+        if not hasattr(self, "_log_sentinel_escalated"):
+            self._log_sentinel_escalated = {}
         self._log_sentinel_metric = getattr(self, "_log_sentinel_metric", {})
         last_sweep = 0.0
         last_dur = 0.0
@@ -8648,7 +8719,10 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         # activity, not the whole tail.
                         lines = self._window_log_lines(self._gather_module_log_lines(module), interval_min)
                         errs = self._error_lines(lines)
-                        sig = hashlib.sha256("\n".join(errs[-40:]).encode("utf-8", "ignore")).hexdigest() if errs else ""
+                        # Fingerprint the NORMALIZED errors, not the raw tail: every
+                        # log line carries its own timestamp, so hashing raw text made
+                        # a persistent condition look new on every single sweep.
+                        sig = _sentinel_fingerprint(errs)
                         # Cheap gate: skip unless this module has NEW error-level lines.
                         if not errs or self._log_sentinel_sig.get(module) == sig:
                             continue
@@ -8690,8 +8764,32 @@ class LabManagerHub(HubOsUpdatesMixin, UpdatePipelineMixin, EndpointSyncMixin, V
                         if res.get("duration_s"):
                             durations.append(res["duration_s"])
                         if res.get("ok") and res.get("verdict") == "escalate":
-                            await self._escalate_to_ab(
-                                module, "\n".join(errs[-60:]), res.get("analysis", ""), "escalate")
+                            # Cooldown per (module, condition). Without this a standing
+                            # fault re-escalates on every sweep for as long as it lasts:
+                            # a single unregistered device filed 50 identical issues over
+                            # 8 days. Keyed on the normalized fingerprint, so a genuinely
+                            # different fault (different device, different command) is
+                            # never suppressed by an unrelated one.
+                            cd_h = float(gc.get("log_escalation_cooldown_h", 24) or 24)
+                            now_m = _t.monotonic()
+                            ekey = (module, sig)
+                            last_esc = self._log_sentinel_escalated.get(ekey)
+                            if last_esc is not None and (now_m - last_esc) < cd_h * 3600:
+                                logger.info(
+                                    f"[log-sentinel] {module}: escalation suppressed, same "
+                                    f"condition already escalated "
+                                    f"{round((now_m - last_esc) / 60)}m ago "
+                                    f"(cooldown {cd_h}h, fp {sig[:8]})")
+                            else:
+                                self._log_sentinel_escalated[ekey] = now_m
+                                # Bound the ledger: drop anything already past cooldown.
+                                cutoff = now_m - cd_h * 3600
+                                for k in [k for k, v in self._log_sentinel_escalated.items()
+                                          if v < cutoff]:
+                                    self._log_sentinel_escalated.pop(k, None)
+                                await self._escalate_to_ab(
+                                    module, "\n".join(errs[-60:]), res.get("analysis", ""),
+                                    "escalate")
                     except Exception as me:  # noqa: BLE001
                         logger.debug(f"[log-sentinel] module {module} error: {me}")
                 last_dur = round(_t.monotonic() - sweep_t0, 1)
