@@ -26,7 +26,8 @@ def register(app, hub, ctx):
         the JSON string ``"false"``, ``"0"``, ``"no"`` or the integer ``0``
         would silently be read as *true* and forgive a strike the operator
         meant to keep. Accept real booleans, the usual string spellings, and
-        0/1; anything else falls back to ``default``."""
+        0/1; anything else — including an empty/whitespace-only string, which
+        carries no operator intent — falls back to ``default``."""
         if value is None:
             return default
         if isinstance(value, bool):
@@ -37,7 +38,7 @@ def register(app, hub, ctx):
             v = value.strip().lower()
             if v in ("true", "1", "yes", "on"):
                 return True
-            if v in ("false", "0", "no", "off", ""):
+            if v in ("false", "0", "no", "off"):
                 return False
         return default
 
