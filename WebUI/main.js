@@ -4782,7 +4782,7 @@ async function loadSecurityData() {
     const neverRow = e => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
         <div class="min-w-0"><span class="font-mono text-slate-700">${escapeHtml(e.ip)}</span>
           ${e.description ? `<div class="text-[11px] text-slate-400 truncate" title="${escapeHtml(e.description)}">${escapeHtml(e.description)}</div>` : ''}</div>
-        <button onclick="securityNeverRemove('${escapeHtml(e.ip)}')" class="text-[11px] text-slate-500 hover:text-red-600 font-medium shrink-0">Remove</button></div>`;
+        <button onclick="securityNeverRemove('${escJsAttr(e.ip)}')" class="text-[11px] text-slate-500 hover:text-red-600 font-medium shrink-0">Remove</button></div>`;
     const neverTile = `<div class="${card}">
         <h3 class="text-sm font-bold text-green-600 mb-1">Trusted IPs — never auto-blocked <span class="text-slate-500">AND allowed through the Azure NSG</span> <span class="text-slate-400 font-normal">(${trusted.length})</span></h3>
         <p class="text-[11px] text-slate-400 mb-2">Shared list — the same one edited under <b>Settings → Cloud → Azure → NSG</b>. Adding an entry here also opens an <b>allow rule</b> hole in the NSG when NSG management is enabled${allowOn ? '' : ' (currently disabled — entries still exempt from auto-block)'}.</p>
@@ -4793,6 +4793,22 @@ async function loadSecurityData() {
         </div>
         <div class="text-xs max-h-56 overflow-y-auto">${trusted.length ? trusted.map(neverRow).join('') : '<p class="text-slate-400 italic">none</p>'}</div>
       </div>`;
+
+    // Strikes on addresses with NO active block. Strikes drive permanent_after,
+    // but were only ever visible on a live block record — so an address could
+    // sit one strike from an unappealable permanent ban with nothing in the UI
+    // saying so until it tripped.
+    const strikes = d.strikes || [];
+    const strikeRow = r => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
+        <div class="min-w-0"><span class="font-mono text-slate-700">${escapeHtml(r.ip)}</span>
+          <span class="ml-2 ${r.at_limit ? 'text-red-600 font-bold' : 'text-slate-500'}">${r.strikes} / ${r.permanent_after}</span>
+          ${r.at_limit ? '<div class="text-[11px] text-red-500">at the limit — its next block would be permanent</div>' : ''}</div>
+        <button onclick="securityForgive('${escJsAttr(r.ip)}')" class="text-[11px] text-slate-500 hover:text-green-600 font-medium shrink-0">Forgive</button></div>`;
+    const strikeTile = strikes.length ? `<div class="${card}">
+        <h3 class="text-sm font-bold text-amber-600 mb-1">Strikes — addresses with a block history <span class="text-slate-400 font-normal">(${strikes.length})</span></h3>
+        <p class="text-[11px] text-slate-400 mb-2">None of these are blocked right now. A strike is recorded per block; at <b>${escapeHtml(String((d.config || {}).permanent_after ?? ''))}</b> the next block becomes <b>permanent</b> — no TTL, no auto-release. Lifting a block now forgives its strike automatically; <b>Forgive</b> clears a backlog left by blocks overturned before that.</p>
+        <div class="text-xs max-h-56 overflow-y-auto">${strikes.map(strikeRow).join('')}</div>
+      </div>` : '';
 
     const manualBlock = `<div class="${card}">
         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Manual block</h3>
@@ -4855,6 +4871,7 @@ async function loadSecurityData() {
       ${subCard}
       ${manualBlock}
       ${blockedTile}
+      ${strikeTile}
       ${neverTile}
       ${events}`;
     _secPrioLive();
@@ -5173,7 +5190,10 @@ function _secBlockRowHtml(b) {
           <div class="text-[11px]" data-geo-ip="${escapeHtml(b.ip || '')}"></div>
           <div class="text-[11px] text-slate-400 truncate" title="${escapeHtml(b.reason || '')}">${escapeHtml(b.reason || '')}</div>
         </div>
-        <button onclick="_secModalUnblock('${escapeHtml(b.ip || '')}')" class="text-[11px] text-red-500 hover:text-red-700 font-medium shrink-0">Unblock</button>
+        <div class="flex items-center gap-2 shrink-0">
+          <button onclick="_secModalUnblock('${escJsAttr(b.ip || '')}')" title="Unblock and clear the strike this block banked (the block was wrong)" class="text-[11px] text-red-500 hover:text-red-700 font-medium">Unblock</button>
+          <button onclick="_secModalUnblock('${escJsAttr(b.ip || '')}', false)" title="Unblock but keep the strike on record (the block was justified)" class="text-[11px] text-slate-400 hover:text-slate-600 font-medium">keep strike</button>
+        </div>
       </div>`;
 }
 function securityBlocksModal(filter) {
@@ -5214,8 +5234,9 @@ function _secBlocksRender() {
     listEl.innerHTML = rows.length ? rows.map(_secBlockRowHtml).join('') : '<p class="text-slate-400 italic py-3 text-sm">no matching blocked IPs</p>';
     _secDecorateGeo(rows.map(b => b.ip), listEl);
 }
-async function _secModalUnblock(ip) {
-    await _securityReq('/api/security/unblock', 'POST', { ip }, `Unblocked ${ip}`);
+async function _secModalUnblock(ip, forgive = true) {
+    await _securityReq('/api/security/unblock', 'POST', { ip, forgive },
+        forgive ? `Unblocked ${ip}` : `Unblocked ${ip} (strike kept)`);
     await loadSecurityData(); // rebuilds the tab + refreshes window._secBlocks
     _secBlocksRender();       // refresh the open modal list (no-op if closed)
 }
@@ -5296,7 +5317,11 @@ async function securityBlock() {
         { ip, reason: (document.getElementById('sec-mb-reason').value || '').trim(), permanent: document.getElementById('sec-mb-perm').checked }, `Blocked ${ip}`);
     loadSecurityData();
 }
-async function securityUnblock(ip) { await _securityReq('/api/security/unblock', 'POST', { ip }, `Unblocked ${ip}`); loadSecurityData(); }
+async function securityUnblock(ip, forgive = true) { await _securityReq('/api/security/unblock', 'POST', { ip, forgive }, forgive ? `Unblocked ${ip}` : `Unblocked ${ip} (strike kept)`); loadSecurityData(); }
+async function securityForgive(ip) {
+    await _securityReq('/api/security/forgive', 'POST', { ip }, `Cleared strikes for ${ip}`);
+    loadSecurityData();
+}
 async function securityNeverAdd() { const cidr = (document.getElementById('sec-never-ip').value || '').trim(); if (!cidr) return; const descEl = document.getElementById('sec-never-desc'); const description = (descEl && descEl.value || '').trim(); await _securityReq('/api/security/never-block', 'POST', { cidr, description }, `Added ${cidr} to trusted list`); loadSecurityData(); }
 async function securityNeverRemove(cidr) { await _securityReq('/api/security/never-block', 'DELETE', { cidr }, `Removed ${cidr}`); loadSecurityData(); }
 async function securityReconcile() { await _securityReq('/api/security/reconcile', 'POST', {}, 'NSG sync requested'); }
@@ -5511,6 +5536,11 @@ async function loadCredVault() {
 
 function _cvBucketLabel(b) {
     if (b.bucket === _cvAdminSlot) return 'Global Admin slot';
+    // An orphaned bucket matches no tenant, so nothing tenant-scoped can ever
+    // use it. Say so inline — otherwise a stray bucket named e.g. "admin" sits
+    // in the dropdown right next to "Global Admin slot" and reads like a second
+    // admin scope, which is exactly how credentials end up in a dead end.
+    if (b.is_orphan) return `${b.bucket} (orphaned — no matching tenant)`;
     // Prefer the server-provided friendly tenant name; fall back to the id.
     return b.name && b.name !== b.bucket ? `${b.name} (${b.bucket})` : b.bucket;
 }
@@ -5565,20 +5595,32 @@ async function _cvRenderBucketBody() {
         // e.g. a Global-Admin-loaded bucket whose PSK state wasn't known upfront.
         const _cur = _cvBuckets.find(b => b.bucket === _cvCurrentBucket);
         if (_cur) _cur.has_psk = !!d.has_psk;
+        // An orphaned bucket is a dead end — nothing tenant-scoped can reference
+        // it and no tenant-admin can reach it. Say so where the operator is
+        // actually looking, and offer the two ways out: rescue the credentials
+        // into a real bucket, or remove the bucket.
+        const orphanBanner = (_cur && _cur.is_orphan && _cvIsGlobalAdmin) ? `
+          <div class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 mb-3 space-y-2">
+            <p><b>This bucket matches no tenant.</b> Credential sets are matched by tenant id, so nothing can reference what is stored here and no tenant-admin can reach it. It is not the Global Admin slot — that one is <span class="font-mono">${escapeHtml(_cvAdminSlot)}</span>.</p>
+            <div class="flex gap-2">
+              <button onclick="_cvMoveSecretModal()" class="px-2 py-1 rounded border border-amber-300 bg-white hover:bg-amber-100 font-semibold">Move a secret out…</button>
+              <button onclick="_cvDeleteBucketModal()" class="px-2 py-1 rounded bg-red-600 text-white font-semibold hover:bg-red-700">Delete this bucket</button>
+            </div>
+          </div>` : '';
         if (!d.has_psk) {
-            el.innerHTML = `<div class="text-sm text-amber-600 space-y-2">
+            el.innerHTML = orphanBanner + `<div class="text-sm text-amber-600 space-y-2">
               <p>This bucket has no pass-phrase yet. A pass-phrase is required before you can add or reveal secrets.</p>
               <button onclick="_cvSetPskModal()" class="px-3 py-1.5 text-xs rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Set a pass-phrase</button>
             </div>`;
             return;
         }
         if (!secrets.length) {
-            el.innerHTML = `<p class="text-sm text-slate-400 italic">No secrets stored in this bucket.</p>`;
+            el.innerHTML = orphanBanner + `<p class="text-sm text-slate-400 italic">No secrets stored in this bucket.</p>`;
             return;
         }
         // Persistent search bar (outside the re-rendered table so typing keeps
         // focus) + a table area that _cvRenderSecretsTable filters in place.
-        el.innerHTML = `
+        el.innerHTML = orphanBanner + `
           <div class="flex items-center gap-2 mb-3">
             <input id="cv-search" type="text" value="${escapeHtml(_cvSearchQuery)}" oninput="_cvOnSearch(this.value)"
                    placeholder="Search secrets (name / type / description)…" autocomplete="off"
@@ -5655,11 +5697,158 @@ function _cvSetPskModal() {
       <p class="text-sm text-slate-500">The pass-phrase decrypts this bucket's pass-phrase-mode secrets. Changing it re-encrypts them; the hub never stores it.</p>
       ${hasPsk ? `<input id="cv-old-psk" type="password" autocomplete="off" placeholder="current pass-phrase" class="${_CV_INP}">` : ''}
       <input id="cv-new-psk" type="password" autocomplete="off" placeholder="new pass-phrase (min 8 chars)" class="${_CV_INP}">
+      ${(hasPsk && _cvIsGlobalAdmin) ? `<p class="text-xs text-slate-400">Lost the current pass-phrase? <button onclick="_cvResetPskModal()" class="text-[#01A982] font-semibold hover:underline">Reset it</button> (Global Admin only).</p>` : ''}
       <div class="flex justify-end gap-2 pt-2">
         <button onclick="document.getElementById('cv-psk-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
         <button onclick="_cvDoSetPsk()" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Save</button>
       </div>`;
     openModal('cv-psk-modal', body, { backdropClose: true });
+}
+
+// Last-resort recovery for a lost/corrupted bucket pass-phrase (Global Admin
+// only — the server enforces it and 404s for anyone else). The rotate path
+// verifies the old pass-phrase first, so without this a forgotten pass-phrase
+// bricked the bucket permanently.
+//
+// The blast radius is stated up front and comes from the server: `hub`-mode
+// secrets are encrypted with the hub key, not the pass-phrase, so they survive
+// a reset untouched; only `psk`-mode secrets die, and they were already
+// undecryptable. A bucket holding no psk-mode secrets resets with no data loss
+// at all, so that case does not demand a destructive confirmation.
+function _cvResetPskModal() {
+    document.getElementById('cv-psk-modal')?.remove();
+    const cur = _cvBuckets.find(b => b.bucket === _cvCurrentBucket) || { bucket: _cvCurrentBucket };
+    const doomed = Number(cur.psk_secret_count || 0);
+    const total = Number(cur.secret_count || 0);
+    const impact = doomed
+        ? `<div class="text-sm text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2 space-y-1">
+             <p><b>${doomed}</b> of this bucket's ${total} secret(s) are encrypted with the lost pass-phrase and <b>cannot be recovered</b> — resetting discards them and you will have to re-enter those credentials.</p>
+             <label class="flex items-center gap-2 text-xs font-semibold"><input id="cv-reset-confirm" type="checkbox" class="rounded border-slate-300"> I understand these secrets will be permanently deleted.</label>
+           </div>`
+        : `<p class="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2">No secret in this bucket is encrypted with the pass-phrase — all ${total} are hub-mode (encrypted with the hub key, still serving automation). <b>Resetting loses nothing.</b></p>`;
+    const body = `
+      <h3 class="text-lg font-bold text-[#263040]">Reset pass-phrase — ${escapeHtml(_cvBucketLabel(cur))}</h3>
+      <p class="text-sm text-slate-500">Sets a new pass-phrase without the old one. This is audit-logged against your account.</p>
+      ${impact}
+      <input id="cv-reset-psk" type="password" autocomplete="off" placeholder="new pass-phrase (min 8 chars)" class="${_CV_INP}">
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="document.getElementById('cv-reset-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button onclick="_cvDoResetPsk()" class="px-4 py-1.5 text-sm rounded-md bg-red-600 text-white font-bold hover:bg-red-700">Reset pass-phrase</button>
+      </div>`;
+    openModal('cv-reset-modal', body, { backdropClose: true });
+}
+
+async function _cvDoResetPsk() {
+    const newPsk = document.getElementById('cv-reset-psk')?.value || '';
+    const confirmEl = document.getElementById('cv-reset-confirm');
+    if (confirmEl && !confirmEl.checked) {
+        showToast('Tick the confirmation — those secrets cannot be recovered.', 'error');
+        return;
+    }
+    try {
+        const d = await apiJson('/tenant/cred-vault/reset-psk', {
+            method: 'POST',
+            body: JSON.stringify({ bucket: _cvCurrentBucket, new_psk: newPsk, confirm_destroy: !!(confirmEl && confirmEl.checked) }),
+        });
+        document.getElementById('cv-reset-modal')?.remove();
+        const lost = (d.destroyed || []).length;
+        showToast(lost ? `Pass-phrase reset — ${lost} unrecoverable secret(s) removed, ${d.kept} kept.`
+                       : `Pass-phrase reset — all ${d.kept} secret(s) kept.`, 'success');
+        loadCredVault();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+function _cvMoveSecretModal() {
+    // Only hub-mode secrets can be moved without pass-phrases; psk-mode ones are
+    // encrypted with the SOURCE bucket's key, so both sides must be unlocked.
+    const secrets = _cvSecrets || [];
+    if (!secrets.length) { showToast('This bucket has no secrets to move.', 'error'); return; }
+    const dests = (_cvBuckets || []).filter(b => b.bucket !== _cvCurrentBucket && b.has_psk);
+    if (!dests.length) { showToast('No other bucket has a pass-phrase set — set one first.', 'error'); return; }
+    const body = `
+      <h3 class="text-lg font-bold text-[#263040]">Move a secret out of ${escapeHtml(_cvCurrentBucket)}</h3>
+      <p class="text-sm text-slate-500">The stored value is not copied — only its bucket is re-pointed, so the credential is never duplicated and never briefly missing.</p>
+      <label class="block text-xs font-semibold text-slate-500">Secret
+        <select id="cv-move-name" onchange="_cvMoveOnPick()" class="${_CV_INP}">
+          ${secrets.map(s => `<option value="${escapeHtml(s.name)}" data-mode="${escapeHtml(s.mode || 'psk')}">${escapeHtml(s.name)}${(s.mode === 'hub') ? '' : ' (pass-phrase protected)'}</option>`).join('')}
+        </select></label>
+      <label class="block text-xs font-semibold text-slate-500">Destination bucket
+        <select id="cv-move-dest" class="${_CV_INP}">
+          ${dests.map(b => `<option value="${escapeHtml(b.bucket)}">${escapeHtml(_cvBucketLabel(b))}</option>`).join('')}
+        </select></label>
+      <div id="cv-move-psks" class="space-y-2 hidden">
+        <p class="text-xs text-slate-500">This secret is encrypted with its bucket's pass-phrase, so both buckets must be unlocked to re-encrypt it.</p>
+        <input id="cv-move-psk" type="password" autocomplete="off" placeholder="this bucket's pass-phrase" class="${_CV_INP}">
+        <input id="cv-move-to-psk" type="password" autocomplete="off" placeholder="destination bucket's pass-phrase" class="${_CV_INP}">
+      </div>
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="document.getElementById('cv-move-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button onclick="_cvDoMoveSecret()" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Move secret</button>
+      </div>`;
+    openModal('cv-move-modal', body, { backdropClose: true });
+    _cvMoveOnPick();
+}
+
+function _cvMoveOnPick() {
+    const mode = document.getElementById('cv-move-name')?.selectedOptions?.[0]?.dataset?.mode;
+    document.getElementById('cv-move-psks')?.classList.toggle('hidden', mode === 'hub');
+}
+
+async function _cvDoMoveSecret() {
+    const name = document.getElementById('cv-move-name')?.value || '';
+    const toBucket = document.getElementById('cv-move-dest')?.value || '';
+    try {
+        await apiJson('/tenant/cred-vault/move-secret', {
+            method: 'POST',
+            body: JSON.stringify({
+                bucket: _cvCurrentBucket, name, to_bucket: toBucket,
+                psk: document.getElementById('cv-move-psk')?.value || '',
+                to_psk: document.getElementById('cv-move-to-psk')?.value || '',
+            }),
+        });
+        document.getElementById('cv-move-modal')?.remove();
+        showToast(`Moved "${name}" to ${toBucket}.`, 'success');
+        loadCredVault();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+function _cvDeleteBucketModal() {
+    const left = (_cvSecrets || []).map(s => s.name);
+    const impact = left.length
+        ? `<div class="text-sm text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2 space-y-1">
+             <p><b>${left.length} secret(s) are still stored here and will be destroyed:</b></p>
+             <ul class="list-disc list-inside font-mono text-xs">${left.map(n => `<li>${escapeHtml(n)}</li>`).join('')}</ul>
+             <label class="flex items-center gap-2 text-xs font-semibold"><input id="cv-delbucket-confirm" type="checkbox" class="rounded border-slate-300"> Destroy these secrets — if any is still worth keeping, cancel and move it out first.</label>
+           </div>`
+        : `<p class="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2">The bucket is empty, so nothing is lost.</p>`;
+    const body = `
+      <h3 class="text-lg font-bold text-[#263040]">Delete bucket — ${escapeHtml(_cvCurrentBucket)}</h3>
+      <p class="text-sm text-slate-500">Removes the bucket and its pass-phrase. This cannot be undone.</p>
+      ${impact}
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="document.getElementById('cv-delbucket-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button onclick="_cvDoDeleteBucket()" class="px-4 py-1.5 text-sm rounded-md bg-red-600 text-white font-bold hover:bg-red-700">Delete bucket</button>
+      </div>`;
+    openModal('cv-delbucket-modal', body, { backdropClose: true });
+}
+
+async function _cvDoDeleteBucket() {
+    const confirmEl = document.getElementById('cv-delbucket-confirm');
+    if (confirmEl && !confirmEl.checked) {
+        showToast('Tick the confirmation — those secrets cannot be recovered.', 'error');
+        return;
+    }
+    try {
+        const d = await apiJson('/tenant/cred-vault/delete-bucket', {
+            method: 'POST',
+            body: JSON.stringify({ bucket: _cvCurrentBucket, confirm_destroy: !!(confirmEl && confirmEl.checked) }),
+        });
+        document.getElementById('cv-delbucket-modal')?.remove();
+        _cvCurrentBucket = null;
+        const n = (d.destroyed || []).length;
+        showToast(`Bucket deleted${n ? ` — ${n} secret(s) destroyed` : ''}.`, 'success');
+        loadCredVault();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
 
 async function _cvDoSetPsk() {
@@ -9364,13 +9553,20 @@ async function runNwScan(btn, dryRun) {
     }
 }
 
-function _renderNwScanResults(d) {
-    const out = document.getElementById('nwscan-results');
-    if (!out) return;
+// Shared scan-result markup for BOTH the Setup card (_renderNwScanResults) and
+// the tenant Scan tab (_renderNwScanResults2) so the two never drift.
+// Renders three things: the run summary, the identified/added devices, and —
+// new — the reachable-but-unidentified hosts, which ARE the whole result of a
+// discovery-only (credential-free) scan.
+function _nwScanResultsHtml(d) {
     const rows = (d.added && d.added.length) ? d.added : (d.preview || []);
+    const reachable = (d.reachable || []).filter(h => h && h.reachable !== false && !(d.identified || []).some(i => i.address === h.address && i.object_type));
     const srcTxt = Object.entries(d.sources || {}).map(([k, v]) => `${k}:${v}`).join(' · ') || 'none';
     let html = `<div class="mt-2 p-3 bg-slate-50 border border-slate-200 rounded-md">
-        <p class="text-slate-600"><b>${d.targets || 0}</b> target(s) scanned (${escapeHtml(srcTxt)}) · <b>${(d.identified || []).length}</b> identified · <b>${d.dry_run ? (d.preview || []).length + ' to add (preview)' : (d.added || []).length + ' added'}</b></p>`;
+        <p class="text-slate-600"><b>${d.targets || 0}</b> target(s) scanned (${escapeHtml(srcTxt)}) · <b>${(d.identified || []).length}</b> identified · <b>${reachable.length}</b> reachable · <b>${d.dry_run ? (d.preview || []).length + ' to add (preview)' : (d.added || []).length + ' added'}</b></p>`;
+    if (d.discovery_only) {
+        html += `<p class="mt-1 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1">Discovery-only scan — no scan credentials were selected, so hosts were probed for reachability and open ports but not logged into. Nothing can be auto-added from this run. Select a credential set to identify and add devices.</p>`;
+    }
     if (rows.length) {
         html += '<table class="w-full mt-2 text-left"><thead><tr class="text-slate-400 uppercase text-[10px]"><th class="py-1">Address</th><th>Type</th><th>Name</th><th>OS</th><th>Via</th></tr></thead><tbody>';
         for (const dev of rows) {
@@ -9380,8 +9576,21 @@ function _renderNwScanResults(d) {
     } else {
         html += '<p class="text-slate-400 italic mt-1">No new manageable devices identified.</p>';
     }
-    html += '</div>';
-    out.innerHTML = html;
+    if (reachable.length) {
+        html += `<p class="mt-3 text-[10px] uppercase tracking-wide text-slate-400">Reachable hosts (not identified as a manageable device)</p>`;
+        html += '<table class="w-full mt-1 text-left"><thead><tr class="text-slate-400 uppercase text-[10px]"><th class="py-1">Address</th><th>Open ports</th><th>Hostname</th></tr></thead><tbody>';
+        for (const h of reachable) {
+            html += `<tr class="border-t border-slate-100"><td class="py-1 font-mono">${escapeHtml(h.address || '')}</td><td class="font-mono text-xs">${escapeHtml((h.open_ports || []).join(', '))}</td><td>${escapeHtml(h.hostname || '')}</td></tr>`;
+        }
+        html += '</tbody></table>';
+    }
+    return html + '</div>';
+}
+
+function _renderNwScanResults(d) {
+    const out = document.getElementById('nwscan-results');
+    if (!out) return;
+    out.innerHTML = _nwScanResultsHtml(d);
 }
 
 // Module-level nw auto-poll default + anti-stampede knobs (Setup → Module
@@ -19026,7 +19235,7 @@ async function _renderNwScanTab() {
             <input type="checkbox" class="nwt-cred rounded border-slate-300 text-[#01A982] focus:ring-green-500" value="${escapeHtml(String(cr.id))}" ${selectedCreds.has(String(cr.id)) ? 'checked' : ''}>
             <span class="font-mono">${escapeHtml(cr.name || cr.id)}</span>${cr.username ? `<span class="text-slate-400">· ${escapeHtml(cr.username)}</span>` : ''}
           </label>`).join('')
-        : `<p class="text-xs text-slate-400 italic">No scan credential sets belong to this tenant (or the shared tenant). Add one in Setup → Network Devices → Scan Credentials, bind it to this tenant, and point it at a Credential Vault entry. Note a vault credential on its own is not enough — the scan uses the credential <em>set</em> that references it.</p>`;
+        : `<p class="text-xs text-slate-400 italic">No scan credential sets belong to this tenant (or the shared tenant). You can still run a <b>discovery-only</b> scan with none selected — it reports which hosts are reachable and what management ports they expose, but cannot identify or add devices. To identify devices, add a set in Setup → Network Devices → Scan Credentials, bind it to <b>this</b> tenant (or the shared tenant so every tenant can use it), and point it at a Credential Vault entry. Note a vault credential on its own is not enough — the scan uses the credential <em>set</em> that references it.</p>`;
 
     const opt = (opts, cur) => opts.map(([v, l]) =>
         `<option value="${escapeHtml(v)}" ${String(cur) === v ? 'selected' : ''}>${escapeHtml(l)}</option>`).join('');
@@ -19114,7 +19323,82 @@ async function _renderNwScanTab() {
           <button onclick="saveNwTenantPollSchedule(this)" class="px-4 py-2 rounded-md bg-[#01A982] text-white text-sm font-bold hover:bg-[#018f6f]" title="Save recurring scan schedule and polling cadence">Save schedule &amp; cadence</button>
         </div>
       </div>
+
+      <div class="${card}">
+        <h3 class="text-sm font-bold text-slate-700 mb-1">Scheduled Scans Already Set Up</h3>
+        <p class="text-xs text-slate-400 mb-4">Every recurring scan configured across the tenants you can see — so you don't have to switch tenant and read one card at a time.</p>
+        <div id="nwt-sched-list"><p class="text-xs text-slate-400 italic">Loading…</p></div>
+      </div>
     </div>`;
+    _loadNwScanSchedules();
+}
+
+// Fetch + render every configured recurring scan the caller may see. Separate
+// from the card markup so it can be refreshed after a schedule is saved without
+// repainting the whole tab.
+async function _loadNwScanSchedules() {
+    const el = document.getElementById('nwt-sched-list');
+    if (!el) return;
+    try {
+        const r = await setupFetch('/api/nw/scan-schedules');
+        if (!r.ok) { el.innerHTML = `<p class="text-xs text-amber-600 italic">Could not load scheduled scans (${r.status}).</p>`; return; }
+        const d = await r.json();
+        el.innerHTML = _nwScanSchedulesHtml(d);
+    } catch (e) {
+        el.innerHTML = `<p class="text-xs text-amber-600 italic">Could not load scheduled scans: ${escapeHtml(e.message)}</p>`;
+    }
+}
+
+function _nwSchedEvery(secs) {
+    const n = Number(secs || 0);
+    if (!n) return 'off';
+    const m = _NW_SCHED_INTERVALS.find(([v]) => Number(v) === n);
+    if (m) return m[1].toLowerCase();
+    if (n % 86400 === 0) return `every ${n / 86400}d`;
+    if (n % 3600 === 0) return `every ${n / 3600}h`;
+    return `every ${Math.round(n / 60)}m`;
+}
+
+// "in 3h 20m" / "2h ago" for the scheduler's wall-clock timestamps (seconds).
+function _nwSchedWhen(ts, { future } = {}) {
+    if (!ts) return '—';
+    const diff = Math.abs(Date.now() / 1000 - Number(ts));
+    const h = Math.floor(diff / 3600), m = Math.floor((diff % 3600) / 60);
+    const span = h ? `${h}h ${m}m` : `${m}m`;
+    return future ? `in ${span}` : `${span} ago`;
+}
+
+function _nwScanSchedulesHtml(d) {
+    const rows = (d.schedules || []).filter(s => s.enabled);
+    if (!rows.length) {
+        return `<p class="text-xs text-slate-400 italic">No recurring scans are enabled${(d.schedules || []).length ? ' on any tenant you can see' : ''}. Enable one on the card above.</p>`;
+    }
+    // The scheduler's last/next-run state lives in hub memory, so a restart
+    // clears it and every schedule re-defers a full interval. Say so rather
+    // than letting a blank "last run" read as "it never ran".
+    const note = d.runtime_since_restart
+        ? ''
+        : `<p class="text-[11px] text-slate-400 italic mb-2">The hub has not completed a scheduled run since it last restarted — last/next run are tracked in memory and each schedule re-defers one full interval after a restart.</p>`;
+    let html = note + '<table class="w-full text-left"><thead><tr class="text-slate-400 uppercase text-[10px]"><th class="py-1">Tenant</th><th>Cadence</th><th>Mode</th><th>Credentials</th><th>Agent</th><th>Last run</th><th>Next due</th></tr></thead><tbody>';
+    for (const s of rows) {
+        const mode = s.dry_run
+            ? '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-100 text-slate-600" title="Reports discoveries without adding them">preview</span>'
+            : '<span class="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-100 text-amber-700" title="Adds identified devices to the fleet automatically">auto-add</span>';
+        const creds = s.discovery_only
+            ? '<span class="text-amber-600" title="No credential sets selected — this run probes reachability and open ports only, and can never add a device">discovery only</span>'
+            : escapeHtml(s.credential_names.join(', '));
+        const agent = s.spoke_id
+            ? (s.spoke_connected ? '<span class="text-emerald-600">connected</span>' : '<span class="text-red-500" title="This schedule will be skipped while its agent is offline">offline</span>')
+            : '<span class="text-slate-400" title="No agent pinned — the hub picks a connected agent for this tenant">auto</span>';
+        const last = s.last_status
+            ? `${escapeHtml(_nwSchedWhen(s.last_run_at))} · ${escapeHtml(s.last_status)}${s.last_added ? ` (+${s.last_added})` : ''}`
+            : _nwSchedWhen(s.last_run_at);
+        html += `<tr class="border-t border-slate-100 text-slate-600"><td class="py-1 font-semibold">${escapeHtml(s.tenant_name)}</td><td>${escapeHtml(_nwSchedEvery(s.interval_seconds))}</td><td>${mode}</td><td class="text-xs">${creds}</td><td class="text-xs">${agent}</td><td class="text-xs">${last}</td><td class="text-xs">${escapeHtml(_nwSchedWhen(s.next_due_at, { future: true }))}</td></tr>`;
+        if (s.last_error) {
+            html += `<tr class="text-[11px] text-red-500"><td colspan="7" class="pb-1 pl-2">last error: ${escapeHtml(s.last_error)}</td></tr>`;
+        }
+    }
+    return html + '</tbody></table>';
 }
 
 function _nwtSources() {
@@ -19192,7 +19476,7 @@ async function saveNwTenantPollSchedule(btn) {
             method: 'POST', body: JSON.stringify(body),
         });
         const d = await r.json().catch(() => ({}));
-        if (r.ok) showToast(`Schedule & cadence saved${d.pushed ? ` (pushed to ${d.pushed} spoke${d.pushed === 1 ? '' : 's'})` : ''}.`, 'success');
+        if (r.ok) { showToast(`Schedule & cadence saved${d.pushed ? ` (pushed to ${d.pushed} spoke${d.pushed === 1 ? '' : 's'})` : ''}.`, 'success'); _loadNwScanSchedules(); }
         else showToast('Failed to save: ' + (d.detail || r.status), 'error');
     } catch (e) {
         showToast('Error saving: ' + e.message, 'error');
@@ -19241,21 +19525,7 @@ function _renderNwScanResults2(out, d) {
         out.innerHTML = `<p class="text-slate-500 italic mt-1">${escapeHtml(d.message)}</p>`;
         return;
     }
-    const rows = (d.added && d.added.length) ? d.added : (d.preview || []);
-    const srcTxt = Object.entries(d.sources || {}).map(([k, v]) => `${k}:${v}`).join(' · ') || 'none';
-    let html = `<div class="mt-2 p-3 bg-slate-50 border border-slate-200 rounded-md">
-        <p class="text-slate-600"><b>${d.targets || 0}</b> target(s) scanned (${escapeHtml(srcTxt)}) · <b>${(d.identified || []).length}</b> identified · <b>${d.dry_run ? (d.preview || []).length + ' to add (preview)' : (d.added || []).length + ' added'}</b></p>`;
-    if (rows.length) {
-        html += '<table class="w-full mt-2 text-left"><thead><tr class="text-slate-400 uppercase text-[10px]"><th class="py-1">Address</th><th>Type</th><th>Name</th><th>OS</th><th>Via</th></tr></thead><tbody>';
-        for (const dev of rows) {
-            html += `<tr class="border-t border-slate-100"><td class="py-1 font-mono">${escapeHtml(dev.address || '')}</td><td>${escapeHtml(dev.object_type || '')}</td><td>${escapeHtml(dev.name || dev.hostname || '')}</td><td>${escapeHtml(dev.os || '')}</td><td>${escapeHtml(dev.method || '')}</td></tr>`;
-        }
-        html += '</tbody></table>';
-    } else {
-        html += '<p class="text-slate-400 italic mt-1">No new manageable devices identified.</p>';
-    }
-    html += '</div>';
-    out.innerHTML = html;
+    out.innerHTML = _nwScanResultsHtml(d);
 }
 
 // Render the device list for one category (click a row to open its detail).

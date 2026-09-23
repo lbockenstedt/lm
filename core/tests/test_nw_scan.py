@@ -125,3 +125,50 @@ def test_correlate_blank_mac_never_false_matches():
     cache = _cache("d1", arp=[{"ip": "10.0.0.9", "mac": ""}])
     assert correlate_nw_records(devs, cache, mac="") == []
     assert correlate_nw_records(devs, cache, ip=None, mac=None) == []
+
+
+# ── targets box accepts CIDRs + ranges ───────────────────────────────────────
+# Regression: a CIDR typed into the explicit "targets" box had its mask stripped
+# by _add() and was scanned as the single network address, so "scan 10.0.0.0/24"
+# quietly probed exactly one host. Targets now expand like subnets do.
+def test_cidr_in_targets_is_expanded():
+    ips, per = build_scan_target_pool(["10.0.0.0/30"], [], 100)
+    assert ips == ["10.0.0.1", "10.0.0.2"]
+    assert per == {"explicit": 2}
+
+
+def test_host_cidr_in_targets_stays_one_host():
+    # A /32 (how NetBox-style host addresses arrive) is still a single host.
+    ips, per = build_scan_target_pool(["10.0.0.5/32"], [], 100)
+    assert ips == ["10.0.0.5"]
+    assert per == {"explicit": 1}
+
+
+def test_dashed_range_in_targets_is_expanded():
+    ips, per = build_scan_target_pool(["10.0.0.10-10.0.0.12"], [], 100)
+    assert ips == ["10.0.0.10", "10.0.0.11", "10.0.0.12"]
+    assert per == {"explicit": 3}
+
+
+def test_dashed_range_shorthand_last_octet():
+    ips, _ = build_scan_target_pool(["10.0.0.10-12"], [], 100)
+    assert ips == ["10.0.0.10", "10.0.0.11", "10.0.0.12"]
+
+
+def test_reversed_range_is_rejected_not_exploded():
+    ips, per = build_scan_target_pool(["10.0.0.9-1"], [], 100)
+    assert ips == []
+    assert per == {}
+
+
+def test_expanded_targets_still_respect_cap():
+    ips, _ = build_scan_target_pool(["10.0.0.0/24"], [], 3)
+    assert len(ips) == 3
+
+
+def test_expanded_targets_dedup_against_subnets():
+    ips, per = build_scan_target_pool(["10.0.0.0/30"], ["10.0.0.0/29"], 100)
+    # /30 gives .1,.2; the /29 then only contributes .3-.6 (network/broadcast excluded).
+    assert ips[:2] == ["10.0.0.1", "10.0.0.2"]
+    assert per["explicit"] == 2
+    assert per["subnets"] == 4

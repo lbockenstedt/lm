@@ -864,6 +864,12 @@ class NwDiscoverySyncMixin:
         """
         await asyncio.sleep(150)  # stagger after boot (let spokes connect)
         last_run: Dict[str, float] = {}
+        # Wall-clock view of the same state, published on the hub so the Scan
+        # tab can show operators WHEN each schedule last ran and when it is next
+        # due. In-memory only (like last_run itself): a hub restart clears it and
+        # every schedule re-defers one interval, which the UI labels as such.
+        runtime: Dict[str, Dict[str, Any]] = {}
+        self.nw_scan_runtime = runtime
         CHECK_INTERVAL = 300
         while True:
             try:
@@ -880,19 +886,33 @@ class NwDiscoverySyncMixin:
                             continue
                         if not sc.get("enabled") or int(sc.get("interval_seconds") or 0) <= 0:
                             last_run.pop(tid, None)
+                            runtime.pop(tid, None)
                             continue
+                        interval = int(sc["interval_seconds"])
                         if tid not in last_run:
                             last_run[tid] = now  # first sight → defer one interval
+                            runtime[tid] = {"last_run_at": None, "last_status": None,
+                                            "last_added": 0, "last_error": "",
+                                            "next_due_at": time.time() + interval}
                             continue
-                        if (now - last_run[tid]) < int(sc["interval_seconds"]):
+                        if (now - last_run[tid]) < interval:
                             continue
                         last_run[tid] = now
+                        rt = runtime.setdefault(tid, {})
+                        rt["last_run_at"] = time.time()
+                        rt["next_due_at"] = time.time() + interval
                         try:
                             res = await runner(tid)
+                            rt["last_status"] = (res or {}).get("status")
+                            rt["last_added"] = len((res or {}).get("added", []) or [])
+                            rt["last_identified"] = len((res or {}).get("identified", []) or [])
+                            rt["last_error"] = ""
                             logger.info("nw scheduled scan tenant=%s status=%s added=%d",
                                         tid, (res or {}).get("status"),
                                         len((res or {}).get("added", []) or []))
                         except Exception as e:  # noqa: BLE001
+                            rt["last_status"] = "error"
+                            rt["last_error"] = str(e)
                             logger.warning("nw scheduled scan tenant=%s failed: %s", tid, e)
             except Exception as e:  # noqa: BLE001 - loop must never die
                 logger.debug("nw scan schedule loop tick error: %s", e)
