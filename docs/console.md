@@ -84,6 +84,31 @@ serial ports from the hub WebUI's **Console** view (an xterm.js terminal in the 
   and full match-by-serial need a NetBox-side field mapping — flagged for real-device verification.
 - Disable auto-identify per agent with role config `auto_identify=false`.
 
+## Probe timing (patience)
+
+Identify is **not** latency-sensitive: it runs on a background probe loop, holds the serial
+handle exclusively for one port at a time, and `CONSOLE_AUTOPROBE` emits keepalive progress
+frames so it isn't cut off at the hub's base timeout. The expensive failure is the opposite
+one — being *impatient*. A loaded chassis that pauses a few seconds mid-reply gets written off
+as unresponsive and the device is reported **unknown**, which costs an operator a manual login.
+
+Every read window is therefore sized for a slow, busy switch on a noisy line. The one that
+matters most is the **idle gap** (`_IDLE_SECS`): `_read_until` stops when the stream goes
+quiet, and the serial handle is opened with a 0.3 s read timeout, so at the old 0.4 s a
+*single* missed poll ended the read mid-reply. It is now several polls wide.
+
+If a site has gear that is slower still, scale the whole schedule from one place with role
+config **`console_probe_patience`** (a multiplier, default `1.0`, clamped to 0.01–10):
+
+```
+console_probe_patience = 2.0     # twice as patient with everything
+```
+
+It multiplies every read/settle window in `fingerprint.py` — banner, login nudges, credential
+re-prompt, enable flow, per-command output and config reads — so their relative behaviour
+(and the code paths they drive) stay identical. The console test suite sets it to `0.05` for
+exactly this reason.
+
 ## Enable / privilege escalation
 
 A prompt ending in **`>`** is *unprivileged* (user EXEC) on Cisco IOS, HPE/Aruba AOS-S and

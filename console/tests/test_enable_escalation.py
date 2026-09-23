@@ -317,9 +317,11 @@ def test_aoss_pause_between_echo_and_banner_still_escalates():
             if "enable" in b.decode(errors="replace"):
                 self.buf += b"enable\r\n"          # echo only, then a pause
                 self.pending = _AOSS_ENABLE_BANNER
-                # Longer than _read_until's 0.4s idle break, so the first read
-                # window ends with nothing but the echo in hand.
-                self.ready_at = time.monotonic() + 0.8
+                # Longer than the idle break (so the first read window ends
+                # with nothing but the echo in hand) but well inside the total
+                # enable window. Derived from the live constants so it tracks
+                # the configured patience instead of hardcoding a duration.
+                self.ready_at = time.monotonic() + fp._t(fp._IDLE_SECS) * 1.5
 
         def read(self):
             if self.pending and time.monotonic() >= self.ready_at:

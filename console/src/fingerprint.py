@@ -726,8 +726,50 @@ def boot_fault(text: str) -> str:
 # more bare CRs — until a login/password/shell prompt appears. Many devices only
 # redraw their prompt on a fresh CR, so this also turns "output but no prompt"
 # into a detectable prompt without hammering (bounded attempt count).
-_LOGIN_NUDGES = 4          # extra CRs after the initial CRLF banner read
-_NUDGE_SECS = 1.2          # per-nudge read window
+# ── How patient the probe is ─────────────────────────────────────────────────
+# Identify is NOT latency-sensitive. It runs on a background probe loop, holds
+# the serial handle exclusively for one port, and the hub keeps CONSOLE_AUTOPROBE
+# alive with progress frames rather than a hard 90s cut-off. Impatience is the
+# expensive failure mode: a switch that simply takes a breath mid-reply gets
+# written off as unresponsive and the device is reported "unknown", which costs
+# an operator a manual login. Every window below is therefore sized for a slow,
+# busy switch on a noisy line, not for a fast one.
+#
+# ``_IDLE_SECS`` is the important one: _read_until also stops when the stream
+# goes quiet, and the serial handle is opened with a 0.3s read timeout, so at
+# the old 0.4s a SINGLE missed poll ended the read. Sized here at several polls.
+_IDLE_SECS = 1.6           # quiet gap that means "the device has finished talking"
+
+# Global multiplier on every read window, so a deployment with unusually slow
+# gear (or a test suite that wants none of this waiting) can scale the whole
+# schedule from one place. See :func:`set_patience`.
+_PATIENCE = 1.0
+
+
+def set_patience(factor: float) -> float:
+    """Scale every read/settle window in this module by ``factor``.
+
+    ``>1`` for slow or heavily loaded gear, ``<1`` to speed up tests. Returns
+    the previous value so callers can restore it. Clamped to a sane range so a
+    bad config value can't wedge a probe for hours or reduce every window to
+    zero."""
+    global _PATIENCE
+    prev = _PATIENCE
+    try:
+        f = float(factor)
+    except (TypeError, ValueError):
+        return prev
+    _PATIENCE = min(max(f, 0.01), 10.0)
+    return prev
+
+
+def _t(seconds: float) -> float:
+    """A read window, scaled by the configured patience."""
+    return seconds * _PATIENCE
+
+
+_LOGIN_NUDGES = 5          # extra CRs after the initial CRLF banner read
+_NUDGE_SECS = 2.5          # per-nudge read window
 
 # After a FAILED credential, a device may be slow to re-draw its login prompt or
 # deliberately rate-limit (a pause + fresh "login:"). Before spending the NEXT
@@ -735,23 +777,23 @@ _NUDGE_SECS = 1.2          # per-nudge read window
 # a valid credential later in the list is never silently skipped just because the
 # prompt hadn't redrawn yet.
 _REPROMPT_NUDGES = 3       # CRs used to coax the login prompt back between creds
-_REPROMPT_SECS = 3.0       # read window per re-prompt nudge (covers rate-limit delay)
+_REPROMPT_SECS = 5.0       # read window per re-prompt nudge (covers rate-limit delay)
 
 # A net-new device often forces a password SET/CHANGE right after a first login
 # with a factory-default credential. Identify is READ-ONLY, so we must NOT set a
 # password — we decline by sending a few bare CRs (what an operator does to skip),
 # which drops the device to its shell or bounces it back to the login prompt.
 _NEW_PW_SKIP_CRS = 4       # bare CRs sent to escape a forced set/change-password flow
-_NEW_PW_SKIP_SECS = 2.0    # read window per skip CR
+_NEW_PW_SKIP_SECS = 3.0    # read window per skip CR
 
 # A prompt ending in ">" is UNPRIVILEGED (user EXEC) on Cisco IOS, HPE/Aruba
 # AOS-S and most network CLIs; the identity `show` commands generally need
 # PRIVILEGED ("#") mode, so we send `enable` and answer whatever it asks for.
 # Two secrets are tried at an enable password prompt: the credential that just
 # logged us in, then a bare Enter (many devices have no separate enable secret).
-_ENABLE_DRAINS = 2
+_ENABLE_DRAINS = 3         # extra passive reads for a device that pauses mid-reply
 _ENABLE_ATTEMPTS = 2       # distinct enable secrets tried before giving up
-_ENABLE_SECS = 4.0         # read window after each enable-flow write
+_ENABLE_SECS = 6.0         # read window after each enable-flow write
 
 # Universal, READ-ONLY discovery commands used to coax an identifying banner out
 # of a device sitting at a LIVE console that presented no login prompt and no
@@ -900,9 +942,15 @@ def passive_identify(text: str) -> Dict[str, Any]:
 
 
 def _read_until(read_fn: Callable[[], bytes], patterns: List[re.Pattern],
-                timeout: float, idle: float = 0.4) -> str:
+                timeout: float, idle: Optional[float] = None) -> str:
     """Accumulate serial output until one of ``patterns`` matches the tail, or
-    ``timeout`` elapses, or the stream goes idle for ``idle`` seconds."""
+    ``timeout`` elapses, or the stream goes idle for ``idle`` seconds.
+
+    Both windows are scaled by the module patience (:func:`set_patience`), and
+    ``idle`` defaults to ``_IDLE_SECS`` — long enough that a device pausing
+    mid-reply isn't mistaken for one that has finished."""
+    idle = _t(_IDLE_SECS if idle is None else idle)
+    timeout = _t(timeout)
     buf = b""
     deadline = time.monotonic() + timeout
     last = time.monotonic()
@@ -933,7 +981,7 @@ def _read_command_output(read_fn: Callable[[], bytes], write_fn: Callable[[bytes
 
 
 def _elicit_identity_banner(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
-                            transcript: str, cmd_secs: float = 2.5):
+                            transcript: str, cmd_secs: float = 4.0):
     """Responsive console, no vendor recognized yet and NO login prompt showing:
     send a few universal read-only discovery commands to force out an identifying
     banner. Stops as soon as :func:`detect_vendor` recognizes the device. Returns
@@ -955,7 +1003,7 @@ def _elicit_identity_banner(read_fn: Callable[[], bytes], write_fn: Callable[[by
 
 
 def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
-                   credentials: List[Dict[str, str]], banner_secs: float = 3.0,
+                   credentials: List[Dict[str, str]], banner_secs: float = 6.0,
                    step_secs: float = 4.0):
     """Vendor-agnostic login run BEFORE vendor detection.
 
@@ -1266,7 +1314,7 @@ _LOGOUT_COMMANDS = ("exit", "logout")
 
 
 def _deescalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
-                          cmd_secs: float = 2.0) -> bool:
+                          cmd_secs: float = 3.0) -> bool:
     """Drop back from privileged ("#") to unprivileged (">") mode.
 
     Only used when we escalated an OPERATOR's already-open console session —
@@ -1288,7 +1336,7 @@ def _deescalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[byte
 
 
 def _logout(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
-            profile: Optional[Dict[str, Any]] = None, cmd_secs: float = 2.0) -> bool:
+            profile: Optional[Dict[str, Any]] = None, cmd_secs: float = 3.0) -> bool:
     """Cleanly end an authenticated session we opened: send ``exit``/``logout``
     (or the profile's own ``logout`` override) and confirm a login/password
     prompt reappears, so profiling never leaves a privileged shell open on the
@@ -1313,8 +1361,8 @@ def _logout(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
 
 
 def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
-                 credentials: List[Dict[str, str]], banner_secs: float = 3.0,
-                 cmd_secs: float = 4.0) -> Dict[str, Any]:
+                 credentials: List[Dict[str, str]], banner_secs: float = 6.0,
+                 cmd_secs: float = 6.0) -> Dict[str, Any]:
     """Drive a read-only identify over an already-open serial channel.
 
     ``read_fn()`` returns available bytes (non-blocking-ish); ``write_fn(bytes)``
@@ -1512,7 +1560,7 @@ def _login_diag(diag: Dict[str, Any], transcript: str, credentials) -> Dict[str,
 
 def run_commands(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
                  credentials: List[Dict[str, str]], commands: List[str],
-                 banner_secs: float = 3.0, cmd_secs: float = 4.0) -> Dict[str, Any]:
+                 banner_secs: float = 6.0, cmd_secs: float = 6.0) -> Dict[str, Any]:
     """Log in generically, then run a caller-supplied list of READ-ONLY commands
     and capture per-command output — the primitive behind LLM-driven identify on
     devices the built-in profiles don't recognize.
@@ -1603,7 +1651,7 @@ def _disable_pager(read_fn, write_fn, profile, cmd_secs: float) -> None:
 
 
 def read_running_config(read_fn, write_fn, profile, credentials,
-                        cmd_secs: float = 12.0) -> Dict[str, Any]:
+                        cmd_secs: float = 20.0) -> Dict[str, Any]:
     """Log in (if needed) and capture the device's running-config (backup/read)."""
     write_fn(b"\r\n")
     ok, _ = login(read_fn, write_fn, profile, credentials)
@@ -1625,7 +1673,7 @@ _CFG_ERR = re.compile(r"%\s|Invalid input|Unknown command|Incomplete command|syn
 
 def push_config(read_fn, write_fn, profile, credentials, config_text: str,
                 save: bool = True, rollback: str = "negate",
-                cmd_secs: float = 4.0) -> Dict[str, Any]:
+                cmd_secs: float = 6.0) -> Dict[str, Any]:
     """Transactional config push (Phase G): login → backup → enter config mode →
     send lines (watch per-line errors) → exit → POST-VERIFY the pushed lines are
     in running-config → on PASS save (unless save=False); on FAIL do NOT save and
