@@ -43,6 +43,7 @@ OPNsense, NetBox, ClearPass, LDAP, Kea, Unbound, switches, TrueNAS, certbot) and
 | WebUI | `docs/webui.md` · `docs/webui-style.md` |
 | New module | `docs/template-repo.md` |
 | Logging contract | `docs/logging-observability-contract.md` |
+| Caching contract | `docs/caching-contract.md` |
 
 ## Hub-specific gotchas
 
