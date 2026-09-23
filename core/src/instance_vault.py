@@ -223,13 +223,27 @@ async def validate_ref(hub, record, sess, *, is_admin, storage_key):
     * resolvable — the reference must resolve to an automation-readable secret;
     * usable — the secret must carry at least one field this product can use.
 
+    When NO reference is present, also enforces the operator's vault-only
+    policy: once a cloud vault is configured for this hub, a record must not
+    carry one of its secret fields inline — see :func:`_vault_only_violation`.
+    This mirrors the console module's pre-existing ``_vault_enabled`` gate
+    (routes/console.py) so the same "vault enabled → no local secrets" rule
+    applies uniformly across every vault-integrated product.
+
     Raises :class:`fastapi.HTTPException` on failure; returns ``None`` (and does
-    nothing) when the record carries no reference."""
+    nothing further) when the record carries no reference and no violation."""
     spec = SECRET_FIELDS.get(storage_key) or {}
     if not spec:
         return  # product has no vault-backed secret fields — nothing to validate
     ref = _normalize_ref(record)
     if ref is None:
+        if _vault_only_violation(hub, record, spec):
+            raise HTTPException(
+                status_code=400,
+                detail="Credential Vault is enabled for this hub — save this secret "
+                       "as a Credential Vault reference (select it from the vault) "
+                       "instead of entering it inline. Locally-stored secrets are "
+                       "not permitted while the vault is available.")
         return
     if not is_admin:
         reach = set((sess or {}).get("user", {}).get("tenants") or [])
@@ -247,3 +261,15 @@ async def validate_ref(hub, record, sess, *, is_admin, storage_key):
             detail="the selected Credential Vault secret carries no usable "
                    "field for this connection (expected one of: "
                    + ", ".join(sorted({a for al in spec.values() for a in al})) + ")")
+
+
+def _vault_only_violation(hub, record, spec) -> bool:
+    """True when the hub's cloud vault is available, this product has
+    vault-backed secret fields, and ``record`` carries a non-empty value in one
+    of them WITHOUT a ``vault_credential`` reference — i.e. an inline/local
+    secret being saved while the operator directive says it must come from the
+    vault instead."""
+    if not cred_vault._vault_available(hub):
+        return False
+    return any(record.get(field) for field in spec)
+
