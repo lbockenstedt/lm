@@ -88,8 +88,20 @@ def _as_bool_from_route():
 def test_as_bool_honours_falsey_strings_and_zero():
     """The whole point: these must NOT be read as 'forgive the strike'."""
     _as_bool = _as_bool_from_route()
-    for falsey in (False, "false", "False", "  FALSE  ", "0", "no", "off", "", 0):
+    for falsey in (False, "false", "False", "  FALSE  ", "0", "no", "off", 0):
         assert _as_bool(falsey, True) is False, falsey
+
+
+def test_as_bool_empty_string_uses_the_default_not_false():
+    """An empty/whitespace-only value carries no operator intent, so it must
+    take the documented ``default`` path rather than being invented into an
+    explicit ``False``. Mapping it to False was both a silent behaviour change
+    beyond this fix's scope (the old ``"" is not False`` yielded True) and a
+    contradiction of ``_as_bool``'s own docstring."""
+    _as_bool = _as_bool_from_route()
+    for blank in ("", "   ", "\t\n"):
+        assert _as_bool(blank, True) is True, blank
+        assert _as_bool(blank, False) is False, blank
 
 
 def test_as_bool_accepts_truthy_forms():
