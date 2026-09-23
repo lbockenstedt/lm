@@ -858,7 +858,7 @@ def register(app, hub, ctx):
                 # per spoke, and all spokes run concurrently so the dashboard
                 # latency is one round-trip, not N×2.
                 async with _FANOUT_SEM:
-                    health_raw, int_raw = await _asyncio.gather(
+                    health_raw, int_raw = await asyncio.gather(
                         hub.request_response(sid, "GET_SYSTEM_HEALTH", {}),
                         hub.request_response(sid, "GET_INTERFACE_STATUS", {}),
                     )
@@ -869,7 +869,7 @@ def register(app, hub, ctx):
             except Exception as e:
                 return {"spoke_id": sid, "spoke_online": False, "status": "ERROR", "error": str(e)}
 
-        results = await _asyncio.gather(*(_one(sid) for sid in opn_spokes))
+        results = await asyncio.gather(*(_one(sid) for sid in opn_spokes))
         return {"hosts": list(results)}
 
     @app.get("/api/aggregate/proxmox")
@@ -898,7 +898,7 @@ def register(app, hub, ctx):
             except Exception as e:
                 return {"spoke_id": sid, "spoke_online": False, "status": "ERROR", "error": str(e)}
 
-        results = await _asyncio.gather(*(_one(sid) for sid in pxmx_spokes))
+        results = await asyncio.gather(*(_one(sid) for sid in pxmx_spokes))
         return {"hosts": list(results)}
 
     @app.get("/api/pxmx/agent-install-cmd")
