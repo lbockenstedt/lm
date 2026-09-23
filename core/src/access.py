@@ -1007,6 +1007,81 @@ def tenant_is_shared(tenant_id) -> bool:
     return bool(tenant_id) and (tenant_id == _SHARED_TENANT_ID or str(tenant_id).strip().lower() == "shared")
 
 
+# ── Tenant picker scoping ────────────────────────────────────────────────────
+# ``default`` is the built-in ADMIN tenant (routes/tenants_users.py renders it
+# as "ADMIN" and synthesises it when absent), NOT an "All tenants" view. The
+# rule — named in routes/nw.py as "ADMIN(default) must not accumulate across
+# tenants" — is that the ADMIN scope covers UNASSIGNED resources and resources
+# explicitly bound to ``default``, plus shared infra, but never another
+# tenant's dedicated resources.
+ADMIN_TENANT_ID = "default"
+
+
+def tenant_scope_ids(requested) -> Optional[set]:
+    """Effective tenant ids for a picker selection.
+
+    ``None`` (no ``?tenant=`` at all) means an unscoped programmatic call: no
+    filtering. ``default`` expands to ``{"", "default"}`` plus the shared
+    tenant. Any other id expands to itself plus the shared tenant.
+    """
+    if requested is None:
+        return None
+    normalized = str(requested).strip()
+    if not normalized:
+        return None
+
+    if normalized.lower() == ADMIN_TENANT_ID:
+        scope = {"", ADMIN_TENANT_ID}
+    else:
+        scope = {normalized}
+
+    shared_id = shared_tenant_id()
+    if shared_id:
+        scope.add(shared_id)
+    return scope
+
+
+def in_tenant_scope(tenant_id, scope: Optional[set]) -> bool:
+    """Whether a resource's tenant belongs to ``scope`` (from tenant_scope_ids).
+
+    A ``None`` scope matches everything. ``tenant_id`` is normalised so that
+    ``None`` and blanks both read as UNASSIGNED ("")."""
+    if scope is None:
+        return True
+    normalized = "" if tenant_id is None else str(tenant_id).strip()
+    if normalized in scope:
+        return True
+    return tenant_is_shared(normalized)
+
+
+def spoke_is_unbound(hub, spoke_id) -> bool:
+    """Whether ``spoke_id`` is NOT dedicated to a real tenant — i.e. it is
+    UNASSIGNED, or bound to the SHARED tenant, or to the ADMIN tenant.
+
+    Callers that fall back to "the global spoke" when no real tenant is
+    selected (``hub.get_hypervisor_spoke()`` returns whichever hypervisor/
+    simulation spoke happens to be connected) must gate that fallback on this,
+    or the ADMIN/Default view silently picks up a spoke BOUND to some other
+    tenant and reports that tenant's data as the admin's own — the reported
+    leak. Shared infra is deliberately included: shared is visible to every
+    tenant AND to the global admin.
+
+    Fails CLOSED (False) if the binding can't be read. A spoke with no
+    ``module_metadata`` entry at all is the ordinary UNASSIGNED case, not a
+    failure, and returns True."""
+    if not spoke_id:
+        return False
+    try:
+        md = (hub.state.system_state.get("module_metadata", {}) or {})
+        tenant_id = (md.get(spoke_id, {}) or {}).get("tenant_id")
+    except Exception:  # noqa: BLE001 - unreadable binding → never leak
+        return False
+    normalized = str(tenant_id or "").strip()
+    if not normalized:
+        return True
+    return tenant_is_shared(normalized) or normalized.lower() == ADMIN_TENANT_ID
+
+
 # ── NW per-tenant poll config (jitter / caps / default cadence) ──────────────
 # Global admin defaults live in global_config.nw_poll_* (set on Setup → Module
 # Management). A tenant-admin may override them for THEIR tenant under

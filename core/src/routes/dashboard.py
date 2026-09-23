@@ -152,7 +152,10 @@ def register(app, hub, ctx):
         # (get_pxmx_vms / get_hypervisor_spokes_for_tenant): fan PXMX_LIST_VMS
         # across the plural visible set + the unbound-global spoke, merge/dedupe,
         # then subnet/tag-filter (below) so shared-spoke VMs land on the right
-        # tenant. admin/default → the single global hypervisor (legacy behavior).
+        # tenant. admin/default → the global hypervisor ONLY when it is itself
+        # UNBOUND (or shared/ADMIN-bound): a spoke dedicated to a real tenant
+        # must never report its VM count as the admin's own — shared infra is
+        # visible to every tenant AND the admin, another tenant's is not.
         _tid = scoping.get("tenant_id")
         if _tid and _tid != "default":
             hv_spokes = list(hub.get_hypervisor_spokes_for_tenant(_tid))
@@ -160,13 +163,11 @@ def register(app, hub, ctx):
             # same fallback get_pxmx_vms adds — so an unbound lab hypervisor's
             # VMs still count. A spoke bound to a DIFFERENT tenant is excluded.
             _gs = hub.get_hypervisor_spoke()
-            if _gs and _gs not in hv_spokes:
-                _md = hub.state.system_state.get("module_metadata", {}) or {}
-                if not (_md.get(_gs, {}) or {}).get("tenant_id"):
-                    hv_spokes.append(_gs)
+            if _gs and _gs not in hv_spokes and access.spoke_is_unbound(hub, _gs):
+                hv_spokes.append(_gs)
         else:
             _gs = hub.get_hypervisor_spoke()
-            hv_spokes = [_gs] if _gs else []
+            hv_spokes = [_gs] if access.spoke_is_unbound(hub, _gs) else []
         spoke_nac        = hub.get_spoke_by_type("nac")
 
         # Whole-host PINNED-agent ownership. A Proxmox host can dial a SHARED
@@ -518,11 +519,14 @@ def register(app, hub, ctx):
         spoke_ipam       = hub.get_spoke_by_type("ipam")
         # Tenant-bound hypervisor: a non-admin only reaches a hypervisor bound
         # to its tenant (None → no VM results, no leak). The admin's
-        # unscoped/default view falls back to any hypervisor.
+        # unscoped/default view falls back to the global hypervisor ONLY when
+        # that spoke is itself UNBOUND (or shared/ADMIN-bound) — otherwise the
+        # ADMIN/Default search silently returned another tenant's VMs.
         if resolved and resolved != "default":
             spoke_hypervisor = hub.get_hypervisor_spoke_for_tenant(resolved)
         else:
-            spoke_hypervisor = hub.get_hypervisor_spoke()
+            _gs = hub.get_hypervisor_spoke()
+            spoke_hypervisor = _gs if access.spoke_is_unbound(hub, _gs) else None
         spoke_nac        = hub.get_spoke_by_type("nac")
         # Tenant-bound directory: a non-admin only reaches the LDAP spoke bound
         # to its tenant (None → no user results). The spoke additionally scopes
