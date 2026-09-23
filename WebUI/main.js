@@ -5570,20 +5570,32 @@ async function _cvRenderBucketBody() {
         // e.g. a Global-Admin-loaded bucket whose PSK state wasn't known upfront.
         const _cur = _cvBuckets.find(b => b.bucket === _cvCurrentBucket);
         if (_cur) _cur.has_psk = !!d.has_psk;
+        // An orphaned bucket is a dead end — nothing tenant-scoped can reference
+        // it and no tenant-admin can reach it. Say so where the operator is
+        // actually looking, and offer the two ways out: rescue the credentials
+        // into a real bucket, or remove the bucket.
+        const orphanBanner = (_cur && _cur.is_orphan && _cvIsGlobalAdmin) ? `
+          <div class="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-3 py-2 mb-3 space-y-2">
+            <p><b>This bucket matches no tenant.</b> Credential sets are matched by tenant id, so nothing can reference what is stored here and no tenant-admin can reach it. It is not the Global Admin slot — that one is <span class="font-mono">${escapeHtml(_cvAdminSlot)}</span>.</p>
+            <div class="flex gap-2">
+              <button onclick="_cvMoveSecretModal()" class="px-2 py-1 rounded border border-amber-300 bg-white hover:bg-amber-100 font-semibold">Move a secret out…</button>
+              <button onclick="_cvDeleteBucketModal()" class="px-2 py-1 rounded bg-red-600 text-white font-semibold hover:bg-red-700">Delete this bucket</button>
+            </div>
+          </div>` : '';
         if (!d.has_psk) {
-            el.innerHTML = `<div class="text-sm text-amber-600 space-y-2">
+            el.innerHTML = orphanBanner + `<div class="text-sm text-amber-600 space-y-2">
               <p>This bucket has no pass-phrase yet. A pass-phrase is required before you can add or reveal secrets.</p>
               <button onclick="_cvSetPskModal()" class="px-3 py-1.5 text-xs rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Set a pass-phrase</button>
             </div>`;
             return;
         }
         if (!secrets.length) {
-            el.innerHTML = `<p class="text-sm text-slate-400 italic">No secrets stored in this bucket.</p>`;
+            el.innerHTML = orphanBanner + `<p class="text-sm text-slate-400 italic">No secrets stored in this bucket.</p>`;
             return;
         }
         // Persistent search bar (outside the re-rendered table so typing keeps
         // focus) + a table area that _cvRenderSecretsTable filters in place.
-        el.innerHTML = `
+        el.innerHTML = orphanBanner + `
           <div class="flex items-center gap-2 mb-3">
             <input id="cv-search" type="text" value="${escapeHtml(_cvSearchQuery)}" oninput="_cvOnSearch(this.value)"
                    placeholder="Search secrets (name / type / description)…" autocomplete="off"
@@ -5717,6 +5729,99 @@ async function _cvDoResetPsk() {
         const lost = (d.destroyed || []).length;
         showToast(lost ? `Pass-phrase reset — ${lost} unrecoverable secret(s) removed, ${d.kept} kept.`
                        : `Pass-phrase reset — all ${d.kept} secret(s) kept.`, 'success');
+        loadCredVault();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+function _cvMoveSecretModal() {
+    // Only hub-mode secrets can be moved without pass-phrases; psk-mode ones are
+    // encrypted with the SOURCE bucket's key, so both sides must be unlocked.
+    const secrets = _cvSecrets || [];
+    if (!secrets.length) { showToast('This bucket has no secrets to move.', 'error'); return; }
+    const dests = (_cvBuckets || []).filter(b => b.bucket !== _cvCurrentBucket && b.has_psk);
+    if (!dests.length) { showToast('No other bucket has a pass-phrase set — set one first.', 'error'); return; }
+    const body = `
+      <h3 class="text-lg font-bold text-[#263040]">Move a secret out of ${escapeHtml(_cvCurrentBucket)}</h3>
+      <p class="text-sm text-slate-500">The stored value is not copied — only its bucket is re-pointed, so the credential is never duplicated and never briefly missing.</p>
+      <label class="block text-xs font-semibold text-slate-500">Secret
+        <select id="cv-move-name" onchange="_cvMoveOnPick()" class="${_CV_INP}">
+          ${secrets.map(s => `<option value="${escapeHtml(s.name)}" data-mode="${escapeHtml(s.mode || 'psk')}">${escapeHtml(s.name)}${(s.mode === 'hub') ? '' : ' (pass-phrase protected)'}</option>`).join('')}
+        </select></label>
+      <label class="block text-xs font-semibold text-slate-500">Destination bucket
+        <select id="cv-move-dest" class="${_CV_INP}">
+          ${dests.map(b => `<option value="${escapeHtml(b.bucket)}">${escapeHtml(_cvBucketLabel(b))}</option>`).join('')}
+        </select></label>
+      <div id="cv-move-psks" class="space-y-2 hidden">
+        <p class="text-xs text-slate-500">This secret is encrypted with its bucket's pass-phrase, so both buckets must be unlocked to re-encrypt it.</p>
+        <input id="cv-move-psk" type="password" autocomplete="off" placeholder="this bucket's pass-phrase" class="${_CV_INP}">
+        <input id="cv-move-to-psk" type="password" autocomplete="off" placeholder="destination bucket's pass-phrase" class="${_CV_INP}">
+      </div>
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="document.getElementById('cv-move-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button onclick="_cvDoMoveSecret()" class="px-4 py-1.5 text-sm rounded-md bg-[#01A982] text-white font-bold hover:bg-[#019972]">Move secret</button>
+      </div>`;
+    openModal('cv-move-modal', body, { backdropClose: true });
+    _cvMoveOnPick();
+}
+
+function _cvMoveOnPick() {
+    const mode = document.getElementById('cv-move-name')?.selectedOptions?.[0]?.dataset?.mode;
+    document.getElementById('cv-move-psks')?.classList.toggle('hidden', mode === 'hub');
+}
+
+async function _cvDoMoveSecret() {
+    const name = document.getElementById('cv-move-name')?.value || '';
+    const toBucket = document.getElementById('cv-move-dest')?.value || '';
+    try {
+        await apiJson('/tenant/cred-vault/move-secret', {
+            method: 'POST',
+            body: JSON.stringify({
+                bucket: _cvCurrentBucket, name, to_bucket: toBucket,
+                psk: document.getElementById('cv-move-psk')?.value || '',
+                to_psk: document.getElementById('cv-move-to-psk')?.value || '',
+            }),
+        });
+        document.getElementById('cv-move-modal')?.remove();
+        showToast(`Moved "${name}" to ${toBucket}.`, 'success');
+        loadCredVault();
+    } catch (e) { showToast('Failed: ' + e.message, 'error'); }
+}
+
+function _cvDeleteBucketModal() {
+    const left = (_cvSecrets || []).map(s => s.name);
+    const impact = left.length
+        ? `<div class="text-sm text-red-700 bg-red-50 border border-red-200 rounded-md px-3 py-2 space-y-1">
+             <p><b>${left.length} secret(s) are still stored here and will be destroyed:</b></p>
+             <ul class="list-disc list-inside font-mono text-xs">${left.map(n => `<li>${escapeHtml(n)}</li>`).join('')}</ul>
+             <label class="flex items-center gap-2 text-xs font-semibold"><input id="cv-delbucket-confirm" type="checkbox" class="rounded border-slate-300"> Destroy these secrets — if any is still worth keeping, cancel and move it out first.</label>
+           </div>`
+        : `<p class="text-sm text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md px-3 py-2">The bucket is empty, so nothing is lost.</p>`;
+    const body = `
+      <h3 class="text-lg font-bold text-[#263040]">Delete bucket — ${escapeHtml(_cvCurrentBucket)}</h3>
+      <p class="text-sm text-slate-500">Removes the bucket and its pass-phrase. This cannot be undone.</p>
+      ${impact}
+      <div class="flex justify-end gap-2 pt-2">
+        <button onclick="document.getElementById('cv-delbucket-modal')?.remove()" class="px-4 py-1.5 text-sm rounded-md border border-slate-200 text-slate-600 hover:bg-slate-50">Cancel</button>
+        <button onclick="_cvDoDeleteBucket()" class="px-4 py-1.5 text-sm rounded-md bg-red-600 text-white font-bold hover:bg-red-700">Delete bucket</button>
+      </div>`;
+    openModal('cv-delbucket-modal', body, { backdropClose: true });
+}
+
+async function _cvDoDeleteBucket() {
+    const confirmEl = document.getElementById('cv-delbucket-confirm');
+    if (confirmEl && !confirmEl.checked) {
+        showToast('Tick the confirmation — those secrets cannot be recovered.', 'error');
+        return;
+    }
+    try {
+        const d = await apiJson('/tenant/cred-vault/delete-bucket', {
+            method: 'POST',
+            body: JSON.stringify({ bucket: _cvCurrentBucket, confirm_destroy: !!(confirmEl && confirmEl.checked) }),
+        });
+        document.getElementById('cv-delbucket-modal')?.remove();
+        _cvCurrentBucket = null;
+        const n = (d.destroyed || []).length;
+        showToast(`Bucket deleted${n ? ` — ${n} secret(s) destroyed` : ''}.`, 'success');
         loadCredVault();
     } catch (e) { showToast('Failed: ' + e.message, 'error'); }
 }
