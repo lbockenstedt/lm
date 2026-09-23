@@ -569,6 +569,36 @@ _DEFAULT_PROMPT_PATTERNS: Dict[str, List[str]] = {
     "login_prompt": [r"(?:[Ll]ogin|[Uu]ser(?:\s?name)?)\s*:\s*$"],
     "password_prompt": [r"[Pp]assword\s*:\s*$"],
     "shell_prompt": [r"\S[>#$%]\s*$"],
+    # Privilege level, read off the prompt's last character. On Cisco IOS,
+    # HPE/Aruba AOS-S and most network CLIs ">" is UNPRIVILEGED (user EXEC)
+    # and "#" is PRIVILEGED (enable). Most identity `show` commands need
+    # privileged mode, so landing on ">" means we must send `enable` first —
+    # see _escalate_privilege. Deliberately NOT "$"/"%": those are UNIX shell
+    # prompts where `enable` is meaningless.
+    "unpriv_prompt": [r"\S>\s*$"],
+    "priv_prompt": [r"\S#\s*$"],
+    # A device refusing the enable escalation, split by CAUSE because the two
+    # mean very different things. "unsupported" = there is no `enable` command
+    # (">" already IS the top level on some AOS-S / appliance CLIs), so retrying
+    # with another secret is pointless. "denied" = enable exists but the secret
+    # was wrong, so the next secret is worth trying.
+    "enable_unsupported": [
+        r"(?i:invalid\s+(?:input|command))",
+        r"(?i:unknown\s+command)",
+        r"(?i:incomplete\s+command)",
+        r"(?i:command\s+not\s+found)",
+        r"(?i:ambiguous\s+command)",
+        r"%\s*(?:Invalid|Unknown|Incomplete)",
+    ],
+    "enable_denied": [
+        r"(?i:invalid\s+(?:password|secret))",
+        r"(?i:access\s+denied)",
+        r"(?i:authentication\s+fail(?:ed|ure))",
+        r"(?i:bad\s+secrets?)",
+        r"(?i:permission\s+denied)",
+        r"(?i:password\s+incorrect)",
+        r"(?i:incorrect\s+password)",
+    ],
     # A NET-NEW device (esp. after a first login with a factory-default cred)
     # often forces a password SET/CHANGE before it will drop to a shell —
     # "Enter new password:", "Confirm new password:", "You must change your
@@ -617,6 +647,10 @@ _LOGIN_PROMPT = _PROMPTS["login_prompt"]
 _PASSWORD_PROMPT = _PROMPTS["password_prompt"]
 _SHELL_PROMPT = _PROMPTS["shell_prompt"]
 _NEW_PASSWORD_PROMPT = _PROMPTS["new_password_prompt"]
+_UNPRIV_PROMPT = _PROMPTS["unpriv_prompt"]
+_PRIV_PROMPT = _PROMPTS["priv_prompt"]
+_ENABLE_UNSUPPORTED = _PROMPTS["enable_unsupported"]
+_ENABLE_DENIED = _PROMPTS["enable_denied"]
 
 # Lines a device emits ASYNCHRONOUSLY on the console, unrelated to the prompt:
 # syslog records, kernel ring-buffer messages and Cisco-style facility messages.
@@ -709,6 +743,14 @@ _REPROMPT_SECS = 3.0       # read window per re-prompt nudge (covers rate-limit 
 # which drops the device to its shell or bounces it back to the login prompt.
 _NEW_PW_SKIP_CRS = 4       # bare CRs sent to escape a forced set/change-password flow
 _NEW_PW_SKIP_SECS = 2.0    # read window per skip CR
+
+# A prompt ending in ">" is UNPRIVILEGED (user EXEC) on Cisco IOS, HPE/Aruba
+# AOS-S and most network CLIs; the identity `show` commands generally need
+# PRIVILEGED ("#") mode, so we send `enable` and answer whatever it asks for.
+# Two secrets are tried at an enable password prompt: the credential that just
+# logged us in, then a bare Enter (many devices have no separate enable secret).
+_ENABLE_ATTEMPTS = 2       # distinct enable secrets tried before giving up
+_ENABLE_SECS = 4.0         # read window after each enable-flow write
 
 # Universal, READ-ONLY discovery commands used to coax an identifying banner out
 # of a device sitting at a LIVE console that presented no login prompt and no
@@ -1070,7 +1112,159 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
     return False, None, transcript, diag
 
 
+def _enable_secrets(credentials: List[Dict[str, str]], cred_idx) -> List[str]:
+    """Enable secrets to try, in order: the password of the credential that
+    just logged us in, then a bare Enter (very common — plenty of devices have
+    no separate enable secret). Deduped, so a blank login password doesn't
+    burn both attempts."""
+    out: List[str] = []
+    if isinstance(cred_idx, int) and 0 <= cred_idx < len(credentials):
+        out.append((credentials[cred_idx] or {}).get("password", "") or "")
+    out.append("")
+    seen, uniq = set(), []
+    for s in out:
+        if s not in seen:
+            seen.add(s)
+            uniq.append(s)
+    return uniq
+
+
+def _escalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
+                        credentials: List[Dict[str, str]], cred_idx,
+                        transcript: str) -> Tuple[str, Dict[str, Any]]:
+    """Escalate an unprivileged console session to privileged (enable) mode.
+
+    A prompt ending in ``>`` is UNPRIVILEGED (user EXEC) on Cisco IOS, HPE/Aruba
+    AOS-S and most network CLIs — most of the identity ``show`` commands are
+    rejected there ("Invalid input"), so the device would be misreported as
+    unknown even though we logged in fine. Seeing ``>`` therefore means: send
+    ``enable`` and answer whatever it asks for, until the prompt ends in ``#``.
+
+    ``$`` and ``%`` prompts are deliberately NOT treated as unprivileged: those
+    are UNIX shells, where ``enable`` is meaningless (and on some appliances is
+    a real, state-changing command). ``_UNPRIV_PROMPT`` matches ``>`` only, so
+    we never type ``enable`` into a shell.
+
+    Read-only w.r.t. device config: ``enable`` only changes OUR session's
+    privilege level, and ``_logout`` afterwards drops back out. Never raises —
+    a dead line must not crash identify. Returns ``(transcript, diag)``."""
+    diag: Dict[str, Any] = {"attempted": False, "escalated": False,
+                            "secrets_tried": 0, "reason": ""}
+    tail = _prompt_tail(transcript)
+    if _PRIV_PROMPT.search(tail):
+        # Already in enable mode (or a UNIX root shell) — nothing to do.
+        diag["escalated"] = True
+        diag["reason"] = "already_privileged"
+        return transcript, diag
+    if not _UNPRIV_PROMPT.search(tail):
+        # Not a ">" prompt: a $/% shell, or we never reached a prompt at all.
+        diag["reason"] = "not_unprivileged"
+        return transcript, diag
+
+    patterns = [_PRIV_PROMPT, _PASSWORD_PROMPT, _LOGIN_PROMPT, _UNPRIV_PROMPT]
+
+    # Offset of the last thing we wrote, so each pass can tell an empty read
+    # window (a line that went quiet) apart from a real refusal.
+    sent_at = len(transcript)
+
+    def _send(data: str) -> bool:
+        nonlocal transcript, sent_at
+        try:
+            write_fn((data + "\r").encode())
+        except Exception:  # noqa: BLE001 - dead line; keep what we have
+            return False
+        sent_at = len(transcript)
+        transcript += _read_until(read_fn, patterns, _ENABLE_SECS)
+        return True
+
+    enable_at = len(transcript)
+    if not _send("enable"):
+        diag["reason"] = "no_prompt"
+        return transcript, diag
+    diag["attempted"] = True
+
+    secrets = _enable_secrets(credentials, cred_idx)
+    used = 0
+    # Bounded: each pass consumes one read window and either finishes or feeds
+    # the device one more answer, so this can never spin on a chatty line.
+    for _ in range(_ENABLE_ATTEMPTS + 2):
+        tail = _prompt_tail(transcript)
+        if _PRIV_PROMPT.search(tail):
+            diag["escalated"] = True
+            diag["reason"] = ""
+            return transcript, diag
+        # Only look at output produced SINCE we sent `enable`, so an error
+        # string from earlier in the login flow can't be mistaken for a
+        # refusal of this escalation.
+        since = transcript[enable_at:]
+        if not transcript[sent_at:].strip():
+            # A responsive device always echoes at least the command back, so
+            # a completely empty read window means the line went quiet — not
+            # that `enable` was refused.
+            diag["reason"] = "no_prompt"
+            return transcript, diag
+        if _UNPRIV_PROMPT.search(tail):
+            # Bounced back to ">". Distinguish the two causes from the error
+            # text: no `enable` command at all (retrying is pointless) versus a
+            # rejected secret.
+            if _ENABLE_UNSUPPORTED.search(since):
+                diag["reason"] = "no_enable_support"
+            elif _ENABLE_DENIED.search(since) or diag["secrets_tried"]:
+                diag["reason"] = "bad_secret"
+            else:
+                diag["reason"] = ("bad_secret" if diag["secrets_tried"]
+                                  else "no_enable_support")
+            return transcript, diag
+        if _LOGIN_PROMPT.search(tail):
+            # Some devices re-ask for a username during escalation.
+            user = ""
+            if isinstance(cred_idx, int) and 0 <= cred_idx < len(credentials):
+                user = (credentials[cred_idx] or {}).get("username", "") or ""
+            if not _send(user):
+                diag["reason"] = "no_prompt"
+                return transcript, diag
+            continue
+        if _PASSWORD_PROMPT.search(tail):
+            if used >= len(secrets) or used >= _ENABLE_ATTEMPTS:
+                diag["reason"] = "bad_secret"
+                return transcript, diag
+            secret = secrets[used]
+            used += 1
+            diag["secrets_tried"] = used
+            if not _send(secret):
+                diag["reason"] = "no_prompt"
+                return transcript, diag
+            continue
+        diag["reason"] = "no_prompt"
+        return transcript, diag
+
+    diag["reason"] = "bad_secret" if diag["secrets_tried"] else "no_prompt"
+    return transcript, diag
+
+
 _LOGOUT_COMMANDS = ("exit", "logout")
+
+
+def _deescalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
+                          cmd_secs: float = 2.0) -> bool:
+    """Drop back from privileged ("#") to unprivileged (">") mode.
+
+    Only used when we escalated an OPERATOR's already-open console session —
+    one we did NOT authenticate and therefore won't log out. Leaving their
+    shared console line sitting in enable mode would be a side effect of a
+    read-only identify, so put the privilege level back. ``disable`` is the
+    Cisco/AOS-S verb; ``exit`` drops a level on CLIs that lack it. Returns True
+    once an unprivileged prompt is confirmed."""
+    for cmd in ("disable", "exit"):
+        try:
+            write_fn((cmd + "\r").encode())
+        except Exception:  # noqa: BLE001 - dead line; nothing more we can do
+            return False
+        out = _read_until(read_fn, [_UNPRIV_PROMPT, _LOGIN_PROMPT], cmd_secs)
+        tail = _prompt_tail(out)
+        if _UNPRIV_PROMPT.search(tail) or _LOGIN_PROMPT.search(tail):
+            return True
+    return False
 
 
 def _logout(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
@@ -1121,6 +1315,15 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     #    detect the vendor (and even unknown vendors get a captured post-login
     #    banner for the passive-glean / LLM-identify paths to use).
     logged_in, cred_idx, transcript, diag = _generic_login(read_fn, write_fn, credentials, banner_secs)
+    # 1b. A ">" prompt is UNPRIVILEGED: most identity `show` commands are
+    #     rejected there ("Invalid input"), so the device would be reported as
+    #     unknown even though the login worked. Escalate with `enable` BEFORE
+    #     vendor detection and before any command runs. _escalate_privilege
+    #     itself no-ops on a "#" prompt, on $/% UNIX shells, and at a login
+    #     prompt, so this is safe to call unconditionally.
+    transcript, enable_diag = _escalate_privilege(
+        read_fn, write_fn, credentials, cred_idx, transcript)
+    diag["enable"] = enable_diag
     result["banner"] = transcript[-4000:]
     result["logged_in"] = logged_in
     result["credential_index"] = cred_idx
@@ -1135,6 +1338,14 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
                 res["diag"]["logged_out"] = _logout(read_fn, write_fn, prof)
             except Exception:  # noqa: BLE001
                 res["diag"]["logged_out"] = False
+        elif enable_diag.get("escalated") and enable_diag.get("attempted"):
+            # We escalated an OPERATOR's already-open session and won't log it
+            # out — put its privilege level back where we found it rather than
+            # leaving a privileged shell on a shared console line.
+            try:
+                enable_diag["deescalated"] = _deescalate_privilege(read_fn, write_fn)
+            except Exception:  # noqa: BLE001
+                enable_diag["deescalated"] = False
         return res
 
     # 2. Detect the vendor from everything seen (pre- and post-login).
@@ -1250,6 +1461,19 @@ def _login_diag(diag: Dict[str, Any], transcript: str, credentials) -> Dict[str,
     d = dict(diag or {})
     d["creds_available"] = len(credentials or [])
     d["tail"] = _sanitize_tail(transcript)
+    # Privilege level reached, so an operator can tell "logged in but stuck in
+    # user EXEC" apart from a plain login failure — the two look identical in
+    # the output otherwise (both leave the identity commands empty).
+    _en = d.get("enable") or {}
+    if _en.get("escalated"):
+        d["privilege"] = "enable"
+    elif _en.get("attempted"):
+        d["privilege"] = "user"
+        d["enable_reason"] = {
+            "no_enable_support": "device has no `enable` command (\">\" is its top level)",
+            "bad_secret": "`enable` rejected the stored credential's password and a blank secret",
+            "no_prompt": "`enable` sent but the device never re-prompted",
+        }.get(_en.get("reason") or "", _en.get("reason") or "")
     if d.get("shell_prompt_seen"):
         d["reason"] = "reached shell prompt"
     elif not d.get("any_output"):
@@ -1282,6 +1506,12 @@ def run_commands(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     result: Dict[str, Any] = {"banner": "", "logged_in": False, "credential_index": None,
                               "outputs": {}, "rejected": [], "diag": {}}
     logged_in, cred_idx, transcript, diag = _generic_login(read_fn, write_fn, credentials, banner_secs)
+    # A ">" prompt is UNPRIVILEGED — escalate before running the caller's
+    # commands, or a device sitting in user EXEC rejects most `show`s.
+    # _escalate_privilege no-ops on "#", on $/% shells and at a login prompt.
+    transcript, enable_diag = _escalate_privilege(
+        read_fn, write_fn, credentials, cred_idx, transcript)
+    diag["enable"] = enable_diag
     result["banner"] = transcript[-4000:]
     result["logged_in"] = logged_in
     result["credential_index"] = cred_idx
@@ -1298,10 +1528,16 @@ def run_commands(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         write_fn((cmd + "\r").encode())
         outputs[cmd] = _read_until(read_fn, [_SHELL_PROMPT], cmd_secs)
     result["outputs"] = outputs
+    if enable_diag.get("escalated") and enable_diag.get("attempted") and cred_idx is None:
+        # Escalated an operator's already-open session (run_commands never logs
+        # out) — restore its privilege level instead of leaving enable mode on
+        # a shared console line.
+        try:
+            enable_diag["deescalated"] = _deescalate_privilege(read_fn, write_fn)
+        except Exception:  # noqa: BLE001
+            enable_diag["deescalated"] = False
+        result["diag"] = _login_diag(diag, transcript, credentials)
     return result
-
-
-# ── Config read / transactional push (Phase G) ─────────────────────────────────
 
 def login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
           profile: Dict[str, Any], credentials: List[Dict[str, str]],

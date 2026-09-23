@@ -84,6 +84,34 @@ serial ports from the hub WebUI's **Console** view (an xterm.js terminal in the 
   and full match-by-serial need a NetBox-side field mapping — flagged for real-device verification.
 - Disable auto-identify per agent with role config `auto_identify=false`.
 
+## Enable / privilege escalation
+
+A prompt ending in **`>`** is *unprivileged* (user EXEC) on Cisco IOS, HPE/Aruba AOS-S and
+most network CLIs. Almost all of the identity `show` commands are rejected there, so a device
+we logged into perfectly well would still come back as **unknown**. After login — and before
+any `show` runs — the probe therefore sends `enable` and answers whatever the device asks for
+(the just-used credential's password first, then a bare Enter, since many devices have no
+separate enable secret) until the prompt ends in `#`.
+
+Rules worth knowing:
+- **`$` and `%` prompts never receive `enable`.** Those are UNIX shells, where the word is
+  meaningless and on some appliances is a real, state-changing command.
+- At most two secrets are tried. A refusal is classified from the error text: *no `enable`
+  command at all* (`>` **is** the top level — retrying is pointless) versus *rejected secret*.
+- `enable`/`disable` are in `is_readonly_command`'s mutation list, so they are written straight
+  to the line by the login code and can never be requested through the profile/LLM command path.
+- If we escalated an **operator's already-open session** — one we did not authenticate and so
+  will not log out of — the privilege level is put back with `disable` afterwards, so a
+  read-only identify never leaves a shared console line sitting in enable mode.
+
+The result shows up in the port's login telemetry as `diag.privilege` (`enable` / `user`),
+`diag.enable` (`attempted`, `escalated`, `secrets_tried`, `reason`) and, when escalation
+failed, a human-readable `diag.enable_reason`.
+
+New prompt spellings are operator-editable in `console/src/prompt_patterns.json` under the
+`unpriv_prompt`, `priv_prompt`, `enable_unsupported` and `enable_denied` families — no code
+change needed.
+
 ## VSF stacks (HPE/Aruba)
 
 A VSF stack presents **one** logical switch across several physical chassis, but the console
