@@ -122,6 +122,18 @@ _SYS_CREDS = (
     "guesses, most likely first. Use an empty string for a blank password. Do not "
     "propose destructive actions or commentary."
 )
+_SYS_PICK_IP = (
+    "You are a network-device addressing assistant. A console fingerprint of ONE "
+    "device found several candidate IPv4 addresses on it (e.g. one per addressed "
+    "VLAN or interface). Pick the single candidate that is the device's own "
+    "primary/management address — the one an operator would use to reach and "
+    "manage it (a management VLAN/interface, mgmt/OOBM port, or loopback is "
+    "usually preferred over a user/data VLAN).\n"
+    "Respond with ONLY a single JSON object and no other text: {\"ip\": \"<one of "
+    "the candidate values, copied exactly>\", \"confidence\": 0.0-1.0}. If the "
+    "information given does not let you tell, respond {\"ip\": null}. Never answer "
+    "with an address that is not in the candidate list."
+)
 
 _IDENTITY_FIELDS = ("model", "os", "type", "serial", "hostname", "ip", "confidence")
 
@@ -253,6 +265,63 @@ async def _ask_llm_credentials(hub, agent, capture: str) -> List[Dict[str, str]]
             out.append({"username": str(c.get("username", "")),
                         "password": str(c.get("password", ""))})
     return out
+
+
+async def resolve_ambiguous_ip(hub, agent: str, candidates: List[Any], context: str = "",
+                               timeout: float = 90.0) -> Optional[Dict[str, Any]]:
+    """Ask the LLM which of a fingerprinted device's candidate IPs is its own
+    primary/management address. ``candidates`` are the distinct addresses the
+    fingerprint found — plain strings, or ``{"ip": ..., "source": <line it came
+    from>}`` dicts; ``context`` briefly describes the device (vendor/model).
+
+    Returns ``{"ip": <a candidate, verbatim>, "confidence": float|None}``, or None
+    when the LLM can't tell, answers with a non-candidate, or the relay fails
+    (best-effort, like ``_ask_llm_credentials``)."""
+    cands: List[Tuple[str, str]] = []
+    for c in candidates or []:
+        if isinstance(c, dict):
+            ip, src = str(c.get("ip") or "").strip(), str(c.get("source") or "")
+        else:
+            ip, src = str(c or "").strip(), ""
+        if ip and ip not in (x for x, _ in cands):
+            cands.append((ip, src))
+    if len(cands) < 2:
+        return None
+    lines = ["=== DEVICE ===", scrub_for_llm(context) or "(unknown)",
+             "", "=== CANDIDATE ADDRESSES ==="]
+    for ip, src in cands:
+        # The source line is scrubbed as usual (its own IPs/masks → [IP]); only
+        # the candidate value itself goes out raw — see the exemption below.
+        lines.append(f"- {ip}" + (f"    (seen on: {scrub_for_llm(src)[:200]})" if src else ""))
+    user = "\n".join(lines)
+    # DELIBERATE, NARROW PRIVACY EXEMPTION (user-approved 2026-09-22): this user
+    # content is NOT routed through _ask_llm/scrub_for_llm, so the candidate IPv4
+    # values reach the LLM unredacted — the LLM can't choose between addresses it
+    # only sees as "[IP]". Everything else in the message (device context, source
+    # lines) is still scrubbed above. This exemption is scoped to THIS function
+    # only; never generalize it or reuse this raw-send pattern elsewhere — every
+    # other LLM call in this module must keep going through _ask_llm.
+    try:
+        res = await hub.request_response(
+            agent, "HELP_ASK",
+            {"messages": [{"role": "user", "content": user}],
+             "tools": None, "system": _SYS_PICK_IP},
+            timeout=timeout)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("console LLM identify: ambiguous-ip resolve failed: %s", e)
+        return None
+    data = _unwrap(res)
+    if not isinstance(data, dict) or data.get("status") != "SUCCESS":
+        return None
+    js = _extract_json((data.get("assistant") or {}).get("content") or "") or {}
+    ip = str(js.get("ip") or "").strip()
+    if ip not in (x for x, _ in cands):
+        return None  # "can't tell" (null) or an address we never offered
+    try:
+        conf: Optional[float] = float(js.get("confidence"))
+    except (TypeError, ValueError):
+        conf = None
+    return {"ip": ip, "confidence": conf}
 
 
 async def orchestrate(hub, agent: str, sid: str, port_id: str,

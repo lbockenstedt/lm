@@ -49,6 +49,12 @@ def _clean_env():
              ("LM_CONSOLE_CREDENTIALS_REF", "LM_KEYVAULT_URL", "LM_TEST_CONSOLE_CREDS")}
     yield
     cs.reset_credential_provider()
+    # Pop first: a test body may have set one of these directly (not just via
+    # the provider), and `saved` only captured what existed BEFORE the test —
+    # restoring over a leftover value without popping first would leak it into
+    # every test collected afterwards (e.g. test_console_local_store_retired).
+    for k in saved:
+        os.environ.pop(k, None)
     for k, v in saved.items():
         if v is not None:
             os.environ[k] = v
