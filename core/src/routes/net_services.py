@@ -890,6 +890,36 @@ def register(app, hub, ctx):
             timeout=30,
         )
 
+    @app.delete("/api/dns/forwarders")
+    async def dns_delete_forwarder(request: Request, tenant: str = None):
+        """Remove a persistent forwarding zone from resolver workers."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return await _relay_spoke(
+            _dns_spoke_for_request(request, tenant),
+            "DNS_FORWARDER_REMOVE",
+            {"zone": body.get("zone", ".")},
+            log_name="dns_delete_forwarder",
+            timeout=30,
+        )
+
+    @app.put("/api/dns/forwarders")
+    async def dns_update_forwarder(request: Request, tenant: str = None):
+        """Update a persistent forwarding zone across resolver workers."""
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        return await _relay_spoke(
+            _dns_spoke_for_request(request, tenant),
+            "DNS_FORWARDER_UPDATE",
+            {"zone": body.get("zone", "."), "upstreams": body.get("upstreams", []), "old_zone": body.get("old_zone")},
+            log_name="dns_update_forwarder",
+            timeout=30,
+        )
+
     @app.post("/api/dns/sync")
     async def dns_sync_from_netbox():
         """
