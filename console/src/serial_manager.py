@@ -253,14 +253,17 @@ def detect_baud(dev: str, candidates: Optional[List[int]] = None,
 # ── Persistence ────────────────────────────────────────────────────────────────
 
 def _state_dir() -> Path:
-    """A writable dir for the port registry: /var/lib/lm/console, falling back to
-    a repo-local .lm-state/console when /var/lib/lm isn't writable (mirrors
-    BaseControlPlane._spoke_state_dir)."""
+    """A writable dir for the port registry: ``LM_CONSOLE_STATE_DIR`` if set,
+    else /var/lib/lm/console, falling back to a repo-local .lm-state/console when
+    /var/lib/lm isn't writable (mirrors BaseControlPlane._spoke_state_dir)."""
     candidates = [
         Path("/var/lib/lm/console"),
         Path(__file__).resolve().parent.parent / ".lm-state" / "console",
         Path("/tmp/lm-console"),
     ]
+    override = os.environ.get("LM_CONSOLE_STATE_DIR", "").strip()
+    if override:
+        candidates.insert(0, Path(override))
     for p in candidates:
         try:
             p.mkdir(parents=True, exist_ok=True)
@@ -345,6 +348,137 @@ class PortStore:
                 entry[k] = v
         self._save()
         return entry
+
+
+class TelemetryStore:
+    """Per-port liveness counters (``last_activity`` / cumulative ``capture_bytes``)
+    persisted to JSON so they survive a spoke restart.
+
+    These used to live only on the in-memory :class:`PortChannel`, so every
+    service restart reset them to 0 and the port list reported every device as
+    "never seen" until it happened to speak again. The serial READER THREAD
+    updates them on every read burst, so writes are debounced (at most one file
+    write per ``SAVE_INTERVAL``) and guarded by a lock."""
+
+    SAVE_INTERVAL = 10.0
+
+    def __init__(self, path: Optional[Path] = None):
+        self.path = path or (_state_dir() / "telemetry.json")
+        self._lock = threading.Lock()
+        # None = never saved this process; the FIRST record always persists so a
+        # newly-seen port isn't lost to the debounce window (time.monotonic()
+        # starts near 0 on some platforms, so 0.0 is not a usable sentinel).
+        self._last_save: Optional[float] = None
+        self._data: Dict[str, Dict[str, Any]] = self._load()
+
+    def _load(self) -> Dict[str, Dict[str, Any]]:
+        try:
+            data = json.loads(self.path.read_text())
+            return data if isinstance(data, dict) else {}
+        except Exception:  # noqa: BLE001 - missing/corrupt → start empty
+            return {}
+
+    def _save_locked(self) -> None:
+        tmp = self.path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(self._data))
+            os.replace(tmp, self.path)  # atomic
+            self._last_save = time.monotonic()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("TelemetryStore save failed: %s", e)
+
+    def get(self, port_id: str) -> Dict[str, Any]:
+        """Last-known ``{last_activity, capture_bytes}`` for a port (zeros if new)."""
+        with self._lock:
+            rec = self._data.get(port_id) or {}
+            return {"last_activity": float(rec.get("last_activity") or 0.0),
+                    "capture_bytes": int(rec.get("capture_bytes") or 0)}
+
+    def record(self, port_id: str, *, last_activity: float, capture_bytes: int) -> None:
+        """Update a port's counters; persists at most once per ``SAVE_INTERVAL``."""
+        with self._lock:
+            self._data[port_id] = {"last_activity": last_activity,
+                                   "capture_bytes": capture_bytes}
+            if self._last_save is None or \
+                    time.monotonic() - self._last_save >= self.SAVE_INTERVAL:
+                self._save_locked()
+
+    def flush(self) -> None:
+        """Force an immediate save (channel close / shutdown)."""
+        with self._lock:
+            self._save_locked()
+
+
+_TELEMETRY: Optional[TelemetryStore] = None
+
+
+def telemetry_store() -> TelemetryStore:
+    """Process-wide telemetry store (lazy so tests can substitute ``_TELEMETRY``)."""
+    global _TELEMETRY
+    if _TELEMETRY is None:
+        _TELEMETRY = TelemetryStore()
+    return _TELEMETRY
+
+
+class HealthStore:
+    """Per-port serial HEALTH / diagnostics records persisted to JSON.
+
+    Open-failure counts, disconnects, recoveries, identify-attempt stats,
+    hostname history and boot state used to live only in memory, so the whole
+    diagnostics report started empty after every restart — exactly the history an
+    operator needs to spot a flapping port. Records are mutated in place by the
+    spoke, so :meth:`load` hands back the live dict and the spoke calls
+    :meth:`save` (debounced) after each update."""
+
+    SAVE_INTERVAL = 15.0
+
+    def __init__(self, path: Optional[Path] = None):
+        self.path = path or (_state_dir() / "health.json")
+        self._last_save: Optional[float] = None  # None = never saved (see TelemetryStore)
+        try:
+            data = json.loads(self.path.read_text())
+        except Exception:  # noqa: BLE001 - missing/corrupt → start empty
+            data = {}
+        self._data: Dict[str, Dict[str, Any]] = data if isinstance(data, dict) else {}
+
+    def load(self) -> Dict[str, Dict[str, Any]]:
+        """The LIVE record dict (not a copy) — callers mutate records in place."""
+        return self._data
+
+    def _write(self, data: Dict[str, Dict[str, Any]]) -> None:
+        tmp = self.path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(data))
+            os.replace(tmp, self.path)  # atomic
+            self._last_save = time.monotonic()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("HealthStore save failed: %s", e)
+
+    def save(self, data: Dict[str, Dict[str, Any]]) -> None:
+        """Persist, debounced — health records are touched on every probe cycle."""
+        if self._last_save is None or \
+                time.monotonic() - self._last_save >= self.SAVE_INTERVAL:
+            self._write(data)
+
+    def flush(self, data: Dict[str, Dict[str, Any]]) -> None:
+        """Persist unconditionally (purge/shutdown)."""
+        self._write(data)
+
+    def clear(self) -> None:
+        """Wipe the in-memory records and the on-disk file (diagnostics purge).
+
+        Empties the dict IN PLACE so the spoke's ``_health`` reference (handed
+        out by :meth:`load`) stays the same object."""
+        self._data.clear()
+        try:
+            self.path.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
+        self._last_save = None
+        try:
+            self.path.unlink(missing_ok=True)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # ── Session recording (per-port circular capture) ──────────────────────────────
@@ -490,8 +624,11 @@ class PortChannel:
         self._capture_log: Optional[CaptureLog] = (
             CaptureLog(port_id, _capture_max_bytes()) if _capture_max_bytes() else None)
         self.capture = bytearray()
-        self.last_activity: float = 0.0
-        self.bytes_seen: int = 0
+        # Seeded from the persisted telemetry so a restart doesn't report a
+        # long-known device as "never seen" / 0 bytes until it next speaks.
+        _tel = telemetry_store().get(port_id)
+        self.last_activity: float = float(_tel.get("last_activity") or 0.0)
+        self.bytes_seen: int = int(_tel.get("capture_bytes") or 0)
         # Outbound write-pacing state (drained by the writer thread).
         self._outbuf = bytearray()
         self._outlock = threading.Lock()
@@ -531,6 +668,8 @@ class PortChannel:
             self._capture_log.append(data)
         self.bytes_seen += len(data)
         self.last_activity = time.time()
+        telemetry_store().record(self.port_id, last_activity=self.last_activity,
+                                 capture_bytes=self.bytes_seen)
 
     def _read_loop(self) -> None:
         while not self._stop.is_set():
@@ -657,7 +796,8 @@ class PortChannel:
         return self.capture_tail(n)
 
     def snapshot(self) -> Dict[str, Any]:
-        """Live telemetry for the port listing."""
+        """Live telemetry for the port listing. ``last_activity``/``capture_bytes``
+        are seeded from the persisted telemetry, so they carry across restarts."""
         return {
             "monitoring": self.monitored,
             "last_activity": self.last_activity,
@@ -681,6 +821,10 @@ class PortChannel:
     def close(self) -> None:
         self._stop.set()
         self._outwake.set()  # wake the writer thread so it can exit
+        try:
+            telemetry_store().flush()  # don't lose the debounced tail on shutdown
+        except Exception:  # noqa: BLE001
+            pass
         try:
             self.ser.close()
         except Exception:  # noqa: BLE001
@@ -810,6 +954,20 @@ class SessionManager:
     def channel(self, port_id: str) -> Optional[PortChannel]:
         return self._channels.get(port_id)
 
+    def persisted_capture(self, port_id: str, limit: Optional[int] = None) -> bytes:
+        """Tail of a port's durable on-disk recording WITHOUT a live channel.
+
+        Lets the capture view serve a port's recorded history straight after a
+        service restart (or for a port that isn't currently open), instead of
+        returning nothing because the in-memory tail is empty."""
+        cap = _capture_max_bytes()
+        if not cap:
+            return b""
+        try:
+            return CaptureLog(port_id, cap).load_tail(limit or cap)
+        except Exception:  # noqa: BLE001
+            return b""
+
     def has_user_sessions(self, port_id: str) -> bool:
         """A human/relay session is attached (as opposed to only the monitor)."""
         chan = self._channels.get(port_id)
@@ -818,9 +976,13 @@ class SessionManager:
     def snapshot(self, port_id: str) -> Dict[str, Any]:
         chan = self._channels.get(port_id)
         if not chan:
-            return {"monitoring": False, "last_activity": 0.0,
-                    "capture_bytes": 0, "pending_out": 0, "has_user": False,
-                    "writer": None, "baud": 0}
+            # No live channel (never opened, or not yet re-opened after a restart)
+            # → serve the persisted counters so the listing keeps the port's
+            # last-known activity instead of reporting it as never seen.
+            tel = telemetry_store().get(port_id)
+            return {"monitoring": False, "last_activity": tel["last_activity"],
+                    "capture_bytes": tel["capture_bytes"], "pending_out": 0,
+                    "has_user": False, "writer": None, "baud": 0}
         return chan.snapshot()
 
     def writer_of(self, port_id: str) -> Optional[str]:
