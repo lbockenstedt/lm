@@ -806,17 +806,18 @@ def register(app, hub, ctx):
         # Per-device authorization is re-run through _authz_nw_device (rather
         # than trusted from _row_visible alone) so the topology can never widen
         # what a caller may read from a device — and it hands back the spoke.
-        authed, spoke_by_id = [], {}
+        authed, spoke_by_id, scope_by_id = [], {}, {}
         for dev in fleet:
             did = dev.get("id")
             if not did:
                 continue
             try:
-                _d, _scope, spoke_id = _authz_nw_device(request, did)
+                _d, scope, spoke_id = _authz_nw_device(request, did)
             except HTTPException:
                 continue
             authed.append(dev)
             spoke_by_id[did] = spoke_id
+            scope_by_id[did] = scope
         fleet = authed
 
         force = _nw_truthy(request.query_params.get("refresh"))
@@ -859,12 +860,31 @@ def register(app, hub, ctx):
             if jobs:
                 await asyncio.gather(*jobs, return_exceptions=True)
 
+        async def _scoped(dev, endpoint, rows):
+            """Apply the same per-device subnet filter the per-device views use.
+
+            LLDP rows carry the REMOTE device's management IP, so on a SHARED
+            switch an unfiltered map would hand a scoped tenant another
+            tenant's gear. A DEDICATED device's whole dataset belongs to its
+            tenant and is never filtered (the subnet filter only makes sense
+            where many tenants' clients coexist).
+            """
+            tid = dev.get("tenant_id", "")
+            dedicated = bool(tid) and not access.tenant_is_shared(tid)
+            out = await _filter_nw_optional(scope_by_id.get(dev["id"], "full"),
+                                            request, {"data": rows}, endpoint,
+                                            acting_tenant, dedicated)
+            got = out.get("data") if isinstance(out, dict) else None
+            return [r for r in (got or []) if isinstance(r, dict)]
+
         lldp_by_device, macs_by_device = {}, {}
         for dev in fleet:
             did = dev["id"]
-            lldp_by_device[did] = _nw_cached_rows(hub, did, "lldp")
+            lldp_by_device[did] = await _scoped(
+                dev, "lldp", _nw_cached_rows(hub, did, "lldp"))
             if infer:
-                macs_by_device[did] = _nw_cached_rows(hub, did, "macs")
+                macs_by_device[did] = await _scoped(
+                    dev, "macs", _nw_cached_rows(hub, did, "macs"))
             if force or not spoke_by_id.get(did):
                 continue
             # Stale-while-revalidate: refresh aging entries for the NEXT load.
