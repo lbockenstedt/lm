@@ -1834,7 +1834,7 @@ const VIEW_SUBMENUS = {
     netbox: ['Overview', 'Devices', 'Racks', 'Prefixes', 'IP Addresses'],
     dns: ['Overview', 'Records', 'Forwarders', 'External DNS', 'Diagnostics'],
     dhcp: ['Overview', 'Subnets', 'Leases', 'Reservations', 'Diagnostics'],
-    nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'Other', 'Scan'],
+    nw: ['Overview', 'Gateways', 'Switches', 'Firewalls', 'Other', 'Topology', 'Scan'],
     truenas: ['Appliances', 'Pools', 'Datasets', 'Shares', 'Disks', 'Alerts', 'Capacity'],
 };
 
@@ -19037,6 +19037,14 @@ async function loadNwData(category) {
     // data-type tabs, or a deep link) onto a real category so the page never
     // blanks. 'Overview' is the tenant-wide summary landing tab.
     const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'Other'];
+    if (category === 'Topology') {
+        window._nwView = null;
+        window._nwDetail = null;
+        const actions = document.getElementById('top-nav-actions');
+        if (actions) actions.innerHTML = '';
+        _renderNwTopologyTab();
+        return;
+    }
     if (category === 'Scan') {
         window._nwView = null;
         window._nwDetail = null;
@@ -19196,9 +19204,317 @@ const _NW_SCHED_INTERVALS = [['0', 'Off'], ['3600', 'Every hour'],
     ['21600', 'Every 6 hours'], ['43200', 'Every 12 hours'],
     ['86400', 'Daily'], ['604800', 'Weekly']];
 
+// ── Network → Topology ───────────────────────────────────────────────────────
+// The map. Links come from three sources and are drawn distinctly, because an
+// LLDP adjacency is a fact while a MAC-table link is a GUESS and an operator
+// must be able to tell them apart at a glance:
+//   lldp   — solid slate   (both ends advertised the adjacency)
+//   manual — solid green   (a human declared it)
+//   mac    — dashed amber  (inferred: exactly one MAC learned on that port)
+// Layout is a small deterministic force simulation — no library, no build step
+// (the WebUI is dependency-free vanilla JS by design).
+const _NW_TOPO_EDGE_STYLE = {
+    lldp:   { stroke: '#64748b', dash: '',     label: 'LLDP' },
+    manual: { stroke: '#01A982', dash: '',     label: 'Declared' },
+    mac:    { stroke: '#d97706', dash: '5 4',  label: 'Inferred (MAC)' },
+};
+
+function _nwTopoLayout(nodes, edges, width, height) {
+    // Seeded by index, so the same graph always lands the same way: a map that
+    // reshuffles on every refresh is unreadable.
+    const pos = {};
+    const n = nodes.length;
+    nodes.forEach((node, i) => {
+        const a = (2 * Math.PI * i) / Math.max(n, 1);
+        pos[node.id] = {
+            x: width / 2 + Math.cos(a) * width * 0.32,
+            y: height / 2 + Math.sin(a) * height * 0.32,
+        };
+    });
+    if (n < 2) return pos;
+    const adj = edges.filter(e => pos[e.a] && pos[e.b]);
+    const ideal = Math.min(width, height) / Math.sqrt(n) * 0.9;
+    for (let step = 0; step < 300; step++) {
+        const disp = {};
+        nodes.forEach(node => { disp[node.id] = { x: 0, y: 0 }; });
+        for (let i = 0; i < n; i++) {
+            for (let j = i + 1; j < n; j++) {
+                const a = pos[nodes[i].id], b = pos[nodes[j].id];
+                let dx = a.x - b.x, dy = a.y - b.y;
+                let d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+                // Nudge exactly-coincident nodes apart or they stay stuck.
+                if (d < 1) { dx = (i - j); dy = 1; d = Math.sqrt(dx * dx + dy * dy); }
+                const rep = (ideal * ideal) / d;
+                disp[nodes[i].id].x += (dx / d) * rep;
+                disp[nodes[i].id].y += (dy / d) * rep;
+                disp[nodes[j].id].x -= (dx / d) * rep;
+                disp[nodes[j].id].y -= (dy / d) * rep;
+            }
+        }
+        adj.forEach(e => {
+            const a = pos[e.a], b = pos[e.b];
+            const dx = a.x - b.x, dy = a.y - b.y;
+            const d = Math.sqrt(dx * dx + dy * dy) || 0.01;
+            const att = (d * d) / ideal;
+            disp[e.a].x -= (dx / d) * att;
+            disp[e.a].y -= (dy / d) * att;
+            disp[e.b].x += (dx / d) * att;
+            disp[e.b].y += (dy / d) * att;
+        });
+        const temp = ideal * (1 - step / 300);
+        nodes.forEach(node => {
+            const d = disp[node.id];
+            const len = Math.sqrt(d.x * d.x + d.y * d.y) || 0.01;
+            const p = pos[node.id];
+            p.x = Math.max(60, Math.min(width - 60, p.x + (d.x / len) * Math.min(len, temp)));
+            p.y = Math.max(40, Math.min(height - 40, p.y + (d.y / len) * Math.min(len, temp)));
+        });
+    }
+    return pos;
+}
+
+function _nwTopoNodeColor(node) {
+    if (node.kind === 'gateway') return '#0ea5e9';
+    if (node.kind === 'switch') return '#01A982';
+    if (node.manual) return '#7c3aed';
+    return '#94a3b8';
+}
+
+function _nwTopoSvg(graph) {
+    const nodes = graph.nodes || [], edges = graph.edges || [];
+    if (!nodes.length) {
+        return `<div class="py-12 text-center text-slate-400 italic">No devices in this tenant's topology yet.</div>`;
+    }
+    const W = 900, H = Math.max(420, Math.min(760, 220 + nodes.length * 26));
+    const pos = _nwTopoLayout(nodes, edges, W, H);
+    const byId = {};
+    nodes.forEach(nd => { byId[nd.id] = nd; });
+    const lines = edges.map(e => {
+        const a = pos[e.a], b = pos[e.b];
+        if (!a || !b) return '';
+        const st = _NW_TOPO_EDGE_STYLE[e.source] || _NW_TOPO_EDGE_STYLE.mac;
+        const tip = `${(byId[e.a] || {}).name || ''} ${e.a_port ? '(' + e.a_port + ')' : ''} — ` +
+                    `${(byId[e.b] || {}).name || ''} ${e.b_port ? '(' + e.b_port + ')' : ''}` +
+                    `\n${st.label}${e.detail ? ' — ' + e.detail : ''}`;
+        return `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}"
+            stroke="${st.stroke}" stroke-width="2" ${st.dash ? `stroke-dasharray="${st.dash}"` : ''} opacity="0.8"><title>${escapeHtml(tip)}</title></line>`;
+    }).join('');
+    const dots = nodes.map(nd => {
+        const p = pos[nd.id];
+        const r = (nd.kind === 'switch' || nd.kind === 'gateway') ? 11 : 7;
+        const tip = [nd.name, nd.object_type || nd.kind,
+                     (nd.addresses || []).join(', '), (nd.macs || []).join(', '),
+                     nd.lldp_capable ? 'LLDP' : '', nd.manual ? 'Declared' : '',
+                     'via ' + (nd.sources || []).join('+')].filter(Boolean).join('\n');
+        return `<g><circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r}"
+              fill="${_nwTopoNodeColor(nd)}" stroke="#fff" stroke-width="2"><title>${escapeHtml(tip)}</title></circle>
+            <text x="${p.x.toFixed(1)}" y="${(p.y + r + 12).toFixed(1)}" text-anchor="middle"
+              class="text-[10px]" fill="#475569">${escapeHtml(nd.name || nd.id)}</text></g>`;
+    }).join('');
+    return `<svg viewBox="0 0 ${W} ${H}" class="w-full" style="max-height:70vh">${lines}${dots}</svg>`;
+}
+
+async function _renderNwTopologyTab(opts) {
+    const c = document.getElementById('nw-table-container');
+    if (!c) return;
+    opts = opts || {};
+    const infer = window._nwTopoInfer !== false;
+    c.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">${
+        opts.refresh ? 'Gathering LLDP and MAC tables from every device…' : 'Building topology…'}</div>`;
+
+    const qs = new URLSearchParams();
+    if (currentTenant) qs.set('tenant', currentTenant);
+    if (opts.refresh) qs.set('refresh', '1');
+    if (!infer) qs.set('infer', '0');
+    let graph;
+    try {
+        const r = await fetch(`/api/nw/topology?${qs.toString()}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        graph = await r.json();
+    } catch (e) {
+        c.innerHTML = `<div class="py-12 text-center text-amber-600 italic">Could not build topology: ${escapeHtml(e.message)}</div>`;
+        return;
+    }
+    if (graph.select_tenant) {
+        c.innerHTML = `<div class="py-12 text-center space-y-3">
+            <p class="text-slate-600 text-sm font-semibold">Select a tenant to view its network topology</p>
+            <p class="text-slate-400 text-xs max-w-md mx-auto">A map is only coherent within one tenant's slice, so the ADMIN (default) view does not aggregate every tenant's devices. Choose a specific tenant from the tenant picker.</p>
+        </div>`;
+        return;
+    }
+    window._nwTopo = graph;
+
+    const st = graph.stats || {};
+    const bySrc = st.edges_by_source || {};
+    const legend = Object.keys(_NW_TOPO_EDGE_STYLE).map(k => {
+        const s = _NW_TOPO_EDGE_STYLE[k];
+        return `<span class="flex items-center gap-1.5 text-xs text-slate-500">
+            <svg width="26" height="8"><line x1="0" y1="4" x2="26" y2="4" stroke="${s.stroke}" stroke-width="2" ${s.dash ? `stroke-dasharray="${s.dash}"` : ''}/></svg>
+            ${s.label} <b class="text-slate-700">${bySrc[k] || 0}</b></span>`;
+    }).join('');
+
+    const trunks = (graph.trunks || []).map(t => `<tr class="border-t border-slate-100">
+        <td class="py-1 pr-3 font-mono text-xs">${escapeHtml(t.node_name || '')}</td>
+        <td class="py-1 pr-3 font-mono text-xs">${escapeHtml(t.port)}</td>
+        <td class="py-1 text-xs text-slate-500">${t.mac_count} MACs</td></tr>`).join('');
+
+    const canEditTopo = isAdmin() || isTenantAdmin();
+    c.innerHTML = `<div class="space-y-4">
+  <div class="flex flex-wrap items-center justify-between gap-3">
+    <div class="flex flex-wrap items-center gap-4">${legend}</div>
+    <div class="flex items-center gap-3">
+      <label class="flex items-center gap-1.5 text-xs text-slate-500" title="Draw a link for a switch port that has learned exactly one MAC belonging to a known device. A guess, not an advertised adjacency.">
+        <input type="checkbox" id="nw-topo-infer" ${infer ? 'checked' : ''}> Infer links from MAC tables
+      </label>
+      <button id="nw-topo-refresh" class="px-3 py-1.5 text-xs font-semibold rounded bg-[#01A982] text-white hover:bg-[#018f6f]">Refresh from devices</button>
+    </div>
+  </div>
+  <div class="flex flex-wrap gap-x-5 gap-y-1 text-xs text-slate-500">
+    <span><b class="text-slate-700">${st.nodes || 0}</b> devices</span>
+    <span><b class="text-slate-700">${st.edges || 0}</b> links</span>
+    <span><b class="text-slate-700">${st.nodes_without_lldp || 0}</b> without LLDP</span>
+    <span><b class="text-slate-700">${st.trunk_ports || 0}</b> trunk/uplink ports</span>
+    <span>NetBox inventory: <b class="text-slate-700">${graph.netbox ? 'included' : 'unavailable'}</b></span>
+  </div>
+  <div class="border border-slate-200 rounded bg-white overflow-hidden">${_nwTopoSvg(graph)}</div>
+  ${trunks ? `<div>
+    <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Trunk / uplink ports</h4>
+    <p class="text-xs text-slate-400 mb-2">These ports carry a whole downstream segment, so what is <em>directly</em> attached can't be inferred. Declare the link below if you know it.</p>
+    <table class="w-full text-left"><tbody>${trunks}</tbody></table></div>` : ''}
+  ${canEditTopo ? `<div class="border-t border-slate-200 pt-4 space-y-3">
+    <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider">Devices that don't speak LLDP</h4>
+    <p class="text-xs text-slate-400">Declare gear the fleet can't discover (unmanaged switches, media converters, PDUs, cameras). Give a MAC and it will be matched against switch MAC tables automatically — that is what puts it on the map.</p>
+    <div id="nw-topo-manual"></div>
+  </div>` : ''}
+</div>`;
+
+    const refreshBtn = document.getElementById('nw-topo-refresh');
+    if (refreshBtn) refreshBtn.onclick = () => _renderNwTopologyTab({ refresh: true });
+    const inferBox = document.getElementById('nw-topo-infer');
+    if (inferBox) inferBox.onchange = () => {
+        window._nwTopoInfer = inferBox.checked;
+        _renderNwTopologyTab();
+    };
+    if (canEditTopo) _renderNwTopologyManual();
+}
+
+async function _renderNwTopologyManual() {
+    const host = document.getElementById('nw-topo-manual');
+    if (!host) return;
+    const tenantQs = currentTenant && currentTenant !== 'default'
+        ? `?tenant=${encodeURIComponent(currentTenant)}` : '';
+    let cfg = { devices: [], links: [] };
+    try {
+        const r = await fetch(`/api/nw/topology/manual${tenantQs}`);
+        if (r.ok) cfg = await r.json();
+    } catch (e) { /* keep the empty editor rather than blanking the map */ }
+    window._nwTopoManual = cfg;
+
+    const names = ((window._nwTopo || {}).nodes || [])
+        .map(n => n.name).filter(Boolean).sort();
+    const options = names.map(n => `<option value="${escapeHtml(n)}"></option>`).join('');
+
+    const devRows = (cfg.devices || []).map(d => `<tr class="border-t border-slate-100">
+        <td class="py-1 pr-3 text-xs">${escapeHtml(d.name)}</td>
+        <td class="py-1 pr-3 font-mono text-xs text-slate-500">${escapeHtml(d.mac || '')}</td>
+        <td class="py-1 pr-3 font-mono text-xs text-slate-500">${escapeHtml(d.ip || '')}</td>
+        <td class="py-1 pr-3 text-xs text-slate-500">${escapeHtml(d.note || '')}</td>
+        <td class="py-1 text-right"><button data-del-dev="${escapeHtml(d.id)}" class="text-xs text-red-500 hover:underline">Remove</button></td>
+      </tr>`).join('');
+    const linkRows = (cfg.links || []).map(l => `<tr class="border-t border-slate-100">
+        <td class="py-1 pr-3 text-xs">${escapeHtml(l.a)}${l.a_port ? ` <span class="text-slate-400 font-mono">${escapeHtml(l.a_port)}</span>` : ''}</td>
+        <td class="py-1 pr-3 text-xs">${escapeHtml(l.b)}${l.b_port ? ` <span class="text-slate-400 font-mono">${escapeHtml(l.b_port)}</span>` : ''}</td>
+        <td class="py-1 pr-3 text-xs text-slate-500">${escapeHtml(l.note || '')}</td>
+        <td class="py-1 text-right"><button data-del-link="${escapeHtml(l.id)}" class="text-xs text-red-500 hover:underline">Remove</button></td>
+      </tr>`).join('');
+
+    const inp = 'px-2 py-1 text-xs border border-slate-300 rounded';
+    host.innerHTML = `<div class="grid md:grid-cols-2 gap-6">
+  <div>
+    <table class="w-full text-left"><tbody>${devRows || `<tr><td class="py-1 text-xs text-slate-400 italic">None declared</td></tr>`}</tbody></table>
+    <div class="flex flex-wrap gap-2 mt-2">
+      <input id="nw-topo-dev-name" class="${inp}" placeholder="Name">
+      <input id="nw-topo-dev-mac" class="${inp}" placeholder="MAC (optional)">
+      <input id="nw-topo-dev-ip" class="${inp}" placeholder="IP (optional)">
+      <input id="nw-topo-dev-note" class="${inp}" placeholder="Note">
+      <button id="nw-topo-dev-add" class="px-3 py-1 text-xs font-semibold rounded bg-slate-700 text-white">Add device</button>
+    </div>
+  </div>
+  <div>
+    <h5 class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">Declared links</h5>
+    <table class="w-full text-left"><tbody>${linkRows || `<tr><td class="py-1 text-xs text-slate-400 italic">None declared</td></tr>`}</tbody></table>
+    <datalist id="nw-topo-names">${options}</datalist>
+    <div class="flex flex-wrap gap-2 mt-2">
+      <input id="nw-topo-link-a" list="nw-topo-names" class="${inp}" placeholder="Device A">
+      <input id="nw-topo-link-ap" class="${inp} w-20" placeholder="Port">
+      <input id="nw-topo-link-b" list="nw-topo-names" class="${inp}" placeholder="Device B">
+      <input id="nw-topo-link-bp" class="${inp} w-20" placeholder="Port">
+      <input id="nw-topo-link-note" class="${inp}" placeholder="Note">
+      <button id="nw-topo-link-add" class="px-3 py-1 text-xs font-semibold rounded bg-slate-700 text-white">Add link</button>
+    </div>
+  </div>
+</div>`;
+
+    const val = id => (document.getElementById(id).value || '').trim();
+    const save = async (body) => {
+        try {
+            const r = await fetch('/api/nw/topology/manual', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(Object.assign(
+                    { tenant: currentTenant && currentTenant !== 'default' ? currentTenant : undefined },
+                    body)),
+            });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            showToast('Topology updated');
+            _renderNwTopologyTab();
+        } catch (e) {
+            showToast(`Could not save: ${e.message}`, 'error');
+        }
+    };
+
+    document.getElementById('nw-topo-dev-add').onclick = () => {
+        const name = val('nw-topo-dev-name');
+        if (!name) { showToast('A name is required', 'error'); return; }
+        save({ devices: (cfg.devices || []).concat([{
+            name, mac: val('nw-topo-dev-mac'), ip: val('nw-topo-dev-ip'),
+            note: val('nw-topo-dev-note') }]) });
+    };
+    document.getElementById('nw-topo-link-add').onclick = () => {
+        const a = val('nw-topo-link-a'), b = val('nw-topo-link-b');
+        if (!a || !b) { showToast('Both ends are required', 'error'); return; }
+        save({ links: (cfg.links || []).concat([{
+            a, a_port: val('nw-topo-link-ap'), b, b_port: val('nw-topo-link-bp'),
+            note: val('nw-topo-link-note') }]) });
+    };
+    host.querySelectorAll('[data-del-dev]').forEach(btn => {
+        btn.onclick = () => save({
+            devices: (cfg.devices || []).filter(d => d.id !== btn.dataset.delDev) });
+    });
+    host.querySelectorAll('[data-del-link]').forEach(btn => {
+        btn.onclick = () => save({
+            links: (cfg.links || []).filter(l => l.id !== btn.dataset.delLink) });
+    });
+}
 async function _renderNwScanTab() {
     const c = document.getElementById('nw-table-container');
     if (!c) return;
+    // ADMIN (default) scope: every object this tab touches is per-tenant — the
+    // scan config and schedule live under nw_tenant_cfg[tenant], and a scan
+    // credential set is stamped with the tenant of the nw spoke it is bound to.
+    // Rendered under ADMIN/default the tab was actively misleading: the
+    // credential picker came back EMPTY (the ?tenant=default scope is
+    // ""/default/shared only, so a set auto-stamped with the spoke's tenant is
+    // filtered out — i.e. a set vanished from the very view that created it),
+    // and any save landed in a nw_tenant_cfg["default"] bucket no real tenant
+    // reads. Prompt for a tenant instead, exactly like the Devices view.
+    if (isAdmin() && (!currentTenant || currentTenant === 'default')) {
+        c.innerHTML = `<div class="py-12 text-center space-y-3">
+            <p class="text-slate-600 text-sm font-semibold">Select a tenant to configure network scans</p>
+            <p class="text-slate-400 text-xs max-w-md mx-auto">Scan settings, schedules and credential sets all belong to a specific tenant — a credential set is bound to that tenant's Network Devices spoke. Choose a tenant from the tenant picker to view and edit its scan configuration.</p>
+        </div>`;
+        return;
+    }
     c.innerHTML = `<div class="py-12 text-center text-slate-400 animate-pulse">Loading scan settings…</div>`;
 
     // Pull the tenant's effective config + its visible scan-credential sets in
