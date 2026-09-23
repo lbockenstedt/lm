@@ -858,7 +858,7 @@ def register(app, hub, ctx):
                 # per spoke, and all spokes run concurrently so the dashboard
                 # latency is one round-trip, not N×2.
                 async with _FANOUT_SEM:
-                    health_raw, int_raw = await _asyncio.gather(
+                    health_raw, int_raw = await asyncio.gather(
                         hub.request_response(sid, "GET_SYSTEM_HEALTH", {}),
                         hub.request_response(sid, "GET_INTERFACE_STATUS", {}),
                     )
@@ -869,7 +869,7 @@ def register(app, hub, ctx):
             except Exception as e:
                 return {"spoke_id": sid, "spoke_online": False, "status": "ERROR", "error": str(e)}
 
-        results = await _asyncio.gather(*(_one(sid) for sid in opn_spokes))
+        results = await asyncio.gather(*(_one(sid) for sid in opn_spokes))
         return {"hosts": list(results)}
 
     @app.get("/api/aggregate/proxmox")
@@ -898,7 +898,7 @@ def register(app, hub, ctx):
             except Exception as e:
                 return {"spoke_id": sid, "spoke_online": False, "status": "ERROR", "error": str(e)}
 
-        results = await _asyncio.gather(*(_one(sid) for sid in pxmx_spokes))
+        results = await asyncio.gather(*(_one(sid) for sid in pxmx_spokes))
         return {"hosts": list(results)}
 
     @app.get("/api/pxmx/agent-install-cmd")
@@ -1348,7 +1348,9 @@ def register(app, hub, ctx):
                 # (Was: every node across every spoke — the reported cross-tenant
                 # accumulation.) A truly unscoped admin call (tid is None — not
                 # the picker, which always sends ?tenant=) still sees the fleet.
-                return {"nodes": [], "spoke_connected": True, "select_tenant": True}
+                # ``spoke_connected`` stays truthful: no hypervisor spoke is
+                # in scope here. The UI branches on ``select_tenant`` first.
+                return {"nodes": [], "spoke_connected": False, "select_tenant": True}
             # No tenant scope AT ALL (tid is None) → every node across every
             # agent-hosting spoke (programmatic/unscoped admin call).
             node_spokes = list(dict.fromkeys(
@@ -1573,7 +1575,13 @@ def register(app, hub, ctx):
                 },
             }
             if select_tenant:
-                empty["spoke_connected"] = True
+                # ``spoke_connected`` answers "is a hypervisor spoke attached?"
+                # and the honest answer here is no — there are zero spokes in
+                # scope. It used to be forced True purely to suppress the UI's
+                # "spoke offline" banner, which made every other consumer of
+                # the field read a connected spoke that does not exist. The UI
+                # now branches on ``select_tenant`` first, so this can stay
+                # truthful.
                 empty["select_tenant"] = True
             return empty
 
@@ -1786,7 +1794,8 @@ def register(app, hub, ctx):
                 # prompts "select a tenant". (Was: None = no restriction = every
                 # spoke — the reported accumulation.) A truly unscoped admin call
                 # (tid is None, not the picker) still sees the whole fleet.
-                return _with_tpl({"vms": [], "spoke_connected": True, "select_tenant": True})
+                # Truthful spoke_connected; the UI branches on select_tenant.
+                return _with_tpl({"vms": [], "spoke_connected": False, "select_tenant": True})
             visible_spokes = None  # no restriction — admin, no tenant scope at all (tid is None)
         else:
             raise HTTPException(status_code=403, detail="Select a tenant to view its hypervisor VMs")

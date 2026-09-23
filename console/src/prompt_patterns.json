@@ -17,7 +17,18 @@
     "SET/CHANGE prompt (e.g. 'Enter new password:'); the probe declines it with",
     "bare Enters (identify is read-only and never sets a password). It is matched",
     "on the LAST line and BEFORE 'password_prompt', so a credential is never typed",
-    "into a set-password field."
+    "into a set-password field.",
+    "The 'unpriv_prompt' / 'priv_prompt' families read the PRIVILEGE LEVEL off the",
+    "prompt's last character: '>' is unprivileged (user EXEC) and '#' is privileged",
+    "(enable) on Cisco IOS, HPE/Aruba AOS-S and most network CLIs. Landing on '>'",
+    "makes the probe send 'enable' to escalate before running the identity show",
+    "commands. Note '$' and '%' are deliberately NOT in 'unpriv_prompt' — those are",
+    "UNIX shell prompts where 'enable' is meaningless, so it is never sent there.",
+    "'enable_unsupported' matches a device that has no 'enable' command at all",
+    "('>' already IS its top level) — retrying with another secret is pointless.",
+    "'enable_denied' matches a wrong enable secret, where the next secret IS worth",
+    "trying. Either way the probe continues unprivileged, which still identifies",
+    "many devices, and records why in the port's login diagnostics."
   ],
   "login_prompt": [
     "(?:[Ll]ogin|[Uu]ser(?:\\s?name)?)\\s*:\\s*$"
@@ -27,6 +38,29 @@
   ],
   "shell_prompt": [
     "\\S[>#$%]\\s*$"
+  ],
+  "unpriv_prompt": [
+    "\\S>\\s*$"
+  ],
+  "priv_prompt": [
+    "\\S#\\s*$"
+  ],
+  "enable_unsupported": [
+    "(?i:invalid\\s+(?:input|command))",
+    "(?i:unknown\\s+command)",
+    "(?i:incomplete\\s+command)",
+    "(?i:command\\s+not\\s+found)",
+    "(?i:ambiguous\\s+command)",
+    "%\\s*(?:Invalid|Unknown|Incomplete)"
+  ],
+  "enable_denied": [
+    "(?i:invalid\\s+(?:password|secret))",
+    "(?i:access\\s+denied)",
+    "(?i:authentication\\s+fail(?:ed|ure))",
+    "(?i:bad\\s+secrets?)",
+    "(?i:permission\\s+denied)",
+    "(?i:password\\s+incorrect)",
+    "(?i:incorrect\\s+password)"
   ],
   "new_password_prompt": [
     "(?i:(?:enter|set|choose|create|type)\\s+(?:a\\s+)?new\\s+password)\\s*:?\\s*$",

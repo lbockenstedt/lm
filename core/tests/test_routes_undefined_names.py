@@ -127,8 +127,6 @@ def _undefined_names(path):
 #:   cert_distribution `_unwrap`  — the LE_LIST_CERTS fallback in the two
 #:       distribute_* paths; both sit inside a try/except, so the lookup
 #:       silently degrades instead of crashing. Probably meant `unwrap_spoke`.
-#:   pxmx `_asyncio`              — three call sites; the module imports
-#:       `asyncio` plainly, so these look like a rename left half-applied.
 #:   oidc `cfg`                   — one site.
 #:   setup_admin `ctx`            — a closure referencing an enclosing-scope
 #:       name before assignment; needs care, not a quick import.
@@ -137,7 +135,6 @@ def _undefined_names(path):
 #: from here, so the baseline cannot quietly rot into a permanent exemption.
 _BASELINE = {
     ("cert_distribution.py", "_unwrap"),
-    ("pxmx.py", "_asyncio"),
     ("oidc.py", "cfg"),
     ("setup_admin.py", "ctx"),
 }
