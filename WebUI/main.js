@@ -4794,6 +4794,22 @@ async function loadSecurityData() {
         <div class="text-xs max-h-56 overflow-y-auto">${trusted.length ? trusted.map(neverRow).join('') : '<p class="text-slate-400 italic">none</p>'}</div>
       </div>`;
 
+    // Strikes on addresses with NO active block. Strikes drive permanent_after,
+    // but were only ever visible on a live block record — so an address could
+    // sit one strike from an unappealable permanent ban with nothing in the UI
+    // saying so until it tripped.
+    const strikes = d.strikes || [];
+    const strikeRow = r => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
+        <div class="min-w-0"><span class="font-mono text-slate-700">${escapeHtml(r.ip)}</span>
+          <span class="ml-2 ${r.at_limit ? 'text-red-600 font-bold' : 'text-slate-500'}">${r.strikes} / ${r.permanent_after}</span>
+          ${r.at_limit ? '<div class="text-[11px] text-red-500">at the limit — its next block would be permanent</div>' : ''}</div>
+        <button onclick="securityForgive('${escapeHtml(r.ip)}')" class="text-[11px] text-slate-500 hover:text-green-600 font-medium shrink-0">Forgive</button></div>`;
+    const strikeTile = strikes.length ? `<div class="${card}">
+        <h3 class="text-sm font-bold text-amber-600 mb-1">Strikes — addresses with a block history <span class="text-slate-400 font-normal">(${strikes.length})</span></h3>
+        <p class="text-[11px] text-slate-400 mb-2">None of these are blocked right now. A strike is recorded per block; at <b>${escapeHtml(String((d.config || {}).permanent_after ?? ''))}</b> the next block becomes <b>permanent</b> — no TTL, no auto-release. Lifting a block now forgives its strike automatically; <b>Forgive</b> clears a backlog left by blocks overturned before that.</p>
+        <div class="text-xs max-h-56 overflow-y-auto">${strikes.map(strikeRow).join('')}</div>
+      </div>` : '';
+
     const manualBlock = `<div class="${card}">
         <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Manual block</h3>
         <div class="flex flex-wrap gap-2 items-center text-xs">
@@ -4855,6 +4871,7 @@ async function loadSecurityData() {
       ${subCard}
       ${manualBlock}
       ${blockedTile}
+      ${strikeTile}
       ${neverTile}
       ${events}`;
     _secPrioLive();
@@ -5297,6 +5314,10 @@ async function securityBlock() {
     loadSecurityData();
 }
 async function securityUnblock(ip) { await _securityReq('/api/security/unblock', 'POST', { ip }, `Unblocked ${ip}`); loadSecurityData(); }
+async function securityForgive(ip) {
+    await _securityReq('/api/security/forgive', 'POST', { ip }, `Cleared strikes for ${ip}`);
+    loadSecurityData();
+}
 async function securityNeverAdd() { const cidr = (document.getElementById('sec-never-ip').value || '').trim(); if (!cidr) return; const descEl = document.getElementById('sec-never-desc'); const description = (descEl && descEl.value || '').trim(); await _securityReq('/api/security/never-block', 'POST', { cidr, description }, `Added ${cidr} to trusted list`); loadSecurityData(); }
 async function securityNeverRemove(cidr) { await _securityReq('/api/security/never-block', 'DELETE', { cidr }, `Removed ${cidr}`); loadSecurityData(); }
 async function securityReconcile() { await _securityReq('/api/security/reconcile', 'POST', {}, 'NSG sync requested'); }

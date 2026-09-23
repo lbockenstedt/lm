@@ -407,16 +407,63 @@ class ThreatMonitor:
                         t.get("signals"))
         return {"status": "SUCCESS", "totals": t}
 
-    def unblock(self, ip: str) -> Dict[str, Any]:
+    def unblock(self, ip: str, *, forgive: bool = True) -> Dict[str, Any]:
+        """Remove an active block. By default this also FORGIVES the strike that
+        block recorded.
+
+        A manual unblock is an operator saying "this block was wrong". The
+        strike counter (``_offense``) drives ``permanent_after``, so leaving the
+        strike behind meant a false positive was still banked against the IP:
+        clear a bad block three times and the fourth becomes PERMANENT — no TTL,
+        no auto-release — purely on the strength of blocks the operator had
+        already overturned. That is how a legitimate egress IP silently walks
+        itself to a permanent ban.
+
+        Only the strike from the block being removed is dropped (floor 0), so
+        genuine earlier offences are preserved. Pass ``forgive=False`` to remove
+        the block but keep the strike, for when the block was right and you are
+        merely letting the address back in.
+
+        Lifetime ``_totals`` are untouched either way — they are monotonic
+        evidence of what the pipeline saw, not a policy input.
+        """
         ip = (ip or "").strip()
         existed = self._blocks.pop(ip, None)
-        if existed:
-            self._totals["unblocks"] = int(self._totals.get("unblocks", 0)) + 1
-            self._nsg_dirty = True
+        if not existed:
+            return {"status": "SUCCESS", "removed": False, "strikes": self._offense.get(ip, 0)}
+        forgiven = False
+        if forgive and self._offense.get(ip):
+            self._offense[ip] -= 1
+            forgiven = True
+            if self._offense[ip] <= 0:
+                self._offense.pop(ip, None)
+        self._totals["unblocks"] = int(self._totals.get("unblocks", 0)) + 1
+        self._nsg_dirty = True
+        self._persist()
+        sec_log.info("THREAT UNBLOCK %s (manual; strike %s, now %d of %d before permanent)",
+                     ip, "forgiven" if forgiven else "kept",
+                     self._offense.get(ip, 0), self._cfg["permanent_after"])
+        self._schedule_reconcile()
+        return {"status": "SUCCESS", "removed": True,
+                "forgiven": forgiven, "strikes": self._offense.get(ip, 0)}
+
+    def forgive(self, ip: str) -> Dict[str, Any]:
+        """Clear an address's accumulated strikes outright, without touching any
+        active block.
+
+        Needed because strikes were historically never decremented: an address
+        can already sit at or past ``permanent_after`` from blocks that were all
+        overturned, which arms an instant permanent ban on its next trip. This
+        is the cleanup for that backlog. Blocking is unaffected — if the address
+        misbehaves it simply starts earning strikes again from zero.
+        """
+        ip = (ip or "").strip()
+        cleared = int(self._offense.pop(ip, 0))
+        if cleared:
             self._persist()
-            sec_log.info("THREAT UNBLOCK %s (manual)", ip)
-            self._schedule_reconcile()
-        return {"status": "SUCCESS", "removed": bool(existed)}
+            sec_log.warning("THREAT FORGIVE %s (%d strike(s) cleared by operator)",
+                            ip, cleared)
+        return {"status": "SUCCESS", "ip": ip, "cleared": cleared}
 
     # ── shared trusted / allow list (== global_config["azure_nsg"]["entries"]) ──
     def _shared_entries(self) -> List[Dict[str, str]]:
@@ -834,6 +881,11 @@ class ThreatMonitor:
         # CIDR — see oci_nsg.py) so this is deliberately a smaller shape than
         # allow_rule above; additive key, doesn't change any existing field.
         oci_allow = {"enabled": bool(oc.get("enabled")), "nsg_id": oc.get("nsg_id") or ""}
+        limit = int(self._cfg["permanent_after"])
+        strikes = sorted(
+            ({"ip": ip, "strikes": n, "permanent_after": limit, "at_limit": n >= limit}
+             for ip, n in self._offense.items() if n > 0 and ip not in self._blocks),
+            key=lambda r: (-r["strikes"], r["ip"]))[:100]
         return {
             "config": self.config(),
             "permanent": [b for b in blocks if b.get("permanent")],
@@ -847,6 +899,12 @@ class ThreatMonitor:
             "allow_rule": allow_rule,
             "oci_allow_rule": oci_allow,
             "events": list(self._events)[:200],
+            # Strike counts for addresses with NO active block. Strikes drive
+            # permanent_after, but were only ever visible on an active block
+            # record — so an address could sit one strike from an unappealable
+            # permanent ban with nothing in the UI saying so, right up until it
+            # tripped. Surfaced here so it can be seen (and forgiven) in advance.
+            "strikes": strikes,
             "counts": {"blocked": len(blocks), "permanent": sum(1 for b in blocks if b.get("permanent")),
                        "never": len(trusted), "events": len(self._events)},
             # Durable lifetime tallies (survive expiry/unblock/deque-rollover) so

@@ -61,10 +61,31 @@ def register(app, hub, ctx):
 
     @app.post("/api/security/unblock")
     async def security_unblock(request: Request):
-        """Remove a block (temporary, permanent, or manual). Body: {ip}."""
+        """Remove a block (temporary, permanent, or manual). Body:
+        ``{ip, forgive?}``.
+
+        ``forgive`` defaults to **true**: a manual unblock is normally the
+        operator overturning a bad block, and strikes drive ``permanent_after``,
+        so banking a strike for a block that was wrong walks a legitimate
+        address toward a permanent ban. Send ``forgive: false`` to let the
+        address back in while keeping the strike on record."""
         _guard(request)
         body = await request.json()
-        return hub.threat_monitor.unblock((body.get("ip") or "").strip())
+        return hub.threat_monitor.unblock((body.get("ip") or "").strip(),
+                                          forgive=body.get("forgive", True) is not False)
+
+    @app.post("/api/security/forgive")
+    async def security_forgive(request: Request):
+        """Clear an address's accumulated strikes without touching any active
+        block. Body: ``{ip}``.
+
+        Strikes were historically never decremented, so an address can already
+        sit at or past ``permanent_after`` from blocks that were all overturned
+        — arming an instant, TTL-less permanent ban on its next trip. This
+        clears that backlog."""
+        _guard(request)
+        body = await request.json()
+        return hub.threat_monitor.forgive((body.get("ip") or "").strip())
 
     @app.post("/api/security/never-block")
     async def security_never_add(request: Request):
