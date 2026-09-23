@@ -80,3 +80,64 @@ def test_literal_shared_tenant_always_in_scope(monkeypatch):
 
 def test_admin_tenant_id_constant():
     assert access.ADMIN_TENANT_ID == "default"
+
+
+# ── spoke_is_unbound: gates every "fall back to the global spoke" call site ──
+class _Hub:
+    def __init__(self, md):
+        self.state = type("_S", (), {"system_state": {"module_metadata": md}})()
+
+
+def test_unbound_spoke_with_no_metadata_entry_at_all(monkeypatch):
+    # The ordinary UNASSIGNED case: the spoke simply isn't in module_metadata.
+    _set_shared(monkeypatch, None)
+    assert access.spoke_is_unbound(_Hub({}), "s1") is True
+
+
+def test_unbound_spoke_with_blank_binding(monkeypatch):
+    _set_shared(monkeypatch, None)
+    hub = _Hub({"s1": {}, "s2": {"tenant_id": None}, "s3": {"tenant_id": "  "}})
+    assert access.spoke_is_unbound(hub, "s1") is True
+    assert access.spoke_is_unbound(hub, "s2") is True
+    assert access.spoke_is_unbound(hub, "s3") is True
+
+
+def test_shared_and_admin_bound_spokes_are_unbound(monkeypatch):
+    # Shared infra is visible to every tenant AND to the global admin.
+    _set_shared(monkeypatch, "sharedtenant")
+    hub = _Hub({"s_shared": {"tenant_id": "sharedtenant"},
+                "s_admin": {"tenant_id": "default"}})
+    assert access.spoke_is_unbound(hub, "s_shared") is True
+    assert access.spoke_is_unbound(hub, "s_admin") is True
+
+
+def test_real_tenant_bound_spoke_is_not_unbound(monkeypatch):
+    # THE leak vector: falling back to "the global spoke" when it actually
+    # belongs to a tenant surfaced that tenant's data in the ADMIN view.
+    _set_shared(monkeypatch, "sharedtenant")
+    assert access.spoke_is_unbound(_Hub({"s1": {"tenant_id": "lrb"}}), "s1") is False
+
+
+def test_falsy_spoke_id_and_unreadable_state_fail_closed(monkeypatch):
+    _set_shared(monkeypatch, None)
+    assert access.spoke_is_unbound(_Hub({}), None) is False
+    assert access.spoke_is_unbound(_Hub({}), "") is False
+
+    class _Boom:
+        @property
+        def state(self):
+            raise RuntimeError("state unavailable")
+
+    assert access.spoke_is_unbound(_Boom(), "s1") is False
+
+
+def test_call_sites_gate_the_global_spoke_fallback():
+    """dashboard + search_index must not re-introduce an ungated fallback."""
+    import os
+    base = os.path.join(os.path.dirname(__file__), "..", "src")
+    dash = open(os.path.join(base, "routes", "dashboard.py")).read()
+    idx = open(os.path.join(base, "search_index.py")).read()
+    assert dash.count("access.spoke_is_unbound(hub,") >= 3
+    assert "access.spoke_is_unbound(self, _gs)" in idx
+    # The hand-rolled module_metadata check it replaced is gone.
+    assert 'if not (_md.get(_gs, {}) or {}).get("tenant_id"):' not in dash

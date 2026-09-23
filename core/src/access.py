@@ -1054,6 +1054,34 @@ def in_tenant_scope(tenant_id, scope: Optional[set]) -> bool:
     return tenant_is_shared(normalized)
 
 
+def spoke_is_unbound(hub, spoke_id) -> bool:
+    """Whether ``spoke_id`` is NOT dedicated to a real tenant — i.e. it is
+    UNASSIGNED, or bound to the SHARED tenant, or to the ADMIN tenant.
+
+    Callers that fall back to "the global spoke" when no real tenant is
+    selected (``hub.get_hypervisor_spoke()`` returns whichever hypervisor/
+    simulation spoke happens to be connected) must gate that fallback on this,
+    or the ADMIN/Default view silently picks up a spoke BOUND to some other
+    tenant and reports that tenant's data as the admin's own — the reported
+    leak. Shared infra is deliberately included: shared is visible to every
+    tenant AND to the global admin.
+
+    Fails CLOSED (False) if the binding can't be read. A spoke with no
+    ``module_metadata`` entry at all is the ordinary UNASSIGNED case, not a
+    failure, and returns True."""
+    if not spoke_id:
+        return False
+    try:
+        md = (hub.state.system_state.get("module_metadata", {}) or {})
+        tenant_id = (md.get(spoke_id, {}) or {}).get("tenant_id")
+    except Exception:  # noqa: BLE001 - unreadable binding → never leak
+        return False
+    normalized = str(tenant_id or "").strip()
+    if not normalized:
+        return True
+    return tenant_is_shared(normalized) or normalized.lower() == ADMIN_TENANT_ID
+
+
 # ── NW per-tenant poll config (jitter / caps / default cadence) ──────────────
 # Global admin defaults live in global_config.nw_poll_* (set on Setup → Module
 # Management). A tenant-admin may override them for THEIR tenant under
