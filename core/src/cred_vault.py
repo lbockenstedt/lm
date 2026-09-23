@@ -283,6 +283,185 @@ async def _rekey_bucket(hub, bucket: str, old_psk: str, new_psk: str) -> None:
     _save(hub)
 
 
+def count_psk_secrets(hub, bucket: str) -> int:
+    """How many secrets in ``bucket`` are encrypted UNDER THE BUCKET PSK, and
+    are therefore unrecoverable if the pass-phrase is lost. ``hub``-mode secrets
+    are keyed on the hub Fernet key instead, so they survive a lost pass-phrase
+    (and keep working for automation) — they are not counted here."""
+    return sum(1 for sm in (_meta(hub)["secrets"].get(bucket, {}) or {}).values()
+               if sm.get("mode", _MODE_PSK) == _MODE_PSK)
+
+
+async def reset_bucket_psk(hub, bucket: str, new_psk: str, *,
+                           destroy_psk_secrets: bool = False,
+                           actor: str = "") -> Dict[str, Any]:
+    """Forgotten-pass-phrase escape hatch for a bucket (Global-Admin only —
+    the caller MUST enforce that).
+
+    ``set_bucket_psk`` can only ROTATE a pass-phrase, because it verifies the
+    old one first. That is correct for a rotation but left a lost pass-phrase
+    with no recovery at all: the bucket became permanently unusable through the
+    UI even when nothing in it was actually encrypted under that pass-phrase.
+
+    This resets the verifier WITHOUT the old pass-phrase:
+
+    * ``hub``-mode secrets are untouched and keep working — they are encrypted
+      with the hub Fernet key, never with the PSK. A bucket holding only
+      ``hub``-mode secrets therefore resets with **zero** data loss.
+    * ``psk``-mode secrets are already undecryptable (their key died with the
+      pass-phrase), so they can only be discarded. That is refused unless the
+      caller explicitly passes ``destroy_psk_secrets``, so the destructive case
+      is always a deliberate, acknowledged act.
+
+    Returns a summary of what happened for the audit log / UI.
+    """
+    new_psk = (new_psk or "").strip()
+    if len(new_psk) < 8:
+        raise CredVaultError("pass-phrase must be at least 8 characters")
+    cv = _meta(hub)
+    doomed = [n for n, sm in (cv["secrets"].get(bucket, {}) or {}).items()
+              if sm.get("mode", _MODE_PSK) == _MODE_PSK]
+    if doomed and not destroy_psk_secrets:
+        raise CredVaultError(
+            f"{len(doomed)} secret(s) in this bucket are encrypted with the lost "
+            f"pass-phrase and CANNOT be recovered: {', '.join(sorted(doomed))}. "
+            "Re-run the reset with confirmation to discard them and set a new "
+            "pass-phrase.")
+    for name in doomed:
+        sm = cv["secrets"][bucket][name]
+        try:
+            await _store_del(hub, sm["kv_name"], _secret_store(sm))
+        except Exception as exc:  # noqa: BLE001 — the blob is unreadable anyway
+            logger.warning("cred-vault: reset could not delete blob for %s/%s: %s",
+                           bucket, name, exc)
+        del cv["secrets"][bucket][name]
+        _cache_invalidate(bucket, name)
+    salt = secrets.token_bytes(16)
+    cv["buckets"].setdefault(bucket, {})
+    cv["buckets"][bucket]["psk"] = {"salt": _b64(salt), "hash": _b64(_scrypt(new_psk, salt))}
+    cv["buckets"][bucket].setdefault("created_at", _now())
+    cv["buckets"][bucket]["updated_at"] = _now()
+    _save(hub)
+    kept = len(cv["secrets"].get(bucket, {}) or {})
+    logger.warning("cred-vault: pass-phrase RESET (no old pass-phrase) for bucket "
+                   "%s by %s — %d psk-mode secret(s) discarded, %d hub-mode "
+                   "secret(s) kept", bucket, actor or "?", len(doomed), kept)
+    return {"bucket": bucket, "destroyed": sorted(doomed), "kept": kept}
+
+
+async def move_secret(hub, bucket: str, name: str, to_bucket: str, *,
+                      psk: str = "", to_psk: str = "", actor: str = "") -> Dict[str, Any]:
+    """Move one secret to another bucket, keeping its Key Vault blob.
+
+    The at-rest blob name is a random id, not derived from the bucket, so a move
+    is a metadata re-point rather than a copy-and-delete — there is no window
+    where the credential exists twice or not at all.
+
+    * ``hub``-mode secrets are encrypted with the hub Fernet key, which does not
+      depend on the bucket, so no pass-phrase is needed for either side. The
+      payload is re-encrypted purely to refresh its embedded ``_bucket`` marker.
+    * ``psk``-mode secrets are keyed on the SOURCE bucket's pass-phrase, so both
+      ``psk`` and ``to_psk`` must be supplied and the value is re-encrypted
+      under the destination bucket's key.
+
+    This is the rescue path for a credential stranded in an orphaned bucket:
+    move it somewhere tenant-scoped code can actually reference, then delete the
+    orphan.
+    """
+    to_bucket = (to_bucket or "").strip()
+    if not to_bucket:
+        raise CredVaultError("destination bucket is required")
+    if to_bucket == bucket:
+        raise CredVaultError("source and destination buckets are the same")
+    cv = _meta(hub)
+    sm = cv["secrets"].get(bucket, {}).get(name)
+    if not sm:
+        raise CredVaultError(f"secret '{name}' not found")
+    if cv["secrets"].get(to_bucket, {}).get(name):
+        raise CredVaultError(
+            f"'{to_bucket}' already has a secret named '{name}' — rename or "
+            "remove it first (a move must never silently overwrite a credential)")
+    if not bucket_has_psk(hub, to_bucket):
+        raise CredVaultError("the destination bucket has no pass-phrase set yet")
+
+    mode = sm.get("mode", _MODE_PSK)
+    if mode == _MODE_HUB:
+        value = await _fetch_and_decrypt(hub, bucket, name, psk=None)
+        payload = dict(value)
+        payload["_bucket"], payload["_name"] = to_bucket, name
+        token = hub_encryption.encrypt(json.dumps(payload)).decode("ascii")
+        salt = ""
+    else:
+        _require_psk(hub, bucket, psk)
+        _require_psk(hub, to_bucket, to_psk)
+        value = await _fetch_and_decrypt(hub, bucket, name, psk=psk)
+        payload = dict(value)
+        payload["_bucket"], payload["_name"] = to_bucket, name
+        salt_bytes = secrets.token_bytes(16)
+        token = _psk_fernet(to_psk, salt_bytes).encrypt(
+            json.dumps(payload).encode("utf-8")).decode("ascii")
+        salt = _b64(salt_bytes)
+
+    await _store_put(hub, sm["kv_name"], token, _secret_store(sm))
+    moved = dict(sm)
+    moved["salt"] = salt
+    moved["updated_at"] = _now()
+    moved["updated_by"] = actor
+    cv["secrets"].setdefault(to_bucket, {})[name] = moved
+    del cv["secrets"][bucket][name]
+    _save(hub)
+    _cache_invalidate(bucket, name)
+    _cache_invalidate(to_bucket, name)
+    logger.info("cred-vault: moved secret %s from bucket %s to %s by %s",
+                name, bucket, to_bucket, actor or "?")
+    return {"name": name, "from": bucket, "to": to_bucket, "mode": mode}
+
+
+async def delete_bucket(hub, bucket: str, *, confirm_destroy: bool = False,
+                        actor: str = "") -> Dict[str, Any]:
+    """Remove a bucket entirely — its pass-phrase record and any secrets left in
+    it (Global-Admin only; the caller MUST enforce that and MUST refuse buckets
+    that belong to a live tenant).
+
+    This exists because a bucket could be created by typing a free-text name,
+    but never removed: ``list_buckets`` derives from the pass-phrase records
+    UNION the secret records, so an unwanted bucket lingered in every Global
+    Admin's picker forever. An orphaned bucket matches no tenant, so nothing
+    tenant-scoped can reference it and no tenant-admin can reach it — it is a
+    dead end that only invites credentials being stored somewhere unusable.
+
+    Deleting secrets is destructive and irreversible, so it is refused unless
+    ``confirm_destroy`` is passed. Move anything worth keeping out first with
+    :func:`move_secret`.
+    """
+    if bucket == ADMIN_BUCKET:
+        raise CredVaultError(
+            "the Global Admin slot is infrastructure and cannot be deleted")
+    cv = _meta(hub)
+    names = sorted((cv["secrets"].get(bucket) or {}).keys())
+    if names and not confirm_destroy:
+        raise CredVaultError(
+            f"this bucket still holds {len(names)} secret(s): {', '.join(names)}. "
+            "Move them to another bucket first, or confirm the deletion to "
+            "destroy them.")
+    if not names and not cv["buckets"].get(bucket):
+        raise CredVaultError(f"bucket '{bucket}' not found")
+    for name in names:
+        sm = cv["secrets"][bucket][name]
+        try:
+            await _store_del(hub, sm["kv_name"], _secret_store(sm))
+        except Exception as exc:  # noqa: BLE001 — never strand the metadata
+            logger.warning("cred-vault: delete-bucket could not remove blob for "
+                           "%s/%s: %s", bucket, name, exc)
+        _cache_invalidate(bucket, name)
+    cv["secrets"].pop(bucket, None)
+    cv["buckets"].pop(bucket, None)
+    _save(hub)
+    logger.warning("cred-vault: bucket %s DELETED by %s (%d secret(s) destroyed)",
+                   bucket, actor or "?", len(names))
+    return {"bucket": bucket, "destroyed": names}
+
+
 # ── secret storage ──────────────────────────────────────────────────────────
 def list_buckets(hub) -> List[Dict[str, Any]]:
     cv = _meta(hub)

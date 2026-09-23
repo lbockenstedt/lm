@@ -43,11 +43,15 @@ class _Hub:
 class _FakeCV:
     ADMIN_BUCKET = _ADMIN
 
-    def __init__(self, existing):
+    def __init__(self, existing, psk_counts=None):
         self._existing = existing
+        self._psk_counts = psk_counts or {}
 
     def list_buckets(self, hub):
         return self._existing
+
+    def count_psk_secrets(self, hub, bucket):
+        return self._psk_counts.get(bucket, 0)
 
     def _vault_available(self, hub):
         return True
@@ -66,14 +70,58 @@ def _ns(hub, cv, sess, is_ga):
     }
 
 
-def test_all_tenants_excludes_default_and_labels():
+def test_all_tenants_includes_default_and_labels():
+    # ``default`` used to be excluded as a "system" bucket, but it is a real
+    # tenant that owns real spokes (e.g. an nw agent bound to ``default``).
+    # Hiding it meant a Global Admin could not create a vault entry for that
+    # tenant, hence no scan-credential set for it, hence an nw agent on
+    # ``default`` with no usable credentials and no way to fix it.
     hub = _Hub({"t-acme": {"display_name": "Acme Corp"},
                 "t-globex": {"name": "Globex"},
                 "t-bare": {},
-                "default": {"name": "Unassigned"}})
+                "default": {"name": "DEFAULT"}})
     ns = _load(_ns(hub, _FakeCV([]), {}, True))
     got = ns["_all_tenants"](hub)
-    assert got == {"t-acme": "Acme Corp", "t-globex": "Globex", "t-bare": "t-bare"}
+    assert got == {"t-acme": "Acme Corp", "t-globex": "Globex",
+                   "t-bare": "t-bare", "default": "DEFAULT"}
+
+
+def test_default_tenant_gets_its_own_bucket():
+    hub = _Hub({"default": {"name": "DEFAULT"}, "t-acme": {"name": "Acme"}})
+    ns = _load(_ns(hub, _FakeCV([]), {"user": {"tenants": []}}, True))
+    res = _run(ns["cv_buckets"](object()))
+    buckets = {b["bucket"]: b for b in res["buckets"]}
+    assert "default" in buckets
+    assert buckets["default"]["name"] == "DEFAULT"
+    assert buckets["default"]["is_orphan"] is False
+
+
+def test_orphan_bucket_is_flagged_not_mistaken_for_the_admin_slot():
+    # A bucket matching no tenant only shows up because it holds secrets.
+    # Nothing tenant-scoped can reference it, so it must be flagged — otherwise
+    # a stray bucket literally named "admin" renders next to "Global Admin slot"
+    # and reads like a second admin scope.
+    hub = _Hub({"t-acme": {"name": "Acme"}})
+    cv = _FakeCV([{"bucket": "admin", "has_psk": True, "secret_count": 1},
+                  {"bucket": "t-acme", "has_psk": True, "secret_count": 1}])
+    ns = _load(_ns(hub, cv, {"user": {"tenants": []}}, True))
+    res = _run(ns["cv_buckets"](object()))
+    buckets = {b["bucket"]: b for b in res["buckets"]}
+    assert buckets["admin"]["is_orphan"] is True
+    assert buckets["admin"]["is_admin_slot"] is False
+    assert buckets["admin"]["name"] == "admin"
+    assert buckets[_ADMIN]["is_orphan"] is False   # the real slot is not orphaned
+    assert buckets["t-acme"]["is_orphan"] is False
+
+
+def test_psk_secret_count_is_reported_for_the_reset_impact_warning():
+    hub = _Hub({"t-acme": {"name": "Acme"}})
+    cv = _FakeCV([{"bucket": "t-acme", "has_psk": True, "secret_count": 3}],
+                 psk_counts={"t-acme": 2})
+    ns = _load(_ns(hub, cv, {"user": {"tenants": []}}, True))
+    res = _run(ns["cv_buckets"](object()))
+    acme = {b["bucket"]: b for b in res["buckets"]}["t-acme"]
+    assert acme["psk_secret_count"] == 2
 
 
 def test_global_admin_sees_all_tenant_buckets_plus_admin_slot():
