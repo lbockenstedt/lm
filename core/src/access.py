@@ -1007,6 +1007,53 @@ def tenant_is_shared(tenant_id) -> bool:
     return bool(tenant_id) and (tenant_id == _SHARED_TENANT_ID or str(tenant_id).strip().lower() == "shared")
 
 
+# ── Tenant picker scoping ────────────────────────────────────────────────────
+# ``default`` is the built-in ADMIN tenant (routes/tenants_users.py renders it
+# as "ADMIN" and synthesises it when absent), NOT an "All tenants" view. The
+# rule — named in routes/nw.py as "ADMIN(default) must not accumulate across
+# tenants" — is that the ADMIN scope covers UNASSIGNED resources and resources
+# explicitly bound to ``default``, plus shared infra, but never another
+# tenant's dedicated resources.
+ADMIN_TENANT_ID = "default"
+
+
+def tenant_scope_ids(requested) -> Optional[set]:
+    """Effective tenant ids for a picker selection.
+
+    ``None`` (no ``?tenant=`` at all) means an unscoped programmatic call: no
+    filtering. ``default`` expands to ``{"", "default"}`` plus the shared
+    tenant. Any other id expands to itself plus the shared tenant.
+    """
+    if requested is None:
+        return None
+    normalized = str(requested).strip()
+    if not normalized:
+        return None
+
+    if normalized.lower() == ADMIN_TENANT_ID:
+        scope = {"", ADMIN_TENANT_ID}
+    else:
+        scope = {normalized}
+
+    shared_id = shared_tenant_id()
+    if shared_id:
+        scope.add(shared_id)
+    return scope
+
+
+def in_tenant_scope(tenant_id, scope: Optional[set]) -> bool:
+    """Whether a resource's tenant belongs to ``scope`` (from tenant_scope_ids).
+
+    A ``None`` scope matches everything. ``tenant_id`` is normalised so that
+    ``None`` and blanks both read as UNASSIGNED ("")."""
+    if scope is None:
+        return True
+    normalized = "" if tenant_id is None else str(tenant_id).strip()
+    if normalized in scope:
+        return True
+    return tenant_is_shared(normalized)
+
+
 # ── NW per-tenant poll config (jitter / caps / default cadence) ──────────────
 # Global admin defaults live in global_config.nw_poll_* (set on Setup → Module
 # Management). A tenant-admin may override them for THEIR tenant under

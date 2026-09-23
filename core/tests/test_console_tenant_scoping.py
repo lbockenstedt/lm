@@ -17,6 +17,7 @@ tests) so we don't import the whole hub app. The subnet mask itself
 """
 import ast
 import os
+import types
 
 _CONSOLE = os.path.join(os.path.dirname(__file__), "..", "src", "routes", "console.py")
 
@@ -26,7 +27,9 @@ def _load_disposition():
     mod = ast.parse(src)
     fn = next(n for n in mod.body
              if isinstance(n, ast.FunctionDef) and n.name == "_console_port_disposition")
-    ns = {}
+    # The predicate reads access.ADMIN_TENANT_ID; stub it rather than importing
+    # the whole access module (which pulls in the hub).
+    ns = {"access": types.SimpleNamespace(ADMIN_TENANT_ID="default")}
     exec(compile(ast.Module(body=[fn], type_ignores=[]), "<console>", "exec"), ns)
     return ns["_console_port_disposition"]
 
@@ -36,10 +39,31 @@ disp = _load_disposition()
 
 # ── Admin ────────────────────────────────────────────────────────────────────
 def test_admin_global_view_shows_every_kind():
-    # sel None == picker on default/global. Admin is visible to everything.
+    # sel None == a genuinely unscoped (programmatic) call, not the picker.
     assert disp(True, True, "lrb", None, False) == "show"   # dedicated
     assert disp(True, True, "shared", None, True) == "show"  # shared, unmasked
     assert disp(True, True, "", None, False) == "show"       # unassigned
+
+
+# ── ADMIN/Default scope ("default" is the ADMIN tenant, not "All") ───────────
+def test_admin_default_hides_other_tenants_dedicated():
+    # THE reported bug: with ADMIN/Default picked, the Console listed EVERY
+    # tenant's ports. Dedicated data belongs wholly to its own tenant.
+    assert disp(True, True, "lrb", "default", False) == "hide"
+    assert disp(True, True, "acme", "default", False) == "hide"
+
+
+def test_admin_default_shows_unassigned_and_default_bound():
+    # Unassigned is the ADMIN holding state; a port explicitly bound to the
+    # ADMIN tenant obviously belongs to it.
+    assert disp(True, True, "", "default", False) == "show"
+    assert disp(True, True, "default", "default", False) == "show"
+
+
+def test_admin_default_shows_shared_unmasked():
+    # The ADMIN tenant owns no NetBox prefixes, so masking there fails closed
+    # and would hide every shared console server from the admin.
+    assert disp(True, True, "shared", "default", True) == "show"
 
 
 def test_admin_selected_tenant_hides_other_dedicated():
