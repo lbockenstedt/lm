@@ -25871,10 +25871,10 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
     // actually worked for this module.
     if (navActions) {
         const addRecordBtn = ((subMenu === 'Records') && (isAdmin() || isTenantAdmin()))
-            ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Record</button>`
+            ? `<button id="dns-add-btn" onclick="showDnsRecordModal()" title="Add a new DNS record" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Record</button>`
             : '';
         const addForwarderBtn = (subMenu === 'Forwarders' && isAdmin())
-            ? `<button id="dns-forwarder-add-btn" onclick="showDnsForwarderModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Forwarder</button>`
+            ? `<button id="dns-forwarder-add-btn" onclick="showDnsForwarderModal()" title="Add a new persistent upstream DNS forwarder" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Forwarder</button>`
             : '';
         navActions.innerHTML = addRecordBtn + addForwarderBtn;
     }
@@ -25982,9 +25982,9 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                     <div class="flex items-center justify-between mb-2 gap-3">
                         <div class="text-sm font-semibold text-slate-700">Queries by Destination</div>
                         <div class="flex gap-2">
-                            <input id="dns-query-name-search" type="search" placeholder="Search domain"
+                            <input id="dns-query-name-search" type="search" placeholder="Search domain" title="Filter query log by domain or prefix"
                                    class="text-xs border border-slate-300 rounded-md px-2 py-1 w-56 focus:outline-none focus:ring-1 focus:ring-blue-400" />
-                            <input id="dns-query-host-search" type="search" placeholder="Search host/IP"
+                            <input id="dns-query-host-search" type="search" placeholder="Search host/IP" title="Filter query log by client host or IP"
                                    class="text-xs border border-slate-300 rounded-md px-2 py-1 w-56 focus:outline-none focus:ring-1 focus:ring-blue-400" />
                         </div>
                     </div>
@@ -26096,14 +26096,23 @@ async function loadDNSData(subMenu, skipWorkerDiscovery = false) {
                 container.innerHTML = _spokeErrorBanner(d.message, 'unbound-control forwarders unavailable'); return;
             }
             const fwds = d.forwarders || [];
+            window._dnsForwarders = fwds;
             const showMember = fwds.some(f => f.member_id);
-            const cols = (showMember ? ['Member'] : []).concat(['Zone', 'Class', 'Upstream Servers']);
-            const rows = fwds.map(f => `<tr class="border-b border-slate-100 hover:bg-slate-50">
+            const cols = (showMember ? ['Member'] : []).concat(['Zone', 'Class', 'Upstream Servers', '']);
+            const rows = fwds.map(f => {
+                const zoneVal = f.zone || '.';
+                const eZone = String(zoneVal).replace(/'/g, "\\'");
+                return `<tr class="border-b border-slate-100 hover:bg-slate-50">
                 ${showMember ? `<td class="px-4 py-2 font-mono text-xs">${escapeHtml(f.member_id || '—')}</td>` : ''}
-                <td class="px-4 py-2 font-mono font-medium">${escapeHtml(f.zone || '.')}</td>
+                <td class="px-4 py-2 font-mono font-medium">${escapeHtml(zoneVal)}</td>
                 <td class="px-4 py-2 text-xs">${escapeHtml(f.class || 'IN')}</td>
                 <td class="px-4 py-2 font-mono text-xs">${(f.upstreams || []).map(u => escapeHtml(u)).join(', ') || '—'}</td>
-            </tr>`).join('');
+                <td class="px-4 py-2 whitespace-nowrap text-right">
+                    <button onclick="editDnsForwarder('${eZone}')" title="Edit" class="p-1 text-slate-400 hover:text-blue-600 transition-colors">${editIcon}</button>
+                    <button onclick="deleteDnsForwarder('${eZone}')" title="Delete" class="p-1 text-slate-300 hover:text-red-500 transition-colors">${delIcon}</button>
+                </td>
+            </tr>`;
+            }).join('');
             // The cluster fanout (dns_spoke.py's _cluster_forwarders) reports a
             // SUCCESS status + whatever it *could* collect even when one or
             // more members failed to answer — a member drop mid-fanout would
@@ -28985,14 +28994,14 @@ function showDnsRecordModal(editItem) {
     const modal = openModal('dns-record-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${editing ? 'Edit' : 'Add'} DNS Record</h3>
         <div class="space-y-3">
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Name</label><input id="dns-r-name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="host.example.com" ${editing ? 'readonly' : ''}></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Type</label><select id="dns-r-type" class="${selectCls}" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Value</label><input id="dns-r-value" value="${val(editItem?.value)}" class="${inputCls}" placeholder="10.0.1.5"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="dns-r-ttl" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Name</label><input id="dns-r-name" title="Fully-qualified domain name" value="${val(editItem?.name)}" class="${inputCls}" placeholder="host.example.com" ${editing ? 'readonly' : ''}></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Type</label><select id="dns-r-type" title="DNS record type (A, AAAA, CNAME, PTR)" class="${selectCls}" ${editing ? 'disabled' : ''}>${typeOpts}</select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Value</label><input id="dns-r-value" title="Target IP address or canonical name" value="${val(editItem?.value)}" class="${inputCls}" placeholder="10.0.1.5"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">TTL</label><input id="dns-r-ttl" title="Time to Live in seconds (minimum 60s)" type="number" min="60" value="${val(editItem?.ttl) || 300}" class="${inputCls}"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsRecord()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
-            <button onclick="document.getElementById('dns-record-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="saveDnsRecord()" title="Save record changes" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Record'}</button>
+            <button onclick="document.getElementById('dns-record-modal').remove()" title="Cancel and close modal" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) { modal.dataset.editName = editItem.name; modal.dataset.editType = editItem.type; }
 }
@@ -29019,30 +29028,46 @@ async function saveDnsRecord() {
     } catch (e) { showToast('Error: ' + e.message, 'error'); }
 }
 
-function showDnsForwarderModal() {
+function editDnsForwarder(zone) {
+    const list = window._dnsForwarders || [];
+    const item = list.find(f => (f.zone || '.') === zone);
+    if (item) {
+        showDnsForwarderModal(item);
+    }
+}
+
+function showDnsForwarderModal(editItem) {
+    const isEdit = !!editItem;
+    const zoneVal = isEdit ? (editItem.zone || '.') : '.';
+    const upstreamsVal = isEdit && editItem.upstreams ? (Array.isArray(editItem.upstreams) ? editItem.upstreams.join(', ') : editItem.upstreams) : '';
     const inputCls = 'w-full bg-white border border-slate-300 rounded-md px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500';
     openModal('dns-forwarder-modal', `
-        <h3 class="text-lg font-bold text-[#263040]">Add DNS Forwarder</h3>
+        <h3 class="text-lg font-bold text-[#263040]">${isEdit ? 'Edit DNS Forwarder' : 'Add DNS Forwarder'}</h3>
         <div class="space-y-3">
             <div class="space-y-1">
                 <label class="text-xs text-slate-500 font-bold uppercase">Zone</label>
-                <input id="dns-fwd-zone" value="." class="${inputCls}" placeholder=". or example.com">
+                <input id="dns-fwd-zone" title="Forwarder zone domain (. for root/default)" value="${escapeHtml(zoneVal)}" ${isEdit ? 'readonly class="' + inputCls + ' bg-slate-50 cursor-not-allowed"' : 'class="' + inputCls + '"'} placeholder=". or example.com">
                 <p class="text-xs text-slate-400">Use <span class="font-mono">.</span> to forward all non-authoritative queries.</p>
             </div>
             <div class="space-y-1">
                 <label class="text-xs text-slate-500 font-bold uppercase">Upstream servers</label>
-                <input id="dns-fwd-upstreams" class="${inputCls}" placeholder="1.1.1.1, 1.0.0.1">
+                <input id="dns-fwd-upstreams" title="Comma-separated upstream DNS server IP addresses" value="${escapeHtml(upstreamsVal)}" class="${inputCls}" placeholder="1.1.1.1, 1.0.0.1">
                 <p class="text-xs text-slate-400">Enter one or more IPv4 or IPv6 addresses separated by commas or spaces.</p>
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDnsForwarder()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">Add Forwarder</button>
-            <button onclick="document.getElementById('dns-forwarder-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="saveDnsForwarder()" title="Save forwarder configuration" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${isEdit ? 'Save Changes' : 'Add Forwarder'}</button>
+            <button onclick="document.getElementById('dns-forwarder-modal').remove()" title="Cancel and close modal" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
+    const modal = document.getElementById('dns-forwarder-modal');
+    if (modal && isEdit) {
+        modal.dataset.editZone = editItem.zone || '.';
+    }
 }
 
 async function saveDnsForwarder() {
     const modal = document.getElementById('dns-forwarder-modal');
+    const editing = modal && modal.dataset.editZone;
     const zone = document.getElementById('dns-fwd-zone')?.value?.trim() || '.';
     const upstreams = (document.getElementById('dns-fwd-upstreams')?.value || '')
         .split(/[\s,]+/).filter(Boolean);
@@ -29050,19 +29075,42 @@ async function saveDnsForwarder() {
         showToast('At least one upstream server is required', 'error');
         return;
     }
+    const payload = { zone, upstreams };
+    if (editing) {
+        payload.old_zone = modal.dataset.editZone;
+    }
     try {
         const { ok, data: d, detail } = await _spokeFetch(
             '/api/dns/forwarders' + _tenantQS(), {
-                method: 'POST',
+                method: editing ? 'PUT' : 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ zone, upstreams }),
+                body: JSON.stringify(payload),
             });
         if (ok && d.status === 'SUCCESS') {
             modal.remove();
-            showToast(`Forwarder ${zone} added to all DNS servers.`, 'success');
+            showToast(editing ? `Forwarder ${zone} updated.` : `Forwarder ${zone} added to all DNS servers.`, 'success');
             loadDNSData('Forwarders');
         } else {
-            showToast('Error: ' + (detail || d?.message || 'Forwarder add failed'), 'error');
+            showToast('Error: ' + (detail || d?.message || (editing ? 'Forwarder update failed' : 'Forwarder add failed')), 'error');
+        }
+    } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+    }
+}
+
+async function deleteDnsForwarder(zone) {
+    if (!await showConfirmToast(`Delete forwarder for zone ${zone}?`)) return;
+    try {
+        const { ok, data: d, detail } = await _spokeFetch('/api/dns/forwarders' + _tenantQS(), {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ zone }),
+        });
+        if (ok && d.status === 'SUCCESS') {
+            showToast(`Forwarder ${zone} deleted.`, 'success');
+            loadDNSData('Forwarders');
+        } else {
+            showToast('Error: ' + (detail || d?.message || 'Delete forwarder failed'), 'error');
         }
     } catch (e) {
         showToast('Error: ' + e.message, 'error');
