@@ -139,6 +139,41 @@ def test_dns_forwarder_post_relays_zone_and_upstreams():
     )
 
 
+def test_dns_forwarder_delete_relays_zone():
+    hub = FakeHub({"dns-1": {"DNS_FORWARDER_REMOVE": {
+        "status": "SUCCESS", "zone": "example.com"}}})
+
+    response = _client(ADMIN, hub).request(
+        "DELETE",
+        "/api/dns/forwarders",
+        json={"zone": "example.com"},
+    )
+
+    assert response.status_code == 200
+    assert hub.forwarded[-1] == (
+        "dns-1",
+        "DNS_FORWARDER_REMOVE",
+        {"zone": "example.com"},
+    )
+
+
+def test_dns_forwarder_put_relays_zone_upstreams_and_old_zone():
+    hub = FakeHub({"dns-1": {"DNS_FORWARDER_UPDATE": {
+        "status": "SUCCESS", "zone": "new.com", "upstreams": ["8.8.8.8"]}}})
+
+    response = _client(ADMIN, hub).put(
+        "/api/dns/forwarders",
+        json={"zone": "new.com", "upstreams": ["8.8.8.8"], "old_zone": "old.com"},
+    )
+
+    assert response.status_code == 200
+    assert hub.forwarded[-1] == (
+        "dns-1",
+        "DNS_FORWARDER_UPDATE",
+        {"zone": "new.com", "upstreams": ["8.8.8.8"], "old_zone": "old.com"},
+    )
+
+
 class StatefulForwarderHub(FakeHub):
     """A hub whose ``DNS_FORWARDER_ADD``/``DNS_FORWARDERS`` replies actually
     round-trip through a shared in-memory forwarder list, so a route-level
@@ -166,6 +201,23 @@ class StatefulForwarderHub(FakeHub):
                 "status": "SUCCESS", "zone": payload.get("zone", "."),
                 "upstreams": payload.get("upstreams", []),
             }}}
+        if cmd == "DNS_FORWARDER_UPDATE":
+            target_zone = payload.get("old_zone") or payload.get("zone", ".")
+            for f in self._forwarders:
+                if f["zone"] == target_zone:
+                    f["zone"] = payload.get("zone", ".")
+                    f["upstreams"] = payload.get("upstreams", [])
+                    break
+            return {"payload": {"data": {
+                "status": "SUCCESS", "zone": payload.get("zone", "."),
+                "upstreams": payload.get("upstreams", []),
+            }}}
+        if cmd == "DNS_FORWARDER_REMOVE":
+            target_zone = payload.get("zone", ".")
+            self._forwarders = [f for f in self._forwarders if f["zone"] != target_zone]
+            return {"payload": {"data": {
+                "status": "SUCCESS", "zone": target_zone,
+            }}}
         if cmd == "DNS_FORWARDERS":
             return {"payload": {"data": {
                 "status": "SUCCESS", "forwarders": list(self._forwarders),
@@ -187,6 +239,33 @@ def test_dns_forwarder_added_via_post_appears_in_the_next_get():
     assert listing.status_code == 200
     zones = [f["zone"] for f in listing.json()["forwarders"]]
     assert "example.com" in zones
+
+
+def test_dns_forwarder_update_and_delete_roundtrip():
+    hub = StatefulForwarderHub()
+    client = _client(ADMIN, hub)
+
+    add = client.post("/api/dns/forwarders",
+                       json={"zone": "example.com", "upstreams": ["1.1.1.1"]})
+    assert add.status_code == 200
+
+    upd = client.put("/api/dns/forwarders",
+                      json={"zone": "example.com", "upstreams": ["8.8.8.8", "8.8.4.4"]})
+    assert upd.status_code == 200
+    assert upd.json()["status"] == "SUCCESS"
+
+    listing = client.get("/api/dns/forwarders")
+    assert listing.status_code == 200
+    fwd = next(f for f in listing.json()["forwarders"] if f["zone"] == "example.com")
+    assert fwd["upstreams"] == ["8.8.8.8", "8.8.4.4"]
+
+    delete = client.request("DELETE", "/api/dns/forwarders", json={"zone": "example.com"})
+    assert delete.status_code == 200
+    assert delete.json()["status"] == "SUCCESS"
+
+    listing_after = client.get("/api/dns/forwarders")
+    assert listing_after.status_code == 200
+    assert not any(f["zone"] == "example.com" for f in listing_after.json()["forwarders"])
 
 
 def test_dns_worker_discovery_enrolls_installed_server_role_without_user_secret():

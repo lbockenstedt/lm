@@ -25,10 +25,20 @@ def test_forwarder_add_button_is_global_admin_only():
 
 def test_forwarder_modal_posts_zone_and_upstreams():
     source = _source()
-    assert "function showDnsForwarderModal()" in source
+    assert "function showDnsForwarderModal(" in source
     assert "async function saveDnsForwarder()" in source
     assert "'/api/dns/forwarders' + _tenantQS()" in source
-    assert "JSON.stringify({ zone, upstreams })" in source
+    assert "JSON.stringify(payload)" in source
+
+
+def test_forwarder_edit_and_delete_functions_exist():
+    source = _source()
+    assert "function editDnsForwarder(zone)" in source
+    assert "async function deleteDnsForwarder(zone)" in source
+    assert "editDnsForwarder(" in source
+    assert "deleteDnsForwarder(" in source
+    assert "method: editing ? 'PUT' : 'POST'" in source
+    assert "method: 'DELETE'" in source
 
 
 def test_forwarder_add_refreshes_the_forwarders_tab():
