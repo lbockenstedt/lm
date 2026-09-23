@@ -8788,7 +8788,7 @@ function _renderSetupModuleMgmtTile(content) {
             <div class="${card}">
                 <div class="flex items-center justify-between mb-4">
                     <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">TrueNAS Appliances ${helpIcon('lm-hub', null, 'Hub help')}</h3>
-                    <button onclick="showAddTruenasApplianceModal()" class="${btnCls}">+ Add Appliance</button>
+                    <button onclick="showAddTruenasApplianceModal()" class="${btnCls}" title="Register a new TrueNAS appliance with Lab Manager">+ Add Appliance</button>
                 </div>
                 <p class="text-xs text-slate-400 mb-3">TrueNAS storage appliances polled over the official WebSocket JSON-RPC client. Each appliance is bound to a tenant + owning storage spoke; the spoke polls on its cycle (pools, datasets, shares, disks, alerts, services, capacity) and warms the hub cache. Use a per-appliance API key (created in TrueNAS → Settings → API Keys); self-signed boxes set Verify SSL off.</p>
                 <div id="truenas-appliances-list" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
@@ -8797,7 +8797,7 @@ function _renderSetupModuleMgmtTile(content) {
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-1">TrueNAS — Auto-Poll Default</h3>
                 <p class="text-xs text-slate-400 mb-3">Module-level poll cadence applied to every TrueNAS appliance that inherits it. An appliance's own Auto-Poll Interval always overrides this. The storage spoke polls on this cycle to warm the hub cache.</p>
                 <div class="flex items-center gap-3">
-                    <select id="truenas-module-poll-default" class="bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    <select id="truenas-module-poll-default" class="bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="Default polling interval applied to all TrueNAS appliances">
                         <option value="">Built-in default (15 minutes)</option>
                         <option value="0">Off (no auto-poll)</option>
                         <option value="60">Every 1 minute</option>
@@ -8808,7 +8808,7 @@ function _renderSetupModuleMgmtTile(content) {
                         <option value="21600">Every 6 hours</option>
                         <option value="86400">Every day</option>
                     </select>
-                    <button onclick="saveTruenasPollConfig(this)" class="${btnCls} ml-auto">Save</button>
+                    <button onclick="saveTruenasPollConfig(this)" class="${btnCls} ml-auto" title="Save TrueNAS default auto-poll cadence">Save</button>
                 </div>
             </div>`;
     loadAllDevices();
@@ -9475,18 +9475,18 @@ function _renderSetupSimulationsTile(content) {
                         <p class="${labelCls} mb-1">Certified globally</p>
                         <div id="global-usb-certified" class="space-y-2 mb-2"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                         <div class="flex gap-1">
-                            <input id="gusbc-vp" placeholder="1a2b:3c4d" class="w-28 font-mono text-xs ${inputCls} px-2 py-1">
-                            <input id="gusbc-label" placeholder="label" class="flex-1 text-xs ${inputCls} px-2 py-1">
-                            <select id="gusbc-type" class="text-xs ${inputCls} px-2 py-1"><option>wireless</option><option>wired</option><option>storage</option><option>other</option></select>
-                            <button onclick="addGlobalUsbCert()" class="${btnCls} text-xs px-3 py-1">+ Add</button>
+                            <input id="gusbc-vp" placeholder="1a2b:3c4d" class="w-28 font-mono text-xs ${inputCls} px-2 py-1" title="Vendor ID and Product ID (e.g. 1a2b:3c4d)">
+                            <input id="gusbc-label" placeholder="label" class="flex-1 text-xs ${inputCls} px-2 py-1" title="Friendly device description label">
+                            <select id="gusbc-type" class="text-xs ${inputCls} px-2 py-1" title="USB device classification type"><option>wireless</option><option>wired</option><option>storage</option><option>other</option></select>
+                            <button onclick="addGlobalUsbCert()" class="${btnCls} text-xs px-3 py-1" title="Add device to global certified USB list">+ Add</button>
                         </div>
                     </div>
                     <div>
                         <p class="${labelCls} mb-1">Ignored globally</p>
                         <div id="global-usb-ignored" class="flex flex-wrap gap-1 mb-2 min-h-[2rem]"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                         <div class="flex gap-1">
-                            <input id="gusbi-vp" placeholder="1a2b:3c4d" class="w-28 font-mono text-xs ${inputCls} px-2 py-1">
-                            <button onclick="addGlobalUsbIgnore()" class="${btnCls} text-xs px-3 py-1">+ Add</button>
+                            <input id="gusbi-vp" placeholder="1a2b:3c4d" class="w-28 font-mono text-xs ${inputCls} px-2 py-1" title="Vendor ID and Product ID to ignore">
+                            <button onclick="addGlobalUsbIgnore()" class="${btnCls} text-xs px-3 py-1" title="Add device to global ignored USB list">+ Add</button>
                         </div>
                     </div>
                 </div>
@@ -9506,16 +9506,16 @@ function _renderSetupSimulationsTile(content) {
                         <p class="${labelCls} mb-1">T1 PCI (never torn down)</p>
                         <div id="global-t1-pci" class="flex flex-wrap gap-1 mb-2 min-h-[2rem]"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                         <div class="flex gap-1">
-                            <input id="gt1-vp" placeholder="1912:0015" class="w-28 font-mono text-xs ${inputCls} px-2 py-1">
-                            <button onclick="addGlobalTierPci('t1')" class="${btnCls} text-xs px-3 py-1">+ Add</button>
+                            <input id="gt1-vp" placeholder="1912:0015" class="w-28 font-mono text-xs ${inputCls} px-2 py-1" title="PCI vendor:product ID for T1 base hardware">
+                            <button onclick="addGlobalTierPci('t1')" class="${btnCls} text-xs px-3 py-1" title="Register T1 physical PCI passthrough device">+ Add</button>
                         </div>
                     </div>
                     <div>
                         <p class="${labelCls} mb-1">T3 PCI (never torn down)</p>
                         <div id="global-t3-pci" class="flex flex-wrap gap-1 mb-2 min-h-[2rem]"><p class="text-xs text-slate-400 italic">Loading…</p></div>
                         <div class="flex gap-1">
-                            <input id="gt3-vp" placeholder="168c:0034" class="w-28 font-mono text-xs ${inputCls} px-2 py-1">
-                            <button onclick="addGlobalTierPci('t3')" class="${btnCls} text-xs px-3 py-1">+ Add</button>
+                            <input id="gt3-vp" placeholder="168c:0034" class="w-28 font-mono text-xs ${inputCls} px-2 py-1" title="PCI vendor:product ID for T3 IoT hardware">
+                            <button onclick="addGlobalTierPci('t3')" class="${btnCls} text-xs px-3 py-1" title="Register T3 IoT adapter PCI device">+ Add</button>
                         </div>
                     </div>
                 </div>
@@ -9533,14 +9533,14 @@ function _renderSetupSimulationsTile(content) {
                 <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider mb-2">Sim Quota Defaults ${helpIcon('cs', null, 'Simulations help')}</h3>
                 <p class="text-xs text-slate-500 mb-3">Platform-wide default templates a tenant inherits unless it overrides per alert/insight + site in Config → Sim Quotas. Site blank = "all sites". The engine (Chunk 2) merges these with each tenant's overrides. Sims come from the full primitive catalog; a tenant's simulation.conf may offer a subset.</p>
                 <div class="flex justify-end flex-wrap gap-2 mb-3">
-                    <button onclick="addSimQuotaDefault()" class="${btnCls} text-xs px-3 py-1">+ Add Default</button>
+                    <button onclick="addSimQuotaDefault()" class="${btnCls} text-xs px-3 py-1" title="Define new platform-wide simulation quota default">+ Add Default</button>
                 </div>
                 <div id="sim-quota-defaults-rows" class="space-y-2"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
             </div>
             <div class="${card}">
                 <div class="flex flex-wrap items-center justify-between gap-2 mb-2">
                   <h3 class="text-sm font-bold text-slate-500 uppercase tracking-wider">Dongle Quarantine — Exclusion Sims</h3>
-                  <button onclick="saveQtExcludeSims()" class="${btnCls} text-xs px-3 py-1">Save</button>
+                  <button onclick="saveQtExcludeSims()" class="${btnCls} text-xs px-3 py-1" title="Save quarantine exclusion simulations">Save</button>
                 </div>
                 <p class="text-xs text-slate-500 mb-3">Sims whose no-IP / no-SSID outcome is the <b>point</b> of the sim (e.g. <span class="font-mono">dhcp_fail</span>, <span class="font-mono">assoc_fail</span>). A T2 (USB-dongle) client running <b>only</b> these past the 1h grace window is <b>not</b> quarantined. A client running any non-excluded sim (or none) that never connects is shed: its bus is struck + the VM destroyed + re-cloned. Per-tenant override: a tenant's Config → Sim Quotas csc <span class="font-mono">qt_exclude_sims</span> overrides this default.</p>
                 <div id="qt-exclude-sims-rows" class="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-0"><p class="text-xs text-slate-400 italic animate-pulse">Loading…</p></div>
@@ -19396,7 +19396,7 @@ async function loadTruenasData(subMenu) {
                         ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">offline</span>'
                         : `<span class="text-slate-400 text-xs">—</span>`;
                 const poll = isAdmin()
-                    ? `<button onclick="pollTruenasAppliance('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3">Poll Now</button>`
+                    ? `<button onclick="pollTruenasAppliance('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3" title="Trigger immediate polling of pools, datasets, and disks">Poll Now</button>`
                     : '';
                 return `<tr class="hover:bg-slate-50 transition-colors">
                     <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}</td>
@@ -19739,7 +19739,7 @@ window.pxmxToggleVmActionMenu = function (evt, uid, isTpl) {
     // applies, mirroring the prior per-row button filtering for templates.
     const specs = PXMX_VM_ACTIONS.filter(s => s.action !== 'destroy' && (!isTpl || s.action === 'backup'));
     menu.innerHTML = specs.map(s =>
-        `<button onclick="event.stopPropagation(); document.getElementById('pxmx-vm-action-menu').classList.add('hidden'); pxmxVmAction('${uid}','${s.action}')" class="w-full text-left px-3 py-1.5 hover:bg-slate-50 font-medium text-slate-700 flex items-center gap-1.5">${s.label}</button>`
+        `<button onclick="event.stopPropagation(); document.getElementById('pxmx-vm-action-menu').classList.add('hidden'); pxmxVmAction('${uid}','${s.action}')" class="w-full text-left px-3 py-1.5 hover:bg-slate-50 font-medium text-slate-700 flex items-center gap-1.5" title="${s.label} virtual machine">${s.label}</button>`
     ).join('');
     const r = evt.currentTarget.getBoundingClientRect();
     menu.style.top = (r.bottom + 4) + 'px';
@@ -19782,7 +19782,7 @@ function pxmxVmTableHtml(vms) {
             if (spec.action === 'destroy' && vm.protected) {
                 return `<button disabled title="Protected from deletion — remove the safeguard in Setup → Hypervisors" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-400 cursor-not-allowed">🔒 Delete</button>`;
             }
-            return `<button onclick="event.stopPropagation(); pxmxVmAction('${uid}','${spec.action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${spec.cls}">${spec.label}</button>`;
+            return `<button onclick="event.stopPropagation(); pxmxVmAction('${uid}','${spec.action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${spec.cls}" title="${spec.label} this virtual machine">${spec.label}</button>`;
         };
         const consoleBtn = !canAct ? ''
             : (isLxc || tpl)
@@ -19793,14 +19793,14 @@ function pxmxVmTableHtml(vms) {
         // buttons (delete-protection and console-availability need their own
         // always-visible state, not a menu item you might miss).
         const destroySpec = PXMX_VM_ACTIONS.find(s => s.action === 'destroy');
-        const menuBtn = !canAct ? '' : `<button onclick="event.stopPropagation(); pxmxToggleVmActionMenu(event, '${uid}', ${tpl})" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 hover:bg-slate-200">⋯ Actions ▾</button>`;
+        const menuBtn = !canAct ? '' : `<button onclick="event.stopPropagation(); pxmxToggleVmActionMenu(event, '${uid}', ${tpl})" class="px-2 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 hover:bg-slate-200" title="Open VM actions menu">⋯ Actions ▾</button>`;
         const actions = `<div class="flex flex-wrap gap-1 justify-end">
             ${consoleBtn}
             ${menuBtn}
             ${act(destroySpec)}
         </div>`;
         return `<tr class="border-b border-slate-100 hover:bg-slate-50 cursor-pointer" data-unique-id="${escapeHtml(vm.unique_id || '')}" onclick="openVmDetail('${uid}')">
-            <td class="px-4 py-2 font-mono text-xs font-bold" onclick="event.stopPropagation()"><input type="checkbox" class="pxmx-vm-sel" value="${escapeHtml(vm.unique_id || '')}"/> ${escapeHtml(vm.vmid)}</td>
+            <td class="px-4 py-2 font-mono text-xs font-bold" onclick="event.stopPropagation()"><input type="checkbox" class="pxmx-vm-sel" value="${escapeHtml(vm.unique_id || '')}" title="Select VM ${escapeHtml(vm.name || vm.vmid)} for bulk operations"/> ${escapeHtml(vm.vmid)}</td>
             <td class="px-4 py-2 text-sm font-medium">${escapeHtml(vm.name || '—')}</td>
             <td class="px-4 py-2 text-slate-500">${escapeHtml(pxmxOs(vm))}</td>
             <td class="px-4 py-2">${pxmxVmStatusBadge(vm)}</td>
@@ -19826,7 +19826,7 @@ function pxmxVmTabsHtml() {
         { numeric: true, sensitivity: 'base' });
     const sortedNodes = nodes.slice().sort((a, b) => _cmp(a.cluster, b.cluster) || _cmp(a.node, b.node));
     const tabBtn = (key, label, count, active) =>
-        `<button onclick="pxmxSelectVmTab('${escJsAttr(key || '')}')" class="px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${active ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}">${escapeHtml(label)} <span class="opacity-60">(${count})</span></button>`;
+        `<button onclick="pxmxSelectVmTab('${escJsAttr(key || '')}')" class="px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${active ? 'bg-[#01A982]/10 text-[#01A982] border border-[#01A982]' : 'text-slate-500 hover:bg-slate-100 border border-transparent'}" title="Filter virtual machines by server ${escapeHtml(label)}">${escapeHtml(label)} <span class="opacity-60">(${count})</span></button>`;
     const countFor = key => allVms.filter(v => pxmxNodeKey(v.cluster, v.node) === key).length;
     return `<div class="flex flex-wrap gap-1.5 mb-3">
         ${tabBtn('', 'All', allVms.length, !activeKey)}
@@ -19846,7 +19846,7 @@ function pxmxVmSectionHtml() {
     const vms = pxmxFilteredVms();
     const countLabel = activeKey ? `${vms.length} on ${escapeHtml((activeKey.split('::')[1] || activeKey))}` : `${vms.length} total`;
     const buildBtn = nodes.length
-        ? `<button onclick="pxmxOpenCreateVm()" class="mb-3 ml-2 px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors">＋ Build VM from ISO</button>`
+        ? `<button onclick="pxmxOpenCreateVm()" class="mb-3 ml-2 px-3 py-1.5 rounded-md text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors" title="Create a new virtual machine from an ISO installer">＋ Build VM from ISO</button>`
         : '';
     return `<div class="flex items-center justify-between mb-1 px-1">
             <h3 class="text-base font-semibold text-[#263040]">Virtual Machines &amp; Containers
@@ -19866,7 +19866,7 @@ function pxmxBulkBar() {
     // Render from the shared PXMX_VM_ACTIONS spec so the bulk buttons match the
     // inline per-row buttons exactly (icon, label, color, hover, sizing).
     const btns = PXMX_VM_ACTIONS.map(s =>
-        `<button onclick="pxmxBulkAction('${s.action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${s.cls}">${s.label}</button>`).join('');
+        `<button onclick="pxmxBulkAction('${s.action}')" class="px-2 py-0.5 rounded text-[10px] font-bold ${s.cls}" title="Execute ${s.label} on all selected VMs">${s.label}</button>`).join('');
     return `<div class="flex flex-wrap items-center gap-2 mb-3 text-xs">
       <span class="text-slate-400 font-medium mr-1">Bulk (selected):</span>
       ${btns}
@@ -19937,7 +19937,7 @@ function openVmDetail(uniqueId) {
     const escJs = s => String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
     const uid = escJs(vm.unique_id);
     container.innerHTML = `
-        <button onclick="loadPxmxData('Virtual Machines')" class="mb-3 inline-flex items-center gap-1 text-sm text-slate-500 hover:text-[#01A982] font-medium transition-colors">
+        <button onclick="loadPxmxData('Virtual Machines')" class="mb-3 inline-flex items-center gap-1 text-sm text-slate-500 hover:text-[#01A982] font-medium transition-colors" title="Return to virtual machines list">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/></svg>
             Back to VM list
         </button>
@@ -19952,10 +19952,10 @@ function openVmDetail(uniqueId) {
                 · Pool ${vm.pool ? escapeHtml(vm.pool) : '—'}</p>
         </div>
         <div class="flex flex-wrap items-center gap-2 mb-4"${canEdit() ? '' : ' style="display:none"'}>
-            <button onclick="pxmxVmAction('${uid}','start')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-green-600 hover:bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-colors">▶ Start</button>
-            <button onclick="pxmxVmAction('${uid}','stop')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-red-600 hover:bg-red-700 text-white transition-colors">■ Stop</button>
-            <button onclick="pxmxVmAction('${uid}','reboot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors">↺ Restart</button>
-            <button onclick="pxmxVmAction('${uid}','snapshot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-600 hover:bg-slate-700 text-white transition-colors">📷 Snapshot</button>
+            <button onclick="pxmxVmAction('${uid}','start')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-green-600 hover:bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] transition-colors" title="Power on this virtual machine">▶ Start</button>
+            <button onclick="pxmxVmAction('${uid}','stop')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-red-600 hover:bg-red-700 text-white transition-colors" title="Gracefully shut down or force-stop this VM">■ Stop</button>
+            <button onclick="pxmxVmAction('${uid}','reboot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors" title="Reboot this virtual machine">↺ Restart</button>
+            <button onclick="pxmxVmAction('${uid}','snapshot')" class="px-3 py-1.5 rounded-md text-xs font-bold bg-slate-600 hover:bg-slate-700 text-white transition-colors" title="Take an instantaneous snapshot of this VM">📷 Snapshot</button>
             <button onclick="pxmxVmAction('${uid}','backup')" title="vzdump backup to the storage configured in Setup → Hypervisors" class="px-3 py-1.5 rounded-md text-xs font-bold bg-sky-600 hover:bg-sky-700 text-white transition-colors">💾 Backup</button>
             <button id="pxmx-backup-hub-btn" onclick="pxmxBackupToHub('${uid}')" title="vzdump this template and store a copy in the hub's Template Repo (Template Repo page). The archive is deleted from the chosen storage after streaming." class="px-3 py-1.5 rounded-md text-xs font-bold bg-sky-100 hover:bg-sky-200 text-sky-700 border border-sky-300 transition-colors">⬆ Back up to Hub</button>
             <select id="pxmx-backup-hub-storage" title="vzdump storage target for THIS backup (file-based only — PBS excluded; vzdump-to-PBS isn't a single streamable file). The archive is deleted from here after it streams to the hub." class="px-2 py-1.5 rounded-md text-xs border border-slate-300 bg-white max-w-[12rem]"><option value="">loading storages…</option></select>
@@ -20020,7 +20020,7 @@ async function renderPxmxSettings(container) {
         const uid = escapeHtml(v.unique_id);
         const checked = protectedVms.has(v.unique_id) ? 'checked' : '';
         return `<label class="flex items-center gap-2 px-3 py-1.5 text-xs text-slate-700 hover:bg-slate-50 cursor-pointer">
-            <input type="checkbox" class="pxmx-protect-cb rounded" value="${uid}" ${checked}/>
+            <input type="checkbox" class="pxmx-protect-cb rounded" value="${uid}" ${checked} title="Lock VM to prevent deletion"/>
             <span class="font-medium">${escapeHtml(v.name || '—')}</span>
             <span class="text-slate-400 font-mono">VMID ${escapeHtml(v.vmid)} · ${escapeHtml((v.cluster || '') + '/' + (v.node || ''))}</span>
         </label>`;
@@ -20030,17 +20030,17 @@ async function renderPxmxSettings(container) {
         <div class="hpe-card rounded-lg p-5 shadow-sm">
           <p class="text-sm font-bold text-[#263040] mb-3">Backup (vzdump) ${helpIcon('pxmx', null, 'Hypervisor help')}</p>
           <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <div><label class="${lbl}">Default storage</label><select id="hv-backup-storage" class="${inp}">${optList(allStorages, cfg.backup_storage, '— select —')}</select></div>
-            <div><label class="${lbl}">Mode</label><select id="hv-backup-mode" class="${inp}">${modeSel(cfg.backup_mode || 'snapshot', '')}</select></div>
-            <div><label class="${lbl}">Keep last (0 = no prune)</label><input id="hv-backup-keep" type="number" min="0" value="${cfg.backup_keep ?? 3}" class="${inp}"/></div>
+            <div><label class="${lbl}">Default storage</label><select id="hv-backup-storage" class="${inp}" title="Default storage destination for VM backups">${optList(allStorages, cfg.backup_storage, '— select —')}</select></div>
+            <div><label class="${lbl}">Mode</label><select id="hv-backup-mode" class="${inp}" title="Backup mode (snapshot, suspend, or stop)">${modeSel(cfg.backup_mode || 'snapshot', '')}</select></div>
+            <div><label class="${lbl}">Keep last (0 = no prune)</label><input id="hv-backup-keep" type="number" min="0" value="${cfg.backup_keep ?? 3}" class="${inp}" title="Number of backup archives to keep per VM"/></div>
           </div>
           <p class="text-[11px] text-slate-400 mt-2">Snapshot mode = no downtime. Storage list is pulled live from each host; per-host overrides below win over the default.</p>
         </div>
         <div class="hpe-card rounded-lg p-5 shadow-sm">
           <p class="text-sm font-bold text-[#263040] mb-3">Snapshot</p>
           <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div><label class="${lbl}">Keep last</label><input id="hv-snap-keep" type="number" min="0" value="${cfg.snapshot_keep ?? 5}" class="${inp}"/></div>
-            <div><label class="${lbl}">Name prefix</label><input id="hv-snap-prefix" type="text" value="${escapeHtml(cfg.snapshot_prefix || 'lm')}" class="${inp}"/></div>
+            <div><label class="${lbl}">Keep last</label><input id="hv-snap-keep" type="number" min="0" value="${cfg.snapshot_keep ?? 5}" class="${inp}" title="Number of snapshots to retain"/></div>
+            <div><label class="${lbl}">Name prefix</label><input id="hv-snap-prefix" type="text" value="${escapeHtml(cfg.snapshot_prefix || 'lm')}" class="${inp}" title="Prefix string for automated snapshot names"/></div>
           </div>
         </div>
         <div class="hpe-card rounded-lg p-5 shadow-sm">
@@ -20051,9 +20051,9 @@ async function renderPxmxSettings(container) {
           </table></div>
         </div>
         <div class="hpe-card rounded-lg p-5 shadow-sm space-y-3">
-          <label class="flex items-center gap-2 text-sm text-slate-700"><input id="hv-confirm" type="checkbox" ${cfg.confirm_destructive !== false ? 'checked' : ''} class="rounded"/> Confirm before destructive VM actions (stop / restart / reboot)</label>
-          ${isAdmin() ? `<label class="flex items-start gap-2 text-sm text-slate-700"><input id="hv-host-shell" type="checkbox" ${cfg.host_shell_enabled ? 'checked' : ''} class="rounded mt-0.5"/> <span>Enable <b>host terminal</b> (root shell on the Proxmox host via VM Server → Terminal). <span class="text-amber-600">Off by default</span> — a live root shell on this tenant's hypervisor. Global Admin (any host) + Tenant Admin (own tenant). Every session is audited.</span></label>` : ''}
-          ${isAdmin() ? `<label class="flex items-start gap-2 text-sm text-slate-700"><input id="hv-tenant-console" type="checkbox" ${cfg.tenant_console_enabled ? 'checked' : ''} class="rounded mt-0.5"/> <span>Allow <b>Tenant Admins</b> to open VM consoles &amp; lifecycle actions on this hypervisor. <span class="text-amber-600">Off by default</span> — turn on for a hypervisor dedicated to one tenant (or a flat lab) whose VMs aren't tagged or subnet-scoped. On a <b>shared</b> hypervisor leave OFF: tenant admins are then limited to VMs attributable to their tenant by Proxmox tag or subnet. (Enabling host terminal above also grants console.)</span></label>` : ''}
+          <label class="flex items-center gap-2 text-sm text-slate-700"><input id="hv-confirm" type="checkbox" ${cfg.confirm_destructive !== false ? 'checked' : ''} class="rounded" title="Require confirmation for destructive operations"/> Confirm before destructive VM actions (stop / restart / reboot)</label>
+          ${isAdmin() ? `<label class="flex items-start gap-2 text-sm text-slate-700"><input id="hv-host-shell" type="checkbox" ${cfg.host_shell_enabled ? 'checked' : ''} class="rounded mt-0.5" title="Enable root PTY shell on hypervisor host"/> <span>Enable <b>host terminal</b> (root shell on the Proxmox host via VM Server → Terminal). <span class="text-amber-600">Off by default</span> — a live root shell on this tenant's hypervisor. Global Admin (any host) + Tenant Admin (own tenant). Every session is audited.</span></label>` : ''}
+          ${isAdmin() ? `<label class="flex items-start gap-2 text-sm text-slate-700"><input id="hv-tenant-console" type="checkbox" ${cfg.tenant_console_enabled ? 'checked' : ''} class="rounded mt-0.5" title="Allow Tenant Admins to open VM consoles"/> <span>Allow <b>Tenant Admins</b> to open VM consoles &amp; lifecycle actions on this hypervisor. <span class="text-amber-600">Off by default</span> — turn on for a hypervisor dedicated to one tenant (or a flat lab) whose VMs aren't tagged or subnet-scoped. On a <b>shared</b> hypervisor leave OFF: tenant admins are then limited to VMs attributable to their tenant by Proxmox tag or subnet. (Enabling host terminal above also grants console.)</span></label>` : ''}
         </div>
         ${isAdmin() ? `<div class="hpe-card rounded-lg p-5 shadow-sm">
           <p class="text-sm font-bold text-[#263040] mb-1">Delete protection ${helpIcon('pxmx', null, 'Hypervisor help')}</p>
@@ -20061,7 +20061,7 @@ async function renderPxmxSettings(container) {
           <div class="max-h-64 overflow-y-auto border border-slate-200 rounded-md divide-y divide-slate-50">${protectRows}</div>
         </div>` : ''}
         <div class="flex justify-end items-center gap-3">
-          <button onclick="savePxmxSettings()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-5 py-2 rounded-md text-sm font-bold">Save</button>
+          <button onclick="savePxmxSettings()" class="bg-[#01A982] hover:bg-[#018a6c] text-white px-5 py-2 rounded-md text-sm font-bold" title="Save hypervisor backup and console settings">Save</button>
           <span id="pxmx-settings-status" class="text-xs text-slate-400"></span>
         </div>
       </div>`;
@@ -20437,21 +20437,21 @@ async function pxmxCloneVm(uniqueId) {
         <div class="bg-white rounded-lg shadow-xl w-full max-w-md p-5 space-y-4">
             <div class="flex items-center justify-between">
                 <h3 class="text-base font-semibold text-[#263040]">Clone template</h3>
-                <button onclick="document.getElementById('pxmx-clone-modal').remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+                <button onclick="document.getElementById('pxmx-clone-modal').remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none" title="Close clone dialog">×</button>
             </div>
             <p class="text-xs text-slate-500">Cloning <span class="font-mono">${escapeHtml(vm.name || '')}</span> (VMID ${vm.vmid}, pool ${escapeHtml(vm.pool || '—')}). The new VM is tagged with the current tenant name and starts stopped.</p>
             <label class="block text-xs font-medium text-slate-600">New VM name
-                <input id="pxmx-clone-name" value="${escapeHtml(baseName)}" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" />
+                <input id="pxmx-clone-name" value="${escapeHtml(baseName)}" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" title="Name for the newly cloned virtual machine" />
             </label>
             <label class="block text-xs font-medium text-slate-600">New VMID (optional — blank = auto-assign)
-                <input id="pxmx-clone-vmid" placeholder="auto" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" />
+                <input id="pxmx-clone-vmid" placeholder="auto" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" title="Optional custom VMID (leave blank to auto-assign)" />
             </label>
             <label class="block text-xs font-medium text-slate-600">Destination pool (optional)
-                <select id="pxmx-clone-pool" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm">${poolOpts}</select>
+                <select id="pxmx-clone-pool" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Select target resource pool">${poolOpts}</select>
             </label>
             <div class="flex justify-end gap-2 pt-1">
-                <button onclick="document.getElementById('pxmx-clone-modal').remove()" class="px-3 py-2 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100">Cancel</button>
-                <button id="pxmx-clone-go" onclick="pxmxCloneVmSubmit('${escJs(vm.unique_id)}')" class="px-4 py-2 rounded-md text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white">⧉ Clone</button>
+                <button onclick="document.getElementById('pxmx-clone-modal').remove()" class="px-3 py-2 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100" title="Cancel cloning">Cancel</button>
+                <button id="pxmx-clone-go" onclick="pxmxCloneVmSubmit('${escJs(vm.unique_id)}')" class="px-4 py-2 rounded-md text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white" title="Clone template to new VM">⧉ Clone</button>
             </div>
             <p id="pxmx-clone-status" class="text-xs text-slate-400"></p>
         </div>
@@ -20600,38 +20600,38 @@ function pxmxOpenCreateVm() {
         <div class="bg-white rounded-lg shadow-xl w-full max-w-lg p-5 space-y-3">
             <div class="flex items-center justify-between">
                 <h3 class="text-base font-semibold text-[#263040]">Build VM from ISO</h3>
-                <button onclick="document.getElementById('pxmx-create-vm-modal').remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none">×</button>
+                <button onclick="document.getElementById('pxmx-create-vm-modal').remove()" class="text-slate-400 hover:text-slate-600 text-xl leading-none" title="Close create VM dialog">×</button>
             </div>
             <p class="text-xs text-slate-500">Define a new qemu VM that boots an installer ISO. The VM is tagged with the current tenant name and starts stopped — boot it from the Console button, install, then Start.</p>
             <div class="grid grid-cols-2 gap-3">
                 <label class="block text-xs font-medium text-slate-600">Node
-                    <select id="pxmx-cv-node" onchange="pxmxLoadNodeMedia()" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm">${nodeOpts}</select>
+                    <select id="pxmx-cv-node" onchange="pxmxLoadNodeMedia()" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Select hypervisor host node">${nodeOpts}</select>
                 </label>
                 <label class="block text-xs font-medium text-slate-600">VM name
-                    <input id="pxmx-cv-name" value="new-vm" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" />
+                    <input id="pxmx-cv-name" value="new-vm" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm font-mono" title="Virtual machine name" />
                 </label>
                 <label class="block text-xs font-medium text-slate-600 col-span-2">Installer ISO
-                    <select id="pxmx-cv-iso" disabled class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm"><option value="">Loading ISOs…</option></select>
+                    <select id="pxmx-cv-iso" disabled class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Select installer ISO image"><option value="">Loading ISOs…</option></select>
                 </label>
                 <label class="block text-xs font-medium text-slate-600">Disk storage
-                    <select id="pxmx-cv-storage" disabled class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm"><option value="">Loading…</option></select>
+                    <select id="pxmx-cv-storage" disabled class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Target storage pool for root disk"><option value="">Loading…</option></select>
                 </label>
                 <label class="block text-xs font-medium text-slate-600">Disk size (GB)
-                    <input id="pxmx-cv-disk" type="number" min="1" value="32" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" />
+                    <input id="pxmx-cv-disk" type="number" min="1" value="32" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Root disk size in gigabytes" />
                 </label>
                 <label class="block text-xs font-medium text-slate-600">Memory (MB)
-                    <input id="pxmx-cv-mem" type="number" min="128" value="2048" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" />
+                    <input id="pxmx-cv-mem" type="number" min="128" value="2048" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Memory allocation in megabytes" />
                 </label>
                 <label class="block text-xs font-medium text-slate-600">CPU cores
-                    <input id="pxmx-cv-cores" type="number" min="1" value="2" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" />
+                    <input id="pxmx-cv-cores" type="number" min="1" value="2" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Virtual CPU core count" />
                 </label>
                 <label class="block text-xs font-medium text-slate-600 col-span-2">Destination pool (optional)
-                    <select id="pxmx-cv-pool" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm"><option value="">— no pool —</option></select>
+                    <select id="pxmx-cv-pool" class="mt-1 w-full px-3 py-2 border border-slate-300 rounded-md text-sm" title="Optional resource pool assignment"><option value="">— no pool —</option></select>
                 </label>
             </div>
             <div class="flex justify-end gap-2 pt-1">
-                <button onclick="document.getElementById('pxmx-create-vm-modal').remove()" class="px-3 py-2 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100">Cancel</button>
-                <button id="pxmx-cv-go" onclick="pxmxCreateVmSubmit()" class="px-4 py-2 rounded-md text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white">＋ Create VM</button>
+                <button onclick="document.getElementById('pxmx-create-vm-modal').remove()" class="px-3 py-2 rounded-md text-sm font-medium text-slate-600 hover:bg-slate-100" title="Cancel VM creation">Cancel</button>
+                <button id="pxmx-cv-go" onclick="pxmxCreateVmSubmit()" class="px-4 py-2 rounded-md text-sm font-bold bg-indigo-600 hover:bg-indigo-700 text-white" title="Provision new virtual machine">＋ Create VM</button>
             </div>
             <p id="pxmx-cv-status" class="text-xs text-slate-400"></p>
         </div>
@@ -23498,7 +23498,7 @@ async function renderPxmxDiagnostics(container) {
                     <div>
                         <span class="font-bold">Failed to load Drive Diagnostics:</span> ${escapeHtml(err.message || String(err))}
                     </div>
-                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-red-300 text-red-700 hover:bg-red-50 font-medium">↻ Retry</button>
+                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-red-300 text-red-700 hover:bg-red-50 font-medium" title="Retry fetching drive diagnostics">↻ Retry</button>
                 </div>
             </div>`;
         return;
@@ -23564,7 +23564,7 @@ async function renderPxmxDiagnostics(container) {
                 <p class="text-xs text-slate-500 mt-1">Storage device telemetry and SSD wear level diagnostics across hypervisor nodes</p>
             </div>
             <div>
-                <button onclick="loadPxmxData('Diagnostics')" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all">
+                <button onclick="loadPxmxData('Diagnostics')" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 text-xs font-semibold shadow-sm transition-all" title="Query SMART telemetry and SSD wear level diagnostics across all nodes">
                     ↻ Run Diagnostics / Refresh
                 </button>
             </div>
@@ -23598,7 +23598,7 @@ async function renderPxmxDiagnostics(container) {
                 <div class="bg-amber-50 border border-amber-200 rounded-lg p-6 text-center">
                     <div class="text-amber-800 font-semibold mb-1">No Hypervisor Spoke Connected</div>
                     <p class="text-xs text-amber-700 mb-4">No connected hypervisor spoke was found for the current tenant. Connect a Proxmox spoke to view drive diagnostics.</p>
-                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 font-medium">↻ Retry Connection</button>
+                    <button onclick="loadPxmxData('Diagnostics')" class="text-xs px-3 py-1.5 rounded-md bg-white border border-amber-300 text-amber-800 hover:bg-amber-50 font-medium" title="Retry connecting to hypervisor spoke">↻ Retry Connection</button>
                 </div>
             </div>`;
         return;
@@ -23817,7 +23817,7 @@ async function loadPxmxData(subMenu) {    const container = document.getElementB
                 if (nodes.length === 0 && vms.length === 0) {
                     container.innerHTML = `<div class="py-10 text-center space-y-3">
                         <p class="text-slate-400 italic text-sm">No Proxmox agents connected.</p>
-                        ${isAdmin() ? `<button onclick="showPxmxInstallModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Show Install Command</button>` : ''}
+                        ${isAdmin() ? `<button onclick="showPxmxInstallModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-4 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Show bash installation command for Proxmox host agent">Show Install Command</button>` : ''}
                     </div>`;
                     return;
                 }
@@ -23909,7 +23909,7 @@ async function showPxmxInstallModal() {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-2xl overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-[#263040]">Install Proxmox Agent</h3>
-                <button onclick="document.getElementById('pxmx-install-modal').remove()" class="text-slate-400 hover:text-slate-600"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <button onclick="document.getElementById('pxmx-install-modal').remove()" class="text-slate-400 hover:text-slate-600" title="Close install modal"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-3">
                 <p class="text-sm text-slate-600">Run this on each Proxmox host as <strong>root</strong>:</p>
@@ -23917,8 +23917,8 @@ async function showPxmxInstallModal() {
                 <p class="text-xs text-slate-400">The <code>--id</code> flag uses <code>$(hostname)</code> — replace it with a unique name if running on multiple nodes.</p>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-                <button onclick="navigator.clipboard.writeText(document.getElementById('pxmx-install-cmd').innerText)" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 border border-slate-300 rounded-md">Copy</button>
-                <button onclick="document.getElementById('pxmx-install-modal').remove()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Done</button>
+                <button onclick="navigator.clipboard.writeText(document.getElementById('pxmx-install-cmd').innerText)" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 border border-slate-300 rounded-md" title="Copy agent install script command to clipboard">Copy</button>
+                <button onclick="document.getElementById('pxmx-install-modal').remove()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Dismiss install dialog">Done</button>
             </div>
         </div>`;
     _mountModal(modal);
@@ -31963,8 +31963,8 @@ async function loadTruenasAppliancesList() {
             return `<div class="flex items-center justify-between p-3 rounded-md bg-slate-50 border border-slate-200">
                 <div><span class="text-sm font-medium text-slate-700">${escapeHtml(a.name || a.id)}</span><span class="ml-2 text-xs text-slate-400">${escapeHtml(sub)}</span></div>
                 <div class="flex gap-2">
-                    <button onclick="editTruenasAppliance('${escapeHtml(a.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Edit</button>
-                    <button onclick="deleteTruenasAppliance('${escapeHtml(a.id)}')" class="text-xs text-red-400 hover:text-red-600 font-medium">Delete</button>
+                    <button onclick="editTruenasAppliance('${escapeHtml(a.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium" title="Edit appliance settings">Edit</button>
+                    <button onclick="deleteTruenasAppliance('${escapeHtml(a.id)}')" class="text-xs text-red-400 hover:text-red-600 font-medium" title="Remove appliance from Lab Manager">Delete</button>
                 </div>
             </div>`;
         }).join('');
@@ -31989,20 +31989,20 @@ function showAddTruenasApplianceModal() {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50 sticky top-0">
                 <h3 class="text-lg font-bold text-[#263040]" id="truenas-modal-title">Add TrueNAS Appliance</h3>
-                <button onclick="closeTruenasApplianceModal()" class="text-slate-400 hover:text-slate-600 transition-colors"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <button onclick="closeTruenasApplianceModal()" class="text-slate-400 hover:text-slate-600 transition-colors" title="Close modal"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Name</label><input type="text" id="truenas-name" placeholder="e.g. nas-01" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Host / IP</label><input type="text" id="truenas-host" placeholder="10.0.0.50" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"></div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">API Key</label><input type="password" id="truenas-api-key" placeholder="Create in TrueNAS → Settings → API Keys" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><p class="text-[11px] text-slate-400">Leave blank on edit to keep the stored key (sentinel-merge). The spoke forces <code>wss://</code>; keys auto-revoke over plain <code>ws://</code>.</p></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Name</label><input type="text" id="truenas-name" placeholder="e.g. nas-01" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TrueNAS appliance display name"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Host / IP</label><input type="text" id="truenas-host" placeholder="10.0.0.50" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TrueNAS host IP address or FQDN"></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">API Key</label><input type="password" id="truenas-api-key" placeholder="Create in TrueNAS → Settings → API Keys" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TrueNAS API key token for WebSocket JSON-RPC auth"><p class="text-[11px] text-slate-400">Leave blank on edit to keep the stored key (sentinel-merge). The spoke forces <code>wss://</code>; keys auto-revoke over plain <code>ws://</code>.</p></div>
                 <div class="grid grid-cols-2 gap-4">
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Verify SSL</label><select id="truenas-verify-ssl" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="true">On (trusted CA)</option><option value="false" selected>Off (self-signed)</option></select></div>
-                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Auth Mechanism</label><select id="truenas-auth-mech" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="auto" selected>Auto (SCRAM→PLAIN)</option><option value="PLAIN">PLAIN (Core / 24.x)</option><option value="SCRAM">SCRAM-SHA-512 (26+)</option></select></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Verify SSL</label><select id="truenas-verify-ssl" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="TLS certificate verification mode"><option value="true">On (trusted CA)</option><option value="false" selected>Off (self-signed)</option></select></div>
+                    <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Auth Mechanism</label><select id="truenas-auth-mech" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="Authentication handshake protocol"><option value="auto" selected>Auto (SCRAM→PLAIN)</option><option value="PLAIN">PLAIN (Core / 24.x)</option><option value="SCRAM">SCRAM-SHA-512 (26+)</option></select></div>
                 </div>
-                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Storage Spoke</label><select id="truenas-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500"><option value="">Loading spokes...</option></select></div>
+                <div class="space-y-2"><label class="text-xs text-slate-500 uppercase font-bold">Associated Storage Spoke</label><select id="truenas-spoke" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="Target storage spoke managing this appliance"><option value="">Loading spokes...</option></select></div>
                 <div class="space-y-2">
                     <label class="text-xs text-slate-500 uppercase font-bold">Auto-Poll Interval</label>
-                    <select id="truenas-poll-interval" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500">
+                    <select id="truenas-poll-interval" class="w-full bg-white border border-slate-300 rounded-md px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-green-500" title="Per-appliance polling cadence">
                         <option value="inherit" selected>Inherit module default</option>
                         <option value="0">Off (manual Poll Now only)</option>
                         <option value="60">Every 1 minute</option>
@@ -32016,8 +32016,8 @@ function showAddTruenasApplianceModal() {
                 </div>
             </div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3 sticky bottom-0">
-                <button onclick="closeTruenasApplianceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors">Cancel</button>
-                <button onclick="saveTruenasAppliance()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save Appliance</button>
+                <button onclick="closeTruenasApplianceModal()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800 transition-colors" title="Cancel and close dialog">Cancel</button>
+                <button onclick="saveTruenasAppliance()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Save appliance credentials and settings">Save Appliance</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
