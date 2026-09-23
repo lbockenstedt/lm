@@ -11166,30 +11166,53 @@ window.csClearCommands = async function () {
 // cleared ONE host and left the rest quarantined while the toast still read as a
 // success.
 async function _csUsbClearCmd(host, action, doneMsg, allSpokes) {
+    const _toast = (msg, type) => { if (typeof showToast === 'function') showToast(msg, type); };
     try {
         const body = { action, target: host || 'proxmox', type: action, args: {} };
         if (allSpokes) body.all_spokes = true;
         const r = await csFetch(`/${csTenant()}/proxmx/command?tenant_id=${csTenant()}`, {
             method: 'POST', body: JSON.stringify(body) });
-        if (r && r.queued_to_spokes > 0) {
-            // Some spokes were unreachable: the clear is queued and applies when
-            // they reconnect. Say so instead of claiming it is live everywhere.
-            const nQ = r.queued_to_spokes, nLive = r.pushed_to_spokes || 0;
-            const bad = (r.errors || []).concat(r.refusals || []);
-            showToast(`${doneMsg}. Cleared live on ${nLive}/${r.spokes_total} spoke(s); queued for ${nQ} unreachable spoke(s) (applies when they reconnect): ${(r.queued || []).join(', ')}`
-                + (bad.length ? ` — failed: ${bad.join('; ')}` : ''), 'warning');
+        if (!r) {
+            _toast('Clear failed: no response received from server', 'error');
             return;
         }
-        if (r && Array.isArray(r.errors) && (r.errors.length || (r.refusals || []).length)) {
-            // Partial fan-out: name the spokes that did NOT clear rather than
-            // reporting a blanket success.
-            const bad = r.errors.concat(r.refusals || []).join('; ');
-            showToast(`${doneMsg}. Cleared ${r.pushed_to_spokes}/${r.spokes_total} spoke(s) — failed: ${bad}`, 'error');
+
+        const bad = (r.errors || []).concat(r.refusals || []);
+        const nLive = r.pushed_to_spokes || 0;
+        const queuedNames = Array.isArray(r.queued) ? r.queued : [];
+        const isQueued = (r.queued_to_spokes > 0) || (r.queued === true) || (queuedNames.length > 0);
+        const nQ = r.queued_to_spokes || queuedNames.length || (isQueued ? 1 : 0);
+        const qDetail = queuedNames.length ? `: ${queuedNames.join(', ')}` : '';
+        const queuePart = isQueued ? `; queued for ${nQ} unreachable spoke(s)${qDetail}` : '';
+
+        if (bad.length > 0) {
+            const countPart = (r.spokes_total != null)
+                ? `Cleared ${nLive}/${r.spokes_total} spoke(s)${queuePart} — failed: `
+                : `Cleared ${nLive} spoke(s)${queuePart} — failed: `;
+            _toast(`${doneMsg}. ${countPart}${bad.join('; ')}`, 'error');
             return;
         }
-        if (typeof csPushToast === 'function') csPushToast(r, doneMsg);
-        else if (typeof showToast === 'function') showToast(doneMsg, 'success');
-    } catch (e) { console.error(action + ' failed', e); if (typeof showToast === 'function') showToast(action + ' failed: ' + (e.message || e), 'error'); }
+
+        if (isQueued) {
+            const countPart = (r.spokes_total != null) ? `live on ${nLive}/${r.spokes_total} spoke(s)` : `live on ${nLive} spoke(s)`;
+            _toast(`${doneMsg}. Cleared ${countPart}; queued for ${nQ} unreachable spoke(s) (applies when they reconnect)${qDetail}`, 'warning');
+            return;
+        }
+
+        if (nLive === 0 && (r.spokes_total != null ? r.spokes_total > 0 : allSpokes)) {
+            const denom = r.spokes_total != null ? `0/${r.spokes_total}` : '0';
+            _toast(`${doneMsg}. No spokes were reachable (${denom} cleared).`, 'warning');
+            return;
+        }
+
+        const countText = (r.spokes_total != null)
+            ? ` Cleared live on ${nLive}/${r.spokes_total} spoke(s).`
+            : (r.pushed_to_spokes != null ? ` Pushed to ${nLive} spoke(s).` : '');
+        _toast(`${doneMsg}.${countText}`, 'success');
+    } catch (e) {
+        console.error(`_csUsbClearCmd: ${action} failed`, e);
+        _toast(`Clear failed: ${e.message || e}`, 'error');
+    }
 }
 // Purge the missing-dongle HISTORY (presence roster + boot baseline) on every
 // spoke. For after a deliberate hardware change — dongles moved, ports rewired,
@@ -13083,8 +13106,9 @@ function _csAssistantBubble(role, text) {
     const isUser = role === 'user';
     const bg = isUser ? 'bg-[#01A982] text-white' : 'bg-white border border-slate-200 text-slate-800';
     const align = isUser ? 'justify-end' : 'justify-start';
-    const body = window.renderHelpMarkdown ? window.renderHelpMarkdown(text) :
+    let body = window.renderHelpMarkdown ? window.renderHelpMarkdown(text) :
         '<p>' + csEscape(text) + '</p>';
+    body = body.replace(/<pre><code/g, '<pre class="bg-slate-800 text-slate-100 p-3 rounded-lg overflow-x-auto text-xs my-2"><code');
     return `<div class="flex ${align} mb-3">
         <div class="max-w-[75%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${bg} shadow-sm">
             <div class="cs-assistant-msg">${body}</div>
@@ -13097,13 +13121,28 @@ function _csAssistantScrollToBottom() {
     if (log) log.scrollTop = log.scrollHeight;
 }
 
+function csAssistantSetInput(text) {
+    const input = csEl('cs-assistant-input');
+    if (input) {
+        input.value = text;
+        input.focus();
+    }
+}
+window.csAssistantSetInput = csAssistantSetInput;
+
 function _csAssistantRenderLog() {
     const log = csEl('cs-assistant-log');
     if (!log) return;
     if (!window._csAssistantMessages.length) {
-        log.innerHTML = '<p class="text-sm text-slate-400 text-center mt-8">' +
+        log.innerHTML = '<p class="text-sm text-slate-400 text-center mt-8 mb-6">' +
             'Tell me what you want to build — e.g. "I want a simulation that runs this ' +
-            'script" and paste it in. I\'ll ask if I need more.</p>';
+            'script" and paste it in. I\'ll ask if I need more.</p>' +
+            '<div class="flex flex-wrap gap-2 justify-center max-w-lg mx-auto">' +
+            '<button onclick="csAssistantSetInput(\'I want to create a new simulation based on dns_fail with custom burst rate and interval.\')" class="px-3 py-1.5 text-xs rounded-full border border-slate-200 bg-white text-slate-600 hover:border-[#01A982] hover:text-[#01A982] shadow-sm transition-colors">Clone dns_fail (custom burst/rate)</button>' +
+            '<button onclick="csAssistantSetInput(\'I want to create a steady high-bandwidth TCP traffic simulation using iperf.\')" class="px-3 py-1.5 text-xs rounded-full border border-slate-200 bg-white text-slate-600 hover:border-[#01A982] hover:text-[#01A982] shadow-sm transition-colors">High-Throughput Iperf</button>' +
+            '<button onclick="csAssistantSetInput(\'I want to create an alert simulation that causes client DHCP exhaustion.\')" class="px-3 py-1.5 text-xs rounded-full border border-slate-200 bg-white text-slate-600 hover:border-[#01A982] hover:text-[#01A982] shadow-sm transition-colors">DHCP Starvation Sim</button>' +
+            '<button onclick="csAssistantSetInput(\'I want a web browsing simulation that requests external HTTPS sites with randomized pauses.\')" class="px-3 py-1.5 text-xs rounded-full border border-slate-200 bg-white text-slate-600 hover:border-[#01A982] hover:text-[#01A982] shadow-sm transition-colors">Web HTTPS Latency</button>' +
+            '</div>';
         return;
     }
     log.innerHTML = window._csAssistantMessages.map(m => _csAssistantBubble(m.role, m.content)).join('');
@@ -13165,7 +13204,7 @@ async function csAssistantSubmitFeatureRequest() {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 explanation, severity: 'medium', type: 'feature',
-                context: { currentView: 'Simulations', source: 'sim-assistant' },
+                context: { currentView: 'Simulations', source: 'sim-assistant', module: 'simulation' },
             }),
         });
         const data = await res.json();
