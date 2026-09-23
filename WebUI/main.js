@@ -18432,7 +18432,7 @@ async function loadOpnsenseManagement() {
     const actions = document.getElementById('top-nav-actions');
     if (actions) {
         if (writable.includes(subMenu) && canEdit()) {
-            actions.innerHTML = `<button onclick="showOpnsenseAddModal('${subMenu}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add ${subMenu.replace(/s$/, '')}</button>`;
+            actions.innerHTML = `<button onclick="showOpnsenseAddModal('${subMenu}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm" title="Create a new ${subMenu.replace(/s$/, '')} on the firewall">+ Add ${subMenu.replace(/s$/, '')}</button>`;
         } else {
             actions.innerHTML = '';
         }
@@ -18578,10 +18578,10 @@ async function loadOpnsenseManagement() {
             const delCell = showDelete ? `
                 <td class="px-4 py-3 text-right">
                     <div class="flex items-center justify-end gap-1">
-                        <button onclick="showOpnsenseEditModal('${item._fwId}','${subMenu}',${idx})" class="p-1 text-slate-400 hover:text-blue-600 transition-colors" title="Edit">
+                        <button onclick="showOpnsenseEditModal('${item._fwId}','${subMenu}',${idx})" class="p-1 text-slate-400 hover:text-blue-600 transition-colors" title="Edit ${subMenu.replace(/s$/, '')}">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
                         </button>
-                        <button onclick="deleteOpnsenseItem('${item._fwId}','${subMenu}','${escJsAttr(rawId)}')" class="p-1 text-slate-400 hover:text-red-600 transition-colors" title="Delete">
+                        <button onclick="deleteOpnsenseItem('${item._fwId}','${subMenu}','${escJsAttr(rawId)}')" class="p-1 text-slate-400 hover:text-red-600 transition-colors" title="Delete ${subMenu.replace(/s$/, '')}">
                             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
                         </button>
                     </div>
@@ -18594,15 +18594,15 @@ async function loadOpnsenseManagement() {
         if (subMenu === 'Firewall Rules' && hiddenRules.length > 0) {
             footerHtml = `<div class="pt-3 flex items-center gap-4">
                 <span class="text-xs text-slate-400">${hiddenRules.length} rules manually hidden</span>
-                <button onclick="toggleHiddenFirewallRules()" class="text-xs font-medium text-blue-600 hover:text-blue-800">${showHiddenOnlyFirewallRules ? 'Show All' : 'View Hidden'}</button>
-                <button onclick="unhideAllFirewallRules()" class="text-xs font-medium text-blue-600 hover:text-blue-800">Unhide All</button>
+                <button onclick="toggleHiddenFirewallRules()" class="text-xs font-medium text-blue-600 hover:text-blue-800" title="Toggle visibility of hidden firewall rules">${showHiddenOnlyFirewallRules ? 'Show All' : 'View Hidden'}</button>
+                <button onclick="unhideAllFirewallRules()" class="text-xs font-medium text-blue-600 hover:text-blue-800" title="Reset and unhide all hidden firewall rules">Unhide All</button>
             </div>`;
         }
 
         const moduleKey = subMenu === 'Firewall Rules' ? 'rules' : subMenu === 'NAT Policies' ? 'nat'
             : subMenu === 'DHCP Leases' ? 'dhcp' : subMenu === 'DNS Records' ? 'dns' : 'interfaces';
         const refreshBtn = !isAdmin() ? `<button onclick="refreshModuleCache('${moduleKey}').then(()=>loadOpnsenseManagement())"
-            class="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1" title="Refresh from cache">
+            class="text-xs text-slate-400 hover:text-slate-600 flex items-center gap-1" title="Refresh ${subMenu} from firewall cache">
             <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
             Refresh</button>` : '';
 
@@ -18932,7 +18932,7 @@ function _renderNwOverview(devices, counts) {
     // Per-category cards → click navigates to that category tab.
     const CATEGORIES = ['Gateways', 'Switches', 'Firewalls', 'Other'];
     const catCard = c => `
-        <div onclick="setSubView('${c}')" class="cursor-pointer bg-white rounded-xl border border-slate-200 p-5 hover:border-[#01A982] hover:shadow-md transition-all">
+        <div onclick="setSubView('${c}')" class="cursor-pointer bg-white rounded-xl border border-slate-200 p-5 hover:border-[#01A982] hover:shadow-md transition-all" title="Filter network devices by ${c}">
             <p class="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">${c}</p>
             <p class="text-3xl font-bold text-[#263040]">${counts[c] || 0}</p>
         </div>`;
@@ -18949,7 +18949,7 @@ function _renderNwOverview(devices, counts) {
             : isDown(it)
                 ? '<span class="px-2 py-0.5 rounded-full text-[10px] font-bold uppercase bg-red-100 text-red-700">down</span>'
                 : '<span class="text-slate-400 text-xs">—</span>';
-        return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer">
+        return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer" title="View device details">
             <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${(it.serial || it.mac) ? `<div class="text-[10px] font-mono font-normal text-slate-400 mt-0.5">${it.serial ? 'SN ' + escapeHtml(String(it.serial)) : ''}${(it.serial && it.mac) ? ' · ' : ''}${it.mac ? escapeHtml(String(it.mac)) : ''}</div>` : ''}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(typeLabel)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(category)}</td>
@@ -19084,9 +19084,9 @@ async function _renderNwScanTab() {
           <div><label class="${lblCls}">Concurrency</label><input type="number" id="nwt-concurrency" min="1" max="128" value="${escapeHtml(String(scan.concurrency || 32))}" class="${inCls}"></div>
         </div>
         <div class="flex flex-wrap gap-2 pt-2 border-t border-slate-100">
-          <button onclick="saveNwTenantScanConfig(this)" class="px-4 py-2 rounded-md bg-[#01A982] text-white text-sm font-bold hover:bg-[#018f6f]">Save config</button>
-          <button onclick="runNwTenantScan(this, true)" class="px-4 py-2 rounded-md bg-slate-100 text-slate-700 text-sm font-bold hover:bg-slate-200">Preview scan</button>
-          <button onclick="runNwTenantScan(this, false)" class="px-4 py-2 rounded-md bg-blue-600 text-white text-sm font-bold hover:bg-blue-700">Scan &amp; add</button>
+          <button onclick="saveNwTenantScanConfig(this)" class="px-4 py-2 rounded-md bg-[#01A982] text-white text-sm font-bold hover:bg-[#018f6f]" title="Save tenant network scan configuration">Save config</button>
+          <button onclick="runNwTenantScan(this, true)" class="px-4 py-2 rounded-md bg-slate-100 text-slate-700 text-sm font-bold hover:bg-slate-200" title="Run discovery scan in preview mode without adding devices to inventory">Preview scan</button>
+          <button onclick="runNwTenantScan(this, false)" class="px-4 py-2 rounded-md bg-blue-600 text-white text-sm font-bold hover:bg-blue-700" title="Execute discovery scan and automatically enroll discovered devices">Scan &amp; add</button>
         </div>
         <div id="nwt-results" class="text-xs mt-3"></div>
       </div>
@@ -19111,7 +19111,7 @@ async function _renderNwScanTab() {
           <div><label class="${lblCls}">Max Concurrent Polls</label><select id="nwt-poll-maxconc" class="${selCls}">${opt([['', 'Inherit global'], ['2', '2'], ['5', '5'], ['10', '10'], ['20', '20'], ['50', '50']], pollVal('max_concurrency'))}</select></div>
         </div>
         <div class="pt-3 mt-3 border-t border-slate-100">
-          <button onclick="saveNwTenantPollSchedule(this)" class="px-4 py-2 rounded-md bg-[#01A982] text-white text-sm font-bold hover:bg-[#018f6f]">Save schedule &amp; cadence</button>
+          <button onclick="saveNwTenantPollSchedule(this)" class="px-4 py-2 rounded-md bg-[#01A982] text-white text-sm font-bold hover:bg-[#018f6f]" title="Save recurring scan schedule and polling cadence">Save schedule &amp; cadence</button>
         </div>
       </div>
     </div>`;
@@ -19293,10 +19293,10 @@ function _renderNwDeviceList(category, devices, counts) {
         // event.stopPropagation() keeps the Poll/Configure buttons from also
         // triggering the row's drill-into-detail click.
         const cfg = (isAdmin() || isTenantAdmin())
-            ? `<button onclick="event.stopPropagation();pollNwDevice('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3">Poll Now</button>` +
-              `<button onclick="event.stopPropagation();showNwConfigModal('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium">Configure</button>`
+            ? `<button onclick="event.stopPropagation();pollNwDevice('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}', this)" class="text-xs text-emerald-600 hover:text-emerald-800 font-medium mr-3" title="Poll device interfaces and status now">Poll Now</button>` +
+              `<button onclick="event.stopPropagation();showNwConfigModal('${escJsAttr(it.id)}','${escJsAttr(it.name || it.id)}')" class="text-xs text-blue-500 hover:text-blue-700 font-medium" title="Configure device connection parameters">Configure</button>`
             : '';
-        return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer">
+        return `<tr onclick="nwOpenDevice('${escJsAttr(it.id)}')" class="hover:bg-slate-50 transition-colors cursor-pointer" title="View device details">
             <td class="px-4 py-3 text-slate-700 font-semibold text-xs whitespace-nowrap">${escapeHtml(it.name || it.id)}${(it.serial || it.mac) ? `<div class="text-[10px] font-mono font-normal text-slate-400 mt-0.5">${it.serial ? 'SN ' + escapeHtml(String(it.serial)) : ''}${(it.serial && it.mac) ? ' · ' : ''}${it.mac ? escapeHtml(String(it.mac)) : ''}</div>` : ''}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(typeLabel)}</td>
             <td class="px-4 py-3 text-slate-600 text-xs">${escapeHtml(transport)}</td>
@@ -23942,16 +23942,16 @@ async function loadNetboxData(subMenu) {
             // already has (RFC1918 free-space scan) and assigns the pick. The
             // manual "+ Add" (carve-from-parent) flow stays alongside it.
             const findBtn = subMenu === 'Prefixes'
-                ? `<button onclick="showFindSubnetModal()" class="bg-white border border-[#01A982] text-[#01A982] hover:bg-[#01A982] hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2">Add Prefix</button>`
+                ? `<button onclick="showFindSubnetModal()" class="bg-white border border-[#01A982] text-[#01A982] hover:bg-[#01A982] hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2" title="Scan for and allocate the next available contiguous subnet">Add Prefix</button>`
                 : '';
             // Admin-only Excel rack-layout importer (Setup → Module Management
             // gating is mirrored here: only admins see the button; the hub
             // routes are admin-gated too — defense in depth).
             const importBtn = (subMenu === 'Racks' && isAdmin())
-                ? `<button onclick="showRackImportModal()" class="bg-white border border-indigo-500 text-indigo-600 hover:bg-indigo-500 hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2">Import .xlsx</button>`
+                ? `<button onclick="showRackImportModal()" class="bg-white border border-indigo-500 text-indigo-600 hover:bg-indigo-500 hover:text-white px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm mr-2" title="Import rack elevation layout from an Excel spreadsheet">Import .xlsx</button>`
                 : '';
             actions.innerHTML = canEdit()
-                ? `${importBtn}${findBtn}<button onclick="showNetboxAddModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add</button>`
+                ? `${importBtn}${findBtn}<button onclick="showNetboxAddModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm" title="Add a new item to NetBox">+ Add</button>`
                 : importBtn;
         } else if (subMenu === 'Overview' && isAdmin()) {
             // Admin-only maintenance: recover data orphaned by a NetBox tenant rename.
@@ -24441,8 +24441,8 @@ function showNetboxAddDeviceModal(editItem, prefill) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-d-status" class="${inputCls}"><option value="active">active</option><option value="planned">planned</option><option value="offline">offline</option><option value="failed">failed</option><option value="inventory">inventory</option></select></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="submitNetboxAddDevice()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Device'}</button>
-            <button onclick="document.getElementById('nb-device-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="submitNetboxAddDevice()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to device' : 'Register new device in NetBox'}">${editing ? 'Save Changes' : 'Add Device'}</button>
+            <button onclick="document.getElementById('nb-device-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-lg p-6 space-y-4' });
     if (editing) modal.dataset.deviceId = editItem.id;
     if (editing && editItem.status) {
@@ -24564,8 +24564,8 @@ async function showNetboxRackModal(editItem) {
             <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Facility ID (optional)</label><input id="nb-r-facility" value="${val(editItem?.facility_id)}" class="${inputCls}" placeholder="A1"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="submitNetboxRack()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Add Rack'}</button>
-            <button onclick="document.getElementById('nb-rack-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="submitNetboxRack()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to rack' : 'Add new rack to NetBox'}">${editing ? 'Save Changes' : 'Add Rack'}</button>
+            <button onclick="document.getElementById('nb-rack-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) modal.dataset.rackId = editItem.id;
 }
@@ -24677,14 +24677,14 @@ async function showNetboxAllocatePrefixModal(editItem) {
                     ${commonOptionFields}
                 </div>
                 <div>
-                    <button type="button" onclick="document.getElementById('nb-p-advanced').classList.toggle('hidden'); this.textContent = this.textContent.startsWith('Show') ? 'Hide advanced options' : 'Show advanced options ▾'" class="text-xs font-bold text-[#01A982] hover:underline">Show advanced options ▾</button>
+                    <button type="button" onclick="document.getElementById('nb-p-advanced').classList.toggle('hidden'); this.textContent = this.textContent.startsWith('Show') ? 'Hide advanced options' : 'Show advanced options ▾'" class="text-xs font-bold text-[#01A982] hover:underline" title="Toggle visibility of advanced DHCP options (NTP, TFTP, Bootfile, NetBIOS, Broadcast)">Show advanced options ▾</button>
                 </div>
                 <div id="nb-p-advanced" class="hidden grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 pt-1">${advancedOptionFields}</div>
             </div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="submitNetboxAllocatePrefix()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Allocate'}</button>
-            <button onclick="document.getElementById('nb-prefix-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="submitNetboxAllocatePrefix()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to prefix' : 'Allocate subnet prefix in NetBox'}">${editing ? 'Save Changes' : 'Allocate'}</button>
+            <button onclick="document.getElementById('nb-prefix-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-4xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
     if (editing) modal.dataset.prefixId = editItem.id;
 
@@ -25009,8 +25009,8 @@ function showNetboxAllocateIPModal(prefixHint, editItem) {
             ${editing ? `<div class="space-y-1 col-span-1 md:col-span-2"><label class="text-xs text-slate-500 font-bold uppercase">Status</label><select id="nb-ip-status" class="${inputCls}">${statusOpts}</select></div>` : ''}
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="submitNetboxAllocateIP()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${editing ? 'Save Changes' : 'Allocate'}</button>
-            <button onclick="document.getElementById('nb-ip-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="submitNetboxAllocateIP()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="${editing ? 'Save changes to IP address' : 'Allocate next available IP address in subnet'}">${editing ? 'Save Changes' : 'Allocate'}</button>
+            <button onclick="document.getElementById('nb-ip-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Close dialog without saving">Cancel</button>
         </div>`, { card: 'w-full max-w-2xl p-6 space-y-4 max-h-[90vh] overflow-y-auto' });
     if (editing) modal.dataset.ipId = editItem.id;
 }
@@ -29878,7 +29878,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
     const navActions = document.getElementById('top-nav-actions');
     if (navActions) {
         const addResBtn = (subMenu === 'Reservations' && (isAdmin() || isTenantAdmin()))
-            ? `<button id="dhcp-add-btn" onclick="showDhcpReservationModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm">+ Add Reservation</button>`
+            ? `<button id="dhcp-add-btn" onclick="showDhcpReservationModal()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-3 py-1 rounded-md text-xs font-bold transition-all shadow-sm" title="Create a new static DHCP host reservation">+ Add Reservation</button>`
             : '';
         navActions.innerHTML = addResBtn;
     }
@@ -29995,7 +29995,7 @@ async function loadDHCPData(subMenu, skipWorkerDiscovery = false) {
             window._dhcpConfigTest = cfg;
             const hasCfgDetails = Boolean((cfg.output || cfg.error) && String(cfg.output || cfg.error).trim());
             const cfgSub = cfg.ok ? 'syntax valid' : (cfg.error || cfg.output ? 'syntax error' : 'syntax invalid');
-            const cfgAction = hasCfgDetails ? `<button onclick="_showDhcpConfigDetailsModal()" class="text-xs text-[#01A982] hover:underline font-semibold ml-auto flex-shrink-0">Details</button>` : '';
+            const cfgAction = hasCfgDetails ? `<button onclick="_showDhcpConfigDetailsModal()" class="text-xs text-[#01A982] hover:underline font-semibold ml-auto flex-shrink-0" title="View detailed Kea configuration test output">Details</button>` : '';
             const subnetRows = subnets.map(s => `<tr class="border-b border-slate-100">
                 <td class="px-4 py-2 text-xs">${escapeHtml(String(s.id == null ? '—' : s.id))}</td>
                 <td class="px-4 py-2 font-mono text-xs">${escapeHtml(s.subnet || '—')}</td>
@@ -30269,14 +30269,14 @@ function showDhcpReservationModal(editItem, isConvert = false, prefillOnly = fal
     const modal = openModal('dhcp-res-modal', `
         <h3 class="text-lg font-bold text-[#263040]">${title}</h3>
         <div class="space-y-3">
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Subnet</label><select id="dhcp-res-subnet" class="${inputCls}"><option value="">Loading…</option></select></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">IP Address</label><input id="dhcp-res-ip" value="${val(editItem?.ip)}" class="${inputCls}" placeholder="10.0.0.50"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">MAC Address</label><input id="dhcp-res-mac" value="${val(editItem?.mac)}" class="${inputCls}" placeholder="aa:bb:cc:dd:ee:ff"></div>
-            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Hostname (optional)</label><input id="dhcp-res-host" value="${val(editItem?.hostname)}" class="${inputCls}" placeholder="printer-01"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Subnet</label><select id="dhcp-res-subnet" class="${inputCls}" title="Select target DHCP subnet scope"><option value="">Loading…</option></select></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">IP Address</label><input id="dhcp-res-ip" value="${val(editItem?.ip)}" class="${inputCls}" placeholder="10.0.0.50" title="Static IP address to assign"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">MAC Address</label><input id="dhcp-res-mac" value="${val(editItem?.mac)}" class="${inputCls}" placeholder="aa:bb:cc:dd:ee:ff" title="Client hardware MAC address (e.g. aa:bb:cc:dd:ee:ff)"></div>
+            <div class="space-y-1"><label class="text-xs text-slate-500 font-bold uppercase">Hostname (optional)</label><input id="dhcp-res-host" value="${val(editItem?.hostname)}" class="${inputCls}" placeholder="printer-01" title="Optional client hostname"></div>
         </div>
         <div class="flex justify-end gap-2 pt-2">
-            <button onclick="saveDhcpReservation()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold">${btnText}</button>
-            <button onclick="document.getElementById('dhcp-res-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm">Cancel</button>
+            <button onclick="saveDhcpReservation()" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold" title="${btnText}">${btnText}</button>
+            <button onclick="document.getElementById('dhcp-res-modal').remove()" class="bg-slate-100 hover:bg-slate-200 text-slate-700 px-4 py-2 rounded-md text-sm" title="Cancel and close dialog">Cancel</button>
         </div>`, { card: 'w-full max-w-md p-6 space-y-4' });
     if (editing) modal.dataset.editIp = editItem.ip;
     if (isConvert && editItem?.ip) modal.dataset.oldLeaseIp = editItem.ip;
@@ -30676,12 +30676,12 @@ function showOpnsenseAddModal(subMenu) {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-[#263040]">Add ${subMenu.replace(/s$/, '')}</h3>
-                <button onclick="document.getElementById('opn-add-modal').remove()" class="text-slate-400 hover:text-slate-600"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <button onclick="document.getElementById('opn-add-modal').remove()" class="text-slate-400 hover:text-slate-600" title="Close dialog"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">${fwPicker}${fields}</div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-                <button onclick="document.getElementById('opn-add-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                <button onclick="${submitFn}" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Add</button>
+                <button onclick="document.getElementById('opn-add-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800" title="Cancel and discard changes">Cancel</button>
+                <button onclick="${submitFn}" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Submit and save ${subMenu.replace(/s$/, '')}">Add</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
@@ -30805,12 +30805,12 @@ function showOpnsenseEditModal(fwId, subMenu, itemIdx) {
         <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
             <div class="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
                 <h3 class="text-lg font-bold text-[#263040]">Edit ${subMenu.replace(/s$/, '')}</h3>
-                <button onclick="document.getElementById('opn-add-modal').remove()" class="text-slate-400 hover:text-slate-600"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
+                <button onclick="document.getElementById('opn-add-modal').remove()" class="text-slate-400 hover:text-slate-600" title="Close dialog"><svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg></button>
             </div>
             <div class="p-6 space-y-4">${fields}</div>
             <div class="px-6 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
-                <button onclick="document.getElementById('opn-add-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800">Cancel</button>
-                <button onclick="submitOpnsenseEdit('${fwId}','${subMenu}','${itemId.replace(/'/g,"\\'")}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm">Save</button>
+                <button onclick="document.getElementById('opn-add-modal').remove()" class="px-4 py-2 text-sm font-medium text-slate-600 hover:text-slate-800" title="Cancel and discard changes">Cancel</button>
+                <button onclick="submitOpnsenseEdit('${fwId}','${subMenu}','${itemId.replace(/'/g,"\\'")}')" class="bg-[#01A982]/10 hover:bg-[#01A982]/20 text-[#01A982] border border-[#01A982] px-6 py-2 rounded-md text-sm font-bold transition-all shadow-sm" title="Save changes to ${subMenu.replace(/s$/, '')}">Save</button>
             </div>
         </div>`;
     document.body.appendChild(modal);
