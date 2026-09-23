@@ -278,6 +278,7 @@ import vmid_alloc
 # ``get_tenant_scoping`` are thin shims defined inside create_app() that delegate
 # to access.* (search for ``def _session_user``).
 _unwrap_spoke = access.unwrap_spoke
+_same_bind_subnet = access.same_bind_subnet
 _filter_config = access.filter_config
 _FILTER_MODULES = access._FILTER_MODULES
 _FILTER_DEFAULTS = access._FILTER_DEFAULTS
@@ -1609,9 +1610,29 @@ def create_app(hub):
                     _raw["client_ip"] = _ip
                     if _ip:
                         _seen[_ip] = _nowt
+                elif _ip and _ip != _bound and _same_bind_subnet(_ip, _bound):
+                    # Same client subnet → a benign egress change (corporate
+                    # proxy / CGNAT pool fan-out, or a DHCP roll), not cookie
+                    # theft. Re-bind and carry on, so a proxied operator is
+                    # never logged out — or NSG-blocked out of their own hub.
+                    logger.info(
+                        "SESSION-IP-REBIND user=%s sid=%s %s → %s (same client "
+                        "subnet) — benign egress change, session kept.",
+                        _raw.get("user_id"), _raw.get("sid"), _bound, _ip)
+                    _raw["client_ip"] = _ip
+                    _seen[_ip] = _nowt
+                    for _stale in [o for o, ts in _seen.items()
+                                   if _nowt - float(ts) > 3600]:
+                        _seen.pop(_stale, None)
                 elif _ip and _ip != _bound:
                     _admin = _is_admin(_raw)
-                    _involved = sorted(set(_concurrent) | {_ip})
+                    # Never sweep the owner's OWN pool addresses into the block
+                    # set: a proxied client legitimately has several
+                    # concurrently-live IPs in the bound subnet, and blocking
+                    # those locks the real admin out along with the attacker.
+                    _involved = sorted(
+                        o for o in (set(_concurrent) | {_ip})
+                        if not _same_bind_subnet(o, _bound))
                     logger.warning(
                         "SESSION-IP-BIND-REJECT user=%s sid=%s bound=%s got=%s "
                         "admin=%s concurrent=%s path=%s ua=%r — invalidating "
@@ -1646,7 +1667,7 @@ def create_app(hub):
                                 })
                         except Exception:  # noqa: BLE001
                             pass
-                        if _admin and _concurrent:
+                        if _admin and _concurrent and _involved:
                             logger.critical(
                                 "SESSION-HIJACK user=%s sid=%s — admin cookie "
                                 "used from %s while bound owner %s active within "
