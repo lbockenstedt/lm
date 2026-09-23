@@ -105,18 +105,26 @@ async def test_unscoped_call_sees_everything():
     assert await _ids(None) == {a["agent_id"] for a in _AGENTS}
 
 
-def test_route_source_uses_the_shared_helper():
-    """The route must not re-introduce the ``tid != "default"`` skip."""
-    import inspect
-    src = inspect.getsource(pxmx.pxmx_agents_payload)
-    assert 'tid != "default"' not in src
-    assert "access.tenant_scope_ids(tid)" in src
-    assert "access.in_tenant_scope(" in src
+# The two source-text guards that used to live here -- grepping the route body
+# for ``access.tenant_scope_ids(tid)`` and for
+# ``'if tid == "default":\n            spokes = []'`` with exact indentation --
+# were replaced by behavioural tests. They asserted the letter of the fix
+# rather than its effect: reformatting the route broke them while an actual
+# regression that kept the same text would have sailed through.
+#
+# Their coverage now lives in:
+#   * the tests above, which exercise pxmx_agents_payload's filter directly
+#     (test_admin_default_excludes_other_tenants and friends);
+#   * test_pxmx_nodes_spoke_fallback.py, which drives /api/pxmx/drive-health
+#     through a TestClient and asserts no spoke is queried for the ADMIN scope.
 
 
-def test_drive_health_does_not_fall_back_to_global_spoke_on_default():
-    import inspect
-    src = inspect.getsource(pxmx)
-    # The ADMIN/default branch must be explicit and flagged for the UI.
-    assert 'if tid == "default":\n            spokes = []' in src
-    assert "select_tenant" in src
+@pytest.mark.asyncio
+async def test_admin_default_never_widens_when_helper_is_bypassed():
+    """Behavioural stand-in for the old "route calls the shared helper" source
+    grep: whatever the route does internally, an agent dedicated to another
+    tenant must never appear in the ADMIN scope."""
+    ids = await _ids("default")
+    assert ids.isdisjoint({"a_lrb", "a_pinned_acme"})
+    # ...and the ADMIN scope is genuinely narrower than the unscoped view.
+    assert ids < await _ids(None)

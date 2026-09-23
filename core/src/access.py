@@ -1003,8 +1003,24 @@ def shared_tenant_id():
     return _SHARED_TENANT_ID
 
 
+def _norm_tenant_id(tenant_id) -> str:
+    """Canonical comparison form for a tenant id: stripped and casefolded.
+
+    Tenant ids reach us from three places that disagree about capitalisation —
+    the picker query string (``?tenant=Default``), the tenant records
+    themselves, and per-resource bindings/tags — so every comparison between
+    them must go through here. Comparing raw strings meant a tenant recorded as
+    ``"Default"`` did not match the ``"default"`` the ADMIN scope is built
+    from, making that tenant's own resources invisible to it.
+
+    ``None`` and blanks both canonicalise to ``""``, the UNASSIGNED marker."""
+    return "" if tenant_id is None else str(tenant_id).strip().casefold()
+
+
 def tenant_is_shared(tenant_id) -> bool:
-    return bool(tenant_id) and (tenant_id == _SHARED_TENANT_ID or str(tenant_id).strip().lower() == "shared")
+    normalized = _norm_tenant_id(tenant_id)
+    return bool(normalized) and (normalized == _norm_tenant_id(_SHARED_TENANT_ID)
+                                 or normalized == "shared")
 
 
 # ── Tenant picker scoping ────────────────────────────────────────────────────
@@ -1023,32 +1039,37 @@ def tenant_scope_ids(requested) -> Optional[set]:
     ``None`` (no ``?tenant=`` at all) means an unscoped programmatic call: no
     filtering. ``default`` expands to ``{"", "default"}`` plus the shared
     tenant. Any other id expands to itself plus the shared tenant.
+
+    Every id in the returned set is canonicalised by ``_norm_tenant_id``; the
+    set is only ever consumed by ``in_tenant_scope``, which canonicalises the
+    resource side the same way, so the two can never disagree on spelling.
     """
     if requested is None:
         return None
-    normalized = str(requested).strip()
+    normalized = _norm_tenant_id(requested)
     if not normalized:
         return None
 
-    if normalized.lower() == ADMIN_TENANT_ID:
+    if normalized == ADMIN_TENANT_ID:
         scope = {"", ADMIN_TENANT_ID}
     else:
         scope = {normalized}
 
     shared_id = shared_tenant_id()
     if shared_id:
-        scope.add(shared_id)
+        scope.add(_norm_tenant_id(shared_id))
     return scope
 
 
 def in_tenant_scope(tenant_id, scope: Optional[set]) -> bool:
     """Whether a resource's tenant belongs to ``scope`` (from tenant_scope_ids).
 
-    A ``None`` scope matches everything. ``tenant_id`` is normalised so that
-    ``None`` and blanks both read as UNASSIGNED ("")."""
+    A ``None`` scope matches everything. ``tenant_id`` is canonicalised so that
+    ``None`` and blanks both read as UNASSIGNED ("") and capitalisation never
+    decides visibility."""
     if scope is None:
         return True
-    normalized = "" if tenant_id is None else str(tenant_id).strip()
+    normalized = _norm_tenant_id(tenant_id)
     if normalized in scope:
         return True
     return tenant_is_shared(normalized)
