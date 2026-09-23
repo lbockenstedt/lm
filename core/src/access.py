@@ -116,6 +116,11 @@ _NW_FILTER_SPEC = {
     # Per-VLAN summary: gateway_ip is the only concrete IP; drop VLANs with no
     # in-tenant IP so a non-admin doesn't see other tenants' VLAN rollups.
     "vlans":     ("fields", ["gateway_ip"]),
+    # NetBox inventory folded into the topology map. NetBox is fleet-wide with
+    # no LM tenant stamp, so IP is the only thing that places a row in a tenant;
+    # a row with no IP is dropped (drop_no_ip default) rather than shown to
+    # everyone — the map must not become a cross-tenant inventory leak.
+    "netbox_devices": ("fields", ["ip"]),
 }
 
 

@@ -8,6 +8,7 @@ from api import (
     HTTPException, Request, _hub_msg, _unwrap_spoke, access, get_spoke_or_503,
     logger, uuid,
 )
+from nw_topology import build_topology
 from routes.role_pool import PRODUCT_ROLE, ensure_role_loaded, maybe_unload_orphaned_role
 
 
@@ -731,6 +732,264 @@ def register(app, hub, ctx):
                 logger.debug("nw_list_devices: cache set failed", exc_info=True)
         return _overlay_names(env)
 
+    # ── topology ─────────────────────────────────────────────────────────────
+    # Registered BEFORE /api/nw/{device_id}/{endpoint}: FastAPI matches in
+    # registration order, so "/api/nw/topology/manual" would otherwise be
+    # swallowed by the two-segment device catch-all as device_id="topology".
+
+    def _nw_topology_cfg(hub, tid):
+        """Operator-declared devices + links for one tenant.
+
+        These are the whole point of the feature: a lot of lab gear (unmanaged
+        switches, media converters, PDUs, older APs) speaks no LLDP and would
+        otherwise be invisible on the map."""
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        cur = (((gc.get("nw_tenant_cfg") or {}).get(tid) or {}).get("topology") or {})
+        return {
+            "devices": [d for d in (cur.get("devices") or []) if isinstance(d, dict)],
+            "links": [l for l in (cur.get("links") or []) if isinstance(l, dict)],
+        }
+
+    def _nw_cached_rows(hub, device_id, endpoint):
+        """Rows from the warm per-device cache, or [] on a cold miss."""
+        env = hub.nw_cache_get_device(device_id, endpoint)
+        rows = env.get("data") if isinstance(env, dict) else None
+        return rows if isinstance(rows, list) else []
+
+    @app.get("/api/nw/topology")
+    async def nw_topology(request: Request, tenant: str = None):
+        """The network map: nodes and links assembled from LLDP adjacencies,
+        NetBox inventory, switch MAC tables and operator-declared gear.
+
+        Tenant-scoped exactly like ``/api/nw/devices``: a Global Admin sitting in
+        the ADMIN (``default``) scope gets an EMPTY graph + ``select_tenant``
+        rather than every tenant's topology fused into one meaningless mesh —
+        a map is only coherent within one tenant's slice anyway. An explicit
+        ``?tenant=`` scopes even an admin to that tenant; a non-admin sees their
+        own + shared devices.
+
+        Cache-first, like every other nw read: built from the warm per-device
+        LLDP/MAC cache WITHOUT blocking on live SSH, kicking off a background
+        revalidate for aging entries. ``?refresh=1`` gathers live from every
+        visible device first (bounded concurrency) — expensive, so it is the
+        explicit "Refresh topology" button, not the page load.
+
+        ``?infer=0`` drops MAC-table inference and shows only links something
+        actually asserted (LLDP or a human)."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        is_admin = _is_admin(sess)
+        empty = {"nodes": [], "edges": [], "trunks": [],
+                 "stats": {"nodes": 0, "edges": 0, "trunks": 0,
+                           "trunk_ports": 0, "nodes_without_lldp": 0,
+                           "edges_by_source": {}}}
+        # ADMIN (default) tenant explicitly selected in the picker: the WebUI
+        # always sends ?tenant=<currentTenant> and 'default' is the built-in
+        # ADMIN scope. Same rule as the device inventory — see nw_list_devices.
+        if is_admin and tenant == "default":
+            return {"status": "SUCCESS", **empty, "select_tenant": True,
+                    "message": "Select a tenant to view its network topology"}
+
+        acting_tenant = None
+        if tenant and tenant != "default" and access.check_tenant_access(sess, tenant):
+            acting_tenant = tenant
+
+        def _row_visible(tid):
+            if acting_tenant is not None:
+                return tid == acting_tenant or access.tenant_is_shared(tid)
+            return is_admin or access.spoke_visible_to_session(sess, tid)
+
+        all_devs = (hub.state.system_state.get("global_config", {}) or {}).get("nw_devices", []) or []
+        fleet = [d for d in all_devs if isinstance(d, dict)
+                 and _row_visible(d.get("tenant_id", ""))]
+
+        # Per-device authorization is re-run through _authz_nw_device (rather
+        # than trusted from _row_visible alone) so the topology can never widen
+        # what a caller may read from a device — and it hands back the spoke.
+        authed, spoke_by_id = [], {}
+        for dev in fleet:
+            did = dev.get("id")
+            if not did:
+                continue
+            try:
+                _d, _scope, spoke_id = _authz_nw_device(request, did)
+            except HTTPException:
+                continue
+            authed.append(dev)
+            spoke_by_id[did] = spoke_id
+        fleet = authed
+
+        force = _nw_truthy(request.query_params.get("refresh"))
+        infer = not (request.query_params.get("infer") in ("0", "false", "no"))
+
+        async def _gather(device_id, endpoint, spoke_cmd, timeout):
+            """Live-fetch one device endpoint and seed the cache. Never raises:
+            one unreachable switch must not blank the whole map."""
+            spoke_id = spoke_by_id.get(device_id) or ""
+            if not spoke_id:
+                return
+            dev = next((d for d in fleet if d.get("id") == device_id), {})
+            payload = {"device_id": device_id}
+            if dev.get("tenant_id"):
+                payload["tenant"] = dev["tenant_id"]
+            try:
+                result = await hub.request_response(spoke_id, spoke_cmd, payload,
+                                                    timeout=timeout)
+                await hub.nw_cache_set_device(device_id, endpoint,
+                                              access.unwrap_spoke(result))
+            except Exception as e:
+                logger.warning("nw_topology: live %s for %s failed: %s",
+                               endpoint, device_id, e)
+
+        if force:
+            # Bounded fan-out: a big fleet would otherwise open one SSH session
+            # per device per datum all at once and starve the spoke.
+            sem = asyncio.Semaphore(4)
+
+            async def _one(device_id, endpoint, cmd, timeout):
+                async with sem:
+                    await _gather(device_id, endpoint, cmd, timeout)
+
+            jobs = []
+            for dev in fleet:
+                did = dev["id"]
+                jobs.append(_one(did, "lldp", "NW_GET_LLDP_NEIGHBORS", 30.0))
+                if infer:
+                    jobs.append(_one(did, "macs", "NW_GET_MAC_TABLE", 30.0))
+            if jobs:
+                await asyncio.gather(*jobs, return_exceptions=True)
+
+        lldp_by_device, macs_by_device = {}, {}
+        for dev in fleet:
+            did = dev["id"]
+            lldp_by_device[did] = _nw_cached_rows(hub, did, "lldp")
+            if infer:
+                macs_by_device[did] = _nw_cached_rows(hub, did, "macs")
+            if force or not spoke_by_id.get(did):
+                continue
+            # Stale-while-revalidate: refresh aging entries for the NEXT load.
+            age = time.time() - hub.nw_cache_device_fetched_at(did)
+            if age <= _NW_SERVE_MAX_AGE_S:
+                continue
+            payload = {"device_id": did}
+            if dev.get("tenant_id"):
+                payload["tenant"] = dev["tenant_id"]
+            for endpoint, cmd in (("lldp", "NW_GET_LLDP_NEIGHBORS"),
+                                  ("macs", "NW_GET_MAC_TABLE")):
+                if endpoint == "macs" and not infer:
+                    continue
+                _nw_spawn_refresh(
+                    f"{did}:{endpoint}",
+                    (lambda d=did, e=endpoint, c=cmd, s=spoke_by_id[did], p=payload:
+                     _nw_bg_refresh_device(hub, d, e, s, c, p, 30.0)))
+
+        # NetBox inventory: gear the nw fleet never logs into (PDUs, patch
+        # panels, APs) still belongs on the map. Best-effort — no IPAM spoke, a
+        # timeout or a NetBox error degrades to "no inventory", never a 500.
+        netbox_devices = []
+        try:
+            netbox = hub.get_spoke_by_type("ipam")
+            if netbox:
+                rr = await hub.request_response(netbox, "NETBOX_GET_DEVICES", {},
+                                                timeout=60.0)
+                rows = (access.unwrap_spoke(rr) or {}).get("devices") or []
+                netbox_devices = [r for r in rows if isinstance(r, dict)]
+        except Exception as e:
+            logger.info("nw_topology: NetBox inventory unavailable (%s)", e)
+
+        if netbox_devices:
+            # NetBox is a FLEET-WIDE inventory with no LM tenant stamp, so it is
+            # the one input that could leak another tenant's gear onto a scoped
+            # reader's map. Narrow it to the reader's prefixes by IP; a row with
+            # no IP can't be placed in a tenant and is dropped (fails closed).
+            for row in netbox_devices:
+                row["ip"] = str(row.get("primary_ip") or "").split("/")[0]
+            filtered = await _filter_nw(request, {"data": netbox_devices},
+                                        "netbox_devices", acting_tenant)
+            rows = filtered.get("data") if isinstance(filtered, dict) else None
+            netbox_devices = [r for r in (rows or []) if isinstance(r, dict)]
+
+        cfg_tid = acting_tenant or _nw_caller_tenant(sess, None)
+        manual = _nw_topology_cfg(hub, cfg_tid)
+
+        graph = build_topology(
+            fleet=fleet,
+            lldp_by_device=lldp_by_device,
+            macs_by_device=macs_by_device,
+            netbox_devices=netbox_devices,
+            manual_devices=manual["devices"],
+            manual_links=manual["links"],
+            infer_from_macs=infer,
+        )
+        graph["status"] = "SUCCESS"
+        graph["tenant_id"] = cfg_tid
+        graph["netbox"] = bool(netbox_devices)
+        return graph
+
+    @app.get("/api/nw/topology/manual")
+    async def nw_topology_manual_get(request: Request, tenant: str = None):
+        """The operator-declared devices and links for a tenant (the editable
+        half of the map)."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        tid = _nw_caller_tenant(sess, tenant if tenant != "default" else None)
+        return {"status": "ok", "tenant_id": tid, **_nw_topology_cfg(hub, tid)}
+
+    @app.post("/api/nw/topology/manual")
+    async def nw_topology_manual_set(request: Request):
+        """Replace a tenant's declared topology. Body:
+        ``{"tenant": "...", "devices": [...], "links": [...]}`` — either list may
+        be omitted to leave that half untouched.
+
+        A declared device is ``{name, mac?, ip?, kind?, note?}``; ``mac``/``ip``
+        are what let MAC-table inference recognise the far end of a port and
+        name it, which is how a device that speaks no LLDP gets onto the map.
+        A declared link is ``{a, a_port?, b, b_port?, note?}`` where ``a``/``b``
+        are a device id, name, IP or MAC."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not (_is_admin(sess) or _is_tenant_admin(sess)):
+            raise HTTPException(status_code=403, detail="admin or tenant-admin required")
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=400, detail="body must be an object")
+        tid = _nw_caller_tenant(sess, data.get("tenant"))
+
+        def _clean(items, keys, required):
+            if not isinstance(items, list):
+                raise HTTPException(status_code=400,
+                                    detail="devices/links must be lists")
+            out = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                row = {k: str(item.get(k) or "").strip() for k in keys}
+                if any(not row.get(k) for k in required):
+                    continue
+                row["id"] = str(item.get("id") or "").strip() or uuid.uuid4().hex[:12]
+                out.append(row)
+            return out
+
+        gc = hub.state.system_state.get("global_config", {})
+        tmap = dict(gc.get("nw_tenant_cfg") or {})
+        cur = dict(tmap.get(tid) or {})
+        topo = dict(cur.get("topology") or {})
+        if "devices" in data:
+            topo["devices"] = _clean(
+                data["devices"], ("name", "mac", "ip", "kind", "note"), ("name",))
+        if "links" in data:
+            topo["links"] = _clean(
+                data["links"], ("a", "a_port", "b", "b_port", "note"), ("a", "b"))
+        cur["topology"] = topo
+        tmap[tid] = cur
+        gc["nw_tenant_cfg"] = tmap
+        hub.state.system_state["global_config"] = gc
+        hub.state._mark_dirty()
+        return {"status": "ok", "tenant_id": tid, **_nw_topology_cfg(hub, tid)}
+
     @app.get("/api/nw/{device_id}/{endpoint}")
     async def nw_get_device_data(request: Request, device_id: str, endpoint: str,
                                  tenant: str = None):
@@ -763,6 +1022,7 @@ def register(app, hub, ctx):
             "interfaces": "NW_GET_INTERFACES",
             "endpoints":  "NW_GET_ENDPOINTS",  # fused ARP+MAC unique IP/MAC list
             "vlans":      "NW_GET_VLANS",       # per-VLAN rollup
+            "lldp":       "NW_GET_LLDP_NEIGHBORS",  # adjacencies for the map
         }
         spoke_cmd = command_map.get(endpoint)
         if not spoke_cmd:
@@ -785,8 +1045,10 @@ def register(app, hub, ctx):
             relay_payload["tenant"] = tid
         # endpoints/vlans run three sequential SSH gathers (arp+mac+interfaces)
         # on the spoke, so the 5s default relay timeout is far too short — give
-        # them room; the single-datum views get a comfortable margin too.
-        timeout = 45.0 if endpoint in ("endpoints", "vlans") else 20.0
+        # them room; lldp walks every port's neighbour detail and is slow on a
+        # big chassis; the single-datum views get a comfortable margin too.
+        timeout = 45.0 if endpoint in ("endpoints", "vlans") else (
+            30.0 if endpoint == "lldp" else 20.0)
 
         # Cache-first: serve the last-known endpoint value WITHOUT blocking on
         # live SSH, then revalidate in the background when it's aging and the
