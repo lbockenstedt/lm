@@ -294,6 +294,18 @@ class ThreatMonitor:
     def _block(self, ip: str, reason: str, kind: str, source: str,
                *, max_ttl_s: Optional[float] = None,
                allow_permanent: bool = True) -> None:
+        # Validate before anything is recorded. `ip` reaches here from request
+        # headers (X-Forwarded-For and friends), i.e. it is attacker-controlled
+        # text, and it becomes a key in `_offense`/`_blocked` that is persisted
+        # and rendered in the Security view. Refusing anything that is not a
+        # real address keeps hostile strings out of state entirely.
+        ip = (ip or "").strip()
+        try:
+            ipaddress.ip_address(ip)
+        except ValueError:
+            sec_log.warning("THREAT BLOCK refused: %r is not a valid IP address (kind=%s, source=%s)",
+                            ip[:64], kind, source)
+            return
         now = _now()
         self._offense[ip] = self._offense.get(ip, 0) + 1
         permanent = (source == "manual_perm"
@@ -460,6 +472,14 @@ class ThreatMonitor:
         ip = (ip or "").strip()
         cleared = int(self._offense.pop(ip, 0))
         if cleared:
+            # Auditable record, not just a log line: clearing strikes relaxes
+            # the path to a permanent ban, so it must be visible in the same
+            # Security-view event feed every other policy action lands in.
+            self._events.appendleft({
+                "ts": _now(), "ip": ip, "kind": "forgive", "username": "",
+                "detail": f"{cleared} strike(s) cleared by operator",
+                "severity": "info", "anomaly": False,
+            })
             self._persist()
             sec_log.warning("THREAT FORGIVE %s (%d strike(s) cleared by operator)",
                             ip, cleared)

@@ -19,6 +19,28 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=403, detail="Admin only")
         return sess
 
+    def _as_bool(value, default: bool) -> bool:
+        """Strict-ish JSON boolean coercion for request bodies.
+
+        ``x is not False`` is wrong for a policy-relaxing flag: a client sending
+        the JSON string ``"false"``, ``"0"``, ``"no"`` or the integer ``0``
+        would silently be read as *true* and forgive a strike the operator
+        meant to keep. Accept real booleans, the usual string spellings, and
+        0/1; anything else falls back to ``default``."""
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return bool(value)
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in ("true", "1", "yes", "on"):
+                return True
+            if v in ("false", "0", "no", "off", ""):
+                return False
+        return default
+
     @app.get("/api/security/overview")
     async def security_overview(request: Request):
         """Snapshot for the Security view: config + blocked-IP tiles (permanent /
@@ -68,11 +90,13 @@ def register(app, hub, ctx):
         operator overturning a bad block, and strikes drive ``permanent_after``,
         so banking a strike for a block that was wrong walks a legitimate
         address toward a permanent ban. Send ``forgive: false`` to let the
-        address back in while keeping the strike on record."""
+        address back in while keeping the strike on record. Parsing is strict
+        (see ``_as_bool``) so ``"false"``/``0`` are honoured as false rather
+        than silently forgiving the strike."""
         _guard(request)
         body = await request.json()
         return hub.threat_monitor.unblock((body.get("ip") or "").strip(),
-                                          forgive=body.get("forgive", True) is not False)
+                                          forgive=_as_bool(body.get("forgive"), True))
 
     @app.post("/api/security/forgive")
     async def security_forgive(request: Request):

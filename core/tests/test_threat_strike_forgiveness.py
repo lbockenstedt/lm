@@ -83,13 +83,13 @@ def test_repeated_overturned_blocks_never_reach_permanent(tmp_path):
     tm = _tm_for(tmp_path)
     tm.set_config({"threshold": 1, "window_s": 600, "permanent_after": 3})
     for _ in range(4):
-        _trip(tm, "170.85.10.96")
-        tm.unblock("170.85.10.96")
+        _trip(tm, "198.51.100.96")
+        tm.unblock("198.51.100.96")
 
-    _trip(tm, "170.85.10.96")
+    _trip(tm, "198.51.100.96")
 
-    assert tm._blocks["170.85.10.96"]["permanent"] is False
-    assert tm._blocks["170.85.10.96"]["expires_at"] is not None
+    assert tm._blocks["198.51.100.96"]["permanent"] is False
+    assert tm._blocks["198.51.100.96"]["expires_at"] is not None
 
 
 def test_forgive_only_drops_one_strike(tmp_path):
@@ -176,13 +176,13 @@ def test_forgive_leaves_an_active_block_in_place(tmp_path):
 def test_forgiven_address_blocks_normally_afterwards(tmp_path):
     tm = _tm_for(tmp_path)
     tm.set_config({"threshold": 1, "window_s": 600, "permanent_after": 3})
-    tm._offense["170.85.10.96"] = 4
-    tm.forgive("170.85.10.96")
+    tm._offense["198.51.100.96"] = 4
+    tm.forgive("198.51.100.96")
 
-    _trip(tm, "170.85.10.96")
+    _trip(tm, "198.51.100.96")
 
-    assert "170.85.10.96" in tm._blocks
-    assert tm._blocks["170.85.10.96"]["permanent"] is False
+    assert "198.51.100.96" in tm._blocks
+    assert tm._blocks["198.51.100.96"]["permanent"] is False
 
 
 # ── snapshot visibility ──────────────────────────────────────────────────────
@@ -191,14 +191,14 @@ def test_snapshot_exposes_strikes_for_unblocked_addresses(tmp_path):
     one strike from a permanent ban showed nothing at all in the UI."""
     tm = _tm_for(tmp_path)
     tm.set_config({"permanent_after": 3})
-    tm._offense.update({"127.0.0.1": 4, "170.85.10.96": 1})
+    tm._offense.update({"127.0.0.1": 4, "198.51.100.96": 1})
 
     rows = {r["ip"]: r for r in tm.snapshot()["strikes"]}
 
     assert rows["127.0.0.1"]["strikes"] == 4
     assert rows["127.0.0.1"]["at_limit"] is True
-    assert rows["170.85.10.96"]["at_limit"] is False
-    assert rows["170.85.10.96"]["permanent_after"] == 3
+    assert rows["198.51.100.96"]["at_limit"] is False
+    assert rows["198.51.100.96"]["permanent_after"] == 3
 
 
 def test_snapshot_strikes_exclude_actively_blocked_ips(tmp_path):

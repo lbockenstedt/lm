@@ -4782,7 +4782,7 @@ async function loadSecurityData() {
     const neverRow = e => `<div class="flex items-center justify-between gap-3 py-1 border-b border-slate-100 last:border-0">
         <div class="min-w-0"><span class="font-mono text-slate-700">${escapeHtml(e.ip)}</span>
           ${e.description ? `<div class="text-[11px] text-slate-400 truncate" title="${escapeHtml(e.description)}">${escapeHtml(e.description)}</div>` : ''}</div>
-        <button onclick="securityNeverRemove('${escapeHtml(e.ip)}')" class="text-[11px] text-slate-500 hover:text-red-600 font-medium shrink-0">Remove</button></div>`;
+        <button onclick="securityNeverRemove('${escJsAttr(e.ip)}')" class="text-[11px] text-slate-500 hover:text-red-600 font-medium shrink-0">Remove</button></div>`;
     const neverTile = `<div class="${card}">
         <h3 class="text-sm font-bold text-green-600 mb-1">Trusted IPs — never auto-blocked <span class="text-slate-500">AND allowed through the Azure NSG</span> <span class="text-slate-400 font-normal">(${trusted.length})</span></h3>
         <p class="text-[11px] text-slate-400 mb-2">Shared list — the same one edited under <b>Settings → Cloud → Azure → NSG</b>. Adding an entry here also opens an <b>allow rule</b> hole in the NSG when NSG management is enabled${allowOn ? '' : ' (currently disabled — entries still exempt from auto-block)'}.</p>
@@ -4803,7 +4803,7 @@ async function loadSecurityData() {
         <div class="min-w-0"><span class="font-mono text-slate-700">${escapeHtml(r.ip)}</span>
           <span class="ml-2 ${r.at_limit ? 'text-red-600 font-bold' : 'text-slate-500'}">${r.strikes} / ${r.permanent_after}</span>
           ${r.at_limit ? '<div class="text-[11px] text-red-500">at the limit — its next block would be permanent</div>' : ''}</div>
-        <button onclick="securityForgive('${escapeHtml(r.ip)}')" class="text-[11px] text-slate-500 hover:text-green-600 font-medium shrink-0">Forgive</button></div>`;
+        <button onclick="securityForgive('${escJsAttr(r.ip)}')" class="text-[11px] text-slate-500 hover:text-green-600 font-medium shrink-0">Forgive</button></div>`;
     const strikeTile = strikes.length ? `<div class="${card}">
         <h3 class="text-sm font-bold text-amber-600 mb-1">Strikes — addresses with a block history <span class="text-slate-400 font-normal">(${strikes.length})</span></h3>
         <p class="text-[11px] text-slate-400 mb-2">None of these are blocked right now. A strike is recorded per block; at <b>${escapeHtml(String((d.config || {}).permanent_after ?? ''))}</b> the next block becomes <b>permanent</b> — no TTL, no auto-release. Lifting a block now forgives its strike automatically; <b>Forgive</b> clears a backlog left by blocks overturned before that.</p>
@@ -5190,7 +5190,10 @@ function _secBlockRowHtml(b) {
           <div class="text-[11px]" data-geo-ip="${escapeHtml(b.ip || '')}"></div>
           <div class="text-[11px] text-slate-400 truncate" title="${escapeHtml(b.reason || '')}">${escapeHtml(b.reason || '')}</div>
         </div>
-        <button onclick="_secModalUnblock('${escapeHtml(b.ip || '')}')" class="text-[11px] text-red-500 hover:text-red-700 font-medium shrink-0">Unblock</button>
+        <div class="flex items-center gap-2 shrink-0">
+          <button onclick="_secModalUnblock('${escJsAttr(b.ip || '')}')" title="Unblock and clear the strike this block banked (the block was wrong)" class="text-[11px] text-red-500 hover:text-red-700 font-medium">Unblock</button>
+          <button onclick="_secModalUnblock('${escJsAttr(b.ip || '')}', false)" title="Unblock but keep the strike on record (the block was justified)" class="text-[11px] text-slate-400 hover:text-slate-600 font-medium">keep strike</button>
+        </div>
       </div>`;
 }
 function securityBlocksModal(filter) {
@@ -5231,8 +5234,9 @@ function _secBlocksRender() {
     listEl.innerHTML = rows.length ? rows.map(_secBlockRowHtml).join('') : '<p class="text-slate-400 italic py-3 text-sm">no matching blocked IPs</p>';
     _secDecorateGeo(rows.map(b => b.ip), listEl);
 }
-async function _secModalUnblock(ip) {
-    await _securityReq('/api/security/unblock', 'POST', { ip }, `Unblocked ${ip}`);
+async function _secModalUnblock(ip, forgive = true) {
+    await _securityReq('/api/security/unblock', 'POST', { ip, forgive },
+        forgive ? `Unblocked ${ip}` : `Unblocked ${ip} (strike kept)`);
     await loadSecurityData(); // rebuilds the tab + refreshes window._secBlocks
     _secBlocksRender();       // refresh the open modal list (no-op if closed)
 }
@@ -5313,7 +5317,7 @@ async function securityBlock() {
         { ip, reason: (document.getElementById('sec-mb-reason').value || '').trim(), permanent: document.getElementById('sec-mb-perm').checked }, `Blocked ${ip}`);
     loadSecurityData();
 }
-async function securityUnblock(ip) { await _securityReq('/api/security/unblock', 'POST', { ip }, `Unblocked ${ip}`); loadSecurityData(); }
+async function securityUnblock(ip, forgive = true) { await _securityReq('/api/security/unblock', 'POST', { ip, forgive }, forgive ? `Unblocked ${ip}` : `Unblocked ${ip} (strike kept)`); loadSecurityData(); }
 async function securityForgive(ip) {
     await _securityReq('/api/security/forgive', 'POST', { ip }, `Cleared strikes for ${ip}`);
     loadSecurityData();
