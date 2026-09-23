@@ -938,6 +938,10 @@ def register(app, hub, ctx):
           * ``ambiguous_fields`` — fields STILL unconfirmed. Omitted when empty,
             like the spoke's own result.
           * ``ip_candidates`` — the distinct candidates, while ip is unconfirmed.
+          * ``ip_resolution`` — why the ip ended up confirmed or not:
+            ``not_asked`` / ``failed`` / ``unknown`` / ``low_confidence`` /
+            ``resolved`` (see ``_console_resolve_ambiguous_ip``), plus
+            ``ip_resolution_confidence`` when the model reported a score.
 
         This is the explicit, on-demand profiling path — nothing calls it
         automatically, so passive capture stays passive unless an operator asks."""
@@ -968,18 +972,38 @@ def register(app, hub, ctx):
         await _console_push_llm_flag(hub, [sid], True)  # permit the spoke's LLM collect
         return await llm.orchestrate(hub, agent, sid, port_id)
 
+    # A pick the model itself is unsure of must not be promoted to a confirmed
+    # answer. Anything at or above this scores as usable; a pick BELOW it keeps
+    # the fingerprint's first-candidate ip and stays flagged ambiguous.
+    _IP_RESOLVE_MIN_CONFIDENCE = 0.6
+
     async def _console_resolve_ambiguous_ip(hub, llm, sid, port_id, out, fp):
         """Ask the LLM which of the fingerprint's ``ip_candidates`` is the device's
         own address and merge it into ``out["identity"]["ip"]`` (in place). No
         agent / the LLM can't tell → ``out`` keeps the fingerprint's first-candidate
-        ip with ``"ip"`` left in ``ambiguous_fields`` so the UI marks it unconfirmed."""
+        ip with ``"ip"`` left in ``ambiguous_fields`` so the UI marks it unconfirmed.
+
+        ``out["ip_resolution"]`` is always set, because the outcomes are NOT
+        interchangeable — a caller retries a transport failure but must not retry
+        a decision the model already declined to make:
+          * ``not_asked``       — no AppBuilder agent, or fewer than 2 candidates
+          * ``failed``          — the resolve call raised (retryable)
+          * ``unknown``         — asked; the LLM couldn't decide or named a
+                                  non-candidate (not retryable)
+          * ``low_confidence``  — a pick came back below the threshold
+          * ``resolved``        — the pick was adopted
+        ``out["ip_resolution_confidence"]`` carries the score whenever the model
+        reported one."""
         ctx_map = fp.get("ip_candidate_context") or {}
         cands = [{"ip": ip, "source": ctx_map.get(ip) or ""}
                  for ip in (fp.get("ip_candidates") or []) if ip]
-        if len(cands) > 1:
+        # Always publish the candidates behind an ambiguous ip: reporting "ip is
+        # ambiguous" with no list left the UI with nothing to show.
+        if cands:
             out["ip_candidates"] = [c["ip"] for c in cands]
         agent = llm.find_ab(hub)
         if not agent or len(cands) < 2:
+            out["ip_resolution"] = "not_asked"
             return
         ident = out["identity"]
         context = ", ".join(str(v) for v in (out.get("vendor"), ident.get("model"),
@@ -989,12 +1013,23 @@ def register(app, hub, ctx):
         except Exception as e:  # noqa: BLE001 - keep the fingerprint best guess
             logger.warning("console profile: LLM ip resolve failed for %s/%s: %s",
                            sid, port_id, e)
-            pick = None
+            out["ip_resolution"] = "failed"
+            return
         if not pick or not pick.get("ip"):
+            out["ip_resolution"] = "unknown"
+            return
+        conf = pick.get("confidence")
+        # A missing confidence is "the model didn't report one", not a low score.
+        if conf is not None and conf < _IP_RESOLVE_MIN_CONFIDENCE:
+            out["ip_resolution"] = "low_confidence"
+            out["ip_resolution_confidence"] = conf
             return
         ident["ip"] = pick["ip"]
         out["source"] = "fingerprint+llm"
         out["llm_resolved_fields"] = ["ip"]
+        out["ip_resolution"] = "resolved"
+        if conf is not None:
+            out["ip_resolution_confidence"] = conf
         out.pop("ip_candidates", None)
         remaining = [f for f in out["ambiguous_fields"] if f != "ip"]
         if remaining:

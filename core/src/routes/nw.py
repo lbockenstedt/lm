@@ -1550,6 +1550,14 @@ def register(app, hub, ctx):
 
         dry_run = bool(data.get("dry_run", True)) or not bool(
             data.get("auto_add", saved.get("auto_add", False)))
+        # A credential-free pass is preview-only, as documented. Scan credentials
+        # are optional now, and the spoke turns nmap service detection on when
+        # none are supplied — nmap CAN classify a host into a manageable
+        # object_type, so without this gate an auto-add scan would write fleet
+        # entries with an empty username and no vault_credential behind them:
+        # devices the fleet can never actually manage.
+        discovery_only = not push_creds
+        dry_run = dry_run or discovery_only
         added, preview = [], []
         for dev in identified:
             addr = str(dev.get("address", "")).strip()
@@ -1604,7 +1612,7 @@ def register(app, hub, ctx):
             "scanned": (scan or {}).get("scanned", 0) if isinstance(scan, dict) else 0,
             "identified": identified,
             "reachable": reachable,
-            "discovery_only": not push_creds,
+            "discovery_only": discovery_only,
             "dry_run": dry_run,
             "preview": preview,
             "added": added,

@@ -551,7 +551,14 @@ def register(app, hub, ctx):
                 turn_messages.append({"role": "tool", "tool_call_id": tc.get("id"),
                                       "name": name, "content": json.dumps(out)[:12000]})
         else:
-            # 5 rounds exhausted
+            # 5 rounds exhausted: one forced synthesis turn.
+            # A relay/provider failure here must NOT come back as assistant text
+            # with HTTP 200 — every other failure in this handler raises 502, and
+            # a caller cannot otherwise tell "the model answered" from "the relay
+            # errored". The raise happens AFTER the try so the surrounding
+            # `except Exception` can't swallow the HTTPException.
+            relay_error = None
+            synth_failed = False
             try:
                 final_req = {
                     "messages": turn_messages + [{"role": "user", "content": "Please synthesize and summarize your findings into a final response now."}],
@@ -564,13 +571,24 @@ def register(app, hub, ctx):
                 if isinstance(data, dict) and data.get("status") == "SUCCESS":
                     assistant = data.get("assistant") or {}
                     answer = assistant.get("content") or ""
-                elif isinstance(data, dict) and data.get("message"):
-                    answer = f"Simulation assistant error: {data['message']}"
+                else:
+                    msg = (data or {}).get("message") if isinstance(data, dict) else None
+                    relay_error = f"Simulation assistant error: {msg}" if msg \
+                        else "Simulation assistant error"
             except Exception as e:  # noqa: BLE001
                 logger.warning("sim_assistant forced synthesis turn failed: %s", e)
+                synth_failed = True
 
-            answer = answer or ("I wasn't able to finish looking up the existing sim source "
-                                "in time — try asking again, or narrow down which sim you mean.")
+            if relay_error:
+                raise HTTPException(status_code=502, detail=relay_error)
+            # "the synthesis call never completed" and "it completed but produced
+            # nothing / the tool budget ran out" are different states; say which.
+            answer = answer or (
+                "I couldn't reach the simulation assistant to summarize what I found "
+                "— try asking again."
+                if synth_failed else
+                "I wasn't able to finish looking up the existing sim source "
+                "in time — try asking again, or narrow down which sim you mean.")
 
         if not answer.strip():
             answer = ("I didn't get a usable response from the current LLM provider. "
