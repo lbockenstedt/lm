@@ -126,6 +126,7 @@ flag live in the repo-root `README.md` **Installation** block and in
 - [backpressure-throttling.md](backpressure-throttling.md) — the hub's graceful-degradation control loop: message classification (must/coalesce/skippable), the escalation ladder (offender-first → fleet slow-down → hub-coalesce → protect shed), per-spoke TokenBucket (80% soft signal / 100% hard drop / DDoS quarantine), protect-mode pre-parse + source shed, spoke-side cooperation (`LM_BACKPRESSURE`), the `<sig>.<body>` sig-verify-over-raw-bytes ceiling raise, and the full config knob table.
 - [environment-variables.md](environment-variables.md) — every `LM_*`/`HUB_*`/`CS_*`/`KEA_*`/`NETBOX_*`/`CPPM_*`/`LDAP_*`/`UNBOUND_*` var, what it does, default, where read.
 - [install-flags.md](install-flags.md) — every installer + its flags.
+- [caching-contract.md](caching-contract.md) — **MANDATORY** for every module that keeps data between requests: use `core/src/cache_core.py` (`JsonCacheFile` debounced atomic 0600 writer + `StalenessPolicy`'s refresh/stale/expire ladder) instead of hand-rolling persistence or age checks, store raw envelopes and filter on the way out, and serve stale-but-badged data when a spoke is down.
 - [logging-observability-contract.md](logging-observability-contract.md) — **MANDATORY** for every module/agent: relay all logs (INFO+ and uncaught exceptions) to the hub, installed once, buffered-while-disconnected + flushed on connect, so Setup → Logs + the AppBuilder see everything without CLI access.
 
 ## Quick lookup

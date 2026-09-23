@@ -15,17 +15,23 @@ Keys: ``(namespace, key)`` — ``namespace`` is the logical dataset
 (e.g. ``"netbox_devices"``), ``key`` is the scope within it (tenant slug, or
 ``"_all_"`` for an admin all-tenants read) so tenant isolation is preserved.
 
+Persistence and the staleness timers are NOT implemented here: they come from
+``cache_core`` so every cache in the hub ages out and writes identically. This
+module used to re-serialize the whole file on every single ``warm_set`` — a
+poll burst of N spokes meant N full-file dumps — while ``nw_cache`` coalesced
+them. Delegating to ``cache_core.JsonCacheFile`` removes that difference.
+
 A leaf: stdlib only. MUST NOT import ``main``/``api``. Audience: Hub developers.
 """
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 import os
 import time
 from typing import Any, Dict, Optional
+
+from cache_core import JsonCacheFile, StalenessPolicy
 
 logger = logging.getLogger("Hub")
 
@@ -40,31 +46,26 @@ class WarmCacheMixin:
     def warm_cache_init(self) -> None:
         """Initialize the in-memory store. Call once from ``__init__``."""
         self.warm_cache: Dict[str, Dict[str, Any]] = {}
-        self._warm_cache_lock = asyncio.Lock()
-        self._warm_cache_tasks: set = set()
+        self.warm_policy = StalenessPolicy()
+        self._warm_cache_file = JsonCacheFile(
+            "warm cache", self._warm_cache_path,
+            lambda: {ns: dict(e) for ns, e in self.warm_cache.items()})
 
     def _warm_cache_path(self) -> str:
         return os.path.join(getattr(self, "cache_dir", "."), self.WARM_CACHE_FILE)
 
     def warm_cache_load(self) -> None:
         """Rehydrate from disk on startup (best-effort; missing/corrupt → empty)."""
-        try:
-            path = self._warm_cache_path()
-            if not os.path.exists(path) or os.path.getsize(path) == 0:
-                return
-            with open(path) as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                self.warm_cache = {
-                    str(ns): {str(k): v for k, v in (entries or {}).items()}
-                    for ns, entries in data.items() if isinstance(entries, dict)
-                }
-                total = sum(len(e) for e in self.warm_cache.values())
-                logger.info("warm cache: restored %d namespace(s) / %d key(s) from %s",
-                            len(self.warm_cache), total, path)
-        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
-            logger.warning("warm cache load failed (%s): %s — starting empty",
-                           self._warm_cache_path(), exc)
+        data = self._warm_cache_file.load()
+        if not isinstance(data, dict):
+            return
+        self.warm_cache = {
+            str(ns): {str(k): v for k, v in (entries or {}).items()}
+            for ns, entries in data.items() if isinstance(entries, dict)
+        }
+        total = sum(len(e) for e in self.warm_cache.values())
+        logger.info("warm cache: restored %d namespace(s) / %d key(s) from %s",
+                    len(self.warm_cache), total, self._warm_cache_path())
 
     # ── read/write ─────────────────────────────────────────────────────────────
 
@@ -82,37 +83,23 @@ class WarmCacheMixin:
         ts = entry.get("fetched_at") if isinstance(entry, dict) else None
         return ts if isinstance(ts, (int, float)) else None
 
+    def warm_state(self, namespace: str, key: str = "_",
+                   policy: Optional[StalenessPolicy] = None) -> str:
+        """Shared staleness verdict for one entry — ``cache_core`` vocabulary
+        (``fresh``/``refresh``/``stale``/``expired``/``missing``).
+
+        Route handlers use this instead of open-coding an age comparison, so
+        "when do we badge it" and "when may we finally error" are one rule for
+        every module rather than per-page guesswork."""
+        return (policy or self.warm_policy).classify(
+            self.warm_fetched_at(namespace, key))
+
     async def warm_set(self, namespace: str, key: str, data: Any) -> None:
         """Store a fresh envelope for ``(namespace, key)`` + persist (best-effort)."""
         self.warm_cache.setdefault(namespace, {})[str(key)] = {
             "data": data, "fetched_at": time.time()}
-        self._warm_cache_schedule_save()
+        self._warm_cache_file.schedule_save()
 
-    # ── persist (mirrors nw_cache) ──────────────────────────────────────────────
-
-    def _warm_cache_schedule_save(self) -> None:
-        try:
-            task = asyncio.create_task(self._warm_cache_persist())
-            self._warm_cache_tasks.add(task)
-            task.add_done_callback(self._warm_cache_tasks.discard)
-        except RuntimeError:  # pragma: no cover - no running loop (sync init)
-            logger.debug("warm cache: skipping async persist (no running loop)")
-
-    async def _warm_cache_persist(self) -> None:
-        async with self._warm_cache_lock:
-            try:
-                snapshot = {ns: dict(e) for ns, e in self.warm_cache.items()}
-                await asyncio.to_thread(self._warm_cache_write, snapshot)
-            except Exception as exc:  # noqa: BLE001 - best-effort persist
-                logger.warning("warm cache persist failed: %s", exc)
-
-    def _warm_cache_write(self, snapshot: Dict[str, Any]) -> None:
-        path = self._warm_cache_path()
-        d = os.path.dirname(path)
-        if d and not os.path.exists(d):
-            os.makedirs(d, exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(snapshot, f, default=str)
-        os.chmod(tmp, 0o600)  # can hold device/user identifiers — 0600 at-rest policy
-        os.replace(tmp, path)
+    async def warm_cache_flush_now(self) -> None:
+        """Immediate persist (shutdown path) — skips the coalescing delay."""
+        await self._warm_cache_file.flush_now()

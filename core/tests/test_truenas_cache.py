@@ -30,7 +30,7 @@ def _envelope(data):
 async def _flush(hub):
     """Force the debounced persist NOW (tests must not wait out the ~5s
     coalescing window): cancel any pending delayed flusher and write."""
-    for t in list(hub._truenas_cache_save_tasks):
+    for t in list(hub._truenas_cache_file._tasks):
         t.cancel()
     await hub.truenas_cache_flush_now()
 
@@ -132,8 +132,8 @@ async def test_write_burst_coalesces_to_one_pending_flusher(tmp_path):
     hub = _CacheHub(str(tmp_path))
     for i in range(10):
         await hub.truenas_cache_set_appliance(f"nas{i}", "pools", _envelope([{"n": i}]))
-    assert len(hub._truenas_cache_save_tasks) == 1
-    assert hub._truenas_cache_dirty is True
+    assert len(hub._truenas_cache_file._tasks) == 1
+    assert hub._truenas_cache_file._dirty is True
     await _flush(hub)
     with open(os.path.join(str(tmp_path), "truenas_data.json")) as f:
         on_disk = json.load(f)

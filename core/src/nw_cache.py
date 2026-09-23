@@ -31,12 +31,12 @@ is ``main → nw_cache`` only). Audience: Hub developers.
 
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
 import os
 import time
 from typing import Any, Dict, Optional
+
+from cache_core import JsonCacheFile, StalenessPolicy
 
 logger = logging.getLogger("Hub")
 
@@ -66,9 +66,12 @@ class NwCacheMixin:
         """Initialize the in-memory cache slots. Call once from ``__init__``."""
         self.nw_fleet_cache: Dict[str, Any] = {}
         self.nw_device_cache: Dict[str, Dict[str, Any]] = {}
-        self._nw_cache_lock = asyncio.Lock()
-        self._nw_cache_save_tasks: set = set()
-        self._nw_cache_dirty = False
+        self.nw_policy = StalenessPolicy()
+        self._nw_cache_file = JsonCacheFile(
+            "nw cache", self._nw_cache_path,
+            lambda: {"fleet": self.nw_fleet_cache,
+                     "devices": self.nw_device_cache},
+            flush_delay_s=self._NW_CACHE_FLUSH_DELAY_S)
 
     def _nw_cache_path(self) -> str:
         return os.path.join(getattr(self, "cache_dir", "."), self.NW_CACHE_FILE)
@@ -78,33 +81,27 @@ class NwCacheMixin:
 
         Missing/corrupt file → leaves the cache empty (cold-start behavior):
         the UI 503s once, then the first live fetch populates + persists.
+        The read itself is ``cache_core``'s, so a truncated or non-JSON file
+        degrades identically here and in every other module.
         """
-        try:
-            path = self._nw_cache_path()
-            if not os.path.exists(path) or os.path.getsize(path) == 0:
-                return
-            with open(path) as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                return
-            fleet = data.get("fleet")
-            if isinstance(fleet, dict):
-                self.nw_fleet_cache = {
-                    "devices": fleet.get("devices"),
-                    "fetched_at": float(fleet.get("fetched_at", 0.0) or 0.0),
-                }
-            devices = data.get("devices")
-            if isinstance(devices, dict):
-                self.nw_device_cache = {
-                    str(did): dict(v) for did, v in devices.items()
-                    if isinstance(v, dict)
-                }
-            if self.nw_fleet_cache or self.nw_device_cache:
-                logger.info("nw cache: restored %d device(s) + fleet snapshot from %s",
-                            len(self.nw_device_cache), path)
-        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
-            logger.warning("nw cache load failed (%s): %s — starting empty",
-                           self._nw_cache_path(), exc)
+        data = self._nw_cache_file.load()
+        if not isinstance(data, dict):
+            return
+        fleet = data.get("fleet")
+        if isinstance(fleet, dict):
+            self.nw_fleet_cache = {
+                "devices": fleet.get("devices"),
+                "fetched_at": float(fleet.get("fetched_at", 0.0) or 0.0),
+            }
+        devices = data.get("devices")
+        if isinstance(devices, dict):
+            self.nw_device_cache = {
+                str(did): dict(v) for did, v in devices.items()
+                if isinstance(v, dict)
+            }
+        if self.nw_fleet_cache or self.nw_device_cache:
+            logger.info("nw cache: restored %d device(s) + fleet snapshot from %s",
+                        len(self.nw_device_cache), self._nw_cache_path())
 
     # ── read ──────────────────────────────────────────────────────────────────
 
@@ -171,7 +168,7 @@ class NwCacheMixin:
     async def nw_cache_set_fleet(self, data: Any) -> None:
         """Store a fresh NW_LIST_DEVICES envelope + persist (best-effort)."""
         self.nw_fleet_cache = {"devices": data, "fetched_at": time.time()}
-        self._nw_cache_schedule_save()
+        self._nw_cache_file.schedule_save()
 
     async def nw_cache_set_reachability(self, device_id: str,
                                         reachable: Optional[bool],
@@ -198,7 +195,7 @@ class NwCacheMixin:
                 touched = True
                 break
         if touched:
-            self._nw_cache_schedule_save()
+            self._nw_cache_file.schedule_save()
 
     async def nw_cache_set_device(self, device_id: str, endpoint: str,
                                   data: Any) -> None:
@@ -208,7 +205,7 @@ class NwCacheMixin:
         entry = self.nw_device_cache.setdefault(device_id, {})
         entry[endpoint] = data
         entry["fetched_at"] = time.time()
-        self._nw_cache_schedule_save()
+        self._nw_cache_file.schedule_save()
 
     async def nw_cache_set_poll(self, device_id: str, poll_result: Dict[str, Any]
                                 ) -> None:
@@ -253,70 +250,26 @@ class NwCacheMixin:
             if isinstance(vlans, list):
                 entry["vlans"] = {"status": "SUCCESS", "data": vlans}
         entry["fetched_at"] = time.time()
-        self._nw_cache_schedule_save()
+        self._nw_cache_file.schedule_save()
 
     # ── persist ───────────────────────────────────────────────────────────────
-
-    def _nw_cache_schedule_save(self) -> None:
-        """Mark the cache dirty + ensure ONE delayed flusher is pending.
-
-        Dirty-flag + coalesced writer: a poll burst of N devices used to
-        fire-and-forget N full-file dumps; now the burst marks dirty N times
-        and the single flusher task writes once after
-        ``_NW_CACHE_FLUSH_DELAY_S``. Single-threaded w.r.t. the event loop, so
-        the flag needs no lock; the file write itself stays serialized under
-        ``_nw_cache_lock`` in ``_nw_cache_persist`` (unchanged)."""
-        self._nw_cache_dirty = True
-        if any(not t.done() for t in self._nw_cache_save_tasks):
-            return  # a flusher is already pending — it will pick this up
-        try:
-            task = asyncio.create_task(self._nw_cache_flush_after_delay())
-            self._nw_cache_save_tasks.add(task)
-            task.add_done_callback(self._nw_cache_save_tasks.discard)
-        except RuntimeError:  # pragma: no cover - no running loop (startup path)
-            # Called outside an event loop (e.g. a sync init test) — skip the
-            # async persist; the next live fetch under a loop will persist.
-            logger.debug("nw cache: skipping async persist (no running loop)")
-
-    async def _nw_cache_flush_after_delay(self) -> None:
-        """Debounced flusher: wait out the coalescing window, then persist.
-        Loops in the rare case a mutation lands while the write is in flight
-        (the snapshot in _nw_cache_persist is taken at write time, so a
-        re-marked dirty during the delay is already covered by that write)."""
-        while self._nw_cache_dirty:
-            self._nw_cache_dirty = False
-            await asyncio.sleep(self._NW_CACHE_FLUSH_DELAY_S)
-            await self._nw_cache_persist()
+    # Persistence itself lives in cache_core.JsonCacheFile: the debounced
+    # writer, the atomic 0600 replace and the best-effort error handling are
+    # shared with every other cache instead of being a fourth copy here.
 
     async def nw_cache_flush_now(self) -> None:
         """Immediate persist (shutdown path) — skips the coalescing delay."""
-        self._nw_cache_dirty = False
-        await self._nw_cache_persist()
+        await self._nw_cache_file.flush_now()
 
-    async def _nw_cache_persist(self) -> None:
-        """Serialize the cache off the event loop + atomically replace the file."""
-        async with self._nw_cache_lock:
-            snapshot = {
-                "fleet": self.nw_fleet_cache,
-                "devices": self.nw_device_cache,
-            }
-            try:
-                await asyncio.to_thread(self._nw_cache_write, snapshot)
-            except Exception as exc:  # noqa: BLE001 - best-effort persist
-                logger.warning("nw cache persist failed: %s", exc)
+    # ── staleness ─────────────────────────────────────────────────────────────
 
-    def _nw_cache_write(self, snapshot: Dict[str, Any]) -> None:
-        """Synchronous atomic write (runs in a worker thread)."""
-        path = self._nw_cache_path()
-        d = os.path.dirname(path)
-        if d and not os.path.exists(d):
-            os.makedirs(d, exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(snapshot, f, default=str)
-        # 0600 (not process-umask ~0644): the nw cache can hold fleet/device
-        # identifiers; matches the at-rest 0600 policy applied to state/secret
-        # files. Defense-in-depth — the parent data_dir is 0700 so traversal is
-        # already gated, but a relocated cache_dir would otherwise expose this.
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
+    def nw_cache_fleet_state(self) -> str:
+        """Shared staleness verdict for the fleet snapshot (``cache_core``
+        vocabulary: fresh/refresh/stale/expired/missing). Routes use this rather
+        than comparing ages themselves, so "badge it" and "finally error" mean
+        the same thing here as on every other page."""
+        return self.nw_policy.classify(self.nw_cache_fleet_fetched_at())
+
+    def nw_cache_device_state(self, device_id: str) -> str:
+        """Shared staleness verdict for one device's cache entry."""
+        return self.nw_policy.classify(self.nw_cache_device_fetched_at(device_id))
