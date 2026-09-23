@@ -23,6 +23,24 @@ credentials (e.g. the shared Hurricane Electric credential, the shared console l
 excluded from tenant-admin reach. (`cred_vault.py:1-15, 62-68`;
 `routes/cred_vault.py:68-83`.)
 
+A bucket is listed for **every** tenant — including `default` (the DEFAULT
+tenant), which is a real tenant that owns real spokes. It used to be hidden as a
+"system" bucket, which meant a Global Admin could not store a credential for the
+DEFAULT tenant at all, so no scan-credential set could be built for it and an
+`nw` agent bound to `default` had nothing to scan with.
+
+A bucket that matches **no** tenant and is not `__admin__` is reported as
+**orphaned** (`is_orphan`) and labelled as such in the UI. Orphans only exist
+because they hold secrets (e.g. a bucket created by typing a free-text name like
+`admin`); nothing tenant-scoped can ever reference one, and a tenant-admin can
+never reach it. Do not confuse an orphan named `admin` with the real Global
+Admin slot, which is `__admin__`.
+
+An orphan can be cleared up: a Global Admin gets a banner offering **Move a
+secret out…** (rescue the credential into a bucket something can actually
+reference) and **Delete this bucket**. See *Rescuing and removing an orphaned
+bucket* below.
+
 Two independent gates protect a secret:
 - **Reach** (role) — which buckets you can see at all.
 - **Pass-phrase / PSK** (knowledge) — whether you can *decrypt* an interactive
@@ -82,9 +100,12 @@ All routes are tenant-admin / Global-Admin only at the middleware layer
 | `GET /tenant/cred-vault/secrets?bucket=` | list secrets in one bucket (names + metadata, no values) | no |
 | `GET /tenant/cred-vault/automation-secrets[?type=]` | list only `hub`-mode secrets across reachable buckets — the **picker source** for module references | no |
 | `POST /tenant/cred-vault/psk` | set/rotate a bucket pass-phrase (rekeys `psk`-mode secrets) | — |
+| `POST /tenant/cred-vault/reset-psk` | **Global Admin only** — last-resort reset of a lost/corrupted pass-phrase, no old pass-phrase required | — |
 | `POST /tenant/cred-vault/secret` | create/update a secret (`value` object, `mode`, `type`, `description`) | ✔ |
 | `POST /tenant/cred-vault/reveal` | reveal plaintext (response is `no-store`) | ✔ |
 | `POST /tenant/cred-vault/delete` | delete a secret | ✔ |
+| `POST /tenant/cred-vault/move-secret` | **Global Admin only** — move one secret to another bucket (metadata re-point, no copy) | only for `psk`-mode |
+| `POST /tenant/cred-vault/delete-bucket` | **Global Admin only** — delete a bucket outright; refuses `__admin__` and live-tenant buckets | — |
 
 The `automation-secrets` endpoint is the key to the "store once, resolve
 unattended" pattern: it returns hub-mode secrets across **every** reachable
@@ -136,6 +157,12 @@ The **Credential Vault** appears in the left nav for tenant-admins / admins
 `_cvDoAddSecret`) picks a type and (for automation types) forces `hub` mode;
 **Reveal** (`_cvRevealModal`) prompts for the bucket pass-phrase.
 
+For an orphaned bucket a Global Admin also sees an amber banner with
+`_cvMoveSecretModal()` and `_cvDeleteBucketModal()`. The move modal hides the
+pass-phrase fields entirely when the selected secret is `hub`-mode, since none
+is needed; the delete modal names every secret that would be destroyed and
+requires a tick-box before it will do so.
+
 ## Gotchas
 
 - **`psk`-mode secrets can't be resolved unattended** — a module that needs a
@@ -148,3 +175,53 @@ The **Credential Vault** appears in the left nav for tenant-admins / admins
   live so they aren't tied to one tenant bucket.
 - **Rotating a bucket PSK rekeys only `psk`-mode secrets** — `hub`-mode secrets
   are encrypted with the hub key, not the PSK (`cred_vault.py:223-255`).
+- **A lost pass-phrase is recoverable, as a last resort.** `POST /psk` can only
+  *rotate*, because it verifies the old pass-phrase first; a forgotten one used
+  to brick the bucket through the UI forever. A **Global Admin** can now
+  `POST /tenant/cred-vault/reset-psk` (surfaced as "Lost the current
+  pass-phrase? Reset it" in the set/change modal). The blast radius is exactly
+  the `psk`-mode secrets:
+  - `hub`-mode secrets are keyed on the hub Fernet key, **not** the
+    pass-phrase, so they survive a reset untouched and keep serving automation.
+    A bucket holding only `hub`-mode secrets resets with **zero** data loss.
+  - `psk`-mode secrets are already undecryptable once the pass-phrase is lost,
+    so they can only be discarded — which the endpoint refuses unless
+    `confirm_destroy` is sent. Those credentials must then be re-entered.
+
+  The reset is audit-logged with the acting account. A non-Global-Admin gets a
+  404, not a 403, so the door isn't advertised.
+- **Moving a secret does not copy it.** The at-rest blob name is a random id,
+  not derived from the bucket, so `move-secret` re-points metadata rather than
+  writing a second copy and deleting the first — the credential never exists in
+  two buckets at once and is never briefly missing. `hub`-mode secrets are keyed
+  on the hub Fernet key, so no pass-phrase is needed for either side;
+  `psk`-mode secrets are keyed on the **source** bucket, so both `psk` and
+  `to_psk` must be supplied and the value is re-encrypted under the
+  destination's key. A move refuses to overwrite a same-named secret in the
+  destination.
+- **A bucket could be created but never removed.** `list_buckets` derives from
+  the pass-phrase records UNION the secret records, so a bucket created by
+  typing a free-text name lingered in every Global Admin's picker forever —
+  inviting credentials to be stored somewhere no tenant-scoped code can
+  reference. `delete-bucket` removes it, and:
+  - always refuses `__admin__`, which is load-bearing infrastructure
+    (IPAM/NetBox and the HE.NET + Let's Encrypt DNS credentials resolve
+    through it);
+  - refuses any bucket that belongs to a **live tenant** — those follow the
+    tenant lifecycle; delete the tenant instead;
+  - refuses to destroy leftover secrets unless `confirm_destroy` is sent, and
+    deletes their backing blobs when it does, so nothing is left alive in Key
+    Vault after the operator is told it was destroyed.
+
+### Rescuing and removing an orphaned bucket
+
+If the pass-phrase is also lost, none of this is blocked as long as the secrets
+are `hub`-mode:
+
+1. **Reset the pass-phrase** (`reset-psk`) — loses nothing if every secret is
+   `hub`-mode.
+2. **Move each secret out** (`move-secret`) into a bucket that matches a real
+   tenant, or into `shared` if it is genuinely cross-tenant.
+3. **Delete the bucket** (`delete-bucket`).
+4. If the credential was meant for scanning, build an `nw` scan-credential set
+   referencing it so the tenant's agent can finally use it.
