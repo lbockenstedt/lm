@@ -24119,6 +24119,19 @@ function pxmxSelectTenantPromptHtml() {
     </div>`;
 }
 
+// One "we're showing cached data" banner for every Hypervisor tab. Overview and
+// the VM list each carried a verbatim copy of this markup and Diagnostics had
+// none at all — so a spoke restart blanked its drive table with no explanation.
+// Kept in one place so the wording (and the "how old" hint) can't drift apart.
+function pxmxStaleBanner(isStale, cachedAt) {
+    if (!isStale) return '';
+    const when = cachedAt ? _relTimeAgo(new Date(cachedAt * 1000)) : '';
+    return `<div class="mb-4 px-3 py-2 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-700 flex items-center gap-2">
+               <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.07 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
+               <span>Showing cached data${when} — agent offline. Live stats resume automatically when the agent reconnects.</span>
+           </div>`;
+}
+
 async function renderPxmxDiagnostics(container) {
     container.innerHTML = '<p class="text-sm text-slate-400 italic p-4">Loading drive diagnostics…</p>';
 
@@ -24182,6 +24195,13 @@ async function renderPxmxDiagnostics(container) {
     }
 
     const spokeConnected = data.spoke_connected !== false;
+    // Cached-but-usable is NOT the same as "no spoke": the hub answers a spoke
+    // restart with the last good diagnostics, stale-flagged and deliberately
+    // spoke_connected=false. Branching on spoke_connected alone would throw
+    // that data away and show "No Hypervisor Spoke Connected" instead — the
+    // whole point of the fallback. Stale wins; the banner explains it.
+    const isStale = data.stale === true;
+    const staleBanner = pxmxStaleBanner(isStale, data.cached_at);
     const nodes = Array.isArray(data.nodes) ? data.nodes : [];
     const summary = data.summary || {
         total_drives: 0,
@@ -24233,7 +24253,7 @@ async function renderPxmxDiagnostics(container) {
             </div>
         </div>`;
 
-    if (!spokeConnected) {
+    if (!spokeConnected && !isStale) {
         container.innerHTML = `
             <div class="p-4">
                 ${headerHtml}
@@ -24251,6 +24271,7 @@ async function renderPxmxDiagnostics(container) {
     if (totalDrives === 0 && nodes.length === 0) {
         container.innerHTML = `
             <div class="p-4">
+                ${staleBanner}
                 ${headerHtml}
                 ${summaryCardsHtml}
                 <div class="bg-white border border-slate-200 rounded-lg p-8 text-center text-slate-500 shadow-sm">
@@ -24406,6 +24427,7 @@ async function renderPxmxDiagnostics(container) {
 
     container.innerHTML = `
         <div class="p-4">
+            ${staleBanner}
             ${headerHtml}
             ${summaryCardsHtml}
             ${tablesHtml}
@@ -24465,12 +24487,7 @@ async function loadPxmxData(subMenu) {    const container = document.getElementB
                     return;
                 }
                 const isStale = vmData.stale || nodesData.stale;
-                const staleBanner = isStale
-                    ? `<div class="mb-4 px-3 py-2 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-700 flex items-center gap-2">
-                           <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.07 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
-                           <span>Showing cached data — agent offline. Live stats resume automatically when the agent reconnects.</span>
-                       </div>`
-                    : '';
+                const staleBanner = pxmxStaleBanner(isStale, nodesData.cached_at || vmData.cached_at);
                 container.innerHTML = staleBanner
                     + `<h3 class="text-base font-semibold text-[#263040] mb-3 px-1">Overview
                         <span class="text-xs text-slate-400 font-normal">(${nodes.length}) — click a node to view its VMs</span> ${helpIcon('pxmx', null, 'Hypervisor help')}</h3>`
@@ -24498,12 +24515,7 @@ async function loadPxmxData(subMenu) {    const container = document.getElementB
             }
 
             const isStale = vmData.stale || nodesData.stale;
-            const staleBanner = isStale
-                ? `<div class="mb-4 px-3 py-2 bg-amber-50 border border-amber-200 rounded-md text-xs text-amber-700 flex items-center gap-2">
-                       <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.07 16.5c-.77.833.192 2.5 1.732 2.5z"/></svg>
-                       <span>Showing cached data — agent offline. Live stats resume automatically when the agent reconnects.</span>
-                   </div>`
-                : '';
+            const staleBanner = pxmxStaleBanner(isStale, nodesData.cached_at || vmData.cached_at);
 
             const backBtn = `<button onclick="setSubView('Overview'); window._pxmxNodeSel = null;"
                 class="mb-3 inline-flex items-center gap-1 text-sm text-slate-500 hover:text-[#01A982] font-medium transition-colors">

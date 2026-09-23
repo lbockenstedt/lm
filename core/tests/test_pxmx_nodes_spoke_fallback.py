@@ -17,7 +17,10 @@ spoke exists, matching the VM list. These lock in:
 * an admin with no tenant selected uses the global spoke (unchanged).
 """
 
+import time
 from types import SimpleNamespace
+
+from cache_core import StalenessPolicy
 
 import pytest
 from fastapi import FastAPI
@@ -62,6 +65,7 @@ class _Hub:
         self.relayed_to = None
         self.raise_on_relay = raise_on_relay
         self.warm_cache = {}
+        self.warm_ts = {}   # {(namespace, key): epoch} — mirrors fetched_at
         # Persisted offline relay-agent roster (reconstructed by
         # _offline_relay_agents): a host whose parent spoke is DOWN. Seed the
         # exact side-data that helper reads (agent_config + composite heartbeat
@@ -106,8 +110,24 @@ class _Hub:
     def warm_get(self, ns, key):
         return (self.warm_cache.get(ns) or {}).get(key)
 
+    def warm_fetched_at(self, ns, key="_"):
+        return self.warm_ts.get((ns, key))
+
+    def warm_state(self, ns, key="_", policy=None):
+        return (policy or StalenessPolicy()).classify(self.warm_fetched_at(ns, key))
+
+    def seed_warm(self, ns, key, data, age=0.0):
+        """Seed a warm entry AND its timestamp, the way warm_set would have.
+
+        Tests previously assigned hub.warm_cache directly, which left no
+        fetched_at — so warm_state() saw 'missing' and the route skipped the
+        fallback it was meant to be exercising."""
+        self.warm_cache.setdefault(ns, {})[key] = data
+        self.warm_ts[(ns, key)] = time.time() - age
+
     async def warm_set(self, ns, key, data):
         self.warm_cache.setdefault(ns, {})[key] = data
+        self.warm_ts[(ns, key)] = time.time()
 
     async def request_response(self, sid, cmd, payload, timeout=30.0,
                                signing_secret=None):
@@ -245,7 +265,7 @@ def test_spoke_down_serves_stale_warm_cache():
     last-known nodes are served (stale) instead of an empty list — mirroring the
     VM tab so the Overview doesn't blank while VMs render from their cache."""
     hub = _Hub(bound_spoke=None, global_spoke=None)
-    hub.warm_cache["pxmx_nodes"] = {"acme": {"nodes": [{"node": "pve1", "status": "online"}]}}
+    hub.seed_warm("pxmx_nodes", "acme", {"nodes": [{"node": "pve1", "status": "online"}]}, age=300)
     c = _build(hub, admin=True, tenant="acme")
     r = c.get("/api/pxmx/nodes?tenant=acme")
     assert r.status_code == 200
@@ -258,7 +278,7 @@ def test_spoke_down_serves_stale_warm_cache():
 def test_live_fetch_failure_falls_back_to_warm_cache():
     """A live GET_NODE_STATS timeout serves stale nodes rather than a 500."""
     hub = _Hub(bound_spoke="pxmx-acme", raise_on_relay=True)
-    hub.warm_cache["pxmx_nodes"] = {"acme": {"nodes": [{"node": "pve1", "status": "online"}]}}
+    hub.seed_warm("pxmx_nodes", "acme", {"nodes": [{"node": "pve1", "status": "online"}]}, age=300)
     c = _build(hub, admin=True, tenant="acme")
     r = c.get("/api/pxmx/nodes?tenant=acme")
     assert r.status_code == 200
