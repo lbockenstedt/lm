@@ -262,6 +262,89 @@ def test_profile_unambiguous_fingerprint_short_circuits(monkeypatch):
     assert not any(cmd == "CONSOLE_SET_LLM_IDENTIFY" for cmd, _ in hub.calls)
 
 
+# ── ip_resolution: WHY the ip ended up confirmed or not ──────────────────────
+# "never asked", "asked and the LLM couldn't decide", "the relay errored" and
+# "the pick scored too low" are four different states. They all used to surface
+# identically (source='fingerprint', ambiguous_fields=['ip']), so a caller could
+# not tell a retryable transport failure from a decision the model had already
+# declined to make. And because the returned `confidence` was never read, a
+# 0.05-confidence guess was adopted and persisted exactly like a 0.99 one.
+
+def test_profile_ambiguous_ip_reports_resolved_with_its_confidence(monkeypatch):
+    c, hub, orchestrated, resolved = _build_profile(
+        monkeypatch, _FP_AMBIGUOUS, pick={"ip": "172.16.50.20", "confidence": 0.9})
+    body = c.post("/api/console/identify-llm", json={"spoke_id": "c1", "port_id": "p1"}).json()
+    assert body["ip_resolution"] == "resolved"
+    assert body["ip_resolution_confidence"] == 0.9
+
+
+def test_profile_ambiguous_ip_low_confidence_pick_is_not_adopted(monkeypatch):
+    """A guess the model itself is unsure of must not be promoted to a confirmed
+    answer, persisted to the spoke, or clear the ambiguity flag."""
+    c, hub, orchestrated, resolved = _build_profile(
+        monkeypatch, _FP_AMBIGUOUS, pick={"ip": "172.16.50.20", "confidence": 0.05})
+    body = c.post("/api/console/identify-llm", json={"spoke_id": "c1", "port_id": "p1"}).json()
+    assert body["ip_resolution"] == "low_confidence"
+    assert body["ip_resolution_confidence"] == 0.05
+    assert body["source"] == "fingerprint"
+    assert "llm_resolved_fields" not in body
+    assert body["identity"] == _FP_AMBIGUOUS["identity"]     # first candidate kept
+    assert body["ambiguous_fields"] == ["ip"]
+    assert body["ip_candidates"] == ["10.1.1.20", "172.16.50.20"]
+    assert not any(cmd == "CONSOLE_LLM_STORE" for cmd, _ in hub.calls)
+
+
+def test_profile_ambiguous_ip_without_a_reported_confidence_is_still_adopted(monkeypatch):
+    """`confidence: None` means the model reported no score — that is not a low
+    score, so the pick is taken (and no score key is invented)."""
+    c, hub, orchestrated, resolved = _build_profile(
+        monkeypatch, _FP_AMBIGUOUS, pick={"ip": "172.16.50.20", "confidence": None})
+    body = c.post("/api/console/identify-llm", json={"spoke_id": "c1", "port_id": "p1"}).json()
+    assert body["ip_resolution"] == "resolved"
+    assert "ip_resolution_confidence" not in body
+    assert body["identity"]["ip"] == "172.16.50.20"
+
+
+def test_profile_ambiguous_ip_not_asked_without_an_agent(monkeypatch):
+    c, hub, orchestrated, resolved = _build_profile(monkeypatch, _FP_AMBIGUOUS, agent=None)
+    body = c.post("/api/console/identify-llm", json={"spoke_id": "c1", "port_id": "p1"}).json()
+    assert resolved == []
+    assert body["ip_resolution"] == "not_asked"
+
+
+def test_profile_ambiguous_ip_unknown_when_the_llm_cannot_decide(monkeypatch):
+    c, hub, orchestrated, resolved = _build_profile(monkeypatch, _FP_AMBIGUOUS, pick=None)
+    body = c.post("/api/console/identify-llm", json={"spoke_id": "c1", "port_id": "p1"}).json()
+    assert body["ip_resolution"] == "unknown"
+
+
+def test_profile_ambiguous_ip_failed_is_distinct_from_unknown(monkeypatch):
+    """A relay/transport failure is retryable; "the LLM couldn't decide" is not.
+    They must not both read as `unknown`."""
+    c, hub, orchestrated, resolved = _build_profile(monkeypatch, _FP_AMBIGUOUS)
+
+    async def _boom(hub_, ag, candidates, context=""):
+        raise RuntimeError("relay unreachable")
+
+    monkeypatch.setattr(llm, "resolve_ambiguous_ip", _boom)
+    body = c.post("/api/console/identify-llm", json={"spoke_id": "c1", "port_id": "p1"}).json()
+    assert body["ip_resolution"] == "failed"
+    assert body["source"] == "fingerprint"
+    assert body["ambiguous_fields"] == ["ip"]
+
+
+def test_profile_single_candidate_still_publishes_the_candidate_list(monkeypatch):
+    """An "ip is ambiguous" result with no candidate list is an inconsistent
+    state for the UI: it has nothing to offer the operator."""
+    fp = dict(_FP_AMBIGUOUS, ip_candidates=["10.1.1.20"])
+    c, hub, orchestrated, resolved = _build_profile(monkeypatch, fp)
+    body = c.post("/api/console/identify-llm", json={"spoke_id": "c1", "port_id": "p1"}).json()
+    assert resolved == []                                    # fewer than 2 to choose from
+    assert body["ip_resolution"] == "not_asked"
+    assert body["ambiguous_fields"] == ["ip"]
+    assert body["ip_candidates"] == ["10.1.1.20"]
+
+
 # ── resolve_ambiguous_ip itself: the ONLY call that sends real IPs to the LLM ──
 class _RelayHub:
     def __init__(self, reply):

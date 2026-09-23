@@ -523,3 +523,101 @@ def test_chat_passes_final_role_on_exhausted_budget(monkeypatch):
     assert hub.last_request[2].get("role") == "final"
     assert "Exhausted final summary" in r.json()["answer"]
 
+
+
+# ── rounds-exhausted branch: a relay failure must not masquerade as an answer ──
+# The forced synthesis turn used to fold a non-SUCCESS reply into the answer
+# string and return HTTP 200 ("Simulation assistant error: ..."), while every
+# other failure in the handler raises 502. A caller could not tell "the model
+# answered" from "the relay errored", and because the error text was truthy it
+# also made the budget-exhausted fallback message unreachable.
+
+class _FakeHubFinalFails(_FakeHub):
+    """Succeeds for the tool rounds, then returns a non-SUCCESS envelope on the
+    forced ``role='final'`` synthesis turn."""
+
+    def __init__(self, *a, final_message="provider quota exceeded", **kw):
+        super().__init__(*a, **kw)
+        self.final_message = final_message
+
+    async def request_response(self, target, cmd, payload, timeout=None):
+        if payload.get("role") == "final":
+            self.last_request = (target, cmd, payload)
+            self.all_requests.append((target, cmd, payload))
+            body = {"status": "ERROR"}
+            if self.final_message is not None:
+                body["message"] = self.final_message
+            return {"payload": {"data": body}}
+        return await super().request_response(target, cmd, payload, timeout)
+
+
+class _FakeHubFinalRaises(_FakeHub):
+    """Succeeds for the tool rounds, then the synthesis turn's transport dies."""
+
+    async def request_response(self, target, cmd, payload, timeout=None):
+        if payload.get("role") == "final":
+            raise RuntimeError("relay unreachable")
+        return await super().request_response(target, cmd, payload, timeout)
+
+
+def _exhausting_replies():
+    tool_reply = {"content": "", "tool_calls": [
+        {"id": "1", "function": {"name": "list_available_sims", "arguments": "{}"}}]}
+    return [tool_reply] * 5
+
+
+def _post_exhausted(c):
+    return c.post("/api/sim-assistant/chat",
+                  json={"messages": [{"role": "user", "content": "search deep"}]})
+
+
+def test_exhausted_branch_relay_error_is_a_502_not_an_answer(monkeypatch):
+    async def fake_get(path):
+        return _FakeGithubResp(200, {"content": _b64("# loop")})
+    monkeypatch.setattr(sim_assistant_module, "_github_get_contents", fake_get)
+
+    hub = _FakeHubFinalFails(replies=_exhausting_replies())
+    r = _post_exhausted(_build(hub))
+    assert r.status_code == 502
+    assert "provider quota exceeded" in r.json()["detail"]
+
+
+def test_exhausted_branch_non_success_without_a_message_still_502s(monkeypatch):
+    async def fake_get(path):
+        return _FakeGithubResp(200, {"content": _b64("# loop")})
+    monkeypatch.setattr(sim_assistant_module, "_github_get_contents", fake_get)
+
+    hub = _FakeHubFinalFails(replies=_exhausting_replies(), final_message=None)
+    r = _post_exhausted(_build(hub))
+    assert r.status_code == 502
+    assert "Simulation assistant error" in r.json()["detail"]
+
+
+def test_exhausted_branch_transport_failure_says_it_could_not_reach(monkeypatch):
+    """A transport failure still degrades to 200 (fail-soft), but its message
+    must name THAT state, not 'I ran out of time looking things up'."""
+    async def fake_get(path):
+        return _FakeGithubResp(200, {"content": _b64("# loop")})
+    monkeypatch.setattr(sim_assistant_module, "_github_get_contents", fake_get)
+
+    hub = _FakeHubFinalRaises(replies=_exhausting_replies())
+    r = _post_exhausted(_build(hub))
+    assert r.status_code == 200
+    answer = r.json()["answer"]
+    assert "couldn't reach the simulation assistant" in answer
+    assert "wasn't able to finish looking up" not in answer
+
+
+def test_exhausted_branch_empty_synthesis_keeps_the_budget_message(monkeypatch):
+    """Synthesis succeeded but produced nothing: that IS the budget-exhausted
+    state, and must keep its own wording."""
+    async def fake_get(path):
+        return _FakeGithubResp(200, {"content": _b64("# loop")})
+    monkeypatch.setattr(sim_assistant_module, "_github_get_contents", fake_get)
+
+    hub = _FakeHub(replies=_exhausting_replies() + [""])
+    r = _post_exhausted(_build(hub))
+    assert r.status_code == 200
+    answer = r.json()["answer"]
+    assert "wasn't able to finish looking up" in answer
+    assert "couldn't reach the simulation assistant" not in answer

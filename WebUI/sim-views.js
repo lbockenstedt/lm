@@ -11178,37 +11178,51 @@ async function _csUsbClearCmd(host, action, doneMsg, allSpokes) {
         }
 
         const bad = (r.errors || []).concat(r.refusals || []);
-        const nLive = r.pushed_to_spokes || 0;
+        // null means "the reply carried no fan-out count", which is NOT the same
+        // as a reported 0. The per-command route (/proxmx/command) enqueues to a
+        // SINGLE spoke and returns a queue result instead of a count, so the old
+        // `|| 0` announced "Cleared 0 spoke(s)" on a command that had in fact
+        // been accepted — the same regression csPushToast above documents.
+        const nLive = (r.pushed_to_spokes != null) ? r.pushed_to_spokes : null;
         const queuedNames = Array.isArray(r.queued) ? r.queued : [];
         const isQueued = (r.queued_to_spokes > 0) || (r.queued === true) || (queuedNames.length > 0);
-        const nQ = r.queued_to_spokes || queuedNames.length || (isQueued ? 1 : 0);
+        // Likewise null = "queued, count unknown" (`r.queued === true`, one spoke).
+        // Inventing the number 1 there reported a spoke count the server never sent.
+        const nQ = (r.queued_to_spokes != null) ? r.queued_to_spokes
+            : (queuedNames.length ? queuedNames.length : null);
         const qDetail = queuedNames.length ? `: ${queuedNames.join(', ')}` : '';
-        const queuePart = isQueued ? `; queued for ${nQ} unreachable spoke(s)${qDetail}` : '';
+
+        const liveText = () => nLive === null
+            ? ''
+            : (r.spokes_total != null ? `${nLive}/${r.spokes_total}` : `${nLive}`);
+        // Never leave an empty count slot in the sentence: with no reported count
+        // the phrase drops the number rather than printing a blank or a zero.
+        const clearedPhrase = () => liveText()
+            ? `Cleared ${liveText()} spoke(s)`
+            : 'Cleared on the reachable spoke(s)';
+        const queuePart = !isQueued ? ''
+            : (nQ === null ? `; queued for delivery on reconnect${qDetail}`
+                : `; queued for ${nQ} unreachable spoke(s)${qDetail}`);
 
         if (bad.length > 0) {
-            const countPart = (r.spokes_total != null)
-                ? `Cleared ${nLive}/${r.spokes_total} spoke(s)${queuePart} — failed: `
-                : `Cleared ${nLive} spoke(s)${queuePart} — failed: `;
-            _toast(`${doneMsg}. ${countPart}${bad.join('; ')}`, 'error');
+            _toast(`${doneMsg}. ${clearedPhrase()}${queuePart} — failed: ${bad.join('; ')}`, 'error');
             return;
         }
 
         if (isQueued) {
-            const countPart = (r.spokes_total != null) ? `live on ${nLive}/${r.spokes_total} spoke(s)` : `live on ${nLive} spoke(s)`;
-            _toast(`${doneMsg}. Cleared ${countPart}; queued for ${nQ} unreachable spoke(s) (applies when they reconnect)${qDetail}`, 'warning');
+            _toast(`${doneMsg}. ${clearedPhrase()}${queuePart} (applies when they reconnect)`, 'warning');
             return;
         }
 
+        // Only a REPORTED zero means nothing was reachable. A missing count is
+        // "no spoke data returned", which must not be announced as a failure.
         if (nLive === 0 && (r.spokes_total != null ? r.spokes_total > 0 : allSpokes)) {
             const denom = r.spokes_total != null ? `0/${r.spokes_total}` : '0';
             _toast(`${doneMsg}. No spokes were reachable (${denom} cleared).`, 'warning');
             return;
         }
 
-        const countText = (r.spokes_total != null)
-            ? ` Cleared live on ${nLive}/${r.spokes_total} spoke(s).`
-            : (r.pushed_to_spokes != null ? ` Pushed to ${nLive} spoke(s).` : '');
-        _toast(`${doneMsg}.${countText}`, 'success');
+        _toast(`${doneMsg}.${nLive !== null ? ` ${clearedPhrase()}.` : ''}`, 'success');
     } catch (e) {
         console.error(`_csUsbClearCmd: ${action} failed`, e);
         _toast(`Clear failed: ${e.message || e}`, 'error');
