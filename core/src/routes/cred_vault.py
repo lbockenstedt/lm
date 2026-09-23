@@ -179,6 +179,61 @@ def register(app, hub, ctx):
             actor=_actor(sess))
         return {"status": "ok", **res}
 
+    @app.post("/tenant/cred-vault/move-secret")
+    @_guard
+    async def cv_move_secret(request: Request):
+        """Move a secret to another bucket (Global Admin only).
+
+        The rescue path for a credential stranded in an orphaned bucket: move it
+        somewhere tenant-scoped code can actually reference, then delete the
+        orphan. ``hub``-mode secrets need no pass-phrase (they are keyed on the
+        hub Fernet key, not the bucket); ``psk``-mode secrets need both the
+        source ``psk`` and the destination ``to_psk``."""
+        sess = _sess(request)
+        if not _is_global_admin(sess):
+            raise HTTPException(status_code=404, detail="bucket not found")
+        body = await _body(request)
+        bucket = (body.get("bucket") or "").strip()
+        to_bucket = (body.get("to_bucket") or "").strip()
+        _require_reach(sess, bucket)
+        _require_reach(sess, to_bucket)
+        res = await _cv.move_secret(
+            hub, bucket, (body.get("name") or "").strip(), to_bucket,
+            psk=body.get("psk") or "", to_psk=body.get("to_psk") or "",
+            actor=_actor(sess))
+        return {"status": "ok", **res}
+
+    @app.post("/tenant/cred-vault/delete-bucket")
+    @_guard
+    async def cv_delete_bucket(request: Request):
+        """Delete a bucket outright (Global Admin only).
+
+        Buckets could be created by typing a free-text name but never removed —
+        ``list_buckets`` derives from the pass-phrase records UNION the secret
+        records — so a mistyped bucket lingered in every Global Admin's picker
+        forever, inviting credentials to be stored somewhere no tenant-scoped
+        code can reference and no tenant-admin can reach.
+
+        Refused for the ``__admin__`` slot (infrastructure) and for any bucket
+        that belongs to a LIVE tenant — those follow the tenant lifecycle, and
+        this endpoint exists to clear up orphans. Destroying leftover secrets
+        requires ``confirm_destroy``."""
+        sess = _sess(request)
+        if not _is_global_admin(sess):
+            raise HTTPException(status_code=404, detail="bucket not found")
+        body = await _body(request)
+        bucket = (body.get("bucket") or "").strip()
+        _require_reach(sess, bucket)
+        if bucket in _all_tenants(hub):
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{bucket}' is a live tenant's bucket — delete the tenant "
+                       "instead. This action is for buckets that match no tenant.")
+        res = await _cv.delete_bucket(hub, bucket,
+                                      confirm_destroy=bool(body.get("confirm_destroy")),
+                                      actor=_actor(sess))
+        return {"status": "ok", **res}
+
     @app.get("/tenant/cred-vault/secrets")
     async def cv_secrets(request: Request):
         sess = _sess(request)
