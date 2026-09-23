@@ -385,9 +385,12 @@ class ConsoleSpoke(BaseSpoke):
                      "vendor": res.get("vendor"), "logged_in": bool(res.get("logged_in")),
                      "identity": res.get("identity") or {}}
             if res.get("ambiguous_fields"):
-                # Fields the fingerprint couldn't pin down (2+ distinct valid
-                # candidates) — the hub asks the LLM to resolve just these.
+                # The fingerprint found 2+ distinct device addresses for "ip" —
+                # pass the candidates so the hub can ask the LLM which is the
+                # device's own (see fingerprint.ip_ambiguity).
                 reply["ambiguous_fields"] = list(res["ambiguous_fields"])
+                reply["ip_candidates"] = list(res.get("ip_candidates") or [])
+                reply["ip_candidate_context"] = dict(res.get("ip_candidate_context") or {})
             return reply
 
         if cmd == "CONSOLE_LLM_COLLECT":

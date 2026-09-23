@@ -51,7 +51,7 @@ class _Hub:
 
 
 def _build(monkeypatch, ports, *, enabled=True, agent="bf-1", is_admin=True, has_write=True, has_access=True,
-           hub=None, llm_result=None):
+           hub=None):
     # Deterministic tenant model: dedicated (not shared), admin sees all.
     monkeypatch.setattr(console_routes.access, "filter_enabled", lambda hub, m: False)
     monkeypatch.setattr(console_routes.access, "tenant_is_shared", lambda t: False)
@@ -63,7 +63,7 @@ def _build(monkeypatch, ports, *, enabled=True, agent="bf-1", is_admin=True, has
 
     async def _fake_orchestrate(hub, ag, sid, pid):
         orchestrated.append((ag, sid, pid))
-        return llm_result if llm_result is not None else {"identified": False}
+        return {"identified": False}
 
     monkeypatch.setattr(llm, "orchestrate", _fake_orchestrate)
 
@@ -154,7 +154,8 @@ def test_identify_all_denied_without_console_access(monkeypatch):
 
 
 # ── Single-port profile (``/api/console/identify-llm`` → _console_profile_one):
-#    an ambiguous fingerprint field is resolved by the LLM, the rest is kept. ──
+#    an ambiguous fingerprint ip goes to the dedicated resolve_ambiguous_ip()
+#    call (never orchestrate(), which redacts every IP); the rest is kept. ──
 class _ProfileHub(_Hub):
     def __init__(self, autoprobe):
         super().__init__([])
@@ -176,82 +177,142 @@ class _ProfileHub(_Hub):
 
 _FP_AMBIGUOUS = {"status": "SUCCESS", "vendor": "hp-procurve", "logged_in": True,
                  "identity": {"hostname": "HP-2530-24G", "serial": "CN12345",
-                              "ip": "10.1.1.20", "type": "Switch"},
-                 "ambiguous_fields": ["ip"]}
+                              "model": "2530-24G", "ip": "10.1.1.20", "type": "Switch"},
+                 "ambiguous_fields": ["ip"],
+                 "ip_candidates": ["10.1.1.20", "172.16.50.20"],
+                 "ip_candidate_context": {
+                     "10.1.1.20": "DEFAULT_VLAN | Manual 10.1.1.20 255.255.255.0 No No",
+                     "172.16.50.20": "MGMT | Manual 172.16.50.20 255.255.255.0 No No"}}
 
 
-def _build_profile(monkeypatch, autoprobe, *, agent="ab-1", llm_result=None):
+def _build_profile(monkeypatch, autoprobe, *, agent="ab-1", pick=None):
     hub = _ProfileHub(autoprobe)
-    c, orchestrated = _build(monkeypatch, [], agent=agent, hub=hub, llm_result=llm_result)
-    return c, hub, orchestrated
+    c, orchestrated = _build(monkeypatch, [], agent=agent, hub=hub)
+    resolved = []
+
+    async def _fake_resolve(hub, ag, candidates, context=""):
+        resolved.append((ag, candidates, context))
+        return pick
+
+    monkeypatch.setattr(llm, "resolve_ambiguous_ip", _fake_resolve)
+    return c, hub, orchestrated, resolved
 
 
-def test_profile_ambiguous_field_resolved_by_llm_and_merged(monkeypatch):
-    llm_res = {"status": "OK", "identified": True, "vendor": "Aruba",
-               "identity": {"ip": "172.16.50.20", "hostname": "llm-guess", "serial": "WRONG"}}
-    c, hub, orchestrated = _build_profile(monkeypatch, _FP_AMBIGUOUS, llm_result=llm_res)
+def test_profile_ambiguous_ip_resolved_by_llm_and_merged(monkeypatch):
+    c, hub, orchestrated, resolved = _build_profile(
+        monkeypatch, _FP_AMBIGUOUS, pick={"ip": "172.16.50.20", "confidence": 0.9})
     r = c.post("/api/console/identify-llm", json={"spoke_id": "c1", "port_id": "p1"})
     assert r.status_code == 200
     body = r.json()
-    assert orchestrated == [("ab-1", "c1", "p1")]
+    assert orchestrated == []                        # general pipeline never used
+    # The real candidate values (with their source lines) reach the resolver.
+    assert len(resolved) == 1
+    ag, cands, context = resolved[0]
+    assert ag == "ab-1"
+    assert [x["ip"] for x in cands] == ["10.1.1.20", "172.16.50.20"]
+    assert cands[1]["source"].startswith("MGMT")
+    assert "hp-procurve" in context and "2530-24G" in context
     assert body["source"] == "fingerprint+llm"
     assert body["llm_resolved_fields"] == ["ip"]
-    assert "ambiguous_fields" not in body            # fully resolved now
-    # Only the ambiguous field comes from the LLM; trusted fields are kept.
-    assert body["identity"] == {"hostname": "HP-2530-24G", "serial": "CN12345",
-                                "ip": "172.16.50.20", "type": "Switch"}
+    assert "ambiguous_fields" not in body and "ip_candidates" not in body
+    # Only ip comes from the LLM; the deterministic fields are preserved.
+    assert body["identity"] == {**_FP_AMBIGUOUS["identity"], "ip": "172.16.50.20"}
     assert body["vendor"] == "hp-procurve"
     assert body["identified"] is True and body["logged_in"] is True
-    # The LLM path was permitted on the spoke, and the MERGED identity persisted.
+    # The merged identity is persisted over the spoke's first-candidate one.
     assert ("CONSOLE_SET_LLM_IDENTIFY", {"enabled": True}) in hub.calls
     stored = [p for cmd, p in hub.calls if cmd == "CONSOLE_LLM_STORE"]
     assert stored and stored[-1]["identity"] == body["identity"]
 
 
-def test_profile_ambiguous_llm_unresolved_keeps_best_guess(monkeypatch):
-    c, hub, orchestrated = _build_profile(monkeypatch, _FP_AMBIGUOUS,
-                                          llm_result={"status": "INCONCLUSIVE", "identified": False})
-    body = c.post("/api/console/identify-llm", json={"spoke_id": "c1", "port_id": "p1"}).json()
-    assert orchestrated == [("ab-1", "c1", "p1")]
-    assert body["source"] == "fingerprint"
-    assert body["identity"]["ip"] == "10.1.1.20"
-    assert body["ambiguous_fields"] == ["ip"]
-    assert not any(cmd == "CONSOLE_LLM_STORE" for cmd, _ in hub.calls)
-
-
-def test_profile_ambiguous_llm_identified_without_field_restores_fingerprint(monkeypatch):
-    # The LLM identified the box but gave no IP: keep the flagged best guess, and
-    # re-store the fingerprint identity over the LLM-only one orchestrate() saved.
-    llm_res = {"status": "OK", "identified": True, "vendor": "Aruba",
-               "identity": {"model": "2530"}}
-    c, hub, orchestrated = _build_profile(monkeypatch, _FP_AMBIGUOUS, llm_result=llm_res)
-    body = c.post("/api/console/identify-llm", json={"spoke_id": "c1", "port_id": "p1"}).json()
-    assert orchestrated == [("ab-1", "c1", "p1")]
-    assert body["source"] == "fingerprint"
-    assert "llm_resolved_fields" not in body
-    assert body["ambiguous_fields"] == ["ip"]
-    assert body["identity"] == _FP_AMBIGUOUS["identity"]
-    stored = [p for cmd, p in hub.calls if cmd == "CONSOLE_LLM_STORE"]
-    assert stored and stored[-1]["identity"] == _FP_AMBIGUOUS["identity"]
-
-
-def test_profile_ambiguous_without_agent_returns_flagged_best_guess(monkeypatch):
-    c, hub, orchestrated = _build_profile(monkeypatch, _FP_AMBIGUOUS, agent=None)
+def test_profile_ambiguous_ip_without_agent_keeps_first_candidate(monkeypatch):
+    c, hub, orchestrated, resolved = _build_profile(monkeypatch, _FP_AMBIGUOUS, agent=None)
     r = c.post("/api/console/identify-llm", json={"spoke_id": "c1", "port_id": "p1"})
     assert r.status_code == 200                      # not a need_agent 409
     body = r.json()
-    assert orchestrated == []
+    assert resolved == [] and orchestrated == []
     assert body["status"] == "OK" and body["identified"] is True
     assert body["source"] == "fingerprint"
-    assert body["identity"]["ip"] == "10.1.1.20"
-    assert body["ambiguous_fields"] == ["ip"]        # caller can see it's unconfirmed
+    assert body["identity"] == _FP_AMBIGUOUS["identity"]   # ip = first candidate
+    assert body["ambiguous_fields"] == ["ip"]        # UI can mark it unconfirmed
+    assert body["ip_candidates"] == ["10.1.1.20", "172.16.50.20"]
+    assert not any(cmd == "CONSOLE_LLM_STORE" for cmd, _ in hub.calls)
+
+
+def test_profile_ambiguous_ip_llm_cannot_tell_keeps_first_candidate(monkeypatch):
+    c, hub, orchestrated, resolved = _build_profile(monkeypatch, _FP_AMBIGUOUS, pick=None)
+    body = c.post("/api/console/identify-llm", json={"spoke_id": "c1", "port_id": "p1"}).json()
+    assert len(resolved) == 1 and orchestrated == []
+    assert body["source"] == "fingerprint"
+    assert "llm_resolved_fields" not in body
+    assert body["identity"] == _FP_AMBIGUOUS["identity"]
+    assert body["ambiguous_fields"] == ["ip"]
+    assert body["ip_candidates"] == ["10.1.1.20", "172.16.50.20"]
+    assert not any(cmd == "CONSOLE_LLM_STORE" for cmd, _ in hub.calls)
 
 
 def test_profile_unambiguous_fingerprint_short_circuits(monkeypatch):
-    fp = {k: v for k, v in _FP_AMBIGUOUS.items() if k != "ambiguous_fields"}
-    c, hub, orchestrated = _build_profile(monkeypatch, fp)
+    fp = {k: v for k, v in _FP_AMBIGUOUS.items()
+          if k not in ("ambiguous_fields", "ip_candidates", "ip_candidate_context")}
+    c, hub, orchestrated, resolved = _build_profile(monkeypatch, fp)
     body = c.post("/api/console/identify-llm", json={"spoke_id": "c1", "port_id": "p1"}).json()
-    assert orchestrated == []                        # LLM never consulted
+    assert resolved == [] and orchestrated == []     # LLM never consulted
     assert body == {"status": "OK", "identified": True, "source": "fingerprint",
                     "vendor": "hp-procurve", "identity": fp["identity"], "logged_in": True}
     assert not any(cmd == "CONSOLE_SET_LLM_IDENTIFY" for cmd, _ in hub.calls)
+
+
+# ── resolve_ambiguous_ip itself: the ONLY call that sends real IPs to the LLM ──
+class _RelayHub:
+    def __init__(self, reply):
+        self.reply = reply
+        self.sent = []
+
+    async def request_response(self, sid, cmd, payload, timeout=15.0):
+        self.sent.append((sid, cmd, payload))
+        return {"status": "SUCCESS", "assistant": {"content": self.reply}}
+
+
+def _run(coro):
+    import asyncio
+    return asyncio.run(coro)
+
+
+_CANDS = [{"ip": "10.1.1.20", "source": "DEFAULT_VLAN | Manual 10.1.1.20 255.255.255.0"},
+          {"ip": "172.16.50.20", "source": "MGMT | Manual 172.16.50.20 255.255.255.0"}]
+
+
+def test_resolve_ambiguous_ip_sends_real_candidates_and_picks_one():
+    hub = _RelayHub('Sure:\n```json\n{"ip": "172.16.50.20", "confidence": 0.8}\n```')
+    res = _run(llm.resolve_ambiguous_ip(hub, "ab", _CANDS, "hp-procurve, 2530-24G"))
+    assert res == {"ip": "172.16.50.20", "confidence": 0.8}
+    (sid, cmd, payload), = hub.sent
+    assert (sid, cmd) == ("ab", "HELP_ASK")
+    assert payload["system"] == llm._SYS_PICK_IP
+    user = payload["messages"][0]["content"]
+    # Candidate values go out unredacted (the narrow exemption) …
+    assert "- 10.1.1.20" in user and "- 172.16.50.20" in user
+    # … but the source lines are still scrubbed (their IPs/masks → [IP]).
+    assert "MGMT | Manual [IP] [IP]" in user
+    assert "255.255.255.0" not in user
+
+
+@pytest.mark.parametrize("reply", ['{"ip": null}', '{"ip": "192.168.9.9", "confidence": 1}',
+                                   "I can't tell from this.", ""])
+def test_resolve_ambiguous_ip_rejects_unknown_or_non_candidate(reply):
+    assert _run(llm.resolve_ambiguous_ip(_RelayHub(reply), "ab", _CANDS, "x")) is None
+
+
+def test_resolve_ambiguous_ip_relay_failure_returns_none():
+    class _Boom:
+        async def request_response(self, *a, **k):
+            raise TimeoutError("relay down")
+    assert _run(llm.resolve_ambiguous_ip(_Boom(), "ab", _CANDS)) is None
+
+
+def test_general_llm_path_still_redacts_ips():
+    # The exemption must not leak: _ask_llm (used by orchestrate) still scrubs.
+    hub = _RelayHub("{}")
+    _run(llm._ask_llm(hub, "ab", "sys", "Vlan10 172.16.50.20 up"))
+    content = hub.sent[0][2]["messages"][0]["content"]
+    assert "172.16.50.20" not in content and "[IP]" in content

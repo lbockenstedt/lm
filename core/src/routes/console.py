@@ -818,16 +818,18 @@ def register(app, hub, ctx):
         device, fall back to the AI (scrubbed output → AppBuilder). Returns an
         identify-shaped result dict (adds ``source='fingerprint'`` on a DB hit).
 
-        Ambiguity: when the fingerprint reports ``ambiguous_fields`` (identity
-        fields with 2+ distinct valid candidates, e.g. ``ip`` on a multi-VLAN
-        switch), it isn't trusted as fully resolved — the LLM is asked, and only
-        those fields are taken from its answer; every other fingerprint field is
-        kept as-is. Result keys on that path:
-          * ``source`` — ``'fingerprint+llm'`` if the LLM resolved at least one
-            ambiguous field, else ``'fingerprint'`` (best guess unchanged).
-          * ``llm_resolved_fields`` — ambiguous fields the LLM supplied a value for.
-          * ``ambiguous_fields`` — fields STILL unconfirmed (first-match best
-            guess). Omitted when empty, like the spoke's own result.
+        Ambiguous IP: when the fingerprint reports ``"ip"`` in ``ambiguous_fields``
+        (2+ distinct device addresses, e.g. a multi-VLAN switch), its stored ip is
+        only the first candidate. The candidates in ``ip_candidates`` go to the
+        dedicated ``llm.resolve_ambiguous_ip`` call (NOT the general orchestrate()
+        pipeline, which redacts every IP and so can never pick one); every other
+        fingerprint field is kept as-is. Result keys on that path:
+          * ``source`` — ``'fingerprint+llm'`` if the LLM picked the ip, else
+            ``'fingerprint'`` (first-candidate best guess unchanged).
+          * ``llm_resolved_fields`` — ``["ip"]`` when the LLM picked it.
+          * ``ambiguous_fields`` — fields STILL unconfirmed. Omitted when empty,
+            like the spoke's own result.
+          * ``ip_candidates`` — the distinct candidates, while ip is unconfirmed.
 
         This is the explicit, on-demand profiling path — nothing calls it
         automatically, so passive capture stays passive unless an operator asks."""
@@ -846,7 +848,10 @@ def register(app, hub, ctx):
             ambiguous = [f for f in (r.get("ambiguous_fields") or []) if f]
             if not ambiguous:
                 return out
-            return await _console_resolve_ambiguous(hub, llm, sid, port_id, out, ambiguous)
+            out["ambiguous_fields"] = ambiguous
+            if "ip" in ambiguous:
+                await _console_resolve_ambiguous_ip(hub, llm, sid, port_id, out, r)
+            return out
         # 2. Unknown device → ask the AI (requires the AppBuilder relay).
         agent = llm.find_ab(hub)
         if not agent:
@@ -855,47 +860,50 @@ def register(app, hub, ctx):
         await _console_push_llm_flag(hub, [sid], True)  # permit the spoke's LLM collect
         return await llm.orchestrate(hub, agent, sid, port_id)
 
-    async def _console_resolve_ambiguous(hub, llm, sid, port_id, out, ambiguous):
-        """Ask the LLM to settle the fingerprint's ``ambiguous`` fields, merging
-        its answer into ``out`` (the fingerprint result) for those fields only.
-        No agent / LLM failure → the fingerprint best guess is returned with
-        ``ambiguous_fields`` kept so the caller knows it's unconfirmed."""
-        out["ambiguous_fields"] = list(ambiguous)
+    async def _console_resolve_ambiguous_ip(hub, llm, sid, port_id, out, fp):
+        """Ask the LLM which of the fingerprint's ``ip_candidates`` is the device's
+        own address and merge it into ``out["identity"]["ip"]`` (in place). No
+        agent / the LLM can't tell → ``out`` keeps the fingerprint's first-candidate
+        ip with ``"ip"`` left in ``ambiguous_fields`` so the UI marks it unconfirmed."""
+        ctx_map = fp.get("ip_candidate_context") or {}
+        cands = [{"ip": ip, "source": ctx_map.get(ip) or ""}
+                 for ip in (fp.get("ip_candidates") or []) if ip]
+        if len(cands) > 1:
+            out["ip_candidates"] = [c["ip"] for c in cands]
         agent = llm.find_ab(hub)
-        if not agent:
-            return out
-        await _console_push_llm_flag(hub, [sid], True)  # permit the spoke's LLM collect
+        if not agent or len(cands) < 2:
+            return
+        ident = out["identity"]
+        context = ", ".join(str(v) for v in (out.get("vendor"), ident.get("model"),
+                                             ident.get("type")) if v)
         try:
-            res = await llm.orchestrate(hub, agent, sid, port_id) or {}
+            pick = await llm.resolve_ambiguous_ip(hub, agent, cands, context)
         except Exception as e:  # noqa: BLE001 - keep the fingerprint best guess
-            logger.warning("console profile: LLM resolve of %s failed for %s/%s: %s",
-                           ambiguous, sid, port_id, e)
-            return out
-        if not res.get("identified"):
-            return out  # nothing persisted by orchestrate(); spoke keeps the fingerprint
-        llm_ident = res.get("identity") or {}
-        resolved = [f for f in ambiguous if llm_ident.get(f) not in (None, "")]
-        for f in resolved:
-            out["identity"][f] = llm_ident[f]
-        if resolved:
-            out["source"] = "fingerprint+llm"
-            out["llm_resolved_fields"] = resolved
-        remaining = [f for f in ambiguous if f not in resolved]
+            logger.warning("console profile: LLM ip resolve failed for %s/%s: %s",
+                           sid, port_id, e)
+            pick = None
+        if not pick or not pick.get("ip"):
+            return
+        ident["ip"] = pick["ip"]
+        out["source"] = "fingerprint+llm"
+        out["llm_resolved_fields"] = ["ip"]
+        out.pop("ip_candidates", None)
+        remaining = [f for f in out["ambiguous_fields"] if f != "ip"]
         if remaining:
             out["ambiguous_fields"] = remaining
         else:
             out.pop("ambiguous_fields", None)
-        # An identified orchestrate() stored the LLM's OWN identity on the spoke,
-        # replacing the trusted fingerprint fields; store the merged one over it.
+        # The spoke stored the fingerprint's first-candidate ip on AUTOPROBE;
+        # store the merged identity over it (CONSOLE_LLM_STORE needs the flag).
+        await _console_push_llm_flag(hub, [sid], True)
         try:
             cap = _console_unwrap(await hub.request_response(
                 sid, "CONSOLE_GET_CAPTURE", {"port_id": port_id}, timeout=15.0))
         except Exception:  # noqa: BLE001
             cap = {}
         await llm._persist(hub, sid, port_id, (cap or {}).get("capture") or "",
-                           {"vendor": out["vendor"], "identity": out["identity"],
+                           {"vendor": out["vendor"], "identity": ident,
                             "logged_in": out["logged_in"]})
-        return out
 
     async def _list_visible_console_ports(request: Request):
         """Serial ports across every connected Console spoke, each tagged with its

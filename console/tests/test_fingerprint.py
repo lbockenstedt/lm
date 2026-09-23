@@ -1118,10 +1118,14 @@ def _procurve():
 
 
 def test_parse_identity_hp_procurve_two_vlans_flags_ip_ambiguous():
-    amb = []
-    ident = fp.parse_identity(_procurve(), {"show ip": _PROCURVE_SHOW_IP_TWO_VLANS}, amb)
+    cands = []
+    ident = fp.parse_identity(_procurve(), {"show ip": _PROCURVE_SHOW_IP_TWO_VLANS}, cands)
     assert ident.get("ip") == "10.1.1.20"  # stored value is still the first valid match
-    assert amb == ["ip"]
+    assert [ip for ip, _ in cands] == ["10.1.1.20", "172.16.50.20"]
+    assert cands[1][1].startswith("MGMT | Manual 172.16.50.20")  # source line kept
+    amb = fp.ip_ambiguity(cands)
+    assert amb["ambiguous_fields"] == ["ip"]
+    assert amb["ip_candidates"] == ["10.1.1.20", "172.16.50.20"]
 
 
 def test_passive_identify_hp_procurve_two_vlans_ambiguous_fields():
@@ -1130,8 +1134,11 @@ def test_passive_identify_hp_procurve_two_vlans_ambiguous_fields():
     res = fp.passive_identify(text)
     assert res["vendor"] == "hp-procurve"
     assert res["identity"].get("ip") == "10.1.1.20"
-    assert "ip" in res["ambiguous_fields"]
+    assert res["ambiguous_fields"] == ["ip"]
+    assert res["ip_candidates"] == ["10.1.1.20", "172.16.50.20"]
+    assert set(res["ip_candidate_context"]) == {"10.1.1.20", "172.16.50.20"}
     assert "ambiguous_fields" not in res["identity"]  # sibling key, not an identity field
+    assert "ip_candidates" not in res["identity"]
 
 
 def test_run_identify_hp_procurve_two_vlans_ambiguous_fields():
@@ -1146,7 +1153,8 @@ def test_run_identify_hp_procurve_two_vlans_ambiguous_fields():
     assert res["vendor"] == "hp-procurve"
     assert res["identity"].get("ip") == "10.1.1.20"
     assert res["identity"].get("hostname") == "HP-2530-24G"
-    assert res["ambiguous_fields"] == ["ip"]  # hostname/serial/model unambiguous
+    assert res["ambiguous_fields"] == ["ip"]  # hostname/serial/model never tracked
+    assert res["ip_candidates"] == ["10.1.1.20", "172.16.50.20"]
     assert "ambiguous_fields" not in res["identity"]
 
 
@@ -1154,25 +1162,81 @@ def test_ambiguity_ignores_invalid_ip_candidates():
     # A rejected junk second address (999.1.1.1) never counts as a candidate.
     text = (_PROCURVE_SHOW_IP_DHCP
             + "  JUNK_VLAN            | Manual     999.1.1.1       255.255.255.0   No  No\n")
-    amb = []
-    ident = fp.parse_identity(_procurve(), {"show ip": text}, amb)
+    cands = []
+    ident = fp.parse_identity(_procurve(), {"show ip": text}, cands)
     assert ident.get("ip") == "172.16.1.57"
-    assert amb == []
+    assert [ip for ip, _ in cands] == ["172.16.1.57"]
+    assert fp.ip_ambiguity(cands) == {}
 
 
 def test_ambiguity_same_value_repeated_is_not_ambiguous():
-    amb = []
-    fp.parse_identity(_procurve(), {"show ip": _PROCURVE_SHOW_IP_DHCP * 2}, amb)
-    assert amb == []
+    cands = []
+    fp.parse_identity(_procurve(), {"show ip": _PROCURVE_SHOW_IP_DHCP * 2}, cands)
+    assert fp.ip_ambiguity(cands) == {}
 
 
 def test_single_vlan_procurve_not_ambiguous():
-    amb = []
-    fp.parse_identity(_procurve(), {"show ip": _PROCURVE_SHOW_IP_DHCP}, amb)
-    assert amb == []
+    cands = []
+    fp.parse_identity(_procurve(), {"show ip": _PROCURVE_SHOW_IP_DHCP}, cands)
+    assert fp.ip_ambiguity(cands) == {}
     text = ("HP J9776A 2530-24G Switch\r\n"
             "HP-2530-24G# show ip\r\n" + _PROCURVE_SHOW_IP_DHCP + "HP-2530-24G# ")
-    assert "ambiguous_fields" not in fp.passive_identify(text)
+    res = fp.passive_identify(text)
+    assert "ambiguous_fields" not in res and "ip_candidates" not in res
+
+
+def test_run_identify_cisco_multi_interface_flags_ip_with_candidates():
+    banner = "\r\nCisco IOS Software, Version 15.2(4)E\r\nSwitch#"
+    chan = _FakeChan(banner, [
+        ("terminal length 0", "\r\nSwitch#"),
+        ("show version", "\r\nProcessor board ID FTX9XYZ\r\nSwitch uptime is 1 day\r\nSwitch#"),
+        ("show ip interface brief",
+         "\r\nInterface              IP-Address      OK? Method Status                Protocol\r\n"
+         "Vlan1                  unassigned      YES unset  administratively down down\r\n"
+         "Vlan10                 172.16.1.90     YES NVRAM  up                    up\r\n"
+         "Vlan20                 10.0.0.5        YES NVRAM  up                    up\r\n"
+         "GigabitEthernet1/0/1   unassigned      YES unset  up                    up\r\n"
+         "Switch#"),
+    ])
+    res = fp.run_identify(chan.read, chan.write, [])
+    assert res["vendor"] == "cisco-ios"
+    assert res["identity"]["ip"] == "172.16.1.90"  # first candidate still stored
+    assert res["ambiguous_fields"] == ["ip"]
+    assert res["ip_candidates"] == ["172.16.1.90", "10.0.0.5"]
+    assert res["ip_candidate_context"]["10.0.0.5"].startswith("Vlan20 10.0.0.5")
+
+
+def test_cisco_show_version_multiple_versions_not_ambiguous():
+    # Regression (review concern 2): several distinct "Version …" substrings in
+    # one show version are a regex-scoping artifact, not competing candidates —
+    # only ip is ever tracked, so nothing is flagged and version = first match.
+    show_ver = ("\r\nCisco IOS Software, C2960X Software (C2960X-UNIVERSALK9-M), "
+                "Version 15.2(4)E, RELEASE SOFTWARE (fc2)\r\n"
+                "ROM: Bootstrap program is C2960X boot loader\r\n"
+                "BOOTLDR: C2960X Boot Loader (C2960X-HBOOT-M) Version 15.2(3r)E1\r\n"
+                "Switch uptime is 1 day\r\n"
+                "cisco WS-C2960X-24TS-L (APM86XXX) processor with 524288K bytes of memory.\r\n"
+                "Processor board ID FOC1234X0YZ\r\n"
+                "Model number                    : WS-C2960X-24TS-L\r\n"
+                "Switch Ports Model              SW Version            SW Image\r\n"
+                "*    1 28    WS-C2960X-24TS-L   15.2(4)E7             C2960X-UNIVERSALK9-M\r\n"
+                "Switch#")
+    chan = _FakeChan("\r\nCisco IOS Software, Version 15.2(4)E\r\nSwitch#", [
+        ("terminal length 0", "\r\nSwitch#"),
+        ("show version", show_ver),
+        ("show ip interface brief", "\r\nVlan1  10.0.0.5  YES  up  up\r\nSwitch#"),
+    ])
+    res = fp.run_identify(chan.read, chan.write, [])
+    assert res["identity"]["version"] == "15.2(4)E"  # first valid match, as before
+    assert "ambiguous_fields" not in res and "ip_candidates" not in res
+    prof = next(p for p in fp.PROFILES if p["name"] == "cisco-ios")
+    passive = fp.passive_identify(show_ver + "\r\nshow ip interface brief\r\n"
+                                  "Vlan1  10.0.0.5  YES  up  up\r\nSwitch#")
+    assert passive["vendor"] == "cisco-ios"
+    assert "ambiguous_fields" not in passive
+    cands = []
+    fp.parse_identity(prof, {"show version": show_ver}, cands)
+    assert cands == []
 
 
 def test_existing_single_device_identifies_report_no_ambiguity():
