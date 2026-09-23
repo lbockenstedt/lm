@@ -749,6 +749,7 @@ _NEW_PW_SKIP_SECS = 2.0    # read window per skip CR
 # PRIVILEGED ("#") mode, so we send `enable` and answer whatever it asks for.
 # Two secrets are tried at an enable password prompt: the credential that just
 # logged us in, then a bare Enter (many devices have no separate enable secret).
+_ENABLE_DRAINS = 2
 _ENABLE_ATTEMPTS = 2       # distinct enable secrets tried before giving up
 _ENABLE_SECS = 4.0         # read window after each enable-flow write
 
@@ -1185,9 +1186,21 @@ def _escalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[bytes]
 
     secrets = _enable_secrets(credentials, cred_idx)
     used = 0
-    # Bounded: each pass consumes one read window and either finishes or feeds
-    # the device one more answer, so this can never spin on a chatty line.
-    for _ in range(_ENABLE_ATTEMPTS + 2):
+    # `_read_until` also stops on a 0.4s idle gap, and real switches pause
+    # between echoing `enable` and printing their post-escalation banner (the
+    # AOS-S "Your previous successful login ..." notice). A couple of extra
+    # passive reads let a slow device finish its reply instead of being written
+    # off as unresponsive.
+    drains_left = _ENABLE_DRAINS
+
+    def _drain() -> None:
+        nonlocal transcript, drains_left
+        drains_left -= 1
+        transcript += _read_until(read_fn, patterns, _ENABLE_SECS)
+
+    # Bounded: each pass consumes one read window and either finishes, drains
+    # once more, or feeds the device one more answer, so this can never spin.
+    for _ in range(_ENABLE_ATTEMPTS + _ENABLE_DRAINS + 2):
         tail = _prompt_tail(transcript)
         if _PRIV_PROMPT.search(tail):
             diag["escalated"] = True
@@ -1198,9 +1211,12 @@ def _escalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[bytes]
         # refusal of this escalation.
         since = transcript[enable_at:]
         if not transcript[sent_at:].strip():
-            # A responsive device always echoes at least the command back, so
-            # a completely empty read window means the line went quiet — not
-            # that `enable` was refused.
+            # Nothing at all came back. A responsive device echoes at least the
+            # command, so this is a quiet line rather than a refusal — but give
+            # it another read window before giving up.
+            if drains_left > 0:
+                _drain()
+                continue
             diag["reason"] = "no_prompt"
             return transcript, diag
         if _UNPRIV_PROMPT.search(tail):
@@ -1234,6 +1250,10 @@ def _escalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[bytes]
             if not _send(secret):
                 diag["reason"] = "no_prompt"
                 return transcript, diag
+            continue
+        # Output arrived but it isn't a prompt yet — mid-banner. Keep reading.
+        if drains_left > 0:
+            _drain()
             continue
         diag["reason"] = "no_prompt"
         return transcript, diag

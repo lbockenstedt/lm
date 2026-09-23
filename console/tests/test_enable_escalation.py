@@ -13,6 +13,7 @@ Guards the two things that must NOT happen:
     is dropped back to its original privilege level.
 """
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -274,3 +275,72 @@ def test_run_identify_reports_user_mode_when_enable_is_unavailable():
     assert d["enable"]["reason"] == "no_enable_support"
     assert d["privilege"] == "user"
     assert "no `enable` command" in d["enable_reason"]
+
+
+# ── Real captured hardware: HPE/Aruba AOS-S ──────────────────────────────────
+# MIPBE-AJ18-L1SW-1# exit
+# MIPBE-AJ18-L1SW-1> enable
+# Your previous successful login (as manager) was on 2026-09-23 19:48:24
+#  from the console
+# MIPBE-AJ18-L1SW-1#
+#
+# Two things this proves: `enable` needs no secret here (the switch goes
+# straight to manager), and it answers with a multi-line login NOTICE whose
+# text contains the word "login" — which must not be read as a login prompt.
+_AOSS_ENABLE_BANNER = (
+    "\r\nYour previous successful login (as manager) was on 2026-09-23 19:48:24     \r\n"
+    " from the console\r\n"
+    "MIPBE-AJ18-L1SW-1#"
+)
+
+
+def test_aoss_enable_banner_is_not_mistaken_for_a_login_prompt():
+    ch, (tr, diag) = _run("\r\nMIPBE-AJ18-L1SW-1> ",
+                          [("enable", _AOSS_ENABLE_BANNER)])
+    assert diag["escalated"] is True
+    assert diag["reason"] == ""
+    assert diag["secrets_tried"] == 0          # AOS-S asked for nothing
+    assert ch.wrote("enable")
+    # The notice says "login" — we must not have answered it with a username.
+    assert not ch.wrote("admin\r")
+
+
+def test_aoss_pause_between_echo_and_banner_still_escalates():
+    """`_read_until` also stops on a 0.4s idle gap, so a switch that echoes
+    `enable` and only then prints its notice used to look unresponsive."""
+    class _Slow(_Chan):
+        pending = ""
+        ready_at = 0.0
+
+        def write(self, b):
+            self.sent.append(b.decode(errors="replace"))
+            if "enable" in b.decode(errors="replace"):
+                self.buf += b"enable\r\n"          # echo only, then a pause
+                self.pending = _AOSS_ENABLE_BANNER
+                # Longer than _read_until's 0.4s idle break, so the first read
+                # window ends with nothing but the echo in hand.
+                self.ready_at = time.monotonic() + 0.8
+
+        def read(self):
+            if self.pending and time.monotonic() >= self.ready_at:
+                self.buf += self.pending.encode()
+                self.pending = ""
+            out = bytes(self.buf[:256])
+            del self.buf[:256]
+            return out
+
+    ch = _Slow("\r\nMIPBE-AJ18-L1SW-1> ", [])
+    ch.read()
+    tr, diag = fp._escalate_privilege(
+        ch.read, ch.write, [{"username": "manager", "password": "pw"}], 0, "\r\nMIPBE-AJ18-L1SW-1> ")
+    assert diag["escalated"] is True, diag
+    assert diag["reason"] == ""
+
+
+def test_aoss_exit_drops_manager_back_to_operator():
+    """Captured from the same switch: `exit` at "#" returns to ">" — the
+    fallback `_deescalate_privilege` relies on when `disable` isn't available."""
+    ch = _Chan("", [("disable", "\r\nInvalid input: disable\r\nMIPBE-AJ18-L1SW-1#"),
+                    ("exit", "\r\nMIPBE-AJ18-L1SW-1> ")])
+    assert fp._deescalate_privilege(ch.read, ch.write) is True
+    assert ch.wrote("exit")

@@ -98,6 +98,11 @@ Rules worth knowing:
   meaningless and on some appliances is a real, state-changing command.
 - At most two secrets are tried. A refusal is classified from the error text: *no `enable`
   command at all* (`>` **is** the top level — retrying is pointless) versus *rejected secret*.
+- Many switches need **no secret at all** — HPE/Aruba AOS-S goes straight from `>` to `#` and
+  answers with a multi-line *"Your previous successful login (as manager) was on …"* notice.
+  That notice contains the word "login" and must not be answered as a login prompt. Devices
+  also pause mid-reply, so the probe will re-read a couple of times before calling a line
+  unresponsive rather than trusting the first idle gap.
 - `enable`/`disable` are in `is_readonly_command`'s mutation list, so they are written straight
   to the line by the login code and can never be requested through the profile/LLM command path.
 - If we escalated an **operator's already-open session** — one we did not authenticate and so
