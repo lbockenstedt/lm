@@ -27,7 +27,7 @@ except ImportError:
 try:
     from serial_manager import (
         PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
-        score_sample,
+        DEFAULT_BAUD, score_sample,
     )
     from fingerprint import (run_identify, read_running_config, push_config, PROFILES,
                              passive_identify, run_commands, merge_credentials,
@@ -38,7 +38,7 @@ try:
 except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .serial_manager import (  # type: ignore
         PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
-        score_sample,
+        DEFAULT_BAUD, score_sample,
     )
     from .fingerprint import (run_identify, read_running_config, push_config, PROFILES,  # type: ignore
                               passive_identify, run_commands, merge_credentials,
@@ -334,6 +334,11 @@ class ConsoleSpoke(BaseSpoke):
                                            "paste_line_delay_ms", "paste_chunk", "paste_char_delay_ms")
                       if k in data}
             self.store.update(pid, settings=fields)
+            if "baud" in fields:
+                # An operator-chosen rate is authoritative: pin it so a later
+                # auto-detect/boot relock can never roll the port back.
+                self.store.update(pid, probe={"baud_pinned": True, "baud_confident": True,
+                                              "detected_baud": int(fields["baud"])})
             return {"status": "SUCCESS", "port_id": pid, "settings": self.store.settings(pid)}
 
         if cmd == "CONSOLE_SET_ALIAS":
@@ -381,9 +386,17 @@ class ConsoleSpoke(BaseSpoke):
             res = await self._exclusive_probe(pid, self._identify_blocking, pid, dev)
             self._record_identify_telemetry(pid, res, method="login")
             await self._emit_probe_result(pid, res)
-            return {"status": "SUCCESS", "port_id": pid,
-                    "vendor": res.get("vendor"), "logged_in": bool(res.get("logged_in")),
-                    "identity": res.get("identity") or {}}
+            reply = {"status": "SUCCESS", "port_id": pid,
+                     "vendor": res.get("vendor"), "logged_in": bool(res.get("logged_in")),
+                     "identity": res.get("identity") or {}}
+            if res.get("ambiguous_fields"):
+                # The fingerprint found 2+ distinct device addresses for "ip" —
+                # pass the candidates so the hub can ask the LLM which is the
+                # device's own (see fingerprint.ip_ambiguity).
+                reply["ambiguous_fields"] = list(res["ambiguous_fields"])
+                reply["ip_candidates"] = list(res.get("ip_candidates") or [])
+                reply["ip_candidate_context"] = dict(res.get("ip_candidate_context") or {})
+            return reply
 
         if cmd == "CONSOLE_LLM_COLLECT":
             # Log in (generically) and run a validated set of READ-ONLY commands,
@@ -458,9 +471,14 @@ class ConsoleSpoke(BaseSpoke):
                 result = await self._exclusive_probe(pid, detect_baud, dev, DEFAULT_BAUD_CANDIDATES)
             except Exception as e:  # noqa: BLE001
                 return {"status": "ERROR", "message": f"baud detect failed: {e}"}
-            if result.get("baud"):
+            if result.get("confident") and not (self.store.get(pid).get("probe") or {}).get("baud_pinned"):
+                # Only a CONFIDENT sweep may change the port's rate — a guess
+                # would strand the session on the wrong baud — and an operator
+                # pin always outranks auto-detection.
                 self.store.update(pid, settings={"baud": result["baud"]},
-                                  probe={"detected_baud": result["baud"], "banner": result.get("sample", "")})
+                                  probe={"detected_baud": result["baud"],
+                                         "banner": result.get("sample", ""),
+                                         "baud_confident": True})
             return {"status": "SUCCESS", "port_id": pid, **result}
 
         if cmd == "CONSOLE_OPEN":
@@ -638,7 +656,7 @@ class ConsoleSpoke(BaseSpoke):
         line yields real text), then logs in / fingerprints at that rate."""
         baud, locked = self._resolve_baud(port_id, dev)
         try:
-            ser = open_raw(dev, baud or 9600, timeout=0.3)
+            ser = open_raw(dev, baud or DEFAULT_BAUD, timeout=0.3)
         except Exception as e:  # noqa: BLE001
             return {"error": f"open failed: {e}"}
         try:
@@ -658,7 +676,7 @@ class ConsoleSpoke(BaseSpoke):
         (for LLM-driven identify). Commands are re-validated inside run_commands.
         ``extra_creds`` are LLM-proposed credential guesses tried after the
         operator's own creds (and before the factory-default fallback)."""
-        baud = self.store.settings(port_id).get("baud") or 9600
+        baud = self.store.settings(port_id).get("baud") or DEFAULT_BAUD
         try:
             ser = open_raw(dev, baud, 0.3)
         except Exception as e:  # noqa: BLE001
@@ -684,7 +702,7 @@ class ConsoleSpoke(BaseSpoke):
         prof = self._profile_for(port_id)
         if not prof:
             return {"status": "ERROR", "message": "device not identified — run Identify first", "config": ""}
-        baud = self.store.settings(port_id).get("baud") or 9600
+        baud = self.store.settings(port_id).get("baud") or DEFAULT_BAUD
         try:
             ser = open_raw(dev, baud, 0.3)
         except Exception as e:  # noqa: BLE001
@@ -702,7 +720,7 @@ class ConsoleSpoke(BaseSpoke):
         prof = self._profile_for(port_id)
         if not prof:
             return {"status": "ERROR", "message": "device not identified — run Identify first"}
-        baud = self.store.settings(port_id).get("baud") or 9600
+        baud = self.store.settings(port_id).get("baud") or DEFAULT_BAUD
         try:
             ser = open_raw(dev, baud, 0.3)
         except Exception as e:  # noqa: BLE001
@@ -1238,16 +1256,19 @@ class ConsoleSpoke(BaseSpoke):
     def _boot_maybe_relock(self, pid: str, dev: str, score: float,
                            cfg: Dict[str, Any], boot: Dict[str, Any],
                            now: float) -> None:
-        """During a boot, if the line reads as garbage (likely wrong baud) and the
-        baud isn't already confidently locked, schedule ONE exclusive baud re-lock
-        (rate-limited) so we capture the boot legibly. No-op when a user holds the
-        port."""
+        """During a boot, if the line reads as garbage (likely wrong baud), schedule
+        ONE exclusive baud re-lock (rate-limited) so we capture the boot legibly.
+        No-op when a user holds the port, or when an operator pinned the rate."""
         if score >= cfg["garbage_score"]:
             return
         if self.sessions.has_user_sessions(pid) or pid in self._probing:
             return
         probe = self.store.get(pid).get("probe") or {}
-        if probe.get("baud_confident"):
+        # Only an operator pin blocks a re-sweep. An AUTOMATIC lock does not: a
+        # port that confidently locked onto the wrong rate would otherwise stay
+        # there forever, which is exactly how sessions got stranded on 9600.
+        # The sweep restarts at 115200, so a garbled line comes back to it.
+        if probe.get("baud_pinned"):
             return
         if now - self._baud_relock_at.get(pid, 0.0) < cfg["relock_secs"]:
             return
@@ -1266,6 +1287,9 @@ class ConsoleSpoke(BaseSpoke):
         persist the new rate + mark it confident. The passive monitor then reopens
         the channel at the correct baud on its next pass (ensure_monitor)."""
         if pid in self._probing or self.sessions.has_user_sessions(pid):
+            return
+        # An operator-pinned rate is never auto-relocked.
+        if (self.store.get(pid).get("probe") or {}).get("baud_pinned"):
             return
         try:
             d = await self._exclusive_probe(pid, detect_baud, dev, DEFAULT_BAUD_CANDIDATES)

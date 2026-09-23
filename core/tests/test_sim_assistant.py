@@ -39,7 +39,7 @@ class _FakeHub:
         if self.fail:
             raise RuntimeError("relay unreachable")
         assert cmd == "HELP_ASK"
-        reply = self.replies.pop(0) if self.replies else "OK"
+        reply = self.replies.pop(0) if self.replies else ""
         if isinstance(reply, dict):
             assistant = {"content": reply.get("content", ""),
                         "tool_calls": reply.get("tool_calls") or []}
@@ -461,3 +461,65 @@ def test_system_prompt_tells_the_model_it_can_read_the_real_code():
         {"role": "user", "content": "how does the collab sim work?"}]})
     system = hub.last_request[2]["system"]
     assert "read_cs_file" in system and "list_cs_dir" in system
+
+
+def test_github_get_contents_injects_auth_header_when_token_present(monkeypatch):
+    import httpx
+    captured_headers = {}
+    
+    class FakeClient:
+        def __init__(self, **kw):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, exc_type, exc_val, exc_tb):
+            pass
+        async def get(self, url, params=None, headers=None):
+            captured_headers.update(headers or {})
+            return _FakeGithubResp(200, {})
+            
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setenv("GITHUB_TOKEN", "fake_token_123")
+    
+    asyncio.run(sim_assistant_module._github_get_contents("some/path"))
+    assert captured_headers.get("Authorization") == "Bearer fake_token_123"
+
+def test_chat_passes_tool_role_on_intermediate_rounds(monkeypatch):
+    async def fake_get(path):
+        return _FakeGithubResp(200, {"content": _b64("# dns_fail.sh")})
+    monkeypatch.setattr(sim_assistant_module, "_github_get_contents", fake_get)
+
+    hub = _FakeHub(replies=[
+        {"content": "", "tool_calls": [
+            {"id": "1", "function": {
+                "name": "read_sim_source",
+                "arguments": '{"sim_name": "dns_fail", "platform": "linux"}'}}]},
+        "Intermediate draft",
+        "Here's a dns_fail variant based on the real dns_fail source...",
+    ])
+    c = _build(hub)
+    r = c.post("/api/sim-assistant/chat", json={"messages": [
+        {"role": "user", "content": "hello"}]})
+    assert r.status_code == 200
+    assert len(hub.all_requests) == 3
+    assert hub.all_requests[0][2].get("role") == "tool"
+    assert hub.all_requests[1][2].get("role") == "tool"
+    assert hub.all_requests[2][2].get("role") == "final"
+    assert hub.all_requests[2][2].get("tools") is None
+    assert "dns_fail variant" in r.json()["answer"]
+
+
+def test_chat_passes_final_role_on_exhausted_budget(monkeypatch):
+    async def fake_get(path):
+        return _FakeGithubResp(200, {"content": _b64("# loop")})
+    monkeypatch.setattr(sim_assistant_module, "_github_get_contents", fake_get)
+
+    tool_reply = {"content": "", "tool_calls": [
+        {"id": "1", "function": {"name": "list_available_sims", "arguments": "{}"}}]}
+    hub = _FakeHub(replies=[tool_reply, tool_reply, tool_reply, tool_reply, tool_reply, "Exhausted final summary"])
+    c = _build(hub)
+    r = c.post("/api/sim-assistant/chat", json={"messages": [{"role": "user", "content": "search deep"}]})
+    assert r.status_code == 200
+    assert hub.last_request[2].get("role") == "final"
+    assert "Exhausted final summary" in r.json()["answer"]
+

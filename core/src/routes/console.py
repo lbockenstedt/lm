@@ -464,22 +464,59 @@ def register(app, hub, ctx):
             return []
         return creds
 
-    def _console_purge_legacy_credentials(hub):
+    def _console_load_legacy_blob_credentials(hub):
+        """Decrypt+parse the retired hub-local ``console_credentials_enc``
+        blob into ``[{username,password}]`` (``[]`` when absent, empty, or
+        undecryptable). Shared by the purge guard and by the ``to-vault``
+        migration endpoint, which is the only way an operator can actually
+        move this blob's contents into the Credential Vault — it predates
+        the vault and is never written there by anything else."""
+        try:
+            state = hub.state.system_state
+            blob = state.get("console_credentials_enc")
+            if not blob:
+                return []
+            from security.encryption import hub_encryption
+            parsed = json.loads(hub_encryption.decrypt(blob.encode()))
+        except Exception:  # noqa: BLE001 — no state / undecryptable / malformed
+            return []
+        return [{"username": str(c.get("username", "")), "password": str(c.get("password", ""))}
+                for c in (parsed or []) if isinstance(c, dict) and c.get("username")]
+
+    async def _console_purge_legacy_credentials(hub):
         """Drop the retired hub-local console password blob
-        (``console_credentials_enc``) from hub state, once, and say so.
+        (``console_credentials_enc``) from hub state, once, and say so —
+        UNLESS it still decrypts to a usable credential list that has no
+        equivalent in the Credential Vault yet, in which case it is left in
+        place (with a loud warning) so the operator has a chance to migrate
+        it via ``POST /api/console/credentials/to-vault`` first.
 
         Console logins live in the Credential Vault — which works on EVERY
         deployment, falling back to its own encrypted ``blobs`` map when no
         cloud vault is configured (``cred_vault._vault_available``) — so this
-        second, module-private password store had no remaining purpose.
+        second, module-private password store had no remaining purpose once
+        migrated. But an install that never migrated has, until now, had this
+        blob as its ONLY copy of its console auto-login passwords: purging it
+        unconditionally — as the previous version of this function did, from
+        a plain GET — silently destroyed the only readable copy the first
+        time the console credentials page loaded, with no way to recover them
+        (the retired POST returns 409). That is unrecoverable data loss, not
+        hygiene.
 
-        It was also actively harmful: the blob is Fernet-encrypted with the
-        hub key, so any install whose key was replaced (re-install, restore,
-        rotation without ``LM_FERNET_KEY_PREVIOUS``) is left holding an
-        ORPHAN it can never read. Every resolve then logged "could not
-        decrypt stored credentials" and returned [], which looked like the
-        cause of an empty credential list while hiding the real one. Deleting
-        it costs nothing: an unreadable blob has no recoverable content.
+        The blob being Fernet-encrypted with the hub key does mean any install
+        whose key was replaced (re-install, restore, rotation without
+        ``LM_FERNET_KEY_PREVIOUS``) holds an ORPHAN it can never read — for
+        that class deleting still costs nothing, an unreadable blob has no
+        recoverable content, so purge proceeds exactly as before.
+
+        "Already migrated" is checked against the ACTUAL Credential Vault
+        (``_console_creds_all_buckets``, i.e. real ``cred_vault`` buckets),
+        never :func:`_console_load_credentials` (which only resolves an
+        external Key Vault *reference* and is unrelated to what ``to-vault``
+        writes) — and it is a content match (every blob credential's
+        username+password pair must already be present in the vault), not
+        mere non-emptiness, so an unrelated credential already sitting in the
+        vault can no longer cause this blob's own logins to be discarded.
 
         Never raises: this also runs on the seed path, and credential hygiene
         must not be able to break credential delivery."""
@@ -487,8 +524,30 @@ def register(app, hub, ctx):
             state = hub.state.system_state
             if "console_credentials_enc" not in state:
                 return False
-            state.pop("console_credentials_enc", None)
         except Exception:  # noqa: BLE001 — no/odd state object (early boot)
+            return False
+
+        blob_creds = _console_load_legacy_blob_credentials(hub)
+        if blob_creds:
+            try:
+                vault_creds = await _console_creds_all_buckets(hub)
+            except Exception:  # noqa: BLE001 — vault read failed; be cautious
+                vault_creds = []
+            vault_keys = {(c.get("username", ""), c.get("password", "")) for c in vault_creds}
+            blob_keys = {(c["username"], c["password"]) for c in blob_creds}
+            migrated = blob_keys.issubset(vault_keys)
+            if not migrated:
+                logger.warning(
+                    "console: the legacy hub-local credential store still "
+                    "holds a readable, unmigrated console login list — NOT "
+                    "purging it. Run POST /api/console/credentials/to-vault "
+                    "to move it into the Credential Vault, after which it "
+                    "will be dropped automatically.")
+                return False
+
+        try:
+            state.pop("console_credentials_enc", None)
+        except Exception:  # noqa: BLE001
             return False
         try:
             hub.state._mark_dirty()
@@ -775,7 +834,7 @@ def register(app, hub, ctx):
         todo = [sid for sid in spokes if sid not in seeded]
         if not todo:
             return
-        _console_purge_legacy_credentials(hub)
+        await _console_purge_legacy_credentials(hub)
 
         async def _seed_one(sid):
             try:
@@ -818,6 +877,19 @@ def register(app, hub, ctx):
         device, fall back to the AI (scrubbed output → AppBuilder). Returns an
         identify-shaped result dict (adds ``source='fingerprint'`` on a DB hit).
 
+        Ambiguous IP: when the fingerprint reports ``"ip"`` in ``ambiguous_fields``
+        (2+ distinct device addresses, e.g. a multi-VLAN switch), its stored ip is
+        only the first candidate. The candidates in ``ip_candidates`` go to the
+        dedicated ``llm.resolve_ambiguous_ip`` call (NOT the general orchestrate()
+        pipeline, which redacts every IP and so can never pick one); every other
+        fingerprint field is kept as-is. Result keys on that path:
+          * ``source`` — ``'fingerprint+llm'`` if the LLM picked the ip, else
+            ``'fingerprint'`` (first-candidate best guess unchanged).
+          * ``llm_resolved_fields`` — ``["ip"]`` when the LLM picked it.
+          * ``ambiguous_fields`` — fields STILL unconfirmed. Omitted when empty,
+            like the spoke's own result.
+          * ``ip_candidates`` — the distinct candidates, while ip is unconfirmed.
+
         This is the explicit, on-demand profiling path — nothing calls it
         automatically, so passive capture stays passive unless an operator asks."""
         from routes import console_llm_identify as llm  # local import (optional feature)
@@ -829,9 +901,16 @@ def register(app, hub, ctx):
         except Exception:  # noqa: BLE001
             r = {}
         if r and (r.get("vendor") or r.get("identity")):
-            return {"status": "OK", "identified": True, "source": "fingerprint",
-                    "vendor": r.get("vendor"), "identity": r.get("identity") or {},
-                    "logged_in": bool(r.get("logged_in"))}
+            out = {"status": "OK", "identified": True, "source": "fingerprint",
+                   "vendor": r.get("vendor"), "identity": dict(r.get("identity") or {}),
+                   "logged_in": bool(r.get("logged_in"))}
+            ambiguous = [f for f in (r.get("ambiguous_fields") or []) if f]
+            if not ambiguous:
+                return out
+            out["ambiguous_fields"] = ambiguous
+            if "ip" in ambiguous:
+                await _console_resolve_ambiguous_ip(hub, llm, sid, port_id, out, r)
+            return out
         # 2. Unknown device → ask the AI (requires the AppBuilder relay).
         agent = llm.find_ab(hub)
         if not agent:
@@ -839,6 +918,51 @@ def register(app, hub, ctx):
                     "message": "Device not in the fingerprint DB and the AppBuilder LLM agent is not connected."}
         await _console_push_llm_flag(hub, [sid], True)  # permit the spoke's LLM collect
         return await llm.orchestrate(hub, agent, sid, port_id)
+
+    async def _console_resolve_ambiguous_ip(hub, llm, sid, port_id, out, fp):
+        """Ask the LLM which of the fingerprint's ``ip_candidates`` is the device's
+        own address and merge it into ``out["identity"]["ip"]`` (in place). No
+        agent / the LLM can't tell → ``out`` keeps the fingerprint's first-candidate
+        ip with ``"ip"`` left in ``ambiguous_fields`` so the UI marks it unconfirmed."""
+        ctx_map = fp.get("ip_candidate_context") or {}
+        cands = [{"ip": ip, "source": ctx_map.get(ip) or ""}
+                 for ip in (fp.get("ip_candidates") or []) if ip]
+        if len(cands) > 1:
+            out["ip_candidates"] = [c["ip"] for c in cands]
+        agent = llm.find_ab(hub)
+        if not agent or len(cands) < 2:
+            return
+        ident = out["identity"]
+        context = ", ".join(str(v) for v in (out.get("vendor"), ident.get("model"),
+                                             ident.get("type")) if v)
+        try:
+            pick = await llm.resolve_ambiguous_ip(hub, agent, cands, context)
+        except Exception as e:  # noqa: BLE001 - keep the fingerprint best guess
+            logger.warning("console profile: LLM ip resolve failed for %s/%s: %s",
+                           sid, port_id, e)
+            pick = None
+        if not pick or not pick.get("ip"):
+            return
+        ident["ip"] = pick["ip"]
+        out["source"] = "fingerprint+llm"
+        out["llm_resolved_fields"] = ["ip"]
+        out.pop("ip_candidates", None)
+        remaining = [f for f in out["ambiguous_fields"] if f != "ip"]
+        if remaining:
+            out["ambiguous_fields"] = remaining
+        else:
+            out.pop("ambiguous_fields", None)
+        # The spoke stored the fingerprint's first-candidate ip on AUTOPROBE;
+        # store the merged identity over it (CONSOLE_LLM_STORE needs the flag).
+        await _console_push_llm_flag(hub, [sid], True)
+        try:
+            cap = _console_unwrap(await hub.request_response(
+                sid, "CONSOLE_GET_CAPTURE", {"port_id": port_id}, timeout=15.0))
+        except Exception:  # noqa: BLE001
+            cap = {}
+        await llm._persist(hub, sid, port_id, (cap or {}).get("capture") or "",
+                           {"vendor": out["vendor"], "identity": ident,
+                            "logged_in": out["logged_in"]})
 
     async def _list_visible_console_ports(request: Request):
         """Serial ports across every connected Console spoke, each tagged with its
@@ -1518,7 +1642,7 @@ def register(app, hub, ctx):
         # console password store any more, so these stay constant. The keys are
         # kept because the WebUI still reads them; it renders the legacy section
         # only when `local_credentials` is non-empty, so it simply disappears.
-        _console_purge_legacy_credentials(hub)
+        await _console_purge_legacy_credentials(hub)
         # Console logins are edited in the Credential Library
         # (POST /api/console/credentials/set), never here.
         kv_backed = _console_creds_keyvault_backed(hub)
@@ -1546,7 +1670,7 @@ def register(app, hub, ctx):
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
-        _console_purge_legacy_credentials(app.state.hub)
+        await _console_purge_legacy_credentials(app.state.hub)
         raise HTTPException(status_code=409, detail=(
             "The hub no longer stores console passwords locally. Manage console "
             "auto-identify logins in the Credential Library (they are read from "
@@ -1557,7 +1681,16 @@ def register(app, hub, ctx):
         """Migrate the current auto-identify credential list into the Credential
         Vault (Global Admin slot ``__admin__``, automation-readable) so it's
         managed alongside every other secret and pulled unattended by the seed
-        loop. Requires the admin-slot pass-phrase. Admin only."""
+        loop. Requires the admin-slot pass-phrase. Admin only.
+
+        Source is the Key Vault *reference* list
+        (:func:`_console_load_credentials`) when configured, falling back to
+        the retired hub-local blob (``console_credentials_enc``) when that's
+        empty — this is the only path that can migrate an install still
+        holding creds solely in that blob, which is exactly the population
+        :func:`_console_purge_legacy_credentials` refuses to purge until a
+        migration happens; without this fallback that guard's own advice
+        ("run this endpoint first") was unusable for those installs."""
         sess = _session_user(request)
         if not _is_admin(sess):
             raise HTTPException(status_code=403, detail="admin only")
@@ -1567,7 +1700,7 @@ def register(app, hub, ctx):
         except Exception:
             body = {}
         psk = str((body or {}).get("psk") or "")
-        creds = _console_load_credentials(hub)
+        creds = _console_load_credentials(hub) or _console_load_legacy_blob_credentials(hub)
         if not creds:
             raise HTTPException(status_code=400, detail="no console credentials to migrate")
         import cred_vault as _cv

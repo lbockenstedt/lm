@@ -128,6 +128,17 @@ comma-separated **source-IP allow-list**. This maps to the role config keys
   an exotic rate that happened to score marginally higher. Only if both stay silent/garbled
   does it fall through to the less-common rates. The chosen rate is saved to the port's
   settings; a confidently-good match (score ≥ 1.3) also stops the sweep early.
+- **115200 is the standing default.** A port nobody has configured opens at **115200**,
+  and a sweep that never gets a readable reply reports 115200 rather than whichever rate
+  happened to rattle loudest — so a port can never quietly settle on 9600. Only a
+  *confident* sweep is allowed to change a port's stored rate; an inconclusive one is
+  reported but never persisted. On an exact score tie a priority rate (115200, then 9600)
+  always beats an exotic one.
+- **Operator pin.** Setting the baud by hand (`CONSOLE_SET_SETTINGS`) **pins** it: neither
+  auto-detect nor the boot-time re-lock will overwrite an operator's choice, so a manually
+  set 115200 stays put. Setting it by hand again simply re-pins the new value. Conversely,
+  an *automatic* lock is never permanent: if a port that auto-locked onto a rate later
+  reads as garbage, the boot watcher re-sweeps it (rate-limited), starting again at 115200.
 - **One-writer session relay.** Opening a terminal (`CONSOLE_OPEN`) attaches a browser
   session to a `PortChannel` — one real OS serial handle per physical port, shared by
   every attached session. A background reader thread reads the handle once and fans the
@@ -190,7 +201,8 @@ comma-separated **source-IP allow-list**. This maps to the role config keys
 2. **Set baud / auto-detect.** From the port's settings panel, either pick a known baud
    rate manually or click **Detect Baud** to let the agent sweep candidate rates and lock
    the best match — useful the first time you plug in an unfamiliar device. Detected/
-   manually-set baud persists across sessions and reboots.
+   manually-set baud persists across sessions and reboots, and a rate you set by hand is
+   **pinned** so auto-detection can never roll it back. Unconfigured ports default to 115200.
 3. **Alias a port.** Give a port a friendly name (`CONSOLE_SET_ALIAS`) so it's recognizable
    in the port list instead of a raw device path or USB id — handy on a host with many
    adapters plugged in.

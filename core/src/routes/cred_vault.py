@@ -48,15 +48,23 @@ def register(app, hub, ctx):
     def _all_tenants(hub):
         """Every known tenant → {tenant_id: label}. Global-Admin-only helper so
         the vault can list a bucket per tenant (even ones with no secrets yet),
-        letting a Global Admin add credentials for any tenant. ``default`` is
-        excluded (it's the unassigned/system bucket, not a real tenant)."""
+        letting a Global Admin add credentials for any tenant.
+
+        ``default`` is INCLUDED. It used to be excluded as "the unassigned/system
+        bucket, not a real tenant", but ``default`` is a real tenant that owns
+        real spokes (e.g. an nw agent bound to ``default``). Hiding it meant a
+        Global Admin could not create a vault entry for that tenant, so they
+        could not build a scan-credential set for it either, and the Scan tab
+        correctly-but-uselessly reported "no scan credential sets belong to this
+        tenant" with no way to fix it. The non-tenant Global Admin slot is
+        ``__admin__`` and is listed separately."""
         try:
             tenants = (hub.state.tenant_state or {}).get("tenants", {}) or {}
         except Exception:  # noqa: BLE001
             return {}
         out = {}
         for tid, meta in tenants.items():
-            if not tid or tid == "default":
+            if not tid:
                 continue
             meta = meta or {}
             out[tid] = meta.get("display_name") or meta.get("name") or tid
@@ -127,10 +135,104 @@ def register(app, hub, ctx):
         out = []
         for b in sorted(reach):
             rec = existing.get(b, {"bucket": b, "has_psk": False, "secret_count": 0})
-            name = ("Global Admin slot" if b == _cv.ADMIN_BUCKET else labels.get(b, b))
-            out.append({**rec, "name": name, "is_admin_slot": b == _cv.ADMIN_BUCKET})
+            is_admin_slot = b == _cv.ADMIN_BUCKET
+            # A bucket that is neither the Global Admin slot nor a known tenant
+            # is ORPHANED: it only shows up because it holds secrets. Nothing
+            # tenant-scoped can ever reference it (credential sets are matched by
+            # tenant_id), and a tenant-admin can never reach it. Flag it so the
+            # UI can say so instead of rendering a bare id like "admin" right
+            # next to "Global Admin slot" — which reads like two admin scopes.
+            is_orphan = not is_admin_slot and b not in labels
+            name = ("Global Admin slot" if is_admin_slot else labels.get(b, b))
+            out.append({**rec, "name": name, "is_admin_slot": is_admin_slot,
+                        "is_orphan": is_orphan,
+                        # Secrets encrypted under the bucket pass-phrase — these
+                        # are what a pass-phrase reset would have to discard.
+                        "psk_secret_count": _cv.count_psk_secrets(hub, b)})
         return {"buckets": out, "is_global_admin": _is_global_admin(sess),
                 "admin_slot": _cv.ADMIN_BUCKET, "vault_available": _cv._vault_available(hub)}
+
+    @app.post("/tenant/cred-vault/reset-psk")
+    @_guard
+    async def cv_reset_psk(request: Request):
+        """Recover a bucket whose pass-phrase was lost (Global Admin only).
+
+        ``/psk`` can only ROTATE — it verifies the old pass-phrase first — so a
+        forgotten pass-phrase previously bricked the bucket permanently through
+        the UI. This resets the verifier without the old pass-phrase.
+
+        ``hub``-mode secrets are keyed on the hub Fernet key, NOT the
+        pass-phrase, so they survive untouched (and keep serving automation). A
+        bucket holding only ``hub``-mode secrets therefore resets with zero data
+        loss. Any ``psk``-mode secret is already undecryptable and can only be
+        discarded, which is refused unless ``confirm_destroy`` is sent."""
+        sess = _sess(request)
+        if not _is_global_admin(sess):
+            # Not 403: a tenant-admin must not learn that this door exists.
+            raise HTTPException(status_code=404, detail="bucket not found")
+        body = await _body(request)
+        bucket = (body.get("bucket") or "").strip()
+        _require_reach(sess, bucket)
+        res = await _cv.reset_bucket_psk(
+            hub, bucket, body.get("new_psk") or "",
+            destroy_psk_secrets=bool(body.get("confirm_destroy")),
+            actor=_actor(sess))
+        return {"status": "ok", **res}
+
+    @app.post("/tenant/cred-vault/move-secret")
+    @_guard
+    async def cv_move_secret(request: Request):
+        """Move a secret to another bucket (Global Admin only).
+
+        The rescue path for a credential stranded in an orphaned bucket: move it
+        somewhere tenant-scoped code can actually reference, then delete the
+        orphan. ``hub``-mode secrets need no pass-phrase (they are keyed on the
+        hub Fernet key, not the bucket); ``psk``-mode secrets need both the
+        source ``psk`` and the destination ``to_psk``."""
+        sess = _sess(request)
+        if not _is_global_admin(sess):
+            raise HTTPException(status_code=404, detail="bucket not found")
+        body = await _body(request)
+        bucket = (body.get("bucket") or "").strip()
+        to_bucket = (body.get("to_bucket") or "").strip()
+        _require_reach(sess, bucket)
+        _require_reach(sess, to_bucket)
+        res = await _cv.move_secret(
+            hub, bucket, (body.get("name") or "").strip(), to_bucket,
+            psk=body.get("psk") or "", to_psk=body.get("to_psk") or "",
+            actor=_actor(sess))
+        return {"status": "ok", **res}
+
+    @app.post("/tenant/cred-vault/delete-bucket")
+    @_guard
+    async def cv_delete_bucket(request: Request):
+        """Delete a bucket outright (Global Admin only).
+
+        Buckets could be created by typing a free-text name but never removed —
+        ``list_buckets`` derives from the pass-phrase records UNION the secret
+        records — so a mistyped bucket lingered in every Global Admin's picker
+        forever, inviting credentials to be stored somewhere no tenant-scoped
+        code can reference and no tenant-admin can reach.
+
+        Refused for the ``__admin__`` slot (infrastructure) and for any bucket
+        that belongs to a LIVE tenant — those follow the tenant lifecycle, and
+        this endpoint exists to clear up orphans. Destroying leftover secrets
+        requires ``confirm_destroy``."""
+        sess = _sess(request)
+        if not _is_global_admin(sess):
+            raise HTTPException(status_code=404, detail="bucket not found")
+        body = await _body(request)
+        bucket = (body.get("bucket") or "").strip()
+        _require_reach(sess, bucket)
+        if bucket in _all_tenants(hub):
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{bucket}' is a live tenant's bucket — delete the tenant "
+                       "instead. This action is for buckets that match no tenant.")
+        res = await _cv.delete_bucket(hub, bucket,
+                                      confirm_destroy=bool(body.get("confirm_destroy")),
+                                      actor=_actor(sess))
+        return {"status": "ok", **res}
 
     @app.get("/tenant/cred-vault/secrets")
     async def cv_secrets(request: Request):

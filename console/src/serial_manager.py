@@ -44,6 +44,12 @@ logger = logging.getLogger("ConsoleSpoke")
 # frequency order for the uncommon device that uses neither.
 DEFAULT_BAUD_CANDIDATES = [115200, 9600, 38400, 19200, 57600, 4800, 2400, 230400]
 
+# The rate we open at whenever nothing better is known — an unconfigured port, a
+# sweep that never got a readable reply, or any internal fallback. Modern console
+# gear is 115200, so that is what we ALWAYS try first; falling back to 9600 here
+# is what used to silently strand sessions on the wrong rate.
+DEFAULT_BAUD = 115200
+
 # The two rates we prefer to "fall back to": if either answers with a confident
 # (mostly-printable) reply, we stop the sweep and lock it instead of continuing
 # into the exotic rates — so detection reliably settles on 115200, else 9600.
@@ -74,7 +80,7 @@ _BAUD_CONFIDENT_SCORE = 0.8
 # what makes 115200 and 9600 reliably answer on that gear.
 _BAUD_NUDGE_ATTEMPTS = 3
 
-_DEFAULT_SETTINGS = {"baud": 9600, "bytesize": 8, "parity": "N", "stopbits": 1, "flow": "none"}
+_DEFAULT_SETTINGS = {"baud": DEFAULT_BAUD, "bytesize": 8, "parity": "N", "stopbits": 1, "flow": "none"}
 
 
 # ── Pure helpers (pyserial-free, unit-testable) ─────────────────────────────────
@@ -165,12 +171,12 @@ def enumerate_ports() -> List[Dict[str, Any]]:
     return ports
 
 
-def open_raw(dev: str, baud: int = 9600, timeout: float = 0.3):
+def open_raw(dev: str, baud: int = DEFAULT_BAUD, timeout: float = 0.3):
     """Open a transient serial handle (for baud-detect / fingerprint), bypassing
     the session machinery. Caller must close it."""
     if serial is None:
         raise RuntimeError("pyserial not installed")
-    return serial.Serial(dev, int(baud or 9600), timeout=timeout)
+    return serial.Serial(dev, int(baud or DEFAULT_BAUD), timeout=timeout)
 
 
 def detect_baud(dev: str, candidates: Optional[List[int]] = None,
@@ -213,7 +219,12 @@ def detect_baud(dev: str, candidates: Optional[List[int]] = None,
                     if len(buf) >= 4096 or score_sample(buf) >= _BAUD_CONFIDENT_SCORE:
                         break
             s = score_sample(buf)
-            if s > best["score"]:
+            # Strictly better always wins; on an exact tie a priority rate
+            # (115200, then 9600) takes the crown from an exotic one, so a
+            # coin-flip score can never strand the port off 115200.
+            if s > best["score"] or (s == best["score"]
+                                     and baud in PRIORITY_BAUDS
+                                     and best["baud"] not in PRIORITY_BAUDS):
                 best = {"baud": baud, "score": s, "sample": buf}
             if s >= 1.3:  # confidently good — stop sweeping
                 break
@@ -226,7 +237,10 @@ def detect_baud(dev: str, candidates: Optional[List[int]] = None,
         except Exception as e:  # noqa: BLE001
             logger.debug("baud probe %s@%d failed: %s", dev, baud, e)
     return {
-        "baud": best["baud"],
+        # An inconclusive sweep must NOT hand back a noise-scored guess: report
+        # the preferred default so callers always come back to 115200 rather
+        # than stranding the port on whatever rate happened to rattle loudest.
+        "baud": best["baud"] if best["score"] >= _BAUD_CONFIDENT_SCORE else DEFAULT_BAUD,
         "score": round(best["score"], 3),
         # Only a mostly-printable reply means we truly locked onto the line's
         # rate; a silent/garbled best-guess is reported but NOT confident, so
@@ -461,7 +475,7 @@ class PortChannel:
         self.port_id = port_id
         self.dev = dev
         self.on_data = on_data
-        self.baud = int(settings.get("baud", 9600) or 9600)
+        self.baud = int(settings.get("baud", DEFAULT_BAUD) or DEFAULT_BAUD)
         self.sessions: set = set()
         self.writer: Optional[str] = None
         self.monitored: bool = False  # kept open for passive capture w/o a user
@@ -489,7 +503,7 @@ class PortChannel:
         parity = {"N": serial.PARITY_NONE, "E": serial.PARITY_EVEN, "O": serial.PARITY_ODD}
         self.ser = serial.Serial(
             port=dev,
-            baudrate=int(settings.get("baud", 9600)),
+            baudrate=int(settings.get("baud", DEFAULT_BAUD) or DEFAULT_BAUD),
             bytesize=int(settings.get("bytesize", 8)),
             parity=parity.get(str(settings.get("parity", "N")).upper(), serial.PARITY_NONE),
             stopbits=int(settings.get("stopbits", 1)),
@@ -758,7 +772,7 @@ class SessionManager:
         # down and reopen at the new rate (so a wrong-baud garbage capture becomes
         # readable — critical for catching a device that just powered on).
         if chan is not None and not chan.sessions:
-            want_baud = int(settings.get("baud", 9600) or 9600)
+            want_baud = int(settings.get("baud", DEFAULT_BAUD) or DEFAULT_BAUD)
             if want_baud != getattr(chan, "baud", want_baud):
                 logger.info("monitor %s: re-opening at baud %d (was %d)",
                             port_id, want_baud, getattr(chan, "baud", 0))
