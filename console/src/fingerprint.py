@@ -569,6 +569,36 @@ _DEFAULT_PROMPT_PATTERNS: Dict[str, List[str]] = {
     "login_prompt": [r"(?:[Ll]ogin|[Uu]ser(?:\s?name)?)\s*:\s*$"],
     "password_prompt": [r"[Pp]assword\s*:\s*$"],
     "shell_prompt": [r"\S[>#$%]\s*$"],
+    # Privilege level, read off the prompt's last character. On Cisco IOS,
+    # HPE/Aruba AOS-S and most network CLIs ">" is UNPRIVILEGED (user EXEC)
+    # and "#" is PRIVILEGED (enable). Most identity `show` commands need
+    # privileged mode, so landing on ">" means we must send `enable` first —
+    # see _escalate_privilege. Deliberately NOT "$"/"%": those are UNIX shell
+    # prompts where `enable` is meaningless.
+    "unpriv_prompt": [r"\S>\s*$"],
+    "priv_prompt": [r"\S#\s*$"],
+    # A device refusing the enable escalation, split by CAUSE because the two
+    # mean very different things. "unsupported" = there is no `enable` command
+    # (">" already IS the top level on some AOS-S / appliance CLIs), so retrying
+    # with another secret is pointless. "denied" = enable exists but the secret
+    # was wrong, so the next secret is worth trying.
+    "enable_unsupported": [
+        r"(?i:invalid\s+(?:input|command))",
+        r"(?i:unknown\s+command)",
+        r"(?i:incomplete\s+command)",
+        r"(?i:command\s+not\s+found)",
+        r"(?i:ambiguous\s+command)",
+        r"%\s*(?:Invalid|Unknown|Incomplete)",
+    ],
+    "enable_denied": [
+        r"(?i:invalid\s+(?:password|secret))",
+        r"(?i:access\s+denied)",
+        r"(?i:authentication\s+fail(?:ed|ure))",
+        r"(?i:bad\s+secrets?)",
+        r"(?i:permission\s+denied)",
+        r"(?i:password\s+incorrect)",
+        r"(?i:incorrect\s+password)",
+    ],
     # A NET-NEW device (esp. after a first login with a factory-default cred)
     # often forces a password SET/CHANGE before it will drop to a shell —
     # "Enter new password:", "Confirm new password:", "You must change your
@@ -617,6 +647,10 @@ _LOGIN_PROMPT = _PROMPTS["login_prompt"]
 _PASSWORD_PROMPT = _PROMPTS["password_prompt"]
 _SHELL_PROMPT = _PROMPTS["shell_prompt"]
 _NEW_PASSWORD_PROMPT = _PROMPTS["new_password_prompt"]
+_UNPRIV_PROMPT = _PROMPTS["unpriv_prompt"]
+_PRIV_PROMPT = _PROMPTS["priv_prompt"]
+_ENABLE_UNSUPPORTED = _PROMPTS["enable_unsupported"]
+_ENABLE_DENIED = _PROMPTS["enable_denied"]
 
 # Lines a device emits ASYNCHRONOUSLY on the console, unrelated to the prompt:
 # syslog records, kernel ring-buffer messages and Cisco-style facility messages.
@@ -692,8 +726,50 @@ def boot_fault(text: str) -> str:
 # more bare CRs — until a login/password/shell prompt appears. Many devices only
 # redraw their prompt on a fresh CR, so this also turns "output but no prompt"
 # into a detectable prompt without hammering (bounded attempt count).
-_LOGIN_NUDGES = 4          # extra CRs after the initial CRLF banner read
-_NUDGE_SECS = 1.2          # per-nudge read window
+# ── How patient the probe is ─────────────────────────────────────────────────
+# Identify is NOT latency-sensitive. It runs on a background probe loop, holds
+# the serial handle exclusively for one port, and the hub keeps CONSOLE_AUTOPROBE
+# alive with progress frames rather than a hard 90s cut-off. Impatience is the
+# expensive failure mode: a switch that simply takes a breath mid-reply gets
+# written off as unresponsive and the device is reported "unknown", which costs
+# an operator a manual login. Every window below is therefore sized for a slow,
+# busy switch on a noisy line, not for a fast one.
+#
+# ``_IDLE_SECS`` is the important one: _read_until also stops when the stream
+# goes quiet, and the serial handle is opened with a 0.3s read timeout, so at
+# the old 0.4s a SINGLE missed poll ended the read. Sized here at several polls.
+_IDLE_SECS = 1.6           # quiet gap that means "the device has finished talking"
+
+# Global multiplier on every read window, so a deployment with unusually slow
+# gear (or a test suite that wants none of this waiting) can scale the whole
+# schedule from one place. See :func:`set_patience`.
+_PATIENCE = 1.0
+
+
+def set_patience(factor: float) -> float:
+    """Scale every read/settle window in this module by ``factor``.
+
+    ``>1`` for slow or heavily loaded gear, ``<1`` to speed up tests. Returns
+    the previous value so callers can restore it. Clamped to a sane range so a
+    bad config value can't wedge a probe for hours or reduce every window to
+    zero."""
+    global _PATIENCE
+    prev = _PATIENCE
+    try:
+        f = float(factor)
+    except (TypeError, ValueError):
+        return prev
+    _PATIENCE = min(max(f, 0.01), 10.0)
+    return prev
+
+
+def _t(seconds: float) -> float:
+    """A read window, scaled by the configured patience."""
+    return seconds * _PATIENCE
+
+
+_LOGIN_NUDGES = 5          # extra CRs after the initial CRLF banner read
+_NUDGE_SECS = 2.5          # per-nudge read window
 
 # After a FAILED credential, a device may be slow to re-draw its login prompt or
 # deliberately rate-limit (a pause + fresh "login:"). Before spending the NEXT
@@ -701,14 +777,23 @@ _NUDGE_SECS = 1.2          # per-nudge read window
 # a valid credential later in the list is never silently skipped just because the
 # prompt hadn't redrawn yet.
 _REPROMPT_NUDGES = 3       # CRs used to coax the login prompt back between creds
-_REPROMPT_SECS = 3.0       # read window per re-prompt nudge (covers rate-limit delay)
+_REPROMPT_SECS = 5.0       # read window per re-prompt nudge (covers rate-limit delay)
 
 # A net-new device often forces a password SET/CHANGE right after a first login
 # with a factory-default credential. Identify is READ-ONLY, so we must NOT set a
 # password — we decline by sending a few bare CRs (what an operator does to skip),
 # which drops the device to its shell or bounces it back to the login prompt.
 _NEW_PW_SKIP_CRS = 4       # bare CRs sent to escape a forced set/change-password flow
-_NEW_PW_SKIP_SECS = 2.0    # read window per skip CR
+_NEW_PW_SKIP_SECS = 3.0    # read window per skip CR
+
+# A prompt ending in ">" is UNPRIVILEGED (user EXEC) on Cisco IOS, HPE/Aruba
+# AOS-S and most network CLIs; the identity `show` commands generally need
+# PRIVILEGED ("#") mode, so we send `enable` and answer whatever it asks for.
+# Two secrets are tried at an enable password prompt: the credential that just
+# logged us in, then a bare Enter (many devices have no separate enable secret).
+_ENABLE_DRAINS = 3         # extra passive reads for a device that pauses mid-reply
+_ENABLE_ATTEMPTS = 2       # distinct enable secrets tried before giving up
+_ENABLE_SECS = 6.0         # read window after each enable-flow write
 
 # Universal, READ-ONLY discovery commands used to coax an identifying banner out
 # of a device sitting at a LIVE console that presented no login prompt and no
@@ -857,9 +942,15 @@ def passive_identify(text: str) -> Dict[str, Any]:
 
 
 def _read_until(read_fn: Callable[[], bytes], patterns: List[re.Pattern],
-                timeout: float, idle: float = 0.4) -> str:
+                timeout: float, idle: Optional[float] = None) -> str:
     """Accumulate serial output until one of ``patterns`` matches the tail, or
-    ``timeout`` elapses, or the stream goes idle for ``idle`` seconds."""
+    ``timeout`` elapses, or the stream goes idle for ``idle`` seconds.
+
+    Both windows are scaled by the module patience (:func:`set_patience`), and
+    ``idle`` defaults to ``_IDLE_SECS`` — long enough that a device pausing
+    mid-reply isn't mistaken for one that has finished."""
+    idle = _t(_IDLE_SECS if idle is None else idle)
+    timeout = _t(timeout)
     buf = b""
     deadline = time.monotonic() + timeout
     last = time.monotonic()
@@ -890,7 +981,7 @@ def _read_command_output(read_fn: Callable[[], bytes], write_fn: Callable[[bytes
 
 
 def _elicit_identity_banner(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
-                            transcript: str, cmd_secs: float = 2.5):
+                            transcript: str, cmd_secs: float = 4.0):
     """Responsive console, no vendor recognized yet and NO login prompt showing:
     send a few universal read-only discovery commands to force out an identifying
     banner. Stops as soon as :func:`detect_vendor` recognizes the device. Returns
@@ -912,7 +1003,7 @@ def _elicit_identity_banner(read_fn: Callable[[], bytes], write_fn: Callable[[by
 
 
 def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
-                   credentials: List[Dict[str, str]], banner_secs: float = 3.0,
+                   credentials: List[Dict[str, str]], banner_secs: float = 6.0,
                    step_secs: float = 4.0):
     """Vendor-agnostic login run BEFORE vendor detection.
 
@@ -1070,11 +1161,182 @@ def _generic_login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], Non
     return False, None, transcript, diag
 
 
+def _enable_secrets(credentials: List[Dict[str, str]], cred_idx) -> List[str]:
+    """Enable secrets to try, in order: the password of the credential that
+    just logged us in, then a bare Enter (very common — plenty of devices have
+    no separate enable secret). Deduped, so a blank login password doesn't
+    burn both attempts."""
+    out: List[str] = []
+    if isinstance(cred_idx, int) and 0 <= cred_idx < len(credentials):
+        out.append((credentials[cred_idx] or {}).get("password", "") or "")
+    out.append("")
+    seen, uniq = set(), []
+    for s in out:
+        if s not in seen:
+            seen.add(s)
+            uniq.append(s)
+    return uniq
+
+
+def _escalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
+                        credentials: List[Dict[str, str]], cred_idx,
+                        transcript: str) -> Tuple[str, Dict[str, Any]]:
+    """Escalate an unprivileged console session to privileged (enable) mode.
+
+    A prompt ending in ``>`` is UNPRIVILEGED (user EXEC) on Cisco IOS, HPE/Aruba
+    AOS-S and most network CLIs — most of the identity ``show`` commands are
+    rejected there ("Invalid input"), so the device would be misreported as
+    unknown even though we logged in fine. Seeing ``>`` therefore means: send
+    ``enable`` and answer whatever it asks for, until the prompt ends in ``#``.
+
+    ``$`` and ``%`` prompts are deliberately NOT treated as unprivileged: those
+    are UNIX shells, where ``enable`` is meaningless (and on some appliances is
+    a real, state-changing command). ``_UNPRIV_PROMPT`` matches ``>`` only, so
+    we never type ``enable`` into a shell.
+
+    Read-only w.r.t. device config: ``enable`` only changes OUR session's
+    privilege level, and ``_logout`` afterwards drops back out. Never raises —
+    a dead line must not crash identify. Returns ``(transcript, diag)``."""
+    diag: Dict[str, Any] = {"attempted": False, "escalated": False,
+                            "secrets_tried": 0, "reason": ""}
+    tail = _prompt_tail(transcript)
+    if _PRIV_PROMPT.search(tail):
+        # Already in enable mode (or a UNIX root shell) — nothing to do.
+        diag["escalated"] = True
+        diag["reason"] = "already_privileged"
+        return transcript, diag
+    if not _UNPRIV_PROMPT.search(tail):
+        # Not a ">" prompt: a $/% shell, or we never reached a prompt at all.
+        diag["reason"] = "not_unprivileged"
+        return transcript, diag
+
+    patterns = [_PRIV_PROMPT, _PASSWORD_PROMPT, _LOGIN_PROMPT, _UNPRIV_PROMPT]
+
+    # Offset of the last thing we wrote, so each pass can tell an empty read
+    # window (a line that went quiet) apart from a real refusal.
+    sent_at = len(transcript)
+
+    def _send(data: str) -> bool:
+        nonlocal transcript, sent_at
+        try:
+            write_fn((data + "\r").encode())
+        except Exception:  # noqa: BLE001 - dead line; keep what we have
+            return False
+        sent_at = len(transcript)
+        transcript += _read_until(read_fn, patterns, _ENABLE_SECS)
+        return True
+
+    enable_at = len(transcript)
+    if not _send("enable"):
+        diag["reason"] = "no_prompt"
+        return transcript, diag
+    diag["attempted"] = True
+
+    secrets = _enable_secrets(credentials, cred_idx)
+    used = 0
+    # `_read_until` also stops on a 0.4s idle gap, and real switches pause
+    # between echoing `enable` and printing their post-escalation banner (the
+    # AOS-S "Your previous successful login ..." notice). A couple of extra
+    # passive reads let a slow device finish its reply instead of being written
+    # off as unresponsive.
+    drains_left = _ENABLE_DRAINS
+
+    def _drain() -> None:
+        nonlocal transcript, drains_left
+        drains_left -= 1
+        transcript += _read_until(read_fn, patterns, _ENABLE_SECS)
+
+    # Bounded: each pass consumes one read window and either finishes, drains
+    # once more, or feeds the device one more answer, so this can never spin.
+    for _ in range(_ENABLE_ATTEMPTS + _ENABLE_DRAINS + 2):
+        tail = _prompt_tail(transcript)
+        if _PRIV_PROMPT.search(tail):
+            diag["escalated"] = True
+            diag["reason"] = ""
+            return transcript, diag
+        # Only look at output produced SINCE we sent `enable`, so an error
+        # string from earlier in the login flow can't be mistaken for a
+        # refusal of this escalation.
+        since = transcript[enable_at:]
+        if not transcript[sent_at:].strip():
+            # Nothing at all came back. A responsive device echoes at least the
+            # command, so this is a quiet line rather than a refusal — but give
+            # it another read window before giving up.
+            if drains_left > 0:
+                _drain()
+                continue
+            diag["reason"] = "no_prompt"
+            return transcript, diag
+        if _UNPRIV_PROMPT.search(tail):
+            # Bounced back to ">". Distinguish the two causes from the error
+            # text: no `enable` command at all (retrying is pointless) versus a
+            # rejected secret.
+            if _ENABLE_UNSUPPORTED.search(since):
+                diag["reason"] = "no_enable_support"
+            elif _ENABLE_DENIED.search(since) or diag["secrets_tried"]:
+                diag["reason"] = "bad_secret"
+            else:
+                diag["reason"] = ("bad_secret" if diag["secrets_tried"]
+                                  else "no_enable_support")
+            return transcript, diag
+        if _LOGIN_PROMPT.search(tail):
+            # Some devices re-ask for a username during escalation.
+            user = ""
+            if isinstance(cred_idx, int) and 0 <= cred_idx < len(credentials):
+                user = (credentials[cred_idx] or {}).get("username", "") or ""
+            if not _send(user):
+                diag["reason"] = "no_prompt"
+                return transcript, diag
+            continue
+        if _PASSWORD_PROMPT.search(tail):
+            if used >= len(secrets) or used >= _ENABLE_ATTEMPTS:
+                diag["reason"] = "bad_secret"
+                return transcript, diag
+            secret = secrets[used]
+            used += 1
+            diag["secrets_tried"] = used
+            if not _send(secret):
+                diag["reason"] = "no_prompt"
+                return transcript, diag
+            continue
+        # Output arrived but it isn't a prompt yet — mid-banner. Keep reading.
+        if drains_left > 0:
+            _drain()
+            continue
+        diag["reason"] = "no_prompt"
+        return transcript, diag
+
+    diag["reason"] = "bad_secret" if diag["secrets_tried"] else "no_prompt"
+    return transcript, diag
+
+
 _LOGOUT_COMMANDS = ("exit", "logout")
 
 
+def _deescalate_privilege(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
+                          cmd_secs: float = 3.0) -> bool:
+    """Drop back from privileged ("#") to unprivileged (">") mode.
+
+    Only used when we escalated an OPERATOR's already-open console session —
+    one we did NOT authenticate and therefore won't log out. Leaving their
+    shared console line sitting in enable mode would be a side effect of a
+    read-only identify, so put the privilege level back. ``disable`` is the
+    Cisco/AOS-S verb; ``exit`` drops a level on CLIs that lack it. Returns True
+    once an unprivileged prompt is confirmed."""
+    for cmd in ("disable", "exit"):
+        try:
+            write_fn((cmd + "\r").encode())
+        except Exception:  # noqa: BLE001 - dead line; nothing more we can do
+            return False
+        out = _read_until(read_fn, [_UNPRIV_PROMPT, _LOGIN_PROMPT], cmd_secs)
+        tail = _prompt_tail(out)
+        if _UNPRIV_PROMPT.search(tail) or _LOGIN_PROMPT.search(tail):
+            return True
+    return False
+
+
 def _logout(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
-            profile: Optional[Dict[str, Any]] = None, cmd_secs: float = 2.0) -> bool:
+            profile: Optional[Dict[str, Any]] = None, cmd_secs: float = 3.0) -> bool:
     """Cleanly end an authenticated session we opened: send ``exit``/``logout``
     (or the profile's own ``logout`` override) and confirm a login/password
     prompt reappears, so profiling never leaves a privileged shell open on the
@@ -1099,8 +1361,8 @@ def _logout(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
 
 
 def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
-                 credentials: List[Dict[str, str]], banner_secs: float = 3.0,
-                 cmd_secs: float = 4.0) -> Dict[str, Any]:
+                 credentials: List[Dict[str, str]], banner_secs: float = 6.0,
+                 cmd_secs: float = 6.0) -> Dict[str, Any]:
     """Drive a read-only identify over an already-open serial channel.
 
     ``read_fn()`` returns available bytes (non-blocking-ish); ``write_fn(bytes)``
@@ -1121,6 +1383,15 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     #    detect the vendor (and even unknown vendors get a captured post-login
     #    banner for the passive-glean / LLM-identify paths to use).
     logged_in, cred_idx, transcript, diag = _generic_login(read_fn, write_fn, credentials, banner_secs)
+    # 1b. A ">" prompt is UNPRIVILEGED: most identity `show` commands are
+    #     rejected there ("Invalid input"), so the device would be reported as
+    #     unknown even though the login worked. Escalate with `enable` BEFORE
+    #     vendor detection and before any command runs. _escalate_privilege
+    #     itself no-ops on a "#" prompt, on $/% UNIX shells, and at a login
+    #     prompt, so this is safe to call unconditionally.
+    transcript, enable_diag = _escalate_privilege(
+        read_fn, write_fn, credentials, cred_idx, transcript)
+    diag["enable"] = enable_diag
     result["banner"] = transcript[-4000:]
     result["logged_in"] = logged_in
     result["credential_index"] = cred_idx
@@ -1135,6 +1406,14 @@ def run_identify(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
                 res["diag"]["logged_out"] = _logout(read_fn, write_fn, prof)
             except Exception:  # noqa: BLE001
                 res["diag"]["logged_out"] = False
+        elif enable_diag.get("escalated") and enable_diag.get("attempted"):
+            # We escalated an OPERATOR's already-open session and won't log it
+            # out — put its privilege level back where we found it rather than
+            # leaving a privileged shell on a shared console line.
+            try:
+                enable_diag["deescalated"] = _deescalate_privilege(read_fn, write_fn)
+            except Exception:  # noqa: BLE001
+                enable_diag["deescalated"] = False
         return res
 
     # 2. Detect the vendor from everything seen (pre- and post-login).
@@ -1250,6 +1529,19 @@ def _login_diag(diag: Dict[str, Any], transcript: str, credentials) -> Dict[str,
     d = dict(diag or {})
     d["creds_available"] = len(credentials or [])
     d["tail"] = _sanitize_tail(transcript)
+    # Privilege level reached, so an operator can tell "logged in but stuck in
+    # user EXEC" apart from a plain login failure — the two look identical in
+    # the output otherwise (both leave the identity commands empty).
+    _en = d.get("enable") or {}
+    if _en.get("escalated"):
+        d["privilege"] = "enable"
+    elif _en.get("attempted"):
+        d["privilege"] = "user"
+        d["enable_reason"] = {
+            "no_enable_support": "device has no `enable` command (\">\" is its top level)",
+            "bad_secret": "`enable` rejected the stored credential's password and a blank secret",
+            "no_prompt": "`enable` sent but the device never re-prompted",
+        }.get(_en.get("reason") or "", _en.get("reason") or "")
     if d.get("shell_prompt_seen"):
         d["reason"] = "reached shell prompt"
     elif not d.get("any_output"):
@@ -1268,7 +1560,7 @@ def _login_diag(diag: Dict[str, Any], transcript: str, credentials) -> Dict[str,
 
 def run_commands(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
                  credentials: List[Dict[str, str]], commands: List[str],
-                 banner_secs: float = 3.0, cmd_secs: float = 4.0) -> Dict[str, Any]:
+                 banner_secs: float = 6.0, cmd_secs: float = 6.0) -> Dict[str, Any]:
     """Log in generically, then run a caller-supplied list of READ-ONLY commands
     and capture per-command output — the primitive behind LLM-driven identify on
     devices the built-in profiles don't recognize.
@@ -1282,6 +1574,12 @@ def run_commands(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
     result: Dict[str, Any] = {"banner": "", "logged_in": False, "credential_index": None,
                               "outputs": {}, "rejected": [], "diag": {}}
     logged_in, cred_idx, transcript, diag = _generic_login(read_fn, write_fn, credentials, banner_secs)
+    # A ">" prompt is UNPRIVILEGED — escalate before running the caller's
+    # commands, or a device sitting in user EXEC rejects most `show`s.
+    # _escalate_privilege no-ops on "#", on $/% shells and at a login prompt.
+    transcript, enable_diag = _escalate_privilege(
+        read_fn, write_fn, credentials, cred_idx, transcript)
+    diag["enable"] = enable_diag
     result["banner"] = transcript[-4000:]
     result["logged_in"] = logged_in
     result["credential_index"] = cred_idx
@@ -1298,10 +1596,16 @@ def run_commands(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None]
         write_fn((cmd + "\r").encode())
         outputs[cmd] = _read_until(read_fn, [_SHELL_PROMPT], cmd_secs)
     result["outputs"] = outputs
+    if enable_diag.get("escalated") and enable_diag.get("attempted") and cred_idx is None:
+        # Escalated an operator's already-open session (run_commands never logs
+        # out) — restore its privilege level instead of leaving enable mode on
+        # a shared console line.
+        try:
+            enable_diag["deescalated"] = _deescalate_privilege(read_fn, write_fn)
+        except Exception:  # noqa: BLE001
+            enable_diag["deescalated"] = False
+        result["diag"] = _login_diag(diag, transcript, credentials)
     return result
-
-
-# ── Config read / transactional push (Phase G) ─────────────────────────────────
 
 def login(read_fn: Callable[[], bytes], write_fn: Callable[[bytes], None],
           profile: Dict[str, Any], credentials: List[Dict[str, str]],
@@ -1347,7 +1651,7 @@ def _disable_pager(read_fn, write_fn, profile, cmd_secs: float) -> None:
 
 
 def read_running_config(read_fn, write_fn, profile, credentials,
-                        cmd_secs: float = 12.0) -> Dict[str, Any]:
+                        cmd_secs: float = 20.0) -> Dict[str, Any]:
     """Log in (if needed) and capture the device's running-config (backup/read)."""
     write_fn(b"\r\n")
     ok, _ = login(read_fn, write_fn, profile, credentials)
@@ -1369,7 +1673,7 @@ _CFG_ERR = re.compile(r"%\s|Invalid input|Unknown command|Incomplete command|syn
 
 def push_config(read_fn, write_fn, profile, credentials, config_text: str,
                 save: bool = True, rollback: str = "negate",
-                cmd_secs: float = 4.0) -> Dict[str, Any]:
+                cmd_secs: float = 6.0) -> Dict[str, Any]:
     """Transactional config push (Phase G): login → backup → enter config mode →
     send lines (watch per-line errors) → exit → POST-VERIFY the pushed lines are
     in running-config → on PASS save (unless save=False); on FAIL do NOT save and

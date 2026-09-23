@@ -82,6 +82,54 @@ def test_admin_tenant_id_constant():
     assert access.ADMIN_TENANT_ID == "default"
 
 
+# ── Capitalisation must never decide visibility ──────────────────────────────
+# tenant_scope_ids used to lowercase only to DETECT the admin tenant, then put
+# the caller's raw spelling in the set, while in_tenant_scope compared the
+# resource side exactly. A tenant recorded as "Default" therefore matched
+# neither {"", "default"} nor {"Default"} -- its own resources were invisible
+# to it under either picker spelling. Flagged on lm#1026.
+
+def test_admin_scope_is_case_insensitive_on_the_picker_side(monkeypatch):
+    _set_shared(monkeypatch, None)
+    for spelling in ("Default", "DEFAULT", "  DeFaUlT  "):
+        assert access.tenant_scope_ids(spelling) == {"", "default"}, spelling
+
+
+def test_admin_scope_matches_a_capitalised_resource_tenant(monkeypatch):
+    _set_shared(monkeypatch, None)
+    scope = access.tenant_scope_ids("default")
+    # The exact case that used to disappear from the ADMIN view.
+    assert access.in_tenant_scope("Default", scope) is True
+    assert access.in_tenant_scope("DEFAULT", scope) is True
+
+
+def test_regular_tenant_scope_is_case_insensitive_both_ways(monkeypatch):
+    _set_shared(monkeypatch, None)
+    assert access.tenant_scope_ids("LRB") == {"lrb"}
+    scope = access.tenant_scope_ids("LRB")
+    assert access.in_tenant_scope("lrb", scope) is True
+    assert access.in_tenant_scope("Lrb", scope) is True
+    # Still never another tenant's resources.
+    assert access.in_tenant_scope("Acme", scope) is False
+
+
+def test_shared_tenant_matches_regardless_of_case(monkeypatch):
+    _set_shared(monkeypatch, "SharedTenant")
+    assert access.tenant_scope_ids("lrb") == {"lrb", "sharedtenant"}
+    assert access.tenant_is_shared("SHAREDTENANT") is True
+    assert access.tenant_is_shared("sharedtenant") is True
+    assert access.in_tenant_scope("SharedTenant", access.tenant_scope_ids("default")) is True
+    assert access.tenant_is_shared("Shared") is True
+
+
+def test_blank_and_none_still_canonicalise_to_unassigned(monkeypatch):
+    _set_shared(monkeypatch, None)
+    assert access._norm_tenant_id(None) == ""
+    assert access._norm_tenant_id("   ") == ""
+    assert access.tenant_is_shared(None) is False
+    assert access.tenant_is_shared("") is False
+
+
 # ── spoke_is_unbound: gates every "fall back to the global spoke" call site ──
 class _Hub:
     def __init__(self, md):

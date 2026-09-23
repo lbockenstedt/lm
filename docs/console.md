@@ -84,6 +84,64 @@ serial ports from the hub WebUI's **Console** view (an xterm.js terminal in the 
   and full match-by-serial need a NetBox-side field mapping — flagged for real-device verification.
 - Disable auto-identify per agent with role config `auto_identify=false`.
 
+## Probe timing (patience)
+
+Identify is **not** latency-sensitive: it runs on a background probe loop, holds the serial
+handle exclusively for one port at a time, and `CONSOLE_AUTOPROBE` emits keepalive progress
+frames so it isn't cut off at the hub's base timeout. The expensive failure is the opposite
+one — being *impatient*. A loaded chassis that pauses a few seconds mid-reply gets written off
+as unresponsive and the device is reported **unknown**, which costs an operator a manual login.
+
+Every read window is therefore sized for a slow, busy switch on a noisy line. The one that
+matters most is the **idle gap** (`_IDLE_SECS`): `_read_until` stops when the stream goes
+quiet, and the serial handle is opened with a 0.3 s read timeout, so at the old 0.4 s a
+*single* missed poll ended the read mid-reply. It is now several polls wide.
+
+If a site has gear that is slower still, scale the whole schedule from one place with role
+config **`console_probe_patience`** (a multiplier, default `1.0`, clamped to 0.01–10):
+
+```
+console_probe_patience = 2.0     # twice as patient with everything
+```
+
+It multiplies every read/settle window in `fingerprint.py` — banner, login nudges, credential
+re-prompt, enable flow, per-command output and config reads — so their relative behaviour
+(and the code paths they drive) stay identical. The console test suite sets it to `0.05` for
+exactly this reason.
+
+## Enable / privilege escalation
+
+A prompt ending in **`>`** is *unprivileged* (user EXEC) on Cisco IOS, HPE/Aruba AOS-S and
+most network CLIs. Almost all of the identity `show` commands are rejected there, so a device
+we logged into perfectly well would still come back as **unknown**. After login — and before
+any `show` runs — the probe therefore sends `enable` and answers whatever the device asks for
+(the just-used credential's password first, then a bare Enter, since many devices have no
+separate enable secret) until the prompt ends in `#`.
+
+Rules worth knowing:
+- **`$` and `%` prompts never receive `enable`.** Those are UNIX shells, where the word is
+  meaningless and on some appliances is a real, state-changing command.
+- At most two secrets are tried. A refusal is classified from the error text: *no `enable`
+  command at all* (`>` **is** the top level — retrying is pointless) versus *rejected secret*.
+- Many switches need **no secret at all** — HPE/Aruba AOS-S goes straight from `>` to `#` and
+  answers with a multi-line *"Your previous successful login (as manager) was on …"* notice.
+  That notice contains the word "login" and must not be answered as a login prompt. Devices
+  also pause mid-reply, so the probe will re-read a couple of times before calling a line
+  unresponsive rather than trusting the first idle gap.
+- `enable`/`disable` are in `is_readonly_command`'s mutation list, so they are written straight
+  to the line by the login code and can never be requested through the profile/LLM command path.
+- If we escalated an **operator's already-open session** — one we did not authenticate and so
+  will not log out of — the privilege level is put back with `disable` afterwards, so a
+  read-only identify never leaves a shared console line sitting in enable mode.
+
+The result shows up in the port's login telemetry as `diag.privilege` (`enable` / `user`),
+`diag.enable` (`attempted`, `escalated`, `secrets_tried`, `reason`) and, when escalation
+failed, a human-readable `diag.enable_reason`.
+
+New prompt spellings are operator-editable in `console/src/prompt_patterns.json` under the
+`unpriv_prompt`, `priv_prompt`, `enable_unsupported` and `enable_denied` families — no code
+change needed.
+
 ## VSF stacks (HPE/Aruba)
 
 A VSF stack presents **one** logical switch across several physical chassis, but the console
