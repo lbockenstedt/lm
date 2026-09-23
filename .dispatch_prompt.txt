@@ -1,0 +1,40 @@
+You are editing the Lab Manager WebUI (vanilla JS/HTML, no build step).
+
+TASK: Remove the "Dashboard" entry that appears as stray text at the very top of the
+left sidebar menu (above Hypervisors, Firewalls, etc). It has no icon so it reads like a
+stray label. Since the Dashboard view is the landing view and would otherwise become
+unreachable, make the header title "Lab Manager" clickable so it navigates back
+(setView('dashboard')) with a pointer cursor.
+
+RELEVANT CURRENT SOURCE:
+
+--- WebUI/index.html (left sidebar nav, around line 490) ---
+            <nav id="main-nav" class="flex-1 min-h-0 overflow-y-auto px-3 space-y-1">
+                <div onclick="setView('dashboard')" id="nav-dashboard" class="nav-item active p-3 rounded-r-lg flex items-center gap-3 text-xs font-medium">
+                    Dashboard
+                </div>
+                <!-- Dynamic Module Navs Injected Here -->
+                <div class="pt-4 mt-4 border-t border-slate-200"></div>
+
+--- WebUI/index.html (header title, around line 418) ---
+            <h1 class="text-white text-xl font-bold tracking-tight">Lab Manager</h1>
+
+--- WebUI/main.js line 3525 ---
+    const dashboardNav = document.getElementById('nav-dashboard') ? document.getElementById('nav-dashboard').outerHTML : '';
+
+--- WebUI/main.js mainNav.innerHTML template, around line 3612 ---
+    mainNav.innerHTML = `
+        ${dashboardNav}
+        ${dynamicHtml}
+
+OUTPUT FORMAT: Reply with ONLY a sequence of edit blocks, no prose, no markdown fences:
+
+FILE: <path>
+<<<OLD
+<exact text to find>
+OLD
+<<<NEW
+<replacement text>
+NEW
+
+Preserve exact leading whitespace/indentation. Keep changes minimal and surgical.
