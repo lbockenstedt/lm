@@ -22,10 +22,35 @@ async function triggerUpdate(evt) {
     btn.textContent = 'Updating...';
     btn.classList.add('opacity-50', 'cursor-not-allowed');
 
+    // The hub arms its OWN restart *before* this request's response is flushed
+    // (perform_update launches /usr/local/bin/lm-update-restart — 3s grace — and
+    // writes the force watchdog sentinel, then run_repo_sync_all still has to run
+    // check_update_health + persist its status before the route can reply). If
+    // that tail outruns the grace, the process dies mid-response and the fetch
+    // below rejects with a network error even though the update SUCCEEDED. A
+    // dropped connection right after a successful POST therefore means "the
+    // restart we asked for started", not "the update failed" — see the catch.
+    const _isRestartDrop = (err) => (
+        err instanceof TypeError
+        || /failed to fetch|load failed|networkerror|network request failed|connection/i.test(err.message || '')
+    ) && err.message !== 'Session expired';
+    const _narrateRestart = (msg) => {
+        if (typeof showToast === 'function') showToast(msg, 'info');
+        window.__lmUpdateInProgress = true;
+        _waitForHubReadyThenReload(btn);
+    };
+
     try {
         const response = await fetch('/setup/update?force_spokes=true', { method: 'POST' });
         if (!response.ok) {
-            const error = await response.json();
+            // 502/503/504 while the hub is going down is the proxy reporting the
+            // restart, not an update failure — narrate it like the drop above.
+            if (response.status === 502 || response.status === 503 || response.status === 504) {
+                _narrateRestart('Update accepted — the hub is restarting to apply it. '
+                    + 'This page reloads once it is back.');
+                return;
+            }
+            const error = await response.json().catch(() => ({}));
             throw new Error(error.detail || 'Update failed');
         }
         const data = await response.json();
@@ -75,6 +100,17 @@ async function triggerUpdate(evt) {
             btn.classList.remove('opacity-50', 'cursor-not-allowed');
         }
     } catch (err) {
+        // A dropped connection here is the hub going down to apply the update we
+        // just asked for — the restart was armed before the response could be
+        // flushed (see the ordering note above). Narrate the restart instead of
+        // crying "Critical Error" over a successful update. A real HTTP failure
+        // (non-ok with a detail body) or a 'Session expired' throw from the
+        // global fetch override still surfaces as an error.
+        if (_isRestartDrop(err)) {
+            _narrateRestart('Update accepted — the hub is restarting to apply it. '
+                + 'This page reloads once it is back.');
+            return;
+        }
         if (typeof showToast === 'function') showToast('Critical Error: ' + err.message, 'error');
         btn.disabled = false;
         btn.textContent = originalText;

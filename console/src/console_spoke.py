@@ -26,8 +26,8 @@ except ImportError:
 
 try:
     from serial_manager import (
-        PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
-        DEFAULT_BAUD, score_sample,
+        PortStore, HealthStore, PortChannel, SessionManager, enumerate_ports, detect_baud,
+        open_raw, DEFAULT_BAUD_CANDIDATES, DEFAULT_BAUD, score_sample,
     )
     from fingerprint import (run_identify, read_running_config, push_config, PROFILES,
                              passive_identify, run_commands, merge_credentials,
@@ -37,8 +37,8 @@ try:
     from dpa import DpaManager
 except ImportError:  # loaded as a package (agent role loader) or from repo root
     from .serial_manager import (  # type: ignore
-        PortStore, SessionManager, enumerate_ports, detect_baud, open_raw, DEFAULT_BAUD_CANDIDATES,
-        DEFAULT_BAUD, score_sample,
+        PortStore, HealthStore, PortChannel, SessionManager, enumerate_ports, detect_baud,
+        open_raw, DEFAULT_BAUD_CANDIDATES, DEFAULT_BAUD, score_sample,
     )
     from .fingerprint import (run_identify, read_running_config, push_config, PROFILES,  # type: ignore
                               passive_identify, run_commands, merge_credentials,
@@ -119,8 +119,11 @@ class ConsoleSpoke(BaseSpoke):
         self._unopenable: Dict[str, Dict[str, Any]] = {}  # port_id → {error, since}
         # Per-port failure/disconnect history for the diagnostics report: open
         # failures (faulty/non-real ports), reader deaths (device pulled), and
-        # recovery cycles (flapping). In memory (since process start).
-        self._health: Dict[str, Dict[str, Any]] = {}
+        # recovery cycles (flapping). PERSISTED to disk (health.json) and
+        # rehydrated here, so a service restart keeps the history an operator
+        # needs to spot a flapping port instead of starting empty.
+        self._health_store = HealthStore()
+        self._health: Dict[str, Dict[str, Any]] = self._health_store.load()
         # Direct Port Access (DPA): reverse Telnet terminal-server. OFF by
         # default; when enabled, bytes for a DPA session are delivered to a local
         # sink (the TCP client) instead of pushed to the hub. See dpa.py.
@@ -271,7 +274,7 @@ class ConsoleSpoke(BaseSpoke):
                     "writer": snap["writer"],
                     "monitoring": snap["monitoring"],    # passive keep-alive capture is holding the port
                     "last_activity": snap["last_activity"],  # epoch of last byte seen (0 = never)
-                    "capture_bytes": snap["capture_bytes"],  # total bytes captured this channel life
+                    "capture_bytes": snap["capture_bytes"],  # total bytes captured (persisted across restarts)
                     "pending_out": snap["pending_out"],  # bytes of a paste still draining
                     "dpa": self._dpa_info(pid),          # Direct Port Access endpoint (None if off)
                     "boot": self._boot_info(pid),        # boot/wake cycle status (None if never seen)
@@ -293,8 +296,17 @@ class ConsoleSpoke(BaseSpoke):
                 limit = int(data.get("bytes") or 0) or None
             except (TypeError, ValueError):
                 limit = None
-            text = chan.capture_tail(limit).decode("utf-8", "replace") if chan else ""
-            if not text:  # no live channel — fall back to the last stored banner
+            # Bound an unlimited request: the durable log holds up to 5 MiB, but
+            # this view previously served the 64 KiB in-memory tail — keep that
+            # envelope size so an unbounded read can't flood the hub leg.
+            limit = limit or PortChannel.CAPTURE_MAX
+            # Prefer the DURABLE on-disk recording: the live in-memory tail is
+            # empty right after a service restart, which made the capture view go
+            # blank even though the full 5 MiB log was sitting on disk.
+            text = chan.persisted_tail(limit).decode("utf-8", "replace") if chan else ""
+            if not text:  # no live channel — read the persistent log directly
+                text = self.sessions.persisted_capture(pid, limit).decode("utf-8", "replace")
+            if not text:  # nothing recorded — fall back to the last stored banner
                 text = (self.store.get(pid).get("probe") or {}).get("banner", "")
             text = sanitize_console_text(text)  # strip VT100/ANSI for readable view + LLM
             snap = self.sessions.snapshot(pid)
@@ -317,6 +329,7 @@ class ConsoleSpoke(BaseSpoke):
             # re-derives on the next probe cycle, so nothing operational is lost.
             n = len(self._health)
             self._health.clear()
+            self._health_store.clear()
             logger.info("console: purged diagnostics telemetry for %d port(s)", n)
             return {"status": "SUCCESS", "spoke_id": self.spoke_id, "purged": n}
 
@@ -1138,6 +1151,7 @@ class ConsoleSpoke(BaseSpoke):
                 h = self._health_rec(pid)
                 h["disconnects"] += 1
                 h["last_disconnect"] = time.time()
+                self._health_save(force=True)
             chan = self.sessions.ensure_monitor(pid, p["device"], self.store.settings(pid))
             if chan is None:
                 self._mark_unopenable(pid, self.sessions.monitor_error(pid) or "cannot open port")
@@ -1252,6 +1266,7 @@ class ConsoleSpoke(BaseSpoke):
                         or "no prompt within boot timeout"
                     boot["reason"] = "boot output stopped before a prompt appeared"
                     boot["stuck_at"] = now
+        self._health_save()
 
     def _boot_maybe_relock(self, pid: str, dev: str, score: float,
                            cfg: Dict[str, Any], boot: Dict[str, Any],
@@ -1352,6 +1367,7 @@ class ConsoleSpoke(BaseSpoke):
         if method == "llm":
             rec["commands_run"] = res.get("commands_run") or list((res.get("outputs") or {}).keys())
             rec["rejected"] = res.get("rejected") or []
+        self._health_save()
 
     def _track_hostname(self, rec: Dict[str, Any], res: Dict[str, Any], method: str) -> None:
         """Track the identified hostname over successive attempts so diagnostics
@@ -1378,6 +1394,15 @@ class ConsoleSpoke(BaseSpoke):
         rec["hostname_distinct"] = len({h["host"] for h in hist})
         rec["hostname_stable"] = rec["hostname_changes"] == 0
 
+    def _health_save(self, force: bool = False) -> None:
+        """Persist the diagnostics history. Debounced by default (this is called
+        on every probe/monitor tick); ``force`` writes immediately for the rare
+        state transitions worth surviving an abrupt shutdown."""
+        if force:
+            self._health_store.flush(self._health)
+        else:
+            self._health_store.save(self._health)
+
     def _health_rec(self, pid: str) -> Dict[str, Any]:
         """Get-or-create the failure/disconnect history record for a port."""
         h = self._health.get(pid)
@@ -1386,6 +1411,7 @@ class ConsoleSpoke(BaseSpoke):
                  "last_error": "", "first_failure": 0.0, "last_failure": 0.0,
                  "last_disconnect": 0.0, "last_recovery": 0.0, "currently_failing": False}
             self._health[pid] = h
+            self._health_save(force=True)  # first sighting of a port — rare, persist now
         return h
 
     def _boot_info(self, pid: str) -> Optional[Dict[str, Any]]:
@@ -1424,6 +1450,7 @@ class ConsoleSpoke(BaseSpoke):
         h["last_failure"] = now
         h["last_error"] = err
         self._unopenable[pid] = {"error": err, "since": now}
+        self._health_save()
 
     def _clear_unopenable(self, pid: str) -> None:
         if self._unopenable.pop(pid, None) is not None:
@@ -1432,6 +1459,7 @@ class ConsoleSpoke(BaseSpoke):
             h["recoveries"] += 1
             h["last_recovery"] = time.time()
             h["currently_failing"] = False
+            self._health_save(force=True)
 
     def _diagnostics_summary(self) -> Dict[str, Any]:
         """Spoke-level context for the diagnostics report: whether the agent is
