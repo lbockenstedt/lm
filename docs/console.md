@@ -117,7 +117,25 @@ comma-separated **source-IP allow-list**. This maps to the role config keys
   unplug/replug and reboot without needing udev rules. Per-port settings (baud, bytesize,
   parity, stopbits, flow, alias, tenant override, last probe result) persist to
   `/var/lib/lm/console/ports.json` (falling back to a repo-local state dir if that path
-  isn't writable).
+  isn't writable). Set **`LM_CONSOLE_STATE_DIR`** to override that directory.
+- **Restart-durable local state.** Everything the console page shows for a port is kept on
+  disk in the state dir, so restarting the service (or the whole host) never blanks the
+  page:
+
+  | File | Holds |
+  | :--- | :--- |
+  | `ports.json` | settings, alias, tenant override, and the identify **profile** (vendor, family, identity fields, banner) |
+  | `telemetry.json` | per-port `last_activity` + cumulative `capture_bytes` |
+  | `health.json` | serial-health / diagnostics history — open failures, disconnects, recoveries, identify-attempt stats, hostname history, boot state |
+  | `capture/<port>.log` | the durable circular recording (5 MiB per device by default) |
+
+  All four are loaded back into memory on startup and written atomically (tmp + rename).
+  The telemetry and health writes are debounced (10 s / 15 s) because the serial reader
+  thread touches them constantly; the first write of a process and rare state transitions
+  (a new port, a disconnect, a recovery) are flushed immediately. Hub-side, the last
+  `CONSOLE_LIST_PORTS` result per spoke is additionally kept in the hub's warm cache
+  (`warm_cache.json`), so a hub restart — or a console host that is down — still renders
+  the fleet, marked `stale`.
 - **Baud auto-detect.** `CONSOLE_DETECT_BAUD` (or the automatic identify pipeline) opens
   the port at each candidate rate in turn (`115200, 9600, 38400, 19200, 57600, 4800,
   2400, 230400`), sends a CR/LF, and scores the reply by printable-ASCII ratio plus a

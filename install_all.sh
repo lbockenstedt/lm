@@ -526,7 +526,14 @@ poll_health() {  # $1=timeout  -> 0 if BOTH probes pass within timeout
 }
 
 # Let the hub return its HTTP response before the restart actually fires.
-sleep 3
+# perform_update launches this helper MID-cycle: run_repo_sync_all still has to
+# finish check_update_health (git/systemctl subprocesses) and persist the sync
+# status before /setup/update can serialize its reply. At 3s that tail routinely
+# outran the grace, killing the hub mid-response so the WebUI's Update button
+# reported "Critical Error: Failed to fetch" on a SUCCESSFUL update. 10s covers
+# the tail; the client also treats a dropped connection as "restarting" now
+# (WebUI/update_handler.js), so this is belt-and-braces.
+sleep 10
 systemctl restart lm 2>/dev/null || true
 
 # Read the pending manifest once (reads, not state-machine writes) so
