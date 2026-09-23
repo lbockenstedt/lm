@@ -644,6 +644,12 @@ class SelfUpdateMixin:
         isn't re-pulled."""
         try:
             cwd = self._repo_root()
+            # Repos this cycle actually ran git against, for the post-failure
+            # lock heal below. core_root cannot be used for that: it is reset to
+            # None on the converged / all-in-one / core-pull-failed paths, so by
+            # the time the handler runs it no longer names the checkout whose
+            # lock may be wedged.
+            core_heal_root = None
             logger.info("Performing update in %s from %s...", cwd, repo_url)
 
             # 0. Pull the shared lm/core checkout (/opt/lm) BEFORE the
@@ -688,6 +694,12 @@ class SelfUpdateMixin:
                             core_root = None
                         else:
                             try:
+                                # Recorded only here, in the branch that actually
+                                # runs git against core, and only while the
+                                # host-wide core lock is held -- which is what
+                                # makes an age-0 force-clear of core's lock safe
+                                # later: no sibling component can be mid-pull.
+                                core_heal_root = core_root
                                 self._clear_stale_git_locks(core_root)
                                 self._run_git(["remote", "set-url", "origin",
                                                core_repo_url], cwd=core_root)
@@ -905,16 +917,26 @@ class SelfUpdateMixin:
             # force-remove it (age 0) rather than waiting for the 90s staleness
             # window. ("cannot lock ref … Unable to create '.git/HEAD.lock':
             # File exists / Another git process seems to be running")
+            #
+            # BOTH repos, not just cwd: step 0 pulls the shared core checkout
+            # (/opt/lm) before the component's own repo, so the command that
+            # failed may well have been a core one -- and healing only cwd left
+            # core wedged until its lock aged past the 90s pre-pull guard.
             if any(s in _dl for s in ("unable to create", ".lock': file exists",
                                       "cannot lock ref",
                                       "another git process seems to be running",
                                       "index.lock")):
-                try:
-                    n = self._clear_stale_git_locks(cwd, max_age_s=0.0)
-                    logger.warning("self-update: cleared %d stale git lock(s) in %s "
-                                   "after a lock failure; next update will retry", n, cwd)
-                except Exception:  # noqa: BLE001
-                    pass
+                roots = [cwd]
+                if core_heal_root and core_heal_root != cwd:
+                    roots.append(core_heal_root)
+                for root in roots:
+                    try:
+                        n = self._clear_stale_git_locks(root, max_age_s=0.0)
+                        if n > 0:
+                            logger.warning("self-update: cleared %d stale git lock(s) in %s "
+                                           "after a lock failure; next update will retry", n, root)
+                    except Exception:  # noqa: BLE001
+                        pass
             return {"status": "ERROR", "message": f"git operation failed: {detail}"}
         except Exception as e:
             logger.error(f"update failed: {e}")
