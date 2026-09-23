@@ -23,6 +23,19 @@ credentials (e.g. the shared Hurricane Electric credential, the shared console l
 excluded from tenant-admin reach. (`cred_vault.py:1-15, 62-68`;
 `routes/cred_vault.py:68-83`.)
 
+A bucket is listed for **every** tenant — including `default` (the DEFAULT
+tenant), which is a real tenant that owns real spokes. It used to be hidden as a
+"system" bucket, which meant a Global Admin could not store a credential for the
+DEFAULT tenant at all, so no scan-credential set could be built for it and an
+`nw` agent bound to `default` had nothing to scan with.
+
+A bucket that matches **no** tenant and is not `__admin__` is reported as
+**orphaned** (`is_orphan`) and labelled as such in the UI. Orphans only exist
+because they hold secrets (e.g. a bucket created by typing a free-text name like
+`admin`); nothing tenant-scoped can ever reference one, and a tenant-admin can
+never reach it. Do not confuse an orphan named `admin` with the real Global
+Admin slot, which is `__admin__`.
+
 Two independent gates protect a secret:
 - **Reach** (role) — which buckets you can see at all.
 - **Pass-phrase / PSK** (knowledge) — whether you can *decrypt* an interactive
@@ -82,6 +95,7 @@ All routes are tenant-admin / Global-Admin only at the middleware layer
 | `GET /tenant/cred-vault/secrets?bucket=` | list secrets in one bucket (names + metadata, no values) | no |
 | `GET /tenant/cred-vault/automation-secrets[?type=]` | list only `hub`-mode secrets across reachable buckets — the **picker source** for module references | no |
 | `POST /tenant/cred-vault/psk` | set/rotate a bucket pass-phrase (rekeys `psk`-mode secrets) | — |
+| `POST /tenant/cred-vault/reset-psk` | **Global Admin only** — last-resort reset of a lost/corrupted pass-phrase, no old pass-phrase required | — |
 | `POST /tenant/cred-vault/secret` | create/update a secret (`value` object, `mode`, `type`, `description`) | ✔ |
 | `POST /tenant/cred-vault/reveal` | reveal plaintext (response is `no-store`) | ✔ |
 | `POST /tenant/cred-vault/delete` | delete a secret | ✔ |
@@ -148,3 +162,18 @@ The **Credential Vault** appears in the left nav for tenant-admins / admins
   live so they aren't tied to one tenant bucket.
 - **Rotating a bucket PSK rekeys only `psk`-mode secrets** — `hub`-mode secrets
   are encrypted with the hub key, not the PSK (`cred_vault.py:223-255`).
+- **A lost pass-phrase is recoverable, as a last resort.** `POST /psk` can only
+  *rotate*, because it verifies the old pass-phrase first; a forgotten one used
+  to brick the bucket through the UI forever. A **Global Admin** can now
+  `POST /tenant/cred-vault/reset-psk` (surfaced as "Lost the current
+  pass-phrase? Reset it" in the set/change modal). The blast radius is exactly
+  the `psk`-mode secrets:
+  - `hub`-mode secrets are keyed on the hub Fernet key, **not** the
+    pass-phrase, so they survive a reset untouched and keep serving automation.
+    A bucket holding only `hub`-mode secrets resets with **zero** data loss.
+  - `psk`-mode secrets are already undecryptable once the pass-phrase is lost,
+    so they can only be discarded — which the endpoint refuses unless
+    `confirm_destroy` is sent. Those credentials must then be re-entered.
+
+  The reset is audit-logged with the acting account. A non-Global-Admin gets a
+  404, not a 403, so the door isn't advertised.
