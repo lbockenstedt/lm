@@ -186,12 +186,18 @@ def resolve_nw_scan_spoke(hub, tenant_id, requested_spoke_id, shared_tenant_id):
 
 
 def build_scan_target_pool(targets, subnets, cap):
-    """Pure IPv4 host-IP pool builder for the network scanner: explicit host IPs
-    (``targets``) + expanded CIDRs (``subnets``), deduped, IPv4-only, bounded to
+    """Pure IPv4 host-IP pool builder for the network scanner: explicit
+    ``targets`` + expanded CIDRs (``subnets``), deduped, IPv4-only, bounded to
     ``cap`` total hosts. Returns ``(ordered_ips, per_source_counts)``. Large
     prefixes are expanded host-by-host until the cap is hit (a /8 won't blow up
     the scan). Shared by ``_aggregate_scan_targets`` so the risky bounded
-    expansion is unit-testable without a spoke."""
+    expansion is unit-testable without a spoke.
+
+    An entry in ``targets`` may be a bare host IP, a CIDR (``10.0.0.0/24``), or
+    an inclusive range (``10.0.0.10-20`` / ``10.0.0.10-10.0.0.20``) — all three
+    are expanded to host IPs. Previously a CIDR typed into the targets box had
+    its mask silently stripped and scanned as the single network address, so
+    "scan this range" quietly scanned one host."""
     seen = []
     seen_set = set()
     per_source = {}
@@ -209,11 +215,59 @@ def build_scan_target_pool(targets, subnets, cap):
         seen.append(ip)
         return True
 
+    def _expand_cidr(text):
+        """Expand an IPv4 CIDR to host IPs (bounded by ``cap``). 0 if not one."""
+        try:
+            net = ipaddress.ip_network(str(text).strip(), strict=False)
+        except ValueError:
+            return 0
+        if not isinstance(net, ipaddress.IPv4Network):
+            return 0
+        hosts = net.hosts() if net.prefixlen < 31 else iter([net.network_address])
+        n = 0
+        for host in hosts:
+            if len(seen) >= cap:
+                break
+            if _add(str(host)):
+                n += 1
+        return n
+
+    def _expand_range(text):
+        """Expand ``a.b.c.d-e`` / ``a.b.c.d-a.b.c.e`` inclusively. 0 if not one."""
+        lo_s, _, hi_s = str(text).strip().partition("-")
+        lo_s, hi_s = lo_s.strip(), hi_s.strip()
+        if not hi_s:
+            return 0
+        if "." not in hi_s:  # shorthand last octet: 10.0.0.10-20
+            hi_s = lo_s.rsplit(".", 1)[0] + "." + hi_s
+        try:
+            lo = ipaddress.ip_address(lo_s)
+            hi = ipaddress.ip_address(hi_s)
+        except ValueError:
+            return 0
+        if not (isinstance(lo, ipaddress.IPv4Address)
+                and isinstance(hi, ipaddress.IPv4Address)) or int(hi) < int(lo):
+            return 0
+        n = 0
+        for v in range(int(lo), int(hi) + 1):
+            if len(seen) >= cap:
+                break
+            if _add(str(ipaddress.IPv4Address(v))):
+                n += 1
+        return n
+
     c = 0
     for t in (targets or []):
         if len(seen) >= cap:
             break
-        if _add(t):
+        text = str(t or "").strip()
+        if not text:
+            continue
+        if "-" in text:
+            c += _expand_range(text)
+        elif "/" in text:
+            c += _expand_cidr(text)
+        elif _add(text):
             c += 1
     if c:
         per_source["explicit"] = c
@@ -222,18 +276,7 @@ def build_scan_target_pool(targets, subnets, cap):
     for s in (subnets or []):
         if len(seen) >= cap:
             break
-        try:
-            net = ipaddress.ip_network(str(s).strip(), strict=False)
-        except ValueError:
-            continue
-        if not isinstance(net, ipaddress.IPv4Network):
-            continue
-        hosts = net.hosts() if net.prefixlen < 31 else iter([net.network_address])
-        for host in hosts:
-            if len(seen) >= cap:
-                break
-            if _add(str(host)):
-                c += 1
+        c += _expand_cidr(s)
     if c:
         per_source["subnets"] = c
     return seen, per_source
@@ -1216,6 +1259,69 @@ def register(app, hub, ctx):
             "scan_schedule": _nw_scan_schedule(hub, tid),
         }
 
+    @app.get("/api/nw/scan-schedules")
+    async def list_nw_scan_schedules(request: Request):
+        """Every recurring network scan that is already set up, across the
+        tenants the caller may see (a Global Admin sees all tenants; a
+        tenant-admin only their own). Answers "what scans are scheduled?"
+        without having to switch tenant context and read one card at a time.
+
+        Each row carries the schedule (enabled / interval / dry-run), a summary
+        of the scan it will run (agent, credential sets, IP sources, auto-add),
+        and the loop's runtime view (last run, next due, last outcome).
+
+        The runtime fields are IN-MEMORY on the hub: a restart clears them and
+        every schedule re-defers one full interval (anti-stampede), so a null
+        ``last_run_at`` means "not since this hub started", not "never"."""
+        hub = app.state.hub
+        sess = _session_user(request)
+        if not (_is_admin(sess) or _is_tenant_admin(sess)):
+            raise HTTPException(status_code=403, detail="admin or tenant-admin required")
+        all_t = (getattr(hub.state, "tenant_state", {}) or {}).get("tenants", {}) or {}
+        if _is_admin(sess):
+            ids = list(all_t.keys())
+        else:
+            ids = [t for t in ((sess or {}).get("user", {}).get("tenants") or []) if t]
+        runtime = getattr(hub, "nw_scan_runtime", {}) or {}
+        gc = hub.state.system_state.get("global_config", {}) or {}
+        all_sets = gc.get("nw_scan_credentials", []) or []
+        by_id = {c.get("id"): c for c in all_sets if isinstance(c, dict)}
+        rows = []
+        for tid in ids:
+            sched = _nw_scan_schedule(hub, tid)
+            cfg = _nw_scan_config(hub, tid)
+            cred_ids = [str(x) for x in (cfg.get("credential_ids") or [])]
+            spoke_id = str(cfg.get("spoke_id") or "").strip()
+            rt = runtime.get(tid) or {}
+            rows.append({
+                "tenant_id": tid,
+                "tenant_name": (all_t.get(tid, {}) or {}).get("name") or tid,
+                "enabled": bool(sched.get("enabled")),
+                "interval_seconds": int(sched.get("interval_seconds") or 0),
+                "dry_run": bool(sched.get("dry_run", True)),
+                "auto_add": bool(cfg.get("auto_add", False)),
+                "ip_sources": list(cfg.get("ip_sources") or []),
+                "max_targets": int(cfg.get("max_targets") or 0),
+                "spoke_id": spoke_id,
+                "spoke_connected": bool(
+                    spoke_id and hub._primary_key(spoke_id) in hub.active_connections),
+                "credential_names": [
+                    (by_id.get(cid, {}) or {}).get("name") or cid for cid in cred_ids],
+                # No credential sets selected → the scheduled run is a
+                # discovery-only pass (reachability + open ports, no auto-add).
+                "discovery_only": not cred_ids,
+                "last_run_at": rt.get("last_run_at"),
+                "next_due_at": rt.get("next_due_at"),
+                "last_status": rt.get("last_status"),
+                "last_added": int(rt.get("last_added") or 0),
+                "last_identified": int(rt.get("last_identified") or 0),
+                "last_error": rt.get("last_error") or "",
+            })
+        rows.sort(key=lambda r: (not r["enabled"], r["tenant_name"].lower()))
+        return {"schedules": rows,
+                "runtime_since_restart": bool(runtime),
+                "configured": sum(1 for r in rows if r["enabled"])}
+
     @app.post("/api/nw/tenant-config")
     async def set_nw_tenant_config(request: Request):
         """Persist a tenant's NW overrides. Body: ``tenant`` (admin only),
@@ -1362,11 +1468,15 @@ def register(app, hub, ctx):
             chosen = [c for c in chosen
                       if access.spoke_visible_to_session(sess, c.get("tenant_id", ""))]
         if not chosen:
-            if system:
-                return {"status": "skipped", "reason": "no accessible scan credential set",
-                        "tenant": tenant_id, "added": [], "identified": []}
-            raise HTTPException(status_code=400,
-                                detail="Select at least one accessible scan credential set")
+            # Credentials are OPTIONAL. With none selected the scan still runs
+            # as a DISCOVERY-ONLY pass: every candidate IP is TCP-probed for
+            # reachability + open management ports, so "what is on this subnet?"
+            # is answerable without first creating a device account. Identify
+            # (SSH/SNMP) is skipped, and because auto-add only ever fires for a
+            # target classified into a manageable object_type, a credential-free
+            # scan cannot mutate the fleet — it is preview-only by construction.
+            logger.info("nw scan tenant=%s: no scan credentials — discovery-only pass",
+                        tenant_id)
         overlaid = await instance_vault.overlay_many(hub, chosen, "nw_scan_credentials")
         push_creds = [{
             "id": c.get("id"), "name": c.get("name") or c.get("id"),
@@ -1386,10 +1496,23 @@ def register(app, hub, ctx):
                     "tenant": tenant_id, "targets": 0, "sources": per_source,
                     "identified": [], "added": []}
 
+        # Credential-free (discovery-only) scans: nmap service detection is the
+        # only classifier left once SSH/SNMP identify is off the table, so
+        # default it ON for that case. A per-request ``use_nmap`` always wins,
+        # and the spoke's nmap augment silently no-ops when nmap isn't
+        # installed, so this can never fail a scan.
+        req_nmap = data.get("use_nmap")
+        if req_nmap is not None:
+            use_nmap = bool(req_nmap)
+        elif not push_creds:
+            use_nmap = True
+        else:
+            use_nmap = bool(saved.get("use_nmap", False))
+
         options = {
             "tcp_ports": saved.get("tcp_ports") or [22, 443, 80, 23],
             "try_snmp": bool(saved.get("try_snmp", True)),
-            "use_nmap": bool(saved.get("use_nmap", False)),
+            "use_nmap": use_nmap,
             "concurrency": int(saved.get("concurrency") or 32),
             "crawl": bool(data.get("crawl", saved.get("crawl", False))),
             "max_targets": cap,
@@ -1410,6 +1533,11 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=500, detail=f"scan failed: {e}")
 
         identified = (scan or {}).get("identified", []) if isinstance(scan, dict) else []
+        # Hosts that answered a TCP probe but were not classified into a device
+        # family. Always reported now — on a discovery-only (credential-free)
+        # scan this IS the result, and even on a credentialed scan it is the
+        # actionable "something is here that I can't manage yet" list.
+        reachable = (scan or {}).get("reachable", []) if isinstance(scan, dict) else []
 
         # Existing addresses for this tenant (dedup) — an identified device that
         # is already in the fleet (own or shared) is reported but not re-added.
@@ -1475,6 +1603,8 @@ def register(app, hub, ctx):
             "sources": per_source,
             "scanned": (scan or {}).get("scanned", 0) if isinstance(scan, dict) else 0,
             "identified": identified,
+            "reachable": reachable,
+            "discovery_only": not push_creds,
             "dry_run": dry_run,
             "preview": preview,
             "added": added,
