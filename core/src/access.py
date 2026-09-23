@@ -463,6 +463,74 @@ def resolve_directory_tenant(is_admin_flag, acting_tenants, requested):
 # ``global_config.session_idle_timeout_minutes`` at startup + on change); the env
 # var is only the fallback default (60 minutes).
 _SESSION_IDLE_TIMEOUT_S = float(os.environ.get("LM_SESSION_IDLE_TIMEOUT_S", "3600"))
+# A live session legitimately changes source IP: a corporate egress proxy or a
+# CGNAT pool hands consecutive requests to different nodes (so two addresses can
+# be active at the very same instant, which no timing window can tell apart from
+# theft), and DHCP leases roll. Those addresses share a subnet, so a move INSIDE
+# the bound address's subnet is the same client — re-bind rather than score it as
+# a stolen cookie. A move ACROSS subnets is still the deterministic hijack close.
+def _bind_prefix(env_var: str, default: int, floor: int, width: int) -> int:
+    """Read a bind-prefix override, falling back to the secure default.
+
+    A malformed or out-of-range value must never take the hub down at import
+    time, nor silently widen the bind to something meaningless (``/0`` would
+    make every address in the family equivalent and disable the control).
+    """
+    raw = os.environ.get(env_var)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        logger.warning("%s=%r is not an integer — using /%s.", env_var, raw, default)
+        return default
+    if not (floor <= value <= width):
+        logger.warning("%s=%s is outside /%s../%s — using /%s.",
+                       env_var, value, floor, width, default)
+        return default
+    return value
+
+
+_IP_BIND_PREFIX4 = _bind_prefix("LM_SESSION_IP_BIND_PREFIX4", 24, 8, 32)
+_IP_BIND_PREFIX6 = _bind_prefix("LM_SESSION_IP_BIND_PREFIX6", 64, 32, 128)
+
+
+def _norm_bind_addr(value):
+    """Parse ``value``, unwrapping IPv4-mapped IPv6 (``::ffff:a.b.c.d``) to the
+    embedded IPv4 address. Without this, two unrelated IPv4 clients both
+    rendered as mapped IPv6 would share a ``/64`` and be treated as the same
+    client — which would defeat the bind entirely. Returns None if unparseable.
+    """
+    try:
+        addr = ipaddress.ip_address(value)
+    except (ValueError, TypeError):
+        return None
+    if addr.version == 6 and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
+
+
+def same_bind_subnet(a, b) -> bool:
+    """True when ``a`` and ``b`` belong to the same client subnet.
+
+    Compares at /24 (IPv4) or /64 (IPv6) by default; override with
+    ``LM_SESSION_IP_BIND_PREFIX4`` / ``LM_SESSION_IP_BIND_PREFIX6``. Setting a
+    prefix to its full width (32 / 128) restores strict per-address binding.
+    Blanks, mixed families and unparseable values are never "same".
+    """
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    ia = _norm_bind_addr(a)
+    ib = _norm_bind_addr(b)
+    if ia is None or ib is None or ia.version != ib.version:
+        return False
+    plen = _IP_BIND_PREFIX4 if ia.version == 4 else _IP_BIND_PREFIX6
+    try:
+        return ib in ipaddress.ip_network(f"{ia}/{plen}", strict=False)
+    except ValueError:
+        return False
 
 
 def set_session_idle_timeout(seconds) -> None:
@@ -538,8 +606,18 @@ def session_user(sessions: dict, request: "Request"):
     if bound:
         ip = _resolve_client_ip(request)
         if ip and ip != bound:
-            sessions.pop(token, None)
-            return None
+            if same_bind_subnet(ip, bound):
+                # Benign egress change inside the client's own subnet → re-bind
+                # so a proxied/roaming operator keeps their session (and their
+                # WebSocket) instead of being logged out mid-use. Keep
+                # ``ip_seen`` in step with the middleware's own re-bind so the
+                # two paths never disagree about which addresses are live.
+                sess["client_ip"] = ip
+                seen = sess.setdefault("ip_seen", {})
+                seen[ip] = time.time()
+            else:
+                sessions.pop(token, None)
+                return None
     return sess
 
 

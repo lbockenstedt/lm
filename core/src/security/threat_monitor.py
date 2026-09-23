@@ -576,6 +576,16 @@ class ThreatMonitor:
 
     # ── exemptions ─────────────────────────────────────────────────────────────
     def _is_exempt(self, ip: str) -> bool:
+        # (0) loopback. The hub's own self-calls arrive as 127.0.0.1/::1, and a
+        # cloud NSG never sees loopback traffic at all — so such a deny prefix
+        # can only ever be inert noise in the rule while recording the hub as
+        # its own attacker (one was recorded PERMANENT). Scoped deliberately to
+        # loopback: RFC1918/CGNAT sources stay blockable because an Azure NSG
+        # DOES filter intra-VNet traffic, so blocking a compromised VNet peer is
+        # a real control we must not give up. ``block_manual`` still overrides,
+        # so operators keep manual control.
+        if self._is_loopback(ip):
+            return True
         # (1) recent successful login
         last = self._recent_success.get(ip)
         if last and last > _now() - self._cfg["success_grace_s"]:
@@ -584,6 +594,17 @@ class ThreatMonitor:
         if self._in_cidr(ip, self._allowlist_ips()):
             return True
         return False
+
+    @staticmethod
+    def _is_loopback(ip: str) -> bool:
+        """True for 127.0.0.0/8 / ::1 / the unspecified address — the sources a
+        cloud NSG can never act on. Unparseable input is NOT treated as loopback
+        (fail closed: it stays blockable)."""
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        return bool(addr.is_loopback or addr.is_unspecified)
 
     def _allowlist_ips(self) -> List[str]:
         return [e["ip"] for e in self._shared_entries() if e.get("ip")]
