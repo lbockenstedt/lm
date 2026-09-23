@@ -39,20 +39,28 @@ def _console_port_disposition(admin: bool, visible: bool, eff: str, sel, shared:
       * ``eff``     — the port's effective tenant (per-port override, else the
         agent binding; ``""`` when unassigned). A per-port override is exactly
         how an admin pins ONE device of a shared console server to a tenant.
-      * ``sel``     — the SELECTED tenant from the picker (``None`` == the global
-        "All" view).
+      * ``sel``     — the SELECTED tenant from the picker (``None`` == an
+        unscoped programmatic call; ``"default"`` == the ADMIN tenant scope).
       * ``shared``  — ``access.tenant_is_shared(eff)``.
 
     Dedicated data belongs wholly to its tenant (exact-match the picker, like
     ``/api/pxmx/agents``); shared data is visible to all but subnet-masked;
-    unassigned is an admin-only holding state shown only in the global view.
+    unassigned is an admin-only holding state.
+
+    ``default`` is the ADMIN tenant, not an "All tenants" view: under it an
+    admin sees UNASSIGNED ports, ports explicitly bound to ``default`` and
+    shared infra (unmasked — the ADMIN tenant owns no NetBox prefixes of its
+    own, so masking there would fail closed), but never another tenant's
+    dedicated ports. Same rule routes/nw.py names "ADMIN(default) must not
+    accumulate across tenants".
     """
     if not visible:
         return "hide"
+    admin_scope = admin and (sel is None or sel == access.ADMIN_TENANT_ID)
     if not eff:                              # unassigned holding state
-        return "show" if (admin and sel is None) else "hide"
+        return "show" if admin_scope else "hide"
     if shared:                               # shared infra → everyone, masked
-        return "show" if (admin and sel is None) else "mask"
+        return "show" if admin_scope else "mask"
     if sel is not None and eff != sel:       # dedicated → honor the picker
         return "hide"
     return "show"
@@ -1071,12 +1079,17 @@ def register(app, hub, ctx):
         admin = _is_admin(sess)
         explicit = str(request.query_params.get("tenant") or "").strip()
         # Picker tenant (like /api/pxmx/agents): explicit ?tenant= else session
-        # tenant. "default"/empty == the global "All" view (no tenant filter).
+        # tenant. "default" is the ADMIN tenant (unassigned + default-bound +
+        # shared), NOT an "All tenants" view; only a genuinely absent ?tenant=
+        # (a programmatic call) is unscoped.
         tid = _resolve_tenant(request, explicit or None)
-        sel = tid if (tid and tid != "default") else None
+        sel = tid or None
+        admin_scope = admin and (sel is None or sel == access.ADMIN_TENANT_ID)
         # Tenant whose prefixes shared-console ports are masked against: the
-        # selected tenant, else (non-admin) the caller's own tenant.
-        mask_scope = sel or (None if admin else (sess or {}).get("user", {}).get("tenant_id") or None)
+        # selected tenant, else (non-admin) the caller's own tenant. The ADMIN
+        # tenant owns no NetBox prefixes, so never mask against it.
+        mask_scope = (None if sel == access.ADMIN_TENANT_ID else sel) \
+            or (None if admin else (sess or {}).get("user", {}).get("tenant_id") or None)
         hub = app.state.hub
         console_filter_on = access.filter_enabled(hub, "console")
         mask_prefixes = None
@@ -1103,7 +1116,11 @@ def register(app, hub, ctx):
             # A dedicated agent bound to the selected tenant is "present" for it
             # even before its ports enumerate (accurate empty-state); shared /
             # unassigned agents only count once a port actually passes below.
-            if sel is None or (stenant == sel and not access.tenant_is_shared(stenant)):
+            # Under the ADMIN scope an UNASSIGNED agent is also "present": that
+            # holding state belongs to ADMIN.
+            if (sel is None
+                    or (stenant == sel and not access.tenant_is_shared(stenant))
+                    or (admin_scope and not stenant)):
                 visible_spokes.add(sid)
             for src in (raw_ports or []):
                 p = dict(src)
@@ -1485,15 +1502,16 @@ def register(app, hub, ctx):
         admin = _is_admin(sess)
         hub = app.state.hub
         all_spokes = hub.get_all_spokes_by_type("console") or []
-        # Tenant scoping follows the WebUI picker (``?tenant=<currentTenant>``;
-        # ``default``/empty/``all`` == the global "All" view). A Global Admin who
-        # picked a specific tenant sees ONLY that tenant's console diagnostics
+        # Tenant scoping follows the WebUI picker (``?tenant=<currentTenant>``).
+        # ``default`` is the ADMIN tenant scope (unassigned + default-bound +
+        # shared), not an "All tenants" view; only ``all``/``__all__`` or an
+        # absent ?tenant= gives the fleet-wide report. A Global Admin who picked
+        # a specific tenant sees ONLY that tenant's console diagnostics
         # (dedicated agents + shared-infra ports masked to it), exactly like the
-        # ports list — never the whole fleet. Only the "All" view (or a role that
-        # can't scope) shows the infra-wide report. A non-admin is always scoped.
+        # ports list — never the whole fleet. A non-admin is always scoped.
         explicit = str(request.query_params.get("tenant") or "").strip()
         tid = _resolve_tenant(request, explicit or None)
-        sel = tid if (tid and tid not in ("default", "all", "__all__")) else None
+        sel = tid if (tid and tid not in ("all", "__all__")) else None
         if admin and sel is None:
             spokes = all_spokes
             ded_visible = set(all_spokes)   # every spoke fully visible

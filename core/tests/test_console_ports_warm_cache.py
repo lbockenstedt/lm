@@ -87,6 +87,8 @@ class _Hub:
 class _FakeAccess:
     """Neutral access shim: filter off, nothing shared, admin sees all."""
 
+    ADMIN_TENANT_ID = "default"
+
     @staticmethod
     def filter_enabled(hub, module):
         return False

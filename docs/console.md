@@ -35,6 +35,15 @@ serial ports from the hub WebUI's **Console** view (an xterm.js terminal in the 
   port — even when the chassis hang off different console agents. See *VSF stacks* below.
 - **Two-level tenant binding** — the whole console agent (spoke Tenant action) or an individual
   port (`CONSOLE_SET_TENANT` override). Effective tenant = per-port override, else the agent's.
+- **Tenant picker scoping** — `?tenant=<id>` from the picker. `default` is the built-in
+  **ADMIN** tenant, *not* an "All tenants" view: under it the list shows UNASSIGNED ports,
+  ports explicitly bound to `default`, and shared infra (unmasked — the ADMIN tenant owns no
+  NetBox prefixes, so masking there would fail closed), but **never another tenant's
+  dedicated ports**. Selecting a real tenant shows that tenant's dedicated ports plus shared
+  infra subnet-masked to it. Only a call with no `?tenant=` at all (programmatic, never the
+  WebUI) is unscoped. Same rule `routes/nw.py` names *"ADMIN(default) must not accumulate
+  across tenants"*; the shared predicates are `access.tenant_scope_ids` /
+  `access.in_tenant_scope`.
 - Gated by the **`console`** permission right (User Management column + `/api/console/*` gate).
 
 ## Command envelope (spoke)

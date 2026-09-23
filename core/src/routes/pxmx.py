@@ -448,10 +448,12 @@ async def pxmx_agents_payload(hub, tid):
     split-topology work), and those agents would otherwise be invisible here
     entirely. Each agent is tagged with its own owning spoke_id so approve/
     revoke route correctly regardless of which spoke it's actually connected
-    to. ``tid`` is an ALREADY-RESOLVED tenant id (or None/"default" for the
-    unscoped/admin roster) — the caller (the ``/api/pxmx/agents`` route via
-    ``_resolve_tenant``, or the tenant-self-service ``/tenant/{tenant}/agents``
-    route in onboarding.py) owns picking it; this function only filters.
+    to. ``tid`` is an ALREADY-RESOLVED tenant id (``None`` == the unscoped
+    programmatic roster; ``"default"`` == the ADMIN tenant scope, i.e.
+    UNASSIGNED + explicitly-default + shared agents only) — the caller (the
+    ``/api/pxmx/agents`` route via ``_resolve_tenant``, or the
+    tenant-self-service ``/tenant/{tenant}/agents`` route in onboarding.py)
+    owns picking it; this function only filters.
 
     Serves a stale-while-revalidate cache (``_AGENTS_CACHE``): fresh within
     ``_AGENTS_FRESH_S`` (instant serve), servable-stale until
@@ -497,10 +499,17 @@ async def pxmx_agents_payload(hub, tid):
     # binding. A Proxmox agent pinned to LRB on a SHARED spoke must appear
     # under LRB (matching its shown tenant), not under the shared spoke's
     # tenant — otherwise the roster filtered by the spoke binding disagreed
-    # with the tenant label rendered next to each agent. Admin with none
-    # selected ("All") or a tenantless resolve → unchanged (full roster). The
-    # SWR cache stays the full roster; we filter this per-request copy.
-    if tid and tid != "default":
+    # with the tenant label rendered next to each agent.
+    #
+    # ``default`` is the ADMIN tenant, NOT "All tenants": under it the roster
+    # is UNASSIGNED + explicitly-default + shared agents, never another
+    # tenant's (the reported accumulation — ADMIN/Default listed every
+    # tenant's hypervisor agents). Only a tenantless resolve (tid None — a
+    # programmatic call, not the picker, which always sends ?tenant=) is
+    # unfiltered. The SWR cache stays the full roster; we filter this
+    # per-request copy.
+    scope = access.tenant_scope_ids(tid)
+    if scope is not None:
         md = hub.state.system_state.get("module_metadata", {}) or {}
         def _agent_tid(a):
             pin = str(((a.get("client_simulation") or {})
@@ -510,7 +519,8 @@ async def pxmx_agents_payload(hub, tid):
             return (md.get(a.get("spoke_id"), {}) or {}).get("tenant_id")
         for _k in ("agents", "pending_agents", "offline_agents"):
             if isinstance(out.get(_k), list):
-                out[_k] = [a for a in out[_k] if _agent_tid(a) == tid]
+                out[_k] = [a for a in out[_k]
+                           if access.in_tenant_scope(_agent_tid(a), scope)]
     return out
 
 
@@ -1420,11 +1430,13 @@ def register(app, hub, ctx):
                 return data
             # Tenant scope: mirror pxmx_agents_payload's per-agent filter (the
             # offline record already carries its effective ``tenant_id``: the
-            # agent's own pin, else its parent spoke's binding). Admin "All"
-            # (no tid / "default") keeps the full roster.
-            if tid and tid != "default":
+            # agent's own pin, else its parent spoke's binding). ``default`` is
+            # the ADMIN tenant scope (unassigned + default-bound + shared), not
+            # "All"; only a tenantless resolve keeps the full roster.
+            scope = access.tenant_scope_ids(tid)
+            if scope is not None:
                 offline = [a for a in offline
-                           if str((a or {}).get("tenant_id") or "") == tid]
+                           if access.in_tenant_scope((a or {}).get("tenant_id"), scope)]
                 if not offline:
                     return data
             present = {str(n.get("node") or "").strip().lower()
@@ -1534,13 +1546,22 @@ def register(app, hub, ctx):
             raise HTTPException(status_code=401, detail="Authentication required")
 
         tid = _resolve_tenant(request, tenant)
-        if tid and tid != "default":
+        # ``default`` is the ADMIN tenant, not "All": do NOT fall back to the
+        # global hypervisor spoke there — it may be bound to ANOTHER tenant,
+        # which leaked that tenant's drive diagnostics into the ADMIN view.
+        # Flagged so the UI prompts "select a tenant" (mirrors get_pxmx_nodes /
+        # get_pxmx_vms). Only a tenantless resolve keeps the global fallback.
+        select_tenant = False
+        if tid == "default":
+            spokes = []
+            select_tenant = True
+        elif tid:
             spokes = hub.get_hypervisor_spokes_for_tenant(tid)
         else:
             spokes = [hub.get_hypervisor_spoke()] if hub.get_hypervisor_spoke() else []
 
         if not spokes:
-            return {
+            empty = {
                 "nodes": [],
                 "spoke_connected": False,
                 "summary": {
@@ -1551,6 +1572,10 @@ def register(app, hub, ctx):
                     "unknown": 0,
                 },
             }
+            if select_tenant:
+                empty["spoke_connected"] = True
+                empty["select_tenant"] = True
+            return empty
 
         target_nodes = [node.strip()] if node and node.strip() else []
         if not target_nodes:

@@ -3150,10 +3150,18 @@ def register_simulations_routes(app, hub, session_user_fn, resolve_tenant_fn,
         if not is_admin_fn(sess):
             tid = _user_tenant(sess)
             reports = [r for r in reports if r.get("tenant") == tid]
-        elif tenant and tenant != "default":
-            # Admin + a specific tenant on the picker → scope the view to it (the
-            # non-admin filter above stays the security floor; this is view scope).
-            reports = [r for r in reports if r.get("tenant") == tenant]
+        elif tenant:
+            # Admin + the picker: scope the view to the selected tenant (the
+            # non-admin filter above stays the security floor; this is view
+            # scope). "default" is the ADMIN tenant, NOT "All tenants" — under
+            # it the admin sees UNASSIGNED + explicitly-default + shared
+            # reports, never another tenant's. Only a call with no ?tenant= at
+            # all (programmatic) keeps the full list.
+            import access
+            scope = access.tenant_scope_ids(tenant)
+            if scope is not None:
+                reports = [r for r in reports
+                           if access.in_tenant_scope(r.get("tenant"), scope)]
         return {"reports": reports}
 
     @app.get("/api/reports/tenants")

@@ -74,7 +74,7 @@ def _build(monkeypatch, ports, *, enabled=True, agent="bf-1", is_admin=True, has
         _is_admin=lambda s: is_admin,
         _has_console_write_access=lambda s: has_write,
         _has_console_access=lambda s: has_access,
-        _resolve_tenant=lambda req, explicit=None: "default",
+        _resolve_tenant=lambda req, explicit=None: explicit,
     )
     console_routes.register(app, app.state.hub, ctx)
     return TestClient(app), orchestrated
@@ -87,7 +87,7 @@ def test_identify_all_queues_idle_skips_in_use(monkeypatch):
         {"port_id": "p3", "in_use": False},
     ]
     c, _ = _build(monkeypatch, ports)
-    r = c.post("/api/console/identify-llm-all?tenant=default", json={})
+    r = c.post("/api/console/identify-llm-all", json={})
     assert r.status_code == 200
     body = r.json()
     assert body["queued"] == 2
@@ -98,7 +98,7 @@ def test_identify_all_runs_without_global_toggle(monkeypatch):
     # Profiling is now an explicit, on-demand action — clicking the button is the
     # opt-in, so there is no separate global enable gate to trip a 409.
     c, _ = _build(monkeypatch, [{"port_id": "p1", "in_use": False}], enabled=False)
-    r = c.post("/api/console/identify-llm-all?tenant=default", json={})
+    r = c.post("/api/console/identify-llm-all", json={})
     assert r.status_code == 200
     assert r.json()["queued"] == 1
 
@@ -107,17 +107,28 @@ def test_identify_all_queues_even_without_agent(monkeypatch):
     # Fingerprint-first: known devices resolve without the AI, so a missing
     # AppBuilder agent no longer blocks the bulk profile — it still queues.
     c, _ = _build(monkeypatch, [{"port_id": "p1", "in_use": False}], agent=None)
-    r = c.post("/api/console/identify-llm-all?tenant=default", json={})
+    r = c.post("/api/console/identify-llm-all", json={})
     assert r.status_code == 200
     assert r.json()["queued"] == 1
 
 
 def test_identify_all_no_idle_ports(monkeypatch):
     c, _ = _build(monkeypatch, [{"port_id": "p1", "in_use": True}])
-    r = c.post("/api/console/identify-llm-all?tenant=default", json={})
+    r = c.post("/api/console/identify-llm-all", json={})
     assert r.status_code == 200
     body = r.json()
     assert body["queued"] == 0 and body["skipped_in_use"] == 1
+
+
+def test_identify_all_admin_default_scope_skips_other_tenants(monkeypatch):
+    # ``default`` is the ADMIN tenant, not "All tenants": the bulk identify
+    # enumerates the SAME visible-port set as the list view, so a port
+    # dedicated to tenant "10" must not be queued from the ADMIN scope.
+    c, orchestrated = _build(monkeypatch, [{"port_id": "p1"}, {"port_id": "p2"}])
+    r = c.post("/api/console/identify-llm-all?tenant=default", json={})
+    assert r.status_code == 200
+    assert r.json()["queued"] == 0
+    assert orchestrated == []
 
 
 def test_identify_all_allowed_for_tenant_admin(monkeypatch):
@@ -126,7 +137,7 @@ def test_identify_all_allowed_for_tenant_admin(monkeypatch):
     # already tenant-scoped.
     c, _ = _build(monkeypatch, [{"port_id": "p1", "in_use": False}],
                   is_admin=False, has_write=True, has_access=True)
-    r = c.post("/api/console/identify-llm-all?tenant=default", json={})
+    r = c.post("/api/console/identify-llm-all", json={})
     assert r.status_code == 200
     assert r.json()["queued"] == 1
 
@@ -139,7 +150,7 @@ def test_identify_all_allowed_for_read_only_console_user(monkeypatch):
     # their own visible ports.
     c, _ = _build(monkeypatch, [{"port_id": "p1", "in_use": False}],
                   is_admin=False, has_write=False, has_access=True)
-    r = c.post("/api/console/identify-llm-all?tenant=default", json={})
+    r = c.post("/api/console/identify-llm-all", json={})
     assert r.status_code == 200
     assert r.json()["queued"] == 1
 
@@ -149,7 +160,7 @@ def test_identify_all_denied_without_console_access(monkeypatch):
     # not trigger profiling.
     c, _ = _build(monkeypatch, [{"port_id": "p1", "in_use": False}],
                   is_admin=False, has_write=False, has_access=False)
-    r = c.post("/api/console/identify-llm-all?tenant=default", json={})
+    r = c.post("/api/console/identify-llm-all", json={})
     assert r.status_code == 403
 
 

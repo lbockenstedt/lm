@@ -268,14 +268,20 @@ class SearchIndexMixin:
                                ) -> Dict[str, Optional[str]]:
         """Map each leg command to the spoke that serves it for this scope —
         the SAME resolution ``cross_system_search`` uses (tenant-bound
-        hypervisor/directory so a scope never reaches another tenant's spoke)."""
+        hypervisor/directory so a scope never reaches another tenant's spoke).
+
+        The unscoped/ADMIN-default fallback takes the global hypervisor ONLY
+        when that spoke is itself UNBOUND (or shared/ADMIN-bound) — otherwise
+        the warmed ADMIN bucket would hold another tenant's VMs."""
+        import access  # local: access imports hub state, circular at module scope
         scoped = bool(resolved and resolved != "default")
         if scoped:
             hypervisor = self.get_hypervisor_spoke_for_tenant(resolved)
             directory = (self.get_directory_spoke_for_tenant(resolved)
                          or self.get_spoke_by_type("directory"))
         else:
-            hypervisor = self.get_hypervisor_spoke()
+            _gs = self.get_hypervisor_spoke()
+            hypervisor = _gs if access.spoke_is_unbound(self, _gs) else None
             directory = self.get_spoke_by_type("directory")
         return {
             "NETBOX_SEARCH": self.get_spoke_by_type("ipam"),
