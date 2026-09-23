@@ -78,6 +78,15 @@ Consolidated reference for every environment variable read across the LM system.
 | `STARTUP_ROLE` | Default `--role` | — | `agent/src/control_plane.py` |
 | `LM_ONBOARDING_PSK` / `LM_TENANT_ID_HINT` | PSK self-provisioning | — | (agent-spoke via BaseControlPlane) |
 
+## console (serial console role)
+
+| Var | Purpose | Default | Read by |
+|---|---|---|---|
+| `LM_CONSOLE_STATE_DIR` | Directory holding the role's restart-durable state — `ports.json` (settings/alias/tenant/identify profile), `telemetry.json` (per-port `last_activity` + cumulative `capture_bytes`), `health.json` (serial-health/diagnostics history) and `capture/<port>.log` (durable recording). Unset → `/var/lib/lm/console`, falling back to a repo-local `.lm-state/console` then `/tmp/lm-console` when that isn't writable. | `/var/lib/lm/console` | `console/src/serial_manager.py` |
+| `LM_CONSOLE_CAPTURE_BYTES` | Per-device durable capture cap. `0` keeps the recording in memory only (disk persistence off — the capture view then goes blank on restart). | 5242880 (5 MiB) | `console/src/serial_manager.py` |
+| `LM_CONSOLE_REPLAY_BYTES` | Scrollback replayed to a session that (re)connects, read from the durable on-disk recording. | 1048576 (1 MiB) | `console/src/console_spoke.py` |
+| `LM_CONSOLE_RELAY_LISTENER` | `1` serves the edge-proxy `/ws/console-relay` endpoint (Phase 2 serial shortcut). | unset | `agent/src/control_plane.py` |
+
 ## pxmx
 
 | Var | Purpose | Default | Read by |
